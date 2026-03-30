@@ -306,7 +306,27 @@ We chose convention (scaffolded templates use semantic HTML) over enforcement (n
 
 **Why single dependency over modular:** Spring Boot's approach of `spring-boot-starter-web` + `spring-boot-starter-data-jpa` + `spring-boot-starter-security` gives flexibility but requires knowing which starters to include. Brace is opinionated — one dependency, everything works. If you don't use the mailer, the unused classes add ~500KB. Acceptable trade-off for zero configuration.
 
-## 14. Naming
+## 14. Cache
+
+**Decision: In-memory ConcurrentHashMap with TTL, tag-based invalidation, and route-level page caching. No external dependency.**
+
+| Option | Pros | Cons |
+|---|---|---|
+| No cache (user uses ConcurrentHashMap) | Zero framework code | No expiration, no invalidation, no page caching. User reinvents the wheel. |
+| EhCache (Play 1's default) | Mature, feature-rich | ~1.5MB dependency for something simple |
+| Caffeine | Best-in-class Java cache, near-optimal eviction | ~1MB dependency, more features than needed |
+| **ConcurrentHashMap + cleanup thread (chosen)** | Zero dependency, ~120 lines, covers 95% of use cases | No LRU eviction (entries expire by TTL only), no size-based eviction |
+| Memcached/Redis support | Distributed caching | Out of scope for single-server framework |
+
+**Inspired by Play 1's cache (754 lines, 7 files)** but much simpler. Play 1 supports EhCache and Memcached backends with a facade pattern. Brace only needs in-memory — if you need Redis, bring a Redis client.
+
+**Key feature: tag-based invalidation.** This was added after assessing the nhlplayoffstats project, where simulation results cache needs to be invalidated across multiple pages when a simulation completes. Time-based TTL alone is insufficient — you want stale data cleared immediately when new data is available, not after an arbitrary timeout.
+
+**Route-level page caching (`cache.wrap()`)** replaces Play 1's `@CacheFor` annotation. Same concept — cache entire rendered responses by URL — but as a function wrapper instead of an annotation, consistent with Brace's "no annotations that do hidden things" philosophy.
+
+**Thread safety:** `ConcurrentHashMap` for storage (lock-free reads), `AtomicLong` for counters, `ConcurrentHashMap.compute()` for atomic `getOrSet`. No `synchronized` blocks needed.
+
+## 15. Naming
 
 **Decision: Brace**
 

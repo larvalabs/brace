@@ -572,6 +572,84 @@ public class ChatSocket {
 - Session available (read-only, from upgrade request).
 - No automatic database session — use `db.withSession()` for explicit scoped access.
 
+## Cache
+
+In-memory cache with time-based expiration, tag-based invalidation, and route-level page caching. No external dependency — backed by `ConcurrentHashMap` with a background cleanup thread.
+
+```java
+// In main()
+var cache = Brace.cache();
+```
+
+### Cache API
+
+```java
+// Basic operations
+cache.get(key, type)                          // get or null
+cache.set(key, value, "30m")                  // set with TTL
+cache.set(key, value)                         // set without TTL
+cache.getOrSet(key, "30m", () -> expensive()) // get or compute and store
+cache.delete(key)                             // remove one entry
+cache.deletePrefix("team:")                   // remove all keys starting with prefix
+cache.clear()                                 // clear everything
+
+// Atomic counters
+cache.incr(key)                               // atomic increment, returns new value
+cache.decr(key)                               // atomic decrement
+
+// Tag-based invalidation
+cache.set(key, value, "1h", "simulation", "standings")  // associate tags
+cache.clearTag("simulation")                             // delete all entries with tag
+```
+
+### Controller usage
+
+Cache is an optional method parameter (like Database and Session):
+
+```java
+public Result index(Request req, Database db, Cache cache) {
+    var results = cache.getOrSet("simResults", "30m", () -> {
+        return db.findAll(SimulationResult.class);
+    });
+    return View.of("index", "results", results);
+}
+```
+
+### Route-level page caching
+
+For expensive pages that render the same content for every visitor:
+
+```java
+// Cache the entire rendered response by URL for 30 minutes
+app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
+app.get("/api", cache.wrap("30m", ctrl::api).tags("simulation"));
+app.get("/team/{abbreviation}", cache.wrap("30m", ctrl::teamDetail).tags("simulation"));
+
+// After simulation runs, invalidate all cached pages at once
+cache.clearTag("simulation");
+```
+
+`cache.wrap()` generates a cache key from the request method + URL + query string. On cache hit, the handler is never called — the cached `Result` is returned directly. Tags allow bulk invalidation when underlying data changes.
+
+### Invalidation strategies
+
+| Strategy | When to use | Example |
+|---|---|---|
+| Time-based TTL | Data changes on a predictable schedule | `cache.wrap("5m", handler)` — stale for up to 5 minutes |
+| Manual delete | You know exactly what changed | `cache.delete("page:/team/TOR")` after updating Toronto's data |
+| Prefix delete | A group of related entries changed | `cache.deletePrefix("page:/team/")` clears all team pages |
+| Tag-based clear | Multiple unrelated cache entries depend on the same data source | `cache.clearTag("simulation")` after simulation runs |
+
+### Implementation notes
+
+- Backed by `ConcurrentHashMap` (thread-safe, no locking on reads)
+- `AtomicLong` for counters
+- Tags stored as `Map<String, Set<String>>` (tag → cache keys)
+- Background virtual thread evicts expired entries every 30 seconds
+- `getOrSet` uses `ConcurrentHashMap.compute()` for atomic check-and-populate
+- No serialization required — objects stored directly in-process
+- Estimated implementation: ~120 lines, no external dependency
+
 ## AI Ops Layer
 
 ### Diagnostics endpoint — `GET /ops/status?key=SECRET`
