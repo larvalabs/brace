@@ -21,10 +21,6 @@ Brace is also fast. No DI container overhead, no proxy indirection, no annotatio
 
 For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33us vs ~125us), no ORM lifecycle tax, compiled templates (~180us vs ~480us for Thymeleaf).
 
-### What It Includes
-
-You don't assemble Brace from starters. One dependency gives you everything a web app needs: HTTP server, ORM, template engine, sessions, form validation, CSRF protection, job scheduler, durable job queue, mailer, database migrations, structured logging, a diagnostics dashboard, and a test harness. If you don't use the mailer, the unused classes cost you 500KB. That's the trade-off for zero configuration.
-
 ### AI Observability
 
 No existing framework exposes a structured diagnostics API designed for AI agents. Brace does. The `/ops/status` endpoint returns everything an AI agent needs to diagnose any problem: request stats, slow routes, recent errors with full context (stack trace, request details, queries that ran before the error), job statuses, memory usage, per-minute timeseries. The built-in dashboard shows the same data visually. An AI agent can deploy via Dokploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
@@ -249,4 +245,4 @@ ops.secret=change-me
 | Passwords | jBCrypt |
 | Email | Jakarta Mail |
 
-**~3,700 lines of framework code. 138 tests. One dependency for your project.**
+**~3,700 lines of framework code. 138 tests.**
