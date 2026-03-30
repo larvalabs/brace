@@ -11,7 +11,7 @@ A full-stack Java web framework designed for the AI era. Plain Java (no DI conta
 3. **AI-optimized API design** — explicit parameter passing, compile-time errors over runtime errors, small API surface (~15 core types), auto-generated CLAUDE.md per project.
 4. **AI-observable** — structured JSON logging, `/ops/status` diagnostics endpoint, built-in dashboard, deploy hooks.
 5. **AI-controllable** — ops control API + Dokploy MCP integration for autonomous deploy/monitor/fix loops.
-6. **Fast** — H2 embedded, Hibernate 7 StatelessSession, JTE compiled templates, Jetty 12, virtual threads. Estimated ~3-4x faster than equivalent Spring Boot stack.
+6. **Fast** — Hibernate 7 StatelessSession, JTE compiled templates, Jetty 12, virtual threads. Works with any JDBC database; H2 in-memory for dev/test (zero setup), PostgreSQL recommended for production.
 
 ## Technology Stack
 
@@ -19,7 +19,7 @@ A full-stack Java web framework designed for the AI era. Plain Java (no DI conta
 |---|---|---|
 | HTTP server | Jetty 12 | Virtual thread support, WebSocket, HTTP/2, ~10-15% slower than Netty but vastly simpler integration |
 | Persistence | Hibernate 7 StatelessSession | No dirty checking, no persistence context, no proxies. ~2-5x less overhead than standard Session |
-| Database | H2 embedded (default), PostgreSQL (optional) | In-process H2 eliminates network latency (~13-17x faster than networked DB). Docker volume for persistence. PostgreSQL supported for zero-downtime deploys |
+| Database | Any JDBC database. PostgreSQL recommended for production, H2 in-memory for dev/test | PostgreSQL is the documented default for production. H2 in-memory for dev (no local DB setup needed) and tests (fast, isolated). H2 embedded available as opt-in for max performance on single-server deploys |
 | Templates | JTE | Compiled to Java classes, typesafe, ~2.7x faster than Thymeleaf. Hot reload in dev mode |
 | Migrations | Flyway | Standard SQL migration files, runs on startup |
 | JSON | Jackson | Industry standard |
@@ -278,7 +278,7 @@ db.withSession(session -> {
 
 ### Key persistence decisions
 
-- **HQL queries, not SQL** — references entity fields, works on H2 and PostgreSQL without changes.
+- **HQL queries, not SQL** — references entity fields, works across any JDBC database without changes. The same queries run on H2 (dev/test) and PostgreSQL (production).
 - **Positional `?` parameters only** — simpler, consistent, AI-friendly.
 - **No lazy loading** — StatelessSession doesn't support it. Fetch what you need explicitly. Eliminates N+1 surprises.
 - **No cascading** — `db.insert(post)` inserts only the post. Insert related entities explicitly.
@@ -301,14 +301,18 @@ migrations/
 ```properties
 # application.conf
 port=8080
-db.url=jdbc:h2:./data/myapp
+db.url=jdbc:postgresql://localhost:5432/myapp
+db.user=myapp
+db.pass=${DB_PASS}
 db.pool.size=10
 smtp.url=smtp://localhost:1025
 session.secret=my-secret-key-at-least-32-chars
 
-# Dev overrides
+# Dev overrides — H2 in-memory, no local PostgreSQL needed
 %dev.port=9000
 %dev.db.url=jdbc:h2:mem:dev
+%dev.db.user=
+%dev.db.pass=
 
 # Prod overrides
 %prod.db.pool.size=50
@@ -317,7 +321,7 @@ session.secret=my-secret-key-at-least-32-chars
 %prod.smtp.pass=${SMTP_PASS}
 
 # Any custom prefix
-%staging.db.url=jdbc:h2:./data/staging
+%staging.db.url=jdbc:postgresql://staging-db:5432/myapp
 ```
 
 Resolution order: active mode prefix → unprefixed default → environment variable (auto-mapped: `db.url` → `DB_URL`) → error if missing.
@@ -695,15 +699,15 @@ myapp/
 
 ### Per-request latency (full-stack page, 5 DB queries + template)
 
-| Layer | Spring Boot + PG localhost + Thymeleaf | Brace + H2 embedded + JTE |
-|---|---|---|
-| Framework overhead | ~125μs | ~33μs |
-| Database (5 queries) | ~775μs | ~165μs |
-| Template rendering | ~479μs | ~180μs |
-| Session check | ~50μs | ~10μs |
-| **Total** | **~1,430μs (1.4ms)** | **~388μs (0.4ms)** |
+| Layer | Spring Boot + PG + Thymeleaf | Brace + PG + JTE | Brace + H2 embedded + JTE |
+|---|---|---|---|
+| Framework overhead | ~125μs | ~33μs | ~33μs |
+| Database (5 queries) | ~775μs | ~475μs | ~165μs |
+| Template rendering | ~479μs | ~180μs | ~180μs |
+| Session check | ~50μs | ~10μs | ~10μs |
+| **Total** | **~1,430μs (1.4ms)** | **~698μs (0.7ms)** | **~388μs (0.4ms)** |
 
-Estimated **~3.7x faster** overall. Max throughput on 8 cores: ~18,000 req/s vs ~5,000 req/s.
+With PostgreSQL (the recommended production setup), Brace is estimated **~2x faster** than Spring Boot — from the framework overhead reduction (no DI, no proxy), StatelessSession (no dirty checking), and JTE (compiled templates). With H2 embedded (opt-in), the gap widens to ~3.7x.
 
 ### AI token efficiency
 

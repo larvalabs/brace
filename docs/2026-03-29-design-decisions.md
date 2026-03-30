@@ -19,16 +19,18 @@ A record of every significant decision made during the design of Brace, the alte
 
 ## 2. Database Engine
 
-**Decision: H2 embedded (Docker volume) as default, PostgreSQL as optional backend**
+**Decision: Any JDBC database. PostgreSQL recommended for production, H2 in-memory for dev/test, H2 embedded as opt-in for max performance.**
 
-### H2 vs SQLite vs PostgreSQL
+**Revised from original:** We initially designed around H2 embedded as the default. During review, we realized this would scare people off — "H2" sounds like a test database, not production. The framework should work with any JDBC database, with PostgreSQL as the documented production recommendation.
+
+### H2 vs SQLite vs PostgreSQL (research that informed the decision)
 
 | Option | Throughput from Java | Durability | Replication | Container-friendly |
 |---|---|---|---|---|
-| **H2 embedded (chosen)** | ~158K stmts/sec (fastest — pure Java, JIT-inlined) | MVStore, ~1s loss window | None built-in | Volume mount, no overlap possible |
+| H2 embedded | ~158K stmts/sec (fastest — pure Java, JIT-inlined) | MVStore, ~1s loss window | None built-in | Volume mount, no overlap possible |
 | SQLite + JNI | ~30-50% slower (JNI boundary per call) | WAL-based, robust | Litestream, LiteFS (excellent ecosystem) | Same volume issue |
 | SQLite + FFM (Panama) | Potentially close to H2 (no production driver exists yet) | Same as SQLite | Same as SQLite | Same volume issue |
-| PostgreSQL localhost | ~50-100μs per query (vs ~1-5μs H2) | Excellent (WAL, PITR) | Built-in streaming replication | Fully container-friendly, zero-downtime deploys |
+| **PostgreSQL (recommended)** | ~50-100μs per query (vs ~1-5μs H2) | Excellent (WAL, PITR) | Built-in streaming replication | Fully container-friendly, zero-downtime deploys |
 | sqlite4j (WASM→bytecode) | Unknown, likely slower | Loads DB into memory | None | Experimental |
 
 **Key benchmarks:**
@@ -36,19 +38,34 @@ A record of every significant decision made during the design of Brace, the alte
 - H2 client-server: ~12,381 statements/sec (12.8x slower — validates in-process approach)
 - PostgreSQL server: ~9,360 statements/sec
 
-**H2 durability model:** MVStore uses log-structured copy-on-write (not traditional WAL). No transaction log, no undo log. Dual file headers with checksums for crash recovery. ~1 second loss window on hard crash. Configurable but forcing fsync kills performance.
+### Why PostgreSQL as the production default
 
-**SQLite advantages we gave up:** Battle-tested durability (billions of deployments), Litestream continuous replication, point-in-time recovery, FULL OUTER JOIN support, FTS5. SQLite's replication ecosystem was a strong pull.
+- Industry standard, everyone trusts it for production data
+- Full container support — zero-downtime blue-green deploys work
+- Replication, WAL archiving, point-in-time recovery out of the box
+- `pg_dump`, mature backup ecosystem
+- Hibernate + HQL means queries are database-agnostic — same code runs on H2 (dev) and PostgreSQL (prod)
 
-**SQLite FFM opportunity:** A prototype fork of xerial/sqlite-jdbc showed ~2x speedup over JNI using Panama's Foreign Function API. But the main project labeled it "wontfix" and no production driver exists. This could be a future Brace contribution.
+### H2 roles in the framework
 
-**Container deployment concern:** H2 file-locks the database — two JVM instances can't access the same file. This prevents zero-downtime blue-green deploys. However, Dokploy's default mode is stop-old-then-start-new (recreate strategy), which works fine with H2 on a Docker volume. The volume mount itself adds zero overhead (it's just a host filesystem directory).
+- **H2 in-memory for dev mode** — `brace dev` just works, no local PostgreSQL install needed
+- **H2 in-memory for tests** — `TestApp` boots in ~50ms, tests run in ~5ms, no Docker/Testcontainers
+- **H2 embedded as opt-in** — for single-server deploys where max performance matters. Documented as a power-user option, not the default.
 
-**H2 vs SQLite feature comparison that influenced the decision:**
+### Research that was conducted but is less central now
+
+**H2 durability model:** MVStore uses log-structured copy-on-write (not traditional WAL). No transaction log, no undo log. Dual file headers with checksums for crash recovery. ~1 second loss window on hard crash.
+
+**SQLite advantages considered:** Battle-tested durability (billions of deployments), Litestream continuous replication, point-in-time recovery, FTS5. SQLite's replication ecosystem was compelling but the JNI overhead and limited ALTER TABLE support were drawbacks.
+
+**SQLite FFM opportunity:** A prototype fork of xerial/sqlite-jdbc showed ~2x speedup over JNI using Panama's Foreign Function API. But the main project labeled it "wontfix" and no production driver exists.
+
+**Container deployment concern with H2 embedded:** H2 file-locks the database — two JVM instances can't access the same file. This prevents zero-downtime blue-green deploys. This was a key factor in making PostgreSQL the production recommendation rather than H2 embedded.
+
+**H2 vs SQLite feature comparison:**
 - H2: strict typing, full ALTER TABLE, multi-writer MVCC, stored procedures, FULL OUTER JOIN
-- SQLite: dynamic typing, very limited ALTER TABLE (migrations require create-copy-drop-rename), single writer only, no stored procedures
-- H2's full ALTER TABLE support is critical for schema migrations in a web framework
-- H2's multi-writer concurrency matters for concurrent form submissions
+- SQLite: dynamic typing, very limited ALTER TABLE, single writer only, no stored procedures
+- H2's advantages make it the better choice for dev/test even though PostgreSQL is the production target
 
 ## 3. Persistence Layer (ORM)
 
@@ -68,8 +85,8 @@ A record of every significant decision made during the design of Brace, the alte
 
 **Why Hibernate won:** The user has extensive JPA experience. Hibernate 7's StatelessSession is dramatically improved — now supports batch operations (`insertMultiple`, `updateMultiple`), EntityGraph, second-level cache, essentially everything except the first-level cache. This eliminates the three biggest overhead sources (dirty checking, snapshot copies, persistence context) while keeping a familiar API.
 
-**Critical insight about in-process DB + ORM overhead:**
-With H2 embedded, a query takes ~1-5μs. Hibernate's standard Session adds ~200μs of overhead (dirty checking, snapshots). That means **the ORM is 87% of total query time** — the opposite of the networked case where the ORM is ~29%. StatelessSession brings Hibernate overhead to ~15-25μs, making the ORM a reasonable ~75-85% of the ~20-30μs total. jOOQ would bring it to ~5-10μs. The difference is ~6.9x per request (estimated 255μs vs 1,750μs for a 5-query + 2-write page).
+**ORM overhead analysis:**
+With PostgreSQL (localhost), a query takes ~50-100μs. Hibernate's standard Session adds ~200μs of overhead (dirty checking, snapshots) — about 67% of total. StatelessSession brings Hibernate overhead to ~15-25μs, making it a small fraction of total query time. The StatelessSession choice is valuable regardless of database engine, but becomes even more impactful with H2 embedded (where query time drops to ~1-5μs and ORM overhead would dominate without StatelessSession).
 
 **Hibernate 6/7 improvements that helped the decision:**
 - ResultSet read-by-position instead of by-name (6.0) — faster column access
