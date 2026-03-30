@@ -31,7 +31,9 @@ public class Request {
     public String param(String name) {
         var value = pathParams.get(name);
         if (value != null) return value;
-        return queryParams.get(name);
+        value = queryParams.get(name);
+        if (value != null) return value;
+        return parseFormBody(body).get(name);
     }
 
     public int intParam(String name) {

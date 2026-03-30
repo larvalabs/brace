@@ -5,7 +5,9 @@ import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.function.Consumer;
 
 public class Brace {
 
@@ -44,6 +46,14 @@ public class Brace {
 
     DatabaseFactory databaseFactory() {
         return databaseFactory;
+    }
+
+    String sessionSecret() {
+        return sessionSecret;
+    }
+
+    Mailer mailer() {
+        return mailer;
     }
 
     public Brace sessions(String secret) {
@@ -266,5 +276,66 @@ public class Brace {
             return connector.getLocalPort();
         }
         return port;
+    }
+
+    // --- Test support ---
+
+    public static TestAppBuilder test() {
+        return new TestAppBuilder();
+    }
+
+    public static class TestAppBuilder {
+        private String dbUrl = "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1";
+        private String templatesPath;
+        private String secret;
+        private final List<Class<?>> entityClasses = new ArrayList<>();
+
+        public TestAppBuilder database(String url) {
+            this.dbUrl = url;
+            return this;
+        }
+
+        public TestAppBuilder templates(String path) {
+            this.templatesPath = path;
+            return this;
+        }
+
+        public TestAppBuilder sessions(String secret) {
+            this.secret = secret;
+            return this;
+        }
+
+        public TestAppBuilder entities(Class<?>... classes) {
+            this.entityClasses.addAll(Arrays.asList(classes));
+            return this;
+        }
+
+        public TestApp start(Consumer<Brace> configure) throws Exception {
+            DatabaseFactory dbFactory = null;
+            if (!entityClasses.isEmpty()) {
+                dbFactory = new DatabaseFactory(dbUrl, null, null, entityClasses);
+            }
+
+            var mailer = new Mailer(null);
+            var app = Brace.app()
+                .port(0)
+                .mailer(mailer);
+
+            if (secret != null) {
+                app.sessions(secret);
+            }
+
+            if (dbFactory != null) {
+                app.database(dbFactory);
+            }
+            if (templatesPath != null) {
+                app.templates(templatesPath);
+            }
+
+            configure.accept(app);
+            app.start();
+
+            return new TestApp(app, dbFactory);
+        }
     }
 }
