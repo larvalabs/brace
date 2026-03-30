@@ -33,7 +33,7 @@ public class Invoker {
                 paramTypes.add(ParamType.REQUEST);
             } else if (type == Database.class) {
                 paramTypes.add(ParamType.DATABASE);
-            } else if (type.getSimpleName().equals("Session")) {
+            } else if (type == Session.class) {
                 paramTypes.add(ParamType.SESSION);
             } else {
                 throw new IllegalArgumentException(
@@ -80,6 +80,26 @@ public class Invoker {
             @Override
             public Result invoke(Request req, Object database, Object session) {
                 return handler.apply(req, (Database) database);
+            }
+        };
+    }
+
+    // Wraps a SessionHandler (Request + Session) for use with Brace.get() etc.
+    public static Invoker fromSessionFunction(SessionHandler handler) {
+        return new Invoker(null, null, List.of(ParamType.SESSION)) {
+            @Override
+            public Result invoke(Request req, Object database, Object session) {
+                return handler.apply(req, (Session) session);
+            }
+        };
+    }
+
+    // Wraps a FullHandler (Request + Database + Session) for use with Brace.get() etc.
+    public static Invoker fromFullFunction(FullHandler handler) {
+        return new Invoker(null, null, List.of(ParamType.DATABASE, ParamType.SESSION)) {
+            @Override
+            public Result invoke(Request req, Object database, Object session) {
+                return handler.apply(req, (Database) database, (Session) session);
             }
         };
     }

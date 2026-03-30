@@ -16,21 +16,31 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final List<Middleware.BoundBefore> beforeMiddleware;
     private final List<Middleware.BoundAfter> afterMiddleware;
     private final DatabaseFactory databaseFactory;
+    private final String sessionSecret;
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware) {
-        this(router, beforeMiddleware, afterMiddleware, null);
+        this(router, beforeMiddleware, afterMiddleware, null, null);
     }
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory) {
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null);
+    }
+
+    public BraceHandler(Router router,
+                        List<Middleware.BoundBefore> beforeMiddleware,
+                        List<Middleware.BoundAfter> afterMiddleware,
+                        DatabaseFactory databaseFactory,
+                        String sessionSecret) {
         this.router = router;
         this.beforeMiddleware = beforeMiddleware;
         this.afterMiddleware = afterMiddleware;
         this.databaseFactory = databaseFactory;
+        this.sessionSecret = sessionSecret;
     }
 
     @Override
@@ -85,13 +95,25 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 invoker = Invoker.fromFunction(handler);
             }
 
+            // Build session if needed
+            Session session = null;
+            if (invoker.needsSession()) {
+                if (sessionSecret != null) {
+                    String cookieHeader = headers.get("Cookie");
+                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
+                    session = Session.fromCookie(sessionCookie, sessionSecret);
+                } else {
+                    session = new Session();
+                }
+            }
+
             // Invoke with per-request database lifecycle if needed
             Result result;
             if (invoker.needsDatabase() && databaseFactory != null) {
                 Database db = new Database(databaseFactory.openSession());
                 try {
                     db.beginTransaction();
-                    result = invoker.invoke(braceRequest, db, null);
+                    result = invoker.invoke(braceRequest, db, session);
                     db.commitTransaction();
                 } catch (Exception e) {
                     db.rollbackTransaction();
@@ -100,7 +122,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     db.close();
                 }
             } else {
-                result = invoker.invoke(braceRequest, null, null);
+                result = invoker.invoke(braceRequest, null, session);
+            }
+
+            // Write session cookie if modified
+            if (session != null && session.isModified() && sessionSecret != null) {
+                result.header("Set-Cookie",
+                    "brace_session=" + session.toCookie(sessionSecret) + "; Path=/; HttpOnly; SameSite=Lax");
             }
 
             // Run after middleware
@@ -128,6 +156,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 ? result.body().getBytes(StandardCharsets.UTF_8)
                 : new byte[0];
         response.write(true, ByteBuffer.wrap(bytes), callback);
+    }
+
+    private String parseCookieValue(String cookieHeader, String name) {
+        if (cookieHeader == null || cookieHeader.isEmpty()) return null;
+        for (String part : cookieHeader.split(";")) {
+            String trimmed = part.strip();
+            if (trimmed.startsWith(name + "=")) {
+                return trimmed.substring(name.length() + 1);
+            }
+        }
+        return null;
     }
 
     private Map<String, String> parseQuery(String query) {

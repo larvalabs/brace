@@ -14,6 +14,7 @@ public class Brace {
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private DatabaseFactory databaseFactory;
+    private String sessionSecret;
     private TemplateEngine templateEngine;
     private Server server;
     private ServerConnector connector;
@@ -38,6 +39,11 @@ public class Brace {
 
     DatabaseFactory databaseFactory() {
         return databaseFactory;
+    }
+
+    public Brace sessions(String secret) {
+        this.sessionSecret = secret;
+        return this;
     }
 
     public Brace templates(String path) {
@@ -90,6 +96,50 @@ public class Brace {
         return this;
     }
 
+    // Route registration with Session
+
+    public Brace get(String pattern, SessionHandler handler) {
+        router.add("GET", pattern, handler, Invoker.fromSessionFunction(handler));
+        return this;
+    }
+
+    public Brace post(String pattern, SessionHandler handler) {
+        router.add("POST", pattern, handler, Invoker.fromSessionFunction(handler));
+        return this;
+    }
+
+    public Brace put(String pattern, SessionHandler handler) {
+        router.add("PUT", pattern, handler, Invoker.fromSessionFunction(handler));
+        return this;
+    }
+
+    public Brace delete(String pattern, SessionHandler handler) {
+        router.add("DELETE", pattern, handler, Invoker.fromSessionFunction(handler));
+        return this;
+    }
+
+    // Route registration with Database + Session
+
+    public Brace get(String pattern, FullHandler handler) {
+        router.add("GET", pattern, handler, Invoker.fromFullFunction(handler));
+        return this;
+    }
+
+    public Brace post(String pattern, FullHandler handler) {
+        router.add("POST", pattern, handler, Invoker.fromFullFunction(handler));
+        return this;
+    }
+
+    public Brace put(String pattern, FullHandler handler) {
+        router.add("PUT", pattern, handler, Invoker.fromFullFunction(handler));
+        return this;
+    }
+
+    public Brace delete(String pattern, FullHandler handler) {
+        router.add("DELETE", pattern, handler, Invoker.fromFullFunction(handler));
+        return this;
+    }
+
     // Middleware
 
     public Brace before(Middleware.Before handler) {
@@ -131,7 +181,7 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory);
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret);
         server.setHandler(handler);
 
         server.start();
