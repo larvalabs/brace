@@ -16,6 +16,7 @@ public class Brace {
     private DatabaseFactory databaseFactory;
     private String sessionSecret;
     private TemplateEngine templateEngine;
+    private Mailer mailer;
     private Server server;
     private ServerConnector connector;
     private final JobScheduler jobScheduler = new JobScheduler();
@@ -51,6 +52,11 @@ public class Brace {
     public Brace templates(String path) {
         this.templateEngine = new TemplateEngine(path);
         View.setEngine(this.templateEngine);
+        return this;
+    }
+
+    public Brace mailer(Mailer mailer) {
+        this.mailer = mailer;
         return this;
     }
 
