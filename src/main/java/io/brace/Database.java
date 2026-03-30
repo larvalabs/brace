@@ -82,6 +82,25 @@ public class Database {
         query.executeUpdate();
     }
 
+    @SuppressWarnings("unchecked")
+    public List<Object[]> sqlQuery(String sql, Object... params) {
+        var query = session.createNativeQuery(convertPositionalParams(sql));
+        bindParams(query, params);
+        var results = query.getResultList();
+        return (List<Object[]>) (List<?>) results;
+    }
+
+    @SuppressWarnings("unchecked")
+    public Long sqlQueryLong(String sql, Object... params) {
+        var query = session.createNativeQuery(convertPositionalParams(sql));
+        bindParams(query, params);
+        var results = query.getResultList();
+        if (results.isEmpty()) return null;
+        Object val = results.get(0);
+        if (val instanceof Object[] arr) return ((Number) arr[0]).longValue();
+        return ((Number) val).longValue();
+    }
+
     // --- Transaction management ---
 
     public void beginTransaction() {

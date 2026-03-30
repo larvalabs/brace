@@ -19,6 +19,7 @@ public class Brace {
     private Server server;
     private ServerConnector connector;
     private final JobScheduler jobScheduler = new JobScheduler();
+    private final JobPoller jobPoller = new JobPoller();
 
     public static Brace app() {
         return new Brace();
@@ -199,6 +200,9 @@ public class Brace {
 
         server.start();
         jobScheduler.start(databaseFactory);
+        if (databaseFactory != null) {
+            jobPoller.start(databaseFactory);
+        }
 
         // Print route table
         System.out.println("Brace started on port " + actualPort());
@@ -208,6 +212,7 @@ public class Brace {
     }
 
     public void stop() throws Exception {
+        jobPoller.stop();
         jobScheduler.stop();
         if (server != null) {
             server.stop();
