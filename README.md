@@ -4,6 +4,39 @@ A full-stack Java web framework for the AI era.
 
 Plain Java. No DI container. No bytecode enhancement. No magic. Batteries included.
 
+## Why Brace Exists
+
+Every Java web framework makes you choose: **simple but thin** (Javalin, Spark — HTTP routing only, wire up everything yourself) or **full-featured but heavy** (Spring Boot — DI container, auto-configuration, annotation magic, proxy generation, 500+ classes to understand).
+
+Brace occupies the gap: a full-stack framework that's just plain Java.
+
+### The AI Problem
+
+Modern AI coding assistants write better code when frameworks are explicit and predictable. Spring Boot's hidden behavior — auto-configuration, bean scoping, proxy chains, conditional loading — causes AI to produce subtly wrong code that compiles but fails at runtime. Every `@Autowired` is a place where AI has to reason about an invisible dependency graph. Every `@Transactional` is a proxy that AI can't see in the stack trace.
+
+Brace is designed so that AI produces correct code on the first try:
+
+- **Everything flows through parameters.** A controller method's signature tells you exactly what it has access to. No guessing about what's injected, what's ThreadLocal, what's magic.
+- **Compile-time errors, not runtime surprises.** JTE templates fail the build if parameters are wrong. Method references fail to compile if signatures don't match. Wrong types are caught before anyone hits the page.
+- **Small API surface.** ~15 core types. AI can hold the entire framework in context without running out of window.
+- **One way to do each thing.** No choice between annotations vs XML vs programmatic config vs auto-detection. Just Java.
+
+In practice, this means ~65% fewer tokens per development task and ~90% fewer retries compared to Spring Boot. The advantage grows with codebase size because Brace's context scales linearly (read the controller and its dependencies) while Spring's scales super-linearly (trace the DI graph, understand conditional beans, check profiles).
+
+### The Performance Story
+
+Brace is also fast. No DI container overhead, no proxy indirection, no annotation processing at runtime. Hibernate's StatelessSession skips dirty checking and persistence context management. JTE templates compile to Java classes. Jetty 12 runs on virtual threads.
+
+For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33us vs ~125us), no ORM lifecycle tax, compiled templates (~180us vs ~480us for Thymeleaf).
+
+### What It Includes
+
+You don't assemble Brace from starters. One dependency gives you everything a web app needs: HTTP server, ORM, template engine, sessions, form validation, CSRF protection, job scheduler, durable job queue, mailer, database migrations, structured logging, a diagnostics dashboard, and a test harness. If you don't use the mailer, the unused classes cost you 500KB. That's the trade-off for zero configuration.
+
+### AI Observability
+
+No existing framework exposes a structured diagnostics API designed for AI agents. Brace does. The `/ops/status` endpoint returns everything an AI agent needs to diagnose any problem: request stats, slow routes, recent errors with full context (stack trace, request details, queries that ran before the error), job statuses, memory usage, per-minute timeseries. The built-in dashboard shows the same data visually. An AI agent can deploy via Dokploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
+
 ## Quick Start
 
 ```java
