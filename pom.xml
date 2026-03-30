@@ -19,6 +19,11 @@
         <jetty.version>12.0.33</jetty.version>
         <jackson.version>2.18.6</jackson.version>
         <junit.version>5.11.4</junit.version>
+
+        <hibernate.version>7.0.10.Final</hibernate.version>
+        <h2.version>2.3.232</h2.version>
+        <hikari.version>6.3.0</hikari.version>
+        <flyway.version>10.22.0</flyway.version>
     </properties>
 
     <dependencies>
@@ -47,6 +52,35 @@
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
             <scope>test</scope>
+        </dependency>
+
+        <!-- Hibernate 7 (includes Jakarta Persistence API transitively) -->
+        <dependency>
+            <groupId>org.hibernate.orm</groupId>
+            <artifactId>hibernate-core</artifactId>
+            <version>${hibernate.version}</version>
+        </dependency>
+
+        <!-- H2 Database (test scope) -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>${h2.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- HikariCP connection pool -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikari.version}</version>
+        </dependency>
+
+        <!-- Flyway database migrations -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>${flyway.version}</version>
         </dependency>
     </dependencies>
 
