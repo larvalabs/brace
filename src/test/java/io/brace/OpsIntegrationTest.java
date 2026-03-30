@@ -69,6 +69,20 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void opsDashboardRequiresKey() throws Exception {
+        var response = get("/ops/dashboard");
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void opsDashboardWithValidKey() throws Exception {
+        var response = get("/ops/dashboard?key=test-ops-key");
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("text/html"));
+        assertTrue(response.body().contains("Brace Dashboard"));
+    }
+
+    @Test
     void errorTracking() throws Exception {
         // Trigger an error
         get("/error");

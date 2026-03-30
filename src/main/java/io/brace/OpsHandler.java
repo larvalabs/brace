@@ -119,6 +119,11 @@ public class OpsHandler {
         return Json.of(data);
     }
 
+    public Result dashboard(Request req) {
+        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        return Result.html(OpsDashboard.html(opsSecret));
+    }
+
     public Result routes(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
 

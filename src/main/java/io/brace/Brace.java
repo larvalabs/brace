@@ -207,6 +207,7 @@ public class Brace {
             var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
+            router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
         }
 
         var threadPool = new QueuedThreadPool();
@@ -224,6 +225,25 @@ public class Brace {
         jobScheduler.start(databaseFactory);
         if (databaseFactory != null) {
             jobPoller.start(databaseFactory);
+        }
+
+        // Flush stats to database every 60 seconds
+        if (databaseFactory != null && opsSecret != null) {
+            jobScheduler.every("60s", "ops-stats-flush", db -> {
+                var snapshot = stats.rotateMinute();
+                if (snapshot.requests() > 0) {
+                    db.sql("INSERT INTO ops_stats (ts, granularity, requests, errors, avg_latency_us, max_latency_us, queries, avg_query_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        java.sql.Timestamp.from(snapshot.ts()),
+                        "minute",
+                        (int) snapshot.requests(),
+                        (int) snapshot.errors(),
+                        snapshot.requests() > 0 ? (int)(snapshot.totalLatencyUs() / snapshot.requests()) : 0,
+                        (int) snapshot.maxLatencyUs(),
+                        (int) snapshot.queries(),
+                        snapshot.queries() > 0 ? (int)(snapshot.queryUs() / snapshot.queries()) : 0
+                    );
+                }
+            });
         }
 
         // Print route table

@@ -29,8 +29,17 @@ public class JobScheduler {
 
     public void every(String interval, String name, Job job) {
         long periodMs = parseInterval(interval);
-        registeredJobs.add(new RegisteredJob(name, "every " + interval, periodMs, periodMs, job));
+        var rj = new RegisteredJob(name, "every " + interval, periodMs, periodMs, job);
+        registeredJobs.add(rj);
         statuses.add(new JobStatus(name, "every " + interval, null, 0, "pending", null, 0, null));
+
+        // If scheduler is already running, schedule immediately
+        if (scheduler != null) {
+            final int index = registeredJobs.size() - 1;
+            scheduler.scheduleAtFixedRate(() -> {
+                Thread.startVirtualThread(() -> executeJob(index, rj));
+            }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
+        }
     }
 
     public void daily(String time, String name, Job job) {

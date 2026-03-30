@@ -36,6 +36,10 @@ public class Result {
         return new Result(401, "text/plain", message);
     }
 
+    public static Result html(String body) {
+        return new Result(200, "text/html", body);
+    }
+
     public int status() { return status; }
     public String contentType() { return contentType; }
     public String body() { return body; }
