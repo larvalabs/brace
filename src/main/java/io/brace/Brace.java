@@ -18,6 +18,7 @@ public class Brace {
     private TemplateEngine templateEngine;
     private Server server;
     private ServerConnector connector;
+    private final JobScheduler jobScheduler = new JobScheduler();
 
     public static Brace app() {
         return new Brace();
@@ -49,6 +50,18 @@ public class Brace {
     public Brace templates(String path) {
         this.templateEngine = new TemplateEngine(path);
         View.setEngine(this.templateEngine);
+        return this;
+    }
+
+    // Job scheduling
+
+    public Brace every(String interval, String name, Job job) {
+        jobScheduler.every(interval, name, job);
+        return this;
+    }
+
+    public Brace daily(String time, String name, Job job) {
+        jobScheduler.daily(time, name, job);
         return this;
     }
 
@@ -185,6 +198,7 @@ public class Brace {
         server.setHandler(handler);
 
         server.start();
+        jobScheduler.start(databaseFactory);
 
         // Print route table
         System.out.println("Brace started on port " + actualPort());
@@ -194,6 +208,7 @@ public class Brace {
     }
 
     public void stop() throws Exception {
+        jobScheduler.stop();
         if (server != null) {
             server.stop();
         }
