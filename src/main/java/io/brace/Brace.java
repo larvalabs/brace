@@ -14,6 +14,7 @@ public class Brace {
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private DatabaseFactory databaseFactory;
+    private TemplateEngine templateEngine;
     private Server server;
     private ServerConnector connector;
 
@@ -37,6 +38,12 @@ public class Brace {
 
     DatabaseFactory databaseFactory() {
         return databaseFactory;
+    }
+
+    public Brace templates(String path) {
+        this.templateEngine = new TemplateEngine(path);
+        View.setEngine(this.templateEngine);
+        return this;
     }
 
     // Route registration
