@@ -24,6 +24,7 @@
         <h2.version>2.3.232</h2.version>
         <hikari.version>6.3.0</hikari.version>
         <flyway.version>10.22.0</flyway.version>
+        <jte.version>3.2.1</jte.version>
     </properties>
 
     <dependencies>
@@ -86,6 +87,13 @@
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
             <version>${flyway.version}</version>
+        </dependency>
+
+        <!-- JTE template engine -->
+        <dependency>
+            <groupId>gg.jte</groupId>
+            <artifactId>jte</artifactId>
+            <version>${jte.version}</version>
         </dependency>
     </dependencies>
 
