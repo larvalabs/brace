@@ -6,6 +6,10 @@ import java.util.Map;
 public class View extends Result {
 
     private static TemplateEngine engine;
+    private static final ThreadLocal<String> currentCsrfField = new ThreadLocal<>();
+
+    static void setCsrfField(String field) { currentCsrfField.set(field); }
+    static void clearCsrfField() { currentCsrfField.remove(); }
 
     private final String template;
     private final Map<String, Object> params;
@@ -24,6 +28,10 @@ public class View extends Result {
         var params = new LinkedHashMap<String, Object>();
         for (int i = 0; i < keyValues.length - 1; i += 2) {
             params.put((String) keyValues[i], keyValues[i + 1]);
+        }
+        String csrfField = currentCsrfField.get();
+        if (csrfField != null) {
+            params.put("csrfField", csrfField);
         }
         String html;
         if (engine != null) {

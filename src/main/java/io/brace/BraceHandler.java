@@ -107,22 +107,67 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
+            // CSRF validation for mutating requests when sessions are enabled
+            if (sessionSecret != null) {
+                String contentType = headers.getOrDefault("Content-Type", "");
+                boolean isMutating = method.equals("POST") || method.equals("PUT") || method.equals("DELETE");
+                boolean isJson = contentType.contains("application/json");
+                if (isMutating && !isJson) {
+                    // Ensure a session object exists for CSRF check even if handler doesn't use sessions
+                    Session csrfSession = session;
+                    if (csrfSession == null) {
+                        String cookieHeader = headers.get("Cookie");
+                        String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
+                        csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
+                    }
+                    String submittedToken = parseFormParam(body, "_csrf");
+                    if (submittedToken == null) {
+                        submittedToken = headers.get("X-CSRF-Token");
+                    }
+                    if (!Csrf.validateToken(csrfSession, submittedToken)) {
+                        writeResult(Result.error(403, "Forbidden"), response, callback);
+                        return true;
+                    }
+                }
+            }
+
+            // Ensure a CSRF token exists in session and expose it to templates
+            if (sessionSecret != null) {
+                Session csrfSession = session;
+                if (csrfSession == null) {
+                    String cookieHeader = headers.get("Cookie");
+                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
+                    csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
+                    // keep a reference for later cookie write — but since handler doesn't
+                    // need the session, we only need the token for the View ThreadLocal
+                    Csrf.ensureToken(csrfSession);
+                    View.setCsrfField(Csrf.hiddenField(csrfSession));
+                } else {
+                    Csrf.ensureToken(session);
+                    View.setCsrfField(Csrf.hiddenField(session));
+                }
+            }
+
             // Invoke with per-request database lifecycle if needed
             Result result;
-            if (invoker.needsDatabase() && databaseFactory != null) {
-                Database db = new Database(databaseFactory.openSession());
-                try {
-                    db.beginTransaction();
-                    result = invoker.invoke(braceRequest, db, session);
-                    db.commitTransaction();
-                } catch (Exception e) {
-                    db.rollbackTransaction();
-                    throw e;
-                } finally {
-                    db.close();
+            try {
+                if (invoker.needsDatabase() && databaseFactory != null) {
+                    Database db = new Database(databaseFactory.openSession());
+                    try {
+                        db.beginTransaction();
+                        result = invoker.invoke(braceRequest, db, session);
+                        db.commitTransaction();
+                    } catch (Exception e) {
+                        db.rollbackTransaction();
+                        throw e;
+                    } finally {
+                        db.close();
+                    }
+                } else {
+                    result = invoker.invoke(braceRequest, null, session);
                 }
-            } else {
-                result = invoker.invoke(braceRequest, null, session);
+            } finally {
+                View.clearCsrfField();
             }
 
             // Write session cookie if modified
@@ -164,6 +209,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String trimmed = part.strip();
             if (trimmed.startsWith(name + "=")) {
                 return trimmed.substring(name.length() + 1);
+            }
+        }
+        return null;
+    }
+
+    private String parseFormParam(String body, String paramName) {
+        if (body == null || body.isEmpty()) return null;
+        for (String pair : body.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0) {
+                String key = pair.substring(0, eq);
+                if (key.equals(paramName)) {
+                    try {
+                        return java.net.URLDecoder.decode(pair.substring(eq + 1), java.nio.charset.StandardCharsets.UTF_8);
+                    } catch (Exception e) {
+                        return pair.substring(eq + 1);
+                    }
+                }
             }
         }
         return null;
