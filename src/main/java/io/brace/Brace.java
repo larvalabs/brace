@@ -13,6 +13,7 @@ public class Brace {
     private final Router router = new Router();
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
+    private DatabaseFactory databaseFactory;
     private Server server;
     private ServerConnector connector;
 
@@ -27,6 +28,15 @@ public class Brace {
 
     public int port() {
         return port;
+    }
+
+    public Brace database(DatabaseFactory factory) {
+        this.databaseFactory = factory;
+        return this;
+    }
+
+    DatabaseFactory databaseFactory() {
+        return databaseFactory;
     }
 
     // Route registration
@@ -48,6 +58,28 @@ public class Brace {
 
     public Brace delete(String pattern, Handler handler) {
         router.add("DELETE", pattern, handler);
+        return this;
+    }
+
+    // Route registration with Database
+
+    public Brace get(String pattern, DbHandler handler) {
+        router.add("GET", pattern, handler, Invoker.fromDbFunction(handler));
+        return this;
+    }
+
+    public Brace post(String pattern, DbHandler handler) {
+        router.add("POST", pattern, handler, Invoker.fromDbFunction(handler));
+        return this;
+    }
+
+    public Brace put(String pattern, DbHandler handler) {
+        router.add("PUT", pattern, handler, Invoker.fromDbFunction(handler));
+        return this;
+    }
+
+    public Brace delete(String pattern, DbHandler handler) {
+        router.add("DELETE", pattern, handler, Invoker.fromDbFunction(handler));
         return this;
     }
 
@@ -92,7 +124,7 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware);
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory);
         server.setHandler(handler);
 
         server.start();

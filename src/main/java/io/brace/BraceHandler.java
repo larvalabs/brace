@@ -15,13 +15,22 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final Router router;
     private final List<Middleware.BoundBefore> beforeMiddleware;
     private final List<Middleware.BoundAfter> afterMiddleware;
+    private final DatabaseFactory databaseFactory;
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware) {
+        this(router, beforeMiddleware, afterMiddleware, null);
+    }
+
+    public BraceHandler(Router router,
+                        List<Middleware.BoundBefore> beforeMiddleware,
+                        List<Middleware.BoundAfter> afterMiddleware,
+                        DatabaseFactory databaseFactory) {
         this.router = router;
         this.beforeMiddleware = beforeMiddleware;
         this.afterMiddleware = afterMiddleware;
+        this.databaseFactory = databaseFactory;
     }
 
     @Override
@@ -67,10 +76,32 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return true;
             }
 
-            // Invoke the route handler
-            Handler handler = (Handler) match.route().handler();
-            Invoker invoker = Invoker.fromFunction(handler);
-            Result result = invoker.invoke(braceRequest, null, null);
+            // Build the invoker
+            Invoker invoker;
+            if (match.route().invoker() != null) {
+                invoker = match.route().invoker();
+            } else {
+                Handler handler = (Handler) match.route().handler();
+                invoker = Invoker.fromFunction(handler);
+            }
+
+            // Invoke with per-request database lifecycle if needed
+            Result result;
+            if (invoker.needsDatabase() && databaseFactory != null) {
+                Database db = new Database(databaseFactory.openSession());
+                try {
+                    db.beginTransaction();
+                    result = invoker.invoke(braceRequest, db, null);
+                    db.commitTransaction();
+                } catch (Exception e) {
+                    db.rollbackTransaction();
+                    throw e;
+                } finally {
+                    db.close();
+                }
+            } else {
+                result = invoker.invoke(braceRequest, null, null);
+            }
 
             // Run after middleware
             for (var after : afterMiddleware) {

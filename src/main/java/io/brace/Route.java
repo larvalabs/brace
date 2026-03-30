@@ -11,13 +11,19 @@ public class Route {
     private final String method;
     private final String pattern;
     private final Object handler;
+    private final Invoker invoker;
     private final Pattern compiledPattern;
     private final List<String> paramNames;
 
     public Route(String method, String pattern, Object handler) {
+        this(method, pattern, handler, null);
+    }
+
+    public Route(String method, String pattern, Object handler, Invoker invoker) {
         this.method = method;
         this.pattern = pattern;
         this.handler = handler;
+        this.invoker = invoker;
         this.paramNames = new ArrayList<>();
 
         var regex = new StringBuilder("^");
@@ -40,6 +46,7 @@ public class Route {
     public String method() { return method; }
     public String pattern() { return pattern; }
     public Object handler() { return handler; }
+    public Invoker invoker() { return invoker; }
     public boolean isStatic() { return paramNames.isEmpty(); }
 
     public Map<String, String> match(String path) {

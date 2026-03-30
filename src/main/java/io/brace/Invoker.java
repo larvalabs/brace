@@ -31,7 +31,7 @@ public class Invoker {
             var type = param.getType();
             if (type == Request.class) {
                 paramTypes.add(ParamType.REQUEST);
-            } else if (type.getSimpleName().equals("Database")) {
+            } else if (type == Database.class) {
                 paramTypes.add(ParamType.DATABASE);
             } else if (type.getSimpleName().equals("Session")) {
                 paramTypes.add(ParamType.SESSION);
@@ -71,6 +71,16 @@ public class Invoker {
             public boolean needsDatabase() { return false; }
             @Override
             public boolean needsSession() { return false; }
+        };
+    }
+
+    // Wraps a DbHandler (Request + Database) for use with Brace.get() etc.
+    public static Invoker fromDbFunction(DbHandler handler) {
+        return new Invoker(null, null, List.of(ParamType.DATABASE)) {
+            @Override
+            public Result invoke(Request req, Object database, Object session) {
+                return handler.apply(req, (Database) database);
+            }
         };
     }
 }

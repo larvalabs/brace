@@ -11,6 +11,10 @@ public class Router {
         routes.add(new Route(method, pattern, handler));
     }
 
+    public void add(String method, String pattern, Object handler, Invoker invoker) {
+        routes.add(new Route(method, pattern, handler, invoker));
+    }
+
     public RouteMatch match(String method, String path) {
         for (var route : routes) {
             if (!route.method().equals(method)) continue;
