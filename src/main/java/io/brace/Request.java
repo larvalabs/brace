@@ -1,5 +1,8 @@
 package io.brace;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class Request {
@@ -73,5 +76,29 @@ public class Request {
         var forwarded = header("X-Forwarded-For");
         if (forwarded != null) return forwarded.split(",")[0].trim();
         return header("Remote-Addr");
+    }
+
+    public <T> Form<T> form(Class<T> type) {
+        var params = parseFormBody(body());
+        for (var entry : queryParams.entrySet()) {
+            params.putIfAbsent(entry.getKey(), entry.getValue());
+        }
+        return FormBinder.bind(type, params);
+    }
+
+    private static Map<String, String> parseFormBody(String body) {
+        var params = new LinkedHashMap<String, String>();
+        if (body == null || body.isEmpty()) return params;
+        for (var pair : body.split("&")) {
+            var eq = pair.indexOf('=');
+            if (eq < 0) {
+                params.put(URLDecoder.decode(pair, StandardCharsets.UTF_8), "");
+            } else {
+                var key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
+                var value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+                params.put(key, value);
+            }
+        }
+        return params;
     }
 }
