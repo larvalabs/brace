@@ -326,7 +326,44 @@ We chose convention (scaffolded templates use semantic HTML) over enforcement (n
 
 **Thread safety:** `ConcurrentHashMap` for storage (lock-free reads), `AtomicLong` for counters, `ConcurrentHashMap.compute()` for atomic `getOrSet`. No `synchronized` blocks needed.
 
-## 15. Naming
+## 15. Why Java, Not Rust
+
+**Decision: Java 21+ with virtual threads**
+
+This question will come up: "if you want max performance, just use Rust." Here's the honest comparison:
+
+### Performance comparison for a full-stack web app
+
+| | Brace (Java 21) | Equivalent Rust (Axum + SQLx + Tera) |
+|---|---|---|
+| Plaintext throughput | ~500K req/s | ~700K req/s (~40% more) |
+| Full page render (DB + template) | ~700μs | ~500μs (~30% less) |
+| Memory | ~250MB | ~30MB |
+| Cold start | ~1s | ~10ms |
+| GC tail latency | ~1-3ms (ZGC) | 0ms |
+| Dev cycle (edit → refresh) | ~1-2s | ~10-30s |
+
+### Where Rust wins
+- **Memory** — ~8x less RSS. Matters on small VPS deployments.
+- **Tail latency** — zero GC pauses. Matters for P999 SLAs.
+- **Cold start** — native binary starts in ~10ms. Matters for serverless.
+- **Raw throughput ceiling** — ~30% faster for full-stack pages, ~40% for plaintext.
+
+### Where Java/Brace wins
+- **Ecosystem** — Hibernate, JPA, JDBC drivers for every database, Jackson, JTE, Flyway, Playwright. Rust equivalents (Diesel, SQLx, Tera, SeaORM) are less mature with fewer features.
+- **Cross-platform deploys** — Java bytecode runs on ARM and x86 unchanged. One Docker build, runs anywhere. Rust needs cross-compilation or multi-arch builds.
+- **AI assistance** — AI writes significantly better Java than Rust. More training data, simpler error patterns, no borrow checker fights. A Rust framework optimized for AI would still have AI struggling with lifetimes, trait bounds, and async Pin/Box gymnastics.
+- **Developer velocity** — borrow checker adds friction for humans and multiplies it for AI (more retries, more token waste).
+- **Hot reload** — Rust recompiles take 5-30 seconds. Java incremental compile + restart is ~1-2 seconds.
+- **ORM maturity** — nothing in Rust compares to Hibernate. SQLx and Diesel are closer to JDBI/jOOQ than to a full ORM.
+
+### The core argument
+
+Brace's thesis isn't maximum theoretical performance — it's maximum practical performance for AI-assisted full-stack web development. Rust gives ~30% more throughput but ~3x more token waste from borrow checker errors, ~5x slower dev cycle, and a much thinner full-stack ecosystem. The AI optimization story only works in a language where AI can write correct code on the first try.
+
+The 30% throughput gap is real but rarely the bottleneck. For a full-stack web app serving HTML pages, the database query and template rendering dominate request time — and Java with virtual threads + StatelessSession + JTE is already sub-millisecond.
+
+## 16. Naming
 
 **Decision: Brace**
 
