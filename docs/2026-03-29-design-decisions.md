@@ -285,7 +285,28 @@ Playwright's recommended selectors (`getByRole`, `getByLabel`, `getByText`) map 
 
 We chose convention (scaffolded templates use semantic HTML) over enforcement (no runtime checks) because the goal is making the accessible path the easiest path.
 
-## 13. Naming
+## 13. Build Tool and Dependency Management
+
+**Decision: Maven. Brace as a single dependency. Standard project structure.**
+
+| Option | Pros | Cons |
+|---|---|---|
+| **Maven (chosen)** | Industry standard, explicit XML, AI handles it well, everyone knows it | Verbose |
+| Gradle | Faster incremental builds, Kotlin DSL | More complex to debug, DSL can confuse AI |
+| Custom dependency system (Play 1 style) | Simpler UX | Non-standard, users can't bring existing Maven knowledge |
+| No build tool (just jars) | Simplest possible | No dependency resolution, impractical for real projects |
+
+**Single dependency approach:** `io.brace:brace:0.1.0` transitively brings Jetty, Hibernate, JTE, Flyway, Jackson, jBCrypt, Jakarta Mail, SLF4J/Logback. Users never specify framework library versions. They add their own dependencies (Stripe SDK, S3 client, etc.) in the normal Maven way.
+
+**Two artifacts:**
+- `brace` — runtime framework with all transitive dependencies
+- `brace-test` — TestApp harness, JUnit 5, Playwright (test scope)
+
+**Why Maven over Gradle:** Maven's XML is more explicit and unambiguous. AI generates correct `pom.xml` more reliably than `build.gradle.kts`. For an AI-optimized framework, the build tool should be the thing AI gets right on the first try. Maven's verbosity is a non-issue when AI is writing it.
+
+**Why single dependency over modular:** Spring Boot's approach of `spring-boot-starter-web` + `spring-boot-starter-data-jpa` + `spring-boot-starter-security` gives flexibility but requires knowing which starters to include. Brace is opinionated — one dependency, everything works. If you don't use the mailer, the unused classes add ~500KB. Acceptable trade-off for zero configuration.
+
+## 14. Naming
 
 **Decision: Brace**
 
