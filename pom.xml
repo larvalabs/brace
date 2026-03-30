@@ -25,6 +25,7 @@
         <hikari.version>6.3.0</hikari.version>
         <flyway.version>10.22.0</flyway.version>
         <jte.version>3.2.1</jte.version>
+        <jbcrypt.version>0.4</jbcrypt.version>
     </properties>
 
     <dependencies>
@@ -94,6 +95,13 @@
             <groupId>gg.jte</groupId>
             <artifactId>jte</artifactId>
             <version>${jte.version}</version>
+        </dependency>
+
+        <!-- jBCrypt password hashing -->
+        <dependency>
+            <groupId>org.mindrot</groupId>
+            <artifactId>jbcrypt</artifactId>
+            <version>${jbcrypt.version}</version>
         </dependency>
     </dependencies>
 
