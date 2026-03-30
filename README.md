@@ -1,18 +1,10 @@
 # Brace
 
-A full-stack Java web framework for the AI era.
-
-Plain Java. No DI container. No bytecode enhancement. No magic. Batteries included.
+A full-stack Java web framework optimized for AI token usage during development and runtime performance when deployed.
 
 ## Why Brace Exists
 
-Every Java web framework makes you choose: **simple but thin** (Javalin, Spark — HTTP routing only, wire up everything yourself) or **full-featured but heavy** (Spring Boot — DI container, auto-configuration, annotation magic, proxy generation, 500+ classes to understand).
-
-Brace occupies the gap: a full-stack framework that's just plain Java.
-
-### The AI Problem
-
-Modern AI coding assistants write better code when frameworks are explicit and predictable. Spring Boot's hidden behavior — auto-configuration, bean scoping, proxy chains, conditional loading — causes AI to produce subtly wrong code that compiles but fails at runtime. Every `@Autowired` is a place where AI has to reason about an invisible dependency graph. Every `@Transactional` is a proxy that AI can't see in the stack trace.
+Current web frameworks were developed to be used by humans. They avoid boilerplate by introducing magical features like auto-configuration, bean scoping, proxy chains, and conditional loading. However, modern AI coding assistants write better code when frameworks are explicit and predictable and they are best when guided by strict compile time checking and unit tests.  
 
 Brace is designed so that AI produces correct code on the first try:
 
