@@ -713,6 +713,228 @@ Estimated **~65% fewer tokens** per development task compared to Spring Boot, du
 - Compile-time errors cost ~50 tokens to fix vs 500-2,000 for runtime/config errors
 - Advantage grows with codebase size (linear vs super-linear context scaling)
 
+## Testing
+
+Brace provides a three-level testing approach. With H2 in-memory, there's no reason to separate unit and integration tests — the full app boots in ~50ms with a real database.
+
+### Level 1: Unit tests (JUnit 5, plain Java)
+
+Controllers and models are plain classes with no framework superclass. Test them directly:
+
+```java
+@Test
+void postApplyForm() {
+    var form = new PostForm("Title", "Body content here", "tech");
+    var post = new Post();
+    post.apply(form);
+
+    assert post.title.equals("Title");
+    assert post.body.equals("Body content here");
+}
+```
+
+### Level 2: In-process integration tests (Brace TestApp)
+
+The framework provides a `TestApp` that boots the real application with H2 in-memory. Real routing, real Hibernate, real JTE templates, real sessions. No mocks, no Docker, no external services.
+
+```java
+public class PostControllerTest {
+
+    static TestApp app = Brace.test()
+        .database("jdbc:h2:mem:test")
+        .templates("views")
+        .sessions("test-secret")
+        .start();
+
+    @AfterAll
+    static void stop() { app.stop(); }
+
+    @BeforeEach
+    void reset() { app.resetDatabase(); }
+
+    @Test
+    void showPost() {
+        app.db().sql("INSERT INTO posts (id, title, body) VALUES (1, 'Hello', 'World')");
+
+        var response = app.get("/posts/1");
+
+        assert response.status() == 200;
+        assert response.body().contains("Hello");
+    }
+
+    @Test
+    void createPostRequiresLogin() {
+        var response = app.post("/posts", Map.of("title", "New", "body", "Content"));
+
+        assert response.status() == 302;
+        assert response.redirectedTo().equals("/login");
+    }
+
+    @Test
+    void createPostWithSession() {
+        app.db().sql("INSERT INTO users (id, email, name) VALUES (1, 'test@test.com', 'Test')");
+
+        var response = app.post("/posts",
+            Map.of("title", "New Post", "body", "This is long enough content"),
+            Session.of("userId", 1));
+
+        assert response.status() == 302;
+        var post = app.db().queryOne(Post.class, "title = ?", "New Post");
+        assert post != null;
+        assert post.authorId == 1;
+    }
+
+    @Test
+    void createPostValidation() {
+        var response = app.post("/posts",
+            Map.of("title", "", "body", "short"),
+            Session.of("userId", 1));
+
+        assert response.status() == 200;
+        assert response.body().contains("is required");
+        assert response.body().contains("at least 10");
+    }
+}
+```
+
+#### TestApp API
+
+```java
+// HTTP methods — return TestResponse
+app.get("/path")
+app.post("/path", formParams)
+app.post("/path", formParams, session)
+app.postJson("/path", jsonBody)
+app.put("/path", body)
+app.delete("/path")
+
+// TestResponse
+response.status()                   // int
+response.body()                     // String (HTML or JSON)
+response.bodyAs(MyDto.class)        // deserialize JSON
+response.header("Location")         // response header
+response.redirectedTo()             // convenience for 302 Location
+
+// Database access for setup/assertions
+app.db()
+
+// Session injection (no need to go through login flow)
+Session.of("userId", 1, "role", "admin")
+
+// Reset between tests
+app.resetDatabase()                 // truncate all tables, re-run migrations
+
+// Mailer assertions
+app.mailer().sent()                 // List<CapturedEmail>
+app.mailer().last().to()
+app.mailer().last().subject()
+app.mailer().last().body()
+app.mailer().clear()
+
+// Job assertions
+app.jobs().pending()                // List<DurableJob> in queue
+app.jobs().runPending()             // execute all pending durable jobs immediately
+```
+
+### Level 3: End-to-end browser tests (Playwright)
+
+For testing full user flows with JavaScript execution, rendered pages, and real browser interaction. Playwright has first-class Java/JUnit 5 support and is the fastest/most reliable browser testing tool available.
+
+```java
+@UsePlaywright
+public class PostFlowTest {
+
+    static TestApp app = Brace.test()
+        .database("jdbc:h2:mem:test")
+        .templates("views")
+        .sessions("test-secret")
+        .start();
+
+    @BeforeEach
+    void reset() { app.resetDatabase(); }
+
+    @Test
+    void userCanCreateAndViewPost(Page page) {
+        app.db().sql("INSERT INTO users (id, email, name, password_hash) VALUES (1, 'test@test.com', 'Test', ?)",
+            Passwords.hash("password"));
+
+        page.navigate(app.url("/login"));
+        page.getByLabel("Email").fill("test@test.com");
+        page.getByLabel("Password").fill("password");
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Log in")).click();
+
+        assertThat(page).hasURL(app.url("/"));
+
+        page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName("New Post")).click();
+        page.getByLabel("Title").fill("My First Post");
+        page.getByLabel("Body").fill("This is the body of my first post, long enough to pass validation.");
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Create")).click();
+
+        assertThat(page).hasURL(Pattern.compile("/posts/\\d+"));
+        assertThat(page.getByRole(AriaRole.HEADING)).hasText("My First Post");
+    }
+
+    @Test
+    void validationErrorsShowInBrowser(Page page) {
+        // ... login ...
+        page.navigate(app.url("/posts/new"));
+        page.getByLabel("Title").fill("");
+        page.getByLabel("Body").fill("short");
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Create")).click();
+
+        assertThat(page.locator(".error")).containsText("is required");
+        assertThat(page.locator(".error")).containsText("at least 10");
+    }
+}
+```
+
+#### Why Playwright
+
+- First-class Java/JUnit 5 support (`@UsePlaywright` annotation)
+- Auto-waiting — no `sleep()` or explicit waits needed (primary cause of flaky tests eliminated)
+- Headless by default, 2-15x faster than Selenium
+- ~10MB footprint (vs Selenium ~50MB, Cypress ~500MB)
+- Supports Chromium, Firefox, WebKit from a single API
+
+### Testing speed summary
+
+| Level | Tool | Speed per test | What it tests |
+|---|---|---|---|
+| Unit | JUnit 5 | <1ms | Model logic, utility functions |
+| In-process integration | Brace TestApp | ~5ms | Routes, controllers, DB, templates, sessions, forms, jobs, emails |
+| E2E browser | Playwright + TestApp | ~100-500ms | Full user flows, JavaScript, visual rendering |
+
+All three levels run against the same in-process app with H2 in-memory. No Docker, no external services, no network flakiness.
+
+## Accessibility & Testability
+
+Brace scaffolded templates and error pages use semantic HTML with proper ARIA attributes by default. This is both an accessibility best practice and a direct enabler of reliable E2E testing.
+
+### The overlap
+
+| Accessibility requirement | E2E testing benefit |
+|---|---|
+| Buttons are `<button>`, not styled `<div>` | `getByRole(BUTTON, "Submit")` works |
+| Form inputs have `<label>` elements | `getByLabel("Email")` works |
+| Headings use `<h1>`-`<h6>` properly | `getByRole(HEADING, "Post Title")` works |
+| Links are `<a>` with descriptive text | `getByRole(LINK, "View all posts")` works |
+| Images have `alt` text | `getByAltText("User avatar")` works |
+| ARIA labels on interactive elements | `getByLabel("Close modal")` works |
+| Semantic HTML structure | Tests survive CSS refactors completely |
+
+### AI benefit
+
+Playwright's role-based selectors (`getByRole`, `getByLabel`) are more self-documenting than CSS selectors. AI generates more reliable tests because the selectors map directly to what's visible in the template — a `<label>` in the template becomes a `getByLabel()` in the test. No brittle CSS class coupling, no XPath guessing.
+
+### Framework conventions
+
+- Scaffolded templates use semantic HTML (`<nav>`, `<main>`, `<article>`, `<button>`, `<label>`)
+- Form helpers render proper `<label>` + `<input>` associations
+- Error pages use ARIA roles for error regions
+- CLAUDE.md convention: "use semantic HTML with labels and ARIA attributes"
+
+This is not a runtime enforcement — just defaults and conventions that make the accessible, testable path the easiest path.
+
 ## Database Tables (Framework-Managed)
 
 ```sql

@@ -228,7 +228,47 @@ This wasn't a choice between alternatives — nothing like this exists in any fr
 
 **Why ~1-2s is acceptable:** H2 embedded means no database reconnection on restart. JTE templates hot-reload without restart (file watcher). Config hot-reloads without restart. The only thing that needs a restart is Java source changes, and incremental compilation + fast JVM startup keeps this under 2 seconds.
 
-## 12. Naming
+## 12. Testing Strategy
+
+**Decision: Three-level testing with in-process H2, no Docker/Testcontainers. Playwright for E2E browser tests.**
+
+### Unit vs integration test boundary
+
+| Option | Speed | Reliability | Realism |
+|---|---|---|---|
+| Mocked unit tests (Mockito) | <1ms | Perfect (no real deps) | Low (mocks can diverge from reality) |
+| Spring-style MockMvc (no real server) | ~10ms | Good | Medium (fake HTTP layer) |
+| Testcontainers (Docker PostgreSQL) | ~5-30s startup + ~50ms per test | Good but flaky (Docker timing) | High |
+| **Brace TestApp with H2 in-memory (chosen)** | ~50ms startup + ~5ms per test | Perfect (no external deps, no network) | High (real routing, real DB, real templates) |
+
+**Key insight:** With H2 in-memory, the traditional reason for separating unit and integration tests (database startup is slow) disappears. The full app boots in ~50ms. A test that hits real routing, real Hibernate, real templates takes ~5ms. There's little reason to maintain mock-based unit tests when the real thing is just as fast.
+
+**Why not Testcontainers:** Testcontainers is the industry standard for testing against real databases like PostgreSQL. But Brace's default database is H2, and H2 in-memory is in-process — no Docker, no container startup, no network. Tests are faster and more reliable. For apps using PostgreSQL as their backend, Testcontainers would still be an option but not the default path.
+
+### E2E browser testing
+
+| Option | Java support | Speed | Reliability | Size |
+|---|---|---|---|---|
+| Selenium | Yes (original) | Slow (WebDriver layer) | Flaky (explicit waits needed) | ~50MB+ |
+| Cypress | No (JavaScript only) | Fast | Good | ~500MB |
+| **Playwright (chosen)** | First-class (`@UsePlaywright` JUnit 5) | Fastest (2-15x over Selenium) | Best (auto-waiting, no sleep) | ~10MB |
+
+**Why Playwright:** Auto-waiting eliminates the primary cause of flaky browser tests — no `Thread.sleep()`, no explicit wait conditions. Playwright waits for elements to be actionable before interacting. This makes AI-generated E2E tests reliable without AI needing to reason about timing.
+
+### Accessibility as a testing strategy
+
+**Decision: Semantic HTML as default in scaffolded templates, enabling Playwright role-based selectors.**
+
+Playwright's recommended selectors (`getByRole`, `getByLabel`, `getByText`) map directly to accessible HTML. A `<label for="email">Email</label>` in the template becomes `page.getByLabel("Email")` in the test. This means:
+
+- Tests don't couple to CSS classes (survive redesigns)
+- AI generates reliable selectors by reading the template (label text → `getByLabel`)
+- Accessibility compliance is a side effect of writing testable HTML
+- No separate "accessibility pass" needed
+
+We chose convention (scaffolded templates use semantic HTML) over enforcement (no runtime checks) because the goal is making the accessible path the easiest path.
+
+## 13. Naming
 
 **Decision: Brace**
 
