@@ -21,6 +21,8 @@ public class Brace {
     private ServerConnector connector;
     private final JobScheduler jobScheduler = new JobScheduler();
     private final JobPoller jobPoller = new JobPoller();
+    private String opsSecret;
+    private Stats stats;
 
     public static Brace app() {
         return new Brace();
@@ -57,6 +59,11 @@ public class Brace {
 
     public Brace mailer(Mailer mailer) {
         this.mailer = mailer;
+        return this;
+    }
+
+    public Brace ops(String secret) {
+        this.opsSecret = secret;
         return this;
     }
 
@@ -193,6 +200,15 @@ public class Brace {
     // Server lifecycle
 
     public void start() throws Exception {
+        stats = new Stats();
+
+        // Register ops endpoints if secret is configured
+        if (opsSecret != null) {
+            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret);
+            router.add("GET", "/ops/status", (Handler) opsHandler::status);
+            router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
+        }
+
         var threadPool = new QueuedThreadPool();
         threadPool.setVirtualThreadsExecutor(Runnable::run);
 
@@ -201,7 +217,7 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret);
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats);
         server.setHandler(handler);
 
         server.start();

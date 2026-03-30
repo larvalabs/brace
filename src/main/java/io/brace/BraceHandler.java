@@ -17,18 +17,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final List<Middleware.BoundAfter> afterMiddleware;
     private final DatabaseFactory databaseFactory;
     private final String sessionSecret;
+    private final Stats stats;
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware) {
-        this(router, beforeMiddleware, afterMiddleware, null, null);
+        this(router, beforeMiddleware, afterMiddleware, null, null, null);
     }
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null, null);
     }
 
     public BraceHandler(Router router,
@@ -36,17 +37,28 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory,
                         String sessionSecret) {
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null);
+    }
+
+    public BraceHandler(Router router,
+                        List<Middleware.BoundBefore> beforeMiddleware,
+                        List<Middleware.BoundAfter> afterMiddleware,
+                        DatabaseFactory databaseFactory,
+                        String sessionSecret,
+                        Stats stats) {
         this.router = router;
         this.beforeMiddleware = beforeMiddleware;
         this.afterMiddleware = afterMiddleware;
         this.databaseFactory = databaseFactory;
         this.sessionSecret = sessionSecret;
+        this.stats = stats;
     }
 
     @Override
     public boolean handle(org.eclipse.jetty.server.Request jettyRequest,
                           Response response,
                           Callback callback) throws Exception {
+        var startNanos = System.nanoTime();
         try {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
@@ -182,9 +194,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             writeResult(result, response, callback);
+            var durationUs = (System.nanoTime() - startNanos) / 1000;
+            if (stats != null) {
+                stats.recordRequest(method, path, result.status(), durationUs, 0, 0);
+                Log.request(method, path, result.status(), durationUs, 0, 0);
+            }
             return true;
 
         } catch (Exception e) {
+            var durationUs = (System.nanoTime() - startNanos) / 1000;
+            if (stats != null) {
+                stats.recordRequest("?", "?", 500, durationUs, 0, 0);
+                stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
+                    "?", stackTraceToString(e), "", "");
+                Log.error("?", "?", e);
+            }
             Result errorResult = Result.error(500, "Internal Server Error");
             writeResult(errorResult, response, callback);
             return true;
@@ -230,6 +254,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         return null;
+    }
+
+    private String stackTraceToString(Throwable t) {
+        var sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        return sw.toString();
     }
 
     private Map<String, String> parseQuery(String query) {
