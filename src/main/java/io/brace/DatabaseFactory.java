@@ -40,6 +40,7 @@ public class DatabaseFactory {
         Flyway.configure()
                 .dataSource(url, user, password)
                 .locations(locations.toArray(String[]::new))
+                .baselineOnMigrate(true)
                 .load()
                 .migrate();
     }

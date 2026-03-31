@@ -9,14 +9,14 @@ import java.util.concurrent.ThreadLocalRandom;
 public class App {
     public static void main(String[] args) throws Exception {
         var db = new DatabaseFactory(
-            "jdbc:postgresql://localhost:5432/hello_world",
+            "jdbc:postgresql://localhost:5433/hello_world",
             "benchmarkdbuser", "benchmarkdbpass",
             List.of(World.class, Fortune.class));
 
         var app = Brace.app()
             .port(8080)
             .database(db)
-            .templates("src/main/resources/views");
+            .templates("benchmark/src/main/resources/views");
 
         // Server header
         app.after((req, result) -> {
