@@ -155,6 +155,50 @@ public class Brace {
         return this;
     }
 
+    // Route registration with read-only Database (no transaction)
+
+    public Brace get(String pattern, ReadDbHandler handler) {
+        router.add("GET", pattern, handler, Invoker.fromReadDbFunction(handler));
+        return this;
+    }
+
+    public Brace post(String pattern, ReadDbHandler handler) {
+        router.add("POST", pattern, handler, Invoker.fromReadDbFunction(handler));
+        return this;
+    }
+
+    public Brace put(String pattern, ReadDbHandler handler) {
+        router.add("PUT", pattern, handler, Invoker.fromReadDbFunction(handler));
+        return this;
+    }
+
+    public Brace delete(String pattern, ReadDbHandler handler) {
+        router.add("DELETE", pattern, handler, Invoker.fromReadDbFunction(handler));
+        return this;
+    }
+
+    // Route registration with read-only Database + Session (no transaction)
+
+    public Brace get(String pattern, ReadFullHandler handler) {
+        router.add("GET", pattern, handler, Invoker.fromReadFullFunction(handler));
+        return this;
+    }
+
+    public Brace post(String pattern, ReadFullHandler handler) {
+        router.add("POST", pattern, handler, Invoker.fromReadFullFunction(handler));
+        return this;
+    }
+
+    public Brace put(String pattern, ReadFullHandler handler) {
+        router.add("PUT", pattern, handler, Invoker.fromReadFullFunction(handler));
+        return this;
+    }
+
+    public Brace delete(String pattern, ReadFullHandler handler) {
+        router.add("DELETE", pattern, handler, Invoker.fromReadFullFunction(handler));
+        return this;
+    }
+
     // Route registration with Database + Session
 
     public Brace get(String pattern, FullHandler handler) {

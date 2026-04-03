@@ -11,6 +11,7 @@ public class Invoker {
     private final Method method;
     private final List<ParamType> paramTypes;
     private final boolean needsDatabase;
+    private final boolean needsReadOnlyDatabase;
     private final boolean needsSession;
 
     enum ParamType {
@@ -18,10 +19,15 @@ public class Invoker {
     }
 
     private Invoker(Object target, Method method, List<ParamType> paramTypes) {
+        this(target, method, paramTypes, false);
+    }
+
+    private Invoker(Object target, Method method, List<ParamType> paramTypes, boolean readOnlyDatabase) {
         this.target = target;
         this.method = method;
         this.paramTypes = paramTypes;
         this.needsDatabase = paramTypes.contains(ParamType.DATABASE);
+        this.needsReadOnlyDatabase = readOnlyDatabase;
         this.needsSession = paramTypes.contains(ParamType.SESSION);
     }
 
@@ -58,6 +64,7 @@ public class Invoker {
     }
 
     public boolean needsDatabase() { return needsDatabase; }
+    public boolean needsReadOnlyDatabase() { return needsReadOnlyDatabase; }
     public boolean needsSession() { return needsSession; }
 
     // Wraps a Handler (functional interface) for use with Brace.get() etc.
@@ -97,6 +104,26 @@ public class Invoker {
     // Wraps a FullHandler (Request + Database + Session) for use with Brace.get() etc.
     public static Invoker fromFullFunction(FullHandler handler) {
         return new Invoker(null, null, List.of(ParamType.DATABASE, ParamType.SESSION)) {
+            @Override
+            public Result invoke(Request req, Object database, Object session) {
+                return handler.apply(req, (Database) database, (Session) session);
+            }
+        };
+    }
+
+    // Wraps a ReadDbHandler (Request + Database, no transaction) for use with Brace.get() etc.
+    public static Invoker fromReadDbFunction(ReadDbHandler handler) {
+        return new Invoker(null, null, List.of(ParamType.DATABASE), true) {
+            @Override
+            public Result invoke(Request req, Object database, Object session) {
+                return handler.apply(req, (Database) database);
+            }
+        };
+    }
+
+    // Wraps a ReadFullHandler (Request + Database + Session, no transaction) for use with Brace.get() etc.
+    public static Invoker fromReadFullFunction(ReadFullHandler handler) {
+        return new Invoker(null, null, List.of(ParamType.DATABASE, ParamType.SESSION), true) {
             @Override
             public Result invoke(Request req, Object database, Object session) {
                 return handler.apply(req, (Database) database, (Session) session);

@@ -166,11 +166,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 if (invoker.needsDatabase() && databaseFactory != null) {
                     Database db = new Database(databaseFactory.openSession());
                     try {
-                        db.beginTransaction();
-                        result = invoker.invoke(braceRequest, db, session);
-                        db.commitTransaction();
+                        if (invoker.needsReadOnlyDatabase()) {
+                            result = invoker.invoke(braceRequest, db, session);
+                        } else {
+                            db.beginTransaction();
+                            result = invoker.invoke(braceRequest, db, session);
+                            db.commitTransaction();
+                        }
                     } catch (Exception e) {
-                        db.rollbackTransaction();
+                        if (!invoker.needsReadOnlyDatabase()) {
+                            db.rollbackTransaction();
+                        }
                         throw e;
                     } finally {
                         db.close();
