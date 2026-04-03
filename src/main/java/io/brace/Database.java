@@ -101,6 +101,32 @@ public class Database {
         return ((Number) val).longValue();
     }
 
+    // --- Raw JDBC access ---
+
+    public <T> T jdbc(JdbcFunction<T> function) {
+        Object[] result = new Object[1];
+        session.doWork(connection -> {
+            result[0] = function.apply(connection);
+        });
+        @SuppressWarnings("unchecked")
+        T value = (T) result[0];
+        return value;
+    }
+
+    public void jdbc(JdbcConsumer consumer) {
+        session.doWork(consumer::accept);
+    }
+
+    @FunctionalInterface
+    public interface JdbcFunction<T> {
+        T apply(java.sql.Connection connection) throws java.sql.SQLException;
+    }
+
+    @FunctionalInterface
+    public interface JdbcConsumer {
+        void accept(java.sql.Connection connection) throws java.sql.SQLException;
+    }
+
     // --- Transaction management ---
 
     public void beginTransaction() {
