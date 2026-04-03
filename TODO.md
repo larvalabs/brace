@@ -25,6 +25,7 @@
 - [ ] Ops control endpoints (POST /ops/config, /ops/cache/clear, /ops/job/run)
 - [ ] `db.withSession()` for scoped DB access outside request lifecycle
 - [ ] `INSERT ... RETURNING id` for PostgreSQL (currently uses `SELECT MAX(id)` for durable job IDs)
+- [ ] `db.query()` with IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`) — currently requires N+1 queries for batch lookups by ID
 
 ## Documentation
 
