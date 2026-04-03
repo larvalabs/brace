@@ -11,7 +11,8 @@ public class App {
         var db = new DatabaseFactory(
             "jdbc:postgresql://localhost:5433/hello_world",
             "benchmarkdbuser", "benchmarkdbpass",
-            List.of(World.class, Fortune.class));
+            List.of(World.class, Fortune.class),
+            256);
 
         var app = Brace.app()
             .port(8080)
@@ -30,15 +31,15 @@ public class App {
         // 2. JSON
         app.get("/json", req -> Json.of(Map.of("message", "Hello, World!")));
 
-        // 3. Single Query
-        app.get("/db", (DbHandler) (req, dbSession) -> {
+        // 3. Single Query (read-only, no transaction)
+        app.get("/db", (ReadDbHandler) (req, dbSession) -> {
             int id = ThreadLocalRandom.current().nextInt(1, 10001);
             var world = dbSession.find(World.class, id);
             return Json.of(world);
         });
 
-        // 4. Multiple Queries
-        app.get("/queries", (DbHandler) (req, dbSession) -> {
+        // 4. Multiple Queries (read-only, no transaction)
+        app.get("/queries", (ReadDbHandler) (req, dbSession) -> {
             int queries = parseQueries(req.param("queries"));
             var worlds = new ArrayList<World>(queries);
             for (int i = 0; i < queries; i++) {
@@ -48,8 +49,8 @@ public class App {
             return Json.of(worlds);
         });
 
-        // 5. Fortunes
-        app.get("/fortunes", (DbHandler) (req, dbSession) -> {
+        // 5. Fortunes (read-only, no transaction)
+        app.get("/fortunes", (ReadDbHandler) (req, dbSession) -> {
             var fortunes = new ArrayList<>(dbSession.findAll(Fortune.class));
             var additional = new Fortune();
             additional.id = 0;
@@ -59,7 +60,7 @@ public class App {
             return View.of("fortunes", "fortunes", fortunes);
         });
 
-        // 6. Updates
+        // 6. Updates (read worlds, then batch update via raw JDBC)
         app.get("/updates", (DbHandler) (req, dbSession) -> {
             int queries = parseQueries(req.param("queries"));
             var worlds = new ArrayList<World>(queries);
@@ -67,9 +68,19 @@ public class App {
                 int id = ThreadLocalRandom.current().nextInt(1, 10001);
                 var world = dbSession.find(World.class, id);
                 world.randomNumber = ThreadLocalRandom.current().nextInt(1, 10001);
-                dbSession.update(world);
                 worlds.add(world);
             }
+            worlds.sort(Comparator.comparingInt(w -> w.id));
+            dbSession.jdbc(conn -> {
+                try (var ps = conn.prepareStatement("UPDATE world SET randomnumber = ? WHERE id = ?")) {
+                    for (var world : worlds) {
+                        ps.setInt(1, world.randomNumber);
+                        ps.setInt(2, world.id);
+                        ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+            });
             return Json.of(worlds);
         });
 
