@@ -19,8 +19,12 @@ public class DatabaseFactory {
     private final SessionFactory sessionFactory;
 
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses) {
+        this(url, user, password, entityClasses, 10);
+    }
+
+    public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses, int poolSize) {
         runMigrations(url, user, password);
-        this.sessionFactory = buildSessionFactory(url, user, password, entityClasses);
+        this.sessionFactory = buildSessionFactory(url, user, password, entityClasses, poolSize);
     }
 
     public StatelessSession openSession() {
@@ -46,7 +50,7 @@ public class DatabaseFactory {
     }
 
     private SessionFactory buildSessionFactory(String url, String user, String password,
-                                               List<Class<?>> entityClasses) {
+                                               List<Class<?>> entityClasses, int poolSize) {
         var configuration = new Configuration();
         configuration.setProperty("hibernate.connection.url", url);
         if (user != null) {
@@ -59,6 +63,8 @@ public class DatabaseFactory {
         configuration.setProperty("hibernate.hbm2ddl.auto", "none");
         configuration.setProperty("hibernate.connection.provider_class",
                 "org.hibernate.hikaricp.internal.HikariCPConnectionProvider");
+        configuration.setProperty("hibernate.hikari.maximumPoolSize", String.valueOf(poolSize));
+        configuration.setProperty("hibernate.hikari.minimumIdle", String.valueOf(poolSize));
 
         for (var entityClass : entityClasses) {
             configuration.addAnnotatedClass(entityClass);
