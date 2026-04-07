@@ -12,20 +12,27 @@ public class OpsHandler {
     private final Router router;
     private final String opsSecret;
     private final ErrorStore errorStore;
+    private final Cache cache;
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, String opsSecret) {
-        this(stats, jobScheduler, mailer, router, opsSecret, null);
+        this(stats, jobScheduler, mailer, router, opsSecret, null, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, String opsSecret, ErrorStore errorStore) {
+        this(stats, jobScheduler, mailer, router, opsSecret, errorStore, null);
+    }
+
+    public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
+                      Router router, String opsSecret, ErrorStore errorStore, Cache cache) {
         this.stats = stats;
         this.jobScheduler = jobScheduler;
         this.mailer = mailer;
         this.router = router;
         this.opsSecret = opsSecret;
         this.errorStore = errorStore;
+        this.cache = cache;
     }
 
     public Result status(Request req) {
@@ -109,6 +116,15 @@ public class OpsHandler {
             data.put("mailer", mailerData);
         }
 
+        // Cache
+        if (cache != null) {
+            var cacheData = new LinkedHashMap<String, Object>();
+            cacheData.put("entries", cache.size());
+            cacheData.put("counters", cache.counterCount());
+            cacheData.put("tags", cache.tagCount());
+            data.put("cache", cacheData);
+        }
+
         // Timeseries
         var timeseries = new LinkedHashMap<String, Object>();
         var minutes = new ArrayList<Map<String, Object>>();
@@ -158,6 +174,13 @@ public class OpsHandler {
         var resolved = errorStore.resolve(id);
         if (resolved == null) return Result.notFound();
         return Json.of(resolved);
+    }
+
+    public Result clearCache(Request req) {
+        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (cache == null) return Json.of(Map.of("status", "no cache configured"));
+        cache.clear();
+        return Json.of(Map.of("status", "cleared"));
     }
 
     private boolean authorize(Request req) {

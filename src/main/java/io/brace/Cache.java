@@ -105,6 +105,10 @@ public class Cache {
         }
     }
 
+    public int size() { return store.size(); }
+    public int counterCount() { return counters.size(); }
+    public int tagCount() { return tagIndex.size(); }
+
     // Route-level page caching
 
     public CachedHandler wrap(String ttl, Handler handler) {

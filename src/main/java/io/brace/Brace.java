@@ -26,6 +26,7 @@ public class Brace {
     private final JobPoller jobPoller = new JobPoller();
     private String opsSecret;
     private Stats stats;
+    private Cache cache;
 
     public static Brace app() {
         return new Brace();
@@ -33,6 +34,11 @@ public class Brace {
 
     public static Cache cache() {
         return new Cache();
+    }
+
+    public Brace cache(Cache cache) {
+        this.cache = cache;
+        return this;
     }
 
     public Brace port(int port) {
@@ -283,12 +289,13 @@ public class Brace {
 
         // Register ops endpoints if secret is configured
         if (opsSecret != null) {
-            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret, errorStore);
+            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret, errorStore, cache);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
             router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
             router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError);
+            router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache);
         }
 
         var threadPool = new QueuedThreadPool();
