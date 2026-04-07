@@ -46,23 +46,28 @@ public class App {
             List.of(Post.class, User.class));
         var mail = new Mailer(config.get("smtp.url")).from("noreply@myapp.com");
 
+        var cache = Brace.cache();
+
         var app = Brace.app()
             .port(config.getInt("port", 8080))
             .database(db)
             .templates("views")
             .sessions(config.get("session.secret"))
             .mailer(mail)
-            .ops(config.get("ops.secret"));
+            .ops(config.get("ops.secret"))
+            .staticFiles("/assets", "public");
 
         var posts = new PostController();
         var auth = new AuthController(mail);
 
         app.before(Auth::requireLogin);
-        app.get("/", posts::index);
+        app.get("/", cache.wrap("5m", posts::index));
         app.get("/posts/{id}", (DbHandler) posts::show);
         app.post("/posts", (FullHandler) posts::create);
-        app.get("/login", auth::loginForm);
-        app.post("/login", (SessionHandler) auth::login);
+        app.group("/auth", g -> {
+            g.get("/login", auth::loginForm);
+            g.post("/login", (SessionHandler) auth::login);
+        });
 
         app.every("5m", "cleanup", new CleanupJob());
         app.daily("02:00", "digest", new DigestJob(mail));
@@ -74,15 +79,16 @@ public class App {
 
 ## What's Included
 
-- **HTTP** -- Jetty 12 with virtual threads, programmatic routing, middleware
-- **Database** -- Hibernate 7 StatelessSession, per-request transactions, Flyway migrations
+- **HTTP** -- Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
+- **Database** -- Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access
 - **Templates** -- JTE compiled templates with layout support, hot-reload in dev
 - **Sessions** -- HMAC-SHA256 signed cookies, no server-side storage
 - **Forms** -- Record-based form binding with validation annotations
 - **CSRF** -- Automatic protection on POST/PUT/DELETE, skip for JSON APIs
+- **Cache** -- In-memory with TTL, tag-based invalidation, route-level page caching via `cache.wrap()`
 - **Jobs** -- In-memory recurring scheduler + durable database-backed queue with retry
 - **Mailer** -- SMTP sending with dev-mode email capture
-- **Ops** -- `/ops/status` diagnostics, `/ops/dashboard` built-in HTML dashboard, structured JSON logging
+- **Ops** -- `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` built-in HTML dashboard, structured JSON logging
 - **Testing** -- `Brace.test()` harness for fast in-process integration tests with H2
 - **CLI** -- `brace new myapp` project scaffolding
 
@@ -143,8 +149,19 @@ db.delete(post)                                   // delete
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
+db.queryIn(Post.class, "id", List.of(1, 2, 3))   // batch lookup with IN clause
 db.count(Post.class, "published = ?", true)       // count with condition
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL
+```
+
+For scoped DB access outside the request lifecycle (background tasks, WebSocket handlers):
+
+```java
+dbFactory.withSession(db -> {
+    db.insert(new AuditLog("user signed up"));
+});
+
+var count = dbFactory.withSession(db -> db.count(User.class));
 ```
 
 ## Forms & Validation
@@ -197,18 +214,53 @@ mail.to("user@example.com")
 
 Dev mode captures emails without sending. Access via `mailer.sent()` in tests.
 
+## Cache
+
+```java
+var cache = Brace.cache();
+
+cache.set("user:42", user, "30m");                 // set with TTL
+cache.get("user:42", User.class);                  // get or null
+cache.getOrSet("stats", "5m", () -> computeStats()); // compute on miss
+cache.delete("user:42");                           // remove one
+cache.deletePrefix("user:");                       // remove by prefix
+cache.clearTag("simulation");                      // remove by tag
+
+// Route-level page caching
+app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
+app.get("/team/{id}", cache.wrap("30m", ctrl::team).tags("simulation"));
+cache.clearTag("simulation");  // invalidate all cached pages at once
+```
+
+## Static Files
+
+```java
+app.staticFiles("/assets", "public");   // serve public/ directory at /assets/*
+```
+
+## Route Grouping
+
+```java
+app.group("/admin", admin -> {
+    admin.get("/users", ctrl::list);
+    admin.post("/users", ctrl::create);
+    admin.group("/api", api -> {        // nesting supported
+        api.get("/stats", ctrl::stats); // registers /admin/api/stats
+    });
+});
+```
+
 ## AI Ops
 
-`/ops/status?key=SECRET` returns full diagnostics:
-- App uptime, Java version
-- Request stats, status codes, slowest routes
-- Memory usage
-- Recent errors with stack traces and request context
-- Job statuses (scheduled + durable)
-- Mailer stats
-- Per-minute timeseries
+Ops endpoints authenticate via `X-Ops-Key` header (query param fallback for dashboard browser access).
 
-`/ops/dashboard?key=SECRET` serves a built-in HTML dashboard.
+`GET /ops/status` — full diagnostics: uptime, request stats, status codes, slowest routes, memory, recent errors with stack traces, job statuses, mailer stats, per-minute timeseries.
+
+`GET /ops/errors` — persistent exception tracking. Returns unresolved errors by default, `?status=resolved` for resolved. Errors are deduplicated by type + route, with occurrence counts. Designed for coding agents to pull production errors and work on fixes.
+
+`POST /ops/errors/{id}/resolve` — marks an error as resolved. New occurrences after resolution create a new incident.
+
+`GET /ops/dashboard` — built-in HTML dashboard with sparkline charts.
 
 ## Testing
 
@@ -256,4 +308,4 @@ ops.secret=change-me
 | Passwords | jBCrypt |
 | Email | Jakarta Mail |
 
-**~3,700 lines of framework code. 138 tests.**
+**~4,500 lines of framework code. 202 tests.**
