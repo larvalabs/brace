@@ -98,4 +98,86 @@ class OpsIntegrationTest {
         var response = getWithKey("/ops/status");
         assertTrue(response.body().contains("\"errors\""));
     }
+
+    // --- Cache ops tests (separate app with cache registered) ---
+
+    static Brace cacheApp;
+    static int cachePort;
+
+    @BeforeAll
+    static void startCacheApp() throws Exception {
+        var cache = Brace.cache();
+        cache.set("key1", "value1");
+        cache.set("key2", "value2", "5m");
+
+        cacheApp = Brace.app().port(0).ops("cache-key").cache(cache);
+        cacheApp.start();
+        cachePort = cacheApp.actualPort();
+    }
+
+    @AfterAll
+    static void stopCacheApp() throws Exception {
+        cacheApp.stop();
+    }
+
+    private HttpResponse<String> cacheGet(String path) throws Exception {
+        return client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + path))
+                .header("X-Ops-Key", "cache-key")
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> cachePost(String path) throws Exception {
+        return client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + path))
+                .header("X-Ops-Key", "cache-key")
+                .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void statusIncludesCacheStats() throws Exception {
+        var response = cacheGet("/ops/status");
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("\"cache\""));
+        assertTrue(response.body().contains("\"entries\""));
+    }
+
+    @Test
+    void clearCacheRequiresKey() throws Exception {
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/cache/clear"))
+                .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void clearCacheWithValidKey() throws Exception {
+        var response = cachePost("/ops/cache/clear");
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("\"cleared\""));
+
+        // Verify cache is empty in status
+        var status = cacheGet("/ops/status");
+        assertTrue(status.body().contains("\"entries\":0"));
+    }
+
+    @Test
+    void dashboardIncludesCacheSection() throws Exception {
+        var response = cacheGet("/ops/dashboard");
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("clearCache"));
+    }
+
+    @Test
+    void dashboardIncludesErrorTracking() throws Exception {
+        var response = cacheGet("/ops/dashboard");
+        assertTrue(response.body().contains("Error Tracking"));
+        assertTrue(response.body().contains("resolveError"));
+    }
 }
