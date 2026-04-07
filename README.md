@@ -13,17 +13,18 @@ Brace is designed so that AI produces correct code on the first try:
 - **Small API surface.** ~15 core types. AI can hold the entire framework in context without running out of window.
 - **One way to do each thing.** No choice between annotations vs XML vs programmatic config vs auto-detection. Just Java.
 
-In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests, 5 feature rounds), Brace costs 32% less than Spring Boot cumulatively ($5.86 vs $8.59) — and the gap widens with each feature addition:
+In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests), Brace costs 32% less than Spring Boot on feature additions ($5.86 vs $8.59) — and the gap widens as the codebase grows:
 
-| Feature | Brace | Spring | Saving |
+| Phase | Brace | Spring | Saving |
 |---|---|---|---|
-| Speaker Availability | $1.44 | $2.02 | 29% |
-| Waitlist + Auto-Promotion | $1.02 | $1.14 | 11% |
-| Ratings + Speaker Stats | $0.75 | $1.18 | 36% |
-| Multi-Day Events + Tracks | $1.29 | $1.96 | 34% |
-| Notifications + Activity Feed | $1.36 | $2.29 | 41% |
+| Greenfield build (6 entities, 35 tests) | $2.24 | $2.38 | 6% |
+| + Speaker Availability | $1.44 | $2.02 | 29% |
+| + Waitlist with Auto-Promotion | $1.02 | $1.14 | 11% |
+| + Ratings & Speaker Stats | $0.75 | $1.18 | 36% |
+| + Multi-Day Events & Tracks | $1.29 | $1.96 | 34% |
+| + Notifications & Activity Feed | $1.36 | $2.29 | 41% |
 
-The advantage grows with codebase size because Brace's context scales linearly (read the controller and its dependencies) while Spring's scales super-linearly (trace the DI graph, understand conditional beans, check profiles). Hono (TypeScript) performed comparably to Brace on token cost ($5.61) but trades runtime performance for simplicity. Full benchmark data and methodology: [ai-benchmark](https://github.com/mattonfoot/ai-benchmark).
+The greenfield build is roughly tied — both frameworks are cheap when the codebase is empty. The advantage emerges as features accumulate and the AI has to read and modify existing code. Brace's context scales linearly (read the controller and its dependencies) while Spring's scales super-linearly (trace the DI graph, understand conditional beans, check profiles). Hono (TypeScript) performed comparably to Brace on token cost ($5.61 for feature additions) but trades runtime performance for simplicity. Full benchmark data and methodology: [ai-benchmark](https://github.com/mattonfoot/ai-benchmark).
 
 ### The Performance Story
 
