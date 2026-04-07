@@ -95,7 +95,7 @@ If the same `error_type + route` occurs again after resolution, a new row is cre
 ## Design Decisions
 
 - **Virtual thread for persistence** — keeps error recording off the request path. The in-memory `Stats.recordError()` provides instant visibility; the DB write is eventual. If the virtual thread write fails, the error is still visible in-memory via `/ops/status`.
-- **Own DB session** — `ErrorStore` opens a fresh session because the request's session has already rolled back after the exception.
+- **Own DB session** — `ErrorStore` opens a fresh session via `DatabaseFactory.openSession()` directly (framework-internal access). The request's session has already rolled back after the exception. This is the same pattern that `db.withSession()` will later expose as a public API for user code.
 - **Dedup by error_type + route** — matches existing in-memory dedup in `Stats`. Simple and effective for grouping repeated occurrences of the same bug.
 - **Resolved errors create new rows on recurrence** — a resolved error that reappears is a new incident, not a continuation. This lets agents distinguish between "fixed and regressed" vs "never fixed".
 - **Row limit, not time-based** — simpler, configurable, and prevents unbounded growth regardless of error rate. Resolved errors are pruned first to preserve unresolved ones.
