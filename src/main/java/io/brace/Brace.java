@@ -15,6 +15,7 @@ public class Brace {
     private final Router router = new Router();
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
+    private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
     private String sessionSecret;
     private TemplateEngine templateEngine;
@@ -74,6 +75,11 @@ public class Brace {
 
     public Brace ops(String secret) {
         this.opsSecret = secret;
+        return this;
+    }
+
+    public Brace staticFiles(String urlPrefix, String directory) {
+        staticFileMappings.add(new BraceHandler.StaticFileMapping(urlPrefix, directory));
         return this;
     }
 
@@ -221,6 +227,14 @@ public class Brace {
         return this;
     }
 
+    // Route grouping
+
+    public Brace group(String prefix, Consumer<RouteGroup> config) {
+        var group = new RouteGroup(prefix, router);
+        config.accept(group);
+        return this;
+    }
+
     // Middleware
 
     public Brace before(Middleware.Before handler) {
@@ -256,12 +270,21 @@ public class Brace {
     public void start() throws Exception {
         stats = new Stats();
 
+        // Create ErrorStore if database is available
+        ErrorStore errorStore = null;
+        if (databaseFactory != null) {
+            int maxErrors = 1000;
+            errorStore = new ErrorStore(databaseFactory, maxErrors);
+        }
+
         // Register ops endpoints if secret is configured
         if (opsSecret != null) {
-            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret);
+            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret, errorStore);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
+            router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
+            router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError);
         }
 
         var threadPool = new QueuedThreadPool();
@@ -272,7 +295,7 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats);
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, List.copyOf(staticFileMappings));
         server.setHandler(handler);
 
         server.start();

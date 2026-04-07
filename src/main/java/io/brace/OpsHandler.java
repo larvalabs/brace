@@ -11,14 +11,21 @@ public class OpsHandler {
     private final Mailer mailer;
     private final Router router;
     private final String opsSecret;
+    private final ErrorStore errorStore;
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, String opsSecret) {
+        this(stats, jobScheduler, mailer, router, opsSecret, null);
+    }
+
+    public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
+                      Router router, String opsSecret, ErrorStore errorStore) {
         this.stats = stats;
         this.jobScheduler = jobScheduler;
         this.mailer = mailer;
         this.router = router;
         this.opsSecret = opsSecret;
+        this.errorStore = errorStore;
     }
 
     public Result status(Request req) {
@@ -135,6 +142,22 @@ public class OpsHandler {
             routeList.add(r);
         }
         return Json.of(routeList);
+    }
+
+    public Result errors(Request req) {
+        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (errorStore == null) return Json.of(List.of());
+        String status = req.param("status");
+        return Json.of(errorStore.list(status));
+    }
+
+    public Result resolveError(Request req) {
+        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (errorStore == null) return Result.notFound();
+        long id = req.longParam("id");
+        var resolved = errorStore.resolve(id);
+        if (resolved == null) return Result.notFound();
+        return Json.of(resolved);
     }
 
     private boolean authorize(Request req) {

@@ -88,6 +88,28 @@ public class TestApp {
         }
     }
 
+    public TestResponse post(String path) {
+        return post(path, Map.of());
+    }
+
+    public TestResponse put(String path, Map<String, String> formParams) {
+        try {
+            var body = encodeForm(formParams);
+            var request = HttpRequest.newBuilder()
+                .uri(URI.create(url(path)))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .PUT(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+            return new TestResponse(client.send(request, HttpResponse.BodyHandlers.ofString()));
+        } catch (Exception e) {
+            throw new RuntimeException("PUT " + path + " failed", e);
+        }
+    }
+
+    public TestResponse put(String path) {
+        return put(path, Map.of());
+    }
+
     public TestResponse delete(String path) {
         try {
             var request = HttpRequest.newBuilder()
@@ -153,6 +175,10 @@ public class TestApp {
     }
 
     // --- Other ---
+
+    public Brace app() {
+        return app;
+    }
 
     public String url(String path) {
         return "http://localhost:" + app.actualPort() + path;

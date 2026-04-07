@@ -4,8 +4,11 @@ import org.eclipse.jetty.io.Content;
 import org.eclipse.jetty.server.Response;
 import org.eclipse.jetty.util.Callback;
 
+import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,18 +21,22 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final DatabaseFactory databaseFactory;
     private final String sessionSecret;
     private final Stats stats;
+    private final ErrorStore errorStore;
+    private final List<StaticFileMapping> staticFileMappings;
+
+    record StaticFileMapping(String urlPrefix, String directory) {}
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware) {
-        this(router, beforeMiddleware, afterMiddleware, null, null, null);
+        this(router, beforeMiddleware, afterMiddleware, null, null, null, null, List.of());
     }
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null, null);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null, null, null, List.of());
     }
 
     public BraceHandler(Router router,
@@ -37,7 +44,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory,
                         String sessionSecret) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, null, List.of());
     }
 
     public BraceHandler(Router router,
@@ -46,12 +53,25 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         DatabaseFactory databaseFactory,
                         String sessionSecret,
                         Stats stats) {
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, null, List.of());
+    }
+
+    public BraceHandler(Router router,
+                        List<Middleware.BoundBefore> beforeMiddleware,
+                        List<Middleware.BoundAfter> afterMiddleware,
+                        DatabaseFactory databaseFactory,
+                        String sessionSecret,
+                        Stats stats,
+                        ErrorStore errorStore,
+                        List<StaticFileMapping> staticFileMappings) {
         this.router = router;
         this.beforeMiddleware = beforeMiddleware;
         this.afterMiddleware = afterMiddleware;
         this.databaseFactory = databaseFactory;
         this.sessionSecret = sessionSecret;
         this.stats = stats;
+        this.errorStore = errorStore;
+        this.staticFileMappings = staticFileMappings;
     }
 
     @Override
@@ -92,8 +112,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
-            // 404 if no route matches
+            // Check static file mappings if no route matched
             if (match == null) {
+                Result staticResult = serveStaticFile(path);
+                if (staticResult != null) {
+                    writeResult(staticResult, response, callback);
+                    return true;
+                }
                 writeResult(Result.notFound(), response, callback);
                 return true;
             }
@@ -209,11 +234,22 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
         } catch (Exception e) {
             var durationUs = (System.nanoTime() - startNanos) / 1000;
+            String errorMethod = jettyRequest.getMethod();
+            String errorPath = jettyRequest.getHttpURI().getPath();
+            String errorQuery = jettyRequest.getHttpURI().getQuery();
+            String routeInfo = errorMethod + " " + errorPath;
+            String requestInfo = errorMethod + " " + errorPath + (errorQuery != null ? "?" + errorQuery : "");
             if (stats != null) {
-                stats.recordRequest("?", "?", 500, durationUs, 0, 0);
+                stats.recordRequest(errorMethod, errorPath, 500, durationUs, 0, 0);
                 stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
-                    "?", stackTraceToString(e), "", "");
-                Log.error("?", "?", e);
+                    routeInfo, stackTraceToString(e), requestInfo, "");
+                Log.error(errorMethod, errorPath, e);
+            }
+            if (errorStore != null) {
+                String errorType = e.getClass().getSimpleName();
+                String errorMessage = e.getMessage();
+                String stackTrace = stackTraceToString(e);
+                Thread.startVirtualThread(() -> errorStore.record(errorType, errorMessage, routeInfo, stackTrace, requestInfo));
             }
             Result errorResult = Result.error(500, "Internal Server Error");
             writeResult(errorResult, response, callback);
@@ -227,10 +263,78 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         for (var entry : result.headers().entrySet()) {
             response.getHeaders().put(entry.getKey(), entry.getValue());
         }
-        byte[] bytes = result.body() != null
-                ? result.body().getBytes(StandardCharsets.UTF_8)
-                : new byte[0];
+        byte[] bytes;
+        if (result.rawBytes() != null) {
+            bytes = result.rawBytes();
+        } else if (result.body() != null) {
+            bytes = result.body().getBytes(StandardCharsets.UTF_8);
+        } else {
+            bytes = new byte[0];
+        }
         response.write(true, ByteBuffer.wrap(bytes), callback);
+    }
+
+    private Result serveStaticFile(String requestPath) {
+        for (var mapping : staticFileMappings) {
+            String prefix = mapping.urlPrefix();
+            if (!requestPath.startsWith(prefix)) continue;
+
+            if (requestPath.contains("..")) {
+                return Result.notFound();
+            }
+
+            String relativePath = requestPath.substring(prefix.length());
+            if (relativePath.startsWith("/")) {
+                relativePath = relativePath.substring(1);
+            }
+
+            if (relativePath.isEmpty()) {
+                return Result.notFound();
+            }
+
+            Path baseDir = Path.of(mapping.directory()).toAbsolutePath().normalize();
+            Path filePath = baseDir.resolve(relativePath).normalize();
+
+            if (!filePath.startsWith(baseDir)) {
+                return Result.notFound();
+            }
+
+            File file = filePath.toFile();
+            if (!file.exists() || !file.isFile()) {
+                return Result.notFound();
+            }
+
+            try {
+                byte[] fileBytes = Files.readAllBytes(filePath);
+                String contentType = contentTypeForPath(filePath.toString());
+                return Result.bytes(fileBytes, contentType);
+            } catch (Exception e) {
+                return Result.error(500, "Internal Server Error");
+            }
+        }
+        return null;
+    }
+
+    private String contentTypeForPath(String path) {
+        int dot = path.lastIndexOf('.');
+        if (dot < 0) return "application/octet-stream";
+        String ext = path.substring(dot + 1).toLowerCase();
+        return switch (ext) {
+            case "html", "htm" -> "text/html; charset=utf-8";
+            case "css"         -> "text/css; charset=utf-8";
+            case "js"          -> "text/javascript; charset=utf-8";
+            case "json"        -> "application/json";
+            case "png"         -> "image/png";
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "gif"         -> "image/gif";
+            case "svg"         -> "image/svg+xml";
+            case "ico"         -> "image/x-icon";
+            case "woff"        -> "font/woff";
+            case "woff2"       -> "font/woff2";
+            case "ttf"         -> "font/ttf";
+            case "pdf"         -> "application/pdf";
+            default            -> "application/octet-stream";
+        };
     }
 
     private String parseCookieValue(String cookieHeader, String name) {

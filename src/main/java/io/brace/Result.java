@@ -8,12 +8,23 @@ public class Result {
     private int status;
     private String contentType;
     private String body;
+    private byte[] rawBytes;
     private final Map<String, String> headers = new LinkedHashMap<>();
 
     protected Result(int status, String contentType, String body) {
         this.status = status;
         this.contentType = contentType;
         this.body = body;
+    }
+
+    private Result(int status, String contentType, byte[] rawBytes) {
+        this.status = status;
+        this.contentType = contentType;
+        this.rawBytes = rawBytes;
+    }
+
+    public static Result bytes(byte[] bytes, String contentType) {
+        return new Result(200, contentType, bytes);
     }
 
     public static Result text(String body) {
@@ -43,6 +54,7 @@ public class Result {
     public int status() { return status; }
     public String contentType() { return contentType; }
     public String body() { return body; }
+    public byte[] rawBytes() { return rawBytes; }
     public Map<String, String> headers() { return headers; }
 
     public Result header(String name, String value) {
