@@ -9,7 +9,7 @@
 - [x] Binary/stream responses (`Result.bytes()` + `Result.download()` with Content-Disposition)
 - [x] Flash messages (`session.flash("key", "value")` — survives one redirect, auto-consumed by BraceHandler)
 - [x] `notFoundIfNull()` convenience (`Result.notFoundIfNull(value)` — throws `NotFoundException`, caught as 404)
-- [ ] Reverse routing / named routes (URL generation from route names in templates)
+- [x] URL generation from route patterns (`Url.to("/users/{id}", 42)` → `"/users/42"`)
 - [x] Enhanced ops dashboard (error tracking with resolve, cache stats, clear cache button, expandable stack traces)
 - [x] Ops control endpoints (`POST /ops/cache/clear`, cache stats in `/ops/status`)
 - [ ] WebSocket support (design is done, not yet implemented)
