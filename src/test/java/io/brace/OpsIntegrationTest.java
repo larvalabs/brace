@@ -33,6 +33,15 @@ class OpsIntegrationTest {
             HttpResponse.BodyHandlers.ofString());
     }
 
+    private HttpResponse<String> getWithKey(String path) throws Exception {
+        return client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + path))
+                .header("X-Ops-Key", "test-ops-key")
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+    }
+
     @Test
     void opsStatusRequiresKey() throws Exception {
         var response = get("/ops/status");
@@ -45,7 +54,7 @@ class OpsIntegrationTest {
         get("/hello");
         get("/hello");
 
-        var response = get("/ops/status?key=test-ops-key");
+        var response = getWithKey("/ops/status");
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("\"app\""));
         assertTrue(response.body().contains("\"http\""));
@@ -55,7 +64,7 @@ class OpsIntegrationTest {
 
     @Test
     void opsRoutesWithValidKey() throws Exception {
-        var response = get("/ops/routes?key=test-ops-key");
+        var response = getWithKey("/ops/routes");
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("/hello"));
         assertTrue(response.body().contains("GET"));
@@ -64,7 +73,7 @@ class OpsIntegrationTest {
     @Test
     void statsRecordRequestsAfterTraffic() throws Exception {
         get("/hello");
-        var response = get("/ops/status?key=test-ops-key");
+        var response = getWithKey("/ops/status");
         assertTrue(response.body().contains("\"statusCodes\""));
     }
 
@@ -86,7 +95,7 @@ class OpsIntegrationTest {
     void errorTracking() throws Exception {
         // Trigger an error
         get("/error");
-        var response = get("/ops/status?key=test-ops-key");
+        var response = getWithKey("/ops/status");
         assertTrue(response.body().contains("\"errors\""));
     }
 }

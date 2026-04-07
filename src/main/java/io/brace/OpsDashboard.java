@@ -43,7 +43,7 @@ public class OpsDashboard {
 
             async function fetchData() {
                 try {
-                    const res = await fetch('/ops/status?key=' + encodeURIComponent(KEY));
+                    const res = await fetch('/ops/status', { headers: { 'X-Ops-Key': KEY } });
                     if (!res.ok) { app.innerHTML = '<p class="error-text">Failed to load: ' + res.status + '</p>'; return; }
                     data = await res.json();
                     render();

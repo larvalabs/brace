@@ -138,7 +138,10 @@ public class OpsHandler {
     }
 
     private boolean authorize(Request req) {
-        return opsSecret != null && opsSecret.equals(req.param("key"));
+        if (opsSecret == null) return false;
+        var headerKey = req.header("X-Ops-Key");
+        if (headerKey != null) return opsSecret.equals(headerKey);
+        return opsSecret.equals(req.param("key"));
     }
 
     private String formatDuration(Duration d) {

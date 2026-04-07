@@ -14,7 +14,7 @@
 ## Framework Improvements
 
 - [ ] Exception tracking — persistent `ops_errors` table, `GET /ops/errors`, `POST /ops/errors/{id}/resolve` ([spec](docs/superpowers/specs/2026-04-07-exception-tracking-design.md))
-- [ ] Ops endpoint security — switch from query param to header-based auth (`X-Ops-Key`), research stronger options
+- [x] Ops endpoint security — `X-Ops-Key` header with query param fallback for dashboard
 - [ ] Cache implementation (~120 lines — ConcurrentHashMap + TTL + tag-based invalidation + `cache.wrap()`)
 - [ ] WebSocket support (design is done, not yet implemented)
 - [ ] Route grouping (`app.group("/admin", admin -> { ... })`)
