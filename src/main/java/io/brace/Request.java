@@ -27,6 +27,7 @@ public class Request {
 
     public String method() { return method; }
     public String path() { return path; }
+    public Map<String, String> queryParams() { return queryParams; }
 
     public String param(String name) {
         var value = pathParams.get(name);

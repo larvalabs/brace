@@ -50,6 +50,23 @@ public class Database {
         return query.getResultList();
     }
 
+    public <T> List<T> queryIn(Class<T> type, String field, List<?> values) {
+        if (values.isEmpty()) {
+            return List.of();
+        }
+        var placeholders = new StringBuilder();
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) placeholders.append(", ");
+            placeholders.append('?').append(i + 1);
+        }
+        String hql = "FROM " + type.getSimpleName() + " WHERE " + field + " IN (" + placeholders + ")";
+        Query<T> query = session.createQuery(hql, type);
+        for (int i = 0; i < values.size(); i++) {
+            query.setParameter(i + 1, values.get(i));
+        }
+        return query.getResultList();
+    }
+
     public <T> T queryOne(Class<T> type, String hqlWhere, Object... params) {
         List<T> results = query(type, hqlWhere, params);
         return results.isEmpty() ? null : results.get(0);

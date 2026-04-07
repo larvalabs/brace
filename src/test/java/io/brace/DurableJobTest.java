@@ -192,6 +192,24 @@ class DurableJobTest {
     }
 
     @Test
+    void scheduleReturnsUniqueSequentialIds() {
+        var db = new Database(factory.openSession());
+        long id1, id2;
+        try {
+            db.beginTransaction();
+            id1 = Jobs.schedule(db, new TestJob("first"), Duration.ZERO);
+            id2 = Jobs.schedule(db, new TestJob("second"), Duration.ZERO);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+
+        assertTrue(id1 > 0, "First job ID should be positive");
+        assertTrue(id2 > 0, "Second job ID should be positive");
+        assertTrue(id2 > id1, "Second job ID should be greater than first");
+    }
+
+    @Test
     void parallelExecution() {
         var items = List.of("a", "b", "c", "d", "e");
         var results = Collections.synchronizedList(new ArrayList<String>());

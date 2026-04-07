@@ -31,6 +31,35 @@ public class DatabaseFactory {
         return sessionFactory.openStatelessSession();
     }
 
+    public <T> T withSession(java.util.function.Function<Database, T> action) {
+        var db = new Database(openSession());
+        db.beginTransaction();
+        try {
+            T result = action.apply(db);
+            db.commitTransaction();
+            return result;
+        } catch (Exception e) {
+            db.rollbackTransaction();
+            throw e instanceof RuntimeException re ? re : new RuntimeException(e);
+        } finally {
+            db.close();
+        }
+    }
+
+    public void withSession(java.util.function.Consumer<Database> action) {
+        var db = new Database(openSession());
+        db.beginTransaction();
+        try {
+            action.accept(db);
+            db.commitTransaction();
+        } catch (Exception e) {
+            db.rollbackTransaction();
+            throw e instanceof RuntimeException re ? re : new RuntimeException(e);
+        } finally {
+            db.close();
+        }
+    }
+
     public void close() {
         sessionFactory.close();
     }

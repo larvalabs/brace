@@ -31,6 +31,10 @@ public class Brace {
         return new Brace();
     }
 
+    public static Cache cache() {
+        return new Cache();
+    }
+
     public Brace port(int port) {
         this.port = port;
         return this;

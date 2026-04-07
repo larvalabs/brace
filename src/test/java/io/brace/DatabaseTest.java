@@ -171,6 +171,109 @@ class DatabaseTest {
     }
 
     @Test
+    void queryInWithMultipleIds() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post1 = new Post();
+            post1.title = "QueryIn_1_" + System.nanoTime();
+            post1.body = "Body1";
+            post1.createdAt = Instant.now();
+            db.insert(post1);
+            var post2 = new Post();
+            post2.title = "QueryIn_2_" + System.nanoTime();
+            post2.body = "Body2";
+            post2.createdAt = Instant.now();
+            db.insert(post2);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var results = db.queryIn(Post.class, "id", List.of(post1.id, post2.id));
+            assertEquals(2, results.size());
+            assertTrue(results.stream().anyMatch(p -> p.id.equals(post1.id)));
+            assertTrue(results.stream().anyMatch(p -> p.id.equals(post2.id)));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryInWithEmptyListReturnsEmpty() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var results = db.queryIn(Post.class, "id", List.of());
+            assertTrue(results.isEmpty());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryInWithSingleValue() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "QueryInSingle_" + System.nanoTime();
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var results = db.queryIn(Post.class, "id", List.of(post.id));
+            assertEquals(1, results.size());
+            assertEquals(post.id, results.get(0).id);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryInByNonIdField() {
+        var db = new Database(factory.openSession());
+        try {
+            long ts = System.nanoTime();
+            db.beginTransaction();
+            var post1 = new Post();
+            post1.title = "QueryInField_A_" + ts;
+            post1.body = "Body";
+            post1.createdAt = Instant.now();
+            db.insert(post1);
+            var post2 = new Post();
+            post2.title = "QueryInField_B_" + ts;
+            post2.body = "Body";
+            post2.createdAt = Instant.now();
+            db.insert(post2);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var results = db.queryIn(Post.class, "title", List.of(post1.title, post2.title));
+            assertEquals(2, results.size());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryInWithNoMatchesReturnsEmpty() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var results = db.queryIn(Post.class, "id", List.of(-1L, -2L, -3L));
+            assertTrue(results.isEmpty());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void findAll() {
         var db = new Database(factory.openSession());
         try {

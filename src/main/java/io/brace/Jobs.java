@@ -18,10 +18,26 @@ public class Jobs {
         var jobClass = job.getClass().getName();
         var data = job.data();
 
-        db.sql("INSERT INTO scheduled_jobs (name, job_class, job_data, run_at, max_attempts, backoff_seconds, depends_on_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            name, jobClass, data, runAt, options.maxAttempts(), options.backoff().toSeconds(), options.afterJobId());
-
-        return db.sqlQueryLong("SELECT MAX(id) FROM scheduled_jobs");
+        return db.jdbc(conn -> {
+            var ps = conn.prepareStatement(
+                "INSERT INTO scheduled_jobs (name, job_class, job_data, run_at, max_attempts, backoff_seconds, depends_on_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                java.sql.Statement.RETURN_GENERATED_KEYS);
+            ps.setString(1, name);
+            ps.setString(2, jobClass);
+            ps.setString(3, data);
+            ps.setTimestamp(4, runAt);
+            ps.setInt(5, options.maxAttempts());
+            ps.setLong(6, options.backoff().toSeconds());
+            if (options.afterJobId() != null) {
+                ps.setLong(7, options.afterJobId());
+            } else {
+                ps.setNull(7, java.sql.Types.BIGINT);
+            }
+            ps.executeUpdate();
+            var rs = ps.getGeneratedKeys();
+            rs.next();
+            return rs.getLong(1);
+        });
     }
 
     public static <T> void parallel(List<T> items, int concurrency, Consumer<T> action) {

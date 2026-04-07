@@ -1,6 +1,31 @@
 # Brace — Next Steps
 
-## Benchmarks (Priority)
+## Framework Improvements
+
+- [x] Exception tracking — persistent `ops_errors` table, `GET /ops/errors`, `POST /ops/errors/{id}/resolve` ([spec](docs/superpowers/specs/2026-04-07-exception-tracking-design.md))
+- [x] Ops endpoint security — `X-Ops-Key` header with query param fallback for dashboard
+- [x] Cache implementation (~120 lines — ConcurrentHashMap + TTL + tag-based invalidation + `cache.wrap()`)
+- [ ] WebSocket support (design is done, not yet implemented)
+- [x] Route grouping (`app.group("/admin", admin -> { ... })`)
+- [x] Static file serving (`app.staticFiles("/assets", "public")`)
+- [ ] `brace dev` CLI command with file watcher + fast restart
+- [ ] `brace deploy` CLI command with Dokploy API integration
+- [ ] Auto-generated CLAUDE.md on build
+- [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
+- [ ] Ops control endpoints (POST /ops/config, /ops/cache/clear, /ops/job/run)
+- [x] `db.withSession()` for scoped DB access outside request lifecycle
+- [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
+- [x] `db.queryIn()` for IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`)
+
+## Documentation
+
+- [ ] Getting started guide
+- [ ] API reference for all 15 core types
+- [ ] Deployment guide (Dokploy + Docker)
+- [ ] Migration guide from Spring Boot
+- [ ] Migration guide from Play 1
+
+## Benchmarks (Lower Priority)
 
 - [ ] Run Spring Boot TFB on same machine for side-by-side comparison
 - [ ] Tune Brace connection pool (HikariCP settings) — DB numbers may improve significantly
@@ -10,31 +35,6 @@
 - [ ] Implement PetClinic in Spring Boot via AI, measuring tokens
 - [ ] Add-feature benchmark: appointment scheduling on both PetClinic implementations
 - [ ] Automate token measurement via Claude API script
-
-## Framework Improvements
-
-- [x] Exception tracking — persistent `ops_errors` table, `GET /ops/errors`, `POST /ops/errors/{id}/resolve` ([spec](docs/superpowers/specs/2026-04-07-exception-tracking-design.md))
-- [x] Ops endpoint security — `X-Ops-Key` header with query param fallback for dashboard
-- [ ] Cache implementation (~120 lines — ConcurrentHashMap + TTL + tag-based invalidation + `cache.wrap()`)
-- [ ] WebSocket support (design is done, not yet implemented)
-- [x] Route grouping (`app.group("/admin", admin -> { ... })`)
-- [x] Static file serving (`app.staticFiles("/assets", "public")`)
-- [ ] `brace dev` CLI command with file watcher + fast restart
-- [ ] `brace deploy` CLI command with Dokploy API integration
-- [ ] Auto-generated CLAUDE.md on build
-- [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
-- [ ] Ops control endpoints (POST /ops/config, /ops/cache/clear, /ops/job/run)
-- [ ] `db.withSession()` for scoped DB access outside request lifecycle
-- [ ] `INSERT ... RETURNING id` for PostgreSQL (currently uses `SELECT MAX(id)` for durable job IDs)
-- [ ] `db.query()` with IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`) — currently requires N+1 queries for batch lookups by ID
-
-## Documentation
-
-- [ ] Getting started guide
-- [ ] API reference for all 15 core types
-- [ ] Deployment guide (Dokploy + Docker)
-- [ ] Migration guide from Spring Boot
-- [ ] Migration guide from Play 1
 
 ## Future Considerations
 
