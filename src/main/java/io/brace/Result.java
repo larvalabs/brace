@@ -27,12 +27,22 @@ public class Result {
         return new Result(200, contentType, bytes);
     }
 
+    public static Result download(byte[] bytes, String contentType, String filename) {
+        return new Result(200, contentType, bytes)
+            .header("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+    }
+
     public static Result text(String body) {
         return new Result(200, "text/plain", body);
     }
 
     public static Result notFound() {
         return new Result(404, "text/plain", "Not Found");
+    }
+
+    public static <T> T notFoundIfNull(T value) {
+        if (value == null) throw new NotFoundException();
+        return value;
     }
 
     public static Result error(int status, String message) {

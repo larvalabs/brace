@@ -33,6 +33,10 @@ class IntegrationTest {
         app.get("/json", req -> Json.of(java.util.Map.of("status", "ok")));
         app.get("/redirect", req -> Redirect.to("/hello"));
         app.get("/admin/secret", req -> Result.text("secret"));
+        app.get("/not-found-if-null", req -> {
+            Result.notFoundIfNull(null);
+            return Result.text("should not reach here");
+        });
 
         app.start();
         port = app.actualPort();
@@ -107,8 +111,15 @@ class IntegrationTest {
     }
 
     @Test
+    void notFoundIfNullReturns404() throws Exception {
+        var response = get("/not-found-if-null");
+        assertEquals(404, response.statusCode());
+        assertEquals("Not Found", response.body());
+    }
+
+    @Test
     void routeTableSize() {
         var routes = app.routes();
-        assertEquals(5, routes.size());
+        assertEquals(6, routes.size());
     }
 }

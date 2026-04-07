@@ -82,4 +82,47 @@ class SessionTest {
         session.set("key", "value");
         assertTrue(session.isModified());
     }
+
+    @Test
+    void flashStoresDataWithPrefix() {
+        var session = new Session();
+        session.flash("success", "Item saved!");
+        assertEquals("Item saved!", session.get("_flash:success"));
+    }
+
+    @Test
+    void consumeFlashMovesDataToFlashMap() {
+        var session = new Session();
+        session.flash("success", "Item saved!");
+        session.flash("error", "Something failed");
+        session.consumeFlash();
+
+        // Flash data available via flash(key) and flashData()
+        assertEquals("Item saved!", session.flash("success"));
+        assertEquals("Something failed", session.flash("error"));
+        assertEquals(2, session.flashData().size());
+
+        // Removed from session data
+        assertFalse(session.has("_flash:success"));
+        assertFalse(session.has("_flash:error"));
+    }
+
+    @Test
+    void flashDataGoneAfterSecondConsume() {
+        var session = new Session();
+        session.flash("success", "Item saved!");
+
+        // First consume: flash is available
+        session.consumeFlash();
+        assertEquals("Item saved!", session.flash("success"));
+
+        // Serialize and deserialize (simulating a new request)
+        var cookie = session.toCookie(SECRET);
+        var restored = Session.fromCookie(cookie, SECRET);
+        restored.consumeFlash();
+
+        // Flash data should not be present
+        assertNull(restored.flash("success"));
+        assertTrue(restored.flashData().isEmpty());
+    }
 }

@@ -73,6 +73,36 @@ class ResultTest {
     }
 
     @Test
+    void downloadSetsContentType() {
+        var result = Result.download(new byte[]{1, 2, 3}, "application/pdf", "report.pdf");
+        assertEquals("application/pdf", result.contentType());
+    }
+
+    @Test
+    void downloadSetsContentDispositionHeader() {
+        var result = Result.download(new byte[]{1, 2, 3}, "application/pdf", "report.pdf");
+        assertEquals("attachment; filename=\"report.pdf\"", result.header("Content-Disposition"));
+    }
+
+    @Test
+    void downloadHasRawBytes() {
+        byte[] data = new byte[]{1, 2, 3};
+        var result = Result.download(data, "application/pdf", "report.pdf");
+        assertArrayEquals(data, result.rawBytes());
+    }
+
+    @Test
+    void notFoundIfNullReturnsValueWhenNonNull() {
+        String value = Result.notFoundIfNull("hello");
+        assertEquals("hello", value);
+    }
+
+    @Test
+    void notFoundIfNullThrowsWhenNull() {
+        assertThrows(NotFoundException.class, () -> Result.notFoundIfNull(null));
+    }
+
+    @Test
     void resultHeaders() {
         var result = Result.text("hello");
         result.header("X-Custom", "value");

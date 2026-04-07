@@ -5,6 +5,13 @@
 - [x] Exception tracking — persistent `ops_errors` table, `GET /ops/errors`, `POST /ops/errors/{id}/resolve` ([spec](docs/superpowers/specs/2026-04-07-exception-tracking-design.md))
 - [x] Ops endpoint security — `X-Ops-Key` header with query param fallback for dashboard
 - [x] Cache implementation (~120 lines — ConcurrentHashMap + TTL + tag-based invalidation + `cache.wrap()`)
+- [x] HTTP client wrapper (`Http.get()`, `Http.post()`, `.bearer()`, `.bodyJson()`, `.fetchJson()` — over `java.net.http.HttpClient`)
+- [x] Binary/stream responses (`Result.bytes()` + `Result.download()` with Content-Disposition)
+- [x] Flash messages (`session.flash("key", "value")` — survives one redirect, auto-consumed by BraceHandler)
+- [x] `notFoundIfNull()` convenience (`Result.notFoundIfNull(value)` — throws `NotFoundException`, caught as 404)
+- [ ] Reverse routing / named routes (URL generation from route names in templates)
+- [ ] Enhanced ops dashboard (add persistent error tracking table, cache stats, and control actions to `/ops/dashboard`)
+- [ ] Ops control endpoints (POST /ops/config, /ops/cache/clear, /ops/job/run)
 - [ ] WebSocket support (design is done, not yet implemented)
 - [x] Route grouping (`app.group("/admin", admin -> { ... })`)
 - [x] Static file serving (`app.staticFiles("/assets", "public")`)
@@ -12,7 +19,6 @@
 - [ ] `brace deploy` CLI command with Dokploy API integration
 - [ ] Auto-generated CLAUDE.md on build
 - [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
-- [ ] Ops control endpoints (POST /ops/config, /ops/cache/clear, /ops/job/run)
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
 - [x] `db.queryIn()` for IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`)

@@ -7,9 +7,12 @@ public class View extends Result {
 
     private static TemplateEngine engine;
     private static final ThreadLocal<String> currentCsrfField = new ThreadLocal<>();
+    private static final ThreadLocal<Map<String, String>> currentFlash = new ThreadLocal<>();
 
     static void setCsrfField(String field) { currentCsrfField.set(field); }
     static void clearCsrfField() { currentCsrfField.remove(); }
+    static void setFlash(Map<String, String> flash) { currentFlash.set(flash); }
+    static void clearFlash() { currentFlash.remove(); }
 
     private final String template;
     private final Map<String, Object> params;
@@ -32,6 +35,10 @@ public class View extends Result {
         String csrfField = currentCsrfField.get();
         if (csrfField != null) {
             params.put("csrfField", csrfField);
+        }
+        Map<String, String> flash = currentFlash.get();
+        if (flash != null) {
+            params.put("flash", flash);
         }
         String html;
         if (engine != null) {

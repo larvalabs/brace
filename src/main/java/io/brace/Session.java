@@ -13,6 +13,7 @@ import java.util.Map;
 public class Session {
 
     private final Map<String, String> data = new LinkedHashMap<>();
+    private final Map<String, String> flashData = new LinkedHashMap<>();
     private boolean modified = false;
 
     // -------------------------------------------------------------------------
@@ -60,6 +61,34 @@ public class Session {
 
     public boolean isModified() {
         return modified;
+    }
+
+    // -------------------------------------------------------------------------
+    // Flash messages
+    // -------------------------------------------------------------------------
+
+    public void flash(String key, String value) {
+        set("_flash:" + key, value);
+    }
+
+    public String flash(String key) {
+        return flashData.get(key);
+    }
+
+    void consumeFlash() {
+        var iterator = data.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            if (entry.getKey().startsWith("_flash:")) {
+                flashData.put(entry.getKey().substring(7), entry.getValue());
+                iterator.remove();
+                modified = true;
+            }
+        }
+    }
+
+    public Map<String, String> flashData() {
+        return flashData;
     }
 
     // -------------------------------------------------------------------------

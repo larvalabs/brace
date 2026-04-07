@@ -139,9 +139,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     String cookieHeader = headers.get("Cookie");
                     String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
                     session = Session.fromCookie(sessionCookie, sessionSecret);
+                    session.consumeFlash();
                 } else {
                     session = new Session();
+                    session.consumeFlash();
                 }
+            }
+
+            // Expose flash data to templates
+            if (session != null) {
+                View.setFlash(session.flashData());
             }
 
             // CSRF validation for mutating requests when sessions are enabled
@@ -211,6 +218,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             } finally {
                 View.clearCsrfField();
+                View.clearFlash();
             }
 
             // Write session cookie if modified
@@ -232,6 +240,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             return true;
 
+        } catch (NotFoundException e) {
+            var durationUs = (System.nanoTime() - startNanos) / 1000;
+            Result notFoundResult = Result.notFound();
+            writeResult(notFoundResult, response, callback);
+            if (stats != null) {
+                String errorMethod = jettyRequest.getMethod();
+                String errorPath = jettyRequest.getHttpURI().getPath();
+                stats.recordRequest(errorMethod, errorPath, 404, durationUs, 0, 0);
+                Log.request(errorMethod, errorPath, 404, durationUs, 0, 0);
+            }
+            return true;
         } catch (Exception e) {
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             String errorMethod = jettyRequest.getMethod();
