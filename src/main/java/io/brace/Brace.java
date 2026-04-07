@@ -3,11 +3,15 @@ package io.brace;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
+import org.eclipse.jetty.websocket.server.WebSocketUpgradeHandler;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 public class Brace {
 
@@ -27,6 +31,7 @@ public class Brace {
     private String opsSecret;
     private Stats stats;
     private Cache cache;
+    private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
 
     public static Brace app() {
         return new Brace();
@@ -90,6 +95,11 @@ public class Brace {
 
     public Brace staticFiles(String urlPrefix, String directory) {
         staticFileMappings.add(new BraceHandler.StaticFileMapping(urlPrefix, directory));
+        return this;
+    }
+
+    public Brace ws(String path, Function<WsContext, Object> handlerFactory) {
+        wsRoutes.put(path, handlerFactory);
         return this;
     }
 
@@ -307,7 +317,34 @@ public class Brace {
         server.addConnector(connector);
 
         var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, List.copyOf(staticFileMappings));
-        server.setHandler(handler);
+
+        if (!wsRoutes.isEmpty()) {
+            // Wrap with WebSocketUpgradeHandler for WebSocket support
+            var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {
+                for (var entry : wsRoutes.entrySet()) {
+                    String wsPath = entry.getKey();
+                    Function<WsContext, Object> factory = entry.getValue();
+                    container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> {
+                        // Extract session from upgrade request cookie
+                        Session braceSession = null;
+                        if (sessionSecret != null) {
+                            var cookies = org.eclipse.jetty.server.Request.getCookies(upgradeRequest);
+                            for (var cookie : cookies) {
+                                if ("brace_session".equals(cookie.getName())) {
+                                    braceSession = Session.fromCookie(cookie.getValue(), sessionSecret);
+                                    break;
+                                }
+                            }
+                        }
+                        return new WsHandler(factory, braceSession);
+                    });
+                }
+            });
+            wsUpgradeHandler.setHandler(handler);
+            server.setHandler(wsUpgradeHandler);
+        } else {
+            server.setHandler(handler);
+        }
 
         server.start();
         jobScheduler.start(databaseFactory);
@@ -338,6 +375,9 @@ public class Brace {
         System.out.println("Brace started on port " + actualPort());
         for (var route : router.routes()) {
             System.out.printf("  %-6s %s%n", route.method(), route.pattern());
+        }
+        for (var wsPath : wsRoutes.keySet()) {
+            System.out.printf("  %-6s %s%n", "WS", wsPath);
         }
     }
 

@@ -12,10 +12,10 @@
 - [x] URL generation from route patterns (`Url.to("/users/{id}", 42)` → `"/users/42"`)
 - [x] Enhanced ops dashboard (error tracking with resolve, cache stats, clear cache button, expandable stack traces)
 - [x] Ops control endpoints (`POST /ops/cache/clear`, cache stats in `/ops/status`)
-- [ ] WebSocket support (design is done, not yet implemented)
+- [x] WebSocket support (`app.ws("/path", Handler::new)` with WsContext, rooms, broadcast, session access)
 - [x] Route grouping (`app.group("/admin", admin -> { ... })`)
 - [x] Static file serving (`app.staticFiles("/assets", "public")`)
-- [ ] `brace dev` CLI command with file watcher + fast restart
+- [x] `brace dev` CLI command with file watcher + fast restart (`./brace dev`, `./brace test`, `./brace run`)
 - [ ] `brace deploy` CLI command with Dokploy API integration
 - [ ] Auto-generated CLAUDE.md on build
 - [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
