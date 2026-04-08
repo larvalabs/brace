@@ -28,6 +28,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final ErrorStore errorStore;
     private final List<StaticFileMapping> staticFileMappings;
     private final long maxUploadSize;
+    private final byte[] htmxJs;
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -92,6 +93,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.errorStore = errorStore;
         this.staticFileMappings = staticFileMappings;
         this.maxUploadSize = maxUploadSize;
+        byte[] htmxBytes = null;
+        try {
+            var stream = BraceHandler.class.getResourceAsStream("/brace/htmx.min.js");
+            if (stream != null) {
+                htmxBytes = stream.readAllBytes();
+                stream.close();
+            }
+        } catch (Exception ignored) {}
+        this.htmxJs = htmxBytes;
     }
 
     @Override
@@ -332,6 +342,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     private Result serveStaticFile(String requestPath) {
+        if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
+            return Result.bytes(htmxJs, "text/javascript; charset=utf-8");
+        }
         for (var mapping : staticFileMappings) {
             String prefix = mapping.urlPrefix();
             if (!requestPath.startsWith(prefix)) continue;

@@ -47,4 +47,12 @@ class HtmxTest {
         var response = get("/htmx-check", "HX-Request", "true");
         assertEquals("htmx", response.body());
     }
+
+    @Test
+    void htmxJsServedFromClasspath() throws Exception {
+        var response = get("/__brace/htmx.min.js");
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("text/javascript"));
+        assertTrue(response.body().contains("htmx"));
+    }
 }
