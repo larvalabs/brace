@@ -30,6 +30,7 @@ public class Brace {
     private final JobPoller jobPoller = new JobPoller();
     private String opsSecret;
     private Stats stats;
+    private JfrProfiler profiler;
     private Cache cache;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
@@ -322,9 +323,14 @@ public class Brace {
             errorStore = new ErrorStore(databaseFactory, maxErrors);
         }
 
+        // Create JFR profiler when ops is enabled
+        if (opsSecret != null) {
+            profiler = new JfrProfiler();
+        }
+
         // Register ops endpoints if secret is configured
         if (opsSecret != null) {
-            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret, errorStore, cache);
+            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret, errorStore, cache, profiler);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
@@ -440,6 +446,9 @@ public class Brace {
     public void stop() throws Exception {
         jobPoller.stop();
         jobScheduler.stop();
+        if (profiler != null) {
+            profiler.close();
+        }
         if (server != null) {
             server.stop();
         }

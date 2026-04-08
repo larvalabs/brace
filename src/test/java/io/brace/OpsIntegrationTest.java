@@ -237,4 +237,63 @@ class OpsIntegrationTest {
         assertTrue(response.body().contains("\"misses\""));
         assertTrue(response.body().contains("\"evictions\""));
     }
+
+    // --- JFR profiler integration tests (separate app) ---
+
+    static Brace jfrApp;
+    static int jfrPort;
+
+    @BeforeAll
+    static void startJfrApp() throws Exception {
+        jfrApp = Brace.app().port(0).ops("jfr-key");
+        jfrApp.get("/work", req -> {
+            long sum = 0;
+            for (int i = 0; i < 10000; i++) sum += i;
+            return Result.text("done:" + sum);
+        });
+        jfrApp.start();
+        jfrPort = jfrApp.actualPort();
+        Thread.sleep(1500);
+    }
+
+    @AfterAll
+    static void stopJfrApp() throws Exception {
+        jfrApp.stop();
+    }
+
+    @Test
+    void jfrStatusHasFullJvmSection() throws Exception {
+        for (int i = 0; i < 5; i++) {
+            client.send(
+                HttpRequest.newBuilder().uri(URI.create("http://localhost:" + jfrPort + "/work")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        }
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + jfrPort + "/ops/status"))
+                .header("X-Ops-Key", "jfr-key").GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode());
+        var body = response.body();
+        assertTrue(body.contains("\"jvm\""));
+        assertTrue(body.contains("\"heap\""));
+        assertTrue(body.contains("\"cpu\""));
+        assertTrue(body.contains("\"threads\""));
+        assertTrue(body.contains("\"gc\""));
+        assertTrue(body.contains("\"profiling\""));
+        assertTrue(body.contains("\"hotMethods\""));
+        assertTrue(body.contains("\"topAllocations\""));
+    }
+
+    @Test
+    void jfrDashboardHasJvmSection() throws Exception {
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + jfrPort + "/ops/dashboard?key=jfr-key")).GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("JVM"));
+        assertTrue(response.body().contains("Hot Methods"));
+        assertTrue(response.body().contains("Top Allocations"));
+    }
 }
