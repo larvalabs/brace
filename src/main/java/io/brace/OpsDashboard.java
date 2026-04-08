@@ -547,6 +547,17 @@ public class OpsDashboard {
         if (friendly != null) {
             return "<span class=\"method\">" + friendly + "</span>";
         }
+        // JVM object array descriptor: [Ljava.lang.String; → String[]
+        if (className.startsWith("[L") && className.endsWith(";")) {
+            className = className.substring(2, className.length() - 1);
+            String suffix = "[]";
+            int lastDot2 = className.lastIndexOf('.');
+            if (lastDot2 <= 0) return "<span class=\"method\">" + esc(className) + suffix + "</span>";
+            String pkg2 = className.substring(0, lastDot2);
+            String name2 = className.substring(lastDot2);
+            return "<span class=\"pkg\" title=\"" + esc(className) + "[]\">" + esc(pkg2)
+                + "</span><span class=\"method\">" + esc(name2) + suffix + "</span>";
+        }
         int lastDot = className.lastIndexOf('.');
         if (lastDot <= 0) return "<span class=\"method\">" + esc(className) + "</span>";
         String pkg = className.substring(0, lastDot);
