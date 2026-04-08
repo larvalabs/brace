@@ -152,19 +152,56 @@ public class OpsDashboard {
         }
         sb.append("</div>\n");
 
-        // Sparkline
+        // Sparklines
         if (!minutes.isEmpty()) {
-            sb.append("<h2>Requests / Minute</h2>\n");
+            // Req/min sparkline
+            sb.append("<div class=\"section\">");
+            sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;\">")
+              .append("Requests / Minute <span style=\"float:right\">last ").append(minutes.size()).append(" min</span></div>");
             long maxReq = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::requests).max().orElse(1));
             sb.append("<div class=\"sparkline\">");
             for (var m : minutes) {
                 double pct = (m.requests() * 100.0) / maxReq;
-                sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(2, pct)))
+                String barClass = pct > 75 ? "bar-hi" : pct > 40 ? "bar-md" : "bar-lo";
+                sb.append("<div class=\"bar ").append(barClass).append("\" style=\"height:")
+                  .append(String.format("%.0f", Math.max(2, pct)))
                   .append("%\" title=\"").append(m.requests()).append(" reqs, ")
                   .append(String.format("%.1f", m.avgLatencyMs())).append(" ms avg @ ")
                   .append(m.ts()).append("\"></div>");
             }
             sb.append("</div>\n");
+
+            // Error rate sparkline
+            long maxErr = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::errors).max().orElse(1));
+            if (maxErr > 0) {
+                sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;\">")
+                  .append("Errors / Minute</div>");
+                sb.append("<div class=\"sparkline sparkline-sm\">");
+                for (var m : minutes) {
+                    double pct = (m.errors() * 100.0) / maxErr;
+                    sb.append("<div class=\"bar bar-err\" style=\"height:")
+                      .append(String.format("%.0f", Math.max(pct > 0 ? 4 : 0, pct)))
+                      .append("%\" title=\"").append(m.errors()).append(" errors @ ").append(m.ts())
+                      .append("\"></div>");
+                }
+                sb.append("</div>\n");
+            }
+
+            // Heap sparkline
+            long maxHeap = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::heapUsedMB).max().orElse(1));
+            sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;\">")
+              .append("Heap MB</div>");
+            sb.append("<div class=\"sparkline sparkline-sm\">");
+            for (var m : minutes) {
+                double pct = (m.heapUsedMB() * 100.0) / maxHeap;
+                sb.append("<div class=\"bar bar-heap\" style=\"height:")
+                  .append(String.format("%.0f", Math.max(4, pct)))
+                  .append("%\" title=\"").append(m.heapUsedMB()).append(" MB @ ").append(m.ts())
+                  .append("\"></div>");
+            }
+            sb.append("</div>\n");
+
+            sb.append("</div>\n"); // close section
         }
 
         // JVM profiling tables
