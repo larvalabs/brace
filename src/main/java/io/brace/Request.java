@@ -15,6 +15,7 @@ public class Request {
     private final Map<String, String> headers;
     private final String body;
     private final Map<String, List<UploadedFile>> uploadedFiles;
+    private Storage storage;
 
     public Request(String method, String path, Map<String, String> pathParams,
                    Map<String, String> queryParams, Map<String, String> headers,
@@ -126,5 +127,16 @@ public class Request {
             }
         }
         return params;
+    }
+
+    void setStorage(Storage storage) {
+        this.storage = storage;
+    }
+
+    public Storage storage() {
+        if (storage == null) {
+            throw new IllegalStateException("Storage not configured. Call app.storage() to configure.");
+        }
+        return storage;
     }
 }

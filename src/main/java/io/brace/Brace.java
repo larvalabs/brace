@@ -32,6 +32,7 @@ public class Brace {
     private Stats stats;
     private JfrProfiler profiler;
     private Cache cache;
+    private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
     private String httpStatsInterval = "60s";
@@ -48,6 +49,11 @@ public class Brace {
 
     public Brace cache(Cache cache) {
         this.cache = cache;
+        return this;
+    }
+
+    public Brace storage(Storage storage) {
+        this.storage = storage;
         return this;
     }
 
@@ -347,7 +353,7 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, List.copyOf(staticFileMappings), maxUploadSize);
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, List.copyOf(staticFileMappings), maxUploadSize, storage);
 
         if (!wsRoutes.isEmpty()) {
             // Wrap with WebSocketUpgradeHandler for WebSocket support
