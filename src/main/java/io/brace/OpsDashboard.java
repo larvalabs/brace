@@ -87,7 +87,7 @@ public class OpsDashboard {
             .c-red { color: #f7768e; }
             .c-cyan { color: #7dcfff; }
             .c-muted { color: #565f89; }
-            .pkg-wrap { display: inline-flex; max-width: 30ch; overflow: hidden; justify-content: flex-end; vertical-align: bottom; -webkit-mask-image: linear-gradient(to right, transparent 0%, black 2ch); mask-image: linear-gradient(to right, transparent 0%, black 2ch); }
+            .pkg-wrap { display: inline-flex; max-width: 30ch; overflow: hidden; justify-content: flex-end; vertical-align: bottom; }
             .pkg { color: #565f89; white-space: nowrap; flex-shrink: 0; }
             .method { color: #c9d1d9; font-weight: bold; }
             .ok-dot { color: #9ece6a; }
