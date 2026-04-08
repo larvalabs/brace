@@ -286,6 +286,18 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void jvmFlushJobsRegistered() throws Exception {
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/status"))
+                .header("X-Ops-Key", "cache-key").GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        var body = response.body();
+        assertTrue(body.contains("ops-flush-jvm"), "should have ops-flush-jvm job");
+        assertTrue(body.contains("ops-flush-jvm-profiling"), "should have ops-flush-jvm-profiling job");
+    }
+
+    @Test
     void jfrDashboardHasJvmSection() throws Exception {
         var response = client.send(
             HttpRequest.newBuilder()

@@ -423,6 +423,48 @@ public class Brace {
                     }
                 });
             }
+
+            // JVM metrics flush
+            if (profiler != null) {
+                jobScheduler.every(httpStatsInterval, "ops-flush-jvm", db -> {
+                    var ts = java.sql.Timestamp.from(java.time.Instant.now());
+                    var snap = profiler.snapshot();
+                    var heap = (java.util.Map<String, Object>) snap.get("heap");
+                    var cpu = (java.util.Map<String, Object>) snap.get("cpu");
+                    var threads = (java.util.Map<String, Object>) snap.get("threads");
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.heap_used_mb", heap.get("usedMB"));
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.heap_max_mb", heap.get("maxMB"));
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.cpu_user", Math.round((double) cpu.get("jvmUser") * 10000));
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.cpu_system", Math.round((double) cpu.get("jvmSystem") * 10000));
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.threads_active", threads.get("active"));
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.threads_peak", threads.get("peak"));
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.gc_count", profiler.gcCount());
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.gc_total_pause_ms", profiler.totalGcPauseMs());
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "jvm.gc_max_pause_ms", profiler.maxRecentGcPauseMs());
+                });
+
+                jobScheduler.every("5m", "ops-flush-jvm-profiling", db -> {
+                    var ts = java.sql.Timestamp.from(java.time.Instant.now());
+                    for (var entry : profiler.topMethods(20)) {
+                        db.sql("INSERT INTO ops_profiling_snapshots (ts, type, name, value) VALUES (?, ?, ?, ?)",
+                            ts, "method", entry.getKey(), entry.getValue());
+                    }
+                    for (var entry : profiler.topAllocations(20)) {
+                        db.sql("INSERT INTO ops_profiling_snapshots (ts, type, name, value) VALUES (?, ?, ?, ?)",
+                            ts, "allocation", entry.getKey(), entry.getValue());
+                    }
+                    profiler.resetProfiling();
+                });
+            }
         }
 
         // Print route table
