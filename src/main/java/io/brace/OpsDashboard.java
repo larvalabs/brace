@@ -204,95 +204,139 @@ public class OpsDashboard {
             sb.append("</div>\n"); // close section
         }
 
-        // JVM profiling tables
+        // JVM profiling
         if (jvmSnap != null) {
-            sb.append("<h2>JVM</h2>\n");
+            // Hot Methods + Slowest Routes
             sb.append("<div class=\"two-col\">\n");
 
-            // Hot methods
             var profiling = (Map<String, Object>) jvmSnap.get("profiling");
             var hotMethods = (List<Map<String, Object>>) profiling.get("hotMethods");
-            sb.append("<div><h2>Hot Methods</h2>");
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-blue\">Hot Methods <span class=\"c-muted\" style=\"font-weight:normal\">— 5 min window</span></div>");
             if (hotMethods.isEmpty()) {
-                sb.append("<p class=\"muted\">No samples yet</p>");
+                sb.append("<p class=\"c-muted\">No samples yet</p>");
             } else {
-                sb.append("<table><tr><th>Method</th><th>Samples</th></tr>");
+                sb.append("<table><tr><th>Method</th><th style=\"text-align:right\">Samples</th></tr>");
                 for (var m : hotMethods) {
                     String method = (String) m.get("method");
-                    String display = method.length() > 60 ? method.substring(method.length() - 60) : method;
-                    sb.append("<tr><td title=\"").append(esc(method)).append("\">").append(esc(display))
-                      .append("</td><td>").append(m.get("samples")).append("</td></tr>");
+                    sb.append("<tr><td title=\"").append(esc(method)).append("\">").append(formatMethod(method))
+                      .append("</td><td style=\"text-align:right\" class=\"c-amber\">").append(m.get("samples")).append("</td></tr>");
                 }
                 sb.append("</table>");
             }
             sb.append("</div>\n");
 
-            // Top allocations
+            // Slowest routes
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
+            sb.append("<table><tr><th>Route</th><th style=\"text-align:right\">Avg</th><th style=\"text-align:right\">Calls</th></tr>");
+            for (var e : routeStats) {
+                String[] parts = e.getKey().split(" ", 2);
+                String httpMethod = parts[0];
+                String path = parts.length > 1 ? parts[1] : e.getKey();
+                String methodColor = switch (httpMethod) {
+                    case "GET" -> "c-green";
+                    case "POST" -> "c-amber";
+                    case "PUT" -> "c-blue";
+                    case "DELETE" -> "c-red";
+                    default -> "c-muted";
+                };
+                sb.append("<tr><td><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
+                  .append("</span> ").append(esc(path)).append("</td>");
+                sb.append("<td style=\"text-align:right\" class=\"c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
+                sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
+            }
+            sb.append("</table>");
+            sb.append("</div>\n");
+
+            sb.append("</div>\n"); // two-col
+
+            // Allocations + GC Pauses
+            sb.append("<div class=\"two-col\">\n");
+
             var topAllocs = (List<Map<String, Object>>) profiling.get("topAllocations");
-            sb.append("<div><h2>Top Allocations</h2>");
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-purple\">Top Allocations <span class=\"c-muted\" style=\"font-weight:normal\">— 5 min window</span></div>");
             if (topAllocs.isEmpty()) {
-                sb.append("<p class=\"muted\">No allocation data yet</p>");
+                sb.append("<p class=\"c-muted\">No allocation data yet</p>");
             } else {
-                sb.append("<table><tr><th>Class</th><th>Allocated</th></tr>");
+                sb.append("<table><tr><th>Class</th><th style=\"text-align:right\">Size</th></tr>");
                 for (var a : topAllocs) {
-                    sb.append("<tr><td>").append(esc((String) a.get("class")))
-                      .append("</td><td>").append(formatBytes((long) a.get("bytes"))).append("</td></tr>");
+                    String className = (String) a.get("class");
+                    sb.append("<tr><td title=\"").append(esc(className)).append("\">").append(formatClassName(className))
+                      .append("</td><td style=\"text-align:right\" class=\"c-purple\">").append(formatBytes((long) a.get("bytes"))).append("</td></tr>");
+                }
+                sb.append("</table>");
+            }
+            sb.append("</div>\n");
+
+            // GC pauses
+            var gc = (Map<String, Object>) jvmSnap.get("gc");
+            var pauses = (List<Map<String, Object>>) gc.get("recentPauses");
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-red\">Recent GC Pauses</div>");
+            if (pauses.isEmpty()) {
+                sb.append("<p class=\"c-muted\">No GC pauses recorded</p>");
+            } else {
+                sb.append("<table><tr><th>Time</th><th>Collector</th><th>Cause</th><th style=\"text-align:right\">Duration</th></tr>");
+                for (var p : pauses) {
+                    String ts = (String) p.get("ts");
+                    String time = ts.length() > 19 ? ts.substring(11, 19) : ts;
+                    double durationMs = (double) p.get("durationMs");
+                    String durColor = durationMs > 100 ? "c-red" : durationMs > 10 ? "c-amber" : "c-green";
+                    String weight = durationMs > 100 ? "font-weight:bold" : "";
+                    sb.append("<tr><td class=\"c-muted\">").append(esc(time))
+                      .append("</td><td>").append(esc((String) p.get("collector")))
+                      .append("</td><td class=\"c-muted\">").append(esc((String) p.get("cause")))
+                      .append("</td><td style=\"text-align:right;").append(weight).append("\" class=\"").append(durColor).append("\">")
+                      .append(String.format("%.0fms", durationMs)).append("</td></tr>");
                 }
                 sb.append("</table>");
             }
             sb.append("</div>\n");
 
             sb.append("</div>\n"); // two-col
-
-            // Recent GC pauses
-            var gc = (Map<String, Object>) jvmSnap.get("gc");
-            var pauses = (List<Map<String, Object>>) gc.get("recentPauses");
-            if (!pauses.isEmpty()) {
-                sb.append("<h2>Recent GC Pauses</h2>");
-                sb.append("<table><tr><th>Time</th><th>Duration</th><th>Collector</th><th>Cause</th></tr>");
-                for (var p : pauses) {
-                    String ts = (String) p.get("ts");
-                    String time = ts.length() > 19 ? ts.substring(11, 19) : ts;
-                    double durationMs = (double) p.get("durationMs");
-                    String cls = durationMs > 100 ? "error-text" : "";
-                    sb.append("<tr class=\"").append(cls).append("\"><td>").append(esc(time))
-                      .append("</td><td>").append(String.format("%.1f ms", durationMs))
-                      .append("</td><td>").append(esc((String) p.get("collector")))
-                      .append("</td><td>").append(esc((String) p.get("cause"))).append("</td></tr>");
-                }
-                sb.append("</table>\n");
-            }
         }
 
-        sb.append("<div class=\"two-col\">\n");
-
-        // Slowest routes
-        sb.append("<div><h2>Slowest Routes</h2>");
-        sb.append("<table><tr><th>Route</th><th>Count</th><th>Avg ms</th></tr>");
-        for (var e : routeStats) {
-            sb.append("<tr><td>").append(esc(e.getKey())).append("</td><td>")
-              .append(e.getValue().count()).append("</td><td>")
-              .append(String.format("%.2f", e.getValue().avgLatencyMs())).append("</td></tr>");
-        }
-        sb.append("</table></div>\n");
-
-        // Recent in-memory errors
-        sb.append("<div><h2>Recent Errors (In-Memory)</h2>");
-        if (recentErrors.isEmpty()) {
-            sb.append("<p class=\"ok-text\">No errors</p>");
-        } else {
-            sb.append("<table><tr><th>Type</th><th>Route</th><th>Count</th><th>Last Seen</th></tr>");
-            for (var e : recentErrors) {
-                sb.append("<tr><td class=\"error-text\">").append(esc(e.type)).append("</td><td>")
-                  .append(esc(e.route != null ? e.route : "-")).append("</td><td>")
-                  .append(e.count).append("</td><td>")
-                  .append(esc(e.lastSeen != null ? e.lastSeen.toString() : "-")).append("</td></tr>");
+        // Slowest routes (standalone — when JFR is not active)
+        if (jvmSnap == null && !routeStats.isEmpty()) {
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
+            sb.append("<table><tr><th>Route</th><th style=\"text-align:right\">Avg</th><th style=\"text-align:right\">Calls</th></tr>");
+            for (var e : routeStats) {
+                String[] parts = e.getKey().split(" ", 2);
+                String httpMethod = parts[0];
+                String path = parts.length > 1 ? parts[1] : e.getKey();
+                String methodColor = switch (httpMethod) {
+                    case "GET" -> "c-green";
+                    case "POST" -> "c-amber";
+                    case "PUT" -> "c-blue";
+                    case "DELETE" -> "c-red";
+                    default -> "c-muted";
+                };
+                sb.append("<tr><td><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
+                  .append("</span> ").append(esc(path)).append("</td>");
+                sb.append("<td style=\"text-align:right\" class=\"c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
+                sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
             }
             sb.append("</table>");
+            sb.append("</div>\n");
         }
-        sb.append("</div>\n");
 
-        sb.append("</div>\n"); // two-col
+        // Recent in-memory errors
+        if (!recentErrors.isEmpty()) {
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-red\">Recent Errors <span class=\"c-muted\" style=\"font-weight:normal\">— in-memory, ").append(recentErrors.size()).append(" tracked</span></div>");
+            sb.append("<table><tr><th>Type</th><th>Route</th><th style=\"text-align:right\">Count</th><th style=\"text-align:right\">Last Seen</th></tr>");
+            for (var e : recentErrors) {
+                sb.append("<tr><td class=\"c-red\">").append(esc(e.type)).append("</td><td>")
+                  .append(esc(e.route != null ? e.route : "-")).append("</td><td style=\"text-align:right\">")
+                  .append(e.count).append("</td><td style=\"text-align:right\" class=\"c-muted\">")
+                  .append(esc(e.lastSeen != null ? e.lastSeen.toString().substring(11, 19) : "-")).append("</td></tr>");
+            }
+            sb.append("</table>");
+            sb.append("</div>\n");
+        }
 
         // Persisted error tracking
         if (errorStore != null) {
@@ -447,6 +491,26 @@ public class OpsDashboard {
 
     private static String str(Object o, String fallback) {
         return o != null ? o.toString() : fallback;
+    }
+
+    private static String formatMethod(String method) {
+        int lastDot = method.lastIndexOf('.');
+        if (lastDot <= 0) return "<span class=\"method\">" + esc(method) + "</span>";
+        int secondLastDot = method.lastIndexOf('.', lastDot - 1);
+        if (secondLastDot <= 0) return "<span class=\"method\">" + esc(method) + "</span>";
+        String pkg = method.substring(0, secondLastDot + 1);
+        String classMethod = method.substring(secondLastDot + 1);
+        return "<span class=\"pkg\" title=\"" + esc(method) + "\">" + esc(pkg)
+            + "</span><span class=\"method\">" + esc(classMethod) + "</span>";
+    }
+
+    private static String formatClassName(String className) {
+        int lastDot = className.lastIndexOf('.');
+        if (lastDot <= 0) return "<span class=\"method\">" + esc(className) + "</span>";
+        String pkg = className.substring(0, lastDot + 1);
+        String name = className.substring(lastDot + 1);
+        return "<span class=\"pkg\" title=\"" + esc(className) + "\">" + esc(pkg)
+            + "</span><span class=\"method\">" + esc(name) + "</span>";
     }
 
     private static String formatBytes(long bytes) {
