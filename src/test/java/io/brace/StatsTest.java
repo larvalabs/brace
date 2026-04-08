@@ -154,6 +154,32 @@ class StatsTest {
     }
 
     @Test
+    void timerRecordsCountAndAverage() {
+        var stats = new Stats();
+        stats.timer("api.latency", 100);
+        stats.timer("api.latency", 200);
+        stats.timer("api.latency", 300);
+        var snapshot = stats.snapshot();
+        var timer = snapshot.timerValues().get("api.latency");
+        assertEquals(3, timer.count());
+        assertEquals(200.0, timer.avgMs(), 0.01);
+        assertEquals(300, timer.maxMs());
+    }
+
+    @Test
+    void timerResetsAfterSnapshot() {
+        var stats = new Stats();
+        stats.timer("api.latency", 100);
+        stats.snapshot();
+        stats.timer("api.latency", 500);
+        var snapshot = stats.snapshot();
+        var timer = snapshot.timerValues().get("api.latency");
+        assertEquals(1, timer.count());
+        assertEquals(500.0, timer.avgMs(), 0.01);
+        assertEquals(500, timer.maxMs());
+    }
+
+    @Test
     void minuteSnapshotsReturnCapturedHeap() {
         var stats = new Stats();
         stats.recordRequest("GET", "/test", 200, 1000, 0, 0);
