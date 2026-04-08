@@ -62,6 +62,10 @@ public class Request {
         return headers.containsKey(name);
     }
 
+    public boolean isHtmx() {
+        return "true".equals(header("HX-Request"));
+    }
+
     public String body() { return body; }
 
     public UploadedFile file(String name) {
