@@ -525,17 +525,32 @@ public class OpsDashboard {
         if (lastDot <= 0) return "<span class=\"method\">" + esc(method) + "</span>";
         int secondLastDot = method.lastIndexOf('.', lastDot - 1);
         if (secondLastDot <= 0) return "<span class=\"method\">" + esc(method) + "</span>";
-        String pkg = method.substring(0, secondLastDot + 1);
-        String classMethod = method.substring(secondLastDot + 1);
+        String pkg = method.substring(0, secondLastDot);
+        String classMethod = method.substring(secondLastDot);
         return "<span class=\"pkg\" title=\"" + esc(method) + "\">" + esc(pkg)
             + "</span><span class=\"method\">" + esc(classMethod) + "</span>";
     }
 
     private static String formatClassName(String className) {
+        // JVM primitive array descriptors
+        String friendly = switch (className) {
+            case "[B" -> "byte[]";
+            case "[I" -> "int[]";
+            case "[J" -> "long[]";
+            case "[S" -> "short[]";
+            case "[C" -> "char[]";
+            case "[F" -> "float[]";
+            case "[D" -> "double[]";
+            case "[Z" -> "boolean[]";
+            default -> null;
+        };
+        if (friendly != null) {
+            return "<span class=\"method\">" + friendly + "</span>";
+        }
         int lastDot = className.lastIndexOf('.');
         if (lastDot <= 0) return "<span class=\"method\">" + esc(className) + "</span>";
-        String pkg = className.substring(0, lastDot + 1);
-        String name = className.substring(lastDot + 1);
+        String pkg = className.substring(0, lastDot);
+        String name = className.substring(lastDot);
         return "<span class=\"pkg\" title=\"" + esc(className) + "\">" + esc(pkg)
             + "</span><span class=\"method\">" + esc(name) + "</span>";
     }
