@@ -83,4 +83,22 @@ class StatsTest {
         var stats = new Stats();
         assertNotNull(stats.startedAt());
     }
+
+    @Test
+    void minuteSnapshotIncludesHeapUsedMB() {
+        var stats = new Stats();
+        stats.recordRequest("GET", "/test", 200, 1000, 0, 0);
+        var snap = stats.snapshot();
+        assertTrue(snap.heapUsedMB() > 0, "heapUsedMB should be captured from runtime");
+    }
+
+    @Test
+    void minuteSnapshotsReturnCapturedHeap() {
+        var stats = new Stats();
+        stats.recordRequest("GET", "/test", 200, 1000, 0, 0);
+        stats.snapshot();
+        var snapshots = stats.minuteSnapshots();
+        assertFalse(snapshots.isEmpty());
+        assertTrue(snapshots.getFirst().heapUsedMB() > 0);
+    }
 }

@@ -101,9 +101,10 @@ public class Stats {
         long queries = totalQueryCount.sumThenReset();
         long queryUs = totalQueryUs.sumThenReset();
         long maxUs = maxLatencyUs.getAndSet(0);
+        long heapMB = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024 * 1024);
 
         var snapshot = new MinuteSnapshot(
-            Instant.now(), requests, errs, latencyUs, maxUs, queries, queryUs
+            Instant.now(), requests, errs, latencyUs, maxUs, queries, queryUs, heapMB
         );
 
         synchronized (ringLock) {
@@ -165,7 +166,8 @@ public class Stats {
         long totalLatencyUs,
         long maxLatencyUs,
         long queries,
-        long queryUs
+        long queryUs,
+        long heapUsedMB
     ) {
         public double avgLatencyMs() {
             if (requests == 0) return 0.0;
