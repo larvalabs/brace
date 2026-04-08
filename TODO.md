@@ -25,6 +25,13 @@
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
 - [x] `db.queryIn()` for IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`)
 
+## Ops Dashboard Polish
+
+- [ ] Use a dashboard template/layout (cards, grid, consistent spacing)
+- [ ] Add graphs for key metrics (request rates, response times, error trends)
+- [ ] Improve JFR data formatting (readable method names, better table layout, units)
+- [ ] Visual polish (typography, color coding, status indicators)
+
 ## Documentation
 
 - [ ] Getting started guide
