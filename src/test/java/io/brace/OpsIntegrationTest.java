@@ -59,7 +59,7 @@ class OpsIntegrationTest {
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("\"app\""));
         assertTrue(response.body().contains("\"http\""));
-        assertTrue(response.body().contains("\"memory\""));
+        assertTrue(response.body().contains("\"jvm\""));
         assertTrue(response.body().contains("\"javaVersion\""));
     }
 
@@ -98,6 +98,19 @@ class OpsIntegrationTest {
         get("/error");
         var response = getWithKey("/ops/status");
         assertTrue(response.body().contains("\"errors\""));
+    }
+
+    @Test
+    void opsStatusJvmSectionHasExpectedFields() throws Exception {
+        var response = getWithKey("/ops/status");
+        var body = response.body();
+        assertTrue(body.contains("\"heap\""));
+        assertTrue(body.contains("\"cpu\""));
+        assertTrue(body.contains("\"threads\""));
+        assertTrue(body.contains("\"gc\""));
+        assertTrue(body.contains("\"profiling\""));
+        assertTrue(body.contains("\"usedMB\""));
+        assertTrue(body.contains("\"maxMB\""));
     }
 
     // --- Cache ops tests (separate app with cache registered) ---

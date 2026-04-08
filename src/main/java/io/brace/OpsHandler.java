@@ -13,19 +13,26 @@ public class OpsHandler {
     private final String opsSecret;
     private final ErrorStore errorStore;
     private final Cache cache;
+    private final JfrProfiler profiler;
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, String opsSecret) {
-        this(stats, jobScheduler, mailer, router, opsSecret, null, null);
+        this(stats, jobScheduler, mailer, router, opsSecret, null, null, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, String opsSecret, ErrorStore errorStore) {
-        this(stats, jobScheduler, mailer, router, opsSecret, errorStore, null);
+        this(stats, jobScheduler, mailer, router, opsSecret, errorStore, null, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, String opsSecret, ErrorStore errorStore, Cache cache) {
+        this(stats, jobScheduler, mailer, router, opsSecret, errorStore, cache, null);
+    }
+
+    public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
+                      Router router, String opsSecret, ErrorStore errorStore, Cache cache,
+                      JfrProfiler profiler) {
         this.stats = stats;
         this.jobScheduler = jobScheduler;
         this.mailer = mailer;
@@ -33,6 +40,7 @@ public class OpsHandler {
         this.opsSecret = opsSecret;
         this.errorStore = errorStore;
         this.cache = cache;
+        this.profiler = profiler;
     }
 
     public Result status(Request req) {
@@ -66,12 +74,45 @@ public class OpsHandler {
         http.put("slowestRoutes", routeList);
         data.put("http", http);
 
-        // Memory
-        var memory = new LinkedHashMap<String, Object>();
-        var runtime = Runtime.getRuntime();
-        memory.put("heapUsedMB", (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024));
-        memory.put("heapMaxMB", runtime.maxMemory() / (1024 * 1024));
-        data.put("memory", memory);
+        // JVM (from JFR profiler or fallback to runtime)
+        if (profiler != null) {
+            data.put("jvm", profiler.snapshot());
+        } else {
+            var jvm = new LinkedHashMap<String, Object>();
+            var heap = new LinkedHashMap<String, Object>();
+            var runtime = Runtime.getRuntime();
+            heap.put("usedMB", (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024));
+            heap.put("maxMB", runtime.maxMemory() / (1024 * 1024));
+            jvm.put("heap", heap);
+
+            var cpu = new LinkedHashMap<String, Object>();
+            cpu.put("jvmUser", 0.0);
+            cpu.put("jvmSystem", 0.0);
+            cpu.put("machineTotal", 0.0);
+            jvm.put("cpu", cpu);
+
+            var threads = new LinkedHashMap<String, Object>();
+            var threadBean = java.lang.management.ManagementFactory.getThreadMXBean();
+            threads.put("active", threadBean.getThreadCount());
+            threads.put("daemon", threadBean.getDaemonThreadCount());
+            threads.put("peak", threadBean.getPeakThreadCount());
+            jvm.put("threads", threads);
+
+            var gc = new LinkedHashMap<String, Object>();
+            gc.put("totalCount", 0L);
+            gc.put("totalPauseMs", 0L);
+            gc.put("avgPauseMs", 0.0);
+            gc.put("recentPauses", List.of());
+            jvm.put("gc", gc);
+
+            var profiling = new LinkedHashMap<String, Object>();
+            profiling.put("windowSeconds", 0);
+            profiling.put("hotMethods", List.of());
+            profiling.put("topAllocations", List.of());
+            jvm.put("profiling", profiling);
+
+            data.put("jvm", jvm);
+        }
 
         // Errors
         var errors = new LinkedHashMap<String, Object>();
