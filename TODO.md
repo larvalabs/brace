@@ -47,7 +47,7 @@
 - [ ] Cron expression support for jobs (currently only `every()` and `daily()`)
 - [ ] Precompiled JTE templates for production
 - [ ] Multi-database support testing (MySQL, MariaDB)
-- [ ] Rate limiting middleware
-- [ ] File upload handling
+- [x] Rate limiting middleware (`RateLimiter.perIp(100, "1m")`, `RateLimiter.perKey(fn, limit, duration)`)
+- [x] File upload handling (`req.file("name")`, `req.files("name")`, multipart parsing, `app.maxUploadSize("50m")`)
 - [ ] SSE (Server-Sent Events) support
 - [ ] Consider publishing to Maven Central

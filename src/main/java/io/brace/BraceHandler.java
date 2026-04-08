@@ -1,5 +1,8 @@
 package io.brace;
 
+import org.eclipse.jetty.http.HttpField;
+import org.eclipse.jetty.http.MultiPart;
+import org.eclipse.jetty.http.MultiPartFormData;
 import org.eclipse.jetty.io.Content;
 import org.eclipse.jetty.server.Response;
 import org.eclipse.jetty.util.Callback;
@@ -9,6 +12,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,20 +27,23 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final Stats stats;
     private final ErrorStore errorStore;
     private final List<StaticFileMapping> staticFileMappings;
+    private final long maxUploadSize;
+
+    static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
     record StaticFileMapping(String urlPrefix, String directory) {}
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware) {
-        this(router, beforeMiddleware, afterMiddleware, null, null, null, null, List.of());
+        this(router, beforeMiddleware, afterMiddleware, null, null, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
     }
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null, null, null, List.of());
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
     }
 
     public BraceHandler(Router router,
@@ -44,7 +51,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory,
                         String sessionSecret) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, null, List.of());
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
     }
 
     public BraceHandler(Router router,
@@ -53,7 +60,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         DatabaseFactory databaseFactory,
                         String sessionSecret,
                         Stats stats) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, null, List.of());
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
     }
 
     public BraceHandler(Router router,
@@ -64,6 +71,18 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         Stats stats,
                         ErrorStore errorStore,
                         List<StaticFileMapping> staticFileMappings) {
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, staticFileMappings, DEFAULT_MAX_UPLOAD_SIZE);
+    }
+
+    public BraceHandler(Router router,
+                        List<Middleware.BoundBefore> beforeMiddleware,
+                        List<Middleware.BoundAfter> afterMiddleware,
+                        DatabaseFactory databaseFactory,
+                        String sessionSecret,
+                        Stats stats,
+                        ErrorStore errorStore,
+                        List<StaticFileMapping> staticFileMappings,
+                        long maxUploadSize) {
         this.router = router;
         this.beforeMiddleware = beforeMiddleware;
         this.afterMiddleware = afterMiddleware;
@@ -72,6 +91,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.stats = stats;
         this.errorStore = errorStore;
         this.staticFileMappings = staticFileMappings;
+        this.maxUploadSize = maxUploadSize;
     }
 
     @Override
@@ -92,16 +112,26 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 headers.put(field.getName(), field.getValue());
             }
 
-            // Read request body
-            String body = Content.Source.asString(jettyRequest);
-            if (body == null) body = "";
+            // Read request body — multipart or plain
+            String body = "";
+            Map<String, List<UploadedFile>> uploadedFiles = Map.of();
+            String requestContentType = headers.getOrDefault("Content-Type", "");
+
+            if (requestContentType.contains("multipart/form-data")) {
+                var parsed = parseMultipart(jettyRequest, requestContentType);
+                body = parsed.formBody();
+                uploadedFiles = parsed.files();
+            } else {
+                body = Content.Source.asString(jettyRequest);
+                if (body == null) body = "";
+            }
 
             // Match route
             RouteMatch match = router.match(method, path);
 
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
-            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body);
+            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles);
 
             // Run before middleware
             for (var before : beforeMiddleware) {
@@ -403,5 +433,73 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         return params;
+    }
+
+    private record MultipartResult(String formBody, Map<String, List<UploadedFile>> files) {}
+
+    private MultipartResult parseMultipart(org.eclipse.jetty.server.Request jettyRequest, String contentType) throws Exception {
+        String boundary = null;
+        for (String part : contentType.split(";")) {
+            String trimmed = part.strip();
+            if (trimmed.startsWith("boundary=")) {
+                boundary = trimmed.substring("boundary=".length()).strip();
+                if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
+                    boundary = boundary.substring(1, boundary.length() - 1);
+                }
+                break;
+            }
+        }
+        if (boundary == null) {
+            return new MultipartResult("", Map.of());
+        }
+
+        var parser = new MultiPartFormData.Parser(boundary);
+        parser.setMaxLength(maxUploadSize);
+        parser.setMaxMemoryFileSize(-1);
+
+        MultiPartFormData.Parts parts = parser.parse(jettyRequest).join();
+
+        var formParams = new LinkedHashMap<String, String>();
+        var files = new LinkedHashMap<String, List<UploadedFile>>();
+
+        try {
+            for (var part : parts) {
+                String name = part.getName();
+                String fileName = part.getFileName();
+
+                if (fileName != null) {
+                    byte[] bytes;
+                    var source = part.getContentSource();
+                    if (source != null) {
+                        var buf = Content.Source.asByteBuffer(source);
+                        bytes = new byte[buf.remaining()];
+                        buf.get(bytes);
+                    } else {
+                        bytes = part.getContentAsString(StandardCharsets.ISO_8859_1).getBytes(StandardCharsets.ISO_8859_1);
+                    }
+                    String partContentType = "application/octet-stream";
+                    HttpField ctField = part.getHeaders().getField("Content-Type");
+                    if (ctField != null) {
+                        partContentType = ctField.getValue();
+                    }
+                    var uploaded = new UploadedFile(fileName, partContentType, bytes);
+                    files.computeIfAbsent(name, k -> new ArrayList<>()).add(uploaded);
+                } else {
+                    formParams.put(name, part.getContentAsString(StandardCharsets.UTF_8));
+                }
+            }
+        } finally {
+            parts.close();
+        }
+
+        var formBody = new StringBuilder();
+        for (var entry : formParams.entrySet()) {
+            if (!formBody.isEmpty()) formBody.append('&');
+            formBody.append(java.net.URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8));
+            formBody.append('=');
+            formBody.append(java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
+        }
+
+        return new MultipartResult(formBody.toString(), files);
     }
 }

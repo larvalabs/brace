@@ -32,6 +32,7 @@ public class Brace {
     private Stats stats;
     private Cache cache;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
+    private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
 
     public static Brace app() {
         return new Brace();
@@ -96,6 +97,16 @@ public class Brace {
 
     public Brace staticFiles(String urlPrefix, String directory) {
         staticFileMappings.add(new BraceHandler.StaticFileMapping(urlPrefix, directory));
+        return this;
+    }
+
+    public Brace maxUploadSize(String size) {
+        this.maxUploadSize = parseSize(size);
+        return this;
+    }
+
+    public Brace maxUploadSize(long bytes) {
+        this.maxUploadSize = bytes;
         return this;
     }
 
@@ -317,7 +328,7 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, List.copyOf(staticFileMappings));
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, List.copyOf(staticFileMappings), maxUploadSize);
 
         if (!wsRoutes.isEmpty()) {
             // Wrap with WebSocketUpgradeHandler for WebSocket support
@@ -403,6 +414,14 @@ public class Brace {
             return connector.getLocalPort();
         }
         return port;
+    }
+
+    private static long parseSize(String size) {
+        var s = size.strip().toLowerCase();
+        if (s.endsWith("k")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024;
+        if (s.endsWith("m")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024;
+        if (s.endsWith("g")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024 * 1024;
+        return Long.parseLong(s);
     }
 
     // --- Test support ---

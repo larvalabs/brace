@@ -3,6 +3,7 @@ package io.brace;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 public class Request {
@@ -13,16 +14,24 @@ public class Request {
     private final Map<String, String> queryParams;
     private final Map<String, String> headers;
     private final String body;
+    private final Map<String, List<UploadedFile>> uploadedFiles;
 
     public Request(String method, String path, Map<String, String> pathParams,
                    Map<String, String> queryParams, Map<String, String> headers,
                    String body) {
+        this(method, path, pathParams, queryParams, headers, body, Map.of());
+    }
+
+    public Request(String method, String path, Map<String, String> pathParams,
+                   Map<String, String> queryParams, Map<String, String> headers,
+                   String body, Map<String, List<UploadedFile>> uploadedFiles) {
         this.method = method;
         this.path = path;
         this.pathParams = pathParams;
         this.queryParams = queryParams;
         this.headers = headers;
         this.body = body;
+        this.uploadedFiles = uploadedFiles;
     }
 
     public String method() { return method; }
@@ -54,6 +63,16 @@ public class Request {
     }
 
     public String body() { return body; }
+
+    public UploadedFile file(String name) {
+        var files = uploadedFiles.get(name);
+        if (files == null || files.isEmpty()) return null;
+        return files.getFirst();
+    }
+
+    public List<UploadedFile> files(String name) {
+        return uploadedFiles.getOrDefault(name, List.of());
+    }
 
     public <T> T bodyAs(Class<T> type) {
         try {
