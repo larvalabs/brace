@@ -87,7 +87,7 @@ public class OpsDashboard {
             .c-red { color: #f7768e; }
             .c-cyan { color: #7dcfff; }
             .c-muted { color: #565f89; }
-            .pkg { color: #565f89; display: inline-block; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; direction: rtl; unicode-bidi: plaintext; text-align: left; vertical-align: bottom; }
+            .pkg { color: #565f89; display: inline-block; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; vertical-align: bottom; }
             .method { color: #c9d1d9; font-weight: bold; }
             .ok-dot { color: #9ece6a; }
             .err-dot { color: #f7768e; }
@@ -527,7 +527,7 @@ public class OpsDashboard {
         if (secondLastDot <= 0) return "<span class=\"method\">" + esc(method) + "</span>";
         String pkg = method.substring(0, secondLastDot);
         String classMethod = method.substring(secondLastDot);
-        return "<span class=\"pkg\" title=\"" + esc(method) + "\">" + esc(pkg)
+        return "<span class=\"pkg\" title=\"" + esc(method) + "\">&lrm;" + esc(pkg)
             + "</span><span class=\"method\">" + esc(classMethod) + "</span>";
     }
 
@@ -555,14 +555,14 @@ public class OpsDashboard {
             if (lastDot2 <= 0) return "<span class=\"method\">" + esc(className) + suffix + "</span>";
             String pkg2 = className.substring(0, lastDot2);
             String name2 = className.substring(lastDot2);
-            return "<span class=\"pkg\" title=\"" + esc(className) + "[]\">" + esc(pkg2)
+            return "<span class=\"pkg\" title=\"" + esc(className) + "[]\">&lrm;" + esc(pkg2)
                 + "</span><span class=\"method\">" + esc(name2) + suffix + "</span>";
         }
         int lastDot = className.lastIndexOf('.');
         if (lastDot <= 0) return "<span class=\"method\">" + esc(className) + "</span>";
         String pkg = className.substring(0, lastDot);
         String name = className.substring(lastDot);
-        return "<span class=\"pkg\" title=\"" + esc(className) + "\">" + esc(pkg)
+        return "<span class=\"pkg\" title=\"" + esc(className) + "\">&lrm;" + esc(pkg)
             + "</span><span class=\"method\">" + esc(name) + "</span>";
     }
 
