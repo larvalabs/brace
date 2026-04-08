@@ -383,6 +383,14 @@ public class Brace {
             jobPoller.start(databaseFactory);
         }
 
+        // Snapshot stats for dashboard sparklines (even without a database)
+        if (opsSecret != null && databaseFactory == null) {
+            var snapshotTimer = new java.util.Timer("brace-stats-snapshot", true);
+            snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
+                @Override public void run() { stats.snapshot(); }
+            }, 60_000, 60_000);
+        }
+
         // Flush stats to ops_timeseries
         if (databaseFactory != null && opsSecret != null) {
             jobScheduler.every(httpStatsInterval, "ops-flush-http", db -> {
