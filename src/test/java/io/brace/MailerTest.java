@@ -82,4 +82,36 @@ class MailerTest {
         assertEquals("Second", mailer.last().subject());
         assertEquals("First", mailer.sent().get(0).subject());
     }
+
+    @Test
+    void failCountStartsAtZero() {
+        var mailer = new Mailer(null);
+        assertEquals(0, mailer.failCount());
+    }
+
+    @Test
+    void failCountIncrementsOnSmtpError() {
+        // Use an invalid SMTP URL so sendSmtp will fail
+        var mailer = new Mailer("smtp://invalid:25");
+        try {
+            mailer.to("user@example.com").subject("Test").text("Hi").send();
+        } catch (RuntimeException e) {
+            // expected
+        }
+        assertEquals(1, mailer.failCount());
+        // sentCount still records the attempt
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
+    void drainFailCountResetsCounter() {
+        var mailer = new Mailer("smtp://invalid:25");
+        try {
+            mailer.to("user@example.com").subject("Test").text("Hi").send();
+        } catch (RuntimeException e) {
+            // expected
+        }
+        assertEquals(1, mailer.drainFailCount());
+        assertEquals(0, mailer.failCount());
+    }
 }

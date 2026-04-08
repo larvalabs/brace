@@ -113,6 +113,7 @@ public class OpsHandler {
         if (mailer != null) {
             var mailerData = new LinkedHashMap<String, Object>();
             mailerData.put("sentCount", mailer.sentCount());
+            mailerData.put("failCount", mailer.failCount());
             data.put("mailer", mailerData);
         }
 
@@ -122,6 +123,9 @@ public class OpsHandler {
             cacheData.put("entries", cache.size());
             cacheData.put("counters", cache.counterCount());
             cacheData.put("tags", cache.tagCount());
+            cacheData.put("hits", cache.hits());
+            cacheData.put("misses", cache.misses());
+            cacheData.put("evictions", cache.evictions());
             data.put("cache", cacheData);
         }
 

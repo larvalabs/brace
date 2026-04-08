@@ -1,6 +1,7 @@
 package io.brace;
 
 import java.util.*;
+import java.util.concurrent.atomic.LongAdder;
 
 public class Mailer {
 
@@ -8,6 +9,7 @@ public class Mailer {
     private String defaultFrom;
     private String defaultReplyTo;
     private final List<CapturedEmail> captured = Collections.synchronizedList(new ArrayList<>());
+    private final LongAdder failCount = new LongAdder();
 
     public Mailer(String smtpUrl) {
         this.smtpUrl = smtpUrl;
@@ -24,13 +26,20 @@ public class Mailer {
     public CapturedEmail last() { return captured.isEmpty() ? null : captured.get(captured.size() - 1); }
     public void clearCaptured() { captured.clear(); }
     public int sentCount() { return captured.size(); }
+    public long failCount() { return failCount.sum(); }
+    public long drainFailCount() { return failCount.sumThenReset(); }
 
     void send(EmailBuilder email) {
         var from = email.from != null ? email.from : defaultFrom;
         captured.add(new CapturedEmail(email.to, email.cc, email.subject, email.textBody, email.htmlBody, from));
 
         if (smtpUrl != null) {
-            sendSmtp(email, from);
+            try {
+                sendSmtp(email, from);
+            } catch (RuntimeException e) {
+                failCount.increment();
+                throw e;
+            }
         }
     }
 

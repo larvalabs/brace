@@ -287,6 +287,44 @@ class DatabaseTest {
     }
 
     @Test
+    void queryCountTracksOperations() {
+        var db = new Database(factory.openSession());
+        try {
+            assertEquals(0, db.queryCount());
+            assertEquals(0, db.queryDurationUs());
+
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "CountTest_" + System.nanoTime();
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);       // 1
+            db.find(Post.class, post.id); // 2
+            db.query(Post.class, "title = ?", post.title); // 3
+            db.count(Post.class);  // 4
+            db.commitTransaction();
+
+            assertEquals(4, db.queryCount());
+            assertTrue(db.queryDurationUs() > 0);
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryCountSurvivesClose() {
+        var db = new Database(factory.openSession());
+        db.beginTransaction();
+        db.count(Post.class);
+        db.commitTransaction();
+        db.close();
+
+        // Counters readable after close
+        assertEquals(1, db.queryCount());
+        assertTrue(db.queryDurationUs() >= 0);
+    }
+
+    @Test
     void nativeSql() {
         var db = new Database(factory.openSession());
         try {

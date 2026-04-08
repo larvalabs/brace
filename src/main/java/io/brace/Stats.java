@@ -14,7 +14,7 @@ public class Stats {
 
     private final Instant startedAt = Instant.now();
 
-    // Current-window counters (reset on rotateMinute)
+    // Current-window counters (reset on snapshot)
     private final LongAdder requestCount = new LongAdder();
     private final LongAdder errorCount = new LongAdder();
     private final LongAdder totalLatencyUs = new LongAdder();
@@ -94,7 +94,7 @@ public class Stats {
         }
     }
 
-    public MinuteSnapshot rotateMinute() {
+    public MinuteSnapshot snapshot() {
         long requests = requestCount.sumThenReset();
         long errs = errorCount.sumThenReset();
         long latencyUs = totalLatencyUs.sumThenReset();

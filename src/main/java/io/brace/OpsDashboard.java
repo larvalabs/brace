@@ -120,6 +120,14 @@ public class OpsDashboard {
                 html += statCard('Heap Max', mem.heapMaxMB + ' MB');
                 if (cacheInfo) {
                     html += statCard('Cache', cacheInfo.entries + ' entries');
+                    const hitRate = (cacheInfo.hits + cacheInfo.misses) > 0 ? ((cacheInfo.hits / (cacheInfo.hits + cacheInfo.misses)) * 100).toFixed(0) + '%%' : '-';
+                    html += statCard('Hit Rate', hitRate);
+                }
+                if (data.mailer) {
+                    html += statCard('Emails', data.mailer.sentCount);
+                    if (data.mailer.failCount > 0) {
+                        html += statCard('Mail Failures', data.mailer.failCount);
+                    }
                 }
                 html += '</div>';
 
@@ -236,6 +244,9 @@ public class OpsDashboard {
                     html += statCard('Entries', cacheInfo.entries);
                     html += statCard('Counters', cacheInfo.counters);
                     html += statCard('Tags', cacheInfo.tags);
+                    html += statCard('Hits', cacheInfo.hits);
+                    html += statCard('Misses', cacheInfo.misses);
+                    html += statCard('Evictions', cacheInfo.evictions);
                     html += '</div>';
                 }
 

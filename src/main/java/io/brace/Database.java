@@ -13,47 +13,74 @@ import java.util.List;
 public class Database {
 
     private final StatelessSession session;
+    private int queryCount = 0;
+    private long queryDurationUs = 0;
 
     public Database(StatelessSession session) {
         this.session = session;
     }
 
+    public int queryCount() { return queryCount; }
+    public long queryDurationUs() { return queryDurationUs; }
+
     // --- CRUD ---
 
     public <T> T find(Class<T> type, Object id) {
-        return session.get(type, id);
+        long start = System.nanoTime();
+        T result = session.get(type, id);
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     public void insert(Object entity) {
+        long start = System.nanoTime();
         session.insert(entity);
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
     }
 
     public void update(Object entity) {
+        long start = System.nanoTime();
         session.update(entity);
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
     }
 
     public void delete(Object entity) {
+        long start = System.nanoTime();
         session.delete(entity);
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
     }
 
     // --- Queries ---
 
     public <T> List<T> findAll(Class<T> type) {
+        long start = System.nanoTime();
         String hql = "FROM " + type.getSimpleName();
-        return session.createQuery(hql, type).getResultList();
+        List<T> result = session.createQuery(hql, type).getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     public <T> List<T> query(Class<T> type, String hqlWhere, Object... params) {
+        long start = System.nanoTime();
         String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
-        return query.getResultList();
+        List<T> result = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     public <T> List<T> queryIn(Class<T> type, String field, List<?> values) {
         if (values.isEmpty()) {
             return List.of();
         }
+        long start = System.nanoTime();
         var placeholders = new StringBuilder();
         for (int i = 0; i < values.size(); i++) {
             if (i > 0) placeholders.append(", ");
@@ -64,54 +91,79 @@ public class Database {
         for (int i = 0; i < values.size(); i++) {
             query.setParameter(i + 1, values.get(i));
         }
-        return query.getResultList();
+        List<T> result = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     public <T> T queryOne(Class<T> type, String hqlWhere, Object... params) {
+        // Delegates to query() which already instruments
         List<T> results = query(type, hqlWhere, params);
         return results.isEmpty() ? null : results.get(0);
     }
 
     public <T> long count(Class<T> type) {
+        long start = System.nanoTime();
         String hql = "SELECT count(*) FROM " + type.getSimpleName();
-        return session.createQuery(hql, Long.class).getSingleResult();
+        long result = session.createQuery(hql, Long.class).getSingleResult();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     public <T> long count(Class<T> type, String hqlWhere, Object... params) {
+        long start = System.nanoTime();
         String hql = "SELECT count(*) FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
         Query<Long> query = session.createQuery(hql, Long.class);
         bindParams(query, params);
-        return query.getSingleResult();
+        long result = query.getSingleResult();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     // --- Raw queries ---
 
     @SuppressWarnings("unchecked")
     public List<Object[]> hql(String hql, Object... params) {
+        long start = System.nanoTime();
         Query<?> query = session.createQuery(convertPositionalParams(hql));
         bindParams(query, params);
-        return (List<Object[]>) query.getResultList();
+        List<Object[]> result = (List<Object[]>) query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     public void sql(String sql, Object... params) {
+        long start = System.nanoTime();
         MutationQuery query = session.createNativeMutationQuery(convertPositionalParams(sql));
         bindParams(query, params);
         query.executeUpdate();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
     }
 
     @SuppressWarnings("unchecked")
     public List<Object[]> sqlQuery(String sql, Object... params) {
+        long start = System.nanoTime();
         var query = session.createNativeQuery(convertPositionalParams(sql));
         bindParams(query, params);
         var results = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
         return (List<Object[]>) (List<?>) results;
     }
 
     @SuppressWarnings("unchecked")
     public Long sqlQueryLong(String sql, Object... params) {
+        long start = System.nanoTime();
         var query = session.createNativeQuery(convertPositionalParams(sql));
         bindParams(query, params);
         var results = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
         if (results.isEmpty()) return null;
         Object val = results.get(0);
         if (val instanceof Object[] arr) return ((Number) arr[0]).longValue();
@@ -121,17 +173,23 @@ public class Database {
     // --- Raw JDBC access ---
 
     public <T> T jdbc(JdbcFunction<T> function) {
+        long start = System.nanoTime();
         Object[] result = new Object[1];
         session.doWork(connection -> {
             result[0] = function.apply(connection);
         });
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
         @SuppressWarnings("unchecked")
         T value = (T) result[0];
         return value;
     }
 
     public void jdbc(JdbcConsumer consumer) {
+        long start = System.nanoTime();
         session.doWork(consumer::accept);
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
     }
 
     @FunctionalInterface

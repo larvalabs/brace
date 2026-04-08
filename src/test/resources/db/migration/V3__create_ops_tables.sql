@@ -12,14 +12,9 @@ CREATE TABLE ops_errors (
     resolved_at TIMESTAMP
 );
 
-CREATE TABLE ops_stats (
+CREATE TABLE ops_timeseries (
     ts TIMESTAMP NOT NULL,
-    granularity VARCHAR(10) NOT NULL,
-    requests INT,
-    errors INT,
-    avg_latency_us INT,
-    max_latency_us INT,
-    queries INT,
-    avg_query_us INT,
-    PRIMARY KEY (ts, granularity)
+    metric VARCHAR(100) NOT NULL,
+    val BIGINT,
+    PRIMARY KEY (ts, metric)
 );

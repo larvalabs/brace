@@ -215,4 +215,72 @@ class CacheTest {
         cache.clear();
         assertEquals(1, cache.incr("hits"));
     }
+
+    @Test
+    void hitOnGetExistingKey() {
+        cache.set("key", "value");
+        cache.get("key", String.class);
+        assertEquals(1, cache.hits());
+        assertEquals(0, cache.misses());
+    }
+
+    @Test
+    void missOnGetMissingKey() {
+        cache.get("missing", String.class);
+        assertEquals(0, cache.hits());
+        assertEquals(1, cache.misses());
+    }
+
+    @Test
+    void missOnGetExpiredKey() throws InterruptedException {
+        cache.set("key", "value", "1s");
+        Thread.sleep(1100);
+        cache.get("key", String.class);
+        assertEquals(0, cache.hits());
+        assertEquals(1, cache.misses());
+    }
+
+    @Test
+    void getOrSetTracksHitAndMiss() {
+        // First call: miss
+        cache.getOrSet("key", "5m", () -> "computed");
+        assertEquals(0, cache.hits());
+        assertEquals(1, cache.misses());
+
+        // Second call: hit
+        cache.getOrSet("key", "5m", () -> "ignored");
+        assertEquals(1, cache.hits());
+        assertEquals(1, cache.misses());
+    }
+
+    @Test
+    void clearTagTracksEvictions() {
+        cache.set("a", "1", "1h", "mytag");
+        cache.set("b", "2", "1h", "mytag");
+        cache.clearTag("mytag");
+        assertEquals(2, cache.evictions());
+    }
+
+    @Test
+    void clearResetsStats() {
+        cache.set("key", "value");
+        cache.get("key", String.class);
+        cache.get("missing", String.class);
+        cache.clear();
+        assertEquals(0, cache.hits());
+        assertEquals(0, cache.misses());
+        assertEquals(0, cache.evictions());
+    }
+
+    @Test
+    void drainResetsCounters() {
+        cache.set("key", "value");
+        cache.get("key", String.class);
+        cache.get("missing", String.class);
+        assertEquals(1, cache.drainHits());
+        assertEquals(1, cache.drainMisses());
+        // After drain, counters are reset
+        assertEquals(0, cache.hits());
+        assertEquals(0, cache.misses());
+    }
 }

@@ -180,4 +180,13 @@ class OpsIntegrationTest {
         assertTrue(response.body().contains("Error Tracking"));
         assertTrue(response.body().contains("resolveError"));
     }
+
+    @Test
+    void statusIncludesCacheHitMissStats() throws Exception {
+        var response = cacheGet("/ops/status");
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("\"hits\""));
+        assertTrue(response.body().contains("\"misses\""));
+        assertTrue(response.body().contains("\"evictions\""));
+    }
 }

@@ -99,6 +99,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                           Response response,
                           Callback callback) throws Exception {
         var startNanos = System.nanoTime();
+        Database db = null;
         try {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
@@ -226,7 +227,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Result result;
             try {
                 if (invoker.needsDatabase() && databaseFactory != null) {
-                    Database db = new Database(databaseFactory.openSession());
+                    db = new Database(databaseFactory.openSession());
                     try {
                         if (invoker.needsReadOnlyDatabase()) {
                             result = invoker.invoke(braceRequest, db, session);
@@ -265,8 +266,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             writeResult(result, response, callback);
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             if (stats != null) {
-                stats.recordRequest(method, path, result.status(), durationUs, 0, 0);
-                Log.request(method, path, result.status(), durationUs, 0, 0);
+                int qc = db != null ? db.queryCount() : 0;
+                long qu = db != null ? db.queryDurationUs() : 0;
+                stats.recordRequest(method, path, result.status(), durationUs, qc, qu);
+                Log.request(method, path, result.status(), durationUs, qc, qu);
             }
             return true;
 
@@ -277,8 +280,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (stats != null) {
                 String errorMethod = jettyRequest.getMethod();
                 String errorPath = jettyRequest.getHttpURI().getPath();
-                stats.recordRequest(errorMethod, errorPath, 404, durationUs, 0, 0);
-                Log.request(errorMethod, errorPath, 404, durationUs, 0, 0);
+                // db may be null (no route matched) or closed (query stats still readable)
+                int qc = db != null ? db.queryCount() : 0;
+                long qu = db != null ? db.queryDurationUs() : 0;
+                stats.recordRequest(errorMethod, errorPath, 404, durationUs, qc, qu);
+                Log.request(errorMethod, errorPath, 404, durationUs, qc, qu);
             }
             return true;
         } catch (Exception e) {
@@ -289,7 +295,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String routeInfo = errorMethod + " " + errorPath;
             String requestInfo = errorMethod + " " + errorPath + (errorQuery != null ? "?" + errorQuery : "");
             if (stats != null) {
-                stats.recordRequest(errorMethod, errorPath, 500, durationUs, 0, 0);
+                int qc = db != null ? db.queryCount() : 0;
+                long qu = db != null ? db.queryDurationUs() : 0;
+                stats.recordRequest(errorMethod, errorPath, 500, durationUs, qc, qu);
                 stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
                     routeInfo, stackTraceToString(e), requestInfo, "");
                 Log.error(errorMethod, errorPath, e);

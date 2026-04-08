@@ -33,6 +33,9 @@ public class Brace {
     private Cache cache;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
+    private String httpStatsInterval = "60s";
+    private String cacheStatsInterval = "60s";
+    private String mailerStatsInterval = "60s";
 
     public static Brace app() {
         return new Brace();
@@ -92,6 +95,16 @@ public class Brace {
 
     public Brace ops(String secret) {
         this.opsSecret = secret;
+        return this;
+    }
+
+    public Brace opsStatsInterval(String group, String interval) {
+        switch (group) {
+            case "http" -> httpStatsInterval = interval;
+            case "cache" -> cacheStatsInterval = interval;
+            case "mailer" -> mailerStatsInterval = interval;
+            default -> throw new IllegalArgumentException("Unknown stats group: " + group);
+        }
         return this;
     }
 
@@ -364,23 +377,46 @@ public class Brace {
             jobPoller.start(databaseFactory);
         }
 
-        // Flush stats to database every 60 seconds
+        // Flush stats to ops_timeseries
         if (databaseFactory != null && opsSecret != null) {
-            jobScheduler.every("60s", "ops-stats-flush", db -> {
-                var snapshot = stats.rotateMinute();
+            jobScheduler.every(httpStatsInterval, "ops-flush-http", db -> {
+                var snapshot = stats.snapshot();
                 if (snapshot.requests() > 0) {
-                    db.sql("INSERT INTO ops_stats (ts, granularity, requests, errors, avg_latency_us, max_latency_us, queries, avg_query_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        java.sql.Timestamp.from(snapshot.ts()),
-                        "minute",
-                        (int) snapshot.requests(),
-                        (int) snapshot.errors(),
-                        snapshot.requests() > 0 ? (int)(snapshot.totalLatencyUs() / snapshot.requests()) : 0,
-                        (int) snapshot.maxLatencyUs(),
-                        (int) snapshot.queries(),
-                        snapshot.queries() > 0 ? (int)(snapshot.queryUs() / snapshot.queries()) : 0
-                    );
+                    var ts = java.sql.Timestamp.from(snapshot.ts());
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.requests", snapshot.requests());
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.errors", snapshot.errors());
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                        ts, "http.avg_latency_us", snapshot.totalLatencyUs() / snapshot.requests());
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.max_latency_us", snapshot.maxLatencyUs());
+                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.queries", snapshot.queries());
+                    if (snapshot.queries() > 0) {
+                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
+                            ts, "http.avg_query_us", snapshot.queryUs() / snapshot.queries());
+                    }
                 }
             });
+
+            if (cache != null) {
+                jobScheduler.every(cacheStatsInterval, "ops-flush-cache", db -> {
+                    long h = cache.drainHits(), m = cache.drainMisses(), e = cache.drainEvictions();
+                    if (h > 0 || m > 0 || e > 0) {
+                        var ts = java.sql.Timestamp.from(java.time.Instant.now());
+                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "cache.hits", h);
+                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "cache.misses", m);
+                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "cache.evictions", e);
+                    }
+                });
+            }
+
+            if (mailer != null) {
+                jobScheduler.every(mailerStatsInterval, "ops-flush-mailer", db -> {
+                    long f = mailer.drainFailCount();
+                    if (f > 0) {
+                        var ts = java.sql.Timestamp.from(java.time.Instant.now());
+                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "mailer.failures", f);
+                    }
+                });
+            }
         }
 
         // Print route table

@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -20,6 +21,9 @@ public class Cache {
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> tagIndex = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> counters = new ConcurrentHashMap<>();
+    private final LongAdder hits = new LongAdder();
+    private final LongAdder misses = new LongAdder();
+    private final LongAdder evictions = new LongAdder();
 
     public Cache() {
         Thread.ofVirtual().name("cache-cleanup").start(() -> {
@@ -37,11 +41,16 @@ public class Cache {
     @SuppressWarnings("unchecked")
     public <T> T get(String key, Class<T> type) {
         var entry = store.get(key);
-        if (entry == null) return null;
-        if (entry.expired()) {
-            remove(key);
+        if (entry == null) {
+            misses.increment();
             return null;
         }
+        if (entry.expired()) {
+            remove(key);
+            misses.increment();
+            return null;
+        }
+        hits.increment();
         return (T) entry.value();
     }
 
@@ -63,11 +72,17 @@ public class Cache {
 
     @SuppressWarnings("unchecked")
     public <T> T getOrSet(String key, String ttl, Supplier<T> supplier) {
-        var existing = store.compute(key, (k, current) -> {
-            if (current != null && !current.expired()) return current;
+        var current = store.get(key);
+        if (current != null && !current.expired()) {
+            hits.increment();
+            return (T) current.value();
+        }
+        misses.increment();
+        var entry = store.compute(key, (k, existing) -> {
+            if (existing != null && !existing.expired()) return existing;
             return new Entry(supplier.get(), Instant.now().plus(parseTtl(ttl)), new String[0]);
         });
-        return (T) existing.value();
+        return (T) entry.value();
     }
 
     public void delete(String key) {
@@ -86,6 +101,9 @@ public class Cache {
         store.clear();
         tagIndex.clear();
         counters.clear();
+        hits.reset();
+        misses.reset();
+        evictions.reset();
     }
 
     public long incr(String key) {
@@ -100,7 +118,9 @@ public class Cache {
         var keys = tagIndex.remove(tag);
         if (keys != null) {
             for (var key : keys) {
-                store.remove(key);
+                if (store.remove(key) != null) {
+                    evictions.increment();
+                }
             }
         }
     }
@@ -108,6 +128,12 @@ public class Cache {
     public int size() { return store.size(); }
     public int counterCount() { return counters.size(); }
     public int tagCount() { return tagIndex.size(); }
+    public long hits() { return hits.sum(); }
+    public long misses() { return misses.sum(); }
+    public long evictions() { return evictions.sum(); }
+    public long drainHits() { return hits.sumThenReset(); }
+    public long drainMisses() { return misses.sumThenReset(); }
+    public long drainEvictions() { return evictions.sumThenReset(); }
 
     // Route-level page caching
 
@@ -132,6 +158,7 @@ public class Cache {
         for (var entry : store.entrySet()) {
             if (entry.getValue().expiry() != null && now.isAfter(entry.getValue().expiry())) {
                 remove(entry.getKey());
+                evictions.increment();
             }
         }
     }

@@ -51,18 +51,18 @@ class StatsTest {
     }
 
     @Test
-    void rotateMinuteSnapshotsCurrent() {
+    void snapshotsCurrent() {
         var stats = new Stats();
         stats.recordRequest("GET", "/a", 200, 500, 1, 100);
         stats.recordRequest("GET", "/b", 200, 300, 2, 200);
 
-        var snapshot = stats.rotateMinute();
+        var snapshot = stats.snapshot();
         assertEquals(2, snapshot.requests());
         assertEquals(0, snapshot.errors());
         assertTrue(snapshot.avgLatencyMs() > 0);
 
         // After rotation, counters should be reset
-        var snapshot2 = stats.rotateMinute();
+        var snapshot2 = stats.snapshot();
         assertEquals(0, snapshot2.requests());
     }
 
@@ -70,9 +70,9 @@ class StatsTest {
     void minuteBufferStoresSnapshots() {
         var stats = new Stats();
         stats.recordRequest("GET", "/a", 200, 500, 0, 0);
-        stats.rotateMinute();
+        stats.snapshot();
         stats.recordRequest("GET", "/b", 200, 300, 0, 0);
-        stats.rotateMinute();
+        stats.snapshot();
 
         var snapshots = stats.minuteSnapshots();
         assertEquals(2, snapshots.size());
