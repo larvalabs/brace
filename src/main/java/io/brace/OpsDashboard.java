@@ -340,7 +340,6 @@ public class OpsDashboard {
 
         // Persisted error tracking
         if (errorStore != null) {
-            sb.append("<div class=\"section-header\"><h2>Error Tracking</h2></div>\n");
             sb.append("<div class=\"tab-bar\">");
             sb.append("<div class=\"tab active\" onclick=\"showErrorTab('unresolved')\">Unresolved (")
               .append(unresolvedErrors.size()).append(")</div>");
@@ -357,61 +356,83 @@ public class OpsDashboard {
             sb.append("</div>\n");
         }
 
-        // Scheduled jobs
-        if (!jobStatuses.isEmpty()) {
-            sb.append("<h2>Scheduled Jobs</h2>");
-            sb.append("<table><tr><th>Name</th><th>Schedule</th><th>Status</th><th>Last Run</th><th>Duration</th><th>Failures</th></tr>");
-            for (var j : jobStatuses) {
-                String statusCls = "ok".equals(j.lastStatus()) ? "ok-text" : "error".equals(j.lastStatus()) ? "error-text" : "muted";
-                sb.append("<tr><td>").append(esc(j.name())).append("</td><td>").append(esc(j.schedule())).append("</td>");
-                sb.append("<td class=\"").append(statusCls).append("\">").append(esc(j.lastStatus() != null ? j.lastStatus() : "pending")).append("</td>");
-                sb.append("<td>").append(j.lastRun() != null ? esc(j.lastRun().toString()) : "-").append("</td>");
-                sb.append("<td>").append(j.lastDurationMs()).append(" ms</td>");
-                sb.append("<td>").append(j.failCount()).append("</td></tr>");
+        // Jobs + Cache (two-column)
+        boolean hasJobs = !jobStatuses.isEmpty();
+        boolean hasCache = cache != null;
+        if (hasJobs || hasCache) {
+            sb.append("<div class=\"two-col\">\n");
+
+            if (hasJobs) {
+                sb.append("<div class=\"section\">");
+                sb.append("<div class=\"section-head c-cyan\">Scheduled Jobs</div>");
+                sb.append("<table><tr><th>Name</th><th>Schedule</th><th>Status</th><th style=\"text-align:right\">Last Run</th></tr>");
+                for (var j : jobStatuses) {
+                    String statusDot = "ok".equals(j.lastStatus()) ? "ok-dot" : "error".equals(j.lastStatus()) ? "err-dot" : "c-muted";
+                    String statusLabel = j.lastStatus() != null ? j.lastStatus() : "pending";
+                    String lastRun = "-";
+                    if (j.lastRun() != null) {
+                        String ago = formatDuration(Duration.between(j.lastRun(), now));
+                        lastRun = ago + " ago (" + j.lastDurationMs() + "ms)";
+                    }
+                    sb.append("<tr><td>").append(esc(j.name())).append("</td><td class=\"c-muted\">").append(esc(j.schedule())).append("</td>");
+                    sb.append("<td><span class=\"").append(statusDot).append("\">● </span>").append(esc(statusLabel)).append("</td>");
+                    sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(esc(lastRun)).append("</td></tr>");
+                }
+                sb.append("</table>");
+                sb.append("</div>\n");
             }
-            sb.append("</table>\n");
+
+            if (hasCache) {
+                sb.append("<div class=\"section\">");
+                sb.append("<div class=\"section-head c-amber\">Cache <span style=\"float:right;font-weight:normal;text-transform:none;letter-spacing:0\">");
+                sb.append("<button class=\"btn btn-danger\" hx-post=\"/ops/cache/clear?key=").append(esc(opsSecret))
+                  .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">[clear all]</button>");
+                sb.append("</span></div>");
+                long hits = cache.hits(), misses = cache.misses();
+                String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";
+                sb.append("<div style=\"display:flex;gap:16px;margin-bottom:4px;\">");
+                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">ENTRIES</span><br/><span class=\"c-amber\" style=\"font-weight:bold\">").append(cache.size()).append("</span></div>");
+                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">HIT RATE</span><br/><span class=\"c-green\" style=\"font-weight:bold\">").append(hitRate).append("</span></div>");
+                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">MISSES</span><br/><span class=\"c-muted\" style=\"font-weight:bold\">").append(misses).append("</span></div>");
+                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">EVICTIONS</span><br/><span class=\"c-muted\" style=\"font-weight:bold\">").append(cache.evictions()).append("</span></div>");
+                sb.append("</div>");
+                sb.append("</div>\n");
+            }
+
+            sb.append("</div>\n"); // two-col
         }
 
         // Rate limiters
         if (!rateLimiterStats.isEmpty()) {
-            sb.append("<h2>Rate Limiters</h2>");
-            sb.append("<table><tr><th>Limiter</th><th>Allowed</th><th>Blocked</th><th>Active Windows</th><th>Limit</th></tr>");
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-blue\">Rate Limiters</div>");
+            sb.append("<table><tr><th>Limiter</th><th style=\"text-align:right\">Allowed</th><th style=\"text-align:right\">Blocked</th><th style=\"text-align:right\">Active</th><th style=\"text-align:right\">Limit</th></tr>");
             for (var rl : rateLimiterStats) {
                 long allowed = ((Number) rl.get("allowed")).longValue();
                 long blocked = ((Number) rl.get("blocked")).longValue();
-                String blockPct = (allowed + blocked) > 0 ? String.format("%.1f", (blocked * 100.0) / (allowed + blocked)) : "0.0";
+                String blockPct = (allowed + blocked) > 0 ? String.format("%.1f%%", (blocked * 100.0) / (allowed + blocked)) : "0.0%";
                 sb.append("<tr><td>").append(esc((String) rl.get("label"))).append("</td>");
-                sb.append("<td>").append(allowed).append("</td>");
-                sb.append("<td class=\"").append(blocked > 0 ? "error-text" : "").append("\">")
-                  .append(blocked).append(" (").append(blockPct).append("%)</td>");
-                sb.append("<td>").append(rl.get("activeWindows")).append("</td>");
-                sb.append("<td>").append(rl.get("maxRequests")).append("/").append(rl.get("windowSeconds")).append("s</td></tr>");
+                sb.append("<td style=\"text-align:right\" class=\"c-green\">").append(allowed).append("</td>");
+                sb.append("<td style=\"text-align:right\" class=\"").append(blocked > 0 ? "c-red" : "c-muted").append("\">")
+                  .append(blocked).append(" (").append(blockPct).append(")</td>");
+                sb.append("<td style=\"text-align:right\">").append(rl.get("activeWindows")).append("</td>");
+                sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(rl.get("maxRequests")).append("/").append(rl.get("windowSeconds")).append("s</td></tr>");
             }
-            sb.append("</table>\n");
-        }
-
-        // Cache details
-        if (cache != null) {
-            sb.append("<div class=\"section-header\"><h2>Cache</h2>");
-            sb.append("<button class=\"btn btn-sm\" hx-post=\"/ops/cache/clear?key=").append(esc(opsSecret))
-              .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">Clear All</button></div>");
-            sb.append("<div class=\"stats-row\">");
-            statCard(sb, "Entries", String.valueOf(cache.size()), "c-blue");
-            statCard(sb, "Counters", String.valueOf(cache.counterCount()), "c-blue");
-            statCard(sb, "Tags", String.valueOf(cache.tagCount()), "c-blue");
-            statCard(sb, "Hits", String.valueOf(cache.hits()), "c-green");
-            statCard(sb, "Misses", String.valueOf(cache.misses()), "c-amber");
-            statCard(sb, "Evictions", String.valueOf(cache.evictions()), "c-amber");
+            sb.append("</table>");
             sb.append("</div>\n");
         }
 
         // Status codes
-        sb.append("<h2>Status Codes</h2>");
-        sb.append("<table><tr><th>Code</th><th>Count</th></tr>");
-        statusCodes.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(e ->
-            sb.append("<tr><td>").append(e.getKey()).append("</td><td>").append(e.getValue()).append("</td></tr>")
-        );
-        sb.append("</table>\n");
+        sb.append("<div class=\"section\">");
+        sb.append("<div class=\"section-head c-muted\">Status Codes</div>");
+        sb.append("<table><tr><th>Code</th><th style=\"text-align:right\">Count</th></tr>");
+        statusCodes.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(e -> {
+            String codeColor = e.getKey() < 300 ? "c-green" : e.getKey() < 400 ? "c-blue" : e.getKey() < 500 ? "c-amber" : "c-red";
+            sb.append("<tr><td class=\"").append(codeColor).append("\">").append(e.getKey())
+              .append("</td><td style=\"text-align:right\">").append(e.getValue()).append("</td></tr>");
+        });
+        sb.append("</table>");
+        sb.append("</div>\n");
 
         sb.append("</div>\n"); // dashboard-content
 
@@ -439,30 +460,30 @@ public class OpsDashboard {
     private static void renderPersistedErrors(StringBuilder sb, List<Map<String, Object>> errors,
                                                String opsSecret, boolean resolved) {
         if (errors.isEmpty()) {
-            sb.append("<p class=\"").append(resolved ? "muted" : "ok-text").append("\">None</p>");
+            sb.append("<p class=\"").append(resolved ? "c-muted" : "c-green").append("\">None</p>");
             return;
         }
-        sb.append("<table><tr><th>Type</th><th>Route</th><th>Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>");
+        sb.append("<table><tr><th>Type</th><th>Route</th><th style=\"text-align:right\">Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>");
         for (var e : errors) {
             long id = ((Number) e.get("id")).longValue();
             sb.append("<tr>");
-            sb.append("<td class=\"error-text expandable\" onclick=\"toggleTrace(this)\">")
+            sb.append("<td class=\"c-red\" style=\"cursor:pointer\" onclick=\"toggleTrace(this)\">")
               .append(esc(str(e.get("errorType")))).append("</td>");
             sb.append("<td>").append(esc(str(e.get("route"), "-"))).append("</td>");
-            sb.append("<td>").append(e.get("occurrenceCount")).append("</td>");
-            sb.append("<td>").append(esc(str(e.get("firstSeen"), "-"))).append("</td>");
-            sb.append("<td>").append(esc(str(e.get("lastSeen"), "-"))).append("</td>");
+            sb.append("<td style=\"text-align:right\">").append(e.get("occurrenceCount")).append("</td>");
+            sb.append("<td class=\"c-muted\">").append(esc(str(e.get("firstSeen"), "-"))).append("</td>");
+            sb.append("<td class=\"c-muted\">").append(esc(str(e.get("lastSeen"), "-"))).append("</td>");
             if (!resolved) {
-                sb.append("<td><button class=\"btn btn-sm\" hx-post=\"/ops/errors/").append(id)
+                sb.append("<td><button class=\"btn btn-resolve\" hx-post=\"/ops/errors/").append(id)
                   .append("/resolve?key=").append(esc(opsSecret))
-                  .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">Resolve</button></td>");
+                  .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">resolve</button></td>");
             } else {
-                sb.append("<td class=\"muted\">").append(esc(str(e.get("resolvedAt"), ""))).append("</td>");
+                sb.append("<td class=\"c-muted\">").append(esc(str(e.get("resolvedAt"), ""))).append("</td>");
             }
             sb.append("</tr>");
             sb.append("<tr style=\"display:none\"><td colspan=\"6\"><div class=\"stack-trace\">")
               .append(esc(str(e.get("stackTrace"), "No stack trace")))
-              .append("</div><div style=\"margin-top:4px;color:#888\">")
+              .append("</div><div style=\"margin-top:4px\" class=\"c-muted\">")
               .append(esc(str(e.get("message"), ""))).append("</div></td></tr>");
         }
         sb.append("</table>");
