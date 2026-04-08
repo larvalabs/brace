@@ -1,9 +1,42 @@
 package io.brace;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
 public class OpsDashboard {
 
-    public static String html(String opsSecret) {
-        return """
+    public static String html(String opsSecret, Stats stats, JobScheduler jobScheduler,
+                              Mailer mailer, ErrorStore errorStore, Cache cache) {
+        var sb = new StringBuilder();
+        var now = Instant.now();
+
+        // Gather data
+        var statusCodes = stats.statusCodeCounts();
+        long totalReqs = statusCodes.values().stream().mapToLong(Long::longValue).sum();
+        long errCount = statusCodes.getOrDefault(500, 0L) + statusCodes.getOrDefault(502, 0L) + statusCodes.getOrDefault(503, 0L);
+        String errRate = totalReqs > 0 ? String.format("%.1f", (errCount * 100.0) / totalReqs) : "0.0";
+        var runtime = Runtime.getRuntime();
+        long heapUsed = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
+        long heapMax = runtime.maxMemory() / (1024 * 1024);
+        var uptime = formatDuration(Duration.between(stats.startedAt(), now));
+        var routeStats = stats.routeStats().entrySet().stream()
+            .sorted((a, b) -> Double.compare(b.getValue().avgLatencyMs(), a.getValue().avgLatencyMs()))
+            .limit(5).toList();
+        var minutes = stats.minuteSnapshots();
+        var recentErrors = stats.recentErrors();
+        var jobStatuses = jobScheduler != null ? jobScheduler.getStatuses() : List.<JobScheduler.JobStatus>of();
+        var rateLimiterStats = RateLimiter.allStats();
+        List<Map<String, Object>> unresolvedErrors = List.of();
+        List<Map<String, Object>> resolvedErrors = List.of();
+        if (errorStore != null) {
+            unresolvedErrors = errorStore.list(null);
+            resolvedErrors = errorStore.list("resolved");
+        }
+
+        // Page head
+        sb.append("""
             <!DOCTYPE html>
             <html>
             <head>
@@ -20,12 +53,12 @@ public class OpsDashboard {
             .stat-card { background: #16213e; border: 1px solid #0f3460; padding: 12px 20px; min-width: 140px; }
             .stat-card .label { color: #888; font-size: 11px; text-transform: uppercase; }
             .stat-card .value { color: #e94560; font-size: 22px; font-weight: bold; margin-top: 4px; }
-            table { border-collapse: collapse; width: 100%%; margin-bottom: 16px; }
+            table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
             th { text-align: left; color: #e94560; border-bottom: 1px solid #333; padding: 6px 12px; font-size: 11px; text-transform: uppercase; }
             td { padding: 5px 12px; border-bottom: 1px solid #222; }
             tr:hover td { background: #16213e; }
             .sparkline { display: flex; align-items: flex-end; gap: 2px; height: 60px; margin: 8px 0; }
-            .sparkline .bar { background: #e94560; min-width: 6px; flex: 1; transition: height 0.3s; }
+            .sparkline .bar { background: #e94560; min-width: 6px; flex: 1; }
             .sparkline .bar:hover { background: #ff6b81; }
             .error-text { color: #ff6b6b; }
             .ok-text { color: #51cf66; }
@@ -44,237 +77,242 @@ public class OpsDashboard {
             .tab.active { background: #1a1a2e; color: #e94560; border-color: #e94560; border-bottom: 1px solid #1a1a2e; margin-bottom: -1px; z-index: 1; position: relative; }
             .tab-content { border-top: 1px solid #e94560; padding-top: 8px; }
             </style>
+            <script src="/__brace/htmx.min.js"></script>
             </head>
             <body>
-            <div id="app">Loading...</div>
+            """);
+
+        // Dashboard content — this is the div that htmx polls and replaces
+        sb.append("<div id=\"dashboard-content\" hx-get=\"/ops/dashboard?key=").append(esc(opsSecret))
+          .append("\" hx-select=\"#dashboard-content\" hx-target=\"this\" hx-swap=\"outerHTML\" hx-trigger=\"every 5s\">\n");
+
+        // Header
+        sb.append("<div class=\"header\">");
+        sb.append("<h1>Brace Dashboard</h1>");
+        sb.append("<span>Uptime: ").append(esc(uptime)).append("</span>");
+        sb.append("<span>Java: ").append(esc(System.getProperty("java.version"))).append("</span>");
+        sb.append("<span>Started: ").append(esc(stats.startedAt().toString())).append("</span>");
+        sb.append("</div>\n");
+
+        // Stat cards
+        sb.append("<div class=\"stats-row\">");
+        statCard(sb, "Requests", String.valueOf(totalReqs));
+        statCard(sb, "Error Rate", errRate + "%");
+        statCard(sb, "Heap Used", heapUsed + " MB");
+        statCard(sb, "Heap Max", heapMax + " MB");
+        if (cache != null) {
+            statCard(sb, "Cache", cache.size() + " entries");
+            long hits = cache.hits(), misses = cache.misses();
+            String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";
+            statCard(sb, "Hit Rate", hitRate);
+        }
+        if (mailer != null) {
+            statCard(sb, "Emails", String.valueOf(mailer.sentCount()));
+            if (mailer.failCount() > 0) {
+                statCard(sb, "Mail Failures", String.valueOf(mailer.failCount()));
+            }
+        }
+        sb.append("</div>\n");
+
+        // Sparkline
+        if (!minutes.isEmpty()) {
+            sb.append("<h2>Requests / Minute</h2>\n");
+            long maxReq = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::requests).max().orElse(1));
+            sb.append("<div class=\"sparkline\">");
+            for (var m : minutes) {
+                double pct = (m.requests() * 100.0) / maxReq;
+                sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(2, pct)))
+                  .append("%\" title=\"").append(m.requests()).append(" reqs, ")
+                  .append(String.format("%.1f", m.avgLatencyMs())).append(" ms avg @ ")
+                  .append(m.ts()).append("\"></div>");
+            }
+            sb.append("</div>\n");
+        }
+
+        sb.append("<div class=\"two-col\">\n");
+
+        // Slowest routes
+        sb.append("<div><h2>Slowest Routes</h2>");
+        sb.append("<table><tr><th>Route</th><th>Count</th><th>Avg ms</th></tr>");
+        for (var e : routeStats) {
+            sb.append("<tr><td>").append(esc(e.getKey())).append("</td><td>")
+              .append(e.getValue().count()).append("</td><td>")
+              .append(String.format("%.2f", e.getValue().avgLatencyMs())).append("</td></tr>");
+        }
+        sb.append("</table></div>\n");
+
+        // Recent in-memory errors
+        sb.append("<div><h2>Recent Errors (In-Memory)</h2>");
+        if (recentErrors.isEmpty()) {
+            sb.append("<p class=\"ok-text\">No errors</p>");
+        } else {
+            sb.append("<table><tr><th>Type</th><th>Route</th><th>Count</th><th>Last Seen</th></tr>");
+            for (var e : recentErrors) {
+                sb.append("<tr><td class=\"error-text\">").append(esc(e.type)).append("</td><td>")
+                  .append(esc(e.route != null ? e.route : "-")).append("</td><td>")
+                  .append(e.count).append("</td><td>")
+                  .append(esc(e.lastSeen != null ? e.lastSeen.toString() : "-")).append("</td></tr>");
+            }
+            sb.append("</table>");
+        }
+        sb.append("</div>\n");
+
+        sb.append("</div>\n"); // two-col
+
+        // Persisted error tracking
+        if (errorStore != null) {
+            sb.append("<div class=\"section-header\"><h2>Error Tracking</h2></div>\n");
+            sb.append("<div class=\"tab-bar\">");
+            sb.append("<div class=\"tab active\" onclick=\"showErrorTab('unresolved')\">Unresolved (")
+              .append(unresolvedErrors.size()).append(")</div>");
+            sb.append("<div class=\"tab\" onclick=\"showErrorTab('resolved')\">Resolved (")
+              .append(resolvedErrors.size()).append(")</div>");
+            sb.append("</div>\n");
+
+            sb.append("<div id=\"tab-unresolved\" class=\"tab-content\" style=\"display:block\">");
+            renderPersistedErrors(sb, unresolvedErrors, opsSecret, false);
+            sb.append("</div>\n");
+
+            sb.append("<div id=\"tab-resolved\" class=\"tab-content\" style=\"display:none\">");
+            renderPersistedErrors(sb, resolvedErrors, opsSecret, true);
+            sb.append("</div>\n");
+        }
+
+        // Scheduled jobs
+        if (!jobStatuses.isEmpty()) {
+            sb.append("<h2>Scheduled Jobs</h2>");
+            sb.append("<table><tr><th>Name</th><th>Schedule</th><th>Status</th><th>Last Run</th><th>Duration</th><th>Failures</th></tr>");
+            for (var j : jobStatuses) {
+                String statusCls = "ok".equals(j.lastStatus()) ? "ok-text" : "error".equals(j.lastStatus()) ? "error-text" : "muted";
+                sb.append("<tr><td>").append(esc(j.name())).append("</td><td>").append(esc(j.schedule())).append("</td>");
+                sb.append("<td class=\"").append(statusCls).append("\">").append(esc(j.lastStatus() != null ? j.lastStatus() : "pending")).append("</td>");
+                sb.append("<td>").append(j.lastRun() != null ? esc(j.lastRun().toString()) : "-").append("</td>");
+                sb.append("<td>").append(j.lastDurationMs()).append(" ms</td>");
+                sb.append("<td>").append(j.failCount()).append("</td></tr>");
+            }
+            sb.append("</table>\n");
+        }
+
+        // Rate limiters
+        if (!rateLimiterStats.isEmpty()) {
+            sb.append("<h2>Rate Limiters</h2>");
+            sb.append("<table><tr><th>Limiter</th><th>Allowed</th><th>Blocked</th><th>Active Windows</th><th>Limit</th></tr>");
+            for (var rl : rateLimiterStats) {
+                long allowed = ((Number) rl.get("allowed")).longValue();
+                long blocked = ((Number) rl.get("blocked")).longValue();
+                String blockPct = (allowed + blocked) > 0 ? String.format("%.1f", (blocked * 100.0) / (allowed + blocked)) : "0.0";
+                sb.append("<tr><td>").append(esc((String) rl.get("label"))).append("</td>");
+                sb.append("<td>").append(allowed).append("</td>");
+                sb.append("<td class=\"").append(blocked > 0 ? "error-text" : "").append("\">")
+                  .append(blocked).append(" (").append(blockPct).append("%)</td>");
+                sb.append("<td>").append(rl.get("activeWindows")).append("</td>");
+                sb.append("<td>").append(rl.get("maxRequests")).append("/").append(rl.get("windowSeconds")).append("s</td></tr>");
+            }
+            sb.append("</table>\n");
+        }
+
+        // Cache details
+        if (cache != null) {
+            sb.append("<div class=\"section-header\"><h2>Cache</h2>");
+            sb.append("<button class=\"btn btn-sm\" hx-post=\"/ops/cache/clear?key=").append(esc(opsSecret))
+              .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">Clear All</button></div>");
+            sb.append("<div class=\"stats-row\">");
+            statCard(sb, "Entries", String.valueOf(cache.size()));
+            statCard(sb, "Counters", String.valueOf(cache.counterCount()));
+            statCard(sb, "Tags", String.valueOf(cache.tagCount()));
+            statCard(sb, "Hits", String.valueOf(cache.hits()));
+            statCard(sb, "Misses", String.valueOf(cache.misses()));
+            statCard(sb, "Evictions", String.valueOf(cache.evictions()));
+            sb.append("</div>\n");
+        }
+
+        // Status codes
+        sb.append("<h2>Status Codes</h2>");
+        sb.append("<table><tr><th>Code</th><th>Count</th></tr>");
+        statusCodes.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(e ->
+            sb.append("<tr><td>").append(e.getKey()).append("</td><td>").append(e.getValue()).append("</td></tr>")
+        );
+        sb.append("</table>\n");
+
+        sb.append("</div>\n"); // dashboard-content
+
+        // Minimal JS for tab switching and stack trace expand/collapse
+        sb.append("""
             <script>
-            const KEY = '%s';
-            const app = document.getElementById('app');
-            let data = null;
-            let persistedErrors = [];
-            let errorTab = 'unresolved';
-
-            async function fetchData() {
-                try {
-                    const [statusRes, unresolvedRes, resolvedRes] = await Promise.all([
-                        fetch('/ops/status', { headers: { 'X-Ops-Key': KEY } }),
-                        fetch('/ops/errors', { headers: { 'X-Ops-Key': KEY } }),
-                        fetch('/ops/errors?status=resolved', { headers: { 'X-Ops-Key': KEY } })
-                    ]);
-                    if (!statusRes.ok) { app.innerHTML = '<p class="error-text">Failed to load: ' + statusRes.status + '</p>'; return; }
-                    data = await statusRes.json();
-                    const unresolved = unresolvedRes.ok ? await unresolvedRes.json() : [];
-                    const resolved = resolvedRes.ok ? await resolvedRes.json() : [];
-                    persistedErrors = [...unresolved, ...resolved];
-                    render();
-                } catch (e) {
-                    app.innerHTML = '<p class="error-text">Error: ' + e.message + '</p>';
-                }
-            }
-
-            async function clearCache() {
-                await fetch('/ops/cache/clear', { method: 'POST', headers: { 'X-Ops-Key': KEY } });
-                fetchData();
-            }
-
-            async function resolveError(id) {
-                await fetch('/ops/errors/' + id + '/resolve', { method: 'POST', headers: { 'X-Ops-Key': KEY } });
-                fetchData();
-            }
-
             function showErrorTab(tab) {
-                errorTab = tab;
-                render();
+                document.getElementById('tab-unresolved').style.display = tab === 'unresolved' ? 'block' : 'none';
+                document.getElementById('tab-resolved').style.display = tab === 'resolved' ? 'block' : 'none';
+                document.querySelectorAll('.tab').forEach((el, i) => {
+                    el.classList.toggle('active', (i === 0 && tab === 'unresolved') || (i === 1 && tab === 'resolved'));
+                });
             }
-
-            function render() {
-                if (!data) return;
-                const a = data.app || {};
-                const mem = data.memory || {};
-                const http = data.http || {};
-                const errors = data.errors || {};
-                const jobs = data.jobs || {};
-                const ts = data.timeseries || {};
-                const codes = http.statusCodes || {};
-                const cacheInfo = data.cache || null;
-
-                const totalReqs = Object.values(codes).reduce((s, v) => s + v, 0);
-                const errCount = (codes[500] || 0) + (codes[502] || 0) + (codes[503] || 0);
-                const errRate = totalReqs > 0 ? ((errCount / totalReqs) * 100).toFixed(1) : '0.0';
-
-                let html = '';
-
-                // Header
-                html += '<div class="header">';
-                html += '<h1>Brace Dashboard</h1>';
-                html += '<span>Uptime: ' + esc(a.uptime || '-') + '</span>';
-                html += '<span>Java: ' + esc(a.javaVersion || '-') + '</span>';
-                html += '<span>Started: ' + esc(a.startedAt || '-') + '</span>';
-                html += '</div>';
-
-                // Stat cards
-                html += '<div class="stats-row">';
-                html += statCard('Requests', totalReqs.toLocaleString());
-                html += statCard('Error Rate', errRate + '%%');
-                html += statCard('Heap Used', mem.heapUsedMB + ' MB');
-                html += statCard('Heap Max', mem.heapMaxMB + ' MB');
-                if (cacheInfo) {
-                    html += statCard('Cache', cacheInfo.entries + ' entries');
-                    const hitRate = (cacheInfo.hits + cacheInfo.misses) > 0 ? ((cacheInfo.hits / (cacheInfo.hits + cacheInfo.misses)) * 100).toFixed(0) + '%%' : '-';
-                    html += statCard('Hit Rate', hitRate);
-                }
-                if (data.mailer) {
-                    html += statCard('Emails', data.mailer.sentCount);
-                    if (data.mailer.failCount > 0) {
-                        html += statCard('Mail Failures', data.mailer.failCount);
-                    }
-                }
-                html += '</div>';
-
-                // Sparkline
-                const minutes = ts.minutes || [];
-                if (minutes.length > 0) {
-                    html += '<h2>Requests / Minute</h2>';
-                    const maxReq = Math.max(1, ...minutes.map(m => m.requests));
-                    html += '<div class="sparkline">';
-                    for (const m of minutes) {
-                        const pct = (m.requests / maxReq) * 100;
-                        html += '<div class="bar" style="height:' + Math.max(2, pct) + '%%"'
-                            + ' title="' + m.requests + ' reqs, ' + m.avgMs + ' ms avg @ ' + m.ts + '"></div>';
-                    }
-                    html += '</div>';
-                }
-
-                html += '<div class="two-col">';
-
-                // Routes table
-                html += '<div>';
-                html += '<h2>Slowest Routes</h2>';
-                html += '<table><tr><th>Route</th><th>Count</th><th>Avg ms</th></tr>';
-                for (const r of (http.slowestRoutes || [])) {
-                    html += '<tr><td>' + esc(r.route) + '</td><td>' + r.count + '</td><td>' + r.avgMs + '</td></tr>';
-                }
-                html += '</table></div>';
-
-                // In-memory errors
-                html += '<div>';
-                html += '<h2>Recent Errors (In-Memory)</h2>';
-                const recentErrs = errors.recent || [];
-                if (recentErrs.length === 0) {
-                    html += '<p class="ok-text">No errors</p>';
-                } else {
-                    html += '<table><tr><th>Type</th><th>Route</th><th>Count</th><th>Last Seen</th></tr>';
-                    for (const e of recentErrs) {
-                        html += '<tr><td class="error-text">' + esc(e.type) + '</td><td>' + esc(e.route || '-') + '</td><td>' + e.count + '</td><td>' + esc(e.lastSeen || '-') + '</td></tr>';
-                    }
-                    html += '</table>';
-                }
-                html += '</div>';
-
-                html += '</div>'; // two-col
-
-                // Persisted errors
-                html += '<div class="section-header"><h2>Error Tracking</h2></div>';
-                html += '<div class="tab-bar">';
-                html += '<div class="tab' + (errorTab === 'unresolved' ? ' active' : '') + '" onclick="showErrorTab('unresolved')" >Unresolved (' + persistedErrors.filter(e => !e.resolvedAt).length + ')</div>';
-                html += '<div class="tab' + (errorTab === 'resolved' ? ' active' : '') + '" onclick="showErrorTab('resolved')">Resolved (' + persistedErrors.filter(e => e.resolvedAt).length + ')</div>';
-                html += '</div>';
-                html += '<div class="tab-content">';
-                const filtered = persistedErrors.filter(e => errorTab === 'resolved' ? e.resolvedAt : !e.resolvedAt);
-                if (filtered.length === 0) {
-                    html += '<p class="' + (errorTab === 'unresolved' ? 'ok-text' : 'muted') + '">None</p>';
-                } else {
-                    html += '<table><tr><th>Type</th><th>Route</th><th>Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>';
-                    for (const e of filtered) {
-                        html += '<tr>';
-                        html += '<td class="error-text expandable" onclick="this.parentElement.nextElementSibling.style.display=this.parentElement.nextElementSibling.style.display==='none'?'table-row':'none'">' + esc(e.errorType) + '</td>';
-                        html += '<td>' + esc(e.route || '-') + '</td>';
-                        html += '<td>' + e.occurrenceCount + '</td>';
-                        html += '<td>' + esc(e.firstSeen || '-') + '</td>';
-                        html += '<td>' + esc(e.lastSeen || '-') + '</td>';
-                        if (!e.resolvedAt) {
-                            html += '<td><button class="btn btn-sm" onclick="resolveError(' + e.id + ')">Resolve</button></td>';
-                        } else {
-                            html += '<td class="muted">' + esc(e.resolvedAt) + '</td>';
-                        }
-                        html += '</tr>';
-                        html += '<tr style="display:none"><td colspan="6"><div class="stack-trace">' + esc(e.stackTrace || 'No stack trace') + '</div><div style="margin-top:4px;color:#888">' + esc(e.message || '') + '</div></td></tr>';
-                    }
-                    html += '</table>';
-                }
-                html += '</div>';
-
-                // Jobs table
-                const scheduled = jobs.scheduled || [];
-                if (scheduled.length > 0) {
-                    html += '<h2>Scheduled Jobs</h2>';
-                    html += '<table><tr><th>Name</th><th>Schedule</th><th>Status</th><th>Last Run</th><th>Duration</th><th>Failures</th></tr>';
-                    for (const j of scheduled) {
-                        const statusCls = j.lastStatus === 'ok' ? 'ok-text' : j.lastStatus === 'error' ? 'error-text' : 'muted';
-                        html += '<tr><td>' + esc(j.name) + '</td><td>' + esc(j.schedule) + '</td>';
-                        html += '<td class="' + statusCls + '">' + esc(j.lastStatus || 'pending') + '</td>';
-                        html += '<td>' + esc(j.lastRun || '-') + '</td>';
-                        html += '<td>' + j.lastDurationMs + ' ms</td>';
-                        html += '<td>' + j.failCount + '</td></tr>';
-                    }
-                    html += '</table>';
-                }
-
-                // Rate limiters
-                const rateLimiters = data.rateLimiters || [];
-                if (rateLimiters.length > 0) {
-                    html += '<h2>Rate Limiters</h2>';
-                    html += '<table><tr><th>Limiter</th><th>Allowed</th><th>Blocked</th><th>Active Windows</th><th>Limit</th></tr>';
-                    for (const rl of rateLimiters) {
-                        const blockPct = (rl.allowed + rl.blocked) > 0 ? ((rl.blocked / (rl.allowed + rl.blocked)) * 100).toFixed(1) : '0.0';
-                        html += '<tr><td>' + esc(rl.label) + '</td>';
-                        html += '<td>' + rl.allowed.toLocaleString() + '</td>';
-                        html += '<td class="' + (rl.blocked > 0 ? 'error-text' : '') + '">' + rl.blocked.toLocaleString() + ' (' + blockPct + '%%)</td>';
-                        html += '<td>' + rl.activeWindows + '</td>';
-                        html += '<td>' + rl.maxRequests + '/' + rl.windowSeconds + 's</td></tr>';
-                    }
-                    html += '</table>';
-                }
-
-                // Cache details + control
-                if (cacheInfo) {
-                    html += '<div class="section-header"><h2>Cache</h2>';
-                    html += '<button class="btn btn-sm" onclick="clearCache()">Clear All</button></div>';
-                    html += '<div class="stats-row">';
-                    html += statCard('Entries', cacheInfo.entries);
-                    html += statCard('Counters', cacheInfo.counters);
-                    html += statCard('Tags', cacheInfo.tags);
-                    html += statCard('Hits', cacheInfo.hits);
-                    html += statCard('Misses', cacheInfo.misses);
-                    html += statCard('Evictions', cacheInfo.evictions);
-                    html += '</div>';
-                }
-
-                // Status codes
-                html += '<h2>Status Codes</h2>';
-                html += '<table><tr><th>Code</th><th>Count</th></tr>';
-                for (const [code, count] of Object.entries(codes).sort((a,b) => a[0] - b[0])) {
-                    html += '<tr><td>' + code + '</td><td>' + count + '</td></tr>';
-                }
-                html += '</table>';
-
-                app.innerHTML = html;
+            function toggleTrace(el) {
+                var row = el.closest('tr').nextElementSibling;
+                row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
             }
-
-            function statCard(label, value) {
-                return '<div class="stat-card"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>';
-            }
-
-            function esc(s) {
-                if (s == null) return '';
-                return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-            }
-
-            fetchData();
-            setInterval(fetchData, 5000);
             </script>
-            </body>
-            </html>
-            """.formatted(opsSecret);
+            """);
+
+        sb.append("</body></html>");
+        return sb.toString();
+    }
+
+    private static void renderPersistedErrors(StringBuilder sb, List<Map<String, Object>> errors,
+                                               String opsSecret, boolean resolved) {
+        if (errors.isEmpty()) {
+            sb.append("<p class=\"").append(resolved ? "muted" : "ok-text").append("\">None</p>");
+            return;
+        }
+        sb.append("<table><tr><th>Type</th><th>Route</th><th>Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>");
+        for (var e : errors) {
+            long id = ((Number) e.get("id")).longValue();
+            sb.append("<tr>");
+            sb.append("<td class=\"error-text expandable\" onclick=\"toggleTrace(this)\">")
+              .append(esc(str(e.get("errorType")))).append("</td>");
+            sb.append("<td>").append(esc(str(e.get("route"), "-"))).append("</td>");
+            sb.append("<td>").append(e.get("occurrenceCount")).append("</td>");
+            sb.append("<td>").append(esc(str(e.get("firstSeen"), "-"))).append("</td>");
+            sb.append("<td>").append(esc(str(e.get("lastSeen"), "-"))).append("</td>");
+            if (!resolved) {
+                sb.append("<td><button class=\"btn btn-sm\" hx-post=\"/ops/errors/").append(id)
+                  .append("/resolve?key=").append(esc(opsSecret))
+                  .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">Resolve</button></td>");
+            } else {
+                sb.append("<td class=\"muted\">").append(esc(str(e.get("resolvedAt"), ""))).append("</td>");
+            }
+            sb.append("</tr>");
+            sb.append("<tr style=\"display:none\"><td colspan=\"6\"><div class=\"stack-trace\">")
+              .append(esc(str(e.get("stackTrace"), "No stack trace")))
+              .append("</div><div style=\"margin-top:4px;color:#888\">")
+              .append(esc(str(e.get("message"), ""))).append("</div></td></tr>");
+        }
+        sb.append("</table>");
+    }
+
+    private static void statCard(StringBuilder sb, String label, String value) {
+        sb.append("<div class=\"stat-card\"><div class=\"label\">").append(esc(label))
+          .append("</div><div class=\"value\">").append(esc(value)).append("</div></div>");
+    }
+
+    private static String esc(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
+    private static String str(Object o) {
+        return o != null ? o.toString() : "";
+    }
+
+    private static String str(Object o, String fallback) {
+        return o != null ? o.toString() : fallback;
+    }
+
+    private static String formatDuration(Duration d) {
+        long days = d.toDays();
+        long hours = d.toHoursPart();
+        long mins = d.toMinutesPart();
+        if (days > 0) return days + "d " + hours + "h " + mins + "m";
+        if (hours > 0) return hours + "h " + mins + "m";
+        return mins + "m";
     }
 }
