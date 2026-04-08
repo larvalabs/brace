@@ -89,7 +89,7 @@ class OpsIntegrationTest {
         var response = get("/ops/dashboard?key=test-ops-key");
         assertEquals(200, response.statusCode());
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("text/html"));
-        assertTrue(response.body().contains("Brace Dashboard"));
+        assertTrue(response.body().contains("Brace Ops"));
     }
 
     @Test
@@ -184,7 +184,7 @@ class OpsIntegrationTest {
     void clearCacheWithValidKey() throws Exception {
         var response = cachePost("/ops/cache/clear");
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("Brace Dashboard"));
+        assertTrue(response.body().contains("Brace Ops"));
 
         // Verify cache is empty in status
         var status = cacheGet("/ops/status");
@@ -195,14 +195,14 @@ class OpsIntegrationTest {
     void dashboardIncludesCacheSection() throws Exception {
         var response = cacheGet("/ops/dashboard");
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("Clear All"));
+        assertTrue(response.body().contains("[clear all]"));
     }
 
     @Test
     void dashboardIncludesErrorTracking() throws Exception {
         var response = cacheGet("/ops/dashboard");
-        assertTrue(response.body().contains("Error Tracking"));
-        assertTrue(response.body().contains("Resolve"));
+        assertTrue(response.body().contains("Unresolved"));
+        assertTrue(response.body().contains("resolve"));
     }
 
     @Test
@@ -222,11 +222,10 @@ class OpsIntegrationTest {
     void dashboardIncludesJvmSection() throws Exception {
         var response = get("/ops/dashboard?key=test-ops-key");
         var body = response.body();
-        assertTrue(body.contains("JVM"));
         assertTrue(body.contains("Heap"));
         assertTrue(body.contains("CPU"));
         assertTrue(body.contains("Threads"));
-        assertTrue(body.contains("GC"));
+        assertTrue(body.contains("GC Avg"));
     }
 
     @Test
@@ -304,7 +303,6 @@ class OpsIntegrationTest {
                 .uri(URI.create("http://localhost:" + jfrPort + "/ops/dashboard?key=jfr-key")).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("JVM"));
         assertTrue(response.body().contains("Hot Methods"));
         assertTrue(response.body().contains("Top Allocations"));
     }

@@ -269,7 +269,7 @@ class ErrorStoreTest {
                     .build(),
                 HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resolveResp.statusCode());
-            assertTrue(resolveResp.body().contains("Brace Dashboard"));
+            assertTrue(resolveResp.body().contains("Brace Ops"));
 
             // Verify it's now resolved
             var resolvedResp = client.send(
