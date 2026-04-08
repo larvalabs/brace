@@ -154,18 +154,20 @@ public class OpsDashboard {
         sb.append("</div>\n");
 
         // Sparklines
+        int SPARKLINE_SLOTS = 60;
         if (!minutes.isEmpty()) {
-            var latest = minutes.getLast();
+            int emptySlots = SPARKLINE_SLOTS - minutes.size();
 
             // Req/min sparkline
             sb.append("<div class=\"section\">");
             long maxReq = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::requests).max().orElse(1));
             sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;\">")
-              .append("Requests / Minute <span style=\"float:right\">last ").append(minutes.size()).append(" min</span></div>");
+              .append("Requests / Minute <span style=\"float:right\">last ").append(minutes.size()).append(" / 60 min</span></div>");
             sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
             sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
               .append("<span>").append(maxReq).append("</span><span>0</span></div>");
             sb.append("<div class=\"sparkline\" style=\"flex:1\">");
+            for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
             for (var m : minutes) {
                 double pct = (m.requests() * 100.0) / maxReq;
                 String barClass = pct > 75 ? "bar-hi" : pct > 40 ? "bar-md" : "bar-lo";
@@ -186,6 +188,7 @@ public class OpsDashboard {
                 sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
                   .append("<span>").append(maxErr).append("</span><span>0</span></div>");
                 sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
                 for (var m : minutes) {
                     double pct = (m.errors() * 100.0) / maxErr;
                     sb.append("<div class=\"bar bar-err\" style=\"height:")
@@ -205,6 +208,7 @@ public class OpsDashboard {
             sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
               .append("<span>").append(maxHeap).append("</span><span>").append(minHeap).append("</span></div>");
             sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+            for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
             for (var m : minutes) {
                 double pct = (m.heapUsedMB() * 100.0) / maxHeap;
                 sb.append("<div class=\"bar bar-heap\" style=\"height:")
