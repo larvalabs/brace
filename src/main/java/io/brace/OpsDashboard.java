@@ -5,10 +5,12 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+@SuppressWarnings("unchecked")
+
 public class OpsDashboard {
 
     public static String html(String opsSecret, Stats stats, JobScheduler jobScheduler,
-                              Mailer mailer, ErrorStore errorStore, Cache cache) {
+                              Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler) {
         var sb = new StringBuilder();
         var now = Instant.now();
 
@@ -17,9 +19,18 @@ public class OpsDashboard {
         long totalReqs = statusCodes.values().stream().mapToLong(Long::longValue).sum();
         long errCount = statusCodes.getOrDefault(500, 0L) + statusCodes.getOrDefault(502, 0L) + statusCodes.getOrDefault(503, 0L);
         String errRate = totalReqs > 0 ? String.format("%.1f", (errCount * 100.0) / totalReqs) : "0.0";
-        var runtime = Runtime.getRuntime();
-        long heapUsed = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
-        long heapMax = runtime.maxMemory() / (1024 * 1024);
+        // JVM data
+        Map<String, Object> jvmSnap = profiler != null ? profiler.snapshot() : null;
+        long heapUsed, heapMax;
+        if (jvmSnap != null) {
+            var heap = (Map<String, Object>) jvmSnap.get("heap");
+            heapUsed = (long) heap.get("usedMB");
+            heapMax = (long) heap.get("maxMB");
+        } else {
+            var runtime = Runtime.getRuntime();
+            heapUsed = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
+            heapMax = runtime.maxMemory() / (1024 * 1024);
+        }
         var uptime = formatDuration(Duration.between(stats.startedAt(), now));
         var routeStats = stats.routeStats().entrySet().stream()
             .sorted((a, b) -> Double.compare(b.getValue().avgLatencyMs(), a.getValue().avgLatencyMs()))
@@ -98,8 +109,21 @@ public class OpsDashboard {
         sb.append("<div class=\"stats-row\">");
         statCard(sb, "Requests", String.valueOf(totalReqs));
         statCard(sb, "Error Rate", errRate + "%");
-        statCard(sb, "Heap Used", heapUsed + " MB");
-        statCard(sb, "Heap Max", heapMax + " MB");
+        statCard(sb, "Heap", heapUsed + " / " + heapMax + " MB");
+        if (jvmSnap != null) {
+            var cpu = (Map<String, Object>) jvmSnap.get("cpu");
+            var threads = (Map<String, Object>) jvmSnap.get("threads");
+            var gc = (Map<String, Object>) jvmSnap.get("gc");
+            statCard(sb, "CPU", String.format("%.0f%%", (double) cpu.get("jvmUser") * 100));
+            statCard(sb, "Threads", String.valueOf(threads.get("active")));
+            double avgGc = (double) gc.get("avgPauseMs");
+            statCard(sb, "GC", String.format("%.1f ms avg", avgGc));
+        } else {
+            var threadBean = java.lang.management.ManagementFactory.getThreadMXBean();
+            statCard(sb, "CPU", "-");
+            statCard(sb, "Threads", String.valueOf(threadBean.getThreadCount()));
+            statCard(sb, "GC", "-");
+        }
         if (cache != null) {
             statCard(sb, "Cache", cache.size() + " entries");
             long hits = cache.hits(), misses = cache.misses();
@@ -127,6 +151,66 @@ public class OpsDashboard {
                   .append(m.ts()).append("\"></div>");
             }
             sb.append("</div>\n");
+        }
+
+        // JVM profiling tables
+        sb.append("<h2>JVM</h2>\n");
+        if (jvmSnap != null) {
+            sb.append("<div class=\"two-col\">\n");
+
+            // Hot methods
+            var profiling = (Map<String, Object>) jvmSnap.get("profiling");
+            var hotMethods = (List<Map<String, Object>>) profiling.get("hotMethods");
+            sb.append("<div><h2>Hot Methods</h2>");
+            if (hotMethods.isEmpty()) {
+                sb.append("<p class=\"muted\">No samples yet</p>");
+            } else {
+                sb.append("<table><tr><th>Method</th><th>Samples</th></tr>");
+                for (var m : hotMethods) {
+                    String method = (String) m.get("method");
+                    String display = method.length() > 60 ? method.substring(method.length() - 60) : method;
+                    sb.append("<tr><td title=\"").append(esc(method)).append("\">").append(esc(display))
+                      .append("</td><td>").append(m.get("samples")).append("</td></tr>");
+                }
+                sb.append("</table>");
+            }
+            sb.append("</div>\n");
+
+            // Top allocations
+            var topAllocs = (List<Map<String, Object>>) profiling.get("topAllocations");
+            sb.append("<div><h2>Top Allocations</h2>");
+            if (topAllocs.isEmpty()) {
+                sb.append("<p class=\"muted\">No allocation data yet</p>");
+            } else {
+                sb.append("<table><tr><th>Class</th><th>Allocated</th></tr>");
+                for (var a : topAllocs) {
+                    sb.append("<tr><td>").append(esc((String) a.get("class")))
+                      .append("</td><td>").append(formatBytes((long) a.get("bytes"))).append("</td></tr>");
+                }
+                sb.append("</table>");
+            }
+            sb.append("</div>\n");
+
+            sb.append("</div>\n"); // two-col
+
+            // Recent GC pauses
+            var gc = (Map<String, Object>) jvmSnap.get("gc");
+            var pauses = (List<Map<String, Object>>) gc.get("recentPauses");
+            if (!pauses.isEmpty()) {
+                sb.append("<h2>Recent GC Pauses</h2>");
+                sb.append("<table><tr><th>Time</th><th>Duration</th><th>Collector</th><th>Cause</th></tr>");
+                for (var p : pauses) {
+                    String ts = (String) p.get("ts");
+                    String time = ts.length() > 19 ? ts.substring(11, 19) : ts;
+                    double durationMs = (double) p.get("durationMs");
+                    String cls = durationMs > 100 ? "error-text" : "";
+                    sb.append("<tr class=\"").append(cls).append("\"><td>").append(esc(time))
+                      .append("</td><td>").append(String.format("%.1f ms", durationMs))
+                      .append("</td><td>").append(esc((String) p.get("collector")))
+                      .append("</td><td>").append(esc((String) p.get("cause"))).append("</td></tr>");
+                }
+                sb.append("</table>\n");
+            }
         }
 
         sb.append("<div class=\"two-col\">\n");
@@ -305,6 +389,13 @@ public class OpsDashboard {
 
     private static String str(Object o, String fallback) {
         return o != null ? o.toString() : fallback;
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return (bytes / 1024) + " KB";
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)) + " MB";
+        return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
     }
 
     private static String formatDuration(Duration d) {

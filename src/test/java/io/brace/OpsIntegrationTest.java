@@ -219,6 +219,17 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void dashboardIncludesJvmSection() throws Exception {
+        var response = get("/ops/dashboard?key=test-ops-key");
+        var body = response.body();
+        assertTrue(body.contains("JVM"));
+        assertTrue(body.contains("Heap"));
+        assertTrue(body.contains("CPU"));
+        assertTrue(body.contains("Threads"));
+        assertTrue(body.contains("GC"));
+    }
+
+    @Test
     void statusIncludesCacheHitMissStats() throws Exception {
         var response = cacheGet("/ops/status");
         assertEquals(200, response.statusCode());

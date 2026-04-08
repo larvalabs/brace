@@ -195,7 +195,7 @@ public class OpsHandler {
 
     public Result dashboard(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
-        return Result.html(OpsDashboard.html(opsSecret, stats, jobScheduler, mailer, errorStore, cache));
+        return Result.html(OpsDashboard.html(opsSecret, stats, jobScheduler, mailer, errorStore, cache, profiler));
     }
 
     public Result routes(Request req) {
