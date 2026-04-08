@@ -51,6 +51,18 @@ class StorageTest {
     }
 
     @Test
+    void buildAuthHeaderProducesValidFormat() {
+        var storage = new Storage("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "examplebucket", "us-east-1", null, null);
+        var auth = storage.buildAuthHeader("PUT", "test-key", "text/plain",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "20130524T000000Z", "20130524");
+        assertTrue(auth.startsWith("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"));
+        assertTrue(auth.contains("SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date"));
+        assertTrue(auth.contains("Signature="));
+    }
+
+    @Test
     void urlEncodesSpecialCharacters() {
         var storage = new Storage("AKID", "secret", "my-bucket", "us-east-1", null, null);
         var url = storage.url("uploads/my file (1).jpg");
