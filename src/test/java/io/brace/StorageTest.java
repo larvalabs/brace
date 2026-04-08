@@ -1,6 +1,9 @@
 package io.brace;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
 
 class StorageTest {
@@ -68,5 +71,22 @@ class StorageTest {
         var url = storage.url("uploads/my file (1).jpg");
         assertTrue(url.contains("my%20file%20%281%29.jpg"));
         assertTrue(url.contains("uploads/"));
+    }
+
+    @Test
+    void s3FactoryReadsConfig(@TempDir Path dir) throws Exception {
+        var confFile = dir.resolve("app.conf");
+        Files.writeString(confFile, "s3.accessKeyId=AKID\ns3.secretKey=secret\ns3.bucket=my-bucket\ns3.region=us-west-2\ns3.endpoint=https://r2.example.com\ns3.publicUrl=https://cdn.example.com\n");
+        var config = Config.load(confFile, "production");
+        var storage = Storage.s3(config);
+        assertEquals("https://cdn.example.com/test.jpg", storage.url("test.jpg"));
+    }
+
+    @Test
+    void s3FactoryThrowsOnMissingConfig(@TempDir Path dir) throws Exception {
+        var confFile = dir.resolve("app.conf");
+        Files.writeString(confFile, "s3.accessKeyId=AKID\n");
+        var config = Config.load(confFile, "production");
+        assertThrows(RuntimeException.class, () -> Storage.s3(config));
     }
 }
