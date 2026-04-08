@@ -260,7 +260,14 @@ Ops endpoints authenticate via `X-Ops-Key` header (query param fallback for dash
 
 `POST /ops/errors/{id}/resolve` — marks an error as resolved. New occurrences after resolution create a new incident.
 
-`GET /ops/dashboard` — built-in HTML dashboard with sparkline charts.
+`GET /ops/dashboard` — built-in HTML dashboard with sparkline charts, JFR profiling, and color-coded metrics.
+
+<details>
+<summary>Dashboard screenshot</summary>
+
+![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
+
+</details>
 
 ## Testing
 
