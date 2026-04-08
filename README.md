@@ -262,12 +262,7 @@ Ops endpoints authenticate via `X-Ops-Key` header (query param fallback for dash
 
 `GET /ops/dashboard` — built-in HTML dashboard with sparkline charts, JFR profiling, and color-coded metrics.
 
-<details>
-<summary>Dashboard screenshot</summary>
-
 ![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
-
-</details>
 
 ## Testing
 
