@@ -49,6 +49,18 @@ class HtmxTest {
     }
 
     @Test
+    void varyHeaderSetForHtmxRequests() throws Exception {
+        var response = get("/htmx-check", "HX-Request", "true");
+        assertEquals("HX-Request", response.headers().firstValue("Vary").orElse(""));
+    }
+
+    @Test
+    void varyHeaderNotSetForNormalRequests() throws Exception {
+        var response = get("/htmx-check");
+        assertTrue(response.headers().firstValue("Vary").isEmpty());
+    }
+
+    @Test
     void htmxJsServedFromClasspath() throws Exception {
         var response = get("/__brace/htmx.min.js");
         assertEquals(200, response.statusCode());

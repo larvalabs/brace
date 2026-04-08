@@ -273,6 +273,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 result = after.apply(braceRequest, result);
             }
 
+            // Add Vary header for htmx requests (caching correctness)
+            if ("true".equals(braceRequest.header("HX-Request"))) {
+                result.header("Vary", "HX-Request");
+            }
+
             writeResult(result, response, callback);
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             if (stats != null) {
