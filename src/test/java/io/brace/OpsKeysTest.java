@@ -80,6 +80,33 @@ class OpsKeysTest {
     }
 
     @Test
+    void readKeyFile(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path keyFile = tmpDir.resolve("ops-private.key");
+        Files.writeString(keyFile, kp.privateKey() + "\n" + kp.publicKey() + "\n");
+
+        var read = OpsKeys.readKeyFile(keyFile.toString());
+        assertEquals(kp.privateKey(), read.privateKey());
+        assertEquals(kp.publicKey(), read.publicKey());
+
+        // Should work for sign/verify
+        String msg = "test message";
+        String sig = OpsKeys.sign(msg, read.privateKey());
+        assertTrue(OpsKeys.verify(msg, sig, read.publicKey()));
+    }
+
+    @Test
+    void readKeyFileIgnoresComments(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path keyFile = tmpDir.resolve("ops-private.key");
+        Files.writeString(keyFile, "# Private key\n" + kp.privateKey() + "\n# Public key\n" + kp.publicKey() + "\n");
+
+        var read = OpsKeys.readKeyFile(keyFile.toString());
+        assertEquals(kp.privateKey(), read.privateKey());
+        assertEquals(kp.publicKey(), read.publicKey());
+    }
+
+    @Test
     void differentKeypairsAreUnique() {
         var kp1 = OpsKeys.generateKeypair();
         var kp2 = OpsKeys.generateKeypair();

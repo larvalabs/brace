@@ -5,8 +5,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.*;
-import java.security.spec.EdECPrivateKeySpec;
-import java.security.spec.EdECPublicKeySpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
@@ -30,6 +28,25 @@ public class OpsKeys {
             return new Keypair(pub, priv);
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException("Ed25519 not available", e);
+        }
+    }
+
+    /**
+     * Read a private key file. Format is two lines: private key, then public key (both base64).
+     * Returns a Keypair.
+     */
+    public static Keypair readKeyFile(String path) {
+        try {
+            var lines = Files.readAllLines(Path.of(path)).stream()
+                .map(String::strip)
+                .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                .toList();
+            if (lines.size() < 2) {
+                throw new RuntimeException("Key file must contain private key and public key on separate lines");
+            }
+            return new Keypair(lines.get(1), lines.get(0));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read key file: " + path, e);
         }
     }
 
