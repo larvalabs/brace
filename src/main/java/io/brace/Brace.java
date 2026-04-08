@@ -437,9 +437,9 @@ public class Brace {
                     db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
                         ts, "jvm.heap_max_mb", heap.get("maxMB"));
                     db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.cpu_user", Math.round((double) cpu.get("jvmUser") * 10000));
+                        ts, "jvm.cpu_user", Math.round((double) cpu.get("jvmUser") * 10000)); // basis points (0.01% precision)
                     db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.cpu_system", Math.round((double) cpu.get("jvmSystem") * 10000));
+                        ts, "jvm.cpu_system", Math.round((double) cpu.get("jvmSystem") * 10000)); // basis points
                     db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
                         ts, "jvm.threads_active", threads.get("active"));
                     db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",

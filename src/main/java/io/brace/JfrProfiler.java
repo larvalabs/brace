@@ -60,6 +60,7 @@ public class JfrProfiler implements AutoCloseable {
                 event.getString("name"),
                 event.getString("cause")
             );
+            // Safe without synchronization: RecordingStream callbacks are single-threaded
             int idx = pauseIndex.getAndUpdate(i -> (i + 1) % recentPauses.length);
             recentPauses[idx] = pause;
         });

@@ -154,8 +154,8 @@ public class OpsDashboard {
         }
 
         // JVM profiling tables
-        sb.append("<h2>JVM</h2>\n");
         if (jvmSnap != null) {
+            sb.append("<h2>JVM</h2>\n");
             sb.append("<div class=\"two-col\">\n");
 
             // Hot methods
