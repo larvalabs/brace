@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 public class JfrProfiler implements AutoCloseable {
@@ -14,7 +15,7 @@ public class JfrProfiler implements AutoCloseable {
     // Latest values (volatile)
     private volatile double jvmCpuUser, jvmCpuSystem, machineCpu;
     private volatile long activeThreads, daemonThreads, peakThreads;
-    private volatile long heapUsed, heapCommitted;
+    private volatile long heapCommitted;
 
     // GC tracking
     private final LongAdder gcCount = new LongAdder();
@@ -23,8 +24,8 @@ public class JfrProfiler implements AutoCloseable {
     private final AtomicInteger pauseIndex = new AtomicInteger(0);
 
     // Profiling (rolling window)
-    private volatile ConcurrentHashMap<String, LongAdder> methodSamples = new ConcurrentHashMap<>();
-    private volatile ConcurrentHashMap<String, LongAdder> allocationByClass = new ConcurrentHashMap<>();
+    private final AtomicReference<ConcurrentHashMap<String, LongAdder>> methodSamples = new AtomicReference<>(new ConcurrentHashMap<>());
+    private final AtomicReference<ConcurrentHashMap<String, LongAdder>> allocationByClass = new AtomicReference<>(new ConcurrentHashMap<>());
 
     private final RecordingStream rs;
 
@@ -66,7 +67,6 @@ public class JfrProfiler implements AutoCloseable {
         // Heap summary after GC
         rs.enable("jdk.GCHeapSummary");
         rs.onEvent("jdk.GCHeapSummary", event -> {
-            heapUsed = event.getLong("heapUsed");
             heapCommitted = event.getLong("heapSpace.committedSize");
         });
 
@@ -77,7 +77,7 @@ public class JfrProfiler implements AutoCloseable {
             if (stackTrace != null && !stackTrace.getFrames().isEmpty()) {
                 var frame = stackTrace.getFrames().getFirst();
                 String key = frame.getMethod().getType().getName() + "." + frame.getMethod().getName();
-                methodSamples.computeIfAbsent(key, k -> new LongAdder()).increment();
+                methodSamples.get().computeIfAbsent(key, k -> new LongAdder()).increment();
             }
         });
 
@@ -86,7 +86,7 @@ public class JfrProfiler implements AutoCloseable {
         rs.onEvent("jdk.ObjectAllocationSample", event -> {
             String className = event.getClass("objectClass").getName();
             long weight = event.getLong("weight");
-            allocationByClass.computeIfAbsent(className, k -> new LongAdder()).add(weight);
+            allocationByClass.get().computeIfAbsent(className, k -> new LongAdder()).add(weight);
         });
 
         rs.startAsync();
@@ -144,30 +144,30 @@ public class JfrProfiler implements AutoCloseable {
         // Profiling
         var profiling = new LinkedHashMap<String, Object>();
         profiling.put("windowSeconds", 300);
-        profiling.put("hotMethods", topEntries(methodSamples, 20));
-        profiling.put("topAllocations", topAllocEntries(allocationByClass, 20));
+        profiling.put("hotMethods", topEntries(methodSamples.get(), 20));
+        profiling.put("topAllocations", topAllocEntries(allocationByClass.get(), 20));
         data.put("profiling", profiling);
 
         return data;
     }
 
     public List<Map.Entry<String, Long>> topMethods(int n) {
-        return methodSamples.entrySet().stream()
+        return methodSamples.get().entrySet().stream()
             .map(e -> Map.entry(e.getKey(), e.getValue().sum()))
             .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
             .limit(n).toList();
     }
 
     public List<Map.Entry<String, Long>> topAllocations(int n) {
-        return allocationByClass.entrySet().stream()
+        return allocationByClass.get().entrySet().stream()
             .map(e -> Map.entry(e.getKey(), e.getValue().sum()))
             .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
             .limit(n).toList();
     }
 
     public void resetProfiling() {
-        methodSamples = new ConcurrentHashMap<>();
-        allocationByClass = new ConcurrentHashMap<>();
+        methodSamples.set(new ConcurrentHashMap<>());
+        allocationByClass.set(new ConcurrentHashMap<>());
     }
 
     public long gcCount() { return gcCount.sum(); }
