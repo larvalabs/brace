@@ -489,12 +489,6 @@ public class OpsDashboard {
         sb.append("</table>");
     }
 
-    private static void statCard(StringBuilder sb, String label, String value, String colorClass) {
-        sb.append("<div class=\"stat-card\"><div class=\"label\">").append(esc(label))
-          .append("</div><div class=\"value ").append(colorClass).append("\">").append(esc(value))
-          .append("</div></div>");
-    }
-
     private static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass) {
         sb.append("<div class=\"stat-card\"><div class=\"label\">").append(esc(label))
           .append("</div><div class=\"value ").append(colorClass).append("\">").append(esc(value))
