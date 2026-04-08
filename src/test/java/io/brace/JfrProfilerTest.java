@@ -1,6 +1,7 @@
 package io.brace;
 
 import org.junit.jupiter.api.*;
+import java.util.List;
 import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -48,5 +49,36 @@ class JfrProfilerTest {
         assertTrue((long) threads.get("active") > 0, "must have at least 1 active thread");
         assertNotNull(threads.get("daemon"));
         assertNotNull(threads.get("peak"));
+    }
+
+    @Test
+    void snapshotContainsGcSection() {
+        var snap = profiler.snapshot();
+        var gc = (Map<String, Object>) snap.get("gc");
+        assertNotNull(gc, "snapshot must contain gc section");
+        assertTrue((long) gc.get("totalCount") >= 0);
+        assertTrue((long) gc.get("totalPauseMs") >= 0);
+        assertTrue((double) gc.get("avgPauseMs") >= 0);
+        assertNotNull(gc.get("recentPauses"));
+        assertInstanceOf(List.class, gc.get("recentPauses"));
+    }
+
+    @Test
+    void snapshotContainsProfilingSection() {
+        var snap = profiler.snapshot();
+        var profiling = (Map<String, Object>) snap.get("profiling");
+        assertNotNull(profiling, "snapshot must contain profiling section");
+        assertEquals(300, profiling.get("windowSeconds"));
+        assertNotNull(profiling.get("hotMethods"));
+        assertNotNull(profiling.get("topAllocations"));
+    }
+
+    @Test
+    void resetProfilingClearsMaps() {
+        profiler.resetProfiling();
+        var methods = profiler.topMethods(10);
+        var allocs = profiler.topAllocations(10);
+        assertTrue(methods.isEmpty(), "methods should be empty after reset");
+        assertTrue(allocs.isEmpty(), "allocations should be empty after reset");
     }
 }
