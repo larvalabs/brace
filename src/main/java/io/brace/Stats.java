@@ -24,6 +24,16 @@ public class Stats {
 
     private final ConcurrentHashMap<Integer, LongAdder> statusCodes = new ConcurrentHashMap<>();
 
+    // Custom counters (delta resets on snapshot, total is cumulative)
+    private final ConcurrentHashMap<String, LongAdder> counterDeltas = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, LongAdder> counterTotals = new ConcurrentHashMap<>();
+
+    // Custom gauges (sampled at snapshot time)
+    private final ConcurrentHashMap<String, java.util.function.Supplier<Long>> gauges = new ConcurrentHashMap<>();
+
+    // Custom timers (reset on snapshot)
+    private final ConcurrentHashMap<String, TimerAccumulator> timerAccumulators = new ConcurrentHashMap<>();
+
     // Per-route stats (cumulative, not reset on rotation)
     private final ConcurrentHashMap<String, RouteStats> routes = new ConcurrentHashMap<>();
 
@@ -94,6 +104,28 @@ public class Stats {
         }
     }
 
+    // --- Custom metric methods ---
+
+    public void counter(String name) { counter(name, 1); }
+
+    public void counter(String name, long amount) {
+        counterDeltas.computeIfAbsent(name, k -> new LongAdder()).add(amount);
+        counterTotals.computeIfAbsent(name, k -> new LongAdder()).add(amount);
+    }
+
+    public long counterTotal(String name) {
+        var adder = counterTotals.get(name);
+        return adder != null ? adder.sum() : 0;
+    }
+
+    public void gauge(String name, java.util.function.Supplier<Long> supplier) {
+        gauges.put(name, supplier);
+    }
+
+    public void timer(String name, long durationMs) {
+        timerAccumulators.computeIfAbsent(name, k -> new TimerAccumulator()).record(durationMs);
+    }
+
     public MinuteSnapshot snapshot() {
         long requests = requestCount.sumThenReset();
         long errs = errorCount.sumThenReset();
@@ -103,8 +135,32 @@ public class Stats {
         long maxUs = maxLatencyUs.getAndSet(0);
         long heapMB = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024 * 1024);
 
+        // Capture counter deltas and reset
+        var cDeltas = new java.util.LinkedHashMap<String, Long>();
+        for (var entry : counterDeltas.entrySet()) {
+            long val = entry.getValue().sumThenReset();
+            if (val != 0) cDeltas.put(entry.getKey(), val);
+        }
+
+        // Sample gauges
+        var gValues = new java.util.LinkedHashMap<String, Long>();
+        for (var entry : gauges.entrySet()) {
+            gValues.put(entry.getKey(), entry.getValue().get());
+        }
+
+        // Capture timers and reset
+        var tValues = new java.util.LinkedHashMap<String, TimerSnapshot>();
+        for (var entry : timerAccumulators.entrySet()) {
+            var acc = entry.getValue();
+            var snap = acc.snapshotAndReset();
+            if (snap != null) tValues.put(entry.getKey(), snap);
+        }
+
         var snapshot = new MinuteSnapshot(
-            Instant.now(), requests, errs, latencyUs, maxUs, queries, queryUs, heapMB
+            Instant.now(), requests, errs, latencyUs, maxUs, queries, queryUs, heapMB,
+            Collections.unmodifiableMap(cDeltas),
+            Collections.unmodifiableMap(gValues),
+            Collections.unmodifiableMap(tValues)
         );
 
         synchronized (ringLock) {
@@ -167,11 +223,40 @@ public class Stats {
         long maxLatencyUs,
         long queries,
         long queryUs,
-        long heapUsedMB
+        long heapUsedMB,
+        Map<String, Long> counterDeltas,
+        Map<String, Long> gaugeValues,
+        Map<String, TimerSnapshot> timerValues
     ) {
         public double avgLatencyMs() {
             if (requests == 0) return 0.0;
             return (totalLatencyUs / (double) requests) / 1000.0;
+        }
+    }
+
+    public record TimerSnapshot(long count, double avgMs, long maxMs) {}
+
+    public static class TimerAccumulator {
+        private final LongAdder count = new LongAdder();
+        private final LongAdder totalMs = new LongAdder();
+        private final AtomicLong maxMs = new AtomicLong(0);
+
+        void record(long durationMs) {
+            count.increment();
+            totalMs.add(durationMs);
+            long current = maxMs.get();
+            while (durationMs > current) {
+                if (maxMs.compareAndSet(current, durationMs)) break;
+                current = maxMs.get();
+            }
+        }
+
+        TimerSnapshot snapshotAndReset() {
+            long c = count.sumThenReset();
+            long t = totalMs.sumThenReset();
+            long m = maxMs.getAndSet(0);
+            if (c == 0) return null;
+            return new TimerSnapshot(c, (double) t / c, m);
         }
     }
 

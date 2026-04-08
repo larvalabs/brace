@@ -93,6 +93,46 @@ class StatsTest {
     }
 
     @Test
+    void counterIncrementsByOne() {
+        var stats = new Stats();
+        stats.counter("talks.created");
+        stats.counter("talks.created");
+        stats.counter("talks.created");
+        var snapshot = stats.snapshot();
+        assertEquals(3, snapshot.counterDeltas().get("talks.created"));
+    }
+
+    @Test
+    void counterIncrementsByN() {
+        var stats = new Stats();
+        stats.counter("bytes.uploaded", 4096);
+        stats.counter("bytes.uploaded", 2048);
+        var snapshot = stats.snapshot();
+        assertEquals(6144, snapshot.counterDeltas().get("bytes.uploaded"));
+    }
+
+    @Test
+    void counterResetsAfterSnapshot() {
+        var stats = new Stats();
+        stats.counter("events");
+        stats.counter("events");
+        stats.snapshot();
+        stats.counter("events");
+        var snapshot = stats.snapshot();
+        assertEquals(1, snapshot.counterDeltas().get("events"));
+    }
+
+    @Test
+    void counterTotalIsCumulative() {
+        var stats = new Stats();
+        stats.counter("events");
+        stats.counter("events");
+        stats.snapshot();
+        stats.counter("events");
+        assertEquals(3, stats.counterTotal("events"));
+    }
+
+    @Test
     void minuteSnapshotsReturnCapturedHeap() {
         var stats = new Stats();
         stats.recordRequest("GET", "/test", 200, 1000, 0, 0);
