@@ -191,6 +191,22 @@ brace_dev() {
     fi
 }
 
+# --- Sample ---
+
+brace_sample() {
+    brace_compile || exit 1
+    local cp
+    cp=$(build_classpath)
+
+    # Compile sample app against the framework
+    info "Compiling sample app..."
+    javac --enable-preview --release ${JAVA_RELEASE:-$(java -version 2>&1 | grep -oE '[0-9]+' | head -1)} -d target/classes -cp "$cp" sample/App.java
+    success "Sample compiled"
+
+    info "Starting ${CYAN}sample.App${NC}"
+    exec java --enable-preview -cp "$cp" sample.App
+}
+
 # --- Help ---
 
 brace_help() {
@@ -199,6 +215,7 @@ brace_help() {
     echo ""
     echo -e "  ${CYAN}./brace dev${NC}            Compile, run, and auto-restart on changes"
     echo -e "  ${CYAN}./brace run${NC}            Compile and run"
+    echo -e "  ${CYAN}./brace sample${NC}         Compile and run the sample app"
     echo -e "  ${CYAN}./brace compile${NC}        Compile the project"
     echo -e "  ${CYAN}./brace test${NC}           Run all tests"
     echo -e "  ${CYAN}./brace test ${YELLOW}Name${NC}      Run a specific test class"
@@ -215,6 +232,7 @@ case "$COMMAND" in
     dev)     brace_dev ;;
     test)    brace_test "$@" ;;
     run)     brace_run ;;
+    sample)  brace_sample ;;
     compile) brace_compile ;;
     help|*)  brace_help ;;
 esac
