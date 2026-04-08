@@ -51,42 +51,57 @@ public class OpsDashboard {
             <!DOCTYPE html>
             <html>
             <head>
-            <title>Brace Dashboard</title>
+            <title>Brace Ops</title>
             <meta charset="UTF-8">
             <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { background: #1a1a2e; color: #e0e0e0; font-family: 'Menlo', 'Consolas', monospace; font-size: 13px; padding: 20px; }
-            h1 { color: #e94560; font-size: 20px; margin-bottom: 4px; }
-            h2 { color: #0f3460; background: #e94560; display: inline-block; padding: 2px 10px; margin: 16px 0 8px 0; font-size: 13px; }
-            .header { margin-bottom: 16px; border-bottom: 1px solid #333; padding-bottom: 12px; }
-            .header span { color: #888; margin-right: 20px; }
-            .stats-row { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
-            .stat-card { background: #16213e; border: 1px solid #0f3460; padding: 12px 20px; min-width: 140px; }
-            .stat-card .label { color: #888; font-size: 11px; text-transform: uppercase; }
-            .stat-card .value { color: #e94560; font-size: 22px; font-weight: bold; margin-top: 4px; }
-            table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
-            th { text-align: left; color: #e94560; border-bottom: 1px solid #333; padding: 6px 12px; font-size: 11px; text-transform: uppercase; }
-            td { padding: 5px 12px; border-bottom: 1px solid #222; }
-            tr:hover td { background: #16213e; }
-            .sparkline { display: flex; align-items: flex-end; gap: 2px; height: 60px; margin: 8px 0; }
-            .sparkline .bar { background: #e94560; min-width: 6px; flex: 1; }
-            .sparkline .bar:hover { background: #ff6b81; }
-            .error-text { color: #ff6b6b; }
-            .ok-text { color: #51cf66; }
-            .muted { color: #666; }
-            .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-            @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
-            .btn { background: #0f3460; color: #e0e0e0; border: 1px solid #e94560; padding: 4px 12px; cursor: pointer; font-family: inherit; font-size: 12px; }
-            .btn:hover { background: #e94560; color: #0f3460; }
-            .btn-sm { padding: 2px 8px; font-size: 11px; }
-            .section-header { display: flex; align-items: center; gap: 12px; }
-            .stack-trace { max-height: 200px; overflow-y: auto; background: #111; padding: 8px; margin-top: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-all; border: 1px solid #222; }
-            .expandable { cursor: pointer; }
-            .expandable:hover { color: #e94560; }
+            body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12px; padding: 16px; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 12px; }
+            .header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; }
+            .header .meta { color: #565f89; }
+            .stats-row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+            .stat-card { flex: 1; border: 1px solid #30363d; padding: 8px; min-width: 120px; }
+            .stat-card .label { color: #565f89; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+            .stat-card .value { font-size: 20px; font-weight: bold; margin-top: 2px; }
+            .stat-card .detail { color: #565f89; font-size: 10px; margin-top: 1px; }
+            .section { border: 1px solid #30363d; padding: 10px; margin-bottom: 14px; }
+            .section-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
+            .two-col { display: flex; gap: 10px; margin-bottom: 14px; }
+            .two-col > div { flex: 1; }
+            @media (max-width: 800px) { .two-col { flex-direction: column; } }
+            table { border-collapse: collapse; width: 100%; }
+            th { text-align: left; color: #565f89; font-size: 9px; text-transform: uppercase; padding: 3px 0; }
+            td { padding: 3px 0; }
+            .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 45px; }
+            .sparkline .bar { flex: 1; min-width: 4px; }
+            .sparkline .bar-lo { background: #238636; }
+            .sparkline .bar-md { background: #2ea043; }
+            .sparkline .bar-hi { background: #3fb950; }
+            .sparkline-sm { height: 25px; }
+            .sparkline .bar-err { background: #f7768e; }
+            .sparkline .bar-heap { background: #bb9af7; }
+            .c-blue { color: #7aa2f7; }
+            .c-green { color: #9ece6a; }
+            .c-purple { color: #bb9af7; }
+            .c-amber { color: #e0af68; }
+            .c-red { color: #f7768e; }
+            .c-cyan { color: #7dcfff; }
+            .c-muted { color: #565f89; }
+            .pkg { color: #565f89; display: inline-block; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; vertical-align: bottom; }
+            .method { color: #c9d1d9; font-weight: bold; }
+            .ok-dot { color: #9ece6a; }
+            .err-dot { color: #f7768e; }
+            .btn { background: transparent; color: #7aa2f7; border: 1px solid #30363d; padding: 2px 8px; cursor: pointer; font-family: inherit; font-size: 11px; }
+            .btn:hover { border-color: #7aa2f7; }
+            .btn-resolve { color: #9ece6a; }
+            .btn-resolve:hover { border-color: #9ece6a; }
+            .btn-danger { color: #f7768e; }
+            .btn-danger:hover { border-color: #f7768e; }
             .tab-bar { display: flex; gap: 0; margin-bottom: 0; }
-            .tab { background: #16213e; border: 1px solid #333; border-bottom: none; padding: 4px 16px; cursor: pointer; color: #888; }
-            .tab.active { background: #1a1a2e; color: #e94560; border-color: #e94560; border-bottom: 1px solid #1a1a2e; margin-bottom: -1px; z-index: 1; position: relative; }
-            .tab-content { border-top: 1px solid #e94560; padding-top: 8px; }
+            .tab { background: transparent; border: 1px solid #30363d; border-bottom: none; padding: 4px 16px; cursor: pointer; color: #565f89; font-family: inherit; font-size: 11px; }
+            .tab.active { color: #7aa2f7; border-color: #7aa2f7; border-bottom: 1px solid #0d1117; margin-bottom: -1px; z-index: 1; position: relative; }
+            .tab-content { border: 1px solid #30363d; border-top: 1px solid #7aa2f7; padding: 10px; margin-bottom: 14px; }
+            .stack-trace { max-height: 200px; overflow-y: auto; background: #161b22; padding: 8px; margin-top: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-all; border: 1px solid #30363d; color: #c9d1d9; }
             </style>
             <script src="/__brace/htmx.min.js"></script>
             </head>
@@ -99,42 +114,41 @@ public class OpsDashboard {
 
         // Header
         sb.append("<div class=\"header\">");
-        sb.append("<h1>Brace Dashboard</h1>");
-        sb.append("<span>Uptime: ").append(esc(uptime)).append("</span>");
-        sb.append("<span>Java: ").append(esc(System.getProperty("java.version"))).append("</span>");
-        sb.append("<span>Started: ").append(esc(stats.startedAt().toString())).append("</span>");
+        sb.append("<span class=\"title\">┌ BRACE</span>");
+        sb.append("<span class=\"meta\">↑ ").append(esc(uptime))
+          .append(" │ Java ").append(esc(System.getProperty("java.version")))
+          .append(" │ started ").append(esc(stats.startedAt().toString().substring(0, 16).replace("T", " ")))
+          .append(" │ 5s refresh</span>");
         sb.append("</div>\n");
 
         // Stat cards
         sb.append("<div class=\"stats-row\">");
-        statCard(sb, "Requests", String.valueOf(totalReqs));
-        statCard(sb, "Error Rate", errRate + "%");
-        statCard(sb, "Heap", heapUsed + " / " + heapMax + " MB");
+        statCard(sb, "Requests", String.valueOf(totalReqs), "", "c-blue");
+        statCard(sb, "Error Rate", errRate + "%", errCount + " total", Double.parseDouble(errRate) > 5 ? "c-red" : "c-green");
+        statCard(sb, "Heap", heapUsed + "M", "/ " + heapMax + "M", "c-purple");
         if (jvmSnap != null) {
             var cpu = (Map<String, Object>) jvmSnap.get("cpu");
             var threads = (Map<String, Object>) jvmSnap.get("threads");
             var gc = (Map<String, Object>) jvmSnap.get("gc");
-            statCard(sb, "CPU", String.format("%.0f%%", (double) cpu.get("jvmUser") * 100));
-            statCard(sb, "Threads", String.valueOf(threads.get("active")));
+            double cpuPct = (double) cpu.get("jvmUser") * 100;
+            statCard(sb, "CPU", String.format("%.0f%%", cpuPct), "", cpuPct > 80 ? "c-red" : cpuPct > 50 ? "c-amber" : "c-amber");
+            statCard(sb, "Threads", String.valueOf(threads.get("active")), threads.get("daemon") + " daemon", "c-cyan");
             double avgGc = (double) gc.get("avgPauseMs");
-            statCard(sb, "GC", String.format("%.1f ms avg", avgGc));
+            statCard(sb, "GC Avg", String.format("%.0fms", avgGc), gc.get("totalCount") + " pauses", avgGc > 100 ? "c-red" : avgGc > 10 ? "c-amber" : "c-green");
         } else {
             var threadBean = java.lang.management.ManagementFactory.getThreadMXBean();
-            statCard(sb, "CPU", "-");
-            statCard(sb, "Threads", String.valueOf(threadBean.getThreadCount()));
-            statCard(sb, "GC", "-");
+            statCard(sb, "CPU", "-", "", "c-amber");
+            statCard(sb, "Threads", String.valueOf(threadBean.getThreadCount()), "", "c-cyan");
+            statCard(sb, "GC", "-", "", "c-green");
         }
         if (cache != null) {
-            statCard(sb, "Cache", cache.size() + " entries");
             long hits = cache.hits(), misses = cache.misses();
             String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";
-            statCard(sb, "Hit Rate", hitRate);
+            statCard(sb, "Cache", cache.size() + " entries", "hit rate " + hitRate, "c-amber");
         }
         if (mailer != null) {
-            statCard(sb, "Emails", String.valueOf(mailer.sentCount()));
-            if (mailer.failCount() > 0) {
-                statCard(sb, "Mail Failures", String.valueOf(mailer.failCount()));
-            }
+            String mailDetail = mailer.failCount() > 0 ? mailer.failCount() + " failed" : "";
+            statCard(sb, "Emails", String.valueOf(mailer.sentCount()), mailDetail, "c-cyan");
         }
         sb.append("</div>\n");
 
@@ -301,12 +315,12 @@ public class OpsDashboard {
             sb.append("<button class=\"btn btn-sm\" hx-post=\"/ops/cache/clear?key=").append(esc(opsSecret))
               .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">Clear All</button></div>");
             sb.append("<div class=\"stats-row\">");
-            statCard(sb, "Entries", String.valueOf(cache.size()));
-            statCard(sb, "Counters", String.valueOf(cache.counterCount()));
-            statCard(sb, "Tags", String.valueOf(cache.tagCount()));
-            statCard(sb, "Hits", String.valueOf(cache.hits()));
-            statCard(sb, "Misses", String.valueOf(cache.misses()));
-            statCard(sb, "Evictions", String.valueOf(cache.evictions()));
+            statCard(sb, "Entries", String.valueOf(cache.size()), "c-blue");
+            statCard(sb, "Counters", String.valueOf(cache.counterCount()), "c-blue");
+            statCard(sb, "Tags", String.valueOf(cache.tagCount()), "c-blue");
+            statCard(sb, "Hits", String.valueOf(cache.hits()), "c-green");
+            statCard(sb, "Misses", String.valueOf(cache.misses()), "c-amber");
+            statCard(sb, "Evictions", String.valueOf(cache.evictions()), "c-amber");
             sb.append("</div>\n");
         }
 
@@ -373,9 +387,16 @@ public class OpsDashboard {
         sb.append("</table>");
     }
 
-    private static void statCard(StringBuilder sb, String label, String value) {
+    private static void statCard(StringBuilder sb, String label, String value, String colorClass) {
         sb.append("<div class=\"stat-card\"><div class=\"label\">").append(esc(label))
-          .append("</div><div class=\"value\">").append(esc(value)).append("</div></div>");
+          .append("</div><div class=\"value ").append(colorClass).append("\">").append(esc(value))
+          .append("</div></div>");
+    }
+
+    private static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass) {
+        sb.append("<div class=\"stat-card\"><div class=\"label\">").append(esc(label))
+          .append("</div><div class=\"value ").append(colorClass).append("\">").append(esc(value))
+          .append("</div><div class=\"detail\">").append(esc(detail)).append("</div></div>");
     }
 
     private static String esc(String s) {
