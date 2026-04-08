@@ -16,8 +16,8 @@
 - [x] Route grouping (`app.group("/admin", admin -> { ... })`)
 - [x] Static file serving (`app.staticFiles("/assets", "public")`)
 - [x] `brace dev` CLI command with file watcher + fast restart (`./brace dev`, `./brace test`, `./brace run`)
-- [ ] `brace deploy` CLI command with Dokploy API integration
-- [ ] Auto-generated CLAUDE.md on build
+- [ ] Dokploy ops skill (not Brace-specific — deploy status, monitoring, restart, rollback, env vars via Dokploy API)
+- [x] Auto-generated CLAUDE.md stub (`app.generateClaudeMd(path)` — minimal, since `main()` is self-documenting)
 - [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)

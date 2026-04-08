@@ -72,6 +72,7 @@ public class Brace {
         return mailer;
     }
 
+
     public Brace sessions(String secret) {
         this.sessionSecret = secret;
         return this;
@@ -379,6 +380,14 @@ public class Brace {
         for (var wsPath : wsRoutes.keySet()) {
             System.out.printf("  %-6s %s%n", "WS", wsPath);
         }
+    }
+
+    /**
+     * Generate a CLAUDE.md file by introspecting the app's routes, entities, and configuration.
+     * Call after start() or during build to produce an AI context file.
+     */
+    public void generateClaudeMd(java.nio.file.Path path) {
+        ClaudeMdGenerator.write(this, path);
     }
 
     public void stop() throws Exception {

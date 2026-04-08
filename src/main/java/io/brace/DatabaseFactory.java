@@ -17,6 +17,7 @@ import java.util.List;
 public class DatabaseFactory {
 
     private final SessionFactory sessionFactory;
+    private final List<Class<?>> entityClasses;
 
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses) {
         this(url, user, password, entityClasses, 10);
@@ -25,6 +26,11 @@ public class DatabaseFactory {
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses, int poolSize) {
         runMigrations(url, user, password);
         this.sessionFactory = buildSessionFactory(url, user, password, entityClasses, poolSize);
+        this.entityClasses = List.copyOf(entityClasses);
+    }
+
+    public List<Class<?>> entityClasses() {
+        return entityClasses;
     }
 
     public StatelessSession openSession() {
