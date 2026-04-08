@@ -28,7 +28,7 @@ public class Brace {
     private ServerConnector connector;
     private final JobScheduler jobScheduler = new JobScheduler();
     private final JobPoller jobPoller = new JobPoller();
-    private String opsSecret;
+    private String opsKeysPath;
     private Stats stats;
     private JfrProfiler profiler;
     private Cache cache;
@@ -94,8 +94,8 @@ public class Brace {
         return this;
     }
 
-    public Brace ops(String secret) {
-        this.opsSecret = secret;
+    public Brace ops(String keysPath) {
+        this.opsKeysPath = keysPath;
         return this;
     }
 
@@ -324,13 +324,17 @@ public class Brace {
         }
 
         // Create JFR profiler when ops is enabled
-        if (opsSecret != null) {
+        if (opsKeysPath != null) {
             profiler = new JfrProfiler();
         }
 
-        // Register ops endpoints if secret is configured
-        if (opsSecret != null) {
-            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, opsSecret, errorStore, cache, profiler);
+        // Register ops endpoints if authorized keys are configured
+        String tokenSecret = null;
+        if (opsKeysPath != null) {
+            var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
+            tokenSecret = OpsToken.generateSecret();
+            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
+            router.add("POST", "/ops/auth", (Handler) opsHandler::auth);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
@@ -384,7 +388,7 @@ public class Brace {
         }
 
         // Snapshot stats for dashboard sparklines (even without a database)
-        if (opsSecret != null && databaseFactory == null) {
+        if (opsKeysPath != null && databaseFactory == null) {
             var snapshotTimer = new java.util.Timer("brace-stats-snapshot", true);
             snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
                 @Override public void run() { stats.snapshot(); }
@@ -392,7 +396,7 @@ public class Brace {
         }
 
         // Flush stats to ops_timeseries
-        if (databaseFactory != null && opsSecret != null) {
+        if (databaseFactory != null && opsKeysPath != null) {
             jobScheduler.every(httpStatsInterval, "ops-flush-http", db -> {
                 var snapshot = stats.snapshot();
                 if (snapshot.requests() > 0) {

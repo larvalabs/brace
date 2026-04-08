@@ -1,8 +1,12 @@
 package io.brace;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
+
 import java.net.URI;
 import java.net.http.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -12,9 +16,20 @@ class OpsIntegrationTest {
     static HttpClient client = HttpClient.newHttpClient();
     static int port;
 
+    @TempDir
+    static Path tmpDir;
+
+    static OpsKeys.Keypair keypair;
+    static String keysFilePath;
+
     @BeforeAll
     static void startApp() throws Exception {
-        app = Brace.app().port(0).ops("test-ops-key");
+        keypair = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, keypair.publicKey() + " test-key\n");
+        keysFilePath = keysFile.toString();
+
+        app = Brace.app().port(0).ops(keysFilePath);
 
         app.get("/hello", req -> Result.text("Hello!"));
         app.get("/error", req -> { throw new RuntimeException("test error"); });
@@ -28,34 +43,63 @@ class OpsIntegrationTest {
         app.stop();
     }
 
+    /** Authenticate via POST /ops/auth and return a Bearer token. */
+    private static String authenticate() throws Exception {
+        return authenticate(port, keypair);
+    }
+
+    private static String authenticate(int targetPort, OpsKeys.Keypair kp) throws Exception {
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String signature = OpsKeys.sign(timestamp, kp.privateKey());
+        String body = "{\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + targetPort + "/ops/auth"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(), "Auth should succeed: " + response.body());
+        // Extract token from {"token":"..."}
+        String respBody = response.body();
+        int start = respBody.indexOf("\"token\":\"") + 9;
+        int end = respBody.indexOf("\"", start);
+        return respBody.substring(start, end);
+    }
+
     private HttpResponse<String> get(String path) throws Exception {
         return client.send(
             HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + path)).GET().build(),
             HttpResponse.BodyHandlers.ofString());
     }
 
-    private HttpResponse<String> getWithKey(String path) throws Exception {
+    private HttpResponse<String> getWithToken(String path) throws Exception {
+        String token = authenticate();
+        return getWithToken(path, token);
+    }
+
+    private HttpResponse<String> getWithToken(String path, String token) throws Exception {
         return client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + path))
-                .header("X-Ops-Key", "test-ops-key")
+                .header("Authorization", "Bearer " + token)
                 .GET().build(),
             HttpResponse.BodyHandlers.ofString());
     }
 
     @Test
-    void opsStatusRequiresKey() throws Exception {
+    void opsStatusRequiresAuth() throws Exception {
         var response = get("/ops/status");
         assertEquals(401, response.statusCode());
     }
 
     @Test
-    void opsStatusWithValidKey() throws Exception {
+    void opsStatusWithValidToken() throws Exception {
         // Make a few requests first to generate stats
         get("/hello");
         get("/hello");
 
-        var response = getWithKey("/ops/status");
+        var response = getWithToken("/ops/status");
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("\"app\""));
         assertTrue(response.body().contains("\"http\""));
@@ -64,8 +108,8 @@ class OpsIntegrationTest {
     }
 
     @Test
-    void opsRoutesWithValidKey() throws Exception {
-        var response = getWithKey("/ops/routes");
+    void opsRoutesWithValidToken() throws Exception {
+        var response = getWithToken("/ops/routes");
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("/hello"));
         assertTrue(response.body().contains("GET"));
@@ -74,19 +118,20 @@ class OpsIntegrationTest {
     @Test
     void statsRecordRequestsAfterTraffic() throws Exception {
         get("/hello");
-        var response = getWithKey("/ops/status");
+        var response = getWithToken("/ops/status");
         assertTrue(response.body().contains("\"statusCodes\""));
     }
 
     @Test
-    void opsDashboardRequiresKey() throws Exception {
+    void opsDashboardRequiresAuth() throws Exception {
         var response = get("/ops/dashboard");
         assertEquals(401, response.statusCode());
     }
 
     @Test
-    void opsDashboardWithValidKey() throws Exception {
-        var response = get("/ops/dashboard?key=test-ops-key");
+    void opsDashboardWithValidToken() throws Exception {
+        var token = authenticate();
+        var response = getWithToken("/ops/dashboard", token);
         assertEquals(200, response.statusCode());
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("text/html"));
         assertTrue(response.body().contains("Brace Ops"));
@@ -96,13 +141,13 @@ class OpsIntegrationTest {
     void errorTracking() throws Exception {
         // Trigger an error
         get("/error");
-        var response = getWithKey("/ops/status");
+        var response = getWithToken("/ops/status");
         assertTrue(response.body().contains("\"errors\""));
     }
 
     @Test
     void opsStatusJvmSectionHasExpectedFields() throws Exception {
-        var response = getWithKey("/ops/status");
+        var response = getWithToken("/ops/status");
         var body = response.body();
         assertTrue(body.contains("\"heap\""));
         assertTrue(body.contains("\"cpu\""));
@@ -113,13 +158,84 @@ class OpsIntegrationTest {
         assertTrue(body.contains("\"maxMB\""));
     }
 
+    // --- Auth endpoint tests ---
+
+    @Test
+    void authEndpointReturnsToken() throws Exception {
+        String token = authenticate();
+        assertNotNull(token);
+        assertFalse(token.isEmpty());
+        assertTrue(token.contains("."));
+    }
+
+    @Test
+    void authRejectsUnknownPublicKey() throws Exception {
+        var unknownKp = OpsKeys.generateKeypair();
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String signature = OpsKeys.sign(timestamp, unknownKp.privateKey());
+        String body = "{\"publicKey\":\"" + unknownKp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void authRejectsStaleTimestamp() throws Exception {
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000 - 120); // 2 minutes ago
+        String signature = OpsKeys.sign(timestamp, keypair.privateKey());
+        String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void authRejectsInvalidSignature() throws Exception {
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"badsignature\"}";
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void oldStyleOpsKeyRejected() throws Exception {
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/status"))
+                .header("X-Ops-Key", "some-secret")
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
+    }
+
     // --- Cache ops tests (separate app with cache registered) ---
 
     static Brace cacheApp;
     static int cachePort;
+    static OpsKeys.Keypair cacheKeypair;
 
     @BeforeAll
     static void startCacheApp() throws Exception {
+        cacheKeypair = OpsKeys.generateKeypair();
+        Path cacheKeysFile = tmpDir.resolve("cache-authorized-keys");
+        Files.writeString(cacheKeysFile, cacheKeypair.publicKey() + "\n");
+
         var cache = Brace.cache();
         cache.set("key1", "value1");
         cache.set("key2", "value2", "5m");
@@ -127,7 +243,7 @@ class OpsIntegrationTest {
         var db = new DatabaseFactory(
             "jdbc:h2:mem:cacheopsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
             List.of());
-        cacheApp = Brace.app().port(0).ops("cache-key").cache(cache).database(db);
+        cacheApp = Brace.app().port(0).ops(cacheKeysFile.toString()).cache(cache).database(db);
         cacheApp.get("/cacheboom", req -> { throw new RuntimeException("cache test error"); });
         cacheApp.start();
         cachePort = cacheApp.actualPort();
@@ -145,19 +261,21 @@ class OpsIntegrationTest {
     }
 
     private HttpResponse<String> cacheGet(String path) throws Exception {
+        String token = authenticate(cachePort, cacheKeypair);
         return client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + cachePort + path))
-                .header("X-Ops-Key", "cache-key")
+                .header("Authorization", "Bearer " + token)
                 .GET().build(),
             HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> cachePost(String path) throws Exception {
+        String token = authenticate(cachePort, cacheKeypair);
         return client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + cachePort + path))
-                .header("X-Ops-Key", "cache-key")
+                .header("Authorization", "Bearer " + token)
                 .POST(HttpRequest.BodyPublishers.noBody()).build(),
             HttpResponse.BodyHandlers.ofString());
     }
@@ -171,7 +289,7 @@ class OpsIntegrationTest {
     }
 
     @Test
-    void clearCacheRequiresKey() throws Exception {
+    void clearCacheRequiresAuth() throws Exception {
         var response = client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + cachePort + "/ops/cache/clear"))
@@ -181,7 +299,7 @@ class OpsIntegrationTest {
     }
 
     @Test
-    void clearCacheWithValidKey() throws Exception {
+    void clearCacheWithValidToken() throws Exception {
         var response = cachePost("/ops/cache/clear");
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("Brace Ops"));
@@ -207,20 +325,33 @@ class OpsIntegrationTest {
 
     @Test
     void dashboardIncludesHtmxScript() throws Exception {
-        var response = get("/ops/dashboard?key=test-ops-key");
+        var token = authenticate();
+        var response = getWithToken("/ops/dashboard", token);
         assertTrue(response.body().contains("/__brace/htmx.min.js"));
     }
 
     @Test
     void dashboardHasHtmxPolling() throws Exception {
-        var response = get("/ops/dashboard?key=test-ops-key");
+        var token = authenticate();
+        var response = getWithToken("/ops/dashboard", token);
         assertTrue(response.body().contains("hx-get="));
         assertTrue(response.body().contains("hx-trigger=\"every 5s\""));
     }
 
     @Test
+    void dashboardUsesBearerTokenNotQueryParam() throws Exception {
+        var token = authenticate();
+        var response = getWithToken("/ops/dashboard", token);
+        var body = response.body();
+        assertTrue(body.contains("Authorization"));
+        assertTrue(body.contains("Bearer"));
+        assertFalse(body.contains("?key="));
+    }
+
+    @Test
     void dashboardIncludesJvmSection() throws Exception {
-        var response = get("/ops/dashboard?key=test-ops-key");
+        var token = authenticate();
+        var response = getWithToken("/ops/dashboard", token);
         var body = response.body();
         assertTrue(body.contains("Heap"));
         assertTrue(body.contains("CPU"));
@@ -241,10 +372,15 @@ class OpsIntegrationTest {
 
     static Brace jfrApp;
     static int jfrPort;
+    static OpsKeys.Keypair jfrKeypair;
 
     @BeforeAll
     static void startJfrApp() throws Exception {
-        jfrApp = Brace.app().port(0).ops("jfr-key");
+        jfrKeypair = OpsKeys.generateKeypair();
+        Path jfrKeysFile = tmpDir.resolve("jfr-authorized-keys");
+        Files.writeString(jfrKeysFile, jfrKeypair.publicKey() + "\n");
+
+        jfrApp = Brace.app().port(0).ops(jfrKeysFile.toString());
         jfrApp.get("/work", req -> {
             long sum = 0;
             for (int i = 0; i < 10000; i++) sum += i;
@@ -267,10 +403,11 @@ class OpsIntegrationTest {
                 HttpRequest.newBuilder().uri(URI.create("http://localhost:" + jfrPort + "/work")).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         }
+        String token = authenticate(jfrPort, jfrKeypair);
         var response = client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + jfrPort + "/ops/status"))
-                .header("X-Ops-Key", "jfr-key").GET().build(),
+                .header("Authorization", "Bearer " + token).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
         var body = response.body();
@@ -286,10 +423,11 @@ class OpsIntegrationTest {
 
     @Test
     void jvmFlushJobsRegistered() throws Exception {
+        String token = authenticate(cachePort, cacheKeypair);
         var response = client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + cachePort + "/ops/status"))
-                .header("X-Ops-Key", "cache-key").GET().build(),
+                .header("Authorization", "Bearer " + token).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         var body = response.body();
         assertTrue(body.contains("ops-flush-jvm"), "should have ops-flush-jvm job");
@@ -298,9 +436,11 @@ class OpsIntegrationTest {
 
     @Test
     void jfrDashboardHasJvmSection() throws Exception {
+        String token = authenticate(jfrPort, jfrKeypair);
         var response = client.send(
             HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + jfrPort + "/ops/dashboard?key=jfr-key")).GET().build(),
+                .uri(URI.create("http://localhost:" + jfrPort + "/ops/dashboard"))
+                .header("Authorization", "Bearer " + token).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("Hot Methods"));
