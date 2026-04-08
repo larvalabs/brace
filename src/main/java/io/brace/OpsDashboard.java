@@ -221,6 +221,96 @@ public class OpsDashboard {
             sb.append("</div>\n"); // close section
         }
 
+        // Custom metrics sparklines
+        {
+            // Collect all metric names across snapshots
+            var counterNames = new java.util.LinkedHashSet<String>();
+            var gaugeNames = new java.util.LinkedHashSet<String>();
+            var timerNames = new java.util.LinkedHashSet<String>();
+            for (var m : minutes) {
+                counterNames.addAll(m.counterDeltas().keySet());
+                gaugeNames.addAll(m.gaugeValues().keySet());
+                timerNames.addAll(m.timerValues().keySet());
+            }
+
+            int METRIC_SLOTS = 60;
+            int emptySlots = minutes.isEmpty() ? METRIC_SLOTS : METRIC_SLOTS - minutes.size();
+
+            if (!counterNames.isEmpty() || !gaugeNames.isEmpty() || !timerNames.isEmpty()) {
+                sb.append("<div class=\"section\">");
+                sb.append("<div class=\"section-head c-cyan\">Custom Metrics</div>");
+
+                // Counter sparklines (cyan)
+                for (var name : counterNames) {
+                    long maxVal = Math.max(1, minutes.stream()
+                        .mapToLong(m -> m.counterDeltas().getOrDefault(name, 0L)).max().orElse(1));
+                    sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;margin-top:10px;\">")
+                      .append(esc(name)).append(" <span class=\"c-cyan\" style=\"font-size:9px\">(counter)</span></div>");
+                    sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
+                    sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                      .append("<span>").append(maxVal).append("</span><span>0</span></div>");
+                    sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                    for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
+                    for (var m : minutes) {
+                        long val = m.counterDeltas().getOrDefault(name, 0L);
+                        double pct = (val * 100.0) / maxVal;
+                        sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(val > 0 ? 4 : 0, pct)))
+                          .append("%;background:#7dcfff\" title=\"").append(val).append(" @ ").append(m.ts()).append("\"></div>");
+                    }
+                    sb.append("</div></div>\n");
+                }
+
+                // Gauge sparklines (amber)
+                for (var name : gaugeNames) {
+                    long maxVal = Math.max(1, minutes.stream()
+                        .mapToLong(m -> m.gaugeValues().getOrDefault(name, 0L)).max().orElse(1));
+                    long minVal = minutes.stream()
+                        .mapToLong(m -> m.gaugeValues().getOrDefault(name, 0L)).min().orElse(0);
+                    sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;margin-top:10px;\">")
+                      .append(esc(name)).append(" <span class=\"c-amber\" style=\"font-size:9px\">(gauge)</span></div>");
+                    sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
+                    sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                      .append("<span>").append(maxVal).append("</span><span>").append(minVal).append("</span></div>");
+                    sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                    for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
+                    for (var m : minutes) {
+                        long val = m.gaugeValues().getOrDefault(name, 0L);
+                        double pct = (val * 100.0) / maxVal;
+                        sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(4, pct)))
+                          .append("%;background:#e0af68\" title=\"").append(val).append(" @ ").append(m.ts()).append("\"></div>");
+                    }
+                    sb.append("</div></div>\n");
+                }
+
+                // Timer sparklines (blue — avg ms)
+                for (var name : timerNames) {
+                    double maxAvg = Math.max(1, minutes.stream()
+                        .mapToDouble(m -> {
+                            var t = m.timerValues().get(name);
+                            return t != null ? t.avgMs() : 0;
+                        }).max().orElse(1));
+                    sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;margin-top:10px;\">")
+                      .append(esc(name)).append(" <span class=\"c-blue\" style=\"font-size:9px\">(timer avg ms)</span></div>");
+                    sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
+                    sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                      .append("<span>").append(String.format("%.0f", maxAvg)).append("</span><span>0</span></div>");
+                    sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                    for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
+                    for (var m : minutes) {
+                        var t = m.timerValues().get(name);
+                        double avg = t != null ? t.avgMs() : 0;
+                        double pct = (avg * 100.0) / maxAvg;
+                        sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(avg > 0 ? 4 : 0, pct)))
+                          .append("%;background:#7aa2f7\" title=\"").append(t != null ? String.format("%.1fms avg, %d max, %d calls", t.avgMs(), t.maxMs(), t.count()) : "0")
+                          .append(" @ ").append(m.ts()).append("\"></div>");
+                    }
+                    sb.append("</div></div>\n");
+                }
+
+                sb.append("</div>\n"); // close section
+            }
+        }
+
         // JVM profiling
         if (jvmSnap != null) {
             // Hot Methods + Slowest Routes
