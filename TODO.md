@@ -4,6 +4,7 @@
 
 - [x] Exception tracking — persistent `ops_errors` table, `GET /ops/errors`, `POST /ops/errors/{id}/resolve` ([spec](docs/superpowers/specs/2026-04-07-exception-tracking-design.md))
 - [x] Ops endpoint security — `X-Ops-Key` header with query param fallback for dashboard
+- [ ] Ops token auth — Ed25519 keypair auth, SSH-style authorized keys, short-lived tokens, CLI commands ([spec](docs/superpowers/specs/2026-04-08-ops-token-auth-design.md))
 - [x] Cache implementation (~120 lines — ConcurrentHashMap + TTL + tag-based invalidation + `cache.wrap()`)
 - [x] HTTP client wrapper (`Http.get()`, `Http.post()`, `.bearer()`, `.bodyJson()`, `.fetchJson()` — over `java.net.http.HttpClient`)
 - [x] Binary/stream responses (`Result.bytes()` + `Result.download()` with Content-Disposition)
