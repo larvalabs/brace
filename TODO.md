@@ -45,6 +45,7 @@
 
 ## Ops Stats Gaps
 
+- [ ] JFR-based JVM profiler (heap, CPU, GC pauses, threads, method hot spots, allocation tracking — [spec](docs/superpowers/specs/2026-04-08-jfr-profiler-design.md))
 - [ ] WebSocket metrics (active connections, messages sent/received, connections per room)
 - [x] Database query instrumentation (query count/latency per request)
 - [x] Cache hit/miss rates and eviction counts
