@@ -87,7 +87,7 @@ public class OpsDashboard {
             .c-red { color: #f7768e; }
             .c-cyan { color: #7dcfff; }
             .c-muted { color: #565f89; }
-            .pkg { color: #565f89; display: inline-block; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; vertical-align: bottom; }
+            .pkg { color: #565f89; display: inline-block; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; direction: rtl; unicode-bidi: plaintext; text-align: left; vertical-align: bottom; }
             .method { color: #c9d1d9; font-weight: bold; }
             .ok-dot { color: #9ece6a; }
             .err-dot { color: #f7768e; }
