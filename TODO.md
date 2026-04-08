@@ -18,6 +18,7 @@
 - [x] `brace dev` CLI command with file watcher + fast restart (`./brace dev`, `./brace test`, `./brace run`)
 - [ ] Dokploy ops skill (not Brace-specific — deploy status, monitoring, restart, rollback, env vars via Dokploy API)
 - [x] Auto-generated CLAUDE.md stub (`app.generateClaudeMd(path)` — minimal, since `main()` is self-documenting)
+- [ ] S3-compatible storage (`Storage.s3(config)`, `storage.put(key, bytes, contentType)` returns public URL, `storage.delete(key)`, `storage.url(key)` — built-in AWS Sig V4 signing, no SDK; works with S3, R2, MinIO; config: accessKeyId, secretKey, bucket, endpoint, region, publicUrl; integrates with `req.file()` uploads)
 - [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
