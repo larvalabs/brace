@@ -65,8 +65,9 @@ Register with: `app.get("/path", handler)` or `app.get("/path", (DbHandler) (req
 
 ```bash
 mvn compile          # compile
-mvn test             # run all 138 tests
+mvn test             # run all 283 tests
 mvn test -Dtest=IntegrationTest   # run specific test class
+./sample/brace sample             # compile and run the sample app
 ```
 
 ## Key Design Decisions
@@ -78,6 +79,7 @@ mvn test -Dtest=IntegrationTest   # run specific test class
 - **CSRF auto-validated** on POST/PUT/DELETE. Skipped for `Content-Type: application/json`.
 - **Session cookie format:** `base64url(json).base64url(hmac-sha256)`. Tamper-proof, not encrypted.
 - **Stats use LongAdder/AtomicLong** — lock-free, zero contention on the hot path.
+- **htmx for dynamic pages.** Bundled htmx 2.0.4 served from `/__brace/htmx.min.js`. Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize with `req.isHtmx()` to return partials when needed. `Vary: HX-Request` header set automatically.
 
 ## File Conventions
 
@@ -104,8 +106,15 @@ mvn test -Dtest=IntegrationTest   # run specific test class
 2. In controller: `var form = req.form(MyForm.class)` then check `form.valid()`
 3. Entity convention: add `apply(MyForm form)` method for mapping
 
+### Adding dynamic page updates with htmx
+1. Include `<script src="/__brace/htmx.min.js"></script>` in your layout
+2. Add `hx-get`, `hx-target`, `hx-select`, `hx-trigger` attributes to HTML elements
+3. The handler returns the full page — htmx extracts the element it needs via `hx-select`
+4. For optimization: use `req.isHtmx()` to return a `_partial.jte` template directly
+5. Partial templates use `_` prefix convention (e.g., `_list.jte`, `_stats.jte`)
+
 ## Dependencies
 
-Jetty 12, Hibernate 7, H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, JUnit 5.
+Jetty 12, Hibernate 7, H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, htmx 2.0.4, JUnit 5.
 
 Single Maven artifact: `io.brace:brace:0.1.0-SNAPSHOT`
