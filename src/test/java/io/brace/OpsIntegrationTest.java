@@ -3,6 +3,7 @@ package io.brace;
 import org.junit.jupiter.api.*;
 import java.net.URI;
 import java.net.http.*;
+import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class OpsIntegrationTest {
@@ -110,9 +111,19 @@ class OpsIntegrationTest {
         cache.set("key1", "value1");
         cache.set("key2", "value2", "5m");
 
-        cacheApp = Brace.app().port(0).ops("cache-key").cache(cache);
+        var db = new DatabaseFactory(
+            "jdbc:h2:mem:cacheopsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+            List.of());
+        cacheApp = Brace.app().port(0).ops("cache-key").cache(cache).database(db);
+        cacheApp.get("/cacheboom", req -> { throw new RuntimeException("cache test error"); });
         cacheApp.start();
         cachePort = cacheApp.actualPort();
+
+        // Trigger an error so error tracking section shows Resolve button
+        client.send(
+            HttpRequest.newBuilder().uri(URI.create("http://localhost:" + cachePort + "/cacheboom")).GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        Thread.sleep(200);
     }
 
     @AfterAll
@@ -160,7 +171,7 @@ class OpsIntegrationTest {
     void clearCacheWithValidKey() throws Exception {
         var response = cachePost("/ops/cache/clear");
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("\"cleared\""));
+        assertTrue(response.body().contains("Brace Dashboard"));
 
         // Verify cache is empty in status
         var status = cacheGet("/ops/status");
@@ -171,14 +182,27 @@ class OpsIntegrationTest {
     void dashboardIncludesCacheSection() throws Exception {
         var response = cacheGet("/ops/dashboard");
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("clearCache"));
+        assertTrue(response.body().contains("Clear All"));
     }
 
     @Test
     void dashboardIncludesErrorTracking() throws Exception {
         var response = cacheGet("/ops/dashboard");
         assertTrue(response.body().contains("Error Tracking"));
-        assertTrue(response.body().contains("resolveError"));
+        assertTrue(response.body().contains("Resolve"));
+    }
+
+    @Test
+    void dashboardIncludesHtmxScript() throws Exception {
+        var response = get("/ops/dashboard?key=test-ops-key");
+        assertTrue(response.body().contains("/__brace/htmx.min.js"));
+    }
+
+    @Test
+    void dashboardHasHtmxPolling() throws Exception {
+        var response = get("/ops/dashboard?key=test-ops-key");
+        assertTrue(response.body().contains("hx-get="));
+        assertTrue(response.body().contains("hx-trigger=\"every 5s\""));
     }
 
     @Test
