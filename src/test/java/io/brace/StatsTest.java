@@ -133,6 +133,27 @@ class StatsTest {
     }
 
     @Test
+    void gaugeSamplesSupplierAtSnapshotTime() {
+        var stats = new Stats();
+        var value = new java.util.concurrent.atomic.AtomicLong(42);
+        stats.gauge("queue.depth", value::get);
+        var snapshot = stats.snapshot();
+        assertEquals(42, snapshot.gaugeValues().get("queue.depth"));
+        value.set(99);
+        snapshot = stats.snapshot();
+        assertEquals(99, snapshot.gaugeValues().get("queue.depth"));
+    }
+
+    @Test
+    void gaugeReplacesSupplierOnReregister() {
+        var stats = new Stats();
+        stats.gauge("metric", () -> 10L);
+        stats.gauge("metric", () -> 20L);
+        var snapshot = stats.snapshot();
+        assertEquals(20, snapshot.gaugeValues().get("metric"));
+    }
+
+    @Test
     void minuteSnapshotsReturnCapturedHeap() {
         var stats = new Stats();
         stats.recordRequest("GET", "/test", 200, 1000, 0, 0);
