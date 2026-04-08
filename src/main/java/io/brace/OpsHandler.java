@@ -176,6 +176,32 @@ public class OpsHandler {
             data.put("rateLimiters", rateLimiterStats);
         }
 
+        // Custom metrics
+        var counterTotals = stats.counterTotals();
+        var gaugeValues = stats.currentGaugeValues();
+        var timerValues = stats.lastTimerValues();
+        if (!counterTotals.isEmpty() || !gaugeValues.isEmpty() || !timerValues.isEmpty()) {
+            var metrics = new LinkedHashMap<String, Object>();
+            if (!counterTotals.isEmpty()) {
+                metrics.put("counters", counterTotals);
+            }
+            if (!gaugeValues.isEmpty()) {
+                metrics.put("gauges", gaugeValues);
+            }
+            if (!timerValues.isEmpty()) {
+                var timers = new LinkedHashMap<String, Object>();
+                for (var entry : timerValues.entrySet()) {
+                    var t = new LinkedHashMap<String, Object>();
+                    t.put("count", entry.getValue().count());
+                    t.put("avgMs", Math.round(entry.getValue().avgMs() * 100.0) / 100.0);
+                    t.put("maxMs", entry.getValue().maxMs());
+                    timers.put(entry.getKey(), t);
+                }
+                metrics.put("timers", timers);
+            }
+            data.put("metrics", metrics);
+        }
+
         // Timeseries
         var timeseries = new LinkedHashMap<String, Object>();
         var minutes = new ArrayList<Map<String, Object>>();

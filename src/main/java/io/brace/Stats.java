@@ -209,6 +209,28 @@ public class Stats {
         }
     }
 
+    public Map<String, Long> counterTotals() {
+        var result = new java.util.LinkedHashMap<String, Long>();
+        for (var entry : counterTotals.entrySet()) {
+            result.put(entry.getKey(), entry.getValue().sum());
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
+    public Map<String, Long> currentGaugeValues() {
+        var result = new java.util.LinkedHashMap<String, Long>();
+        for (var entry : gauges.entrySet()) {
+            result.put(entry.getKey(), entry.getValue().get());
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
+    public Map<String, TimerSnapshot> lastTimerValues() {
+        var snapshots = minuteSnapshots();
+        if (snapshots.isEmpty()) return Map.of();
+        return snapshots.getLast().timerValues();
+    }
+
     public Map<String, RouteStats> routeStats() {
         return Collections.unmodifiableMap(routes);
     }

@@ -237,6 +237,67 @@ class OpsIntegrationTest {
         assertTrue(response.body().contains("\"evictions\""));
     }
 
+    // --- Custom metrics tests (separate app) ---
+
+    static Brace metricsApp;
+    static int metricsPort;
+
+    @BeforeAll
+    static void startMetricsApp() throws Exception {
+        metricsApp = Brace.app().port(0).ops("metrics-key");
+        metricsApp.get("/ping", req -> Result.text("pong"));
+        metricsApp.start();
+        metricsPort = metricsApp.actualPort();
+
+        // Register custom metrics
+        var stats = metricsApp.stats();
+        stats.counter("talks.created");
+        stats.counter("talks.created");
+        stats.counter("bytes.uploaded", 4096);
+        stats.gauge("queue.depth", () -> 42L);
+        stats.timer("api.latency", 150);
+        stats.timer("api.latency", 250);
+        stats.snapshot(); // capture metrics into ring buffer
+    }
+
+    @AfterAll
+    static void stopMetricsApp() throws Exception {
+        metricsApp.stop();
+    }
+
+    private HttpResponse<String> metricsGet(String path) throws Exception {
+        return client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + metricsPort + path))
+                .header("X-Ops-Key", "metrics-key")
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void statusIncludesCustomMetrics() throws Exception {
+        var response = metricsGet("/ops/status");
+        assertEquals(200, response.statusCode());
+        var body = response.body();
+        assertTrue(body.contains("\"metrics\""), "should have metrics section");
+        assertTrue(body.contains("\"counters\""), "should have counters");
+        assertTrue(body.contains("\"gauges\""), "should have gauges");
+        assertTrue(body.contains("\"timers\""), "should have timers");
+        assertTrue(body.contains("talks.created"), "should include counter name");
+        assertTrue(body.contains("queue.depth"), "should include gauge name");
+        assertTrue(body.contains("api.latency"), "should include timer name");
+    }
+
+    @Test
+    void dashboardIncludesCustomMetricSparklines() throws Exception {
+        var response = metricsGet("/ops/dashboard");
+        assertEquals(200, response.statusCode());
+        var body = response.body();
+        assertTrue(body.contains("talks.created"), "dashboard should show counter name");
+        assertTrue(body.contains("queue.depth"), "dashboard should show gauge name");
+        assertTrue(body.contains("api.latency"), "dashboard should show timer name");
+    }
+
     // --- JFR profiler integration tests (separate app) ---
 
     static Brace jfrApp;
