@@ -154,7 +154,7 @@ public class OpsHandler {
 
     public Result dashboard(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
-        return Result.html(OpsDashboard.html(opsSecret));
+        return Result.html(OpsDashboard.html(opsSecret, stats, jobScheduler, mailer, errorStore, cache));
     }
 
     public Result routes(Request req) {
@@ -181,16 +181,15 @@ public class OpsHandler {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Result.notFound();
         long id = req.longParam("id");
-        var resolved = errorStore.resolve(id);
-        if (resolved == null) return Result.notFound();
-        return Json.of(resolved);
+        errorStore.resolve(id);
+        return dashboard(req);
     }
 
     public Result clearCache(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
-        if (cache == null) return Json.of(Map.of("status", "no cache configured"));
+        if (cache == null) return Result.notFound();
         cache.clear();
-        return Json.of(Map.of("status", "cleared"));
+        return dashboard(req);
     }
 
     private boolean authorize(Request req) {
