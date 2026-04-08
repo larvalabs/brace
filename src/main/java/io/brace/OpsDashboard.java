@@ -212,6 +212,22 @@ public class OpsDashboard {
                     html += '</table>';
                 }
 
+                // Rate limiters
+                const rateLimiters = data.rateLimiters || [];
+                if (rateLimiters.length > 0) {
+                    html += '<h2>Rate Limiters</h2>';
+                    html += '<table><tr><th>Limiter</th><th>Allowed</th><th>Blocked</th><th>Active Windows</th><th>Limit</th></tr>';
+                    for (const rl of rateLimiters) {
+                        const blockPct = (rl.allowed + rl.blocked) > 0 ? ((rl.blocked / (rl.allowed + rl.blocked)) * 100).toFixed(1) : '0.0';
+                        html += '<tr><td>' + esc(rl.label) + '</td>';
+                        html += '<td>' + rl.allowed.toLocaleString() + '</td>';
+                        html += '<td class="' + (rl.blocked > 0 ? 'error-text' : '') + '">' + rl.blocked.toLocaleString() + ' (' + blockPct + '%%)</td>';
+                        html += '<td>' + rl.activeWindows + '</td>';
+                        html += '<td>' + rl.maxRequests + '/' + rl.windowSeconds + 's</td></tr>';
+                    }
+                    html += '</table>';
+                }
+
                 // Cache details + control
                 if (cacheInfo) {
                     html += '<div class="section-header"><h2>Cache</h2>';

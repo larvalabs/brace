@@ -125,6 +125,12 @@ public class OpsHandler {
             data.put("cache", cacheData);
         }
 
+        // Rate limiters
+        var rateLimiterStats = RateLimiter.allStats();
+        if (!rateLimiterStats.isEmpty()) {
+            data.put("rateLimiters", rateLimiterStats);
+        }
+
         // Timeseries
         var timeseries = new LinkedHashMap<String, Object>();
         var minutes = new ArrayList<Map<String, Object>>();

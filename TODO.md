@@ -42,6 +42,14 @@
 - [ ] Add-feature benchmark: appointment scheduling on both PetClinic implementations
 - [ ] Automate token measurement via Claude API script
 
+## Ops Stats Gaps
+
+- [ ] WebSocket metrics (active connections, messages sent/received, connections per room)
+- [ ] Database query instrumentation (query count/latency per request — currently always 0)
+- [ ] Cache hit/miss rates and eviction counts
+- [ ] File upload metrics (count, total bytes, by endpoint)
+- [ ] Mailer failure tracking (currently only success count)
+
 ## Future Considerations
 
 - [ ] Cron expression support for jobs (currently only `every()` and `daily()`)
