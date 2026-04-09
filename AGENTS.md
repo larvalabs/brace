@@ -34,7 +34,7 @@ var app = Brace.app()
     .maxUploadSize("10MB");
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `ws()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`.
 
 ## Routing
 
@@ -233,7 +233,7 @@ Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
 
 ## Sessions
 
-HMAC-SHA256 signed cookies. Stateless — no server-side storage.
+AES-256-GCM encrypted cookies. Stateless — no server-side storage. Safe to store emails, roles, and permissions.
 
 ```java
 session.set("userId", user.id);        // store int
@@ -245,6 +245,16 @@ session.has("userId");                 // check existence
 session.remove("userId");             // remove key
 session.clear();                       // remove all
 ```
+
+Configure session cookie security:
+
+```java
+app.sessions(SessionOptions.secure("secret")  // HttpOnly + Secure + SameSite=Lax
+    .maxAgeDays(14)
+    .sameSiteStrict());
+```
+
+`SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `path(String)`, `domain(String)`.
 
 Flash messages (available for one subsequent request):
 
@@ -362,13 +372,66 @@ app.before("/api/*", RateLimiter.perIp(100, "1m"));
 app.before("/login", RateLimiter.perKey(req -> req.param("email"), 5, "15m"));
 ```
 
-## Ops
+## Ops — Debugging & Monitoring
 
-Built-in diagnostics at `/ops/status` (JSON) and `/ops/dashboard` (HTML). Secured with Ed25519 keypair auth.
+**When debugging a running Brace app, use `/ops/status` instead of tailing logs.** It returns structured JSON with everything you need to diagnose problems.
 
-Setup: `app.ops("ops-authorized-keys")` — path to file containing public keys.
+Setup: `app.ops("ops-authorized-keys")`. Generate keys: `brace ops keypair`.
 
-Generate keys: `brace ops keypair`.
+Authenticate: `POST /ops/auth` with signed timestamp, receive a Bearer token. Then pass `Authorization: Bearer <token>` header or `?token=<token>` query param.
+
+### Endpoints
+
+| Endpoint | Returns |
+|---|---|
+| `GET /ops/status` | Full system snapshot (see below) |
+| `GET /ops/errors` | All tracked errors with status filter (`?status=open`) |
+| `GET /ops/routes` | All registered routes |
+| `GET /ops/dashboard` | HTML dashboard (human-readable) |
+| `POST /ops/errors/{id}/resolve` | Mark an error as resolved |
+| `POST /ops/cache/clear` | Clear the entire cache |
+
+### What `/ops/status` returns
+
+```json
+{
+  "app": { "uptime": "2h 15m", "startedAt": "...", "javaVersion": "21" },
+  "http": {
+    "statusCodes": { "200": 1523, "404": 12, "500": 3 },
+    "slowestRoutes": [{ "route": "GET /search", "count": 45, "avgMs": 234.5 }]
+  },
+  "jvm": {
+    "heap": { "usedMB": 128, "maxMB": 512 },
+    "cpu": { "jvmUser": 0.12 },
+    "threads": { "active": 42 },
+    "gc": { "totalCount": 15, "avgPauseMs": 2.1, "recentPauses": [...] },
+    "profiling": { "hotMethods": [...], "topAllocations": [...] }
+  },
+  "errors": {
+    "recent": [{
+      "type": "NullPointerException",
+      "message": "Cannot invoke method on null",
+      "route": "GET /posts/{id}",
+      "count": 3,
+      "stackTrace": "...",
+      "requestDetail": "...",
+      "queriesBefore": "..."
+    }]
+  },
+  "jobs": { "scheduled": [{ "name": "cleanup", "lastStatus": "ok", "lastError": null }] },
+  "cache": { "entries": 42, "hits": 1200, "misses": 80 },
+  "metrics": { "counters": {...}, "gauges": {...}, "timers": {...} },
+  "timeseries": { "minutes": [{ "ts": "...", "requests": 45, "errors": 0, "avgMs": 12.3 }] }
+}
+```
+
+### Debugging workflow
+
+1. **App throwing errors?** Check `errors.recent` — each error includes the stack trace, the route that triggered it, the request details, and which DB queries ran before it failed.
+2. **Endpoint slow?** Check `http.slowestRoutes` for avg latency. Check `timeseries.minutes` for trends. Check `jvm.profiling.hotMethods` for CPU bottlenecks.
+3. **Memory issues?** Check `jvm.heap` for usage, `jvm.gc` for pause frequency, `jvm.profiling.topAllocations` for what's allocating.
+4. **Job failing?** Check `jobs.scheduled` — each job shows `lastStatus`, `lastError`, and `failCount`.
+5. **Cache not helping?** Check `cache.hits` vs `cache.misses` for hit rate.
 
 ## Custom Metrics
 
