@@ -43,6 +43,8 @@ The same design choices that help AI also eliminate runtime overhead. No DI cont
 
 For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33μs vs ~125μs), no ORM lifecycle tax, compiled templates (~180μs vs ~480μs for Thymeleaf).
 
+AI agents: read [AGENTS.md](AGENTS.md) for the complete framework reference.
+
 ## Quick Start
 
 Brace wires everything explicitly in `main()`, making the app self-documenting. An agent can read one file and knows every route, middleware, entity, and job. No separate architecture docs to maintain or drift out of sync.

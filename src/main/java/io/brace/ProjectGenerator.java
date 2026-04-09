@@ -205,18 +205,15 @@ h1 { margin-bottom: 1rem; }
                 "EXPOSE 8080\n" +
                 "CMD [\"java\", \"-jar\", \"app.jar\"]\n");
 
-            // CLAUDE.md
-            Files.writeString(root.resolve("CLAUDE.md"),
-                "# " + name + "\n" +
-                "\n" +
-                "Built with Brace framework.\n" +
-                "\n" +
-                "## Routes\n" +
-                "- GET / → HomeController::index\n" +
-                "\n" +
-                "## Running\n" +
-                "- Dev: `mvn compile exec:java -Dexec.mainClass=app.App -Dbrace.mode=dev`\n" +
-                "- Prod: `java -jar target/" + name + ".jar`\n");
+            // CLAUDE.md — Brace framework reference for AI agents
+            try (var in = ProjectGenerator.class.getResourceAsStream("/brace/AGENTS.md")) {
+                if (in != null) {
+                    Files.writeString(root.resolve("CLAUDE.md"), new String(in.readAllBytes()));
+                } else {
+                    Files.writeString(root.resolve("CLAUDE.md"),
+                        "# " + name + "\n\nBuilt with Brace framework.\n");
+                }
+            }
 
             // .gitignore
             Files.writeString(root.resolve(".gitignore"), """

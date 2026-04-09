@@ -106,6 +106,9 @@ mvn test -Dtest=IntegrationTest   # run specific test class
 2. In controller: `var form = req.form(MyForm.class)` then check `form.valid()`
 3. Entity convention: add `apply(MyForm form)` method for mapping
 
+### Updating documentation
+When changing public API (adding/removing/renaming methods, classes, or handler types), update `AGENTS.md` and `README.md` to reflect the change.
+
 ### Adding dynamic page updates with htmx
 1. Include `<script src="/__brace/htmx.min.js"></script>` in your layout
 2. Add `hx-get`, `hx-target`, `hx-select`, `hx-trigger` attributes to HTML elements
