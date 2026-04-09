@@ -29,7 +29,7 @@ public class Brace {
     private final JobScheduler jobScheduler = new JobScheduler();
     private final JobPoller jobPoller = new JobPoller();
     private String opsKeysPath;
-    private Stats stats;
+    private Stats stats = new Stats();
     private JfrProfiler profiler;
     private Cache cache;
     private Storage storage;
@@ -324,8 +324,6 @@ public class Brace {
     // Server lifecycle
 
     public void start() throws Exception {
-        stats = new Stats();
-
         // Create ErrorStore if database is available
         ErrorStore errorStore = null;
         if (databaseFactory != null) {
