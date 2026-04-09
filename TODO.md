@@ -4,7 +4,7 @@
 
 - [x] Exception tracking — persistent `ops_errors` table, `GET /ops/errors`, `POST /ops/errors/{id}/resolve` ([spec](docs/superpowers/specs/2026-04-07-exception-tracking-design.md))
 - [x] Ops endpoint security — `X-Ops-Key` header with query param fallback for dashboard
-- [ ] Ops token auth — Ed25519 keypair auth, SSH-style authorized keys, short-lived tokens, CLI commands ([spec](docs/superpowers/specs/2026-04-08-ops-token-auth-design.md))
+- [x] Ops token auth — Ed25519 keypair auth, SSH-style authorized keys, short-lived tokens, CLI commands ([spec](docs/superpowers/specs/2026-04-08-ops-token-auth-design.md))
 - [x] Cache implementation (~120 lines — ConcurrentHashMap + TTL + tag-based invalidation + `cache.wrap()`)
 - [x] HTTP client wrapper (`Http.get()`, `Http.post()`, `.bearer()`, `.bodyJson()`, `.fetchJson()` — over `java.net.http.HttpClient`)
 - [x] Binary/stream responses (`Result.bytes()` + `Result.download()` with Content-Disposition)
@@ -19,8 +19,8 @@
 - [x] `brace dev` CLI command with file watcher + fast restart (`./brace dev`, `./brace test`, `./brace run`)
 - [ ] Dokploy ops skill (not Brace-specific — deploy status, monitoring, restart, rollback, env vars via Dokploy API)
 - [x] Auto-generated CLAUDE.md stub (`app.generateClaudeMd(path)` — minimal, since `main()` is self-documenting)
-- [ ] App-level custom metrics (`Stats.counter("talks.created")`, `Stats.gauge("queue.depth", supplier)`, `Stats.timer("api.latency", durationMs)` — standard Grafana types: counters, gauges, timers/histograms; lock-free LongAdder internals; auto-rendered in ops dashboard with sparklines; exposed in `/ops/status` JSON; persisted to `ops_timeseries` when DB available)
-- [ ] S3-compatible storage (`Storage.s3(config)`, `storage.put(key, bytes, contentType)` returns public URL, `storage.delete(key)`, `storage.url(key)` — built-in AWS Sig V4 signing, no SDK; works with S3, R2, MinIO; config: accessKeyId, secretKey, bucket, endpoint, region, publicUrl; integrates with `req.file()` uploads)
+- [x] App-level custom metrics (`Stats.counter("talks.created")`, `Stats.gauge("queue.depth", supplier)`, `Stats.timer("api.latency", durationMs)` — lock-free LongAdder internals; auto-rendered in ops dashboard with sparklines; exposed in `/ops/status` JSON; in-memory ring buffer)
+- [x] S3-compatible storage (`Storage.s3(config)`, `storage.put(key, bytes, contentType)` returns public URL, `storage.delete(key)`, `storage.url(key)` — built-in AWS Sig V4 signing, no SDK; works with S3, R2, MinIO; config: accessKeyId, secretKey, bucket, endpoint, region, publicUrl; integrates with `req.file()` uploads)
 - [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
@@ -28,10 +28,10 @@
 
 ## Ops Dashboard Polish
 
-- [ ] Use a dashboard template/layout (cards, grid, consistent spacing)
-- [ ] Add graphs for key metrics (request rates, response times, error trends)
-- [ ] Improve JFR data formatting (readable method names, better table layout, units)
-- [ ] Visual polish (typography, color coding, status indicators)
+- [x] Use a dashboard template/layout (cards, grid, consistent spacing)
+- [ ] Add latency sparkline + custom metric graphs (requires app-level custom metrics)
+- [x] Improve JFR data formatting (readable method names, better table layout, units)
+- [x] Visual polish (typography, color coding, status indicators)
 
 ## Documentation
 
