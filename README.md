@@ -10,7 +10,7 @@ Current web frameworks were designed for human developers. They avoid boilerplat
 
 Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
 
-Brace is both simple and complete. ~15 core types, ~5,500 lines of framework code, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+Brace is both simple and complete. ~20 core types, ~4,000 lines of framework code, 407 tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
 
 ### AI Token Efficiency
 
@@ -64,8 +64,9 @@ public class App {
             .port(config.getInt("port", 8080))
             .database(db)
             .templates("views")
-            .sessions(config.get("session.secret"))
+            .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
             .trustedProxies("10.0.0.0/8", "172.16.0.0/12")  // secure IP handling behind load balancer
+            .after(SecurityHeaders.defaults())               // security headers on all responses
             .mailer(mail)
             .cache(cache)
             .storage(storage)
@@ -99,8 +100,8 @@ public class App {
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
-- **CSRF** — Automatic protection on POST/PUT/DELETE, skip for JSON APIs
-- **Security** — Trusted proxy configuration, secure cookie options (HttpOnly, Secure, SameSite), IP-based rate limiting
+- **CSRF** — Required by default on POST/PUT/DELETE, explicit opt-out with `.csrf(false)` for bearer-token APIs
+- **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware
 - **Cache** — In-memory with TTL, tag-based invalidation, route-level page caching via `cache.wrap()`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
@@ -150,6 +151,9 @@ app.get("/hello", req -> Result.text("Hello!"));                              //
 app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));  // DbHandler: Request + Database
 app.get("/profile", (SessionHandler) (req, session) -> ...);                  // SessionHandler: Request + Session
 app.post("/posts", (FullHandler) (req, db, session) -> ...);                  // FullHandler: Request + Database + Session
+
+// CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
+app.post("/api/public", req -> Json.of(data)).csrf(false);  // no CSRF for bearer-token API
 ```
 
 ## Database
@@ -379,7 +383,7 @@ session.secret=change-me
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~5,600 lines of framework code. 393 tests.**
+**~4,000 lines of framework code. 407 tests.**
 
 ## Security
 

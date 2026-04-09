@@ -25,16 +25,18 @@ var app = Brace.app()
     .port(config.getInt("port", 8080))
     .database(db)
     .templates("views")
-    .sessions(config.get("session.secret"))
+    .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
+    .trustedProxies("10.0.0.0/8", "172.16.0.0/12")
     .mailer(new Mailer(config.get("smtp.url")).from("noreply@app.com"))
     .cache(Brace.cache())
     .storage(Storage.s3(config))
     .ops("ops-authorized-keys")
     .staticFiles("/assets", "public")
-    .maxUploadSize("10MB");
+    .maxUploadSize("10MB")
+    .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
 
 ## Routing
 
@@ -45,11 +47,17 @@ app.get("/hello", req -> Result.text("Hi"));                                // H
 app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));  // DbHandler
 app.get("/me", (SessionHandler) (req, session) -> ...);                    // SessionHandler
 app.post("/posts", (FullHandler) (req, db, session) -> ...);               // FullHandler
+
+// CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
+app.post("/api/public", req -> Json.of(data)).csrf(false);
 ```
 
 Read-only variants skip the transaction commit: `ReadDbHandler`, `ReadFullHandler`.
 
 Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.param("id")` or `req.intParam("id")`.
+
+Route configuration methods (called after route registration):
+- `.csrf(false)` — disable CSRF protection (only use for bearer-token APIs, NOT cookie-authenticated endpoints)
 
 Grouping:
 
@@ -266,11 +274,44 @@ session.flashData();                      // all flash data as Map
 
 ## CSRF
 
-Automatic CSRF protection on POST/PUT/DELETE. Skipped for requests with `Content-Type: application/json`. Include the token in forms:
+CSRF protection is **required by default** on POST/PUT/DELETE requests when sessions are enabled. Explicitly opt out with `.csrf(false)` for bearer-token APIs.
+
+**Form submission:**
 
 ```html
-<input type="hidden" name="_csrf" value="${csrf}">
+<form method="POST" action="/submit">
+    ${csrfField}  <!-- auto-provided hidden input -->
+    <input name="data" value="...">
+    <button>Submit</button>
+</form>
 ```
+
+**AJAX/fetch with CSRF:**
+
+```javascript
+fetch('/api/private', {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': tokenFromServer  // get from session or meta tag
+    },
+    credentials: 'include',  // sends cookies
+    body: JSON.stringify({data: 'value'})
+});
+```
+
+**Opt out for bearer-token APIs:**
+
+```java
+// Public API with Authorization header (no cookies)
+app.post("/api/data", req -> {
+    String token = req.header("Authorization");
+    // validate bearer token
+    return Json.of(data);
+}).csrf(false);
+```
+
+**Important:** Only disable CSRF for endpoints that do NOT use cookie-based authentication. Cookie-authenticated JSON endpoints still need CSRF protection.
 
 ## Cache
 
@@ -370,6 +411,57 @@ Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 ```java
 app.before("/api/*", RateLimiter.perIp(100, "1m"));
 app.before("/login", RateLimiter.perKey(req -> req.param("email"), 5, "15m"));
+```
+
+**Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below).
+
+## Security
+
+### Trusted Proxies
+
+Configure which proxies to trust for IP forwarding headers. Without this, `X-Forwarded-For` is ignored to prevent IP spoofing:
+
+```java
+app.trustedProxies("10.0.0.0/8", "172.16.0.0/12");  // trust RFC1918 private networks
+app.trustedProxies("192.168.1.0/24");               // trust specific CIDR
+```
+
+Once configured, `req.ip()` will extract the real client IP from `X-Forwarded-For` when the immediate peer is trusted. Without trusted proxies, `req.ip()` always returns the socket's remote address.
+
+### Security Headers
+
+Add security headers to all responses with one line:
+
+```java
+app.after(SecurityHeaders.defaults());
+```
+
+Default headers:
+- `X-Content-Type-Options: nosniff` (prevents MIME sniffing)
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `X-Frame-Options: DENY` (prevents clickjacking)
+- `Permissions-Policy: interest-cohort=()` (disables FLoC)
+
+Custom configuration:
+
+```java
+app.after(SecurityHeaders.builder()
+    .contentTypeOptions("nosniff")
+    .referrerPolicy("no-referrer")
+    .frameOptions("SAMEORIGIN")
+    .strictTransportSecurity("max-age=31536000; includeSubDomains")
+    .contentSecurityPolicy("default-src 'self'; script-src 'self' 'unsafe-inline'")
+    .build());
+```
+
+### Session Secret Validation
+
+Session secrets must be at least 32 characters. The framework validates on startup and warns about weak patterns:
+
+```java
+app.sessions("short");  // throws IllegalArgumentException
+app.sessions("this-is-a-test-secret-changeme-ok");  // warns but allows (weak pattern detected)
+app.sessions("a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6");  // good (32+ random chars)
 ```
 
 ## Ops — Debugging & Monitoring

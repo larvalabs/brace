@@ -7,8 +7,8 @@ Brace is a full-stack Java 21+ web framework. Plain Java, no DI container, no by
 ## Project Structure
 
 ```
-src/main/java/io/brace/     # Framework source (~3,700 lines)
-src/test/java/io/brace/     # Tests (138 tests)
+src/main/java/io/brace/     # Framework source (~4,000 lines)
+src/test/java/io/brace/     # Tests (407 tests)
 src/test/resources/          # Test templates, migrations
 docs/                        # Design spec, decisions, implementation plans
 sample/                      # Sample app demonstrating the API
@@ -33,7 +33,10 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Redirect` | 302/301 redirect |
 | `Database` | Thin wrapper over Hibernate StatelessSession |
 | `DatabaseFactory` | Creates SessionFactory, runs Flyway migrations |
-| `Session` | HMAC-SHA256 signed cookie session |
+| `Session` | AES-256-GCM encrypted cookie session |
+| `SessionOptions` | Fluent API for session cookie configuration |
+| `TrustedProxies` | CIDR-based proxy trust validation |
+| `SecurityHeaders` | Security headers middleware with safe defaults |
 | `Form<T>` | Validated form binding result |
 | `FormBinder` | Binds request params to Java records with validation |
 | `Router` | Route registration and matching |
@@ -65,7 +68,7 @@ Register with: `app.get("/path", handler)` or `app.get("/path", (DbHandler) (req
 
 ```bash
 mvn compile          # compile
-mvn test             # run all 283 tests
+mvn test             # run all 407 tests
 mvn test -Dtest=IntegrationTest   # run specific test class
 ./sample/brace sample             # compile and run the sample app
 ```
@@ -76,8 +79,11 @@ mvn test -Dtest=IntegrationTest   # run specific test class
 - **Hibernate StatelessSession.** No dirty checking, no persistence context, no lazy loading. Explicit insert/update/delete.
 - **HQL queries with `?` positional params.** Framework converts `?` to `?1`, `?2` for Hibernate 7.
 - **Per-request transactions.** BraceHandler opens/commits/rollbacks automatically. No `@Transactional`.
-- **CSRF auto-validated** on POST/PUT/DELETE. Skipped for `Content-Type: application/json`.
-- **Session cookie format:** `base64url(json).base64url(hmac-sha256)`. Tamper-proof, not encrypted.
+- **CSRF required by default** on POST/PUT/DELETE. Explicitly opt out with `.csrf(false)` for bearer-token APIs.
+- **Session cookie format:** `base64url(12-byte-nonce || aes-gcm-ciphertext || 16-byte-auth-tag)`. Encrypted and authenticated.
+- **Trusted proxies.** IP forwarding headers only respected from configured proxy CIDRs. Prevents IP spoofing.
+- **Security headers.** Easy defaults via `app.after(SecurityHeaders.defaults())` for nosniff, frame-options, etc.
+- **Secret validation.** Session secrets must be 32+ characters. Warns about weak patterns on startup.
 - **Stats use LongAdder/AtomicLong** — lock-free, zero contention on the hot path.
 - **htmx for dynamic pages.** Bundled htmx 2.0.4 served from `/__brace/htmx.min.js`. Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize with `req.isHtmx()` to return partials when needed. `Vary: HX-Request` header set automatically.
 
