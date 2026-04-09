@@ -16,8 +16,6 @@ Brace is both simple and complete. ~15 core types, ~5,500 lines of framework cod
 
 Everything flows through parameters. A controller method's signature tells you exactly what it has access to — no guessing about what's injected, what's ThreadLocal, what's magic. Templates fail the build if parameters are wrong. Wrong types are caught at compile time, not when a user hits the page.
 
-Because everything is wired explicitly in `main()`, the app is self-documenting. An agent reads one file and knows every route, middleware, entity, and job. No separate architecture docs to maintain or drift out of sync.
-
 In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests), Brace costs 33% less than Spring Boot on feature additions ($5.43 vs $8.16) — and the gap widens as the codebase grows:
 
 | Phase | Brace | Spring | Saving |
@@ -46,6 +44,9 @@ The same design choices that help AI also eliminate runtime overhead. No DI cont
 For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33μs vs ~125μs), no ORM lifecycle tax, compiled templates (~180μs vs ~480μs for Thymeleaf).
 
 ## Quick Start
+
+Brace wires everything explicitly in `main()`, making the app self-documenting. An agent can read one file and knows every route, middleware, entity, and job. No separate architecture docs to maintain or drift out of sync.
+
 
 ```java
 public class App {
