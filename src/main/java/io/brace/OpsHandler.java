@@ -47,33 +47,29 @@ public class OpsHandler {
         this.profiler = profiler;
     }
 
+    public record OpsAuthRequest(String publicKey, String timestamp, String signature, Integer ttlSeconds) {}
+
     /**
      * POST /ops/auth — validate signed timestamp, issue short-lived token.
-     * Body: JSON with "publicKey", "timestamp", "signature" fields.
+     * Body: JSON with "publicKey", "timestamp", "signature", and optional "ttlSeconds" fields.
      */
     public Result auth(Request req) {
         try {
-            String body = req.body();
-            if (body == null || body.isEmpty()) return Result.unauthorized("Missing request body");
-
-            // Simple JSON parsing (no Jackson dependency in OpsHandler)
-            String publicKey = jsonField(body, "publicKey");
-            String timestamp = jsonField(body, "timestamp");
-            String signature = jsonField(body, "signature");
-
-            if (publicKey == null || timestamp == null || signature == null) {
+            // Parse request with Jackson
+            OpsAuthRequest auth = req.bodyAs(OpsAuthRequest.class);
+            if (auth == null || auth.publicKey == null || auth.timestamp == null || auth.signature == null) {
                 return Result.unauthorized("Missing required fields");
             }
 
             // Check public key is authorized
-            if (!authorizedKeys.contains(publicKey)) {
+            if (!authorizedKeys.contains(auth.publicKey)) {
                 return Result.unauthorized("Unknown public key");
             }
 
             // Check timestamp is not stale (within ±30 seconds)
             java.time.Instant ts;
             try {
-                ts = java.time.Instant.parse(timestamp);
+                ts = java.time.Instant.parse(auth.timestamp);
             } catch (Exception e) {
                 return Result.unauthorized("Invalid timestamp");
             }
@@ -83,16 +79,12 @@ public class OpsHandler {
             }
 
             // Verify signature
-            if (!OpsKeys.verify(timestamp, signature, publicKey)) {
+            if (!OpsKeys.verify(auth.timestamp, auth.signature, auth.publicKey)) {
                 return Result.unauthorized("Invalid signature");
             }
 
             // Issue token — check for client-requested TTL
-            String ttlField = jsonField(body, "ttlSeconds");
-            int requestedTtl = 3600; // default API TTL: 1 hour
-            if (ttlField != null) {
-                try { requestedTtl = Integer.parseInt(ttlField); } catch (NumberFormatException ignored) {}
-            }
+            int requestedTtl = auth.ttlSeconds != null ? auth.ttlSeconds : 3600; // default: 1 hour
             int ttl = Math.min(requestedTtl, 86400); // cap at 24 hours
             String token = OpsToken.create(tokenSecret, ttl);
             var expiresAt = java.time.Instant.now().plusSeconds(ttl).toString();
@@ -349,20 +341,6 @@ public class OpsHandler {
             return OpsToken.validate(tokenParam, tokenSecret);
         }
         return false;
-    }
-
-    /** Simple JSON field extraction (no dependency on Jackson). */
-    private static String jsonField(String json, String field) {
-        String key = "\"" + field + "\"";
-        int idx = json.indexOf(key);
-        if (idx < 0) return null;
-        int colon = json.indexOf(':', idx + key.length());
-        if (colon < 0) return null;
-        int start = json.indexOf('"', colon + 1);
-        if (start < 0) return null;
-        int end = json.indexOf('"', start + 1);
-        if (end < 0) return null;
-        return json.substring(start + 1, end);
     }
 
     private String formatDuration(Duration d) {
