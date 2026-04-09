@@ -39,13 +39,6 @@ No existing framework exposes a structured diagnostics API designed for AI agent
 
 Ops endpoints use Ed25519 keypair authentication with short-lived tokens — agents authenticate securely without shared secrets. An AI agent can deploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
 
-```java
-// App-level custom metrics, auto-rendered in dashboard with sparklines
-Stats.counter("talks.created");
-Stats.gauge("queue.depth", () -> queue.size());
-Stats.timer("api.external", durationMs);
-```
-
 ### Runtime Performance
 
 The same design choices that help AI also eliminate runtime overhead. No DI container means no proxy indirection. Hibernate's StatelessSession skips dirty checking and persistence context management. JTE templates compile to Java classes. Jetty 12 runs on virtual threads.
