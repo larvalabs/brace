@@ -103,6 +103,7 @@ public class App {
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
+- **htmx** — Bundled htmx 2.0.4, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, JFR profiling, Ed25519 token auth
 - **CLI** — `brace new` project scaffolding, `brace ops keypair` key generation, `brace ops dashboard` authenticated access
@@ -289,6 +290,30 @@ app.group("/admin", admin -> {
     });
 });
 ```
+
+## htmx
+
+Brace bundles htmx 2.0.4 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.
+
+```java
+// In your layout: <script src="/__brace/htmx.min.js"></script>
+
+// Full page by default, partial when htmx requests it
+app.get("/posts", (DbHandler) (req, db) -> {
+    var posts = db.findAll(Post.class);
+    if (req.isHtmx()) return View.of("posts/_list", "posts", posts);
+    return View.of("posts/index", "posts", posts);
+});
+```
+
+```html
+<!-- In your template -->
+<div hx-get="/posts" hx-trigger="every 5s" hx-select="#post-list" hx-swap="outerHTML">
+    <div id="post-list">...</div>
+</div>
+```
+
+Brace automatically sets `Vary: HX-Request` so caches don't mix full pages with partials.
 
 ## Testing
 
