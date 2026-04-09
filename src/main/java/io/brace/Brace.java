@@ -176,134 +176,110 @@ public class Brace {
 
     // Route registration
 
-    public Brace get(String pattern, Handler handler) {
-        router.add("GET", pattern, handler);
-        return this;
+    public RouteConfig get(String pattern, Handler handler) {
+        return new RouteConfig(this, router.add("GET", pattern, handler));
     }
 
-    public Brace post(String pattern, Handler handler) {
-        router.add("POST", pattern, handler);
-        return this;
+    public RouteConfig post(String pattern, Handler handler) {
+        return new RouteConfig(this, router.add("POST", pattern, handler));
     }
 
-    public Brace put(String pattern, Handler handler) {
-        router.add("PUT", pattern, handler);
-        return this;
+    public RouteConfig put(String pattern, Handler handler) {
+        return new RouteConfig(this, router.add("PUT", pattern, handler));
     }
 
-    public Brace delete(String pattern, Handler handler) {
-        router.add("DELETE", pattern, handler);
-        return this;
+    public RouteConfig delete(String pattern, Handler handler) {
+        return new RouteConfig(this, router.add("DELETE", pattern, handler));
     }
 
     // Route registration with Database
 
-    public Brace get(String pattern, DbHandler handler) {
-        router.add("GET", pattern, handler, Invoker.fromDbFunction(handler));
-        return this;
+    public RouteConfig get(String pattern, DbHandler handler) {
+        return new RouteConfig(this, router.add("GET", pattern, handler, Invoker.fromDbFunction(handler)));
     }
 
-    public Brace post(String pattern, DbHandler handler) {
-        router.add("POST", pattern, handler, Invoker.fromDbFunction(handler));
-        return this;
+    public RouteConfig post(String pattern, DbHandler handler) {
+        return new RouteConfig(this, router.add("POST", pattern, handler, Invoker.fromDbFunction(handler)));
     }
 
-    public Brace put(String pattern, DbHandler handler) {
-        router.add("PUT", pattern, handler, Invoker.fromDbFunction(handler));
-        return this;
+    public RouteConfig put(String pattern, DbHandler handler) {
+        return new RouteConfig(this, router.add("PUT", pattern, handler, Invoker.fromDbFunction(handler)));
     }
 
-    public Brace delete(String pattern, DbHandler handler) {
-        router.add("DELETE", pattern, handler, Invoker.fromDbFunction(handler));
-        return this;
+    public RouteConfig delete(String pattern, DbHandler handler) {
+        return new RouteConfig(this, router.add("DELETE", pattern, handler, Invoker.fromDbFunction(handler)));
     }
 
     // Route registration with Session
 
-    public Brace get(String pattern, SessionHandler handler) {
-        router.add("GET", pattern, handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public RouteConfig get(String pattern, SessionHandler handler) {
+        return new RouteConfig(this, router.add("GET", pattern, handler, Invoker.fromSessionFunction(handler)));
     }
 
-    public Brace post(String pattern, SessionHandler handler) {
-        router.add("POST", pattern, handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public RouteConfig post(String pattern, SessionHandler handler) {
+        return new RouteConfig(this, router.add("POST", pattern, handler, Invoker.fromSessionFunction(handler)));
     }
 
-    public Brace put(String pattern, SessionHandler handler) {
-        router.add("PUT", pattern, handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public RouteConfig put(String pattern, SessionHandler handler) {
+        return new RouteConfig(this, router.add("PUT", pattern, handler, Invoker.fromSessionFunction(handler)));
     }
 
-    public Brace delete(String pattern, SessionHandler handler) {
-        router.add("DELETE", pattern, handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public RouteConfig delete(String pattern, SessionHandler handler) {
+        return new RouteConfig(this, router.add("DELETE", pattern, handler, Invoker.fromSessionFunction(handler)));
     }
 
     // Route registration with read-only Database (no transaction)
 
-    public Brace get(String pattern, ReadDbHandler handler) {
-        router.add("GET", pattern, handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public RouteConfig get(String pattern, ReadDbHandler handler) {
+        return new RouteConfig(this, router.add("GET", pattern, handler, Invoker.fromReadDbFunction(handler)));
     }
 
-    public Brace post(String pattern, ReadDbHandler handler) {
-        router.add("POST", pattern, handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public RouteConfig post(String pattern, ReadDbHandler handler) {
+        return new RouteConfig(this, router.add("POST", pattern, handler, Invoker.fromReadDbFunction(handler)));
     }
 
-    public Brace put(String pattern, ReadDbHandler handler) {
-        router.add("PUT", pattern, handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public RouteConfig put(String pattern, ReadDbHandler handler) {
+        return new RouteConfig(this, router.add("PUT", pattern, handler, Invoker.fromReadDbFunction(handler)));
     }
 
-    public Brace delete(String pattern, ReadDbHandler handler) {
-        router.add("DELETE", pattern, handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public RouteConfig delete(String pattern, ReadDbHandler handler) {
+        return new RouteConfig(this, router.add("DELETE", pattern, handler, Invoker.fromReadDbFunction(handler)));
     }
 
     // Route registration with read-only Database + Session (no transaction)
 
-    public Brace get(String pattern, ReadFullHandler handler) {
-        router.add("GET", pattern, handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public RouteConfig get(String pattern, ReadFullHandler handler) {
+        return new RouteConfig(this, router.add("GET", pattern, handler, Invoker.fromReadFullFunction(handler)));
     }
 
-    public Brace post(String pattern, ReadFullHandler handler) {
-        router.add("POST", pattern, handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public RouteConfig post(String pattern, ReadFullHandler handler) {
+        return new RouteConfig(this, router.add("POST", pattern, handler, Invoker.fromReadFullFunction(handler)));
     }
 
-    public Brace put(String pattern, ReadFullHandler handler) {
-        router.add("PUT", pattern, handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public RouteConfig put(String pattern, ReadFullHandler handler) {
+        return new RouteConfig(this, router.add("PUT", pattern, handler, Invoker.fromReadFullFunction(handler)));
     }
 
-    public Brace delete(String pattern, ReadFullHandler handler) {
-        router.add("DELETE", pattern, handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public RouteConfig delete(String pattern, ReadFullHandler handler) {
+        return new RouteConfig(this, router.add("DELETE", pattern, handler, Invoker.fromReadFullFunction(handler)));
     }
 
     // Route registration with Database + Session
 
-    public Brace get(String pattern, FullHandler handler) {
-        router.add("GET", pattern, handler, Invoker.fromFullFunction(handler));
-        return this;
+    public RouteConfig get(String pattern, FullHandler handler) {
+        return new RouteConfig(this, router.add("GET", pattern, handler, Invoker.fromFullFunction(handler)));
     }
 
-    public Brace post(String pattern, FullHandler handler) {
-        router.add("POST", pattern, handler, Invoker.fromFullFunction(handler));
-        return this;
+    public RouteConfig post(String pattern, FullHandler handler) {
+        return new RouteConfig(this, router.add("POST", pattern, handler, Invoker.fromFullFunction(handler)));
     }
 
-    public Brace put(String pattern, FullHandler handler) {
-        router.add("PUT", pattern, handler, Invoker.fromFullFunction(handler));
-        return this;
+    public RouteConfig put(String pattern, FullHandler handler) {
+        return new RouteConfig(this, router.add("PUT", pattern, handler, Invoker.fromFullFunction(handler)));
     }
 
-    public Brace delete(String pattern, FullHandler handler) {
-        router.add("DELETE", pattern, handler, Invoker.fromFullFunction(handler));
-        return this;
+    public RouteConfig delete(String pattern, FullHandler handler) {
+        return new RouteConfig(this, router.add("DELETE", pattern, handler, Invoker.fromFullFunction(handler)));
     }
 
     // Route grouping

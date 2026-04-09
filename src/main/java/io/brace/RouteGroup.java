@@ -26,133 +26,109 @@ public class RouteGroup {
 
     // Route registration
 
-    public RouteGroup get(String pattern, Handler handler) {
-        router.add("GET", path(pattern), handler);
-        return this;
+    public GroupRouteConfig get(String pattern, Handler handler) {
+        return new GroupRouteConfig(this, router.add("GET", path(pattern), handler));
     }
 
-    public RouteGroup post(String pattern, Handler handler) {
-        router.add("POST", path(pattern), handler);
-        return this;
+    public GroupRouteConfig post(String pattern, Handler handler) {
+        return new GroupRouteConfig(this, router.add("POST", path(pattern), handler));
     }
 
-    public RouteGroup put(String pattern, Handler handler) {
-        router.add("PUT", path(pattern), handler);
-        return this;
+    public GroupRouteConfig put(String pattern, Handler handler) {
+        return new GroupRouteConfig(this, router.add("PUT", path(pattern), handler));
     }
 
-    public RouteGroup delete(String pattern, Handler handler) {
-        router.add("DELETE", path(pattern), handler);
-        return this;
+    public GroupRouteConfig delete(String pattern, Handler handler) {
+        return new GroupRouteConfig(this, router.add("DELETE", path(pattern), handler));
     }
 
     // Route registration with Database
 
-    public RouteGroup get(String pattern, DbHandler handler) {
-        router.add("GET", path(pattern), handler, Invoker.fromDbFunction(handler));
-        return this;
+    public GroupRouteConfig get(String pattern, DbHandler handler) {
+        return new GroupRouteConfig(this, router.add("GET", path(pattern), handler, Invoker.fromDbFunction(handler)));
     }
 
-    public RouteGroup post(String pattern, DbHandler handler) {
-        router.add("POST", path(pattern), handler, Invoker.fromDbFunction(handler));
-        return this;
+    public GroupRouteConfig post(String pattern, DbHandler handler) {
+        return new GroupRouteConfig(this, router.add("POST", path(pattern), handler, Invoker.fromDbFunction(handler)));
     }
 
-    public RouteGroup put(String pattern, DbHandler handler) {
-        router.add("PUT", path(pattern), handler, Invoker.fromDbFunction(handler));
-        return this;
+    public GroupRouteConfig put(String pattern, DbHandler handler) {
+        return new GroupRouteConfig(this, router.add("PUT", path(pattern), handler, Invoker.fromDbFunction(handler)));
     }
 
-    public RouteGroup delete(String pattern, DbHandler handler) {
-        router.add("DELETE", path(pattern), handler, Invoker.fromDbFunction(handler));
-        return this;
+    public GroupRouteConfig delete(String pattern, DbHandler handler) {
+        return new GroupRouteConfig(this, router.add("DELETE", path(pattern), handler, Invoker.fromDbFunction(handler)));
     }
 
     // Route registration with Session
 
-    public RouteGroup get(String pattern, SessionHandler handler) {
-        router.add("GET", path(pattern), handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public GroupRouteConfig get(String pattern, SessionHandler handler) {
+        return new GroupRouteConfig(this, router.add("GET", path(pattern), handler, Invoker.fromSessionFunction(handler)));
     }
 
-    public RouteGroup post(String pattern, SessionHandler handler) {
-        router.add("POST", path(pattern), handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public GroupRouteConfig post(String pattern, SessionHandler handler) {
+        return new GroupRouteConfig(this, router.add("POST", path(pattern), handler, Invoker.fromSessionFunction(handler)));
     }
 
-    public RouteGroup put(String pattern, SessionHandler handler) {
-        router.add("PUT", path(pattern), handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public GroupRouteConfig put(String pattern, SessionHandler handler) {
+        return new GroupRouteConfig(this, router.add("PUT", path(pattern), handler, Invoker.fromSessionFunction(handler)));
     }
 
-    public RouteGroup delete(String pattern, SessionHandler handler) {
-        router.add("DELETE", path(pattern), handler, Invoker.fromSessionFunction(handler));
-        return this;
+    public GroupRouteConfig delete(String pattern, SessionHandler handler) {
+        return new GroupRouteConfig(this, router.add("DELETE", path(pattern), handler, Invoker.fromSessionFunction(handler)));
     }
 
     // Route registration with read-only Database (no transaction)
 
-    public RouteGroup get(String pattern, ReadDbHandler handler) {
-        router.add("GET", path(pattern), handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public GroupRouteConfig get(String pattern, ReadDbHandler handler) {
+        return new GroupRouteConfig(this, router.add("GET", path(pattern), handler, Invoker.fromReadDbFunction(handler)));
     }
 
-    public RouteGroup post(String pattern, ReadDbHandler handler) {
-        router.add("POST", path(pattern), handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public GroupRouteConfig post(String pattern, ReadDbHandler handler) {
+        return new GroupRouteConfig(this, router.add("POST", path(pattern), handler, Invoker.fromReadDbFunction(handler)));
     }
 
-    public RouteGroup put(String pattern, ReadDbHandler handler) {
-        router.add("PUT", path(pattern), handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public GroupRouteConfig put(String pattern, ReadDbHandler handler) {
+        return new GroupRouteConfig(this, router.add("PUT", path(pattern), handler, Invoker.fromReadDbFunction(handler)));
     }
 
-    public RouteGroup delete(String pattern, ReadDbHandler handler) {
-        router.add("DELETE", path(pattern), handler, Invoker.fromReadDbFunction(handler));
-        return this;
+    public GroupRouteConfig delete(String pattern, ReadDbHandler handler) {
+        return new GroupRouteConfig(this, router.add("DELETE", path(pattern), handler, Invoker.fromReadDbFunction(handler)));
     }
 
     // Route registration with read-only Database + Session (no transaction)
 
-    public RouteGroup get(String pattern, ReadFullHandler handler) {
-        router.add("GET", path(pattern), handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public GroupRouteConfig get(String pattern, ReadFullHandler handler) {
+        return new GroupRouteConfig(this, router.add("GET", path(pattern), handler, Invoker.fromReadFullFunction(handler)));
     }
 
-    public RouteGroup post(String pattern, ReadFullHandler handler) {
-        router.add("POST", path(pattern), handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public GroupRouteConfig post(String pattern, ReadFullHandler handler) {
+        return new GroupRouteConfig(this, router.add("POST", path(pattern), handler, Invoker.fromReadFullFunction(handler)));
     }
 
-    public RouteGroup put(String pattern, ReadFullHandler handler) {
-        router.add("PUT", path(pattern), handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public GroupRouteConfig put(String pattern, ReadFullHandler handler) {
+        return new GroupRouteConfig(this, router.add("PUT", path(pattern), handler, Invoker.fromReadFullFunction(handler)));
     }
 
-    public RouteGroup delete(String pattern, ReadFullHandler handler) {
-        router.add("DELETE", path(pattern), handler, Invoker.fromReadFullFunction(handler));
-        return this;
+    public GroupRouteConfig delete(String pattern, ReadFullHandler handler) {
+        return new GroupRouteConfig(this, router.add("DELETE", path(pattern), handler, Invoker.fromReadFullFunction(handler)));
     }
 
     // Route registration with Database + Session
 
-    public RouteGroup get(String pattern, FullHandler handler) {
-        router.add("GET", path(pattern), handler, Invoker.fromFullFunction(handler));
-        return this;
+    public GroupRouteConfig get(String pattern, FullHandler handler) {
+        return new GroupRouteConfig(this, router.add("GET", path(pattern), handler, Invoker.fromFullFunction(handler)));
     }
 
-    public RouteGroup post(String pattern, FullHandler handler) {
-        router.add("POST", path(pattern), handler, Invoker.fromFullFunction(handler));
-        return this;
+    public GroupRouteConfig post(String pattern, FullHandler handler) {
+        return new GroupRouteConfig(this, router.add("POST", path(pattern), handler, Invoker.fromFullFunction(handler)));
     }
 
-    public RouteGroup put(String pattern, FullHandler handler) {
-        router.add("PUT", path(pattern), handler, Invoker.fromFullFunction(handler));
-        return this;
+    public GroupRouteConfig put(String pattern, FullHandler handler) {
+        return new GroupRouteConfig(this, router.add("PUT", path(pattern), handler, Invoker.fromFullFunction(handler)));
     }
 
-    public RouteGroup delete(String pattern, FullHandler handler) {
-        router.add("DELETE", path(pattern), handler, Invoker.fromFullFunction(handler));
-        return this;
+    public GroupRouteConfig delete(String pattern, FullHandler handler) {
+        return new GroupRouteConfig(this, router.add("DELETE", path(pattern), handler, Invoker.fromFullFunction(handler)));
     }
 }

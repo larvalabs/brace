@@ -14,16 +14,22 @@ public class Route {
     private final Invoker invoker;
     private final Pattern compiledPattern;
     private final List<String> paramNames;
+    private boolean csrfRequired;
 
     public Route(String method, String pattern, Object handler) {
-        this(method, pattern, handler, null);
+        this(method, pattern, handler, null, true);
     }
 
     public Route(String method, String pattern, Object handler, Invoker invoker) {
+        this(method, pattern, handler, invoker, true);
+    }
+
+    public Route(String method, String pattern, Object handler, Invoker invoker, boolean csrfRequired) {
         this.method = method;
         this.pattern = pattern;
         this.handler = handler;
         this.invoker = invoker;
+        this.csrfRequired = csrfRequired;
         this.paramNames = new ArrayList<>();
 
         var regex = new StringBuilder("^");
@@ -48,6 +54,11 @@ public class Route {
     public Object handler() { return handler; }
     public Invoker invoker() { return invoker; }
     public boolean isStatic() { return paramNames.isEmpty(); }
+    public boolean csrfRequired() { return csrfRequired; }
+
+    void setCsrfRequired(boolean required) {
+        this.csrfRequired = required;
+    }
 
     public Map<String, String> match(String path) {
         var matcher = compiledPattern.matcher(path);

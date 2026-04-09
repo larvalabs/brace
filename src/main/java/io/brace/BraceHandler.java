@@ -232,12 +232,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.setFlash(session.flashData());
             }
 
-            // CSRF validation for mutating requests when sessions are enabled
-            if (sessionSecret != null) {
-                String contentType = headers.getOrDefault("Content-Type", "");
+            // CSRF validation for routes that require it when sessions are enabled
+            if (sessionSecret != null && match.route().csrfRequired()) {
                 boolean isMutating = method.equals("POST") || method.equals("PUT") || method.equals("DELETE");
-                boolean isJson = contentType.contains("application/json");
-                if (isMutating && !isJson) {
+                if (isMutating) {
                     // Ensure a session object exists for CSRF check even if handler doesn't use sessions
                     Session csrfSession = session;
                     if (csrfSession == null) {

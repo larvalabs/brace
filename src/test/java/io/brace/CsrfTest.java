@@ -27,8 +27,8 @@ class CsrfTest {
             return Result.text("submitted");
         });
 
-        // POST JSON endpoint (should skip CSRF)
-        app.post("/api/data", req -> Json.of(java.util.Map.of("ok", true)));
+        // POST JSON endpoint (explicitly opt out of CSRF for bearer-token auth)
+        app.post("/api/data", req -> Json.of(java.util.Map.of("ok", true))).csrf(false);
 
         app.start();
         port = app.actualPort();

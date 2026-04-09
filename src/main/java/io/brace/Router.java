@@ -7,12 +7,22 @@ public class Router {
 
     private final List<Route> routes = new ArrayList<>();
 
-    public void add(String method, String pattern, Handler handler) {
-        routes.add(new Route(method, pattern, handler));
+    public Route add(String method, String pattern, Handler handler) {
+        var route = new Route(method, pattern, handler);
+        routes.add(route);
+        return route;
     }
 
-    public void add(String method, String pattern, Object handler, Invoker invoker) {
-        routes.add(new Route(method, pattern, handler, invoker));
+    public Route add(String method, String pattern, Object handler, Invoker invoker) {
+        var route = new Route(method, pattern, handler, invoker);
+        routes.add(route);
+        return route;
+    }
+
+    public Route add(String method, String pattern, Object handler, Invoker invoker, boolean csrfRequired) {
+        var route = new Route(method, pattern, handler, invoker, csrfRequired);
+        routes.add(route);
+        return route;
     }
 
     public RouteMatch match(String method, String path) {
