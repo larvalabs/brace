@@ -372,10 +372,15 @@ class OpsIntegrationTest {
 
     static Brace metricsApp;
     static int metricsPort;
+    static OpsKeys.Keypair metricsKeypair;
 
     @BeforeAll
     static void startMetricsApp() throws Exception {
-        metricsApp = Brace.app().port(0).ops("metrics-key");
+        metricsKeypair = OpsKeys.generateKeypair();
+        Path metricsKeysFile = tmpDir.resolve("metrics-authorized-keys");
+        Files.writeString(metricsKeysFile, metricsKeypair.publicKey() + "\n");
+
+        metricsApp = Brace.app().port(0).ops(metricsKeysFile.toString());
         metricsApp.get("/ping", req -> Result.text("pong"));
         metricsApp.start();
         metricsPort = metricsApp.actualPort();
@@ -397,10 +402,11 @@ class OpsIntegrationTest {
     }
 
     private HttpResponse<String> metricsGet(String path) throws Exception {
+        var token = authenticate(metricsPort, metricsKeypair);
         return client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + metricsPort + path))
-                .header("X-Ops-Key", "metrics-key")
+                .header("Authorization", "Bearer " + token)
                 .GET().build(),
             HttpResponse.BodyHandlers.ofString());
     }
