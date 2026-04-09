@@ -105,15 +105,33 @@ public class Brace {
 
 
     public Brace sessions(String secret) {
+        validateSecret(secret, "session");
         this.sessionSecret = secret;
         this.sessionOptions = SessionOptions.of(secret);
         return this;
     }
 
     public Brace sessions(SessionOptions options) {
+        validateSecret(options.secret(), "session");
         this.sessionSecret = options.secret();
         this.sessionOptions = options;
         return this;
+    }
+
+    private void validateSecret(String secret, String type) {
+        if (secret == null || secret.isEmpty()) {
+            throw new IllegalArgumentException(type + " secret cannot be null or empty");
+        }
+        if (secret.length() < 32) {
+            throw new IllegalArgumentException(
+                type + " secret must be at least 32 characters (current: " + secret.length() + ")");
+        }
+        // Warn about obvious placeholder values
+        String lower = secret.toLowerCase();
+        if (lower.contains("changeme") || lower.contains("secret") || lower.contains("password") ||
+            lower.contains("test") || lower.equals("placeholder") || lower.matches("^[a-z]+$")) {
+            Log.warn("Weak " + type + " secret detected - use a cryptographically random value in production");
+        }
     }
 
     public Brace templates(String path) {
