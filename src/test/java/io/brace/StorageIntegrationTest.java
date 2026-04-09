@@ -30,6 +30,29 @@ class StorageIntegrationTest {
     static void stopApp() throws Exception { app.stop(); }
 
     @Test
+    void storageThrowsWhenNotConfigured() throws Exception {
+        var noStorageApp = Brace.app().port(0);
+        noStorageApp.get("/no-storage", req -> {
+            try {
+                req.storage();
+                return Result.text("has storage");
+            } catch (IllegalStateException e) {
+                return Result.text("no storage");
+            }
+        });
+        noStorageApp.start();
+        try {
+            var response = client.send(
+                    HttpRequest.newBuilder().uri(URI.create("http://localhost:" + noStorageApp.actualPort() + "/no-storage")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode());
+            assertEquals("no storage", response.body());
+        } finally {
+            noStorageApp.stop();
+        }
+    }
+
+    @Test
     void storageAvailableViaRequest() throws Exception {
         var response = client.send(
                 HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/has-storage")).GET().build(),

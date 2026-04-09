@@ -74,6 +74,13 @@ class StorageTest {
     }
 
     @Test
+    void keyFromUrlRoundtripsSpecialCharacters() {
+        var storage = new Storage("AKID", "secret", "my-bucket", "us-east-1", null, null);
+        var key = "uploads/my file (1).jpg";
+        assertEquals(key, storage.keyFromUrl(storage.url(key)));
+    }
+
+    @Test
     void s3FactoryReadsConfig(@TempDir Path dir) throws Exception {
         var confFile = dir.resolve("app.conf");
         Files.writeString(confFile, "s3.accessKeyId=AKID\ns3.secretKey=secret\ns3.bucket=my-bucket\ns3.region=us-west-2\ns3.endpoint=https://r2.example.com\ns3.publicUrl=https://cdn.example.com\n");

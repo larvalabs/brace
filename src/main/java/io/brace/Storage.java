@@ -2,6 +2,7 @@ package io.brace;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -84,23 +85,21 @@ public class Storage {
      */
     public String keyFromUrl(String url) {
         if (url == null) return null;
+        String encoded = null;
         if (publicUrl != null) {
             var prefix = publicUrl + "/";
-            if (url.startsWith(prefix)) {
-                return url.substring(prefix.length());
-            }
+            if (url.startsWith(prefix)) encoded = url.substring(prefix.length());
         }
-        if (endpoint != null) {
+        if (encoded == null && endpoint != null) {
             var prefix = endpoint + "/" + bucket + "/";
-            if (url.startsWith(prefix)) {
-                return url.substring(prefix.length());
-            }
+            if (url.startsWith(prefix)) encoded = url.substring(prefix.length());
         }
-        var awsPrefix = "https://" + bucket + ".s3." + region + ".amazonaws.com/";
-        if (url.startsWith(awsPrefix)) {
-            return url.substring(awsPrefix.length());
+        if (encoded == null) {
+            var awsPrefix = "https://" + bucket + ".s3." + region + ".amazonaws.com/";
+            if (url.startsWith(awsPrefix)) encoded = url.substring(awsPrefix.length());
         }
-        return null;
+        if (encoded == null) return null;
+        return URLDecoder.decode(encoded, StandardCharsets.UTF_8);
     }
 
     /**
