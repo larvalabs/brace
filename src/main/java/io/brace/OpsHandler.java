@@ -70,15 +70,15 @@ public class OpsHandler {
                 return Result.unauthorized("Unknown public key");
             }
 
-            // Check timestamp is not stale (within 60 seconds)
-            long ts;
+            // Check timestamp is not stale (within ±30 seconds)
+            java.time.Instant ts;
             try {
-                ts = Long.parseLong(timestamp);
-            } catch (NumberFormatException e) {
+                ts = java.time.Instant.parse(timestamp);
+            } catch (Exception e) {
                 return Result.unauthorized("Invalid timestamp");
             }
-            long now = System.currentTimeMillis() / 1000;
-            if (Math.abs(now - ts) > 60) {
+            var now = java.time.Instant.now();
+            if (Math.abs(java.time.Duration.between(ts, now).getSeconds()) > 30) {
                 return Result.unauthorized("Stale timestamp");
             }
 
@@ -87,9 +87,16 @@ public class OpsHandler {
                 return Result.unauthorized("Invalid signature");
             }
 
-            // Issue token with 2 hour TTL
-            String token = OpsToken.create(tokenSecret, 7200);
-            return Json.of(Map.of("token", token));
+            // Issue token — check for client-requested TTL
+            String ttlField = jsonField(body, "ttlSeconds");
+            int requestedTtl = 3600; // default API TTL: 1 hour
+            if (ttlField != null) {
+                try { requestedTtl = Integer.parseInt(ttlField); } catch (NumberFormatException ignored) {}
+            }
+            int ttl = Math.min(requestedTtl, 86400); // cap at 24 hours
+            String token = OpsToken.create(tokenSecret, ttl);
+            var expiresAt = java.time.Instant.now().plusSeconds(ttl).toString();
+            return Json.of(Map.of("token", token, "expiresAt", expiresAt));
         } catch (Exception e) {
             return Result.unauthorized("Authentication failed");
         }

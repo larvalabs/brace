@@ -49,7 +49,7 @@ class OpsIntegrationTest {
     }
 
     private static String authenticate(int targetPort, OpsKeys.Keypair kp) throws Exception {
-        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String timestamp = java.time.Instant.now().toString();
         String signature = OpsKeys.sign(timestamp, kp.privateKey());
         String body = "{\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
         var response = client.send(
@@ -171,7 +171,7 @@ class OpsIntegrationTest {
     @Test
     void authRejectsUnknownPublicKey() throws Exception {
         var unknownKp = OpsKeys.generateKeypair();
-        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String timestamp = java.time.Instant.now().toString();
         String signature = OpsKeys.sign(timestamp, unknownKp.privateKey());
         String body = "{\"publicKey\":\"" + unknownKp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
         var response = client.send(
@@ -186,7 +186,7 @@ class OpsIntegrationTest {
 
     @Test
     void authRejectsStaleTimestamp() throws Exception {
-        String timestamp = String.valueOf(System.currentTimeMillis() / 1000 - 120); // 2 minutes ago
+        String timestamp = java.time.Instant.now().minusSeconds(60).toString(); // 1 minute ago, outside ±30s window
         String signature = OpsKeys.sign(timestamp, keypair.privateKey());
         String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
         var response = client.send(
@@ -201,7 +201,7 @@ class OpsIntegrationTest {
 
     @Test
     void authRejectsInvalidSignature() throws Exception {
-        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String timestamp = java.time.Instant.now().toString();
         String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"badsignature\"}";
         var response = client.send(
             HttpRequest.newBuilder()

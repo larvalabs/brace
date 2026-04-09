@@ -2,7 +2,10 @@ package io.brace;
 
 import java.net.URI;
 import java.net.http.*;
-
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Instant;
 
 public class Cli {
     public static void main(String[] args) {
@@ -39,7 +42,7 @@ public class Cli {
     }
 
     private static void opsKeypair(String[] args) {
-        String label = null;
+        String label = "key-1";
         for (int i = 2; i < args.length - 1; i++) {
             if ("--label".equals(args[i])) {
                 label = args[i + 1];
@@ -48,24 +51,28 @@ public class Cli {
         }
 
         var kp = OpsKeys.generateKeypair();
-        System.out.println("# Ops keypair generated");
+        System.out.println("Public key:   " + kp.publicKey());
+        System.out.println("Private key:  " + kp.privateKey());
         System.out.println();
-        System.out.println("# Add this line to your ops-authorized-keys file:");
-        if (label != null) {
-            System.out.println(kp.publicKey() + " " + label);
-        } else {
-            System.out.println(kp.publicKey());
+
+        var file = Path.of("ops-authorized-keys");
+        try {
+            var line = kp.publicKey() + "  " + label + "\n";
+            if (Files.exists(file)) {
+                Files.writeString(file, line, StandardOpenOption.APPEND);
+            } else {
+                Files.writeString(file, "# Ops authorized public keys — one per line, optional label after space\n" + line);
+            }
+            System.out.println("Added to ops-authorized-keys.");
+        } catch (Exception e) {
+            System.err.println("Failed to write ops-authorized-keys: " + e.getMessage());
         }
-        System.out.println();
-        System.out.println("# Save these two lines to a key file (e.g., ops-private.key):");
-        System.out.println("# Line 1: private key, Line 2: public key");
-        System.out.println(kp.privateKey());
-        System.out.println(kp.publicKey());
+        System.out.println("Store the private key securely — it won't be shown again.");
     }
 
     private static void opsDashboard(String[] args) {
         String url = "http://localhost:8080";
-        String keyPath = null;
+        String keyPath = "ops-private.key";
 
         for (int i = 2; i < args.length - 1; i++) {
             if ("--url".equals(args[i])) {
@@ -75,16 +82,47 @@ public class Cli {
             }
         }
 
-        if (keyPath == null) {
-            System.err.println("Usage: brace ops dashboard --key <private-key-file> [--url <url>]");
+        OpsKeys.Keypair kp;
+        try {
+            if (Files.exists(Path.of(keyPath))) {
+                kp = OpsKeys.readKeyFile(keyPath);
+            } else {
+                var envKey = System.getenv("OPS_PRIVATE_KEY");
+                if (envKey != null && !envKey.isEmpty()) {
+                    // Env var contains raw private key — need to match against authorized keys
+                    var authKeysPath = Path.of("ops-authorized-keys");
+                    if (!Files.exists(authKeysPath)) {
+                        System.err.println("ops-authorized-keys not found — cannot determine public key.");
+                        System.exit(1);
+                        return;
+                    }
+                    var authorizedKeys = OpsKeys.loadAuthorizedKeys(authKeysPath.toString());
+                    String matchedPub = null;
+                    var testSig = OpsKeys.sign("test", envKey);
+                    for (var pub : authorizedKeys) {
+                        if (OpsKeys.verify("test", testSig, pub)) { matchedPub = pub; break; }
+                    }
+                    if (matchedPub == null) {
+                        System.err.println("OPS_PRIVATE_KEY does not match any key in ops-authorized-keys.");
+                        System.exit(1);
+                        return;
+                    }
+                    kp = new OpsKeys.Keypair(matchedPub, envKey);
+                } else {
+                    System.err.println("Private key not found at " + keyPath + " and OPS_PRIVATE_KEY env var not set.");
+                    System.exit(1);
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to read private key: " + e.getMessage());
             System.exit(1);
+            return;
         }
 
         try {
-            var kp = OpsKeys.readKeyFile(keyPath);
-
             // Sign timestamp with private key
-            String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+            String timestamp = Instant.now().toString();
             String signature = OpsKeys.sign(timestamp, kp.privateKey());
             String publicKey = kp.publicKey();
 

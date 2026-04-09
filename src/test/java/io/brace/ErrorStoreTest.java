@@ -195,7 +195,7 @@ class ErrorStoreTest {
     static int port;
 
     private static String authenticateOps(int targetPort, OpsKeys.Keypair kp) throws Exception {
-        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String timestamp = java.time.Instant.now().toString();
         String signature = OpsKeys.sign(timestamp, kp.privateKey());
         String body = "{\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
         var response = client.send(
