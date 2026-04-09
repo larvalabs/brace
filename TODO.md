@@ -68,5 +68,6 @@
 - [ ] Multi-database support testing (MySQL, MariaDB)
 - [x] Rate limiting middleware (`RateLimiter.perIp(100, "1m")`, `RateLimiter.perKey(fn, limit, duration)`)
 - [x] File upload handling (`req.file("name")`, `req.files("name")`, multipart parsing, `app.maxUploadSize("50m")`)
+- [ ] Simple async tasks (`Jobs.run(runnable)`, `Jobs.submit(callable)` — non-scheduled, non-durable, managed thread pool)
 - [ ] SSE (Server-Sent Events) support
 - [ ] Consider publishing to Maven Central
