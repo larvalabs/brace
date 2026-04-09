@@ -1,17 +1,20 @@
 # Brace
 
-A full-stack Java web framework optimized for AI token usage during development and runtime performance when deployed.
+A full-stack Java web framework built for AI agents. Token-efficient development, production observability designed for autonomous agents, and runtime performance — from the same set of design choices.
+
+![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
 
 ## Why Brace Exists
 
-Current web frameworks were developed to be used by humans. They avoid boilerplate by introducing magical features like auto-configuration, bean scoping, proxy chains, and conditional loading. However, modern AI coding assistants write better code when frameworks are explicit and predictable and they are best when guided by strict compile time checking and unit tests.  
+Current web frameworks were designed for human developers. They avoid boilerplate through magic: auto-configuration, bean scoping, proxy chains, conditional loading. AI coding agents write better code when frameworks are explicit and predictable, and they work best when guided by strict compile-time checking and unit tests.
 
-Brace is designed so that AI produces correct code on the first try:
+Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
 
-- **Everything flows through parameters.** A controller method's signature tells you exactly what it has access to. No guessing about what's injected, what's ThreadLocal, what's magic.
-- **Compile-time errors, not runtime surprises.** JTE templates fail the build if parameters are wrong. Method references fail to compile if signatures don't match. Wrong types are caught before anyone hits the page.
-- **Small API surface.** ~15 core types. AI can hold the entire framework in context without running out of window.
-- **One way to do each thing.** No choice between annotations vs XML vs programmatic config vs auto-detection. Just Java.
+Brace is both simple and complete. ~15 core types, ~5,500 lines of framework code, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+
+### AI Token Efficiency
+
+Everything flows through parameters. A controller method's signature tells you exactly what it has access to — no guessing about what's injected, what's ThreadLocal, what's magic. Templates fail the build if parameters are wrong. Wrong types are caught at compile time, not when a user hits the page.
 
 In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests), Brace costs 33% less than Spring Boot on feature additions ($5.43 vs $8.16) — and the gap widens as the codebase grows:
 
@@ -26,15 +29,26 @@ In benchmarks measuring AI token cost to build and extend a Conference Manager A
 
 The greenfield build is roughly tied — both frameworks are cheap when the codebase is empty. The advantage emerges as features accumulate and the AI has to read and modify existing code. Brace's context scales linearly (read the controller and its dependencies) while Spring's scales super-linearly (trace the DI graph, understand conditional beans, check profiles). Hono (TypeScript) performed comparably to Brace on token cost ($5.79 for feature additions) but trades runtime performance for simplicity. Full benchmark data and methodology: [ai-benchmark](https://github.com/mattonfoot/ai-benchmark).
 
-### The Performance Story
+### Agent Observability
 
-Brace is also fast. No DI container overhead, no proxy indirection, no annotation processing at runtime. Hibernate's StatelessSession skips dirty checking and persistence context management. JTE templates compile to Java classes. Jetty 12 runs on virtual threads.
+No existing framework exposes a structured diagnostics API designed for AI agents. Brace does.
 
-For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33us vs ~125us), no ORM lifecycle tax, compiled templates (~180us vs ~480us for Thymeleaf).
+`GET /ops/status` returns everything an agent needs to diagnose any problem: request stats, slow routes, recent errors with full context (stack trace, request details, queries that ran before the error), custom metrics, JFR profiling (heap, CPU, GC pauses, hot methods, allocations), job statuses, cache hit rates, and per-minute timeseries. The built-in dashboard shows the same data visually.
 
-### AI Observability
+Ops endpoints use Ed25519 keypair authentication with short-lived tokens — agents authenticate securely without shared secrets. An AI agent can deploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
 
-No existing framework exposes a structured diagnostics API designed for AI agents. Brace does. The `/ops/status` endpoint returns everything an AI agent needs to diagnose any problem: request stats, slow routes, recent errors with full context (stack trace, request details, queries that ran before the error), job statuses, memory usage, per-minute timeseries. The built-in dashboard shows the same data visually. An AI agent can deploy via Dokploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
+```java
+// App-level custom metrics, auto-rendered in dashboard with sparklines
+Stats.counter("talks.created");
+Stats.gauge("queue.depth", () -> queue.size());
+Stats.timer("api.external", durationMs);
+```
+
+### Runtime Performance
+
+The same design choices that help AI also eliminate runtime overhead. No DI container means no proxy indirection. Hibernate's StatelessSession skips dirty checking and persistence context management. JTE templates compile to Java classes. Jetty 12 runs on virtual threads.
+
+For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33μs vs ~125μs), no ORM lifecycle tax, compiled templates (~180μs vs ~480μs for Thymeleaf).
 
 ## Quick Start
 
@@ -45,8 +59,8 @@ public class App {
         var db = new DatabaseFactory(config.get("db.url"), config.get("db.user"), config.get("db.pass"),
             List.of(Post.class, User.class));
         var mail = new Mailer(config.get("smtp.url")).from("noreply@myapp.com");
-
         var cache = Brace.cache();
+        var storage = Storage.s3(config);
 
         var app = Brace.app()
             .port(config.getInt("port", 8080))
@@ -54,7 +68,9 @@ public class App {
             .templates("views")
             .sessions(config.get("session.secret"))
             .mailer(mail)
-            .ops(config.get("ops.secret"))
+            .cache(cache)
+            .storage(storage)
+            .ops("ops-authorized-keys")
             .staticFiles("/assets", "public");
 
         var posts = new PostController();
@@ -79,27 +95,23 @@ public class App {
 
 ## What's Included
 
-- **HTTP** -- Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
-- **Database** -- Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access
-- **Templates** -- JTE compiled templates with layout support, hot-reload in dev
-- **Sessions** -- HMAC-SHA256 signed cookies, no server-side storage
-- **Forms** -- Record-based form binding with validation annotations
-- **CSRF** -- Automatic protection on POST/PUT/DELETE, skip for JSON APIs
-- **Cache** -- In-memory with TTL, tag-based invalidation, route-level page caching via `cache.wrap()`
-- **Jobs** -- In-memory recurring scheduler + durable database-backed queue with retry
-- **Mailer** -- SMTP sending with dev-mode email capture
-- **Ops** -- `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` built-in HTML dashboard, structured JSON logging
-- **Testing** -- `Brace.test()` harness for fast in-process integration tests with H2
-- **CLI** -- `brace new myapp` project scaffolding
-
-## Philosophy
-
-Brace is designed for AI-assisted development:
-
-- **Explicit over implicit.** Every dependency is visible in `main()`. No classpath scanning, no auto-configuration, no proxy generation.
-- **Compile-time over runtime.** Typed templates, typed parameters. Errors caught at build time, not when a user hits the page.
-- **Small API surface.** ~15 core types. AI can hold the entire framework in context.
-- **One way to do things.** No choice between annotations vs XML vs programmatic config. Just plain Java.
+- **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
+- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access
+- **Templates** — JTE compiled templates with layout support, hot-reload in dev
+- **Sessions** — HMAC-SHA256 signed cookies, no server-side storage
+- **Forms** — Record-based form binding with validation annotations
+- **CSRF** — Automatic protection on POST/PUT/DELETE, skip for JSON APIs
+- **Cache** — In-memory with TTL, tag-based invalidation, route-level page caching via `cache.wrap()`
+- **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
+- **Mailer** — SMTP sending with dev-mode email capture
+- **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
+- **WebSocket** — `app.ws()` with rooms, broadcast, and session access
+- **Rate Limiting** — Per-IP and per-key rate limiting middleware
+- **File Uploads** — `req.file()` and `req.files()` with configurable size limits
+- **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
+- **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, JFR profiling, Ed25519 token auth
+- **CLI** — `brace new` project scaffolding, `brace ops keypair` key generation, `brace ops dashboard` authenticated access
+- **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
 
 ## Controllers
 
@@ -133,10 +145,10 @@ public class PostController {
 ## Handler Types
 
 ```java
-app.get("/hello", req -> Result.text("Hello!"));                          // Handler: Request only
-app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class))); // DbHandler: Request + Database
-app.get("/profile", (SessionHandler) (req, session) -> ...);              // SessionHandler: Request + Session
-app.post("/posts", (FullHandler) (req, db, session) -> ...);              // FullHandler: Request + Database + Session
+app.get("/hello", req -> Result.text("Hello!"));                              // Handler: Request only
+app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));  // DbHandler: Request + Database
+app.get("/profile", (SessionHandler) (req, session) -> ...);                  // SessionHandler: Request + Session
+app.post("/posts", (FullHandler) (req, db, session) -> ...);                  // FullHandler: Request + Database + Session
 ```
 
 ## Database
@@ -214,17 +226,34 @@ mail.to("user@example.com")
 
 Dev mode captures emails without sending. Access via `mailer.sent()` in tests.
 
+## Storage
+
+```java
+var storage = Storage.s3(config);  // reads s3.* keys from Config
+
+String url = storage.put("uploads/photo.jpg", bytes, "image/jpeg");  // upload, returns public URL
+storage.delete("uploads/photo.jpg");                                  // delete
+storage.url("uploads/photo.jpg");                                     // public URL (no network call)
+
+// Available in handlers via req.storage()
+app.post("/upload", (req, db) -> {
+    var file = req.file("photo");
+    String url = req.storage().put("photos/" + file.name(), file.bytes(), file.contentType());
+    return Json.of(Map.of("url", url));
+});
+```
+
 ## Cache
 
 ```java
 var cache = Brace.cache();
 
-cache.set("user:42", user, "30m");                 // set with TTL
-cache.get("user:42", User.class);                  // get or null
+cache.set("user:42", user, "30m");                   // set with TTL
+cache.get("user:42", User.class);                    // get or null
 cache.getOrSet("stats", "5m", () -> computeStats()); // compute on miss
-cache.delete("user:42");                           // remove one
-cache.deletePrefix("user:");                       // remove by prefix
-cache.clearTag("simulation");                      // remove by tag
+cache.delete("user:42");                             // remove one
+cache.deletePrefix("user:");                         // remove by prefix
+cache.clearTag("simulation");                        // remove by tag
 
 // Route-level page caching
 app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
@@ -249,20 +278,6 @@ app.group("/admin", admin -> {
     });
 });
 ```
-
-## AI Ops
-
-Ops endpoints authenticate via `X-Ops-Key` header (query param fallback for dashboard browser access).
-
-`GET /ops/status` — full diagnostics: uptime, request stats, status codes, slowest routes, memory, recent errors with stack traces, job statuses, mailer stats, per-minute timeseries.
-
-`GET /ops/errors` — persistent exception tracking. Returns unresolved errors by default, `?status=resolved` for resolved. Errors are deduplicated by type + route, with occurrence counts. Designed for coding agents to pull production errors and work on fixes.
-
-`POST /ops/errors/{id}/resolve` — marks an error as resolved. New occurrences after resolution create a new incident.
-
-`GET /ops/dashboard` — built-in HTML dashboard with sparkline charts, JFR profiling, and color-coded metrics.
-
-![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
 
 ## Testing
 
@@ -290,7 +305,6 @@ db.url=jdbc:postgresql://localhost:5432/myapp
 db.user=myapp
 db.pass=${DB_PASS}
 session.secret=change-me
-ops.secret=change-me
 
 %dev.port=9000
 %dev.db.url=jdbc:h2:mem:dev
@@ -309,5 +323,6 @@ ops.secret=change-me
 | JSON | Jackson |
 | Passwords | jBCrypt |
 | Email | Jakarta Mail |
+| Storage | AWS Sig V4 (no SDK) |
 
-**~4,500 lines of framework code. 202 tests.**
+**~5,500 lines of framework code. 342 tests.**
