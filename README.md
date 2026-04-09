@@ -65,6 +65,7 @@ public class App {
             .database(db)
             .templates("views")
             .sessions(config.get("session.secret"))
+            .trustedProxies("10.0.0.0/8", "172.16.0.0/12")  // secure IP handling behind load balancer
             .mailer(mail)
             .cache(cache)
             .storage(storage)
@@ -96,15 +97,16 @@ public class App {
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
-- **Sessions** — HMAC-SHA256 signed cookies, no server-side storage, stateless
+- **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Automatic protection on POST/PUT/DELETE, skip for JSON APIs
+- **Security** — Trusted proxy configuration, secure cookie options (HttpOnly, Secure, SameSite), IP-based rate limiting
 - **Cache** — In-memory with TTL, tag-based invalidation, route-level page caching via `cache.wrap()`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
-- **Rate Limiting** — Per-IP and per-key rate limiting middleware
+- **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
 - **htmx** — Bundled htmx 2.0.4, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
@@ -194,11 +196,24 @@ if (!form.valid()) return View.of("posts/new", "form", form);
 
 ## Sessions
 
+Sessions are encrypted with AES-256-GCM — you can safely store emails, roles, and permissions.
+
 ```java
 session.set("userId", user.id);
+session.set("email", user.email);
+session.set("role", user.role);
 session.getInt("userId");
+session.get("email");
 session.has("userId");
 session.clear();
+```
+
+Configure session cookie security:
+
+```java
+app.sessions(SessionOptions.secure("secret")
+    .maxAgeDays(14)
+    .sameSiteLax());
 ```
 
 ## Jobs
@@ -364,4 +379,15 @@ session.secret=change-me
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~5,500 lines of framework code. 342 tests.**
+**~5,600 lines of framework code. 393 tests.**
+
+## Security
+
+See [docs/SECURITY.md](docs/SECURITY.md) for comprehensive security documentation including:
+- Encrypted sessions (AES-256-GCM)
+- Trusted proxy configuration
+- CSRF protection
+- Cookie security options
+- Rate limiting
+- File upload security
+- Ops endpoint hardening
