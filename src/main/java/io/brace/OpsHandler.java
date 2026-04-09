@@ -177,27 +177,42 @@ public class OpsHandler {
         }
 
         // Custom metrics
-        var counterTotals = stats.counterTotals();
-        var gaugeValues = stats.currentGaugeValues();
-        var timerValues = stats.lastTimerValues();
-        if (!counterTotals.isEmpty() || !gaugeValues.isEmpty() || !timerValues.isEmpty()) {
+        var counterTotalMap = stats.counterTotals();
+        var gaugeValueMap = stats.currentGaugeValues();
+        var timerValueMap = stats.lastTimerValues();
+        if (!counterTotalMap.isEmpty() || !gaugeValueMap.isEmpty() || !timerValueMap.isEmpty()) {
             var metrics = new LinkedHashMap<String, Object>();
-            if (!counterTotals.isEmpty()) {
-                metrics.put("counters", counterTotals);
+            if (!counterTotalMap.isEmpty()) {
+                var countersJson = new LinkedHashMap<String, Object>();
+                var latestSnapshots = stats.minuteSnapshots();
+                var lastSnap = latestSnapshots.isEmpty() ? null : latestSnapshots.get(latestSnapshots.size() - 1);
+                for (var entry : counterTotalMap.entrySet()) {
+                    var c = new LinkedHashMap<String, Object>();
+                    c.put("total", entry.getValue());
+                    long rate = lastSnap != null && lastSnap.counterDeltas().containsKey(entry.getKey())
+                            ? lastSnap.counterDeltas().get(entry.getKey()) : 0;
+                    c.put("rate", rate);
+                    countersJson.put(entry.getKey(), c);
+                }
+                metrics.put("counters", countersJson);
             }
-            if (!gaugeValues.isEmpty()) {
-                metrics.put("gauges", gaugeValues);
+            if (!gaugeValueMap.isEmpty()) {
+                var gaugesJson = new LinkedHashMap<String, Object>();
+                for (var entry : gaugeValueMap.entrySet()) {
+                    gaugesJson.put(entry.getKey(), Map.of("value", entry.getValue()));
+                }
+                metrics.put("gauges", gaugesJson);
             }
-            if (!timerValues.isEmpty()) {
-                var timers = new LinkedHashMap<String, Object>();
-                for (var entry : timerValues.entrySet()) {
+            if (!timerValueMap.isEmpty()) {
+                var timersJson = new LinkedHashMap<String, Object>();
+                for (var entry : timerValueMap.entrySet()) {
                     var t = new LinkedHashMap<String, Object>();
                     t.put("count", entry.getValue().count());
                     t.put("avgMs", Math.round(entry.getValue().avgMs() * 100.0) / 100.0);
                     t.put("maxMs", entry.getValue().maxMs());
-                    timers.put(entry.getKey(), t);
+                    timersJson.put(entry.getKey(), t);
                 }
-                metrics.put("timers", timers);
+                metrics.put("timers", timersJson);
             }
             data.put("metrics", metrics);
         }
