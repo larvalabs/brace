@@ -293,7 +293,7 @@ app.group("/admin", admin -> {
 
 ## htmx
 
-Brace bundles htmx 2.0.4 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.
+Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.4 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.
 
 ```java
 // In your layout: <script src="/__brace/htmx.min.js"></script>
