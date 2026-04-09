@@ -69,5 +69,7 @@
 - [x] Rate limiting middleware (`RateLimiter.perIp(100, "1m")`, `RateLimiter.perKey(fn, limit, duration)`)
 - [x] File upload handling (`req.file("name")`, `req.files("name")`, multipart parsing, `app.maxUploadSize("50m")`)
 - [ ] Simple async tasks (`Jobs.run(runnable)`, `Jobs.submit(callable)` — non-scheduled, non-durable, managed thread pool)
+- [ ] Binary response support for `Http` client (`Http.get(url).fetchBytes()` → `byte[]` — currently only `fetchString()` / `fetchJson()`, forcing raw `URL.openStream()` for binary downloads)
+- [ ] Make `TestApp` work without `Mailer` dependency (currently always creates a `Mailer`, requiring `jakarta.mail` even for apps that don't use email)
 - [ ] SSE (Server-Sent Events) support
 - [ ] Consider publishing to Maven Central
