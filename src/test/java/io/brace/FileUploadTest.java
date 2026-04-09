@@ -46,7 +46,7 @@ class FileUploadTest {
         });
 
         app.post("/upload-mixed", req -> {
-            var name = req.param("name");
+            var name = req.formParam("name");
             var file = req.file("avatar");
             var fileName = file != null ? file.filename() : "none";
             return Result.text(name + "|" + fileName);

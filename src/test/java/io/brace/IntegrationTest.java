@@ -29,7 +29,7 @@ class IntegrationTest {
         });
 
         app.get("/hello", req -> Result.text("Hello, World!"));
-        app.get("/greet/{name}", req -> Result.text("Hello, " + req.param("name") + "!"));
+        app.get("/greet/{name}", req -> Result.text("Hello, " + req.pathParam("name") + "!"));
         app.get("/json", req -> Json.of(java.util.Map.of("status", "ok")));
         app.get("/redirect", req -> Redirect.to("/hello"));
         app.get("/admin/secret", req -> Result.text("secret"));

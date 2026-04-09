@@ -43,7 +43,7 @@ class DatabaseIntegrationTest {
         });
 
         app.get("/posts/{id}", (DbHandler) (req, db2) -> {
-            var p = db2.find(Post.class, req.longParam("id"));
+            var p = db2.find(Post.class, req.longPathParam("id"));
             if (p == null) return Result.notFound();
             return Json.of(p);
         });

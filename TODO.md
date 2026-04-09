@@ -25,6 +25,7 @@
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
 - [x] `db.queryIn()` for IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`)
+- [ ] Support all logging levels: DEBUG, INFO, WARN, ERROR in Log.java
 
 ## Ops Dashboard Polish
 

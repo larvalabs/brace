@@ -19,7 +19,7 @@ class TemplateTest {
 
         app.get("/hello", req -> View.of("hello"));
         app.get("/greet/{name}", req ->
-            View.of("params", "name", req.param("name"), "count", 42));
+            View.of("params", "name", req.pathParam("name"), "count", 42));
         app.get("/layout", req ->
             View.of("withLayout", "message", "It works!"));
 
@@ -75,4 +75,5 @@ class TemplateTest {
         var response = get("/hello");
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("text/html"));
     }
+
 }

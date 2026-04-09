@@ -9,21 +9,22 @@ class RequestTest {
     @Test
     void pathParams() {
         var req = new Request("GET", "/posts/42", Map.of("id", "42"), Map.of(), Map.of(), null);
-        assertEquals("42", req.param("id"));
-        assertEquals(42, req.intParam("id"));
+        assertEquals("42", req.pathParam("id"));
+        assertEquals(42, req.intPathParam("id"));
     }
 
     @Test
     void queryParams() {
         var req = new Request("GET", "/search", Map.of(), Map.of("q", "hello", "page", "2"), Map.of(), null);
-        assertEquals("hello", req.param("q"));
-        assertEquals(2, req.intParam("page"));
+        assertEquals("hello", req.queryParam("q"));
+        assertEquals(2, req.queryInt("page"));
     }
 
     @Test
-    void pathParamOverridesQueryParam() {
+    void pathParamIndependent() {
         var req = new Request("GET", "/posts/42", Map.of("id", "42"), Map.of("id", "99"), Map.of(), null);
-        assertEquals("42", req.param("id"));
+        assertEquals("42", req.pathParam("id"));
+        assertEquals("99", req.queryParam("id"));
     }
 
     @Test
@@ -59,8 +60,8 @@ class RequestTest {
     }
 
     @Test
-    void intParamThrowsForMissing() {
+    void intPathParamThrowsForMissing() {
         var req = new Request("GET", "/", Map.of(), Map.of(), Map.of(), null);
-        assertThrows(NumberFormatException.class, () -> req.intParam("missing"));
+        assertThrows(NumberFormatException.class, () -> req.intPathParam("missing"));
     }
 }

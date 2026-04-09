@@ -49,21 +49,94 @@ public class Request {
     public String method() { return method; }
     public String path() { return path; }
     public Map<String, String> queryParams() { return queryParams; }
+    public Map<String, String> pathParams() { return pathParams; }
 
-    public String param(String name) {
-        var value = pathParams.get(name);
-        if (value != null) return value;
-        value = queryParams.get(name);
-        if (value != null) return value;
+    // Path parameter accessors
+
+    public String pathParam(String name) {
+        return pathParams.get(name);
+    }
+
+    public int intPathParam(String name) {
+        return Integer.parseInt(pathParams.get(name));
+    }
+
+    public long longPathParam(String name) {
+        return Long.parseLong(pathParams.get(name));
+    }
+
+    // Query parameter accessors
+
+    public String queryParam(String name) {
+        return queryParams.get(name);
+    }
+
+    public String queryParam(String name, String defaultValue) {
+        return queryParams.getOrDefault(name, defaultValue);
+    }
+
+    public int queryInt(String name) {
+        return Integer.parseInt(queryParams.get(name));
+    }
+
+    public int queryInt(String name, int defaultValue) {
+        var value = queryParams.get(name);
+        return value != null ? Integer.parseInt(value) : defaultValue;
+    }
+
+    public long queryLong(String name) {
+        return Long.parseLong(queryParams.get(name));
+    }
+
+    public long queryLong(String name, long defaultValue) {
+        var value = queryParams.get(name);
+        return value != null ? Long.parseLong(value) : defaultValue;
+    }
+
+    public boolean hasQueryParam(String name) {
+        return queryParams.containsKey(name);
+    }
+
+    // Form parameter accessors
+
+    public String formParam(String name) {
         return parseFormBody(body).get(name);
     }
 
-    public int intParam(String name) {
-        return Integer.parseInt(param(name));
+    public int formInt(String name) {
+        return Integer.parseInt(parseFormBody(body).get(name));
     }
 
-    public long longParam(String name) {
-        return Long.parseLong(param(name));
+    public boolean hasFormParam(String name) {
+        return parseFormBody(body).containsKey(name);
+    }
+
+    // JSON request helpers
+
+    public boolean isJson() {
+        var contentType = header("Content-Type");
+        return contentType != null && contentType.toLowerCase().contains("application/json");
+    }
+
+    public boolean isFormPost() {
+        var contentType = header("Content-Type");
+        return contentType != null && contentType.toLowerCase().contains("application/x-www-form-urlencoded");
+    }
+
+    public boolean isMultipart() {
+        var contentType = header("Content-Type");
+        return contentType != null && contentType.toLowerCase().contains("multipart/form-data");
+    }
+
+    public <T> T json(Class<T> type) {
+        return bodyAs(type);
+    }
+
+    public <T> T requireJson(Class<T> type) {
+        if (!isJson()) {
+            throw new IllegalArgumentException("Request Content-Type must be application/json");
+        }
+        return bodyAs(type);
     }
 
     public String header(String name) {

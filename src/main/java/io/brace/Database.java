@@ -123,6 +123,35 @@ public class Database {
         return result;
     }
 
+    // --- Constrained helpers (single-field queries) ---
+
+    public <T> T findBy(Class<T> type, String field, Object value) {
+        return queryOne(type, field + " = ?", value);
+    }
+
+    public <T> List<T> findAllBy(Class<T> type, String field, Object value) {
+        return query(type, field + " = ?", value);
+    }
+
+    public <T> long countBy(Class<T> type, String field, Object value) {
+        return count(type, field + " = ?", value);
+    }
+
+    public <T> boolean existsBy(Class<T> type, String field, Object value) {
+        return countBy(type, field, value) > 0;
+    }
+
+    public <T> int deleteBy(Class<T> type, String field, Object value) {
+        long start = System.nanoTime();
+        String hql = "DELETE FROM " + type.getSimpleName() + " WHERE " + field + " = ?1";
+        MutationQuery query = session.createMutationQuery(hql);
+        query.setParameter(1, value);
+        int result = query.executeUpdate();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
+    }
+
     // --- Raw queries ---
 
     @SuppressWarnings("unchecked")

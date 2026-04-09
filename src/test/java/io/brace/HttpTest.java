@@ -30,7 +30,7 @@ class HttpTest {
             return Result.text("too late");
         });
 
-        app.get("/status/{code}", req -> Result.error(req.intParam("code"), "error"));
+        app.get("/status/{code}", req -> Result.error(req.intPathParam("code"), "error"));
 
         app.start();
         port = app.actualPort();

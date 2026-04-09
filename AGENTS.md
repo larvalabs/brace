@@ -43,18 +43,18 @@ Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`
 Four handler types — the cast tells Brace which parameters to inject:
 
 ```java
-app.get("/hello", req -> Result.text("Hi"));                                // Handler
-app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));  // DbHandler
-app.get("/me", (SessionHandler) (req, session) -> ...);                    // SessionHandler
-app.post("/posts", (FullHandler) (req, db, session) -> ...);               // FullHandler
+app.get("/hello", req -> Result.text("Hi"));                                     // Handler
+app.get("/posts", (DbHandler) (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler
+app.get("/me", (SessionHandler) (req, session) -> ...);                         // SessionHandler
+app.post("/posts", (FullHandler) (req, db, session) -> ...);                    // FullHandler
 
 // CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
-app.post("/api/public", req -> Json.of(data)).csrf(false);
+app.post("/api/public", req -> Result.json(data)).csrf(false);
 ```
 
 Read-only variants skip the transaction commit: `ReadDbHandler`, `ReadFullHandler`.
 
-Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.param("id")` or `req.intParam("id")`.
+Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`.
 
 Route configuration methods (called after route registration):
 - `.csrf(false)` — disable CSRF protection (only use for bearer-token APIs, NOT cookie-authenticated endpoints)
@@ -89,17 +89,43 @@ app.after("/api/*", (req, result) -> result.header("X-Api-Version", "1"));
 ```java
 req.method()                  // "GET", "POST", etc.
 req.path()                    // "/posts/42"
-req.param("id")               // path or query param as String
-req.intParam("id")            // as int
-req.longParam("id")           // as long
+
+// Path parameters (from route pattern like /posts/{id})
+req.pathParam("id")           // path param as String
+req.intPathParam("id")        // as int
+req.longPathParam("id")       // as long
+req.pathParams()              // Map<String, String>
+
+// Query parameters (from ?key=value)
+req.queryParam("page")        // query param as String or null
+req.queryParam("page", "1")   // with default value
+req.queryInt("page")          // as int
+req.queryInt("page", 1)       // with default
+req.queryLong("offset")       // as long
+req.queryLong("offset", 0)    // with default
+req.hasQueryParam("filter")   // boolean
 req.queryParams()             // Map<String, String>
+
+// Form parameters (from POST body application/x-www-form-urlencoded)
+req.formParam("title")        // form param as String
+req.formInt("count")          // as int
+req.hasFormParam("optional")  // boolean
+
+// Headers, body, and JSON
 req.header("Accept")          // header value or null
 req.hasHeader("Accept")       // boolean
 req.body()                    // raw body string
 req.bodyAs(MyClass.class)     // JSON body deserialized
+req.json(MyClass.class)       // alias for bodyAs
+req.requireJson(MyClass.class) // enforces Content-Type: application/json
+req.isJson()                  // check if Content-Type is JSON
+req.isFormPost()              // check if form POST
+req.isMultipart()             // check if multipart/form-data
+
+// Other
 req.cookie("name")            // cookie value
-req.ip()                      // client IP
-req.isHtmx()                 // true if HX-Request header present
+req.ip()                      // client IP (respects trusted proxies)
+req.isHtmx()                  // true if HX-Request header present
 req.form(MyForm.class)        // bind and validate form (see Forms)
 req.file("photo")             // UploadedFile
 req.files("photos")           // List<UploadedFile>
@@ -110,43 +136,74 @@ req.storage()                 // Storage instance
 
 ## Responses
 
+All response factory methods are on the `Result` class:
+
 ```java
+// Text and HTML
 Result.text("hello")                        // 200 text/plain
 Result.html("<h1>hi</h1>")                  // 200 text/html
+
+// Status codes
 Result.noContent()                          // 204
 Result.notFound()                           // 404
 Result.notFoundIfNull(thing)                // throws 404 if null, returns thing otherwise
 Result.error(500, "oops")                   // error with status
-Result.unauthorized("no")                   // 401
+Result.unauthorized()                       // 401 "Unauthorized"
+Result.unauthorized("no")                   // 401 with custom message
+Result.forbidden()                          // 403 "Forbidden"
+Result.forbidden("access denied")           // 403 with message
+Result.badRequest("invalid input")          // 400
+Result.created("/posts/42")                 // 201 with Location header
+
+// Binary
 Result.bytes(data, "image/png")             // binary response
 Result.download(data, "text/csv", "f.csv")  // Content-Disposition attachment
+
+// Templates
+Result.view("posts/index", "posts", posts)      // render JTE template
+View.render("emails/welcome", "user", user)     // render to String (for emails)
+
+// JSON
+Result.json(object)                         // 200 JSON
+Result.json(object, 201)                    // JSON with status
+
+// Redirects
+Result.redirect("/posts")                   // 302 redirect
+Result.redirectPermanent("/new-url")        // 301 redirect
+
+// Headers
 result.header("X-Custom", "value")          // add response header
-
-View.of("posts/index", "posts", posts)      // render JTE template
-View.render("emails/welcome", "user", user) // render to String (for emails)
-
-Json.of(object)                             // 200 JSON
-Json.of(object, 201)                        // JSON with status
-
-Redirect.to("/posts")                       // 302 redirect
-Redirect.permanent("/new-url")              // 301 redirect
 ```
+
+Note: `Json.of()`, `View.of()`, and `Redirect.to()` still work (called by the `Result.*` methods).
 
 ## Database
 
 Thin wrapper over Hibernate StatelessSession. No dirty checking, no lazy loading — all operations are explicit. Transactions are managed per-request automatically.
 
 ```java
+// Basic CRUD
 db.find(Post.class, id)                          // by ID, or null
 db.insert(post)                                   // INSERT
 db.update(post)                                   // UPDATE
 db.delete(post)                                   // DELETE
+
+// Queries
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause, returns List
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryIn(Post.class, "id", List.of(1, 2, 3))   // IN clause batch lookup
 db.count(Post.class)                              // count all
 db.count(Post.class, "published = ?", true)       // count with condition
+
+// Constrained helpers (single-field queries)
+db.findBy(Post.class, "slug", "hello")            // find one by field
+db.findAllBy(Post.class, "authorId", 42)          // find all by field
+db.countBy(Post.class, "published", true)         // count by field
+db.existsBy(Post.class, "email", "user@ex.com")   // check existence (boolean)
+db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns count)
+
+// Raw queries
 db.hql("SELECT p FROM Post p WHERE ...", args)    // raw HQL, returns List<Object[]>
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL execute
 db.sqlQuery("SELECT * FROM posts WHERE ...", args) // native SQL query, returns List<Object[]>
@@ -211,13 +268,13 @@ Usage in a handler:
 
 ```java
 var form = req.form(PostForm.class);
-if (!form.valid()) return View.of("posts/new", "form", form);
+if (form.hasErrors()) return Result.view("posts/new", "form", form);
 var post = new Post();
 post.apply(form.value());
 db.insert(post);
 ```
 
-`Form` methods: `valid()`, `value()`, `errors()`, `allErrors()`, `errors(field)`, `raw(field)`.
+`Form` methods: `hasErrors()`, `value()`, `errors()`, `allErrors()`, `errors(field)`, `raw(field)`.
 
 ## Templates
 
@@ -235,7 +292,7 @@ JTE compiled templates. Files are `.jte` in the configured templates directory.
 @endtemplate
 ```
 
-Render from handler: `View.of("posts/index", "title", "Posts", "posts", posts)`. Template params are type-checked at compile time.
+Render from handler: `Result.view("posts/index", "title", "Posts", "posts", posts)`. Template params are type-checked at compile time.
 
 Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
 
@@ -388,13 +445,30 @@ S3-compatible object storage (works with S3, R2, MinIO):
 ```java
 var storage = Storage.s3(config);  // reads s3.* keys from Config
 
+// Basic operations
 String url = storage.put("uploads/photo.jpg", bytes, "image/jpeg");  // returns public URL
 storage.delete("uploads/photo.jpg");
 storage.url("uploads/photo.jpg");                  // public URL (no network call)
 storage.keyFromUrl("https://cdn.example.com/...");  // extract key from URL
+
+// Safe file upload helpers
+var file = req.file("avatar");
+var stored = storage.putGenerated("avatars", file);  // auto-generates UUID-based key
+// returns StoredFile(key, url)
+String key = stored.key();   // "avatars/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jpg"
+String url = stored.url();   // "https://cdn.example.com/avatars/..."
+
+// Manual safe key generation
+String key = Storage.safeKey("uploads", "user photo.jpg");  // sanitizes and adds UUID
+String ext = Storage.extension("photo.jpg");  // "jpg" (sanitized, alphanumeric only)
+
+// Upload with UploadedFile
+var stored = storage.put("custom/path.jpg", file);  // returns StoredFile(key, url)
 ```
 
-Config keys: `s3.access-key`, `s3.secret-key`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.public-url`.
+Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`.
+
+**StoredFile** record: `key()`, `url()`.
 
 ## WebSocket
 

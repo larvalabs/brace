@@ -36,21 +36,21 @@ class FormTest {
     @Test
     void validSimpleForm() {
         var form = FormBinder.bind(SimpleForm.class, Map.of("title", "Hello", "body", "This is long enough content"));
-        assertTrue(form.valid());
+        assertFalse(form.hasErrors());
         assertEquals("Hello", form.value().title());
     }
 
     @Test
     void requiredValidation() {
         var form = FormBinder.bind(SimpleForm.class, Map.of("title", "", "body", "This is long enough content"));
-        assertFalse(form.valid());
+        assertTrue(form.hasErrors());
         assertFalse(form.errors("title").isEmpty());
     }
 
     @Test
     void minLengthValidation() {
         var form = FormBinder.bind(SimpleForm.class, Map.of("title", "Hi", "body", "short"));
-        assertFalse(form.valid());
+        assertTrue(form.hasErrors());
         assertFalse(form.errors("body").isEmpty());
         assertTrue(form.errors("body").get(0).contains("10"));
     }
@@ -58,39 +58,39 @@ class FormTest {
     @Test
     void intTypeConversion() {
         var form = FormBinder.bind(TypedForm.class, Map.of("name", "Alice", "age", "25", "email", "alice@example.com"));
-        assertTrue(form.valid());
+        assertFalse(form.hasErrors());
         assertEquals(25, form.value().age());
     }
 
     @Test
     void minMaxValidation() {
         var form = FormBinder.bind(TypedForm.class, Map.of("name", "Alice", "age", "0", "email", "alice@example.com"));
-        assertFalse(form.valid());
+        assertTrue(form.hasErrors());
         assertFalse(form.errors("age").isEmpty());
     }
 
     @Test
     void emailValidation() {
         var form = FormBinder.bind(TypedForm.class, Map.of("name", "Alice", "age", "25", "email", "notanemail"));
-        assertFalse(form.valid());
+        assertTrue(form.hasErrors());
         assertFalse(form.errors("email").isEmpty());
     }
 
     @Test
     void inValidation() {
         var form = FormBinder.bind(InForm.class, Map.of("status", "invalid"));
-        assertFalse(form.valid());
+        assertTrue(form.hasErrors());
         assertFalse(form.errors("status").isEmpty());
 
         var valid = FormBinder.bind(InForm.class, Map.of("status", "draft"));
-        assertTrue(valid.valid());
+        assertFalse(valid.hasErrors());
     }
 
     @Test
     void customValidation() {
         var form = FormBinder.bind(CustomValidationForm.class,
             Map.of("password", "secret", "passwordConfirm", "different"));
-        assertFalse(form.valid());
+        assertTrue(form.hasErrors());
         assertTrue(form.errors("passwordConfirm").get(0).contains("match"));
     }
 
@@ -104,7 +104,7 @@ class FormTest {
     @Test
     void missingFieldTreatedAsEmpty() {
         var form = FormBinder.bind(SimpleForm.class, Map.of("body", "This is long enough content"));
-        assertFalse(form.valid());
+        assertTrue(form.hasErrors());
         assertFalse(form.errors("title").isEmpty());
     }
 
@@ -113,7 +113,7 @@ class FormTest {
         var req = new Request("POST", "/posts", Map.of(), Map.of(),
             Map.of(), "title=Hello&body=This+is+long+enough+content");
         var form = req.form(SimpleForm.class);
-        assertTrue(form.valid());
+        assertFalse(form.hasErrors());
         assertEquals("Hello", form.value().title());
         assertEquals("This is long enough content", form.value().body());
     }

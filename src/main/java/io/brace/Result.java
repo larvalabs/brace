@@ -61,6 +61,47 @@ public class Result {
         return new Result(200, "text/html", body);
     }
 
+    public static Result json(Object value) {
+        return Json.of(value);
+    }
+
+    public static Result json(Object value, int status) {
+        return Json.of(value, status);
+    }
+
+    public static Result view(String template, Object... keyValues) {
+        return View.of(template, keyValues);
+    }
+
+    public static Result redirect(String location) {
+        return Redirect.to(location);
+    }
+
+    public static Result redirectPermanent(String location) {
+        return Redirect.permanent(location);
+    }
+
+    public static Result unauthorized() {
+        return new Result(401, "text/plain", "Unauthorized");
+    }
+
+    public static Result forbidden() {
+        return new Result(403, "text/plain", "Forbidden");
+    }
+
+    public static Result forbidden(String message) {
+        return new Result(403, "text/plain", message);
+    }
+
+    public static Result badRequest(String message) {
+        return new Result(400, "text/plain", message);
+    }
+
+    public static Result created(String location) {
+        return new Result(201, "text/plain", "Created")
+            .header("Location", location);
+    }
+
     public int status() { return status; }
     public String contentType() { return contentType; }
     public String body() { return body; }

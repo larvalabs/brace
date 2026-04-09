@@ -308,14 +308,14 @@ public class OpsHandler {
     public Result errors(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Json.of(List.of());
-        String status = req.param("status");
+        String status = req.queryParam("status");
         return Json.of(errorStore.list(status));
     }
 
     public Result resolveError(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Result.notFound();
-        long id = req.longParam("id");
+        long id = req.longPathParam("id");
         errorStore.resolve(id);
         return dashboard(req);
     }
@@ -336,7 +336,7 @@ public class OpsHandler {
             if (OpsToken.validate(token, tokenSecret)) return true;
         }
         // Check ?token= query param
-        var tokenParam = req.param("token");
+        var tokenParam = req.queryParam("token");
         if (tokenParam != null) {
             return OpsToken.validate(tokenParam, tokenSecret);
         }

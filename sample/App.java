@@ -10,16 +10,16 @@ public class App {
         app.get("/", req -> Result.text("Welcome to Brace!"));
 
         app.get("/hello/{name}", req ->
-            Result.text("Hello, " + req.param("name") + "!"));
+            Result.text("Hello, " + req.pathParam("name") + "!"));
 
         app.get("/json", req ->
-            Json.of(Map.of(
+            Result.json(Map.of(
                 "framework", "Brace",
                 "version", "0.1.0",
                 "status", "running"
             )));
 
-        app.get("/redirect", req -> Redirect.to("/"));
+        app.get("/redirect", req -> Result.redirect("/"));
 
         app.before("/admin/*", req -> Result.unauthorized("Login required"));
         app.get("/admin/dashboard", req -> Result.text("Admin Dashboard"));

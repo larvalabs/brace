@@ -123,23 +123,23 @@ Plain classes. Dependencies via constructor. Request-scoped data via method para
 public class PostController {
     public Result index(Request req, Database db) {
         var posts = db.findAll(Post.class);
-        return View.of("posts/index", "posts", posts);
+        return Result.view("posts/index", "posts", posts);
     }
 
     public Result show(Request req, Database db) {
-        var post = db.find(Post.class, req.intParam("id"));
+        var post = db.find(Post.class, req.intPathParam("id"));
         if (post == null) return Result.notFound();
-        return View.of("posts/show", "post", post);
+        return Result.view("posts/show", "post", post);
     }
 
     public Result create(Request req, Database db, Session session) {
         var form = req.form(PostForm.class);
-        if (!form.valid()) return View.of("posts/new", "form", form);
+        if (form.hasErrors()) return Result.view("posts/new", "form", form);
         var post = new Post();
         post.apply(form.value());
         post.authorId = session.getInt("userId");
         db.insert(post);
-        return Redirect.to("/posts/" + post.id);
+        return Result.redirect("/posts/" + post.id);
     }
 }
 ```
@@ -147,13 +147,13 @@ public class PostController {
 ## Handler Types
 
 ```java
-app.get("/hello", req -> Result.text("Hello!"));                              // Handler: Request only
-app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));  // DbHandler: Request + Database
-app.get("/profile", (SessionHandler) (req, session) -> ...);                  // SessionHandler: Request + Session
-app.post("/posts", (FullHandler) (req, db, session) -> ...);                  // FullHandler: Request + Database + Session
+app.get("/hello", req -> Result.text("Hello!"));                                   // Handler: Request only
+app.get("/posts", (DbHandler) (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler: Request + Database
+app.get("/profile", (SessionHandler) (req, session) -> ...);                      // SessionHandler: Request + Session
+app.post("/posts", (FullHandler) (req, db, session) -> ...);                      // FullHandler: Request + Database + Session
 
 // CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
-app.post("/api/public", req -> Json.of(data)).csrf(false);  // no CSRF for bearer-token API
+app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API
 ```
 
 ## Database
@@ -169,6 +169,13 @@ db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryIn(Post.class, "id", List.of(1, 2, 3))   // batch lookup with IN clause
 db.count(Post.class, "published = ?", true)       // count with condition
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL
+
+// Constrained helpers for common single-field queries
+db.findBy(Post.class, "slug", "hello-world")      // find one by field
+db.findAllBy(Post.class, "authorId", 42)          // find all by field
+db.countBy(Post.class, "published", true)         // count by field
+db.existsBy(Post.class, "email", "user@ex.com")   // check existence
+db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns count)
 ```
 
 For scoped DB access outside the request lifecycle (background tasks, WebSocket handlers):
@@ -195,7 +202,7 @@ public record PostForm(
 }
 
 var form = req.form(PostForm.class);
-if (!form.valid()) return View.of("posts/new", "form", form);
+if (form.hasErrors()) return Result.view("posts/new", "form", form);
 ```
 
 ## Sessions
@@ -253,11 +260,19 @@ String url = storage.put("uploads/photo.jpg", bytes, "image/jpeg");  // upload, 
 storage.delete("uploads/photo.jpg");                                  // delete
 storage.url("uploads/photo.jpg");                                     // public URL (no network call)
 
-// Available in handlers via req.storage()
-app.post("/upload", (req, db) -> {
+// Safe file upload with auto-generated UUID-based keys
+app.post("/upload", req -> {
     var file = req.file("photo");
-    String url = req.storage().put("photos/" + file.name(), file.bytes(), file.contentType());
-    return Json.of(Map.of("url", url));
+    var stored = req.storage().putGenerated("avatars", file);  // returns StoredFile(key, url)
+    return Result.json(Map.of("key", stored.key(), "url", stored.url()));
+});
+
+// Manual key with safety helpers
+app.post("/upload-manual", req -> {
+    var file = req.file("photo");
+    var key = Storage.safeKey("avatars", file.filename());  // sanitizes extension, adds UUID
+    var stored = req.storage().put(key, file);
+    return Result.json(Map.of("url", stored.url()));
 });
 ```
 
@@ -323,8 +338,8 @@ Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.4 an
 // Full page by default, partial when htmx requests it
 app.get("/posts", (DbHandler) (req, db) -> {
     var posts = db.findAll(Post.class);
-    if (req.isHtmx()) return View.of("posts/_list", "posts", posts);
-    return View.of("posts/index", "posts", posts);
+    if (req.isHtmx()) return Result.view("posts/_list", "posts", posts);
+    return Result.view("posts/index", "posts", posts);
 });
 ```
 
@@ -352,6 +367,11 @@ static TestApp app = Brace.test()
     var response = app.get("/posts");
     assertEquals(200, response.status());
     assertTrue(response.body().contains("Hello"));
+}
+
+@Test void showPost() {
+    var response = app.get("/posts/42");
+    assertEquals(200, response.status());
 }
 ```
 

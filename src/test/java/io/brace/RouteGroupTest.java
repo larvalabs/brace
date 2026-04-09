@@ -16,8 +16,8 @@ class RouteGroupTest {
             app.group("/admin", admin -> {
                 admin.get("/users", req -> Result.text("list users"));
                 admin.post("/users", req -> Result.text("create user"));
-                admin.put("/users/{id}", req -> Result.text("update user " + req.param("id")));
-                admin.delete("/users/{id}", req -> Result.text("delete user " + req.param("id")));
+                admin.put("/users/{id}", req -> Result.text("update user " + req.pathParam("id")));
+                admin.delete("/users/{id}", req -> Result.text("delete user " + req.pathParam("id")));
             });
 
             app.group("/api", api -> {

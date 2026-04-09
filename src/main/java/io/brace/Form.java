@@ -13,7 +13,7 @@ public class Form<T> {
         this.rawValues = rawValues;
     }
 
-    public boolean valid() { return !errors.hasErrors(); }
+    public boolean hasErrors() { return errors.hasErrors(); }
     public T value() { return value; }
     public Errors errors() { return errors; }
     public Map<String, List<String>> allErrors() { return errors.all(); }

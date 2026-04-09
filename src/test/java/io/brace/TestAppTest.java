@@ -23,8 +23,8 @@ class TestAppTest {
                     Json.of(db.findAll(Post.class)));
                 app.post("/posts", (DbHandler) (req, db) -> {
                     var post = new Post();
-                    post.title = req.param("title");
-                    post.body = req.param("body");
+                    post.title = req.formParam("title");
+                    post.body = req.formParam("body");
                     post.createdAt = Instant.now();
                     db.insert(post);
                     return Json.of(post, 201);

@@ -13,6 +13,7 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 
 /**
  * S3-compatible storage client with built-in AWS Signature V4 signing.
@@ -140,6 +141,52 @@ public class Storage {
         } catch (Exception e) {
             throw new RuntimeException("S3 upload failed", e);
         }
+    }
+
+    /**
+     * Upload an UploadedFile with a user-specified key. Returns a StoredFile record.
+     */
+    public StoredFile put(String key, UploadedFile file) {
+        String url = put(key, file.bytes(), file.contentType());
+        return new StoredFile(key, url);
+    }
+
+    /**
+     * Upload an UploadedFile with an auto-generated safe key (UUID-based).
+     * Returns a StoredFile record containing the generated key and public URL.
+     */
+    public StoredFile putGenerated(String folder, UploadedFile file) {
+        String key = safeKey(folder, file.filename());
+        String url = put(key, file.bytes(), file.contentType());
+        return new StoredFile(key, url);
+    }
+
+    /**
+     * Generate a safe storage key from a folder and original filename.
+     * Uses UUID to prevent conflicts and sanitizes the extension.
+     * Example: safeKey("avatars", "user photo.jpg") -> "avatars/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jpg"
+     */
+    public static String safeKey(String folder, String originalName) {
+        String uuid = UUID.randomUUID().toString();
+        String ext = extension(originalName);
+        if (ext != null && !ext.isEmpty()) {
+            return folder + "/" + uuid + "." + ext;
+        }
+        return folder + "/" + uuid;
+    }
+
+    /**
+     * Extract the file extension from a filename (without the dot).
+     * Returns null if no extension found.
+     * Sanitizes the extension to contain only alphanumeric characters.
+     */
+    public static String extension(String filename) {
+        if (filename == null || filename.isEmpty()) return null;
+        int dot = filename.lastIndexOf('.');
+        if (dot < 0 || dot == filename.length() - 1) return null;
+        String ext = filename.substring(dot + 1).toLowerCase();
+        // Only allow alphanumeric extensions (prevents path traversal)
+        return ext.matches("[a-z0-9]+") ? ext : null;
     }
 
     /**
@@ -279,4 +326,9 @@ public class Storage {
         }
         return sb.toString();
     }
+
+    /**
+     * Record representing a stored file with its key and public URL.
+     */
+    public record StoredFile(String key, String url) {}
 }

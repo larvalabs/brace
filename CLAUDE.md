@@ -109,7 +109,7 @@ mvn test -Dtest=IntegrationTest   # run specific test class
 
 ### Adding form validation
 1. Create a record with validation annotations (`@Required`, `@MinLength`, etc.)
-2. In controller: `var form = req.form(MyForm.class)` then check `form.valid()`
+2. In controller: `var form = req.form(MyForm.class)` then check `form.hasErrors()`
 3. Entity convention: add `apply(MyForm form)` method for mapping
 
 ### Updating documentation
