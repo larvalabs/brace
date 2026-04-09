@@ -2,9 +2,12 @@ package io.brace;
 
 import io.brace.testmodels.Post;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URI;
 import java.net.http.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -191,13 +194,34 @@ class ErrorStoreTest {
     static HttpClient client = HttpClient.newHttpClient();
     static int port;
 
+    private static String authenticateOps(int targetPort, OpsKeys.Keypair kp) throws Exception {
+        String timestamp = java.time.Instant.now().toString();
+        String signature = OpsKeys.sign(timestamp, kp.privateKey());
+        String body = "{\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + targetPort + "/ops/auth"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        String respBody = response.body();
+        int start = respBody.indexOf("\"token\":\"") + 9;
+        int end = respBody.indexOf("\"", start);
+        return respBody.substring(start, end);
+    }
+
     @Test
-    void opsErrorsEndpointReturnsErrors() throws Exception {
+    void opsErrorsEndpointReturnsErrors(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + "\n");
+
         app = Brace.app().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
-            .ops("test-key");
+            .ops(keysFile.toString());
 
         app.get("/boom", req -> { throw new RuntimeException("kaboom"); });
 
@@ -215,8 +239,12 @@ class ErrorStoreTest {
             Thread.sleep(200);
 
             // Check errors endpoint
+            String token = authenticateOps(port, kp);
             var response = client.send(
-                HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/ops/errors?key=test-key")).GET().build(),
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors"))
+                    .header("Authorization", "Bearer " + token)
+                    .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
             assertEquals(200, response.statusCode());
             assertTrue(response.body().contains("RuntimeException"));
@@ -227,12 +255,16 @@ class ErrorStoreTest {
     }
 
     @Test
-    void opsResolveErrorEndpoint() throws Exception {
+    void opsResolveErrorEndpoint(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + "\n");
+
         app = Brace.app().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opsresolvedb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
-            .ops("test-key");
+            .ops(keysFile.toString());
 
         app.get("/boom", req -> { throw new RuntimeException("kaboom"); });
 
@@ -248,8 +280,12 @@ class ErrorStoreTest {
             Thread.sleep(200);
 
             // Get errors to find the ID
+            String token = authenticateOps(port, kp);
             var listResp = client.send(
-                HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/ops/errors?key=test-key")).GET().build(),
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors"))
+                    .header("Authorization", "Bearer " + token)
+                    .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
             assertEquals(200, listResp.statusCode());
 
@@ -261,9 +297,11 @@ class ErrorStoreTest {
             long errorId = Long.parseLong(idStr);
 
             // Resolve it
+            token = authenticateOps(port, kp);
             var resolveResp = client.send(
                 HttpRequest.newBuilder()
-                    .uri(URI.create("http://localhost:" + port + "/ops/errors/" + errorId + "/resolve?key=test-key"))
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors/" + errorId + "/resolve"))
+                    .header("Authorization", "Bearer " + token)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.noBody())
                     .build(),
@@ -272,8 +310,12 @@ class ErrorStoreTest {
             assertTrue(resolveResp.body().contains("Brace Ops"));
 
             // Verify it's now resolved
+            token = authenticateOps(port, kp);
             var resolvedResp = client.send(
-                HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/ops/errors?key=test-key&status=resolved")).GET().build(),
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors?status=resolved"))
+                    .header("Authorization", "Bearer " + token)
+                    .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resolvedResp.statusCode());
             assertTrue(resolvedResp.body().contains("RuntimeException"));
@@ -283,12 +325,16 @@ class ErrorStoreTest {
     }
 
     @Test
-    void opsErrorsRequiresAuth() throws Exception {
+    void opsErrorsRequiresAuth(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + "\n");
+
         app = Brace.app().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsauthdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
-            .ops("test-key");
+            .ops(keysFile.toString());
 
         app.start();
         try {

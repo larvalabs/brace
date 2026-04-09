@@ -9,7 +9,7 @@ import java.util.Map;
 
 public class OpsDashboard {
 
-    public static String html(String opsSecret, Stats stats, JobScheduler jobScheduler,
+    public static String html(String token, Stats stats, JobScheduler jobScheduler,
                               Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler) {
         var sb = new StringBuilder();
         var now = Instant.now();
@@ -110,8 +110,9 @@ public class OpsDashboard {
             """);
 
         // Dashboard content — this is the div that htmx polls and replaces
-        sb.append("<div id=\"dashboard-content\" hx-get=\"/ops/dashboard?key=").append(esc(opsSecret))
-          .append("\" hx-select=\"#dashboard-content\" hx-target=\"this\" hx-swap=\"outerHTML\" hx-trigger=\"every 5s\">\n");
+        sb.append("<div id=\"dashboard-content\" hx-get=\"/ops/dashboard\"")
+          .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
+          .append(" hx-select=\"#dashboard-content\" hx-target=\"this\" hx-swap=\"outerHTML\" hx-trigger=\"every 5s\">\n");
 
         // Header
         sb.append("<div class=\"header\">");
@@ -455,11 +456,11 @@ public class OpsDashboard {
             sb.append("</div>\n");
 
             sb.append("<div id=\"tab-unresolved\" class=\"tab-content\" style=\"display:block\">");
-            renderPersistedErrors(sb, unresolvedErrors, opsSecret, false);
+            renderPersistedErrors(sb, unresolvedErrors, token, false);
             sb.append("</div>\n");
 
             sb.append("<div id=\"tab-resolved\" class=\"tab-content\" style=\"display:none\">");
-            renderPersistedErrors(sb, resolvedErrors, opsSecret, true);
+            renderPersistedErrors(sb, resolvedErrors, token, true);
             sb.append("</div>\n");
         }
 
@@ -492,8 +493,9 @@ public class OpsDashboard {
             if (hasCache) {
                 sb.append("<div class=\"section\">");
                 sb.append("<div class=\"section-head c-amber\">Cache <span style=\"float:right;font-weight:normal;text-transform:none;letter-spacing:0\">");
-                sb.append("<button class=\"btn btn-danger\" hx-post=\"/ops/cache/clear?key=").append(esc(opsSecret))
-                  .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">[clear all]</button>");
+                sb.append("<button class=\"btn btn-danger\" hx-post=\"/ops/cache/clear\"")
+                  .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
+                  .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">[clear all]</button>");
                 sb.append("</span></div>");
                 long hits = cache.hits(), misses = cache.misses();
                 String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";
@@ -565,7 +567,7 @@ public class OpsDashboard {
     }
 
     private static void renderPersistedErrors(StringBuilder sb, List<Map<String, Object>> errors,
-                                               String opsSecret, boolean resolved) {
+                                               String token, boolean resolved) {
         if (errors.isEmpty()) {
             sb.append("<p class=\"").append(resolved ? "c-muted" : "c-green").append("\">None</p>");
             return;
@@ -582,8 +584,9 @@ public class OpsDashboard {
             sb.append("<td class=\"c-muted\">").append(esc(str(e.get("lastSeen"), "-"))).append("</td>");
             if (!resolved) {
                 sb.append("<td><button class=\"btn btn-resolve\" hx-post=\"/ops/errors/").append(id)
-                  .append("/resolve?key=").append(esc(opsSecret))
-                  .append("\" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">resolve</button></td>");
+                  .append("/resolve\"")
+                  .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
+                  .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">resolve</button></td>");
             } else {
                 sb.append("<td class=\"c-muted\">").append(esc(str(e.get("resolvedAt"), ""))).append("</td>");
             }

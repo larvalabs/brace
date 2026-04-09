@@ -47,6 +47,16 @@ public class ProjectGenerator {
 </project>
 """);
 
+            // Generate ops keypair
+            var opsKeypair = OpsKeys.generateKeypair();
+            Files.writeString(root.resolve("ops-authorized-keys"),
+                "# Authorized public keys for ops dashboard access\n" +
+                opsKeypair.publicKey() + " dev\n");
+            Files.writeString(root.resolve("ops-private.key"),
+                "# Private key for ops dashboard access (do not commit)\n" +
+                opsKeypair.privateKey() + "\n" +
+                opsKeypair.publicKey() + "\n");
+
             // App.java
             Files.writeString(root.resolve("src/main/java/app/App.java"), """
 package app;
@@ -69,7 +79,7 @@ public class App {
             .database(db)
             .templates("views")
             .sessions(config.get("session.secret"))
-            .ops(config.get("ops.secret"));
+            .ops("ops-authorized-keys");
 
         var home = new HomeController();
         app.get("/", home::index);
@@ -133,7 +143,6 @@ class HomeControllerTest {
                 "db.user=" + name + "\n" +
                 "db.pass=\n" +
                 "session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars\n" +
-                "ops.secret=CHANGE-ME-ops-secret\n" +
                 "\n" +
                 "%dev.port=9000\n" +
                 "%dev.db.url=jdbc:h2:mem:dev\n" +
@@ -217,6 +226,7 @@ jte-classes/
 .idea/
 *.iml
 .DS_Store
+*.key
 """);
 
             System.out.println("Created new Brace project: " + name);

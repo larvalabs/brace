@@ -10,37 +10,96 @@ public class OpsHandler {
     private final JobScheduler jobScheduler;
     private final Mailer mailer;
     private final Router router;
-    private final String opsSecret;
+    private final Set<String> authorizedKeys;
+    private final String tokenSecret;
     private final ErrorStore errorStore;
     private final Cache cache;
     private final JfrProfiler profiler;
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, String opsSecret) {
-        this(stats, jobScheduler, mailer, router, opsSecret, null, null, null);
+                      Router router, Set<String> authorizedKeys, String tokenSecret) {
+        this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, null, null, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, String opsSecret, ErrorStore errorStore) {
-        this(stats, jobScheduler, mailer, router, opsSecret, errorStore, null, null);
+                      Router router, Set<String> authorizedKeys, String tokenSecret,
+                      ErrorStore errorStore) {
+        this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, null, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, String opsSecret, ErrorStore errorStore, Cache cache) {
-        this(stats, jobScheduler, mailer, router, opsSecret, errorStore, cache, null);
+                      Router router, Set<String> authorizedKeys, String tokenSecret,
+                      ErrorStore errorStore, Cache cache) {
+        this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, String opsSecret, ErrorStore errorStore, Cache cache,
-                      JfrProfiler profiler) {
+                      Router router, Set<String> authorizedKeys, String tokenSecret,
+                      ErrorStore errorStore, Cache cache, JfrProfiler profiler) {
         this.stats = stats;
         this.jobScheduler = jobScheduler;
         this.mailer = mailer;
         this.router = router;
-        this.opsSecret = opsSecret;
+        this.authorizedKeys = authorizedKeys;
+        this.tokenSecret = tokenSecret;
         this.errorStore = errorStore;
         this.cache = cache;
         this.profiler = profiler;
+    }
+
+    /**
+     * POST /ops/auth — validate signed timestamp, issue short-lived token.
+     * Body: JSON with "publicKey", "timestamp", "signature" fields.
+     */
+    public Result auth(Request req) {
+        try {
+            String body = req.body();
+            if (body == null || body.isEmpty()) return Result.unauthorized("Missing request body");
+
+            // Simple JSON parsing (no Jackson dependency in OpsHandler)
+            String publicKey = jsonField(body, "publicKey");
+            String timestamp = jsonField(body, "timestamp");
+            String signature = jsonField(body, "signature");
+
+            if (publicKey == null || timestamp == null || signature == null) {
+                return Result.unauthorized("Missing required fields");
+            }
+
+            // Check public key is authorized
+            if (!authorizedKeys.contains(publicKey)) {
+                return Result.unauthorized("Unknown public key");
+            }
+
+            // Check timestamp is not stale (within ±30 seconds)
+            java.time.Instant ts;
+            try {
+                ts = java.time.Instant.parse(timestamp);
+            } catch (Exception e) {
+                return Result.unauthorized("Invalid timestamp");
+            }
+            var now = java.time.Instant.now();
+            if (Math.abs(java.time.Duration.between(ts, now).getSeconds()) > 30) {
+                return Result.unauthorized("Stale timestamp");
+            }
+
+            // Verify signature
+            if (!OpsKeys.verify(timestamp, signature, publicKey)) {
+                return Result.unauthorized("Invalid signature");
+            }
+
+            // Issue token — check for client-requested TTL
+            String ttlField = jsonField(body, "ttlSeconds");
+            int requestedTtl = 3600; // default API TTL: 1 hour
+            if (ttlField != null) {
+                try { requestedTtl = Integer.parseInt(ttlField); } catch (NumberFormatException ignored) {}
+            }
+            int ttl = Math.min(requestedTtl, 86400); // cap at 24 hours
+            String token = OpsToken.create(tokenSecret, ttl);
+            var expiresAt = java.time.Instant.now().plusSeconds(ttl).toString();
+            return Json.of(Map.of("token", token, "expiresAt", expiresAt));
+        } catch (Exception e) {
+            return Result.unauthorized("Authentication failed");
+        }
     }
 
     public Result status(Request req) {
@@ -236,7 +295,9 @@ public class OpsHandler {
 
     public Result dashboard(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
-        return Result.html(OpsDashboard.html(opsSecret, stats, jobScheduler, mailer, errorStore, cache, profiler));
+        // Generate a dashboard token with 2h TTL for htmx polling
+        String dashboardToken = OpsToken.create(tokenSecret, 7200);
+        return Result.html(OpsDashboard.html(dashboardToken, stats, jobScheduler, mailer, errorStore, cache, profiler));
     }
 
     public Result routes(Request req) {
@@ -275,10 +336,33 @@ public class OpsHandler {
     }
 
     private boolean authorize(Request req) {
-        if (opsSecret == null) return false;
-        var headerKey = req.header("X-Ops-Key");
-        if (headerKey != null) return opsSecret.equals(headerKey);
-        return opsSecret.equals(req.param("key"));
+        if (tokenSecret == null) return false;
+        // Check Authorization: Bearer <token> header
+        var authHeader = req.header("Authorization");
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            String token = authHeader.substring(7);
+            if (OpsToken.validate(token, tokenSecret)) return true;
+        }
+        // Check ?token= query param
+        var tokenParam = req.param("token");
+        if (tokenParam != null) {
+            return OpsToken.validate(tokenParam, tokenSecret);
+        }
+        return false;
+    }
+
+    /** Simple JSON field extraction (no dependency on Jackson). */
+    private static String jsonField(String json, String field) {
+        String key = "\"" + field + "\"";
+        int idx = json.indexOf(key);
+        if (idx < 0) return null;
+        int colon = json.indexOf(':', idx + key.length());
+        if (colon < 0) return null;
+        int start = json.indexOf('"', colon + 1);
+        if (start < 0) return null;
+        int end = json.indexOf('"', start + 1);
+        if (end < 0) return null;
+        return json.substring(start + 1, end);
     }
 
     private String formatDuration(Duration d) {
