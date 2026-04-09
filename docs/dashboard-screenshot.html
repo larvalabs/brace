@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Brace Ops</title>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12px; padding: 16px; }
+.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 12px; }
+.header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; }
+.header .meta { color: #565f89; }
+.stats-row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.stat-card { flex: 1; border: 1px solid #30363d; padding: 8px; min-width: 120px; }
+.stat-card .label { color: #565f89; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-card .value { font-size: 20px; font-weight: bold; margin-top: 2px; }
+.stat-card .detail { color: #565f89; font-size: 10px; margin-top: 1px; }
+.section { border: 1px solid #30363d; padding: 10px; margin-bottom: 14px; }
+.section-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
+.two-col { display: flex; gap: 10px; margin-bottom: 14px; }
+.two-col > div { flex: 1; }
+table { border-collapse: collapse; width: 100%; }
+th { text-align: left; color: #565f89; font-size: 9px; text-transform: uppercase; padding: 3px 0; }
+td { padding: 3px 0; }
+.sparkline { display: flex; align-items: flex-end; gap: 1px; height: 45px; }
+.sparkline .bar { flex: 1; min-width: 4px; }
+.sparkline .bar-lo { background: #238636; }
+.sparkline .bar-md { background: #2ea043; }
+.sparkline .bar-hi { background: #3fb950; }
+.sparkline-sm { height: 25px; }
+.sparkline .bar-err { background: #f7768e; }
+.sparkline .bar-heap { background: #bb9af7; }
+.c-blue { color: #7aa2f7; }
+.c-green { color: #9ece6a; }
+.c-purple { color: #bb9af7; }
+.c-amber { color: #e0af68; }
+.c-red { color: #f7768e; }
+.c-cyan { color: #7dcfff; }
+.c-muted { color: #565f89; }
+.pkg-wrap { display: inline-flex; max-width: 30ch; overflow: hidden; justify-content: flex-end; vertical-align: bottom; }
+.pkg { color: #565f89; white-space: nowrap; flex-shrink: 0; }
+.method { color: #c9d1d9; font-weight: bold; }
+.ok-dot { color: #9ece6a; }
+.err-dot { color: #f7768e; }
+.btn { background: transparent; color: #7aa2f7; border: 1px solid #30363d; padding: 2px 8px; cursor: pointer; font-family: inherit; font-size: 11px; }
+.btn-danger { color: #f7768e; }
+.tab-bar { display: flex; gap: 0; margin-bottom: 0; }
+.tab { background: transparent; border: 1px solid #30363d; border-bottom: none; padding: 4px 16px; cursor: pointer; color: #565f89; font-family: inherit; font-size: 11px; }
+.tab.active { color: #7aa2f7; border-color: #7aa2f7; border-bottom: 1px solid #0d1117; margin-bottom: -1px; z-index: 1; position: relative; }
+.tab-content { border: 1px solid #30363d; border-top: 1px solid #7aa2f7; padding: 10px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+<span class="title">┌ BRACE</span>
+<span class="meta">↑ 2d 14h 23m │ Java 21.0.2 │ started 2026-04-06 09:14 │ 5s refresh</span>
+</div>
+
+<div class="stats-row">
+<div class="stat-card"><div class="label">Requests</div><div class="value c-blue">284,731</div><div class="detail"></div></div>
+<div class="stat-card"><div class="label">Error Rate</div><div class="value c-green">0.2%</div><div class="detail">487 total</div></div>
+<div class="stat-card"><div class="label">Heap</div><div class="value c-purple">187M</div><div class="detail">/ 512M</div></div>
+<div class="stat-card"><div class="label">CPU</div><div class="value c-amber">8%</div><div class="detail"></div></div>
+<div class="stat-card"><div class="label">Threads</div><div class="value c-cyan">32</div><div class="detail">24 daemon</div></div>
+<div class="stat-card"><div class="label">GC Avg</div><div class="value c-green">4ms</div><div class="detail">1,847 pauses</div></div>
+<div class="stat-card"><div class="label">Cache</div><div class="value c-amber">2,461</div><div class="detail">entries (96% hit rate)</div></div>
+<div class="stat-card"><div class="label">Sent</div><div class="value c-cyan">142</div><div class="detail">since start</div></div>
+</div>
+
+<!-- Sparklines -->
+<div class="section">
+<div style="color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Requests / Minute <span style="float:right">last 60 / 60 min</span></div>
+<div style="display:flex;align-items:stretch;gap:6px">
+<div style="display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;">
+<span>312</span><span>0</span></div>
+<div class="sparkline" style="flex:1">
+<div class="bar bar-lo" style="height:35%"></div>
+<div class="bar bar-lo" style="height:28%"></div>
+<div class="bar bar-lo" style="height:32%"></div>
+<div class="bar bar-md" style="height:45%"></div>
+<div class="bar bar-md" style="height:52%"></div>
+<div class="bar bar-md" style="height:48%"></div>
+<div class="bar bar-lo" style="height:38%"></div>
+<div class="bar bar-lo" style="height:30%"></div>
+<div class="bar bar-lo" style="height:25%"></div>
+<div class="bar bar-md" style="height:42%"></div>
+<div class="bar bar-md" style="height:55%"></div>
+<div class="bar bar-md" style="height:62%"></div>
+<div class="bar bar-hi" style="height:78%"></div>
+<div class="bar bar-hi" style="height:85%"></div>
+<div class="bar bar-hi" style="height:92%"></div>
+<div class="bar bar-hi" style="height:100%"></div>
+<div class="bar bar-hi" style="height:95%"></div>
+<div class="bar bar-hi" style="height:88%"></div>
+<div class="bar bar-hi" style="height:82%"></div>
+<div class="bar bar-md" style="height:70%"></div>
+<div class="bar bar-md" style="height:65%"></div>
+<div class="bar bar-md" style="height:58%"></div>
+<div class="bar bar-md" style="height:62%"></div>
+<div class="bar bar-md" style="height:68%"></div>
+<div class="bar bar-hi" style="height:75%"></div>
+<div class="bar bar-hi" style="height:80%"></div>
+<div class="bar bar-hi" style="height:85%"></div>
+<div class="bar bar-hi" style="height:78%"></div>
+<div class="bar bar-md" style="height:65%"></div>
+<div class="bar bar-md" style="height:55%"></div>
+<div class="bar bar-md" style="height:50%"></div>
+<div class="bar bar-md" style="height:48%"></div>
+<div class="bar bar-md" style="height:52%"></div>
+<div class="bar bar-md" style="height:58%"></div>
+<div class="bar bar-md" style="height:62%"></div>
+<div class="bar bar-md" style="height:55%"></div>
+<div class="bar bar-md" style="height:48%"></div>
+<div class="bar bar-lo" style="height:40%"></div>
+<div class="bar bar-lo" style="height:35%"></div>
+<div class="bar bar-lo" style="height:32%"></div>
+<div class="bar bar-lo" style="height:38%"></div>
+<div class="bar bar-md" style="height:45%"></div>
+<div class="bar bar-md" style="height:52%"></div>
+<div class="bar bar-md" style="height:58%"></div>
+<div class="bar bar-md" style="height:65%"></div>
+<div class="bar bar-hi" style="height:72%"></div>
+<div class="bar bar-hi" style="height:78%"></div>
+<div class="bar bar-hi" style="height:82%"></div>
+<div class="bar bar-hi" style="height:88%"></div>
+<div class="bar bar-hi" style="height:92%"></div>
+<div class="bar bar-hi" style="height:85%"></div>
+<div class="bar bar-hi" style="height:78%"></div>
+<div class="bar bar-md" style="height:68%"></div>
+<div class="bar bar-md" style="height:60%"></div>
+<div class="bar bar-md" style="height:55%"></div>
+<div class="bar bar-md" style="height:50%"></div>
+<div class="bar bar-md" style="height:48%"></div>
+<div class="bar bar-md" style="height:52%"></div>
+<div class="bar bar-md" style="height:58%"></div>
+<div class="bar bar-md" style="height:62%"></div>
+</div></div>
+
+<div style="color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;">Errors / Minute</div>
+<div style="display:flex;align-items:stretch;gap:6px">
+<div style="display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;">
+<span>4</span><span>0</span></div>
+<div class="sparkline sparkline-sm" style="flex:1">
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar bar-err" style="height:50%"></div>
+<div class="bar bar-err" style="height:100%"></div>
+<div class="bar bar-err" style="height:25%"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar bar-err" style="height:25%"></div>
+<div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+<div class="bar"></div><div class="bar"></div>
+</div></div>
+
+<div style="color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;">Heap MB</div>
+<div style="display:flex;align-items:stretch;gap:6px">
+<div style="display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;">
+<span>245</span><span>142</span></div>
+<div class="sparkline sparkline-sm" style="flex:1">
+<div class="bar bar-heap" style="height:60%"></div>
+<div class="bar bar-heap" style="height:62%"></div>
+<div class="bar bar-heap" style="height:65%"></div>
+<div class="bar bar-heap" style="height:68%"></div>
+<div class="bar bar-heap" style="height:72%"></div>
+<div class="bar bar-heap" style="height:75%"></div>
+<div class="bar bar-heap" style="height:78%"></div>
+<div class="bar bar-heap" style="height:82%"></div>
+<div class="bar bar-heap" style="height:85%"></div>
+<div class="bar bar-heap" style="height:88%"></div>
+<div class="bar bar-heap" style="height:92%"></div>
+<div class="bar bar-heap" style="height:95%"></div>
+<div class="bar bar-heap" style="height:98%"></div>
+<div class="bar bar-heap" style="height:100%"></div>
+<div class="bar bar-heap" style="height:60%"></div>
+<div class="bar bar-heap" style="height:58%"></div>
+<div class="bar bar-heap" style="height:62%"></div>
+<div class="bar bar-heap" style="height:65%"></div>
+<div class="bar bar-heap" style="height:68%"></div>
+<div class="bar bar-heap" style="height:72%"></div>
+<div class="bar bar-heap" style="height:75%"></div>
+<div class="bar bar-heap" style="height:78%"></div>
+<div class="bar bar-heap" style="height:80%"></div>
+<div class="bar bar-heap" style="height:82%"></div>
+<div class="bar bar-heap" style="height:85%"></div>
+<div class="bar bar-heap" style="height:88%"></div>
+<div class="bar bar-heap" style="height:90%"></div>
+<div class="bar bar-heap" style="height:92%"></div>
+<div class="bar bar-heap" style="height:58%"></div>
+<div class="bar bar-heap" style="height:60%"></div>
+<div class="bar bar-heap" style="height:62%"></div>
+<div class="bar bar-heap" style="height:65%"></div>
+<div class="bar bar-heap" style="height:68%"></div>
+<div class="bar bar-heap" style="height:70%"></div>
+<div class="bar bar-heap" style="height:72%"></div>
+<div class="bar bar-heap" style="height:75%"></div>
+<div class="bar bar-heap" style="height:78%"></div>
+<div class="bar bar-heap" style="height:80%"></div>
+<div class="bar bar-heap" style="height:82%"></div>
+<div class="bar bar-heap" style="height:85%"></div>
+<div class="bar bar-heap" style="height:88%"></div>
+<div class="bar bar-heap" style="height:90%"></div>
+<div class="bar bar-heap" style="height:92%"></div>
+<div class="bar bar-heap" style="height:95%"></div>
+<div class="bar bar-heap" style="height:98%"></div>
+<div class="bar bar-heap" style="height:100%"></div>
+<div class="bar bar-heap" style="height:62%"></div>
+<div class="bar bar-heap" style="height:58%"></div>
+<div class="bar bar-heap" style="height:60%"></div>
+<div class="bar bar-heap" style="height:62%"></div>
+<div class="bar bar-heap" style="height:65%"></div>
+<div class="bar bar-heap" style="height:68%"></div>
+<div class="bar bar-heap" style="height:70%"></div>
+<div class="bar bar-heap" style="height:72%"></div>
+<div class="bar bar-heap" style="height:75%"></div>
+<div class="bar bar-heap" style="height:78%"></div>
+<div class="bar bar-heap" style="height:80%"></div>
+<div class="bar bar-heap" style="height:82%"></div>
+<div class="bar bar-heap" style="height:85%"></div>
+<div class="bar bar-heap" style="height:88%"></div>
+</div></div>
+</div>
+
+<!-- Custom Metrics -->
+<div class="section">
+<div class="section-head c-blue">Custom Metrics</div>
+
+<div style="margin-bottom:8px"><span class="label" style="color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">talks.created</span> <span class="value" style="color:#7dcfff;font-size:14px;font-weight:bold">24/min</span></div>
+<div class="sparkline sparkline-sm">
+<div class="bar" style="height:15%;background:#7dcfff"></div>
+<div class="bar" style="height:20%;background:#7dcfff"></div>
+<div class="bar" style="height:18%;background:#7dcfff"></div>
+<div class="bar" style="height:25%;background:#7dcfff"></div>
+<div class="bar" style="height:30%;background:#7dcfff"></div>
+<div class="bar" style="height:35%;background:#7dcfff"></div>
+<div class="bar" style="height:42%;background:#7dcfff"></div>
+<div class="bar" style="height:48%;background:#7dcfff"></div>
+<div class="bar" style="height:55%;background:#7dcfff"></div>
+<div class="bar" style="height:62%;background:#7dcfff"></div>
+<div class="bar" style="height:70%;background:#7dcfff"></div>
+<div class="bar" style="height:78%;background:#7dcfff"></div>
+<div class="bar" style="height:85%;background:#7dcfff"></div>
+<div class="bar" style="height:92%;background:#7dcfff"></div>
+<div class="bar" style="height:100%;background:#7dcfff"></div>
+<div class="bar" style="height:95%;background:#7dcfff"></div>
+<div class="bar" style="height:88%;background:#7dcfff"></div>
+<div class="bar" style="height:80%;background:#7dcfff"></div>
+<div class="bar" style="height:72%;background:#7dcfff"></div>
+<div class="bar" style="height:65%;background:#7dcfff"></div>
+<div class="bar" style="height:58%;background:#7dcfff"></div>
+<div class="bar" style="height:52%;background:#7dcfff"></div>
+<div class="bar" style="height:48%;background:#7dcfff"></div>
+<div class="bar" style="height:55%;background:#7dcfff"></div>
+<div class="bar" style="height:62%;background:#7dcfff"></div>
+<div class="bar" style="height:68%;background:#7dcfff"></div>
+<div class="bar" style="height:72%;background:#7dcfff"></div>
+<div class="bar" style="height:78%;background:#7dcfff"></div>
+<div class="bar" style="height:82%;background:#7dcfff"></div>
+<div class="bar" style="height:75%;background:#7dcfff"></div>
+<div class="bar" style="height:68%;background:#7dcfff"></div>
+<div class="bar" style="height:60%;background:#7dcfff"></div>
+<div class="bar" style="height:55%;background:#7dcfff"></div>
+<div class="bar" style="height:50%;background:#7dcfff"></div>
+<div class="bar" style="height:45%;background:#7dcfff"></div>
+<div class="bar" style="height:42%;background:#7dcfff"></div>
+<div class="bar" style="height:48%;background:#7dcfff"></div>
+<div class="bar" style="height:55%;background:#7dcfff"></div>
+<div class="bar" style="height:62%;background:#7dcfff"></div>
+<div class="bar" style="height:70%;background:#7dcfff"></div>
+<div class="bar" style="height:78%;background:#7dcfff"></div>
+<div class="bar" style="height:85%;background:#7dcfff"></div>
+<div class="bar" style="height:80%;background:#7dcfff"></div>
+<div class="bar" style="height:72%;background:#7dcfff"></div>
+<div class="bar" style="height:65%;background:#7dcfff"></div>
+<div class="bar" style="height:58%;background:#7dcfff"></div>
+<div class="bar" style="height:52%;background:#7dcfff"></div>
+<div class="bar" style="height:48%;background:#7dcfff"></div>
+<div class="bar" style="height:45%;background:#7dcfff"></div>
+<div class="bar" style="height:50%;background:#7dcfff"></div>
+<div class="bar" style="height:55%;background:#7dcfff"></div>
+<div class="bar" style="height:60%;background:#7dcfff"></div>
+<div class="bar" style="height:65%;background:#7dcfff"></div>
+<div class="bar" style="height:70%;background:#7dcfff"></div>
+<div class="bar" style="height:75%;background:#7dcfff"></div>
+<div class="bar" style="height:72%;background:#7dcfff"></div>
+<div class="bar" style="height:68%;background:#7dcfff"></div>
+<div class="bar" style="height:62%;background:#7dcfff"></div>
+<div class="bar" style="height:58%;background:#7dcfff"></div>
+<div class="bar" style="height:55%;background:#7dcfff"></div>
+<div class="bar" style="height:60%;background:#7dcfff"></div>
+</div>
+
+<div style="margin-top:10px;margin-bottom:8px"><span class="label" style="color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">queue.depth</span> <span class="value" style="color:#e0af68;font-size:14px;font-weight:bold">18</span></div>
+<div class="sparkline sparkline-sm">
+<div class="bar" style="height:30%;background:#e0af68"></div>
+<div class="bar" style="height:32%;background:#e0af68"></div>
+<div class="bar" style="height:35%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+<div class="bar" style="height:45%;background:#e0af68"></div>
+<div class="bar" style="height:50%;background:#e0af68"></div>
+<div class="bar" style="height:55%;background:#e0af68"></div>
+<div class="bar" style="height:60%;background:#e0af68"></div>
+<div class="bar" style="height:65%;background:#e0af68"></div>
+<div class="bar" style="height:70%;background:#e0af68"></div>
+<div class="bar" style="height:75%;background:#e0af68"></div>
+<div class="bar" style="height:80%;background:#e0af68"></div>
+<div class="bar" style="height:85%;background:#e0af68"></div>
+<div class="bar" style="height:90%;background:#e0af68"></div>
+<div class="bar" style="height:95%;background:#e0af68"></div>
+<div class="bar" style="height:100%;background:#e0af68"></div>
+<div class="bar" style="height:90%;background:#e0af68"></div>
+<div class="bar" style="height:80%;background:#e0af68"></div>
+<div class="bar" style="height:70%;background:#e0af68"></div>
+<div class="bar" style="height:60%;background:#e0af68"></div>
+<div class="bar" style="height:50%;background:#e0af68"></div>
+<div class="bar" style="height:45%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+<div class="bar" style="height:38%;background:#e0af68"></div>
+<div class="bar" style="height:35%;background:#e0af68"></div>
+<div class="bar" style="height:32%;background:#e0af68"></div>
+<div class="bar" style="height:30%;background:#e0af68"></div>
+<div class="bar" style="height:28%;background:#e0af68"></div>
+<div class="bar" style="height:30%;background:#e0af68"></div>
+<div class="bar" style="height:35%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+<div class="bar" style="height:45%;background:#e0af68"></div>
+<div class="bar" style="height:50%;background:#e0af68"></div>
+<div class="bar" style="height:55%;background:#e0af68"></div>
+<div class="bar" style="height:58%;background:#e0af68"></div>
+<div class="bar" style="height:55%;background:#e0af68"></div>
+<div class="bar" style="height:50%;background:#e0af68"></div>
+<div class="bar" style="height:45%;background:#e0af68"></div>
+<div class="bar" style="height:42%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+<div class="bar" style="height:38%;background:#e0af68"></div>
+<div class="bar" style="height:35%;background:#e0af68"></div>
+<div class="bar" style="height:32%;background:#e0af68"></div>
+<div class="bar" style="height:35%;background:#e0af68"></div>
+<div class="bar" style="height:38%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+<div class="bar" style="height:42%;background:#e0af68"></div>
+<div class="bar" style="height:45%;background:#e0af68"></div>
+<div class="bar" style="height:42%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+<div class="bar" style="height:38%;background:#e0af68"></div>
+<div class="bar" style="height:35%;background:#e0af68"></div>
+<div class="bar" style="height:32%;background:#e0af68"></div>
+<div class="bar" style="height:35%;background:#e0af68"></div>
+<div class="bar" style="height:38%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+<div class="bar" style="height:42%;background:#e0af68"></div>
+<div class="bar" style="height:45%;background:#e0af68"></div>
+<div class="bar" style="height:42%;background:#e0af68"></div>
+<div class="bar" style="height:40%;background:#e0af68"></div>
+</div>
+
+<div style="margin-top:10px;margin-bottom:8px"><span class="label" style="color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">api.external</span> <span class="value" style="color:#7aa2f7;font-size:14px;font-weight:bold">142.3ms avg</span></div>
+<div class="sparkline sparkline-sm">
+<div class="bar" style="height:45%;background:#7aa2f7"></div>
+<div class="bar" style="height:48%;background:#7aa2f7"></div>
+<div class="bar" style="height:52%;background:#7aa2f7"></div>
+<div class="bar" style="height:55%;background:#7aa2f7"></div>
+<div class="bar" style="height:60%;background:#7aa2f7"></div>
+<div class="bar" style="height:65%;background:#7aa2f7"></div>
+<div class="bar" style="height:70%;background:#7aa2f7"></div>
+<div class="bar" style="height:75%;background:#7aa2f7"></div>
+<div class="bar" style="height:80%;background:#7aa2f7"></div>
+<div class="bar" style="height:85%;background:#7aa2f7"></div>
+<div class="bar" style="height:90%;background:#7aa2f7"></div>
+<div class="bar" style="height:95%;background:#7aa2f7"></div>
+<div class="bar" style="height:100%;background:#7aa2f7"></div>
+<div class="bar" style="height:92%;background:#7aa2f7"></div>
+<div class="bar" style="height:85%;background:#7aa2f7"></div>
+<div class="bar" style="height:78%;background:#7aa2f7"></div>
+<div class="bar" style="height:72%;background:#7aa2f7"></div>
+<div class="bar" style="height:68%;background:#7aa2f7"></div>
+<div class="bar" style="height:65%;background:#7aa2f7"></div>
+<div class="bar" style="height:62%;background:#7aa2f7"></div>
+<div class="bar" style="height:58%;background:#7aa2f7"></div>
+<div class="bar" style="height:55%;background:#7aa2f7"></div>
+<div class="bar" style="height:52%;background:#7aa2f7"></div>
+<div class="bar" style="height:50%;background:#7aa2f7"></div>
+<div class="bar" style="height:48%;background:#7aa2f7"></div>
+<div class="bar" style="height:50%;background:#7aa2f7"></div>
+<div class="bar" style="height:55%;background:#7aa2f7"></div>
+<div class="bar" style="height:60%;background:#7aa2f7"></div>
+<div class="bar" style="height:65%;background:#7aa2f7"></div>
+<div class="bar" style="height:70%;background:#7aa2f7"></div>
+<div class="bar" style="height:75%;background:#7aa2f7"></div>
+<div class="bar" style="height:72%;background:#7aa2f7"></div>
+<div class="bar" style="height:68%;background:#7aa2f7"></div>
+<div class="bar" style="height:65%;background:#7aa2f7"></div>
+<div class="bar" style="height:62%;background:#7aa2f7"></div>
+<div class="bar" style="height:60%;background:#7aa2f7"></div>
+<div class="bar" style="height:58%;background:#7aa2f7"></div>
+<div class="bar" style="height:55%;background:#7aa2f7"></div>
+<div class="bar" style="height:52%;background:#7aa2f7"></div>
+<div class="bar" style="height:55%;background:#7aa2f7"></div>
+<div class="bar" style="height:58%;background:#7aa2f7"></div>
+<div class="bar" style="height:62%;background:#7aa2f7"></div>
+<div class="bar" style="height:65%;background:#7aa2f7"></div>
+<div class="bar" style="height:68%;background:#7aa2f7"></div>
+<div class="bar" style="height:72%;background:#7aa2f7"></div>
+<div class="bar" style="height:75%;background:#7aa2f7"></div>
+<div class="bar" style="height:78%;background:#7aa2f7"></div>
+<div class="bar" style="height:80%;background:#7aa2f7"></div>
+<div class="bar" style="height:78%;background:#7aa2f7"></div>
+<div class="bar" style="height:75%;background:#7aa2f7"></div>
+<div class="bar" style="height:72%;background:#7aa2f7"></div>
+<div class="bar" style="height:68%;background:#7aa2f7"></div>
+<div class="bar" style="height:65%;background:#7aa2f7"></div>
+<div class="bar" style="height:62%;background:#7aa2f7"></div>
+<div class="bar" style="height:60%;background:#7aa2f7"></div>
+<div class="bar" style="height:58%;background:#7aa2f7"></div>
+<div class="bar" style="height:55%;background:#7aa2f7"></div>
+<div class="bar" style="height:58%;background:#7aa2f7"></div>
+<div class="bar" style="height:60%;background:#7aa2f7"></div>
+<div class="bar" style="height:62%;background:#7aa2f7"></div>
+</div>
+</div>
+
+<!-- Hot Methods + Slowest Routes -->
+<div class="two-col">
+<div class="section">
+<div class="section-head c-blue">Hot Methods <span class="c-muted" style="font-weight:normal">— 5 min window</span></div>
+<table>
+<tr><th>Method</th><th style="text-align:right">Samples</th></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">io.confmgr.controllers</span></span><span class="method">.TalkController.list</span></td><td style="text-align:right" class="c-amber">1,247</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">io.brace</span></span><span class="method">.Database.query</span></td><td style="text-align:right" class="c-amber">893</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">io.brace</span></span><span class="method">.Router.match</span></td><td style="text-align:right" class="c-amber">651</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">io.confmgr.controllers</span></span><span class="method">.SpeakerController.show</span></td><td style="text-align:right" class="c-amber">428</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">io.brace</span></span><span class="method">.Session.load</span></td><td style="text-align:right" class="c-amber">312</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">com.zaxxer.hikari.pool</span></span><span class="method">.HikariPool.getConnection</span></td><td style="text-align:right" class="c-amber">287</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">io.confmgr.controllers</span></span><span class="method">.ScheduleController.index</span></td><td style="text-align:right" class="c-amber">198</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">org.hibernate.query.sql.internal</span></span><span class="method">.NativeQueryImpl.list</span></td><td style="text-align:right" class="c-amber">145</td></tr>
+</table>
+</div>
+
+<div class="section">
+<div class="section-head c-blue">Slowest Routes <span class="c-muted" style="font-weight:normal">— avg latency</span></div>
+<table>
+<tr><th>Route</th><th style="text-align:right">Avg</th><th style="text-align:right">Calls</th></tr>
+<tr><td><span class="c-green">GET</span> /api/talks</td><td style="text-align:right" class="c-amber">23ms</td><td style="text-align:right" class="c-muted">14,204</td></tr>
+<tr><td><span class="c-amber">POST</span> /api/talks</td><td style="text-align:right" class="c-amber">18ms</td><td style="text-align:right" class="c-muted">2,847</td></tr>
+<tr><td><span class="c-green">GET</span> /api/speakers/{id}</td><td style="text-align:right" class="c-amber">12ms</td><td style="text-align:right" class="c-muted">8,301</td></tr>
+<tr><td><span class="c-green">GET</span> /schedule</td><td style="text-align:right" class="c-amber">9ms</td><td style="text-align:right" class="c-muted">23,412</td></tr>
+<tr><td><span class="c-red">DELETE</span> /api/talks/{id}</td><td style="text-align:right" class="c-amber">7ms</td><td style="text-align:right" class="c-muted">142</td></tr>
+</table>
+</div>
+</div>
+
+<!-- Allocations + GC Pauses -->
+<div class="two-col">
+<div class="section">
+<div class="section-head c-purple">Top Allocations <span class="c-muted" style="font-weight:normal">— 5 min window</span></div>
+<table>
+<tr><th>Class</th><th style="text-align:right">Size</th></tr>
+<tr><td><span class="method">byte[]</span></td><td style="text-align:right" class="c-purple">48 MB</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">java.lang</span></span><span class="method">.String</span></td><td style="text-align:right" class="c-purple">12 MB</td></tr>
+<tr><td><span class="method">int[]</span></td><td style="text-align:right" class="c-purple">3 MB</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">java.util</span></span><span class="method">.HashMap$Node</span></td><td style="text-align:right" class="c-purple">1 MB</td></tr>
+<tr><td><span class="pkg-wrap"><span class="pkg">java.lang</span></span><span class="method">.Object[]</span></td><td style="text-align:right" class="c-purple">982 KB</td></tr>
+</table>
+</div>
+
+<div class="section">
+<div class="section-head c-red">Recent GC Pauses</div>
+<table>
+<tr><th>Time</th><th>Collector</th><th>Cause</th><th style="text-align:right">Duration</th></tr>
+<tr><td class="c-muted">14:23:41</td><td>G1 Young</td><td class="c-muted">Allocation</td><td style="text-align:right" class="c-green">2ms</td></tr>
+<tr><td class="c-muted">14:22:58</td><td>G1 Young</td><td class="c-muted">Allocation</td><td style="text-align:right" class="c-green">3ms</td></tr>
+<tr><td class="c-muted">14:21:15</td><td>G1 Mixed</td><td class="c-muted">Heap Occupancy</td><td style="text-align:right" class="c-amber">18ms</td></tr>
+<tr><td class="c-muted">14:18:02</td><td>G1 Full</td><td class="c-muted">Ergonomic</td><td style="text-align:right;font-weight:bold" class="c-red">142ms</td></tr>
+<tr><td class="c-muted">14:17:51</td><td>G1 Young</td><td class="c-muted">Allocation</td><td style="text-align:right" class="c-green">1ms</td></tr>
+</table>
+</div>
+</div>
+
+<!-- Error tracking -->
+<div class="section">
+<div class="section-head c-red">Recent Errors <span class="c-muted" style="font-weight:normal">— in-memory, 3 tracked</span></div>
+<table>
+<tr><th>Type</th><th>Route</th><th style="text-align:right">Count</th><th style="text-align:right">Last Seen</th></tr>
+<tr><td class="c-red">NullPointerException</td><td>GET /api/speakers/{id}</td><td style="text-align:right">12</td><td style="text-align:right" class="c-muted">14:21:03</td></tr>
+<tr><td class="c-red">SQLException</td><td>POST /api/talks</td><td style="text-align:right">3</td><td style="text-align:right" class="c-muted">14:07:45</td></tr>
+<tr><td class="c-red">IllegalStateException</td><td>GET /schedule</td><td style="text-align:right">1</td><td style="text-align:right" class="c-muted">13:42:18</td></tr>
+</table>
+</div>
+
+<!-- Persisted error tracking tabs -->
+<div class="tab-bar">
+<div class="tab active">Unresolved (2)</div>
+<div class="tab">Resolved (5)</div>
+</div>
+<div class="tab-content">
+<table>
+<tr><th>Type</th><th>Route</th><th style="text-align:right">Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>
+<tr><td class="c-red" style="cursor:pointer">NullPointerException</td><td>GET /api/speakers/{id}</td><td style="text-align:right">12</td><td class="c-muted">2026-04-06</td><td class="c-muted">2026-04-08</td><td><button class="btn" style="color:#9ece6a">resolve</button></td></tr>
+<tr><td class="c-red" style="cursor:pointer">SQLException</td><td>POST /api/talks</td><td style="text-align:right">3</td><td class="c-muted">2026-04-08</td><td class="c-muted">2026-04-08</td><td><button class="btn" style="color:#9ece6a">resolve</button></td></tr>
+</table>
+</div>
+
+<!-- Jobs + Cache -->
+<div class="two-col">
+<div class="section">
+<div class="section-head c-cyan">Scheduled Jobs</div>
+<table>
+<tr><th>Name</th><th>Schedule</th><th>Status</th><th style="text-align:right">Last Run</th></tr>
+<tr><td>CleanupExpired</td><td class="c-muted">every 1h</td><td><span class="ok-dot">● </span>ok</td><td style="text-align:right" class="c-muted">12m ago (45ms)</td></tr>
+<tr><td>SendDigest</td><td class="c-muted">daily at 08:00</td><td><span class="ok-dot">● </span>ok</td><td style="text-align:right" class="c-muted">6h ago (1.2s)</td></tr>
+<tr><td>SyncExternal</td><td class="c-muted">every 15m</td><td><span class="err-dot">● </span>error</td><td style="text-align:right" class="c-muted">3m ago (timeout)</td></tr>
+</table>
+</div>
+
+<div class="section">
+<div class="section-head c-amber">Cache <span style="float:right;font-weight:normal;text-transform:none;letter-spacing:0"><button class="btn btn-danger">[clear all]</button></span></div>
+<div style="display:flex;gap:16px;margin-bottom:4px;">
+<div><span class="c-muted" style="font-size:9px">ENTRIES</span><br/><span class="c-amber" style="font-weight:bold">2,461</span></div>
+<div><span class="c-muted" style="font-size:9px">HIT RATE</span><br/><span class="c-green" style="font-weight:bold">96%</span></div>
+<div><span class="c-muted" style="font-size:9px">MISSES</span><br/><span class="c-muted" style="font-weight:bold">1,847</span></div>
+<div><span class="c-muted" style="font-size:9px">EVICTIONS</span><br/><span class="c-muted" style="font-weight:bold">312</span></div>
+</div>
+</div>
+</div>
+
+<!-- Status Codes -->
+<div class="section">
+<div class="section-head c-muted">Status Codes</div>
+<table>
+<tr><th>Code</th><th style="text-align:right">Count</th></tr>
+<tr><td class="c-green">200</td><td style="text-align:right">271,842</td></tr>
+<tr><td class="c-blue">301</td><td style="text-align:right">4,123</td></tr>
+<tr><td class="c-blue">304</td><td style="text-align:right">7,891</td></tr>
+<tr><td class="c-amber">404</td><td style="text-align:right">388</td></tr>
+<tr><td class="c-red">500</td><td style="text-align:right">487</td></tr>
+</table>
+</div>
+
+</body>
+</html>
