@@ -238,6 +238,22 @@ app.post("/upload", (req, db) -> {
 });
 ```
 
+## Custom Metrics
+
+Built-in counters, gauges, and timers — no external metrics server needed. Metrics auto-render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
+
+```java
+// Counter — tracks rate (events per minute)
+Stats.counter("talks.created");
+Stats.counter("bytes.uploaded", file.size());
+
+// Gauge — samples a value each minute
+Stats.gauge("queue.depth", () -> queue.size());
+
+// Timer — tracks count, avg, and max duration
+Stats.timer("api.external", durationMs);
+```
+
 ## Cache
 
 ```java
