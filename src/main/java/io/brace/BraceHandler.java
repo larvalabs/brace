@@ -24,11 +24,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final List<Middleware.BoundAfter> afterMiddleware;
     private final DatabaseFactory databaseFactory;
     private final String sessionSecret;
+    private final SessionOptions sessionOptions;
     private final Stats stats;
     private final ErrorStore errorStore;
     private final List<StaticFileMapping> staticFileMappings;
     private final long maxUploadSize;
     private final Storage storage;
+    private final TrustedProxies trustedProxies;
     private final byte[] htmxJs;
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
@@ -38,14 +40,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware) {
-        this(router, beforeMiddleware, afterMiddleware, null, null, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
+        this(router, beforeMiddleware, afterMiddleware, null, null, null, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE, null, null);
     }
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, null, null, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE, null, null);
     }
 
     public BraceHandler(Router router,
@@ -53,7 +55,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         List<Middleware.BoundAfter> afterMiddleware,
                         DatabaseFactory databaseFactory,
                         String sessionSecret) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, null, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE, null, null);
     }
 
     public BraceHandler(Router router,
@@ -62,7 +64,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         DatabaseFactory databaseFactory,
                         String sessionSecret,
                         Stats stats) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, stats, null, List.of(), DEFAULT_MAX_UPLOAD_SIZE, null, null);
     }
 
     public BraceHandler(Router router,
@@ -73,7 +75,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         Stats stats,
                         ErrorStore errorStore,
                         List<StaticFileMapping> staticFileMappings) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, staticFileMappings, DEFAULT_MAX_UPLOAD_SIZE);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, stats, errorStore, staticFileMappings, DEFAULT_MAX_UPLOAD_SIZE, null, null);
     }
 
     public BraceHandler(Router router,
@@ -85,7 +87,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         ErrorStore errorStore,
                         List<StaticFileMapping> staticFileMappings,
                         long maxUploadSize) {
-        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, staticFileMappings, maxUploadSize, null);
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, stats, errorStore, staticFileMappings, maxUploadSize, null, null);
     }
 
     public BraceHandler(Router router,
@@ -98,16 +100,33 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         List<StaticFileMapping> staticFileMappings,
                         long maxUploadSize,
                         Storage storage) {
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, null, stats, errorStore, staticFileMappings, maxUploadSize, storage, null);
+    }
+
+    public BraceHandler(Router router,
+                        List<Middleware.BoundBefore> beforeMiddleware,
+                        List<Middleware.BoundAfter> afterMiddleware,
+                        DatabaseFactory databaseFactory,
+                        String sessionSecret,
+                        SessionOptions sessionOptions,
+                        Stats stats,
+                        ErrorStore errorStore,
+                        List<StaticFileMapping> staticFileMappings,
+                        long maxUploadSize,
+                        Storage storage,
+                        TrustedProxies trustedProxies) {
         this.router = router;
         this.beforeMiddleware = beforeMiddleware;
         this.afterMiddleware = afterMiddleware;
         this.databaseFactory = databaseFactory;
         this.sessionSecret = sessionSecret;
+        this.sessionOptions = sessionOptions;
         this.stats = stats;
         this.errorStore = errorStore;
         this.staticFileMappings = staticFileMappings;
         this.maxUploadSize = maxUploadSize;
         this.storage = storage;
+        this.trustedProxies = trustedProxies;
         byte[] htmxBytes = null;
         try {
             var stream = BraceHandler.class.getResourceAsStream("/brace/htmx.min.js");
@@ -155,9 +174,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Match route
             RouteMatch match = router.match(method, path);
 
+            // Extract remote address from socket
+            String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
+
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
-            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles);
+            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles, remoteAddr, trustedProxies);
             if (storage != null) {
                 braceRequest.setStorage(storage);
             }
@@ -282,8 +304,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Write session cookie if modified
             if (session != null && session.isModified() && sessionSecret != null) {
-                result.header("Set-Cookie",
-                    "brace_session=" + session.toCookie(sessionSecret) + "; Path=/; HttpOnly; SameSite=Lax");
+                String cookieValue = session.toCookie(sessionSecret);
+                if (sessionOptions != null) {
+                    result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
+                } else {
+                    // Fallback for backward compatibility
+                    result.header("Set-Cookie",
+                        "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
+                }
             }
 
             // Run after middleware

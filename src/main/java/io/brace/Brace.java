@@ -22,6 +22,7 @@ public class Brace {
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
     private String sessionSecret;
+    private SessionOptions sessionOptions;
     private TemplateEngine templateEngine;
     private Mailer mailer;
     private Server server;
@@ -38,6 +39,7 @@ public class Brace {
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
+    private TrustedProxies trustedProxies;
 
     public static Brace app() {
         return new Brace();
@@ -54,6 +56,16 @@ public class Brace {
 
     public Brace storage(Storage storage) {
         this.storage = storage;
+        return this;
+    }
+
+    public Brace trustedProxies(String... cidrs) {
+        this.trustedProxies = new TrustedProxies(cidrs);
+        return this;
+    }
+
+    public Brace trustedProxies(List<String> cidrs) {
+        this.trustedProxies = new TrustedProxies(cidrs);
         return this;
     }
 
@@ -79,6 +91,10 @@ public class Brace {
         return sessionSecret;
     }
 
+    SessionOptions sessionOptions() {
+        return sessionOptions;
+    }
+
     Mailer mailer() {
         return mailer;
     }
@@ -90,6 +106,13 @@ public class Brace {
 
     public Brace sessions(String secret) {
         this.sessionSecret = secret;
+        this.sessionOptions = SessionOptions.of(secret);
+        return this;
+    }
+
+    public Brace sessions(SessionOptions options) {
+        this.sessionSecret = options.secret();
+        this.sessionOptions = options;
         return this;
     }
 
@@ -359,7 +382,7 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, List.copyOf(staticFileMappings), maxUploadSize, storage);
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, List.copyOf(staticFileMappings), maxUploadSize, storage, trustedProxies);
 
         if (!wsRoutes.isEmpty()) {
             // Wrap with WebSocketUpgradeHandler for WebSocket support

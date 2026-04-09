@@ -17,12 +17,12 @@ class RateLimiterTest {
 
     private Request fakeRequest(String ip) {
         return new Request("GET", "/test", Map.of(), Map.of(),
-            Map.of("Remote-Addr", ip), null);
+            Map.of(), null, Map.of(), ip, null);
     }
 
     private Request fakeRequestWithHeader(String headerName, String headerValue) {
         return new Request("GET", "/test", Map.of(), Map.of(),
-            Map.of("Remote-Addr", "1.2.3.4", headerName, headerValue), null);
+            Map.of(headerName, headerValue), null, Map.of(), "1.2.3.4", null);
     }
 
     @Test

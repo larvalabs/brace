@@ -42,6 +42,14 @@ public class Log {
         println(entry);
     }
 
+    public static void warn(String message) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "WARN");
+        entry.put("message", message);
+        println(entry);
+    }
+
     private static void println(Map<String, Object> map) {
         try {
             System.out.println(Json.mapper().writeValueAsString(map));

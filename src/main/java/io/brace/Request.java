@@ -15,6 +15,8 @@ public class Request {
     private final Map<String, String> headers;
     private final String body;
     private final Map<String, List<UploadedFile>> uploadedFiles;
+    private final String remoteAddr;
+    private final TrustedProxies trustedProxies;
     private Storage storage;
 
     public Request(String method, String path, Map<String, String> pathParams,
@@ -26,6 +28,13 @@ public class Request {
     public Request(String method, String path, Map<String, String> pathParams,
                    Map<String, String> queryParams, Map<String, String> headers,
                    String body, Map<String, List<UploadedFile>> uploadedFiles) {
+        this(method, path, pathParams, queryParams, headers, body, uploadedFiles, null, null);
+    }
+
+    public Request(String method, String path, Map<String, String> pathParams,
+                   Map<String, String> queryParams, Map<String, String> headers,
+                   String body, Map<String, List<UploadedFile>> uploadedFiles,
+                   String remoteAddr, TrustedProxies trustedProxies) {
         this.method = method;
         this.path = path;
         this.pathParams = pathParams;
@@ -33,6 +42,8 @@ public class Request {
         this.headers = headers;
         this.body = body;
         this.uploadedFiles = uploadedFiles;
+        this.remoteAddr = remoteAddr;
+        this.trustedProxies = trustedProxies;
     }
 
     public String method() { return method; }
@@ -100,9 +111,42 @@ public class Request {
     }
 
     public String ip() {
-        var forwarded = header("X-Forwarded-For");
-        if (forwarded != null) return forwarded.split(",")[0].trim();
-        return header("Remote-Addr");
+        // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
+        if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
+            // Check X-Forwarded-For first (most common)
+            var forwarded = header("X-Forwarded-For");
+            if (forwarded != null && !forwarded.isEmpty()) {
+                // Return the first (client) IP in the chain
+                return forwarded.split(",")[0].trim();
+            }
+
+            // Check Forwarded header (RFC 7239)
+            var forwardedRfc = header("Forwarded");
+            if (forwardedRfc != null && !forwardedRfc.isEmpty()) {
+                // Parse "for=..." from Forwarded header
+                var forPart = extractForwardedFor(forwardedRfc);
+                if (forPart != null) return forPart;
+            }
+        }
+
+        // Default: use socket remote address
+        return remoteAddr != null ? remoteAddr : "unknown";
+    }
+
+    private String extractForwardedFor(String forwarded) {
+        // Simple parser for Forwarded: for=1.2.3.4, for="[::1]", etc.
+        var parts = forwarded.split(";");
+        for (var part : parts) {
+            var trimmed = part.trim();
+            if (trimmed.startsWith("for=")) {
+                var value = trimmed.substring(4);
+                // Remove quotes and brackets if present
+                value = value.replaceAll("^\"|\"$", "");
+                value = value.replaceAll("^\\[|\\]$", "");
+                return value;
+            }
+        }
+        return null;
     }
 
     public <T> Form<T> form(Class<T> type) {

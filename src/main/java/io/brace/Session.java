@@ -1,15 +1,49 @@
 package io.brace;
 
+import javax.crypto.Cipher;
 import javax.crypto.Mac;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * Session data stored in an encrypted and authenticated cookie.
+ *
+ * <p><strong>Security:</strong> Session cookies are encrypted using <strong>AES-256-GCM</strong>.
+ * This provides:
+ * <ul>
+ *   <li>✅ Confidentiality: Data cannot be read by the client</li>
+ *   <li>✅ Integrity: Data cannot be tampered with</li>
+ *   <li>✅ Authenticity: Only the server can create valid sessions</li>
+ * </ul>
+ *
+ * <p><strong>What you can safely store:</strong>
+ * <ul>
+ *   <li>✅ User ID</li>
+ *   <li>✅ Email addresses</li>
+ *   <li>✅ Permissions, roles, scopes</li>
+ *   <li>✅ UI preferences (theme, language)</li>
+ *   <li>✅ CSRF tokens</li>
+ *   <li>✅ Flash messages</li>
+ *   <li>✅ Shopping cart contents (small amounts)</li>
+ * </ul>
+ *
+ * <p><strong>Size considerations:</strong>
+ * Cookies have a 4KB size limit. For large session data, consider server-side storage.
+ *
+ * <p><strong>Encryption details:</strong>
+ * Uses AES-256-GCM with a random 12-byte nonce per cookie. The encryption key is derived
+ * from the session secret using PBKDF2-HMAC-SHA256.
+ */
 public class Session {
 
     private final Map<String, String> data = new LinkedHashMap<>();
@@ -92,47 +126,78 @@ public class Session {
     }
 
     // -------------------------------------------------------------------------
-    // Cookie serialization
+    // Cookie serialization (AES-256-GCM encryption)
     // -------------------------------------------------------------------------
 
     /**
-     * Serialize to: base64url(json) + "." + base64url(hmac)
+     * Serialize to encrypted cookie: base64url(nonce || ciphertext || auth_tag)
      */
     public String toCookie(String secret) {
-        String json = toJson(data);
-        String payload = base64Encode(json.getBytes(StandardCharsets.UTF_8));
-        String sig = sign(payload, secret);
-        return payload + "." + sig;
+        try {
+            String json = toJson(data);
+            byte[] jsonBytes = json.getBytes(StandardCharsets.UTF_8);
+
+            // Derive AES-256 key from secret
+            SecretKeySpec key = deriveKey(secret);
+
+            // Generate random 12-byte nonce for GCM
+            byte[] nonce = new byte[12];
+            new SecureRandom().nextBytes(nonce);
+
+            // Encrypt with AES-256-GCM (includes authentication tag)
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+            cipher.init(Cipher.ENCRYPT_MODE, key, spec);
+            byte[] ciphertext = cipher.doFinal(jsonBytes);
+
+            // Combine: nonce + ciphertext (ciphertext includes 16-byte auth tag)
+            byte[] combined = new byte[nonce.length + ciphertext.length];
+            System.arraycopy(nonce, 0, combined, 0, nonce.length);
+            System.arraycopy(ciphertext, 0, combined, nonce.length, ciphertext.length);
+
+            return base64Encode(combined);
+        } catch (Exception e) {
+            throw new RuntimeException("Session encryption failed", e);
+        }
     }
 
     /**
-     * Deserialize and verify signature. Returns an empty Session if the cookie
-     * is null, malformed, or the signature does not match.
+     * Deserialize and decrypt cookie. Returns an empty Session if the cookie
+     * is null, malformed, or fails authentication/decryption.
      */
     public static Session fromCookie(String cookie, String secret) {
         if (cookie == null || cookie.isEmpty()) {
             return new Session();
         }
-        int dot = cookie.lastIndexOf('.');
-        if (dot < 0) {
-            return new Session();
-        }
-        String payload = cookie.substring(0, dot);
-        String providedSig = cookie.substring(dot + 1);
-
-        // Constant-time comparison
-        String expectedSig = sign(payload, secret);
-        if (!constantTimeEquals(expectedSig, providedSig)) {
-            return new Session();
-        }
 
         try {
-            byte[] jsonBytes = Base64.getUrlDecoder().decode(payload);
+            byte[] combined = Base64.getUrlDecoder().decode(cookie);
+
+            // Need at least 12 bytes (nonce) + 16 bytes (auth tag)
+            if (combined.length < 28) {
+                return new Session();
+            }
+
+            // Extract nonce and ciphertext
+            byte[] nonce = new byte[12];
+            byte[] ciphertext = new byte[combined.length - 12];
+            System.arraycopy(combined, 0, nonce, 0, 12);
+            System.arraycopy(combined, 12, ciphertext, 0, ciphertext.length);
+
+            // Derive key and decrypt
+            SecretKeySpec key = deriveKey(secret);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+            cipher.init(Cipher.DECRYPT_MODE, key, spec);
+            byte[] jsonBytes = cipher.doFinal(ciphertext);
+
+            // Parse JSON
             String json = new String(jsonBytes, StandardCharsets.UTF_8);
             Session session = new Session();
             parseJson(json, session.data);
             return session;
         } catch (Exception e) {
+            // Any decryption or authentication failure returns empty session
             return new Session();
         }
     }
@@ -251,23 +316,23 @@ public class Session {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
-    private static String sign(String payload, String secret) {
+    /**
+     * Derive a 256-bit AES key from the session secret using PBKDF2-HMAC-SHA256.
+     * Uses a fixed salt "brace-session" since the secret itself should be random.
+     */
+    private static SecretKeySpec deriveKey(String secret) {
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            SecretKeySpec keySpec = new SecretKeySpec(
-                    secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256");
-            mac.init(keySpec);
-            byte[] hmac = mac.doFinal(payload.getBytes(StandardCharsets.UTF_8));
-            return base64Encode(hmac);
-        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
-            throw new RuntimeException("HMAC-SHA256 signing failed", e);
+            SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+            PBEKeySpec spec = new PBEKeySpec(
+                secret.toCharArray(),
+                "brace-session".getBytes(StandardCharsets.UTF_8),
+                100000, // 100k iterations
+                256     // 256-bit key
+            );
+            byte[] keyBytes = factory.generateSecret(spec).getEncoded();
+            return new SecretKeySpec(keyBytes, "AES");
+        } catch (Exception e) {
+            throw new RuntimeException("Key derivation failed", e);
         }
-    }
-
-    /** Constant-time string comparison to prevent timing attacks. */
-    private static boolean constantTimeEquals(String a, String b) {
-        byte[] aBytes = a.getBytes(StandardCharsets.UTF_8);
-        byte[] bBytes = b.getBytes(StandardCharsets.UTF_8);
-        return MessageDigest.isEqual(aBytes, bBytes);
     }
 }
