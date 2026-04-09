@@ -28,6 +28,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final ErrorStore errorStore;
     private final List<StaticFileMapping> staticFileMappings;
     private final long maxUploadSize;
+    private final Storage storage;
     private final byte[] htmxJs;
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
@@ -84,6 +85,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         ErrorStore errorStore,
                         List<StaticFileMapping> staticFileMappings,
                         long maxUploadSize) {
+        this(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, stats, errorStore, staticFileMappings, maxUploadSize, null);
+    }
+
+    public BraceHandler(Router router,
+                        List<Middleware.BoundBefore> beforeMiddleware,
+                        List<Middleware.BoundAfter> afterMiddleware,
+                        DatabaseFactory databaseFactory,
+                        String sessionSecret,
+                        Stats stats,
+                        ErrorStore errorStore,
+                        List<StaticFileMapping> staticFileMappings,
+                        long maxUploadSize,
+                        Storage storage) {
         this.router = router;
         this.beforeMiddleware = beforeMiddleware;
         this.afterMiddleware = afterMiddleware;
@@ -93,6 +107,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.errorStore = errorStore;
         this.staticFileMappings = staticFileMappings;
         this.maxUploadSize = maxUploadSize;
+        this.storage = storage;
         byte[] htmxBytes = null;
         try {
             var stream = BraceHandler.class.getResourceAsStream("/brace/htmx.min.js");
@@ -143,6 +158,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
             Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles);
+            if (storage != null) {
+                braceRequest.setStorage(storage);
+            }
 
             // Run before middleware
             for (var before : beforeMiddleware) {
