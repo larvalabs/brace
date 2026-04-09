@@ -1,6 +1,6 @@
 # Brace
 
-A full-stack Java web framework built for AI agents. Token-efficient development, production observability designed for autonomous agents, and runtime performance — from the same set of design choices.
+A full-stack Java web framework built for AI agents. Designed for token-efficient development, full production observability for autonomous agents (and humans), and first class runtime performance and scalability.
 
 ![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
 
@@ -15,6 +15,8 @@ Brace is both simple and complete. ~15 core types, ~5,500 lines of framework cod
 ### AI Token Efficiency
 
 Everything flows through parameters. A controller method's signature tells you exactly what it has access to — no guessing about what's injected, what's ThreadLocal, what's magic. Templates fail the build if parameters are wrong. Wrong types are caught at compile time, not when a user hits the page.
+
+Because everything is wired explicitly in `main()`, the app is self-documenting. An agent reads one file and knows every route, middleware, entity, and job. No separate architecture docs to maintain or drift out of sync.
 
 In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests), Brace costs 33% less than Spring Boot on feature additions ($5.43 vs $8.16) — and the gap widens as the codebase grows:
 
@@ -97,17 +99,17 @@ public class App {
 
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access
-- **Templates** — JTE compiled templates with layout support, hot-reload in dev
-- **Sessions** — HMAC-SHA256 signed cookies, no server-side storage
+- **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
+- **Sessions** — HMAC-SHA256 signed cookies, no server-side storage, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Automatic protection on POST/PUT/DELETE, skip for JSON APIs
 - **Cache** — In-memory with TTL, tag-based invalidation, route-level page caching via `cache.wrap()`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
-- **Mailer** — SMTP sending with dev-mode email capture
+- **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware
-- **File Uploads** — `req.file()` and `req.files()` with configurable size limits
+- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, JFR profiling, Ed25519 token auth
 - **CLI** — `brace new` project scaffolding, `brace ops keypair` key generation, `brace ops dashboard` authenticated access
