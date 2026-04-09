@@ -146,11 +146,12 @@ public class OpsDashboard {
         if (cache != null) {
             long hits = cache.hits(), misses = cache.misses();
             String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";
-            statCard(sb, "Cache", cache.size() + " entries", "hit rate " + hitRate, "c-amber");
+            String cacheDetail = (hits + misses) > 0 ? "entries (" + hitRate + " hit rate)" : "entries";
+            statCard(sb, "Cache", String.valueOf(cache.size()), cacheDetail, "c-amber");
         }
         if (mailer != null) {
-            String mailDetail = mailer.failCount() > 0 ? mailer.failCount() + " failed" : "";
-            statCard(sb, "Emails", String.valueOf(mailer.sentCount()), mailDetail, "c-cyan");
+            String mailDetail = mailer.failCount() > 0 ? mailer.failCount() + " failed" : "since start";
+            statCard(sb, "Sent", String.valueOf(mailer.sentCount()), mailDetail, "c-cyan");
         }
         sb.append("</div>\n");
 
