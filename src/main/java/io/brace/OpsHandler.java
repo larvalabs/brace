@@ -176,6 +176,47 @@ public class OpsHandler {
             data.put("rateLimiters", rateLimiterStats);
         }
 
+        // Custom metrics
+        var counterTotalMap = stats.counterTotals();
+        var gaugeValueMap = stats.currentGaugeValues();
+        var timerValueMap = stats.lastTimerValues();
+        if (!counterTotalMap.isEmpty() || !gaugeValueMap.isEmpty() || !timerValueMap.isEmpty()) {
+            var metrics = new LinkedHashMap<String, Object>();
+            if (!counterTotalMap.isEmpty()) {
+                var countersJson = new LinkedHashMap<String, Object>();
+                var latestSnapshots = stats.minuteSnapshots();
+                var lastSnap = latestSnapshots.isEmpty() ? null : latestSnapshots.get(latestSnapshots.size() - 1);
+                for (var entry : counterTotalMap.entrySet()) {
+                    var c = new LinkedHashMap<String, Object>();
+                    c.put("total", entry.getValue());
+                    long rate = lastSnap != null && lastSnap.counterDeltas().containsKey(entry.getKey())
+                            ? lastSnap.counterDeltas().get(entry.getKey()) : 0;
+                    c.put("rate", rate);
+                    countersJson.put(entry.getKey(), c);
+                }
+                metrics.put("counters", countersJson);
+            }
+            if (!gaugeValueMap.isEmpty()) {
+                var gaugesJson = new LinkedHashMap<String, Object>();
+                for (var entry : gaugeValueMap.entrySet()) {
+                    gaugesJson.put(entry.getKey(), Map.of("value", entry.getValue()));
+                }
+                metrics.put("gauges", gaugesJson);
+            }
+            if (!timerValueMap.isEmpty()) {
+                var timersJson = new LinkedHashMap<String, Object>();
+                for (var entry : timerValueMap.entrySet()) {
+                    var t = new LinkedHashMap<String, Object>();
+                    t.put("count", entry.getValue().count());
+                    t.put("avgMs", Math.round(entry.getValue().avgMs() * 100.0) / 100.0);
+                    t.put("maxMs", entry.getValue().maxMs());
+                    timersJson.put(entry.getKey(), t);
+                }
+                metrics.put("timers", timersJson);
+            }
+            data.put("metrics", metrics);
+        }
+
         // Timeseries
         var timeseries = new LinkedHashMap<String, Object>();
         var minutes = new ArrayList<Map<String, Object>>();

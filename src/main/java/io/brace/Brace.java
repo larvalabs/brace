@@ -83,6 +83,10 @@ public class Brace {
         return mailer;
     }
 
+    public Stats stats() {
+        return stats;
+    }
+
 
     public Brace sessions(String secret) {
         this.sessionSecret = secret;

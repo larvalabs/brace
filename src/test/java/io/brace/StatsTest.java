@@ -93,6 +93,93 @@ class StatsTest {
     }
 
     @Test
+    void counterIncrementsByOne() {
+        var stats = new Stats();
+        stats.counter("talks.created");
+        stats.counter("talks.created");
+        stats.counter("talks.created");
+        var snapshot = stats.snapshot();
+        assertEquals(3, snapshot.counterDeltas().get("talks.created"));
+    }
+
+    @Test
+    void counterIncrementsByN() {
+        var stats = new Stats();
+        stats.counter("bytes.uploaded", 4096);
+        stats.counter("bytes.uploaded", 2048);
+        var snapshot = stats.snapshot();
+        assertEquals(6144, snapshot.counterDeltas().get("bytes.uploaded"));
+    }
+
+    @Test
+    void counterResetsAfterSnapshot() {
+        var stats = new Stats();
+        stats.counter("events");
+        stats.counter("events");
+        stats.snapshot();
+        stats.counter("events");
+        var snapshot = stats.snapshot();
+        assertEquals(1, snapshot.counterDeltas().get("events"));
+    }
+
+    @Test
+    void counterTotalIsCumulative() {
+        var stats = new Stats();
+        stats.counter("events");
+        stats.counter("events");
+        stats.snapshot();
+        stats.counter("events");
+        assertEquals(3, stats.counterTotal("events"));
+    }
+
+    @Test
+    void gaugeSamplesSupplierAtSnapshotTime() {
+        var stats = new Stats();
+        var value = new java.util.concurrent.atomic.AtomicLong(42);
+        stats.gauge("queue.depth", value::get);
+        var snapshot = stats.snapshot();
+        assertEquals(42, snapshot.gaugeValues().get("queue.depth"));
+        value.set(99);
+        snapshot = stats.snapshot();
+        assertEquals(99, snapshot.gaugeValues().get("queue.depth"));
+    }
+
+    @Test
+    void gaugeReplacesSupplierOnReregister() {
+        var stats = new Stats();
+        stats.gauge("metric", () -> 10L);
+        stats.gauge("metric", () -> 20L);
+        var snapshot = stats.snapshot();
+        assertEquals(20, snapshot.gaugeValues().get("metric"));
+    }
+
+    @Test
+    void timerRecordsCountAndAverage() {
+        var stats = new Stats();
+        stats.timer("api.latency", 100);
+        stats.timer("api.latency", 200);
+        stats.timer("api.latency", 300);
+        var snapshot = stats.snapshot();
+        var timer = snapshot.timerValues().get("api.latency");
+        assertEquals(3, timer.count());
+        assertEquals(200.0, timer.avgMs(), 0.01);
+        assertEquals(300, timer.maxMs());
+    }
+
+    @Test
+    void timerResetsAfterSnapshot() {
+        var stats = new Stats();
+        stats.timer("api.latency", 100);
+        stats.snapshot();
+        stats.timer("api.latency", 500);
+        var snapshot = stats.snapshot();
+        var timer = snapshot.timerValues().get("api.latency");
+        assertEquals(1, timer.count());
+        assertEquals(500.0, timer.avgMs(), 0.01);
+        assertEquals(500, timer.maxMs());
+    }
+
+    @Test
     void minuteSnapshotsReturnCapturedHeap() {
         var stats = new Stats();
         stats.recordRequest("GET", "/test", 200, 1000, 0, 0);
