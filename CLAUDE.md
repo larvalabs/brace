@@ -8,7 +8,7 @@ Brace is a full-stack Java 21+ web framework. Plain Java, no DI container, no by
 
 ```
 src/main/java/io/brace/     # Framework source (~4,000 lines)
-src/test/java/io/brace/     # Tests (409 tests)
+src/test/java/io/brace/     # Tests (410 tests)
 src/test/resources/          # Test templates, migrations
 src/assembly/distribution.xml # Assembly descriptor for the brace CLI zip
 bin/brace                    # CLI launcher script (shipped in distribution)
@@ -72,7 +72,7 @@ Register with: `app.get("/path", handler)` or `app.get("/path", (DbHandler) (req
 ```bash
 # Framework development (these commands build/test Brace itself)
 mvn compile          # compile brace framework
-mvn test             # run all 409 tests
+mvn test             # run all 410 tests
 mvn package          # build distribution zip (target/brace-0.1.0-SNAPSHOT.zip)
 
 # Using brace as an end user (e.g., building the sample app)

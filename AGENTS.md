@@ -56,13 +56,18 @@ Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`
 
 ## Routing
 
-Four handler types — the cast tells Brace which parameters to inject:
+Four handler types with typed route methods (no casts needed):
 
 ```java
-app.get("/hello", req -> Result.text("Hi"));                                     // Handler
-app.get("/posts", (DbHandler) (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler
-app.get("/me", (SessionHandler) (req, session) -> ...);                         // SessionHandler
-app.post("/posts", (FullHandler) (req, db, session) -> ...);                    // FullHandler
+app.get("/hello", req -> Result.text("Hi"));                 // Handler: Request only
+app.getDb("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler: Request + Database
+app.getSession("/me", (req, session) -> ...);                // SessionHandler: Request + Session
+app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Request + Database + Session
+
+// Typed route methods available for all HTTP methods:
+// getDb, postDb, putDb, deleteDb
+// getSession, postSession, putSession, deleteSession
+// getFull, postFull, putFull, deleteFull
 
 // CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);
@@ -636,8 +641,8 @@ static TestApp app = Brace.test()
     .templates("views")
     .start(app -> {
         var ctrl = new PostController();
-        app.get("/posts", (DbHandler) ctrl::index);
-        app.post("/posts", (FullHandler) ctrl::create);
+        app.getDb("/posts", ctrl::index);
+        app.postFull("/posts", ctrl::create);
     });
 
 @Test void listPosts() {
@@ -707,7 +712,7 @@ return View.of("posts/index", "posts", posts);
 
 **Adding an endpoint:**
 1. Add handler method to controller
-2. Register in `main()`: `app.get("/path", (DbHandler) ctrl::method)`
+2. Register in `main()`: `app.getDb("/path", ctrl::method)` (or `postDb`, `getFull`, etc.)
 
 **Adding an entity:**
 1. Create `@Entity` class with public fields

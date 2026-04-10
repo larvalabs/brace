@@ -10,7 +10,7 @@ Current web frameworks were designed for human developers. They avoid boilerplat
 
 Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
 
-Brace is both simple and complete. ~20 core types, ~4,000 lines of framework code, 409 tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+Brace is both simple and complete. ~20 core types, ~4,000 lines of framework code, 410 tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
 
 ### AI Token Efficiency
 
@@ -101,11 +101,11 @@ public class App {
 
         app.before(Auth::requireLogin);
         app.get("/", cache.wrap("5m", posts::index));
-        app.get("/posts/{id}", (DbHandler) posts::show);
-        app.post("/posts", (FullHandler) posts::create);
+        app.getDb("/posts/{id}", posts::show);
+        app.postFull("/posts", posts::create);
         app.group("/auth", g -> {
             g.get("/login", auth::loginForm);
-            g.post("/login", (SessionHandler) auth::login);
+            g.postSession("/login", auth::login);
         });
 
         app.every("5m", "cleanup", new CleanupJob());
@@ -170,10 +170,15 @@ public class PostController {
 ## Handler Types
 
 ```java
-app.get("/hello", req -> Result.text("Hello!"));                                   // Handler: Request only
-app.get("/posts", (DbHandler) (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler: Request + Database
-app.get("/profile", (SessionHandler) (req, session) -> ...);                      // SessionHandler: Request + Session
-app.post("/posts", (FullHandler) (req, db, session) -> ...);                      // FullHandler: Request + Database + Session
+app.get("/hello", req -> Result.text("Hello!"));                       // Handler: Request only
+app.getDb("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler: Request + Database
+app.getSession("/profile", (req, session) -> ...);                     // SessionHandler: Request + Session
+app.postFull("/posts", (req, db, session) -> ...);                     // FullHandler: Request + Database + Session
+
+// Typed route methods eliminate cast syntax
+app.getDb("/posts", (req, db) -> ...);          // getDb, postDb, putDb, deleteDb
+app.getSession("/profile", (req, session) -> ...); // getSession, postSession, putSession, deleteSession
+app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull
 
 // CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API
