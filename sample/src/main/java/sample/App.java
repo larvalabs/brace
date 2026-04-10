@@ -5,7 +5,7 @@ import java.util.Map;
 
 public class App {
     public static void main(String[] args) throws Exception {
-        var app = Brace.app().port(8080).ops("sample/ops-authorized-keys");
+        var app = Brace.app().port(8080).ops("ops-authorized-keys");
 
         app.get("/", req -> Result.text("Welcome to Brace!"));
 
