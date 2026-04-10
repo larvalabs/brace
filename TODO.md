@@ -1,5 +1,34 @@
 # Brace — Next Steps
 
+## Security Hardening — Phase 1 ✅ COMPLETE (409 tests passing)
+
+- [x] Trusted proxy configuration — explicit CIDR-based proxy trust, prevents IP spoofing
+- [x] Session encryption — AES-256-GCM encrypted cookies with PBKDF2 key derivation
+- [x] Session cookie policy — SessionOptions with secure defaults (Secure, HttpOnly, SameSite)
+- [x] CSRF exemption logic — explicit `.csrf(false)` opt-out, required by default for mutating requests
+- [x] Security headers middleware — SecurityHeaders.defaults() with nosniff, frame-options, referrer-policy, permissions-policy
+- [x] Secret validation — 32-char minimum, rejects weak patterns, startup validation
+- [x] Ops auth uses Jackson — replaced manual JSON parsing with typed OpsAuthRequest record
+
+## Tier 0 — Critical Security & Ops Hardening
+
+- [x] Ops browser login token — CLI requests short-lived/single-use token, opens browser to exchange endpoint that sets httpOnly cookie and redirects to dashboard (eliminates query-param token from ongoing dashboard URLs)
+- [ ] Scoped ops tokens — separate read-only, dashboard, and control/admin token scopes (reduces blast radius of compromised tokens)
+- [ ] Redaction layer — auto-redact sensitive headers/params/keys in logs and ops diagnostics (authorization, cookie, token, secret, password, key patterns)
+- [ ] Key rotation — support current + previous keys for sessions and ops auth (allow rotation without forced logout)
+- [ ] Clean up doc drift — ensure README, AGENTS.md, SECURITY.md are consistent; mark historical design docs with status banners
+
+## Tier 1 — API Clarity & AI Ergonomics (Additive, Non-Breaking)
+
+- [ ] Typed route methods — `app.getDb(path, DbHandler)`, `app.postSession(...)`, `app.putFull(...)` etc. (eliminates cast syntax)
+- [ ] Source-specific request accessors — `req.pathParam()`, `req.queryParam()`, `req.formParam()`, `req.intPathParam()`, `req.queryInt()` etc. (eliminates ambiguity)
+- [ ] Unified `Result.*` helpers — `Result.json()`, `Result.view()`, `Result.redirect()`, `Result.notFound()` etc. (one namespace for all responses)
+- [ ] Constrained DB helpers — `db.findBy(Class, field, value)`, `db.findAllBy()`, `db.countBy()`, `db.existsBy()`, `db.deleteBy()` (covers 80% of queries without string generation)
+- [ ] `Form.hasErrors()` — clearer boolean logic than `!valid()`
+- [ ] Safer storage helpers — `storage.safeKey()`, `storage.putGenerated()` (makes safe pattern the easy pattern)
+- [ ] Style guide — publish official Brace style guide with "Preferred / Supported / Avoid" sections
+- [ ] Update all examples to canonical style — ensure docs/examples show one dominant pattern per feature
+
 ## Framework Improvements
 
 - [x] Exception tracking — persistent `ops_errors` table, `GET /ops/errors`, `POST /ops/errors/{id}/resolve` ([spec](docs/superpowers/specs/2026-04-07-exception-tracking-design.md))
@@ -21,12 +50,10 @@
 - [x] Auto-generated CLAUDE.md (`app.generateClaudeMd(projectName, path)` — capability index with pointers to AGENTS.md for full API reference)
 - [x] App-level custom metrics (`Stats.counter("talks.created")`, `Stats.gauge("queue.depth", supplier)`, `Stats.timer("api.latency", durationMs)` — lock-free LongAdder internals; auto-rendered in ops dashboard with sparklines; exposed in `/ops/status` JSON; in-memory ring buffer)
 - [x] S3-compatible storage (`Storage.s3(config)`, `storage.put(key, bytes, contentType)` returns public URL, `storage.delete(key)`, `storage.url(key)` — built-in AWS Sig V4 signing, no SDK; works with S3, R2, MinIO; config: accessKeyId, secretKey, bucket, endpoint, region, publicUrl; integrates with `req.file()` uploads)
-- [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
 - [x] `db.queryIn()` for IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`)
-- [ ] Support all logging levels: DEBUG, INFO, WARN, ERROR in Log.java
-- [ ] Generate agent migration guides for each new release so agents can upgrade automatically to new versions of framework, we can store each migration doc as a separate file named brance-ver-ver2.md
+- [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
 - [ ] Custom message from a job run to show on the ops dashboard (e.g., "Retrieved 4 new listings")
 
 ## Ops Dashboard Polish
@@ -38,9 +65,11 @@
 
 ## Documentation
 
-- [ ] Getting started guide
-- [ ] API reference for all 15 core types
+- [ ] Getting started guide — curated walkthrough of routing, forms, auth, database, templates, uploads, ops
+- [ ] API reference for all core types
 - [ ] Deployment guide (Dokploy + Docker)
+- [ ] Security model page — document session encryption, CSRF policy, trusted proxies, upload safety, ops hardening, secret rotation
+- [ ] API style guide — canonical patterns for routes, requests, responses, database, storage, controllers
 - [ ] Migration guide from Spring Boot
 - [ ] Migration guide from Play 1
 
@@ -55,13 +84,29 @@
 - [ ] Add-feature benchmark: appointment scheduling on both PetClinic implementations
 - [ ] Automate token measurement via Claude API script
 
+## Tier 2 — Production Maturity
+
+- [x] Constant-time CSRF token comparison — use `MessageDigest.isEqual()` instead of `String.equals()` in Csrf.validateToken()
+- [ ] Upload spooling/streaming — small files in memory, larger files spooled to temp storage, configurable thresholds and limits
+- [ ] CSP helpers — builder API for Content-Security-Policy with nonce support and safe defaults
+- [ ] Static asset caching — `Cache-Control`, `ETag`, `Last-Modified`, optional immutable asset mode
+- [ ] WebSocket metrics (active connections, messages sent/received, connections per room)
+- [ ] File upload metrics (count, total bytes, by endpoint)
+- [ ] Support all logging levels — add `Log.debug()`, `Log.info()`, `Log.error()` (currently has warn() and event())
+- [ ] Binary response support for `Http` client — `Http.get(url).fetchBytes()` → `byte[]` (currently only `fetchString()` / `fetchJson()`)
+
+## Tier 3 — Evidence & Adoption
+
+- [ ] Broader benchmark suite — add CRUD app, auth-heavy app, htmx flow to token-efficiency benchmarks
+- [ ] Migration guides per release — one file per release with "what changed / what to replace / before / after" diffs (e.g., brace-0.1.0-0.2.0.md)
+- [ ] Golden path sample app — one blessed example showing current best practices end-to-end
+- [ ] Getting started guide — curated walkthrough of routing, forms, auth, database, templates, uploads, ops (consolidate with docs section below)
+
 ## Ops Stats Gaps
 
 - [x] JFR-based JVM profiler (heap, CPU, GC pauses, threads, method hot spots, allocation tracking — [spec](docs/superpowers/specs/2026-04-08-jfr-profiler-design.md))
-- [ ] WebSocket metrics (active connections, messages sent/received, connections per room)
 - [x] Database query instrumentation (query count/latency per request)
 - [x] Cache hit/miss rates and eviction counts
-- [ ] File upload metrics (count, total bytes, by endpoint)
 - [x] Mailer failure tracking
 
 ## Future Considerations
@@ -69,10 +114,7 @@
 - [ ] Cron expression support for jobs (currently only `every()` and `daily()`)
 - [ ] Precompiled JTE templates for production
 - [ ] Multi-database support testing (MySQL, MariaDB)
-- [x] Rate limiting middleware (`RateLimiter.perIp(100, "1m")`, `RateLimiter.perKey(fn, limit, duration)`)
-- [x] File upload handling (`req.file("name")`, `req.files("name")`, multipart parsing, `app.maxUploadSize("50m")`)
 - [ ] Simple async tasks (`Jobs.run(runnable)`, `Jobs.submit(callable)` — non-scheduled, non-durable, managed thread pool)
-- [ ] Binary response support for `Http` client (`Http.get(url).fetchBytes()` → `byte[]` — currently only `fetchString()` / `fetchJson()`, forcing raw `URL.openStream()` for binary downloads)
 - [ ] Make `TestApp` work without `Mailer` dependency (currently always creates a `Mailer`, requiring `jakarta.mail` even for apps that don't use email)
 - [ ] SSE (Server-Sent Events) support
 - [ ] Consider publishing to Maven Central

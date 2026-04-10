@@ -1,5 +1,6 @@
 package io.brace;
 
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 
@@ -26,7 +27,7 @@ public class Csrf {
     public static boolean validateToken(Session session, String submittedToken) {
         var expected = session.get(TOKEN_KEY);
         if (expected == null || submittedToken == null) return false;
-        return expected.equals(submittedToken);
+        return MessageDigest.isEqual(expected.getBytes(), submittedToken.getBytes());
     }
 
     public static String hiddenField(Session session) {

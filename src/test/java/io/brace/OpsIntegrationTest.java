@@ -513,4 +513,70 @@ class OpsIntegrationTest {
         assertTrue(response.body().contains("Hot Methods"));
         assertTrue(response.body().contains("Top Allocations"));
     }
+
+    @Test
+    void browserLoginTokenFlow() throws Exception {
+        // Step 1: Authenticate and request a login token
+        String token = authenticate();
+        var loginTokenResponse = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/login-token"))
+                .header("Authorization", "Bearer " + token)
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, loginTokenResponse.statusCode());
+
+        // Extract loginToken from JSON
+        String body = loginTokenResponse.body();
+        int start = body.indexOf("\"loginToken\":\"") + 14;
+        int end = body.indexOf("\"", start);
+        String loginToken = body.substring(start, end);
+        assertNotNull(loginToken);
+        assertFalse(loginToken.isEmpty());
+
+        // Step 2: Exchange login token for session cookie
+        var exchangeResponse = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
+                .GET()
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        // Should redirect to dashboard
+        assertEquals(302, exchangeResponse.statusCode());
+        assertEquals("/ops/dashboard", exchangeResponse.headers().firstValue("Location").orElse(""));
+
+        // Should set httpOnly cookie
+        String setCookie = exchangeResponse.headers().firstValue("Set-Cookie").orElse("");
+        assertTrue(setCookie.contains("__brace_ops_session="));
+        assertTrue(setCookie.contains("HttpOnly"));
+        assertTrue(setCookie.contains("SameSite=Strict"));
+        assertTrue(setCookie.contains("Max-Age=86400"));
+
+        // Extract cookie value for Step 3
+        int cookieStart = setCookie.indexOf("=") + 1;
+        int cookieEnd = setCookie.indexOf(";");
+        String sessionCookie = setCookie.substring(cookieStart, cookieEnd);
+
+        // Step 3: Access dashboard with cookie (no token in URL)
+        var dashboardResponse = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/dashboard"))
+                .header("Cookie", "__brace_ops_session=" + sessionCookie)
+                .GET()
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, dashboardResponse.statusCode());
+        assertTrue(dashboardResponse.body().contains("Brace Ops"));
+
+        // Step 4: Verify login token is single-use
+        var exchangeAgain = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
+                .GET()
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, exchangeAgain.statusCode()); // Should fail - token already consumed
+    }
 }

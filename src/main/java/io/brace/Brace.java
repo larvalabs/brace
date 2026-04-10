@@ -360,6 +360,8 @@ public class Brace {
             tokenSecret = OpsToken.generateSecret();
             var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             router.add("POST", "/ops/auth", (Handler) opsHandler::auth);
+            router.add("POST", "/ops/auth/login-token", (Handler) opsHandler::loginToken);
+            router.add("GET", "/ops/auth/exchange", (Handler) opsHandler::exchange);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);

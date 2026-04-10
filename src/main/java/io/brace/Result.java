@@ -116,4 +116,26 @@ public class Result {
     public String header(String name) {
         return headers.get(name);
     }
+
+    /**
+     * Set a cookie on the response.
+     * @param name Cookie name
+     * @param value Cookie value
+     * @param maxAge Max age in seconds
+     * @param httpOnly HttpOnly flag
+     * @param secure Secure flag
+     * @param sameSite SameSite attribute (Strict, Lax, or None)
+     * @return this Result for chaining
+     */
+    public Result cookie(String name, String value, int maxAge, boolean httpOnly, boolean secure, String sameSite) {
+        var cookie = new StringBuilder();
+        cookie.append(name).append("=").append(value);
+        cookie.append("; Max-Age=").append(maxAge);
+        cookie.append("; Path=/");
+        if (httpOnly) cookie.append("; HttpOnly");
+        if (secure) cookie.append("; Secure");
+        if (sameSite != null) cookie.append("; SameSite=").append(sameSite);
+        header("Set-Cookie", cookie.toString());
+        return this;
+    }
 }

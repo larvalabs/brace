@@ -16,6 +16,10 @@ public class OpsHandler {
     private final Cache cache;
     private final JfrProfiler profiler;
 
+    // In-memory store for single-use login tokens (token -> expiry timestamp)
+    private final Map<String, Instant> loginTokens = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final String OPS_COOKIE_NAME = "__brace_ops_session";
+
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, Set<String> authorizedKeys, String tokenSecret) {
         this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, null, null, null);
@@ -92,6 +96,61 @@ public class OpsHandler {
         } catch (Exception e) {
             return Result.unauthorized("Authentication failed");
         }
+    }
+
+    /**
+     * POST /ops/auth/login-token — issue a short-lived, single-use browser login token.
+     * Requires valid Bearer token authentication.
+     */
+    public Result loginToken(Request req) {
+        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+
+        // Generate a random login token (5 minute TTL)
+        String loginToken = java.util.UUID.randomUUID().toString();
+        Instant expiry = Instant.now().plusSeconds(300); // 5 minutes
+        loginTokens.put(loginToken, expiry);
+
+        // Clean up expired tokens
+        cleanupExpiredLoginTokens();
+
+        return Json.of(Map.of(
+            "loginToken", loginToken,
+            "expiresAt", expiry.toString(),
+            "exchangeUrl", "/ops/auth/exchange?token=" + loginToken
+        ));
+    }
+
+    /**
+     * GET /ops/auth/exchange?token=... — exchange login token for session cookie.
+     * Validates the single-use token, sets httpOnly cookie, redirects to dashboard.
+     */
+    public Result exchange(Request req) {
+        String loginToken = req.queryParam("token");
+        if (loginToken == null) {
+            return Result.badRequest("Missing token parameter");
+        }
+
+        // Check if token exists and is not expired
+        Instant expiry = loginTokens.get(loginToken);
+        if (expiry == null || Instant.now().isAfter(expiry)) {
+            return Result.unauthorized("Invalid or expired login token");
+        }
+
+        // Consume the single-use token
+        loginTokens.remove(loginToken);
+
+        // Create a long-lived ops session token (24 hours)
+        String sessionToken = OpsToken.create(tokenSecret, 86400);
+
+        // Set httpOnly cookie and redirect to dashboard
+        var result = Redirect.to("/ops/dashboard");
+        result.cookie(OPS_COOKIE_NAME, sessionToken, 86400, true, true, "Strict");
+        return result;
+    }
+
+    private void cleanupExpiredLoginTokens() {
+        Instant now = Instant.now();
+        loginTokens.entrySet().removeIf(entry -> now.isAfter(entry.getValue()));
     }
 
     public Result status(Request req) {
@@ -329,17 +388,26 @@ public class OpsHandler {
 
     private boolean authorize(Request req) {
         if (tokenSecret == null) return false;
+
         // Check Authorization: Bearer <token> header
         var authHeader = req.header("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             String token = authHeader.substring(7);
             if (OpsToken.validate(token, tokenSecret)) return true;
         }
-        // Check ?token= query param
+
+        // Check ops session cookie (set by /ops/auth/exchange)
+        String cookieToken = req.cookie(OPS_COOKIE_NAME);
+        if (cookieToken != null && OpsToken.validate(cookieToken, tokenSecret)) {
+            return true;
+        }
+
+        // Check ?token= query param (fallback for direct access, but discouraged)
         var tokenParam = req.queryParam("token");
         if (tokenParam != null) {
             return OpsToken.validate(tokenParam, tokenSecret);
         }
+
         return false;
     }
 
