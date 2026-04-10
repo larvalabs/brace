@@ -74,13 +74,13 @@ brace_compile() {
     require_project
     info "Compiling..."
     mkdir -p target/classes
-    local sources
-    sources=$(find src/main/java -name '*.java' 2>/dev/null)
-    if [[ -z "$sources" ]]; then
+    local sources=()
+    while IFS= read -r -d '' f; do sources+=("$f"); done < <(find src/main/java -name '*.java' -print0 2>/dev/null)
+    if [[ ${#sources[@]} -eq 0 ]]; then
         error "No Java sources found under src/main/java"
         exit 1
     fi
-    if javac -d target/classes -cp "$(project_classpath)" $sources; then
+    if javac -d target/classes -cp "$(project_classpath)" "${sources[@]}"; then
         success "Compiled"
     else
         error "Compilation failed"
@@ -94,10 +94,10 @@ brace_compile_tests() {
     [[ ! -d src/test/java ]] && return 0
     info "Compiling tests..."
     mkdir -p target/test-classes
-    local sources
-    sources=$(find src/test/java -name '*.java' 2>/dev/null)
-    [[ -z "$sources" ]] && return 0
-    if javac -d target/test-classes -cp "$(test_classpath)" $sources; then
+    local sources=()
+    while IFS= read -r -d '' f; do sources+=("$f"); done < <(find src/test/java -name '*.java' -print0 2>/dev/null)
+    [[ ${#sources[@]} -eq 0 ]] && return 0
+    if javac -d target/test-classes -cp "$(test_classpath)" "${sources[@]}"; then
         success "Tests compiled"
     else
         error "Test compilation failed"
