@@ -218,6 +218,7 @@ h1 { margin-bottom: 1rem; }
             // .gitignore
             Files.writeString(root.resolve(".gitignore"), """
 target/
+lib/
 jte-classes/
 *.class
 .idea/
