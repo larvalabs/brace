@@ -1,6 +1,7 @@
 target/
 jte-classes/
 dependency-reduced-pom.xml
+.worktrees/
 .idea/
 .classpath
 .project
