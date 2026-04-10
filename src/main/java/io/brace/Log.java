@@ -50,6 +50,67 @@ public class Log {
         println(entry);
     }
 
+    public static void debug(String message) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "DEBUG");
+        entry.put("message", message);
+        println(entry);
+    }
+
+    public static void debug(String message, Map<String, Object> data) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "DEBUG");
+        entry.put("message", message);
+        entry.putAll(data);
+        println(entry);
+    }
+
+    public static void info(String message) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "INFO");
+        entry.put("message", message);
+        println(entry);
+    }
+
+    public static void info(String message, Map<String, Object> data) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "INFO");
+        entry.put("message", message);
+        entry.putAll(data);
+        println(entry);
+    }
+
+    public static void error(String message) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "ERROR");
+        entry.put("message", message);
+        println(entry);
+    }
+
+    public static void error(String message, Throwable throwable) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "ERROR");
+        entry.put("message", message);
+        entry.put("error", throwable.getClass().getSimpleName());
+        entry.put("errorMessage", throwable.getMessage());
+        println(entry);
+    }
+
+    public static void error(String message, Map<String, Object> data) {
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("ts", Instant.now().toString());
+        entry.put("level", "ERROR");
+        entry.put("message", message);
+        entry.putAll(data);
+        println(entry);
+    }
+
     private static void println(Map<String, Object> map) {
         try {
             System.out.println(Json.mapper().writeValueAsString(map));

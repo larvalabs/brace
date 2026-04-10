@@ -103,6 +103,29 @@ public class Http {
         return fetch().body();
     }
 
+    public byte[] fetchBytes() {
+        try {
+            var builder = HttpRequest.newBuilder().uri(URI.create(url)).timeout(timeout);
+            for (var entry : headers.entrySet()) {
+                builder.header(entry.getKey(), entry.getValue());
+            }
+            var bodyPublisher = body != null
+                ? HttpRequest.BodyPublishers.ofString(body)
+                : HttpRequest.BodyPublishers.noBody();
+            builder.method(method, bodyPublisher);
+            var httpResponse = CLIENT.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
+            if (httpResponse.statusCode() < 200 || httpResponse.statusCode() >= 300) {
+                throw new RuntimeException("HTTP request failed: " + method + " " + url + " (status " + httpResponse.statusCode() + ")");
+            }
+            return httpResponse.body();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("HTTP request interrupted: " + method + " " + url, e);
+        } catch (Exception e) {
+            throw new RuntimeException("HTTP request failed: " + method + " " + url, e);
+        }
+    }
+
     // --- Response ---
 
     public static class Response {

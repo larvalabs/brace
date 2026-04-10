@@ -24,10 +24,9 @@
 - [x] Constrained DB helpers — `db.findBy(Class, field, value)`, `db.findAllBy()`, `db.countBy()`, `db.existsBy()`, `db.deleteBy()` (covers 80% of queries without string generation)
 - [x] `Form.hasErrors()` — clearer boolean logic than `!valid()`
 - [x] Safer storage helpers — `storage.safeKey()`, `storage.putGenerated()` (makes safe pattern the easy pattern)
-- [ ] Style guide — publish official Brace style guide with "Preferred / Supported / Avoid" sections
 - [ ] Update all examples to canonical style — ensure docs/examples show one dominant pattern per feature
-- [ ] Support all logging levels — add `Log.debug()`, `Log.info()`, `Log.error()` (currently has warn() and event())
-- [ ] Binary response support for `Http` client — `Http.get(url).fetchBytes()` → `byte[]` (currently only `fetchString()` / `fetchJson()`)
+- [x] Support all logging levels — add `Log.debug()`, `Log.info()`, `Log.error()` (currently has warn() and event())
+- [x] Binary response support for `Http` client — `Http.get(url).fetchBytes()` → `byte[]` (currently only `fetchString()` / `fetchJson()`)
 - [ ] Clean up doc drift — ensure README, AGENTS.md, SECURITY.md are consistent; mark historical design docs with status banners
 
 ## Framework Improvements
