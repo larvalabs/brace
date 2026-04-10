@@ -9,8 +9,8 @@ class ClaudeMdGeneratorTest {
     @Test
     void generateIncludesBuildCommands() {
         var md = ClaudeMdGenerator.generate("myapp");
-        assertTrue(md.contains("./brace dev"));
-        assertTrue(md.contains("./brace test"));
+        assertTrue(md.contains("brace dev"));
+        assertTrue(md.contains("brace test"));
     }
 
     @Test

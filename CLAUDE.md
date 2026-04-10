@@ -67,10 +67,12 @@ Register with: `app.get("/path", handler)` or `app.get("/path", (DbHandler) (req
 ## Building and Testing
 
 ```bash
-mvn compile          # compile
-mvn test             # run all 407 tests
-mvn test -Dtest=IntegrationTest   # run specific test class
-# Build and run the sample app (uses the installed brace CLI)
+# Framework development (these commands build/test Brace itself)
+mvn compile          # compile brace framework
+mvn test             # run all 409 tests
+mvn package          # build distribution zip (target/brace-0.1.0-SNAPSHOT.zip)
+
+# Using brace as an end user (e.g., building the sample app)
 cd sample && brace run
 ```
 

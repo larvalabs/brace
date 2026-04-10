@@ -19,9 +19,11 @@ Built with [Brace](https://github.com/matth/brace) — a plain Java 21+ web fram
 ## Build & Run
 
 ```bash
-./brace dev       # compile + run + watch for changes
-./brace test      # run all tests
-./brace test Name # run specific test class
+brace deps        # copy dependencies from pom.xml into ./lib/ (first-time setup)
+brace dev         # compile + run + watch for changes
+brace run         # compile and run (no watching)
+brace test        # run all tests
+brace test Name   # run specific test class
 ```
 
 ## Brace Capabilities

@@ -2,14 +2,30 @@
 
 Brace is a full-stack Java 21+ web framework. No DI container, no classpath scanning, no magic. Everything is wired explicitly in `main()`. Read `main()` first — it's the map to every route, service, and dependency in the app.
 
+## Installation
+
+Download the latest release zip, unzip it, and add `bin/` to your PATH:
+
+```bash
+curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.0.zip
+unzip brace-0.1.0.zip
+export PATH="$PWD/brace-0.1.0/bin:$PATH"
+brace help
+```
+
+No Maven or per-project scripts needed for the dev loop. Maven is only invoked by `brace deps` to populate a project-local `lib/` folder from `pom.xml`.
+
 ## Build & Run
 
 ```bash
-mvn compile                                    # compile
-mvn test                                       # run all tests
-mvn test -Dtest=MyTest                         # run one test class
-mvn compile exec:java -Dexec.mainClass=app.App -Dbrace.mode=dev   # run in dev mode
-java -jar target/myapp.jar                     # run in production
+brace new myapp                                 # create a new project
+cd myapp
+brace deps                                      # populate lib/ from pom.xml (first time)
+brace compile                                   # compile
+brace test                                      # run all tests
+brace test app.HomeControllerTest               # run one test class
+brace dev                                       # run with auto-restart on file changes
+brace run                                       # run without watching
 ```
 
 ## App Setup
