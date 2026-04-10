@@ -70,7 +70,8 @@ Register with: `app.get("/path", handler)` or `app.get("/path", (DbHandler) (req
 mvn compile          # compile
 mvn test             # run all 407 tests
 mvn test -Dtest=IntegrationTest   # run specific test class
-./sample/brace sample             # compile and run the sample app
+# Build and run the sample app (uses the installed brace CLI)
+cd sample && brace run
 ```
 
 ## Key Design Decisions
