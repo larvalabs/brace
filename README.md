@@ -10,7 +10,7 @@ Current web frameworks were designed for human developers. They avoid boilerplat
 
 Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
 
-Brace is both simple and complete. ~20 core types, ~4,000 lines of framework code, 407 tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+Brace is both simple and complete. ~20 core types, ~4,000 lines of framework code, 409 tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
 
 ### AI Token Efficiency
 
@@ -44,6 +44,29 @@ The same design choices that help AI also eliminate runtime overhead. No DI cont
 For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33μs vs ~125μs), no ORM lifecycle tax, compiled templates (~180μs vs ~480μs for Thymeleaf).
 
 AI agents: read [AGENTS.md](AGENTS.md) for the complete framework reference.
+
+## Install
+
+Download the latest release zip, unzip it, and add `bin/` to your PATH:
+
+```bash
+curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.0.zip
+unzip brace-0.1.0.zip
+export PATH="$PWD/brace-0.1.0/bin:$PATH"
+brace help
+```
+
+No Maven or per-project scripts needed for the dev loop. Maven is only invoked by `brace deps` to populate a project-local `lib/` folder from `pom.xml`.
+
+```bash
+brace new myapp        # scaffold a new project
+cd myapp
+brace deps             # populate ./lib/ from pom.xml (one time, requires Maven)
+brace dev              # compile + run + watch for changes
+brace test             # run all tests
+brace ops keypair      # generate ops auth keys
+brace ops dashboard    # authenticate and open /ops/dashboard
+```
 
 ## Quick Start
 
@@ -112,7 +135,7 @@ public class App {
 - **htmx** — Bundled htmx 2.0.4, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, JFR profiling, Ed25519 token auth
-- **CLI** — `brace new` project scaffolding, `brace ops keypair` key generation, `brace ops dashboard` authenticated access
+- **CLI** — global `brace` command distributed as a downloadable zip: `brace new` scaffolding, `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
 - **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
 
 ## Controllers
@@ -403,7 +426,7 @@ session.secret=change-me
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~4,000 lines of framework code. 407 tests.**
+**~4,000 lines of framework code. 409 tests.**
 
 ## Security
 
