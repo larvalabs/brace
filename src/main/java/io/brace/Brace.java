@@ -300,6 +300,56 @@ public class Brace {
         return new RouteConfig(this, router.add("DELETE", pattern, handler, Invoker.fromFullFunction(handler)));
     }
 
+    // Typed route methods with explicit names (eliminates cast syntax for lambdas)
+
+    public RouteConfig getDb(String pattern, DbHandler handler) {
+        return get(pattern, handler);
+    }
+
+    public RouteConfig postDb(String pattern, DbHandler handler) {
+        return post(pattern, handler);
+    }
+
+    public RouteConfig putDb(String pattern, DbHandler handler) {
+        return put(pattern, handler);
+    }
+
+    public RouteConfig deleteDb(String pattern, DbHandler handler) {
+        return delete(pattern, handler);
+    }
+
+    public RouteConfig getSession(String pattern, SessionHandler handler) {
+        return get(pattern, handler);
+    }
+
+    public RouteConfig postSession(String pattern, SessionHandler handler) {
+        return post(pattern, handler);
+    }
+
+    public RouteConfig putSession(String pattern, SessionHandler handler) {
+        return put(pattern, handler);
+    }
+
+    public RouteConfig deleteSession(String pattern, SessionHandler handler) {
+        return delete(pattern, handler);
+    }
+
+    public RouteConfig getFull(String pattern, FullHandler handler) {
+        return get(pattern, handler);
+    }
+
+    public RouteConfig postFull(String pattern, FullHandler handler) {
+        return post(pattern, handler);
+    }
+
+    public RouteConfig putFull(String pattern, FullHandler handler) {
+        return put(pattern, handler);
+    }
+
+    public RouteConfig deleteFull(String pattern, FullHandler handler) {
+        return delete(pattern, handler);
+    }
+
     // Route grouping
 
     public Brace group(String prefix, Consumer<RouteGroup> config) {

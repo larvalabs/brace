@@ -13,21 +13,22 @@
 ## Tier 0 — Critical Security & Ops Hardening
 
 - [x] Ops browser login token — CLI requests short-lived/single-use token, opens browser to exchange endpoint that sets httpOnly cookie and redirects to dashboard (eliminates query-param token from ongoing dashboard URLs)
-- [ ] Scoped ops tokens — separate read-only, dashboard, and control/admin token scopes (reduces blast radius of compromised tokens)
 - [ ] Redaction layer — auto-redact sensitive headers/params/keys in logs and ops diagnostics (authorization, cookie, token, secret, password, key patterns)
 - [ ] Key rotation — support current + previous keys for sessions and ops auth (allow rotation without forced logout)
-- [ ] Clean up doc drift — ensure README, AGENTS.md, SECURITY.md are consistent; mark historical design docs with status banners
 
 ## Tier 1 — API Clarity & AI Ergonomics (Additive, Non-Breaking)
 
-- [ ] Typed route methods — `app.getDb(path, DbHandler)`, `app.postSession(...)`, `app.putFull(...)` etc. (eliminates cast syntax)
-- [ ] Source-specific request accessors — `req.pathParam()`, `req.queryParam()`, `req.formParam()`, `req.intPathParam()`, `req.queryInt()` etc. (eliminates ambiguity)
-- [ ] Unified `Result.*` helpers — `Result.json()`, `Result.view()`, `Result.redirect()`, `Result.notFound()` etc. (one namespace for all responses)
-- [ ] Constrained DB helpers — `db.findBy(Class, field, value)`, `db.findAllBy()`, `db.countBy()`, `db.existsBy()`, `db.deleteBy()` (covers 80% of queries without string generation)
-- [ ] `Form.hasErrors()` — clearer boolean logic than `!valid()`
-- [ ] Safer storage helpers — `storage.safeKey()`, `storage.putGenerated()` (makes safe pattern the easy pattern)
+- [x] Typed route methods — `app.getDb(path, DbHandler)`, `app.postSession(...)`, `app.putFull(...)` etc. (eliminates cast syntax)
+- [x] Source-specific request accessors — `req.pathParam()`, `req.queryParam()`, `req.formParam()`, `req.intPathParam()`, `req.queryInt()` etc. (eliminates ambiguity)
+- [x] Unified `Result.*` helpers — `Result.json()`, `Result.view()`, `Result.redirect()`, `Result.notFound()` etc. (one namespace for all responses)
+- [x] Constrained DB helpers — `db.findBy(Class, field, value)`, `db.findAllBy()`, `db.countBy()`, `db.existsBy()`, `db.deleteBy()` (covers 80% of queries without string generation)
+- [x] `Form.hasErrors()` — clearer boolean logic than `!valid()`
+- [x] Safer storage helpers — `storage.safeKey()`, `storage.putGenerated()` (makes safe pattern the easy pattern)
 - [ ] Style guide — publish official Brace style guide with "Preferred / Supported / Avoid" sections
 - [ ] Update all examples to canonical style — ensure docs/examples show one dominant pattern per feature
+- [ ] Support all logging levels — add `Log.debug()`, `Log.info()`, `Log.error()` (currently has warn() and event())
+- [ ] Binary response support for `Http` client — `Http.get(url).fetchBytes()` → `byte[]` (currently only `fetchString()` / `fetchJson()`)
+- [ ] Clean up doc drift — ensure README, AGENTS.md, SECURITY.md are consistent; mark historical design docs with status banners
 
 ## Framework Improvements
 
@@ -92,8 +93,6 @@
 - [ ] Static asset caching — `Cache-Control`, `ETag`, `Last-Modified`, optional immutable asset mode
 - [ ] WebSocket metrics (active connections, messages sent/received, connections per room)
 - [ ] File upload metrics (count, total bytes, by endpoint)
-- [ ] Support all logging levels — add `Log.debug()`, `Log.info()`, `Log.error()` (currently has warn() and event())
-- [ ] Binary response support for `Http` client — `Http.get(url).fetchBytes()` → `byte[]` (currently only `fetchString()` / `fetchJson()`)
 
 ## Tier 3 — Evidence & Adoption
 
@@ -111,6 +110,7 @@
 
 ## Future Considerations
 
+- [ ] Scoped ops tokens — separate read-only, dashboard, and control/admin token scopes (reduces blast radius of compromised tokens)
 - [ ] Cron expression support for jobs (currently only `every()` and `daily()`)
 - [ ] Precompiled JTE templates for production
 - [ ] Multi-database support testing (MySQL, MariaDB)
