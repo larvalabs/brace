@@ -6,30 +6,31 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ClaudeMdGeneratorTest {
 
-    static Brace app;
-
-    @BeforeAll
-    static void startApp() throws Exception {
-        app = Brace.app().port(0);
-        app.get("/", req -> Result.text("home"));
-        app.start();
-    }
-
-    @AfterAll
-    static void stopApp() throws Exception {
-        app.stop();
-    }
-
     @Test
     void generateIncludesBuildCommands() {
-        var md = ClaudeMdGenerator.generate(app);
+        var md = ClaudeMdGenerator.generate("myapp");
         assertTrue(md.contains("./brace dev"));
         assertTrue(md.contains("./brace test"));
     }
 
     @Test
+    void generateIncludesProjectName() {
+        var md = ClaudeMdGenerator.generate("myapp");
+        assertTrue(md.contains("# myapp"));
+    }
+
+    @Test
+    void generateIncludesCapabilities() {
+        var md = ClaudeMdGenerator.generate("myapp");
+        assertTrue(md.contains("Brace Capabilities"));
+        assertTrue(md.contains("Routing"));
+        assertTrue(md.contains("Database"));
+        assertTrue(md.contains("Ops"));
+    }
+
+    @Test
     void generateMentionsBrace() {
-        var md = ClaudeMdGenerator.generate(app);
+        var md = ClaudeMdGenerator.generate("myapp");
         assertTrue(md.contains("Brace"));
         assertTrue(md.contains("main()"));
     }
@@ -37,9 +38,10 @@ class ClaudeMdGeneratorTest {
     @Test
     void writesToFile() throws Exception {
         var path = Path.of("target/test-CLAUDE.md");
-        app.generateClaudeMd(path);
+        ClaudeMdGenerator.write("myapp", path);
         assertTrue(Files.exists(path));
         var content = Files.readString(path);
+        assertTrue(content.contains("# myapp"));
         assertTrue(content.contains("Brace"));
         Files.deleteIfExists(path);
     }

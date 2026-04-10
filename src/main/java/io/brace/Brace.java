@@ -515,11 +515,10 @@ public class Brace {
     }
 
     /**
-     * Generate a CLAUDE.md file by introspecting the app's routes, entities, and configuration.
-     * Call after start() or during build to produce an AI context file.
+     * Generate a CLAUDE.md file with a capability index and pointers to the full framework reference.
      */
-    public void generateClaudeMd(java.nio.file.Path path) {
-        ClaudeMdGenerator.write(this, path);
+    public void generateClaudeMd(String projectName, java.nio.file.Path path) {
+        ClaudeMdGenerator.write(projectName, path);
     }
 
     public void stop() throws Exception {

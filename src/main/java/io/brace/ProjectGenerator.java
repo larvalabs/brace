@@ -205,13 +205,13 @@ h1 { margin-bottom: 1rem; }
                 "EXPOSE 8080\n" +
                 "CMD [\"java\", \"-jar\", \"app.jar\"]\n");
 
-            // CLAUDE.md — Brace framework reference for AI agents
+            // CLAUDE.md — capability index with pointers to full reference
+            ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));
+
+            // AGENTS.md — full Brace framework API reference
             try (var in = ProjectGenerator.class.getResourceAsStream("/brace/AGENTS.md")) {
                 if (in != null) {
-                    Files.writeString(root.resolve("CLAUDE.md"), new String(in.readAllBytes()));
-                } else {
-                    Files.writeString(root.resolve("CLAUDE.md"),
-                        "# " + name + "\n\nBuilt with Brace framework.\n");
+                    Files.writeString(root.resolve("AGENTS.md"), new String(in.readAllBytes()));
                 }
             }
 
