@@ -16,6 +16,7 @@ import java.util.function.Function;
 public class Brace {
 
     private int port = 8080;
+    private boolean showBanner = true;
     private final Router router = new Router();
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
@@ -76,6 +77,11 @@ public class Brace {
 
     public int port() {
         return port;
+    }
+
+    public Brace banner(boolean show) {
+        this.showBanner = show;
+        return this;
     }
 
     public Brace database(DatabaseFactory factory) {
@@ -576,14 +582,37 @@ public class Brace {
             }
         }
 
-        // Print route table
-        System.out.println("Brace started on port " + actualPort());
+        if (showBanner) {
+            printBanner();
+        }
+    }
+
+    private void printBanner() {
+        System.out.println("  {");
+        System.out.println("      _");
+        System.out.println("     | |__ _ _ __ _ __ ___");
+        System.out.println("     | '_ \\ '_/ _` / _/ -_)");
+        System.out.println("     |_.__/_| \\__,_\\__\\___|");
+        System.out.println();
+        System.out.printf("     port   %d%n", actualPort());
+        System.out.printf("     mode   %s%n", modeOrDash());
+        System.out.println("     ready  \u2713");
+        System.out.println();
+        int routeCount = router.routes().size() + wsRoutes.size();
+        System.out.printf("     routes (%d) {%n", routeCount);
         for (var route : router.routes()) {
-            System.out.printf("  %-6s %s%n", route.method(), route.pattern());
+            System.out.printf("        %-6s %s%n", route.method(), route.pattern());
         }
         for (var wsPath : wsRoutes.keySet()) {
-            System.out.printf("  %-6s %s%n", "WS", wsPath);
+            System.out.printf("        %-6s %s%n", "WS", wsPath);
         }
+        System.out.println("     }");
+        System.out.println("  }");
+    }
+
+    private String modeOrDash() {
+        String mode = System.getProperty("brace.mode");
+        return (mode != null && !mode.isEmpty()) ? mode : "\u2014";
     }
 
     /**
@@ -660,6 +689,7 @@ public class Brace {
             var mailer = new Mailer(null);
             var app = Brace.app()
                 .port(0)
+                .banner(false)
                 .mailer(mailer);
 
             if (secret != null) {
