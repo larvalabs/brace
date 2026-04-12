@@ -6,3 +6,6 @@ dependency-reduced-pom.xml
 .classpath
 .project
 .settings/
+.DS_Store
+.claude/
+.superpowers/
