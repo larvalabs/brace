@@ -132,8 +132,11 @@ public class OpsDashboard {
             var cpu = (Map<String, Object>) jvmSnap.get("cpu");
             var threads = (Map<String, Object>) jvmSnap.get("threads");
             var gc = (Map<String, Object>) jvmSnap.get("gc");
-            double cpuPct = (double) cpu.get("jvmUser") * 100;
-            statCard(sb, "CPU", String.format("%.0f%%", cpuPct), "", cpuPct > 80 ? "c-red" : cpuPct > 50 ? "c-amber" : "c-amber");
+            double jvmPct = ((double) cpu.get("jvmUser") + (double) cpu.get("jvmSystem")) * 100;
+            double hostPct = (double) cpu.get("machineTotal") * 100;
+            double worst = Math.max(jvmPct, hostPct);
+            statCard(sb, "CPU", String.format("JVM %.1f%%", jvmPct), String.format("host %.1f%%", hostPct),
+                worst > 80 ? "c-red" : worst > 50 ? "c-amber" : "c-green");
             statCard(sb, "Threads", String.valueOf(threads.get("active")), threads.get("daemon") + " daemon", "c-cyan");
             double avgGc = (double) gc.get("avgPauseMs");
             statCard(sb, "GC Avg", String.format("%.0fms", avgGc), gc.get("totalCount") + " pauses", avgGc > 100 ? "c-red" : avgGc > 10 ? "c-amber" : "c-green");

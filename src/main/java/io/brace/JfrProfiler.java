@@ -104,11 +104,12 @@ public class JfrProfiler implements AutoCloseable {
         heap.put("maxMB", mxHeap.getMax() / (1024 * 1024));
         data.put("heap", heap);
 
-        // CPU
+        // CPU — keep raw fractions; rounding to 2 decimals would bucket anything
+        // under 0.5% to 0 and hide the real load on a mostly-idle JVM.
         var cpu = new LinkedHashMap<String, Object>();
-        cpu.put("jvmUser", round(jvmCpuUser));
-        cpu.put("jvmSystem", round(jvmCpuSystem));
-        cpu.put("machineTotal", round(machineCpu));
+        cpu.put("jvmUser", jvmCpuUser);
+        cpu.put("jvmSystem", jvmCpuSystem);
+        cpu.put("machineTotal", machineCpu);
         data.put("cpu", cpu);
 
         // Threads
