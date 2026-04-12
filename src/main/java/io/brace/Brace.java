@@ -459,6 +459,26 @@ public class Brace {
         }
 
         server.start();
+
+        // Capture uncaught exceptions from any thread (e.g., background libraries)
+        // so they appear in /ops/status errors.recent and in structured logs.
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            var sw = new java.io.StringWriter();
+            throwable.printStackTrace(new java.io.PrintWriter(sw));
+            String threadName = thread.getName();
+            stats.recordError(
+                throwable.getClass().getName(),
+                throwable.getMessage(),
+                "thread:" + threadName,
+                sw.toString(),
+                null,
+                null);
+            Log.event("uncaught_exception", java.util.Map.of(
+                "thread", threadName,
+                "type", throwable.getClass().getName(),
+                "message", String.valueOf(throwable.getMessage())));
+        });
+
         jobScheduler.start(databaseFactory);
         if (databaseFactory != null) {
             jobPoller.start(databaseFactory);
