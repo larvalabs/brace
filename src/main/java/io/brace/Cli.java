@@ -142,14 +142,33 @@ public class Cli {
                 System.exit(1);
             }
 
-            // Extract token
+            // Extract bearer token
             String respBody = response.body();
             int start = respBody.indexOf("\"token\":\"") + 9;
             int end = respBody.indexOf("\"", start);
             String token = respBody.substring(start, end);
 
-            String dashboardUrl = url + "/ops/dashboard?token=" + token;
-            System.out.println("Opening dashboard: " + dashboardUrl);
+            // Exchange bearer token for a single-use login token
+            var loginResponse = client.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create(url + "/ops/auth/login-token"))
+                    .header("Authorization", "Bearer " + token)
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+            if (loginResponse.statusCode() != 200) {
+                System.err.println("Failed to get login token: " + loginResponse.body());
+                System.exit(1);
+            }
+
+            String loginBody = loginResponse.body();
+            int ltStart = loginBody.indexOf("\"loginToken\":\"") + 14;
+            int ltEnd = loginBody.indexOf("\"", ltStart);
+            String loginToken = loginBody.substring(ltStart, ltEnd);
+
+            String dashboardUrl = url + "/ops/auth/exchange?token=" + loginToken;
+            System.out.println("Opening dashboard...");
 
             // Try to open browser
             try {
