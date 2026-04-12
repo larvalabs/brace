@@ -6,7 +6,7 @@ import java.nio.file.Path;
 
 /**
  * Generates CLAUDE.md for a Brace project.
- * Compact capability index with pointers to AGENTS.md for full API details.
+ * Compact capability index with pointers to BRACE-AGENTS.md for full API details.
  */
 public class ClaudeMdGenerator {
 
@@ -26,9 +26,19 @@ brace test        # run all tests
 brace test Name   # run specific test class
 ```
 
+## Deploy
+
+<!-- TODO: Fill in deploy details for this project. Without this section, the agent
+     cannot help with deployments, ops dashboard access, or production debugging. -->
+
+- **Production URL:** (e.g. https://myapp.example.com)
+- **Deploy method:** (e.g. `docker deploy`, `fly deploy`, `git push`)
+- **Hosting:** (e.g. DigitalOcean, Fly.io, Railway)
+- **Ops dashboard:** `brace ops dashboard --url <production-url>`
+
 ## Brace Capabilities
 
-Full API reference: see `AGENTS.md`. Below is what's available — check the reference when you need method signatures or usage details.
+Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check the reference when you need method signatures or usage details.
 
 - **Routing** — `app.get("/path", handler)` with four handler types: `Handler` (request only), `DbHandler` (+database), `SessionHandler` (+session), `FullHandler` (+both). Read-only variants: `ReadDbHandler`, `ReadFullHandler`. Path params: `/posts/{id}`. Route groups: `app.group("/prefix", g -> ...)`.
 - **Request** — `req.queryParam(name)`, `req.pathParam(name)`, `req.formParam(name)`, `req.header(name)`, `req.body()`, `req.bodyAs(Class)`, `req.form(Class)`, `req.file(name)`, `req.ip()`, `req.isHtmx()`.
@@ -53,6 +63,19 @@ Full API reference: see `AGENTS.md`. Below is what's available — check the ref
 - **Logging** — `Log.event("name", Map.of(...))` structured JSON to stdout.
 - **Passwords** — `Passwords.hash(pw)`, `Passwords.check(pw, hash)` (bcrypt).
 - **Testing** — `Brace.test().start(app -> ...)` returns `TestApp`. `.get()`, `.post()`, `.postJson()`, `.withDb()`. H2 in-memory.
+
+## Code Navigation
+
+For symbol-level questions about Java code, prefer the `LSP` tool over `Grep` when available. The Java LSP is type-aware and returns exact symbols — no false positives from name collisions, comments, or textual matches — which usually means fewer tokens and zero disambiguating reads.
+
+- `LSP goToDefinition` — where a symbol is defined
+- `LSP findReferences` — every usage of a symbol
+- `LSP goToImplementation` — implementations of an interface or abstract method
+- `LSP incomingCalls` / `outgoingCalls` — call hierarchy
+- `LSP documentSymbol` — list classes, methods, fields in a file
+- `LSP hover` — type info and Javadoc
+
+Use `Grep` for text searches (TODOs, string literals, config values, error messages), non-Java files, and existence checks. Rule of thumb: **symbol-level question → LSP; text-level question → Grep.**
 
 ## Ops — Debugging & Monitoring
 

@@ -79,6 +79,19 @@ mvn package          # build distribution zip (target/brace-0.1.0-SNAPSHOT.zip)
 cd sample && brace run
 ```
 
+## Code Navigation
+
+For symbol-level questions about Java code, prefer the `LSP` tool over `Grep`. The Java LSP (jdtls) is type-aware and returns exact symbols — no false positives from name collisions, comments, or textual matches — which usually means fewer tokens and zero disambiguating reads.
+
+- `LSP goToDefinition` — where a symbol is defined
+- `LSP findReferences` — every usage of a symbol
+- `LSP goToImplementation` — implementations of an interface or abstract method
+- `LSP incomingCalls` / `outgoingCalls` — call hierarchy
+- `LSP documentSymbol` — list classes, methods, fields in a file
+- `LSP hover` — type info and Javadoc
+
+Use `Grep` for text searches (TODOs, string literals, config values, error messages), non-Java files, and existence checks. Rule of thumb: **symbol-level question → LSP; text-level question → Grep.**
+
 ## Key Design Decisions
 
 - **No DI container.** Dependencies passed via constructors (services) or method parameters (request-scoped).
@@ -119,7 +132,7 @@ cd sample && brace run
 3. Entity convention: add `apply(MyForm form)` method for mapping
 
 ### Updating documentation
-When changing public API (adding/removing/renaming methods, classes, or handler types), update `AGENTS.md` and `README.md` to reflect the change.
+When changing public API (adding/removing/renaming methods, classes, or handler types), update `BRACE-AGENTS.md` and `README.md` to reflect the change.
 
 ### Adding dynamic page updates with htmx
 1. Include `<script src="/__brace/htmx.min.js"></script>` in your layout
