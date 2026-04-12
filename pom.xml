@@ -132,7 +132,7 @@
             <resource>
                 <directory>${project.basedir}</directory>
                 <includes>
-                    <include>AGENTS.md</include>
+                    <include>BRACE-AGENTS.md</include>
                 </includes>
                 <targetPath>brace</targetPath>
             </resource>

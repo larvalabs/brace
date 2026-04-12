@@ -208,10 +208,10 @@ h1 { margin-bottom: 1rem; }
             // CLAUDE.md — capability index with pointers to full reference
             ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));
 
-            // AGENTS.md — full Brace framework API reference
-            try (var in = ProjectGenerator.class.getResourceAsStream("/brace/AGENTS.md")) {
+            // BRACE-AGENTS.md — full Brace framework API reference
+            try (var in = ProjectGenerator.class.getResourceAsStream("/brace/BRACE-AGENTS.md")) {
                 if (in != null) {
-                    Files.writeString(root.resolve("AGENTS.md"), new String(in.readAllBytes()));
+                    Files.writeString(root.resolve("BRACE-AGENTS.md"), new String(in.readAllBytes()));
                 }
             }
 
