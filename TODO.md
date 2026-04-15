@@ -48,6 +48,9 @@
 - [x] `brace dev` CLI command with file watcher + fast restart (`./brace dev`, `./brace test`, `./brace run`)
 - [ ] Dokploy ops skill (not Brace-specific — deploy status, monitoring, restart, rollback, env vars via Dokploy API)
 - [x] Auto-generated CLAUDE.md (`app.generateClaudeMd(projectName, path)` — capability index with pointers to AGENTS.md for full API reference)
+- [ ] `brace init` + `.brace` project config file — store dashboard URL, ops key path, etc. so CLI commands don't need `--url` and other repeated flags ([spec](docs/superpowers/specs/2026-04-14-brace-cli-project-config-and-ops-commands-design.md))
+- [ ] Move ops keypair + dashboard CLI config from global to project-scoped (each project has its own keypair and ops URL) ([spec](docs/superpowers/specs/2026-04-14-brace-cli-project-config-and-ops-commands-design.md))
+- [ ] Additional `brace` ops commands for humans + AI agents: `brace errors`, `brace logs` (in-memory ring buffer), `brace status`, `brace cache`, `brace resolve` ([spec](docs/superpowers/specs/2026-04-14-brace-cli-project-config-and-ops-commands-design.md))
 - [x] App-level custom metrics (`Stats.counter("talks.created")`, `Stats.gauge("queue.depth", supplier)`, `Stats.timer("api.latency", durationMs)` — lock-free LongAdder internals; auto-rendered in ops dashboard with sparklines; exposed in `/ops/status` JSON; in-memory ring buffer)
 - [x] S3-compatible storage (`Storage.s3(config)`, `storage.put(key, bytes, contentType)` returns public URL, `storage.delete(key)`, `storage.url(key)` — built-in AWS Sig V4 signing, no SDK; works with S3, R2, MinIO; config: accessKeyId, secretKey, bucket, endpoint, region, publicUrl; integrates with `req.file()` uploads)
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
