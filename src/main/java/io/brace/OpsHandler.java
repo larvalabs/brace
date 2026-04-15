@@ -371,22 +371,37 @@ public class OpsHandler {
         String sinceTsStr = req.queryParam("since_ts");
         String level = req.queryParam("level");
         String limitStr = req.queryParam("limit");
-        int limit = Math.min(limitStr != null ? Integer.parseInt(limitStr) : 200, 1000);
+
+        int limit;
+        try {
+            limit = limitStr != null ? Integer.parseInt(limitStr) : 200;
+        } catch (NumberFormatException e) {
+            return Result.badRequest("Invalid limit: " + limitStr);
+        }
+        limit = Math.max(1, Math.min(limit, 1000));
 
         List<LogTap.LogEntry> entries;
-        if (sinceStr != null) {
-            entries = LogTap.since(Long.parseLong(sinceStr));
-        } else if (sinceTsStr != null) {
-            entries = LogTap.sinceTimestamp(Instant.parse(sinceTsStr));
-        } else {
-            entries = LogTap.snapshot();
+        try {
+            if (sinceStr != null) {
+                entries = LogTap.since(Long.parseLong(sinceStr));
+            } else if (sinceTsStr != null) {
+                entries = LogTap.sinceTimestamp(Instant.parse(sinceTsStr));
+            } else {
+                entries = LogTap.snapshot();
+            }
+        } catch (NumberFormatException e) {
+            return Result.badRequest("Invalid since: " + sinceStr);
+        } catch (java.time.format.DateTimeParseException e) {
+            return Result.badRequest("Invalid since_ts: " + sinceTsStr);
         }
 
         if (level != null) {
             int minRank = levelRank(level);
             var filtered = new ArrayList<LogTap.LogEntry>();
             for (var e : entries) {
-                if (levelRank((String) e.fields().get("level")) >= minRank) filtered.add(e);
+                Object lvl = e.fields().get("level");
+                String lvlStr = lvl instanceof String s ? s : null;
+                if (levelRank(lvlStr) >= minRank) filtered.add(e);
             }
             entries = filtered;
         }

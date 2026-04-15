@@ -604,7 +604,11 @@ class OpsIntegrationTest {
     void opsLogsSinceFiltersById() throws Exception {
         LogTap.clear();
         Log.info("first");
-        long firstId = LogTap.snapshot().get(0).id();
+        long firstId = LogTap.snapshot().stream()
+            .filter(e -> "first".equals(e.fields().get("message")))
+            .findFirst()
+            .orElseThrow()
+            .id();
         Log.info("second");
 
         String token = authenticate();
