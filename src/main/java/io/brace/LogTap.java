@@ -47,7 +47,12 @@ public class LogTap {
 
     public static void append(Map<String, Object> fields) {
         long id = nextId.getAndIncrement();
-        entries.add(new LogEntry(id, fields));
+        // Defensive copy: callers must not be coupled to internal state, and
+        // snapshot()/since() readers see immutable maps.
+        // LinkedHashMap used instead of Map.copyOf because Log.error() paths can
+        // put null values (e.g. throwable.getMessage()) which Map.copyOf rejects.
+        var copy = new LinkedHashMap<>(fields);
+        entries.add(new LogEntry(id, copy));
         if (currentSize.incrementAndGet() > capacity) {
             if (entries.pollFirst() != null) {
                 currentSize.decrementAndGet();

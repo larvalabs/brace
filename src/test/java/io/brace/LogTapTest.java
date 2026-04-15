@@ -84,6 +84,20 @@ class LogTapTest {
     }
 
     @Test
+    void mutatingMapAfterAppendDoesNotAffectStoredEntry() {
+        var mutable = new java.util.HashMap<String, Object>();
+        mutable.put("message", "original");
+        LogTap.append(mutable);
+
+        mutable.put("message", "mutated");
+        mutable.put("extra", "added");
+
+        var snap = LogTap.snapshot();
+        assertEquals("original", snap.get(0).fields().get("message"));
+        assertNull(snap.get(0).fields().get("extra"));
+    }
+
+    @Test
     void concurrentAppendsRespectCapacityWithBoundedOvershoot() throws Exception {
         LogTap.clear();
         LogTap.setCapacity(500);
