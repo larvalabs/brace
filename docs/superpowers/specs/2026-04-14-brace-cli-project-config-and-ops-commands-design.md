@@ -176,7 +176,7 @@ record LogEntry(long id, Map<String, Object> fields) { }
 | Method | Path | Returns |
 |---|---|---|
 | GET | `/ops/logs?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=<200>` | JSON array of log entries newer than `since` (ID) *or* `since_ts` (timestamp), level >= filter, capped by limit |
-| GET | `/ops/cache` | `{ size, hits, misses, hit_rate, evictions }` — broken out of `/ops/status` |
+| GET | `/ops/cache` | `{ enabled, size, hits, misses, hitRate, evictions }` — broken out of `/ops/status`; when no cache is configured, returns `{ enabled: false }` only |
 
 Registered the same way existing ops routes are, in `Brace.java` next to the existing `router.add("GET", "/ops/...", (Handler) opsHandler::...)` lines (around `Brace.java:418`-`426`). Both go through the existing `authorize(req)` check (Bearer token *or* `__brace_ops_session` cookie), no new auth path.
 
@@ -228,7 +228,7 @@ Today, `/ops/errors` returns everything. Add `?since=<iso8601>` to filter to err
 
 **`brace cache [--env prod]` and `brace cache clear [--env prod]`**
 
-- `brace cache` → `GET /ops/cache`, prints `size`, `hits`, `misses`, `hit_rate`, `evictions`.
+- `brace cache` → `GET /ops/cache`, prints `size`, `hits`, `misses`, `hitRate`, `evictions`.
 - `brace cache clear` → `POST /ops/cache/clear`, prints confirmation.
 - Exit 0 on success, non-zero on HTTP failure.
 

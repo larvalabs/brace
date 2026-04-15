@@ -447,12 +447,14 @@ public class OpsHandler {
             out.put("enabled", false);
             return Json.of(out);
         }
+        long hits = cache.hits();
+        long misses = cache.misses();
+        long total = hits + misses;
         out.put("enabled", true);
         out.put("size", cache.size());
-        out.put("hits", cache.hits());
-        out.put("misses", cache.misses());
-        long total = cache.hits() + cache.misses();
-        out.put("hitRate", total == 0 ? 0.0 : (double) cache.hits() / total);
+        out.put("hits", hits);
+        out.put("misses", misses);
+        out.put("hitRate", total == 0 ? 0.0 : (double) hits / total);
         out.put("evictions", cache.evictions());
         return Json.of(out);
     }

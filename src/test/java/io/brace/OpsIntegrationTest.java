@@ -657,18 +657,15 @@ class OpsIntegrationTest {
 
     @Test
     void opsCacheReturnsStats() throws Exception {
-        String token = authenticate(cachePort, cacheKeypair);
-        var response = client.send(
-            HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + cachePort + "/ops/cache"))
-                .header("Authorization", "Bearer " + token)
-                .GET().build(),
-            HttpResponse.BodyHandlers.ofString());
+        var response = cacheGet("/ops/cache");
 
         assertEquals(200, response.statusCode());
         String body = response.body();
-        assertTrue(body.contains("size"));
-        assertTrue(body.contains("hits"));
-        assertTrue(body.contains("misses"));
+        assertTrue(body.contains("\"enabled\":true"), body);
+        assertTrue(body.contains("\"size\""), body);
+        assertTrue(body.contains("\"hits\""), body);
+        assertTrue(body.contains("\"misses\""), body);
+        assertTrue(body.contains("\"hitRate\""), body);
+        assertTrue(body.contains("\"evictions\""), body);
     }
 }
