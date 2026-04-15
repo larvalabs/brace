@@ -188,6 +188,23 @@ class ErrorStoreTest {
         assertEquals(2, errors.size());
     }
 
+    @Test
+    void listSinceReturnsOnlyErrorsAfterTimestamp() throws Exception {
+        var store = new ErrorStore(dbFactory, 100);
+        store.record("OldError", "old", "/old", "stack", null);
+        Thread.sleep(20);
+        var cutoff = java.time.Instant.now();
+        Thread.sleep(20);
+        store.record("NewError", "new", "/new", "stack", null);
+
+        var all = store.list(null);
+        assertEquals(2, all.size());
+
+        var recent = store.list(null, cutoff);
+        assertEquals(1, recent.size());
+        assertEquals("NewError", recent.get(0).get("errorType"));
+    }
+
     // --- Integration tests for ops endpoints ---
 
     static Brace app;

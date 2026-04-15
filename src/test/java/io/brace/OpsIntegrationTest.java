@@ -656,6 +656,20 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void opsErrorsAcceptsSinceQueryParam() throws Exception {
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/errors?since=2099-01-01T00:00:00Z"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertEquals("[]", response.body().trim());
+    }
+
+    @Test
     void opsCacheReturnsStats() throws Exception {
         var response = cacheGet("/ops/cache");
 

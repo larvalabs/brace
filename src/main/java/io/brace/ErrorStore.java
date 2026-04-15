@@ -95,6 +95,35 @@ public class ErrorStore {
         }
     }
 
+    public List<Map<String, Object>> list(String status, java.time.Instant since) {
+        var all = list(status);
+        if (since == null) return all;
+        var out = new ArrayList<Map<String, Object>>();
+        for (var row : all) {
+            Object firstSeen = row.get("firstSeen");
+            if (firstSeen == null) continue;
+            try {
+                java.time.Instant ts;
+                String s = firstSeen.toString();
+                if (s.endsWith("Z") || s.contains("+")) {
+                    // Already ISO-8601 with timezone
+                    ts = java.time.Instant.parse(s);
+                } else {
+                    // Timestamp.toString() format: "yyyy-MM-dd HH:mm:ss.SSS" in local time
+                    String normalized = s.replace(' ', 'T');
+                    ts = java.time.LocalDateTime.parse(normalized)
+                        .atZone(java.time.ZoneId.systemDefault())
+                        .toInstant();
+                }
+                if (!ts.isBefore(since)) out.add(row);
+            } catch (Exception ignored) {
+                // Fall back to keeping the row if timestamp is unparseable
+                out.add(row);
+            }
+        }
+        return out;
+    }
+
     public Map<String, Object> resolve(long id) {
         var db = new Database(databaseFactory.openSession());
         db.beginTransaction();

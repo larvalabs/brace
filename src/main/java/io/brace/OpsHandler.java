@@ -422,7 +422,13 @@ public class OpsHandler {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Json.of(List.of());
         String status = req.queryParam("status");
-        return Json.of(errorStore.list(status));
+        String since = req.queryParam("since");
+        Instant sinceTs = null;
+        if (since != null) {
+            try { sinceTs = Instant.parse(since); }
+            catch (Exception e) { return Result.badRequest("Invalid since timestamp"); }
+        }
+        return Json.of(errorStore.list(status, sinceTs));
     }
 
     public Result resolveError(Request req) {
