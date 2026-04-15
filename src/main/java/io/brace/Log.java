@@ -112,6 +112,7 @@ public class Log {
     }
 
     private static void println(Map<String, Object> map) {
+        LogTap.append(map);
         try {
             System.out.println(Json.mapper().writeValueAsString(map));
         } catch (Exception e) {
