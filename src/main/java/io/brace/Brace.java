@@ -425,6 +425,7 @@ public class Brace {
             router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
             router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError);
             router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache);
+            router.add("GET", "/ops/cache", (Handler) opsHandler::cacheStats);
         }
 
         var threadPool = new QueuedThreadPool();

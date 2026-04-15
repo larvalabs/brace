@@ -440,6 +440,23 @@ public class OpsHandler {
         return dashboard(req);
     }
 
+    public Result cacheStats(Request req) {
+        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        var out = new LinkedHashMap<String, Object>();
+        if (cache == null) {
+            out.put("enabled", false);
+            return Json.of(out);
+        }
+        out.put("enabled", true);
+        out.put("size", cache.size());
+        out.put("hits", cache.hits());
+        out.put("misses", cache.misses());
+        long total = cache.hits() + cache.misses();
+        out.put("hitRate", total == 0 ? 0.0 : (double) cache.hits() / total);
+        out.put("evictions", cache.evictions());
+        return Json.of(out);
+    }
+
     private boolean authorize(Request req) {
         if (tokenSecret == null) return false;
 

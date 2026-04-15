@@ -654,4 +654,21 @@ class OpsIntegrationTest {
             HttpResponse.BodyHandlers.ofString());
         assertEquals(401, response.statusCode());
     }
+
+    @Test
+    void opsCacheReturnsStats() throws Exception {
+        String token = authenticate(cachePort, cacheKeypair);
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/cache"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        String body = response.body();
+        assertTrue(body.contains("size"));
+        assertTrue(body.contains("hits"));
+        assertTrue(body.contains("misses"));
+    }
 }
