@@ -579,4 +579,75 @@ class OpsIntegrationTest {
             HttpResponse.BodyHandlers.ofString());
         assertEquals(401, exchangeAgain.statusCode()); // Should fail - token already consumed
     }
+
+    @Test
+    void opsLogsReturnsRecentEntries() throws Exception {
+        LogTap.clear();
+        Log.info("hello from test");
+        Log.warn("warning from test");
+
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/logs"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        String body = response.body();
+        assertTrue(body.contains("hello from test"), body);
+        assertTrue(body.contains("warning from test"), body);
+    }
+
+    @Test
+    void opsLogsSinceFiltersById() throws Exception {
+        LogTap.clear();
+        Log.info("first");
+        long firstId = LogTap.snapshot().get(0).id();
+        Log.info("second");
+
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/logs?since=" + firstId))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.body().contains("second"));
+        assertFalse(response.body().contains("\"first\""));
+    }
+
+    @Test
+    void opsLogsLevelFilter() throws Exception {
+        LogTap.clear();
+        Log.info("info-line");
+        Log.warn("warn-line");
+        Log.error("error-line");
+
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/logs?level=warn"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertFalse(response.body().contains("info-line"));
+        assertTrue(response.body().contains("warn-line"));
+        assertTrue(response.body().contains("error-line"));
+    }
+
+    @Test
+    void opsLogsRequiresAuth() throws Exception {
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/logs"))
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
+    }
 }

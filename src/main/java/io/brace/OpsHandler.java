@@ -364,6 +364,45 @@ public class OpsHandler {
         return Json.of(routeList);
     }
 
+    public Result logs(Request req) {
+        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+
+        String sinceStr = req.queryParam("since");
+        String sinceTsStr = req.queryParam("since_ts");
+        String level = req.queryParam("level");
+        String limitStr = req.queryParam("limit");
+        int limit = Math.min(limitStr != null ? Integer.parseInt(limitStr) : 200, 1000);
+
+        List<LogTap.LogEntry> entries;
+        if (sinceStr != null) {
+            entries = LogTap.since(Long.parseLong(sinceStr));
+        } else if (sinceTsStr != null) {
+            entries = LogTap.sinceTimestamp(Instant.parse(sinceTsStr));
+        } else {
+            entries = LogTap.snapshot();
+        }
+
+        if (level != null) {
+            int minRank = levelRank(level);
+            var filtered = new ArrayList<LogTap.LogEntry>();
+            for (var e : entries) {
+                if (levelRank((String) e.fields().get("level")) >= minRank) filtered.add(e);
+            }
+            entries = filtered;
+        }
+
+        if (entries.size() > limit) entries = entries.subList(entries.size() - limit, entries.size());
+
+        var out = new ArrayList<Map<String, Object>>();
+        for (var e : entries) {
+            var m = new LinkedHashMap<String, Object>();
+            m.put("id", e.id());
+            m.putAll(e.fields());
+            out.add(m);
+        }
+        return Json.of(out);
+    }
+
     public Result errors(Request req) {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Json.of(List.of());
@@ -409,6 +448,17 @@ public class OpsHandler {
         }
 
         return false;
+    }
+
+    private static int levelRank(String level) {
+        if (level == null) return 0;
+        return switch (level.toUpperCase()) {
+            case "DEBUG" -> 0;
+            case "INFO"  -> 1;
+            case "WARN"  -> 2;
+            case "ERROR" -> 3;
+            default      -> 0;
+        };
     }
 
     private String formatDuration(Duration d) {

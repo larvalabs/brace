@@ -420,6 +420,7 @@ public class Brace {
             router.add("GET", "/ops/auth/exchange", (Handler) opsHandler::exchange);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
+            router.add("GET", "/ops/logs", (Handler) opsHandler::logs);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
             router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
             router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError);
