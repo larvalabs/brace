@@ -102,26 +102,23 @@ public class ErrorStore {
         for (var row : all) {
             Object firstSeen = row.get("firstSeen");
             if (firstSeen == null) continue;
-            try {
-                java.time.Instant ts;
-                String s = firstSeen.toString();
-                if (s.endsWith("Z") || s.contains("+")) {
-                    // Already ISO-8601 with timezone
-                    ts = java.time.Instant.parse(s);
-                } else {
-                    // Timestamp.toString() format: "yyyy-MM-dd HH:mm:ss.SSS" in local time
-                    String normalized = s.replace(' ', 'T');
-                    ts = java.time.LocalDateTime.parse(normalized)
-                        .atZone(java.time.ZoneId.systemDefault())
-                        .toInstant();
-                }
-                if (!ts.isBefore(since)) out.add(row);
-            } catch (Exception ignored) {
-                // Fall back to keeping the row if timestamp is unparseable
-                out.add(row);
-            }
+            java.time.Instant ts = parseFirstSeen(firstSeen.toString());
+            if (ts == null || !ts.isBefore(since)) out.add(row);
         }
         return out;
+    }
+
+    // Unparseable values fall through to null and are kept, to avoid silently
+    // dropping rows if a future storage format appears.
+    private static java.time.Instant parseFirstSeen(String s) {
+        try { return java.time.Instant.parse(s); } catch (java.time.format.DateTimeParseException ignored) {}
+        try { return java.time.OffsetDateTime.parse(s).toInstant(); } catch (java.time.format.DateTimeParseException ignored) {}
+        try {
+            return java.time.LocalDateTime.parse(s.replace(' ', 'T'))
+                .atZone(java.time.ZoneId.systemDefault())
+                .toInstant();
+        } catch (java.time.format.DateTimeParseException ignored) {}
+        return null;
     }
 
     public Map<String, Object> resolve(long id) {

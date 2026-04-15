@@ -192,9 +192,9 @@ class ErrorStoreTest {
     void listSinceReturnsOnlyErrorsAfterTimestamp() throws Exception {
         var store = new ErrorStore(dbFactory, 100);
         store.record("OldError", "old", "/old", "stack", null);
-        Thread.sleep(20);
+        Thread.sleep(50);
         var cutoff = java.time.Instant.now();
-        Thread.sleep(20);
+        Thread.sleep(50);
         store.record("NewError", "new", "/new", "stack", null);
 
         var all = store.list(null);

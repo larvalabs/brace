@@ -426,7 +426,7 @@ public class OpsHandler {
         Instant sinceTs = null;
         if (since != null) {
             try { sinceTs = Instant.parse(since); }
-            catch (Exception e) { return Result.badRequest("Invalid since timestamp"); }
+            catch (java.time.format.DateTimeParseException e) { return Result.badRequest("Invalid since timestamp"); }
         }
         return Json.of(errorStore.list(status, sinceTs));
     }
