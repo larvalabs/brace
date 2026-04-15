@@ -34,11 +34,14 @@ All new subcommands (`init`, `errors`, `logs`, `status`, `cache`, `resolve`, plu
 | `Cli.java` | Top-level dispatch, `main()`, shared error-print helpers |
 | `CliConfig.java` | Loads `.brace` and `.brace.local`, resolves URL + key path + env |
 | `CliInit.java` | `brace init` — scaffold and diagnostic checklist |
-| `CliOps.java` | `brace ops keypair`, `brace ops dashboard` (existing logic, refactored to use `CliConfig`) |
+| `CliOps.java` | `brace ops keypair`, `brace ops dashboard` (existing logic, refactored to use `CliConfig` and `Json.mapper()`) |
 | `CliCommands.java` | The new read commands: `errors`, `logs`, `status`, `cache`, `resolve` |
+| `CliAuth.java` | Shared auth helper: load private key, sign timestamp, POST `/ops/auth`, return + cache bearer token |
 | `CliOutput.java` | TTY detection, table renderer, JSON renderer, exit-code helpers |
 
-All in `io.brace`, no new package. Reuses existing types: `Config` (key=value parser), `OpsKeys` (Ed25519), `Http` (HTTP client), `Json` (Jackson wrapper).
+All in `io.brace`, no new package. Reuses existing types: `Config` (key=value parser), `OpsKeys` (Ed25519), `Http` (HTTP client), `Json` (Jackson wrapper), and the existing server-side `OpsHandler.OpsAuthRequest` record (the CLI sends instances of it serialized via `Json.mapper()`).
+
+**Existing `Cli.opsDashboard()` cleanup.** Today it hand-builds JSON with string concatenation (`"{\"publicKey\":\"" + ... + "\"}"`). When refactoring it into `CliOps`, replace string concat with `Json.mapper().writeValueAsString(new OpsHandler.OpsAuthRequest(pub, ts, sig, 3600))`. Same change for parsing the auth response — use `Json.mapper().readTree()` instead of substring scanning. The browser login-token + exchange flow (`POST /ops/auth/login-token` → `GET /ops/auth/exchange?token=...`) is preserved as-is — read commands don't need it; only `brace ops dashboard` does.
 
 ## `.brace` and `.brace.local` config files
 
@@ -159,11 +162,12 @@ Two server-side pieces enable the new commands.
 A new ~60-line class. Captures structured log entries as `Log` emits them, retaining the last N (default 1000). Each entry:
 
 ```java
-record LogEntry(long id, Instant timestamp, String level, String message, Map<String, Object> fields) { }
+record LogEntry(long id, Map<String, Object> fields) { }
 ```
 
+- The `fields` map is the exact same `LinkedHashMap` that `Log` already builds for stdout output (with `ts`, `level`, `event` or `message`, plus call-site fields). No transformation needed.
 - Implementation: `ConcurrentLinkedDeque<LogEntry>` plus an `AtomicLong` for monotonic IDs. Lock-free on the hot path, same pattern as `Stats`.
-- Wired in via a single `LogTap.append(level, message, fields)` call inside the existing `Log` methods. No new logging API surfaces to user code.
+- **Wire point:** `Log.println(Map<String, Object>)` at `Log.java:114` is the single chokepoint every existing logging method already funnels through (`event`, `request`, `error`, `info`, `debug`, `warn`). Add one line: `LogTap.append(map)`. No changes to the public `Log` API, no changes to call sites, and `request`/`http.error` lines are captured for free.
 - Default capacity 1000 entries, configurable via `application.conf` (`ops.log_tap.size=2000`).
 - Lost on process restart. Confirmed acceptable.
 
@@ -173,6 +177,8 @@ record LogEntry(long id, Instant timestamp, String level, String message, Map<St
 |---|---|---|
 | GET | `/ops/logs?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=<200>` | JSON array of log entries newer than `since` (ID) *or* `since_ts` (timestamp), level >= filter, capped by limit |
 | GET | `/ops/cache` | `{ size, hits, misses, hit_rate, evictions }` — broken out of `/ops/status` |
+
+Registered the same way existing ops routes are, in `Brace.java` next to the existing `router.add("GET", "/ops/...", (Handler) opsHandler::...)` lines (around `Brace.java:418`-`426`). Both go through the existing `authorize(req)` check (Bearer token *or* `__brace_ops_session` cookie), no new auth path.
 
 `since` defaults to 0 (return everything in the buffer). `level` defaults to `info`. `limit` defaults to 200, max 1000.
 
@@ -190,8 +196,13 @@ Today, `/ops/errors` returns everything. Add `?since=<iso8601>` to filter to err
 - **Exit codes:** zero = healthy, non-zero = needs attention. The exact contract is per-command.
 - **`--since` flag:** accepts durations (`10m`, `1h`, `24h`) on commands where it makes sense. The CLI converts to whatever the endpoint expects (ID for logs, ISO8601 for errors).
 - **`--env` flag:** overrides `ops.env` from `.brace.local` for one invocation.
-- **Authentication:** every command loads `CliConfig`, signs a token via `OpsKeys.sign(timestamp, privateKey)` exactly like `brace ops dashboard` does today, posts to `/ops/auth` to receive a short-lived bearer token, and includes it as `Authorization: Bearer <token>` on subsequent requests.
-- **Token caching:** the issued bearer token is cached at `target/.brace-token` along with its expiry. Subsequent commands within the token's lifetime reuse it instead of re-authenticating. Invalidated automatically on expiry or auth failure.
+- **Authentication:** every command goes through `CliAuth.bearer()`, which:
+  1. Loads the private key from `CliConfig.keyPath` (or `OPS_PRIVATE_KEY` env var).
+  2. If a non-expired cached token exists at `target/.brace-token`, returns it.
+  3. Otherwise builds an `OpsHandler.OpsAuthRequest(publicKey, timestamp, signature, ttlSeconds=3600)` via `Json.mapper().writeValueAsString(...)`, POSTs to `/ops/auth`, parses the response with `Json.mapper().readTree()`, caches the returned `token` + `expiresAt`, and returns it.
+  4. Includes the bearer as `Authorization: Bearer <token>` on the actual request.
+- **Token caching:** the issued bearer token is cached at `target/.brace-token` along with its `expiresAt` (1-hour TTL by default — chosen so an interactive session of `brace errors`, `brace status`, `brace logs -f` re-uses one token, but a stolen cache file expires fast). Invalidated automatically on expiry or on a 401 response (which triggers one retry with a fresh auth).
+- **The browser login-token / exchange flow is irrelevant to read commands.** Only `brace ops dashboard` uses `POST /ops/auth/login-token` and `GET /ops/auth/exchange?token=...` — that path stays in `CliOps` unchanged. Read commands always go through plain bearer.
 
 **`brace errors [--since 1h] [--env prod]`**
 
@@ -245,11 +256,12 @@ Two artifacts ship with this work, because the surface is only useful if agents 
 
 - **`CliConfig`**: parsing precedence (flag > local > committed > default), `ops.env` resolution, missing files, missing keys.
 - **`CliInit`**: each local check independently (file present, file missing, partial state), `.gitignore` append idempotency, JSON output shape, exit codes. Remote checks via `TestApp` to a stub `/ops/auth` returning 200/401/connection-refused.
-- **`CliOps` / `CliCommands`**: integration tests via `TestApp` that boot a real `OpsHandler`, sign a real token, hit each endpoint, and assert the rendered output (both TTY and JSON modes). Use `System.setOut` to a `ByteArrayOutputStream` and a forced TTY/non-TTY indicator since auto-detection isn't testable directly.
-- **`LogTap`**: ring buffer eviction, `since` filtering, level filtering, concurrent appends from multiple threads.
-- **New `OpsHandler` endpoints**: `/ops/logs` (since, level, limit), `/ops/cache`, `/ops/errors?since=`. Added to `OpsIntegrationTest`.
-- **`brace init` end-to-end**: scaffold a temp directory, run init, assert files created, run init again, assert no overwrites.
+- **`CliAuth`**: bearer fetch happy path, cache hit path, expired-cache refresh, 401 → one retry → fail, missing key file, missing authorized-keys file.
+- **`CliOps` / `CliCommands`**: integration tests via `TestApp` that boot a real `OpsHandler`, sign a real token through `CliAuth`, hit each endpoint, and assert the rendered output (both TTY and JSON modes). Use `System.setOut` to a `ByteArrayOutputStream` and a forced TTY/non-TTY indicator since auto-detection isn't testable directly.
+- **`LogTap`**: ring buffer eviction, `since` (ID) filtering, `since_ts` filtering, level filtering, concurrent appends from multiple threads. Plus a wiring test that calls `Log.info(...)` / `Log.warn(...)` / `Log.error(...)` and asserts each entry shows up in `LogTap.snapshot()` with the same `Map` content that was printed to stdout.
+- **New `OpsHandler` endpoints**: `/ops/logs` (since, since_ts, level, limit), `/ops/cache`, `/ops/errors?since=`. Added to `OpsIntegrationTest`.
+- **`brace init` end-to-end**: scaffold a temp directory, run init, assert files created, run init again, assert no overwrites. Remote-check path uses `TestApp` to a stub server returning 200/401/connection-refused.
 
 ## Open questions
 
-None at this point. Everything in this document was confirmed in the brainstorming session.
+None at this point. Everything in this document was confirmed in the brainstorming session and re-validated against current `main` after a rebase pulled in the security-hardening, browser-login-token, and typed-route work that landed since the spec was first drafted.
