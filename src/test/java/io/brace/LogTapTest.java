@@ -82,4 +82,27 @@ class LogTapTest {
         pool.shutdown();
         assertEquals(threads * perThread, LogTap.snapshot().size());
     }
+
+    @Test
+    void concurrentAppendsRespectCapacityWithBoundedOvershoot() throws Exception {
+        LogTap.clear();
+        LogTap.setCapacity(500);
+
+        int threads = 10, perThread = 200;
+        var pool = Executors.newFixedThreadPool(threads);
+        var latch = new CountDownLatch(threads);
+        for (int t = 0; t < threads; t++) {
+            pool.submit(() -> {
+                for (int i = 0; i < perThread; i++) LogTap.append(Map.of("m", "x"));
+                latch.countDown();
+            });
+        }
+        latch.await();
+        pool.shutdown();
+
+        int size = LogTap.snapshot().size();
+        // Bounded overshoot: at most (capacity + threads) before next eviction settles.
+        assertTrue(size >= 500, "size below capacity: " + size);
+        assertTrue(size <= 500 + threads, "size exceeded bounded overshoot: " + size);
+    }
 }

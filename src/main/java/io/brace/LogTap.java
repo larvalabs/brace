@@ -3,12 +3,22 @@ package io.brace;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * In-memory ring buffer of structured log entries. Captures everything that
  * flows through {@link Log#println(Map)} so that /ops/logs can serve a
  * tail-able view of recent activity. Lock-free; lost on process restart.
+ *
+ * <p>IDs are monotonic for the lifetime of the JVM. They are not reset by
+ * {@link #clear()} so polling clients holding a {@code since(id)} cursor
+ * never see negative gaps.
+ *
+ * <p>Under heavy concurrent appends the deque may transiently hold up to
+ * {@code capacity + (concurrent appender count)} entries before the next
+ * round of single-step eviction settles it back to {@code capacity}. This
+ * bounded overshoot is the trade for a fully lock-free hot path.
  */
 public class LogTap {
 
@@ -16,6 +26,7 @@ public class LogTap {
 
     private static final ConcurrentLinkedDeque<LogEntry> entries = new ConcurrentLinkedDeque<>();
     private static final AtomicLong nextId = new AtomicLong(1);
+    private static final AtomicInteger currentSize = new AtomicInteger(0);
     private static volatile int capacity = 1000;
 
     private LogTap() {}
@@ -23,7 +34,13 @@ public class LogTap {
     public static void setCapacity(int n) {
         if (n < 1) throw new IllegalArgumentException("capacity must be >= 1");
         capacity = n;
-        evictExcess();
+        while (currentSize.get() > n) {
+            if (entries.pollFirst() != null) {
+                currentSize.decrementAndGet();
+            } else {
+                break;
+            }
+        }
     }
 
     public static int capacity() { return capacity; }
@@ -31,7 +48,11 @@ public class LogTap {
     public static void append(Map<String, Object> fields) {
         long id = nextId.getAndIncrement();
         entries.add(new LogEntry(id, fields));
-        evictExcess();
+        if (currentSize.incrementAndGet() > capacity) {
+            if (entries.pollFirst() != null) {
+                currentSize.decrementAndGet();
+            }
+        }
     }
 
     public static List<LogEntry> snapshot() {
@@ -57,12 +78,13 @@ public class LogTap {
         return out;
     }
 
+    /**
+     * Clears all retained entries. IDs are NOT reset — the next appended entry
+     * will continue from the current monotonic counter so that polling clients
+     * holding a since(id) cursor are unaffected.
+     */
     public static void clear() {
         entries.clear();
-        nextId.set(1);
-    }
-
-    private static void evictExcess() {
-        while (entries.size() > capacity) entries.pollFirst();
+        currentSize.set(0);
     }
 }
