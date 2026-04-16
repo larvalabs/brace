@@ -59,6 +59,20 @@ class CliConfigTest {
     }
 
     @Test
+    void authorizedKeysOverrideFromBraceFile() throws Exception {
+        Files.writeString(tmp.resolve(".brace"), "ops.authorized_keys=/etc/keys\n");
+        var cfg = CliConfig.load(tmp, new String[]{});
+        assertEquals("/etc/keys", cfg.authorizedKeysPath());
+    }
+
+    @Test
+    void valueWithEmbeddedEquals() throws Exception {
+        Files.writeString(tmp.resolve(".brace"), "ops.local.url=https://host?token=abc\n");
+        var cfg = CliConfig.load(tmp, new String[]{});
+        assertEquals("https://host?token=abc", cfg.url());
+    }
+
+    @Test
     void unknownEnvFallsBackToLocal() throws Exception {
         Files.writeString(tmp.resolve(".brace"), "ops.local.url=http://x:1\n");
         var cfg = CliConfig.load(tmp, new String[]{"--env", "staging"});
