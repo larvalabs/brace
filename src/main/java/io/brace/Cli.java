@@ -35,6 +35,7 @@ public class Cli {
             case "errors"  -> requireProject(cwd, () -> CliCommands.errors(cwd, args));
             case "logs"    -> requireProject(cwd, () -> CliCommands.logs(cwd, args));
             case "status"  -> requireProject(cwd, () -> CliCommands.status(cwd, args));
+            case "check"   -> requireProject(cwd, () -> CliCheck.run(cwd, args));
             case "cache"   -> cacheCommand(cwd, args);
             case "resolve" -> requireProject(cwd, () -> CliCommands.resolve(cwd, args));
             default -> { printUsage(); yield 0; }
@@ -113,6 +114,7 @@ public class Cli {
         System.out.println("  brace errors [--since 1h]   List unresolved errors");
         System.out.println("  brace logs [-f] [--since]   Tail recent log lines");
         System.out.println("  brace status                Show app health snapshot");
+        System.out.println("  brace check                 Run all health checks");
         System.out.println("  brace cache                 Show cache stats");
         System.out.println("  brace cache clear           Clear the cache");
         System.out.println("  brace resolve <id>          Mark an error as resolved");
