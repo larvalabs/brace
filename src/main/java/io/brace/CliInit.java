@@ -85,6 +85,59 @@ public class CliInit {
         return new Result(ok, local, List.of(), actions);
     }
 
+    public static Result runWithRemote(Path projectDir) throws IOException {
+        var localResult = run(projectDir);
+
+        var braceFile = projectDir.resolve(".brace");
+        String prodUrl = null;
+        if (Files.exists(braceFile)) {
+            for (var line : Files.readAllLines(braceFile)) {
+                line = line.trim();
+                if (line.startsWith("ops.prod.url=")) {
+                    prodUrl = line.substring("ops.prod.url=".length()).trim();
+                    break;
+                }
+            }
+        }
+        if (prodUrl == null || prodUrl.isEmpty()) return localResult;
+
+        Path privKey = projectDir.resolve("ops-private.key");
+        if (!Files.exists(privKey)) return localResult;
+
+        var remote = new ArrayList<Check>();
+        var actions = new ArrayList<>(localResult.actions());
+
+        try {
+            var cfg = new CliConfig(prodUrl, privKey.toString(), "ops-authorized-keys", "prod");
+            try {
+                CliAuth.clearCache(projectDir);
+                CliAuth.bearer(cfg, projectDir);
+                remote.add(new Check("reachable", true, prodUrl));
+                remote.add(new Check("authorized", true, "key accepted"));
+            } catch (Exception e) {
+                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+                if (msg.contains("Connection") || msg.contains("refused") || msg.contains("HostNotFound")) {
+                    remote.add(new Check("reachable", false, "not reachable: " + msg));
+                    actions.add("Verify " + prodUrl + " is reachable");
+                } else {
+                    remote.add(new Check("reachable", true, prodUrl));
+                    remote.add(new Check("authorized", false, msg));
+                    try {
+                        String pub = OpsKeys.readKeyFile(privKey.toString()).publicKey();
+                        actions.add("Add to server's ops-authorized-keys: " + pub + "  <label>");
+                    } catch (Exception ex) {
+                        actions.add("Add your public key to server's ops-authorized-keys");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            remote.add(new Check("setup", false, e.getMessage()));
+        }
+
+        boolean ok = localResult.ok() && remote.stream().allMatch(Check::ok);
+        return new Result(ok, localResult.local(), remote, actions);
+    }
+
     public static void print(Result r, CliOutput.Mode mode) {
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(Map.of(
