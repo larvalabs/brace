@@ -161,6 +161,18 @@ class CliCheckTest {
     }
 
     @Test
+    void followUpCommandsUseEnvName() {
+        var errors = json(List.of(
+            Map.of("errorType", "NPE", "route", "GET /x", "occurrenceCount", 1)
+        ));
+        var result = CliCheck.evaluate(healthyStatus(), errors, json(List.of()),
+            CheckThresholds.DEFAULTS, "staging");
+        var errCheck = result.checks().stream()
+            .filter(c -> "errors".equals(c.name())).findFirst().orElseThrow();
+        assertTrue(errCheck.followUp().contains("--env staging"));
+    }
+
+    @Test
     void summaryListsIssues() {
         var status = healthyStatus();
         var errors = json(List.of(
