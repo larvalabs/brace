@@ -682,4 +682,21 @@ class OpsIntegrationTest {
         assertTrue(body.contains("\"hitRate\""), body);
         assertTrue(body.contains("\"evictions\""), body);
     }
+
+    @Test
+    void clearCacheReturnsJsonWhenAcceptIsJson() throws Exception {
+        String token = authenticate(cachePort, cacheKeypair);
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/cache/clear"))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("application/json"));
+        assertTrue(response.body().contains("cleared"));
+    }
 }

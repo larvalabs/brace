@@ -436,6 +436,9 @@ public class OpsHandler {
         if (errorStore == null) return Result.notFound();
         long id = req.longPathParam("id");
         errorStore.resolve(id);
+        if (wantsJson(req)) {
+            return Json.of(Map.of("resolved", true, "id", id));
+        }
         return dashboard(req);
     }
 
@@ -443,6 +446,9 @@ public class OpsHandler {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
         if (cache == null) return Result.notFound();
         cache.clear();
+        if (wantsJson(req)) {
+            return Json.of(Map.of("cleared", true));
+        }
         return dashboard(req);
     }
 
@@ -463,6 +469,11 @@ public class OpsHandler {
         out.put("hitRate", total == 0 ? 0.0 : (double) hits / total);
         out.put("evictions", cache.evictions());
         return Json.of(out);
+    }
+
+    private boolean wantsJson(Request req) {
+        String accept = req.header("Accept");
+        return accept != null && accept.contains("application/json");
     }
 
     private boolean authorize(Request req) {
