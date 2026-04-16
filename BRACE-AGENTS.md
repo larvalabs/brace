@@ -570,6 +570,7 @@ Brace ships with CLI commands and HTTP endpoints for inspecting a running app. U
 | Command | Purpose | Exit code |
 |---|---|---|
 | `brace status [--env prod]` | Full system snapshot | 0 healthy / 1 errors exist / 2 unreachable |
+| `brace check [--env prod]` | Run all health checks, return structured verdict | 0 all pass / 1 issues / 2 unreachable |
 | `brace errors [--since 1h] [--env prod]` | List unresolved errors | 0 none / 1 some / 2 unreachable |
 | `brace logs [-f] [--since 10m] [--level warn] [--env prod]` | Tail structured log entries | 0 |
 | `brace cache [--env prod]` | Cache size, hit rate, evictions | 0 / 2 unreachable |
@@ -595,7 +596,52 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 
 Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pass `Authorization: Bearer <token>`.
 
-### Runbook: general health check
+### Agent health check (start here)
+
+When asked to check on production, act as on-call, or verify app health, start with this single command:
+
+```bash
+brace check --env prod --json
+```
+
+If `healthy` is `true`, report healthy and stop. If `false`, read `summary` for an overview, then look at each check with status `"fail"` or `"warn"`. Use the `followUp` command on any failed check to investigate further.
+
+**Do not run `brace status` first.** `brace check` already fetches status data and applies threshold analysis. Only use the individual commands (`brace errors`, `brace logs`, `brace status`) for follow-up investigation.
+
+**Output structure:**
+
+```json
+{
+  "healthy": false,
+  "summary": "2 issues: 3 unresolved errors, 1 failing job",
+  "checks": [
+    {
+      "name": "errors",
+      "status": "fail",
+      "message": "3 unresolved errors",
+      "details": [{"type": "NullPointerException", "route": "GET /posts/{id}", "count": 3, "id": "42"}],
+      "followUp": "brace errors --env prod --json"
+    }
+  ]
+}
+```
+
+**Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, recent_logs.
+
+**Thresholds** are configurable in `.brace`:
+
+```
+check.slow_route_ms=500
+check.heap_warn_percent=70
+check.heap_fail_percent=80
+check.gc_pause_ms=50
+check.cache_hit_rate=0.5
+check.log_window_minutes=30
+```
+
+### Runbook: detailed status inspection
+
+> **Note:** For most health checks, use `brace check` above. Use `brace status` directly when you need the full raw data for deeper investigation.
 
 Start here when asked to "check on production" or "is the app healthy":
 
