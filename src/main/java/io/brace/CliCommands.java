@@ -343,6 +343,9 @@ public class CliCommands {
 
     static Instant parseDuration(String s) {
         if (s == null) return Instant.EPOCH;
+        if (s.length() < 2 || !Character.isLetter(s.charAt(s.length() - 1))) {
+            throw new IllegalArgumentException("Unknown duration: " + s + " (expected e.g. 10m, 1h)");
+        }
         char unit = s.charAt(s.length() - 1);
         long n = Long.parseLong(s.substring(0, s.length() - 1));
         Duration d = switch (unit) {

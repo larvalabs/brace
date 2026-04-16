@@ -80,19 +80,20 @@ class CliCommandsTest {
     }
 
     @Test
-    void logsCommandFiltersBySince() throws Exception {
+    void logsCommandWithSinceExitsCleanly() throws Exception {
         LogTap.clear();
-        Log.info("ancient-message");
-        Thread.sleep(20);
+        Log.info("recent-message");
 
         var bout = new ByteArrayOutputStream();
         var prev = System.out;
         System.setOut(new PrintStream(bout));
         try {
-            CliCommands.logs(projectDir, new String[]{"--json", "--since", "1s"});
+            int code = CliCommands.logs(projectDir, new String[]{"--json", "--since", "1s"});
+            assertEquals(0, code);
         } finally {
             System.setOut(prev);
         }
+        assertTrue(bout.toString().contains("recent-message"), bout.toString());
     }
 
     // --- Task 14: status ---
