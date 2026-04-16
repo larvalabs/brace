@@ -73,6 +73,13 @@ class CliConfigTest {
     }
 
     @Test
+    void checkThresholdsFromBraceFile() throws Exception {
+        Files.writeString(tmp.resolve(".brace"), "check.slow_route_ms=1000\n");
+        var cfg = CliConfig.load(tmp, new String[]{});
+        assertEquals(1000, cfg.checkThresholds().slowRouteMs());
+    }
+
+    @Test
     void unknownEnvFallsBackToLocal() throws Exception {
         Files.writeString(tmp.resolve(".brace"), "ops.local.url=http://x:1\n");
         var cfg = CliConfig.load(tmp, new String[]{"--env", "staging"});

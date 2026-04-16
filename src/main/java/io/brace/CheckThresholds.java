@@ -26,12 +26,20 @@ public record CheckThresholds(
     private static int intOr(Map<String, String> m, String key, int def) {
         String v = m.get(key);
         if (v == null) return def;
-        return Integer.parseInt(v);
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid value for " + key + ": " + v, e);
+        }
     }
 
     private static double doubleOr(Map<String, String> m, String key, double def) {
         String v = m.get(key);
         if (v == null) return def;
-        return Double.parseDouble(v);
+        try {
+            return Double.parseDouble(v.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid value for " + key + ": " + v, e);
+        }
     }
 }
