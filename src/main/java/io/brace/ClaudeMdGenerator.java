@@ -94,7 +94,33 @@ When debugging a running Brace app, use `/ops/status` instead of tailing logs. S
 3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations`
 4. **Job failing?** → `jobs.scheduled` shows `lastStatus`, `lastError`, `failCount`
 5. **Cache miss rate?** → `cache.hits` vs `cache.misses`
+
+## Production ops (for agents)
+
+This project ships with `brace` CLI commands for inspecting the running app.
+Use these to check production health, investigate errors, and read recent
+logs without leaving the terminal.
+
+| Command | Purpose |
+|---|---|
+| `brace status [--env prod]` | App health snapshot — exits non-zero on degradation |
+| `brace errors [--since 1h]` | List unresolved errors — exits non-zero if any exist |
+| `brace logs [-f] [--since 10m]` | Tail recent structured log entries |
+| `brace cache` / `brace cache clear` | Cache stats; clear cache |
+| `brace resolve <id>` | Mark an error as resolved |
+
+All read commands auto-detect TTY vs JSON output. Pipe to `jq` or use
+`--json` explicitly. See `docs/agent-ops-guide.md` in the brace repo for
+workflows and exit-code contracts.
 """.formatted(projectName);
+    }
+
+    public static void generate(String projectName, Path dir) {
+        try {
+            Files.writeString(dir.resolve("CLAUDE.md"), generate(projectName));
+        } catch (IOException e) {
+            System.err.println("Warning: could not write CLAUDE.md: " + e.getMessage());
+        }
     }
 
     public static void write(String projectName, Path path) {

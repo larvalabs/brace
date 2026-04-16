@@ -36,6 +36,22 @@ class ClaudeMdGeneratorTest {
     }
 
     @Test
+    void generatedClaudeMdMentionsOpsCommands() throws Exception {
+        Path tmp = Files.createTempDirectory("claudemd-");
+        try {
+            ClaudeMdGenerator.generate("DemoApp", tmp);
+            String content = Files.readString(tmp.resolve("CLAUDE.md"));
+            assertTrue(content.contains("brace status"), content);
+            assertTrue(content.contains("brace errors"), content);
+            assertTrue(content.contains("brace logs"), content);
+            assertTrue(content.contains("agent-ops-guide.md"), content);
+        } finally {
+            Files.walk(tmp).sorted(java.util.Comparator.reverseOrder())
+                .forEach(p -> { try { Files.delete(p); } catch (Exception ignored) {} });
+        }
+    }
+
+    @Test
     void writesToFile() throws Exception {
         var path = Path.of("target/test-CLAUDE.md");
         ClaudeMdGenerator.write("myapp", path);
