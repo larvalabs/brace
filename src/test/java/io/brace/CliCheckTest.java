@@ -2,6 +2,9 @@ package io.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
+import java.io.*;
+import java.nio.file.*;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -182,5 +185,67 @@ class CliCheckTest {
         assertFalse(result.healthy());
         assertTrue(result.summary().contains("1 issue"));
         assertTrue(result.summary().contains("1 unresolved error"));
+    }
+
+    // --- Integration tests (with real Brace app) ---
+
+    static Brace integrationApp;
+    static int integrationPort;
+    static OpsKeys.Keypair integrationKeypair;
+    @TempDir static Path integrationProjectDir;
+
+    @BeforeAll
+    static void startApp() throws Exception {
+        integrationKeypair = OpsKeys.generateKeypair();
+        Path keysFile = integrationProjectDir.resolve("ops-authorized-keys");
+        Files.writeString(keysFile, integrationKeypair.publicKey() + " test\n");
+        Files.writeString(integrationProjectDir.resolve("ops-private.key"),
+            integrationKeypair.privateKey() + "\n" + integrationKeypair.publicKey() + "\n");
+
+        integrationApp = Brace.app().port(0).ops(keysFile.toString());
+        integrationApp.start();
+        integrationPort = integrationApp.actualPort();
+
+        Files.writeString(integrationProjectDir.resolve(".brace"),
+            "ops.local.url=http://localhost:" + integrationPort + "\n");
+        Files.writeString(integrationProjectDir.resolve(".brace.local"),
+            "ops.key=" + integrationProjectDir.resolve("ops-private.key") + "\n");
+    }
+
+    @AfterAll
+    static void stopApp() throws Exception {
+        if (integrationApp != null) integrationApp.stop();
+    }
+
+    @Test
+    void checkCommandReturnsZeroForHealthyApp() throws Exception {
+        CliAuth.clearCache(integrationProjectDir);
+        var bout = new ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new PrintStream(bout));
+        try {
+            int code = CliCheck.run(integrationProjectDir, new String[]{"--json"});
+            assertEquals(0, code);
+        } finally {
+            System.setOut(prev);
+        }
+        String output = bout.toString();
+        // Output may contain log lines (JSON per line) before the pretty-printed result.
+        // The check result spans multiple lines and contains "healthy"; find it.
+        String[] lines = output.split("\n");
+        StringBuilder jsonBuf = new StringBuilder();
+        boolean capturing = false;
+        for (String line : lines) {
+            if (!capturing && line.trim().startsWith("{") && !line.contains("\"event\"")) {
+                capturing = true;
+            }
+            if (capturing) jsonBuf.append(line).append("\n");
+        }
+        JsonNode result = Json.mapper().readTree(jsonBuf.toString());
+        assertTrue(result.has("healthy"), "Missing 'healthy' field in: " + jsonBuf);
+        assertTrue(result.path("healthy").asBoolean(), "Expected healthy=true but got: " + jsonBuf);
+        // Fresh app has 0m uptime so reachability check warns; healthy is still true
+        assertTrue(result.has("summary"));
+        assertTrue(result.has("checks"));
     }
 }
