@@ -32,12 +32,14 @@ public class CliOutput {
             }
         }
 
-        int total = 0;
-        for (int w : widths) total += w + 2;
-        if (total > maxWidth) {
-            int over = total - maxWidth;
+        for (;;) {
+            int total = 0;
+            for (int w : widths) total += w + 2;
+            if (total <= maxWidth) break;
             int widest = 0;
             for (int i = 1; i < cols; i++) if (widths[i] > widths[widest]) widest = i;
+            if (widths[widest] <= 8) break;
+            int over = total - maxWidth;
             widths[widest] = Math.max(8, widths[widest] - over);
         }
 

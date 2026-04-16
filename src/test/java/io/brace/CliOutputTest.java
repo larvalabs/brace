@@ -40,6 +40,17 @@ class CliOutputTest {
     }
 
     @Test
+    void truncatesMultipleWideColumns() {
+        var out = CliOutput.table(
+            List.of("A", "B"),
+            List.of(List.of("x".repeat(50), "y".repeat(50))),
+            40);
+        for (var line : out.split("\n")) {
+            assertTrue(line.length() <= 40, "line too long: " + line.length());
+        }
+    }
+
+    @Test
     void formatsJson() throws Exception {
         var out = CliOutput.json(Map.of("ok", true, "count", 5));
         assertTrue(out.contains("\"ok\""));
