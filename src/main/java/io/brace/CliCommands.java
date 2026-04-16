@@ -9,15 +9,12 @@ import java.util.*;
 
 public class CliCommands {
 
-    private static final HttpClient http = HttpClient.newHttpClient();
-
     private CliCommands() {}
 
     // ---------- brace errors ----------
 
     public static int errors(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
-        String token = CliAuth.bearer(cfg, projectDir);
 
         String url = cfg.url() + "/ops/errors";
         String since = parseFlag(args, "--since");
@@ -26,13 +23,11 @@ public class CliCommands {
             url += "?since=" + cutoff.toString();
         }
 
-        var response = http.send(
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("Authorization", "Bearer " + token)
                 .header("Accept", "application/json")
-                .GET().build(),
-            HttpResponse.BodyHandlers.ofString());
+                .GET());
 
         if (response.statusCode() != 200) {
             CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
@@ -73,7 +68,6 @@ public class CliCommands {
 
     public static int logs(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
-        String token = CliAuth.bearer(cfg, projectDir);
 
         String level = parseFlag(args, "--level");
         String since = parseFlag(args, "--since");
@@ -92,26 +86,24 @@ public class CliCommands {
         }
         String firstUrl = query.length() == 0 ? baseUrl : baseUrl + "?" + query;
 
-        long lastId = renderLogsOnce(firstUrl, token, mode);
+        long lastId = renderLogsOnce(cfg, projectDir, firstUrl, mode);
         if (!follow) return 0;
 
         while (true) {
             Thread.sleep(1000);
             StringBuilder q = new StringBuilder("since=").append(lastId);
             if (level != null) q.append("&level=").append(level);
-            long newLast = renderLogsOnce(baseUrl + "?" + q, token, mode);
+            long newLast = renderLogsOnce(cfg, projectDir, baseUrl + "?" + q, mode);
             if (newLast > 0) lastId = newLast;
         }
     }
 
-    private static long renderLogsOnce(String url, String token, CliOutput.Mode mode) throws Exception {
-        var response = http.send(
+    private static long renderLogsOnce(CliConfig cfg, Path projectDir, String url, CliOutput.Mode mode) throws Exception {
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("Authorization", "Bearer " + token)
                 .header("Accept", "application/json")
-                .GET().build(),
-            HttpResponse.BodyHandlers.ofString());
+                .GET());
         if (response.statusCode() != 200) {
             CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
             return 0;
@@ -150,23 +142,14 @@ public class CliCommands {
 
     public static int status(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
-        String token;
-        try {
-            token = CliAuth.bearer(cfg, projectDir);
-        } catch (Exception e) {
-            CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
-            return 2;
-        }
 
         HttpResponse<String> response;
         try {
-            response = http.send(
+            response = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
                     .uri(URI.create(cfg.url() + "/ops/status"))
-                    .header("Authorization", "Bearer " + token)
                     .header("Accept", "application/json")
-                    .GET().build(),
-                HttpResponse.BodyHandlers.ofString());
+                    .GET());
         } catch (Exception e) {
             CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
             return 2;
@@ -225,15 +208,12 @@ public class CliCommands {
 
     public static int cache(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
-        String token = CliAuth.bearer(cfg, projectDir);
 
-        var response = http.send(
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
                 .uri(URI.create(cfg.url() + "/ops/cache"))
-                .header("Authorization", "Bearer " + token)
                 .header("Accept", "application/json")
-                .GET().build(),
-            HttpResponse.BodyHandlers.ofString());
+                .GET());
 
         if (response.statusCode() != 200) {
             CliOutput.printError("HTTP " + response.statusCode());
@@ -260,16 +240,12 @@ public class CliCommands {
 
     public static int cacheClear(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
-        String token = CliAuth.bearer(cfg, projectDir);
 
-        var response = http.send(
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
                 .uri(URI.create(cfg.url() + "/ops/cache/clear"))
-                .header("Authorization", "Bearer " + token)
                 .header("Accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.noBody())
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
+                .POST(HttpRequest.BodyPublishers.noBody()));
 
         if (response.statusCode() == 404) {
             // Cache not configured — nothing to clear
@@ -299,16 +275,12 @@ public class CliCommands {
         String id = args[0];
 
         var cfg = CliConfig.load(projectDir, args);
-        String token = CliAuth.bearer(cfg, projectDir);
 
-        var response = http.send(
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
                 .uri(URI.create(cfg.url() + "/ops/errors/" + id + "/resolve"))
-                .header("Authorization", "Bearer " + token)
                 .header("Accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.noBody())
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
+                .POST(HttpRequest.BodyPublishers.noBody()));
 
         if (response.statusCode() == 404) {
             CliOutput.printError("error " + id + " not found");

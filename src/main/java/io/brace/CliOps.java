@@ -7,8 +7,6 @@ import java.nio.file.*;
 
 public class CliOps {
 
-    private static final HttpClient http = HttpClient.newHttpClient();
-
     private CliOps() {}
 
     public static int keypair(Path projectDir, String[] args) {
@@ -42,16 +40,12 @@ public class CliOps {
     public static int dashboard(Path projectDir, String[] args) {
         try {
             var cfg = CliConfig.load(projectDir, args);
-            String bearer = CliAuth.bearer(cfg, projectDir);
 
             // Exchange bearer for single-use login token
-            var loginResponse = http.send(
+            var loginResponse = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
                     .uri(URI.create(cfg.url() + "/ops/auth/login-token"))
-                    .header("Authorization", "Bearer " + bearer)
-                    .POST(HttpRequest.BodyPublishers.noBody())
-                    .build(),
-                HttpResponse.BodyHandlers.ofString());
+                    .POST(HttpRequest.BodyPublishers.noBody()));
 
             if (loginResponse.statusCode() != 200) {
                 CliOutput.printError("Failed to get login token: " + loginResponse.body());

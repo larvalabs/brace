@@ -18,6 +18,29 @@ public class CliAuth {
         return bearer(cfg, projectDir, false);
     }
 
+    /**
+     * Send an authenticated HTTP request, transparently refreshing the bearer
+     * token if the server rejects it. The supplied builder must not carry an
+     * Authorization header — the helper adds one. On a 401 response the cached
+     * token is discarded, a fresh one is minted, and the request is sent once
+     * more. A second 401 is returned to the caller.
+     */
+    public static HttpResponse<String> sendAuthenticated(
+            CliConfig cfg, Path projectDir, HttpRequest.Builder builder) throws Exception {
+        String token = bearer(cfg, projectDir);
+        var response = http.send(
+            builder.copy().header("Authorization", "Bearer " + token).build(),
+            HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 401) {
+            clearCache(projectDir);
+            token = bearer(cfg, projectDir);
+            response = http.send(
+                builder.copy().header("Authorization", "Bearer " + token).build(),
+                HttpResponse.BodyHandlers.ofString());
+        }
+        return response;
+    }
+
     private static String bearer(CliConfig cfg, Path projectDir, boolean retried) throws Exception {
         var cached = readCache(projectDir);
         if (cached != null) return cached;

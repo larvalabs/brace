@@ -12,8 +12,6 @@ public class CliCheck {
 
     private CliCheck() {}
 
-    private static final HttpClient http = HttpClient.newHttpClient();
-
     public record CheckResult(boolean healthy, String summary, List<Check> checks) {}
 
     public record Check(String name, String status, String message,
@@ -30,25 +28,10 @@ public class CliCheck {
             CliCommands.hasFlag(args, "--json"),
             CliCommands.hasFlag(args, "--pretty"));
 
-        String token;
-        try {
-            token = CliAuth.bearer(cfg, projectDir);
-        } catch (Exception e) {
-            if (mode == CliOutput.Mode.JSON) {
-                var result = new CheckResult(false, "App unreachable: " + e.getMessage(), List.of(
-                    new Check("reachability", "fail", "Cannot connect: " + e.getMessage())
-                ));
-                System.out.println(CliOutput.json(result));
-            } else {
-                CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
-            }
-            return 2;
-        }
-
         // Fetch all three endpoints
         JsonNode status, errors, logs;
         try {
-            status = fetchJson(cfg.url() + "/ops/status", token);
+            status = fetchJson(cfg, projectDir, cfg.url() + "/ops/status");
         } catch (Exception e) {
             if (mode == CliOutput.Mode.JSON) {
                 var result = new CheckResult(false, "App unreachable: " + e.getMessage(), List.of(
@@ -62,14 +45,14 @@ public class CliCheck {
         }
 
         try {
-            errors = fetchJson(cfg.url() + "/ops/errors", token);
+            errors = fetchJson(cfg, projectDir, cfg.url() + "/ops/errors");
         } catch (Exception e) {
             errors = Json.mapper().valueToTree(List.of());
         }
 
         try {
             Instant since = Instant.now().minusSeconds(thresholds.logWindowMinutes() * 60L);
-            logs = fetchJson(cfg.url() + "/ops/logs?level=warn&since_ts=" + since.toString(), token);
+            logs = fetchJson(cfg, projectDir, cfg.url() + "/ops/logs?level=warn&since_ts=" + since.toString());
         } catch (Exception e) {
             logs = Json.mapper().valueToTree(List.of());
         }
@@ -85,14 +68,12 @@ public class CliCheck {
         return result.healthy() ? 0 : 1;
     }
 
-    private static JsonNode fetchJson(String url, String token) throws Exception {
-        var response = http.send(
+    private static JsonNode fetchJson(CliConfig cfg, Path projectDir, String url) throws Exception {
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("Authorization", "Bearer " + token)
                 .header("Accept", "application/json")
-                .GET().build(),
-            HttpResponse.BodyHandlers.ofString());
+                .GET());
         if (response.statusCode() != 200) {
             throw new RuntimeException("HTTP " + response.statusCode());
         }
