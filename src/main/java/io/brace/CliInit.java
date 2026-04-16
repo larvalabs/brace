@@ -44,10 +44,15 @@ public class CliInit {
 
         // .gitignore
         Path gitignore = projectDir.resolve(".gitignore");
-        var existing = Files.exists(gitignore) ? Files.readString(gitignore) : "";
+        var existingLines = Files.exists(gitignore) ? Files.readAllLines(gitignore) : List.<String>of();
+        var existing = String.join("\n", existingLines);
+        var activeEntries = existingLines.stream()
+            .map(String::trim)
+            .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+            .toList();
         var needs = new ArrayList<String>();
-        if (!existing.contains(".brace.local")) needs.add(".brace.local");
-        if (!existing.contains("ops-private.key")) needs.add("ops-private.key");
+        if (activeEntries.stream().noneMatch(l -> l.equals(".brace.local"))) needs.add(".brace.local");
+        if (activeEntries.stream().noneMatch(l -> l.equals("ops-private.key"))) needs.add("ops-private.key");
         if (!needs.isEmpty()) {
             String addition = (existing.isEmpty() || existing.endsWith("\n") ? "" : "\n")
                 + "\n# brace CLI\n" + String.join("\n", needs) + "\n";
