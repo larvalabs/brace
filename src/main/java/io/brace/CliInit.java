@@ -113,7 +113,7 @@ public class CliInit {
         var actions = new ArrayList<>(localResult.actions());
 
         try {
-            var cfg = new CliConfig(prodUrl, privKey.toString(), "ops-authorized-keys", "prod");
+            var cfg = new CliConfig(prodUrl, privKey.toString(), "ops-authorized-keys", "prod", Map.of());
             try {
                 CliAuth.clearCache(projectDir);
                 CliAuth.bearer(cfg, projectDir);

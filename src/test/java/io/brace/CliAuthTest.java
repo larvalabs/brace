@@ -3,6 +3,7 @@ package io.brace;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.*;
+import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CliAuthTest {
@@ -38,7 +39,7 @@ class CliAuthTest {
     void freshFetchReturnsBearerToken() throws Exception {
         var cfg = new CliConfig("http://localhost:" + port,
             tmp.resolve("ops-private.key").toString(),
-            "authorized-keys", "local");
+            "authorized-keys", "local", Map.of());
         String token = CliAuth.bearer(cfg, tmp);
         assertNotNull(token);
         assertFalse(token.isEmpty());
@@ -48,7 +49,7 @@ class CliAuthTest {
     void cachedTokenReused() throws Exception {
         var cfg = new CliConfig("http://localhost:" + port,
             tmp.resolve("ops-private.key").toString(),
-            "authorized-keys", "local");
+            "authorized-keys", "local", Map.of());
         String first = CliAuth.bearer(cfg, tmp);
         assertTrue(Files.exists(tmp.resolve("target/.brace-token")), "token should be cached on disk");
         String second = CliAuth.bearer(cfg, tmp);
@@ -59,7 +60,7 @@ class CliAuthTest {
     void missingKeyFileThrows() {
         var cfg = new CliConfig("http://localhost:" + port,
             tmp.resolve("does-not-exist.key").toString(),
-            "authorized-keys", "local");
+            "authorized-keys", "local", Map.of());
         var ex = assertThrows(Exception.class, () -> CliAuth.bearer(cfg, tmp));
         assertTrue(ex.getMessage().toLowerCase().contains("key"));
     }

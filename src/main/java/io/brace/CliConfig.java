@@ -5,7 +5,8 @@ import java.nio.file.*;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-public record CliConfig(String url, String keyPath, String authorizedKeysPath, String env) {
+public record CliConfig(String url, String keyPath, String authorizedKeysPath, String env,
+                        Map<String, String> rawValues) {
 
     private static final String DEFAULT_LOCAL_URL = "http://localhost:8080";
     private static final String DEFAULT_KEY_PATH = "ops-private.key";
@@ -50,7 +51,11 @@ public record CliConfig(String url, String keyPath, String authorizedKeysPath, S
 
         String authKeys = values.getOrDefault("ops.authorized_keys", DEFAULT_AUTH_KEYS);
 
-        return new CliConfig(url, keyPath, authKeys, env);
+        return new CliConfig(url, keyPath, authKeys, env, Map.copyOf(values));
+    }
+
+    public CheckThresholds checkThresholds() {
+        return CheckThresholds.fromConfig(rawValues);
     }
 
     private static void merge(Map<String, String> into, Path file) throws IOException {
