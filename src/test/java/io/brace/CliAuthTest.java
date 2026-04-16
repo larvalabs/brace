@@ -50,6 +50,7 @@ class CliAuthTest {
             tmp.resolve("ops-private.key").toString(),
             "authorized-keys", "local");
         String first = CliAuth.bearer(cfg, tmp);
+        assertTrue(Files.exists(tmp.resolve("target/.brace-token")), "token should be cached on disk");
         String second = CliAuth.bearer(cfg, tmp);
         assertEquals(first, second);
     }

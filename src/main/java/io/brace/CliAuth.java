@@ -15,6 +15,10 @@ public class CliAuth {
     private CliAuth() {}
 
     public static String bearer(CliConfig cfg, Path projectDir) throws Exception {
+        return bearer(cfg, projectDir, false);
+    }
+
+    private static String bearer(CliConfig cfg, Path projectDir, boolean retried) throws Exception {
         var cached = readCache(projectDir);
         if (cached != null) return cached;
 
@@ -36,6 +40,10 @@ public class CliAuth {
                 .build(),
             HttpResponse.BodyHandlers.ofString());
 
+        if (response.statusCode() == 401 && !retried) {
+            clearCache(projectDir);
+            return bearer(cfg, projectDir, true);
+        }
         if (response.statusCode() != 200) {
             throw new RuntimeException("Authentication failed (" + response.statusCode() + "): " + response.body());
         }
