@@ -699,4 +699,32 @@ class OpsIntegrationTest {
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("application/json"));
         assertTrue(response.body().contains("cleared"));
     }
+
+    @Test
+    void resolveErrorReturnsJsonWhenAcceptIsJson() throws Exception {
+        String token = authenticate(cachePort, cacheKeypair);
+        var errorsResp = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/errors"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertTrue(errorsResp.body().contains("errorType"), errorsResp.body());
+        int idStart = errorsResp.body().indexOf("\"id\":") + 5;
+        int idEnd = errorsResp.body().indexOf(",", idStart);
+        String errorId = errorsResp.body().substring(idStart, idEnd).trim();
+
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/errors/" + errorId + "/resolve"))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("application/json"));
+        assertTrue(response.body().contains("resolvedAt"), response.body());
+    }
 }

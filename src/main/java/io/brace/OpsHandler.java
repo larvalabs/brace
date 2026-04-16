@@ -435,9 +435,10 @@ public class OpsHandler {
         if (!authorize(req)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Result.notFound();
         long id = req.longPathParam("id");
-        errorStore.resolve(id);
+        var resolved = errorStore.resolve(id);
         if (wantsJson(req)) {
-            return Json.of(Map.of("resolved", true, "id", id));
+            if (resolved == null) return Result.notFound();
+            return Json.of(resolved);
         }
         return dashboard(req);
     }
