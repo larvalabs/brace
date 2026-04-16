@@ -244,16 +244,24 @@ brace_help() {
     echo ""
     echo "Global commands:"
     echo -e "  ${CYAN}brace new <name>${NC}           Create a new Brace project"
-    echo -e "  ${CYAN}brace ops keypair${NC}          Generate an Ed25519 keypair for ops auth"
-    echo -e "  ${CYAN}brace ops dashboard${NC}        Authenticate and open the ops dashboard"
     echo ""
     echo "Project commands (run inside a project directory):"
+    echo -e "  ${CYAN}brace init${NC}                 Scaffold project config + run readiness checks"
+    echo -e "  ${CYAN}brace ops keypair${NC}          Generate an Ed25519 keypair for ops auth"
+    echo -e "  ${CYAN}brace ops dashboard${NC}        Authenticate and open the ops dashboard"
+    echo -e "  ${CYAN}brace errors${NC} [--since 1h]  List unresolved errors"
+    echo -e "  ${CYAN}brace logs${NC} [-f] [--since]  Tail recent log lines"
+    echo -e "  ${CYAN}brace status${NC}               Show app health snapshot"
+    echo -e "  ${CYAN}brace cache${NC} [clear]        Show cache stats / clear cache"
+    echo -e "  ${CYAN}brace resolve${NC} <id>         Mark an error as resolved"
     echo -e "  ${CYAN}brace deps${NC}                 Copy dependencies from pom.xml into ./lib/"
     echo -e "  ${CYAN}brace compile${NC}              Compile the project"
     echo -e "  ${CYAN}brace run${NC}                  Compile and run"
     echo -e "  ${CYAN}brace dev${NC}                  Compile, run, and watch for changes"
-    echo -e "  ${CYAN}brace test${NC} [class]         Run tests (all or a specific class)"
+    echo -e "  ${CYAN}brace test${NC} [class]         Run tests"
     echo -e "  ${CYAN}brace help${NC}                 Show this help"
+    echo ""
+    echo "All read commands accept --env <name>, --json, --pretty."
     echo ""
 }
 
@@ -264,8 +272,12 @@ shift 2>/dev/null || true
 case "$COMMAND" in
     # Global (Java CLI)
     new)     run_java_cli new "$@" ;;
-    ops)     run_java_cli ops "$@" ;;
-    # Project
+
+    # Project (Java CLI — handled by Cli.java with require_project guards)
+    init|ops|errors|logs|status|cache|resolve)
+             run_java_cli "$COMMAND" "$@" ;;
+
+    # Project (bash)
     deps)    brace_deps ;;
     compile) brace_compile ;;
     run)     brace_run ;;
