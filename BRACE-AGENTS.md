@@ -559,24 +559,128 @@ app.sessions("this-is-a-test-secret-changeme-ok");  // warns but allows (weak pa
 app.sessions("a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6");  // good (32+ random chars)
 ```
 
-## Ops — Debugging & Monitoring
+## Ops — Production Health Runbook
 
-**When debugging a running Brace app, use `/ops/status` instead of tailing logs.** It returns structured JSON with everything you need to diagnose problems.
+Brace ships with CLI commands and HTTP endpoints for inspecting a running app. Use these to diagnose production issues without SSH access or log aggregators.
 
-Setup: `app.ops("ops-authorized-keys")`. Generate keys: `brace ops keypair`.
+**Setup:** `app.ops("ops-authorized-keys")` in `main()`. Generate keys with `brace ops keypair`. Run `brace init` to scaffold `.brace` config. All commands below use `--env prod` to target production; omit it for local.
 
-Authenticate: `POST /ops/auth` with signed timestamp, receive a Bearer token. Then pass `Authorization: Bearer <token>` header or `?token=<token>` query param.
+### CLI commands
 
-### Endpoints
+| Command | Purpose | Exit code |
+|---|---|---|
+| `brace status [--env prod]` | Full system snapshot | 0 healthy / 1 errors exist / 2 unreachable |
+| `brace errors [--since 1h] [--env prod]` | List unresolved errors | 0 none / 1 some / 2 unreachable |
+| `brace logs [-f] [--since 10m] [--level warn] [--env prod]` | Tail structured log entries | 0 |
+| `brace cache [--env prod]` | Cache size, hit rate, evictions | 0 / 2 unreachable |
+| `brace cache clear [--env prod]` | Empty the cache | 0 / 2 unreachable |
+| `brace resolve <id> [--env prod]` | Mark an error as resolved | 0 / 1 not found / 2 unreachable |
+
+All commands auto-detect output: human-readable table when stdout is a TTY, JSON when piped. Force with `--json` or `--pretty`.
+
+### HTTP endpoints
+
+The CLI commands call these under the hood. Use them directly when you need raw JSON or aren't in a project directory.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /ops/status` | Full system snapshot (see below) |
-| `GET /ops/errors` | All tracked errors with status filter (`?status=open`) |
+| `GET /ops/status` | Full system snapshot (app, http, jvm, errors, jobs, cache, metrics, timeseries) |
+| `GET /ops/errors[?status=open&since=<iso8601>]` | Tracked errors, filterable by status and time window |
+| `GET /ops/logs[?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=200]` | Recent log entries from in-memory ring buffer |
+| `GET /ops/cache` | Cache stats: size, hits, misses, hitRate, evictions |
 | `GET /ops/routes` | All registered routes |
-| `GET /ops/dashboard` | HTML dashboard (human-readable) |
-| `POST /ops/errors/{id}/resolve` | Mark an error as resolved |
-| `POST /ops/cache/clear` | Clear the entire cache |
+| `GET /ops/dashboard` | HTML dashboard (browser) |
+| `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) |
+| `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true}` with `Accept: application/json`) |
+
+Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pass `Authorization: Bearer <token>`.
+
+### Runbook: general health check
+
+Start here when asked to "check on production" or "is the app healthy":
+
+```bash
+brace status --env prod --json
+```
+
+Read the output in this order:
+
+1. **`app.uptime`** — if very short, the app recently restarted. Check logs for crash/OOM.
+2. **`http.statusCodes`** — look at 5xx count. Any 500s mean unhandled exceptions.
+3. **`errors.count`** — if > 0, switch to the error investigation runbook below.
+4. **`http.slowestRoutes`** — anything over 500ms avg deserves investigation.
+5. **`jvm.heap.usedMB` vs `maxMB`** — if usage is above 80% of max, memory pressure is likely. Check `jvm.gc.avgPauseMs` for GC impact.
+6. **`jobs.scheduled`** — any job with `lastStatus` != `"ok"` needs attention.
+7. **`cache`** — compute hit rate (hits / (hits + misses)). Below 50% means the cache isn't helping; review TTLs and key strategies.
+
+If everything looks normal, report healthy and stop.
+
+### Runbook: error investigation
+
+When users report errors or `brace status` shows a non-zero error count:
+
+```bash
+brace errors --env prod --json
+```
+
+Each error includes: `id`, `errorType`, `message`, `route`, `stackTrace`, `occurrenceCount`, `firstSeen`, `lastSeen`.
+
+**Triage by route and count.** High-count errors on critical routes are the priority. Then:
+
+1. **Read the stack trace** — identify the exception type and the line in your code where it originates.
+2. **Check recent logs around the error time:**
+   ```bash
+   brace logs --env prod --since 30m --level warn --json
+   ```
+   Look for log entries on the same route or with related context (e.g., the same user ID, request path).
+3. **Check if it's new or recurring** — compare `firstSeen` vs `lastSeen`. A new error after a deploy is likely a regression; a long-running error is a latent bug.
+4. **Find the code** — use the route from the error (e.g., `GET /posts/{id}`) to find the handler registration in `main()`, then trace into the handler method.
+5. **Fix, deploy, then resolve:**
+   ```bash
+   brace resolve <id> --env prod
+   ```
+
+### Runbook: slow endpoint diagnosis
+
+When `brace status` shows a route with high average latency:
+
+1. **Get the route name** from `http.slowestRoutes` (e.g., `GET /search`).
+2. **Check logs for that route:**
+   ```bash
+   brace logs --env prod --since 1h --json | jq '.[] | select(.path == "/search")'
+   ```
+   Look at `durationMs` and `queries` / `queryMs` fields in the structured log entries.
+3. **If `queryMs` dominates `durationMs`** — the database is the bottleneck. Look at the handler code for N+1 queries, missing indexes, or full table scans.
+4. **If `durationMs` is high but `queryMs` is low** — the handler is CPU-bound or waiting on an external service. Check `jvm.profiling.hotMethods` in status output.
+5. **Check for GC pauses** — `jvm.gc.avgPauseMs` above 50ms can cause latency spikes across all routes.
+6. **Check heap pressure** — if heap usage is near max, GC runs more frequently and takes longer.
+
+### Runbook: post-deploy verification
+
+Run immediately after deploying a new version:
+
+```bash
+brace status --env prod --json    # confirm app restarted (short uptime)
+brace errors --env prod --since 5m --json   # any new errors since deploy?
+brace logs --env prod --since 5m --level error --json   # any error-level log entries?
+```
+
+If errors appeared that weren't present before the deploy, they are likely regressions. Investigate with the error runbook above.
+
+### Runbook: cache diagnosis
+
+When performance is worse than expected or cache hit rate is low:
+
+```bash
+brace cache --env prod --json
+```
+
+- **`hitRate` below 0.5** — cache is missing more than it hits. Check that frequently-accessed data is being cached, TTLs aren't too short, and cache keys match the access pattern.
+- **`evictions` growing fast** — cache is full and dropping entries. Consider whether the working set is too large for the configured size.
+- **Stale data suspected** — clear and let it repopulate:
+  ```bash
+  brace cache clear --env prod
+  ```
 
 ### What `/ops/status` returns
 
@@ -611,14 +715,6 @@ Authenticate: `POST /ops/auth` with signed timestamp, receive a Bearer token. Th
   "timeseries": { "minutes": [{ "ts": "...", "requests": 45, "errors": 0, "avgMs": 12.3 }] }
 }
 ```
-
-### Debugging workflow
-
-1. **App throwing errors?** Check `errors.recent` — each error includes the stack trace, the route that triggered it, the request details, and which DB queries ran before it failed.
-2. **Endpoint slow?** Check `http.slowestRoutes` for avg latency. Check `timeseries.minutes` for trends. Check `jvm.profiling.hotMethods` for CPU bottlenecks.
-3. **Memory issues?** Check `jvm.heap` for usage, `jvm.gc` for pause frequency, `jvm.profiling.topAllocations` for what's allocating.
-4. **Job failing?** Check `jobs.scheduled` — each job shows `lastStatus`, `lastError`, and `failCount`.
-5. **Cache not helping?** Check `cache.hits` vs `cache.misses` for hit rate.
 
 ## Custom Metrics
 
