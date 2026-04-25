@@ -47,6 +47,8 @@ AI agents: read [AGENTS.md](AGENTS.md) for the complete framework reference.
 
 ## Install
 
+Requires JDK 21 or later. JDK 25 LTS is recommended — [JEP 491](https://openjdk.org/jeps/491) removes virtual-thread pinning inside `synchronized` blocks, which materially improves tail latency under load when Hibernate and JDBC drivers are on the hot path.
+
 Download the latest release zip, unzip it, and add `bin/` to your PATH:
 
 ```bash

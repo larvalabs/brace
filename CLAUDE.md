@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Brace is a full-stack Java 21+ web framework. Plain Java, no DI container, no bytecode enhancement, no classpath scanning. Batteries included: HTTP, database, templates, sessions, forms, jobs, mailer, ops dashboard.
+Brace is a full-stack Java web framework. Requires JDK 21+; JDK 25 LTS recommended (JEP 491 removes virtual-thread pinning on `synchronized`, which matters under load with Hibernate/JDBC). Plain Java, no DI container, no bytecode enhancement, no classpath scanning. Batteries included: HTTP, database, templates, sessions, forms, jobs, mailer, ops dashboard.
 
 ## Project Structure
 

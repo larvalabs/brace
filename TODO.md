@@ -80,6 +80,7 @@
 
 ## Benchmarks (Lower Priority)
 
+- [ ] Re-run runtime benchmarks on JDK 25 — current `benchmark/RESULTS.md` is on Java 23.0.2, pre-JEP 491. Expect tail-latency improvement under load now that virtual threads no longer pin on `synchronized` (Hibernate/JDBC hot paths)
 - [ ] Run Spring Boot TFB on same machine for side-by-side comparison
 - [ ] Tune Brace connection pool (HikariCP settings) — DB numbers may improve significantly
 - [ ] Run Brace TFB with H2 embedded for max-performance baseline
