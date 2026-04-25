@@ -21,6 +21,7 @@
 
         <hibernate.version>7.0.10.Final</hibernate.version>
         <h2.version>2.3.232</h2.version>
+        <postgresql.version>42.7.10</postgresql.version>
         <hikari.version>6.3.0</hikari.version>
         <flyway.version>10.22.0</flyway.version>
         <jte.version>3.2.1</jte.version>
@@ -86,6 +87,14 @@
             <artifactId>h2</artifactId>
             <version>${h2.version}</version>
             <scope>test</scope>
+        </dependency>
+
+        <!-- PostgreSQL JDBC driver (recommended production database) -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+            <scope>runtime</scope>
         </dependency>
 
         <!-- HikariCP connection pool -->

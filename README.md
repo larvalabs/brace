@@ -121,7 +121,7 @@ public class App {
 ## What's Included
 
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
-- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access
+- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access. PostgreSQL JDBC driver bundled — no extra dependency to add
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
@@ -426,6 +426,7 @@ session.secret=change-me
 |---|---|
 | HTTP | Jetty 12 (virtual threads) |
 | ORM | Hibernate 7 (StatelessSession) |
+| JDBC Drivers | PostgreSQL 42.7.10 (bundled), H2 (test) |
 | Templates | JTE |
 | Migrations | Flyway |
 | JSON | Jackson |

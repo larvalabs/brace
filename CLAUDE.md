@@ -143,6 +143,6 @@ When changing public API (adding/removing/renaming methods, classes, or handler 
 
 ## Dependencies
 
-Jetty 12, Hibernate 7, H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, htmx 2.0.4, JUnit 5.
+Jetty 12, Hibernate 7, PostgreSQL JDBC (runtime), H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, htmx 2.0.4, JUnit 5.
 
 Single Maven artifact: `io.brace:brace:0.1.0-SNAPSHOT`
