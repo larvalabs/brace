@@ -9,6 +9,11 @@ public class ProjectGenerator {
         try {
             var root = Path.of(name);
 
+            if (Files.exists(root)) {
+                System.err.println("Failed to create project: " + root.toAbsolutePath() + " already exists.");
+                System.exit(1);
+            }
+
             // Create directories
             Files.createDirectories(root.resolve("src/main/java/app/controllers"));
             Files.createDirectories(root.resolve("src/test/java/app"));
