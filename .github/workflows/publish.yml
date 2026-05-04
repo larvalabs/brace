@@ -15,10 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK 25
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: '25'
           distribution: 'temurin'
           cache: maven
           server-id: github
@@ -31,10 +31,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mvn -B versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
 
-      - name: Build and test
-        run: mvn -B verify
-
-      - name: Deploy
+      - name: Deploy (runs tests then publishes)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: mvn -B deploy -DskipTests
+        run: mvn -B deploy
