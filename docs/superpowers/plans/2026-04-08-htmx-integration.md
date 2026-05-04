@@ -16,28 +16,28 @@
 
 | File | Action | Purpose |
 |---|---|---|
-| `src/main/java/io/brace/Request.java` | Modify | Add `isHtmx()` method |
-| `src/main/java/io/brace/BraceHandler.java` | Modify | Add `Vary: HX-Request` header, serve `/__brace/htmx.min.js` |
-| `src/main/java/io/brace/OpsDashboard.java` | Rewrite | Server-side HTML rendering from data objects, htmx polling |
-| `src/main/java/io/brace/OpsHandler.java` | Modify | Pass data to OpsDashboard, action endpoints return dashboard HTML |
+| `src/main/java/com/larvalabs/brace/Request.java` | Modify | Add `isHtmx()` method |
+| `src/main/java/com/larvalabs/brace/BraceHandler.java` | Modify | Add `Vary: HX-Request` header, serve `/__brace/htmx.min.js` |
+| `src/main/java/com/larvalabs/brace/OpsDashboard.java` | Rewrite | Server-side HTML rendering from data objects, htmx polling |
+| `src/main/java/com/larvalabs/brace/OpsHandler.java` | Modify | Pass data to OpsDashboard, action endpoints return dashboard HTML |
 | `src/main/resources/brace/htmx.min.js` | Create | Bundled htmx 2.0.4 |
-| `src/test/java/io/brace/HtmxTest.java` | Create | Tests for isHtmx, Vary header, htmx.min.js serving |
-| `src/test/java/io/brace/OpsIntegrationTest.java` | Modify | Update assertions for server-rendered dashboard |
+| `src/test/java/com/larvalabs/brace/HtmxTest.java` | Create | Tests for isHtmx, Vary header, htmx.min.js serving |
+| `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java` | Modify | Update assertions for server-rendered dashboard |
 
 ---
 
 ### Task 1: Add `req.isHtmx()` to Request
 
 **Files:**
-- Modify: `src/main/java/io/brace/Request.java`
-- Create: `src/test/java/io/brace/HtmxTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Request.java`
+- Create: `src/test/java/com/larvalabs/brace/HtmxTest.java`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `src/test/java/io/brace/HtmxTest.java`:
+Create `src/test/java/com/larvalabs/brace/HtmxTest.java`:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import java.net.URI;
@@ -97,7 +97,7 @@ Expected: Compilation error — `isHtmx()` method does not exist on Request.
 
 - [ ] **Step 3: Implement `isHtmx()` on Request**
 
-Add to `src/main/java/io/brace/Request.java` after the `hasHeader` method (line 62):
+Add to `src/main/java/com/larvalabs/brace/Request.java` after the `hasHeader` method (line 62):
 
 ```java
 public boolean isHtmx() {
@@ -114,7 +114,7 @@ Expected: 2 tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/Request.java src/test/java/io/brace/HtmxTest.java
+git add src/main/java/com/larvalabs/brace/Request.java src/test/java/com/larvalabs/brace/HtmxTest.java
 git commit -m "Add req.isHtmx() for detecting htmx requests"
 ```
 
@@ -124,12 +124,12 @@ git commit -m "Add req.isHtmx() for detecting htmx requests"
 
 **Files:**
 - Create: `src/main/resources/brace/htmx.min.js`
-- Modify: `src/main/java/io/brace/BraceHandler.java`
-- Modify: `src/test/java/io/brace/HtmxTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/BraceHandler.java`
+- Modify: `src/test/java/com/larvalabs/brace/HtmxTest.java`
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `src/test/java/io/brace/HtmxTest.java`:
+Add to `src/test/java/com/larvalabs/brace/HtmxTest.java`:
 
 ```java
 @Test
@@ -162,7 +162,7 @@ head -1 src/main/resources/brace/htmx.min.js
 
 - [ ] **Step 4: Serve htmx.min.js from BraceHandler**
 
-Add a classpath resource serving method to `src/main/java/io/brace/BraceHandler.java`. Add a field and initialize it in the constructor:
+Add a classpath resource serving method to `src/main/java/com/larvalabs/brace/BraceHandler.java`. Add a field and initialize it in the constructor:
 
 Add field at the top of the class (after `maxUploadSize`):
 
@@ -207,7 +207,7 @@ Expected: All tests pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/main/resources/brace/htmx.min.js src/main/java/io/brace/BraceHandler.java src/test/java/io/brace/HtmxTest.java
+git add src/main/resources/brace/htmx.min.js src/main/java/com/larvalabs/brace/BraceHandler.java src/test/java/com/larvalabs/brace/HtmxTest.java
 git commit -m "Bundle htmx 2.0.4 and serve from /__brace/htmx.min.js"
 ```
 
@@ -216,12 +216,12 @@ git commit -m "Bundle htmx 2.0.4 and serve from /__brace/htmx.min.js"
 ### Task 3: Add `Vary: HX-Request` header for htmx responses
 
 **Files:**
-- Modify: `src/main/java/io/brace/BraceHandler.java`
-- Modify: `src/test/java/io/brace/HtmxTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/BraceHandler.java`
+- Modify: `src/test/java/com/larvalabs/brace/HtmxTest.java`
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `src/test/java/io/brace/HtmxTest.java`:
+Add to `src/test/java/com/larvalabs/brace/HtmxTest.java`:
 
 ```java
 @Test
@@ -245,7 +245,7 @@ Expected: FAIL — no Vary header in response.
 
 - [ ] **Step 3: Add Vary header logic to BraceHandler**
 
-In `src/main/java/io/brace/BraceHandler.java`, in the `handle` method, add after the after-middleware loop (after line 264 `result = after.apply(braceRequest, result);` and its closing brace) and before `writeResult(result, response, callback);` (line 266):
+In `src/main/java/com/larvalabs/brace/BraceHandler.java`, in the `handle` method, add after the after-middleware loop (after line 264 `result = after.apply(braceRequest, result);` and its closing brace) and before `writeResult(result, response, callback);` (line 266):
 
 ```java
 // Add Vary header for htmx requests (caching correctness)
@@ -263,7 +263,7 @@ Expected: All HtmxTest tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/BraceHandler.java src/test/java/io/brace/HtmxTest.java
+git add src/main/java/com/larvalabs/brace/BraceHandler.java src/test/java/com/larvalabs/brace/HtmxTest.java
 git commit -m "Add Vary: HX-Request header for htmx responses"
 ```
 
@@ -272,16 +272,16 @@ git commit -m "Add Vary: HX-Request header for htmx responses"
 ### Task 4: Rewrite OpsDashboard for server-side rendering with htmx
 
 **Files:**
-- Rewrite: `src/main/java/io/brace/OpsDashboard.java`
+- Rewrite: `src/main/java/com/larvalabs/brace/OpsDashboard.java`
 
 This is the largest task. The current `OpsDashboard.html()` returns an HTML shell with ~220 lines of JavaScript that fetches JSON and renders the DOM client-side. The new version renders HTML server-side from data objects and uses htmx for 5-second polling.
 
 - [ ] **Step 1: Rewrite OpsDashboard.java**
 
-Replace the entire contents of `src/main/java/io/brace/OpsDashboard.java` with a server-side rendering implementation. The method signature changes to accept data objects:
+Replace the entire contents of `src/main/java/com/larvalabs/brace/OpsDashboard.java` with a server-side rendering implementation. The method signature changes to accept data objects:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -612,7 +612,7 @@ Expected: BUILD SUCCESS.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsDashboard.java
+git add src/main/java/com/larvalabs/brace/OpsDashboard.java
 git commit -m "Rewrite OpsDashboard for server-side rendering with htmx polling"
 ```
 
@@ -621,11 +621,11 @@ git commit -m "Rewrite OpsDashboard for server-side rendering with htmx polling"
 ### Task 5: Update OpsHandler to pass data and return dashboard from actions
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsHandler.java`
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java`
 
 - [ ] **Step 1: Update `dashboard()` to pass data to OpsDashboard**
 
-In `src/main/java/io/brace/OpsHandler.java`, change the `dashboard` method from:
+In `src/main/java/com/larvalabs/brace/OpsHandler.java`, change the `dashboard` method from:
 
 ```java
 public Result dashboard(Request req) {
@@ -709,7 +709,7 @@ Expected: BUILD SUCCESS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsHandler.java
+git add src/main/java/com/larvalabs/brace/OpsHandler.java
 git commit -m "Update OpsHandler to pass data to dashboard and return HTML from actions"
 ```
 
@@ -718,13 +718,13 @@ git commit -m "Update OpsHandler to pass data to dashboard and return HTML from 
 ### Task 6: Update tests and verify
 
 **Files:**
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java`
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`
 
 - [ ] **Step 1: Update dashboard test assertions**
 
 The existing tests in `OpsIntegrationTest.java` check for JS function names (`clearCache`, `resolveError`) that no longer exist. Update the assertions to match the new server-rendered output.
 
-In `src/test/java/io/brace/OpsIntegrationTest.java`, change the `dashboardIncludesCacheSection` test (line 171-175):
+In `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`, change the `dashboardIncludesCacheSection` test (line 171-175):
 
 ```java
 @Test
@@ -793,7 +793,7 @@ Expected: All tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/test/java/io/brace/OpsIntegrationTest.java
+git add src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "Update ops dashboard tests for server-rendered htmx output"
 ```
 

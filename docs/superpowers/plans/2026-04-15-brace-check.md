@@ -15,14 +15,14 @@
 ### Task 1: CheckThresholds record and config parsing
 
 **Files:**
-- Create: `src/main/java/io/brace/CheckThresholds.java`
-- Modify: `src/main/java/io/brace/CliConfig.java`
-- Test: `src/test/java/io/brace/CheckThresholdsTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CheckThresholds.java`
+- Modify: `src/main/java/com/larvalabs/brace/CliConfig.java`
+- Test: `src/test/java/com/larvalabs/brace/CheckThresholdsTest.java`
 
 - [ ] **Step 1: Write the failing test for default thresholds**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import java.util.Map;
@@ -50,10 +50,10 @@ Expected: FAIL — `CheckThresholds` class does not exist
 
 - [ ] **Step 3: Create CheckThresholds record**
 
-Create `src/main/java/io/brace/CheckThresholds.java`:
+Create `src/main/java/com/larvalabs/brace/CheckThresholds.java`:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.util.Map;
 
@@ -123,7 +123,7 @@ Expected: PASS (implementation already handles this)
 
 - [ ] **Step 7: Add checkThresholds() to CliConfig**
 
-In `src/main/java/io/brace/CliConfig.java`, the `merge()` method already reads all key=value pairs from `.brace` files. We need to expose those raw values so `CheckThresholds.fromConfig()` can read the `check.*` keys.
+In `src/main/java/com/larvalabs/brace/CliConfig.java`, the `merge()` method already reads all key=value pairs from `.brace` files. We need to expose those raw values so `CheckThresholds.fromConfig()` can read the `check.*` keys.
 
 Change the `CliConfig` record to include the raw config values:
 
@@ -154,7 +154,7 @@ Expected: PASS — existing tests may need a minor update if they construct `Cli
 - [ ] **Step 9: Commit**
 
 ```bash
-cd /Users/matt/code/brace && git add src/main/java/io/brace/CheckThresholds.java src/test/java/io/brace/CheckThresholdsTest.java src/main/java/io/brace/CliConfig.java src/test/java/io/brace/CliConfigTest.java
+cd /Users/matt/code/brace && git add src/main/java/com/larvalabs/brace/CheckThresholds.java src/test/java/com/larvalabs/brace/CheckThresholdsTest.java src/main/java/com/larvalabs/brace/CliConfig.java src/test/java/com/larvalabs/brace/CliConfigTest.java
 git commit -m "feat: add CheckThresholds record with configurable defaults"
 ```
 
@@ -163,15 +163,15 @@ git commit -m "feat: add CheckThresholds record with configurable defaults"
 ### Task 2: CliCheck core — check evaluation logic
 
 **Files:**
-- Create: `src/main/java/io/brace/CliCheck.java`
-- Test: `src/test/java/io/brace/CliCheckTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CliCheck.java`
+- Test: `src/test/java/com/larvalabs/brace/CliCheckTest.java`
 
 This task implements the pure check evaluation function that takes parsed JSON data and thresholds and returns a structured result. No HTTP calls — just logic. All nine checks.
 
 - [ ] **Step 1: Write failing test for a fully healthy app**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.*;
@@ -232,10 +232,10 @@ Expected: FAIL — `CliCheck` class does not exist
 
 - [ ] **Step 3: Create CliCheck with the evaluate method and inner types**
 
-Create `src/main/java/io/brace/CliCheck.java`:
+Create `src/main/java/com/larvalabs/brace/CliCheck.java`:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.*;
@@ -616,7 +616,7 @@ Expected: ALL PASS
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/matt/code/brace && git add src/main/java/io/brace/CliCheck.java src/test/java/io/brace/CliCheckTest.java
+cd /Users/matt/code/brace && git add src/main/java/com/larvalabs/brace/CliCheck.java src/test/java/com/larvalabs/brace/CliCheckTest.java
 git commit -m "feat: add CliCheck evaluation logic with all nine health checks"
 ```
 
@@ -625,8 +625,8 @@ git commit -m "feat: add CliCheck evaluation logic with all nine health checks"
 ### Task 3: CliCheck CLI wiring — run method with HTTP fetches and output
 
 **Files:**
-- Modify: `src/main/java/io/brace/CliCheck.java`
-- Modify: `src/main/java/io/brace/Cli.java`
+- Modify: `src/main/java/com/larvalabs/brace/CliCheck.java`
+- Modify: `src/main/java/com/larvalabs/brace/Cli.java`
 
 - [ ] **Step 1: Add the `run` method to CliCheck**
 
@@ -768,7 +768,7 @@ Expected: BUILD SUCCESS
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/matt/code/brace && git add src/main/java/io/brace/CliCheck.java src/main/java/io/brace/Cli.java
+cd /Users/matt/code/brace && git add src/main/java/com/larvalabs/brace/CliCheck.java src/main/java/com/larvalabs/brace/Cli.java
 git commit -m "feat: wire brace check command into CLI dispatcher"
 ```
 
@@ -777,7 +777,7 @@ git commit -m "feat: wire brace check command into CLI dispatcher"
 ### Task 4: Integration test — end-to-end check against a running test app
 
 **Files:**
-- Create: `src/test/java/io/brace/CliCheckTest.java` (add integration tests to existing file)
+- Create: `src/test/java/com/larvalabs/brace/CliCheckTest.java` (add integration tests to existing file)
 
 - [ ] **Step 1: Write integration test**
 
@@ -859,7 +859,7 @@ Expected: ALL PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/matt/code/brace && git add src/test/java/io/brace/CliCheckTest.java
+cd /Users/matt/code/brace && git add src/test/java/com/larvalabs/brace/CliCheckTest.java
 git commit -m "test: add integration test for brace check command"
 ```
 
@@ -868,8 +868,8 @@ git commit -m "test: add integration test for brace check command"
 ### Task 5: Pass the env name through to followUp commands
 
 **Files:**
-- Modify: `src/main/java/io/brace/CliCheck.java`
-- Modify: `src/test/java/io/brace/CliCheckTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/CliCheck.java`
+- Modify: `src/test/java/com/larvalabs/brace/CliCheckTest.java`
 
 The `evaluate()` method currently hardcodes `"prod"` for followUp commands. It should use the actual `--env` value so followUp commands work correctly.
 
@@ -930,7 +930,7 @@ Expected: ALL PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/matt/code/brace && git add src/main/java/io/brace/CliCheck.java src/test/java/io/brace/CliCheckTest.java
+cd /Users/matt/code/brace && git add src/main/java/com/larvalabs/brace/CliCheck.java src/test/java/com/larvalabs/brace/CliCheckTest.java
 git commit -m "feat: pass env name through to followUp commands in check output"
 ```
 
@@ -1018,7 +1018,7 @@ git commit -m "docs: add brace check to agent ops runbook"
 ### Task 7: Update Brace CLI help text
 
 **Files:**
-- Modify: `src/main/java/io/brace/Cli.java`
+- Modify: `src/main/java/com/larvalabs/brace/Cli.java`
 
 The global `brace --help` output should include `brace check` as a formatting-only change (the dispatch was already wired in Task 3).
 

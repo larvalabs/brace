@@ -7,8 +7,8 @@ Brace is a full-stack Java web framework. Requires JDK 21+; JDK 25 LTS recommend
 ## Project Structure
 
 ```
-src/main/java/io/brace/     # Framework source (~4,000 lines)
-src/test/java/io/brace/     # Tests (410 tests)
+src/main/java/com/larvalabs/brace/     # Framework source (~4,000 lines)
+src/test/java/com/larvalabs/brace/     # Tests (410 tests)
 src/test/resources/          # Test templates, migrations
 src/assembly/distribution.xml # Assembly descriptor for the brace CLI zip
 bin/brace                    # CLI launcher script (shipped in distribution)
@@ -145,4 +145,4 @@ When changing public API (adding/removing/renaming methods, classes, or handler 
 
 Jetty 12, Hibernate 7, PostgreSQL JDBC (runtime), H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, htmx 2.0.4, JUnit 5.
 
-Single Maven artifact: `io.brace:brace:0.1.0-SNAPSHOT`
+Single Maven artifact: `com.larvalabs.brace:brace:0.1.0-SNAPSHOT`

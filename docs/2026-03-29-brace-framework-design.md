@@ -773,7 +773,7 @@ Rich error page showing: source code with highlighted line, stack trace, request
     <dependencies>
         <!-- One dependency — brings Jetty, Hibernate, JTE, Flyway, Jackson, etc. -->
         <dependency>
-            <groupId>io.brace</groupId>
+            <groupId>com.larvalabs</groupId>
             <artifactId>brace</artifactId>
             <version>${brace.version}</version>
         </dependency>
@@ -789,7 +789,7 @@ Rich error page showing: source code with highlighted line, stack trace, request
 
         <!-- Testing (provided by Brace's test artifact) -->
         <dependency>
-            <groupId>io.brace</groupId>
+            <groupId>com.larvalabs</groupId>
             <artifactId>brace-test</artifactId>
             <version>${brace.version}</version>
             <scope>test</scope>

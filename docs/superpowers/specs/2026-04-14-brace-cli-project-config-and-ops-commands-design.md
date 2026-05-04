@@ -23,7 +23,7 @@ The end state: an agent with shell access to a project can run `brace status --e
 
 ## Architecture
 
-The current CLI is split between a bash launcher (`bin/brace`) and a Java entry point (`io.brace.Cli`). The launcher handles compile/run/test/dev locally; it delegates `new` and `ops *` to `java io.brace.Cli`. This split is preserved.
+The current CLI is split between a bash launcher (`bin/brace`) and a Java entry point (`com.larvalabs.brace.Cli`). The launcher handles compile/run/test/dev locally; it delegates `new` and `ops *` to `java com.larvalabs.brace.Cli`. This split is preserved.
 
 All new subcommands (`init`, `errors`, `logs`, `status`, `cache`, `resolve`, plus the existing `ops keypair` and `ops dashboard`) live in `Cli.java` because they need JSON parsing, HTTP, Ed25519 signing, and TTY detection — easier in Java than bash. The bash launcher dispatches each with one line.
 
@@ -39,7 +39,7 @@ All new subcommands (`init`, `errors`, `logs`, `status`, `cache`, `resolve`, plu
 | `CliAuth.java` | Shared auth helper: load private key, sign timestamp, POST `/ops/auth`, return + cache bearer token |
 | `CliOutput.java` | TTY detection, table renderer, JSON renderer, exit-code helpers |
 
-All in `io.brace`, no new package. Reuses existing types: `Config` (key=value parser), `OpsKeys` (Ed25519), `Http` (HTTP client), `Json` (Jackson wrapper), and the existing server-side `OpsHandler.OpsAuthRequest` record (the CLI sends instances of it serialized via `Json.mapper()`).
+All in `com.larvalabs.brace`, no new package. Reuses existing types: `Config` (key=value parser), `OpsKeys` (Ed25519), `Http` (HTTP client), `Json` (Jackson wrapper), and the existing server-side `OpsHandler.OpsAuthRequest` record (the CLI sends instances of it serialized via `Json.mapper()`).
 
 **Existing `Cli.opsDashboard()` cleanup.** Today it hand-builds JSON with string concatenation (`"{\"publicKey\":\"" + ... + "\"}"`). When refactoring it into `CliOps`, replace string concat with `Json.mapper().writeValueAsString(new OpsHandler.OpsAuthRequest(pub, ts, sig, 3600))`. Same change for parsing the auth response — use `Json.mapper().readTree()` instead of substring scanning. The browser login-token + exchange flow (`POST /ops/auth/login-token` → `GET /ops/auth/exchange?token=...`) is preserved as-is — read commands don't need it; only `brace ops dashboard` does.
 

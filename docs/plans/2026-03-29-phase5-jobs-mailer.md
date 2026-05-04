@@ -13,7 +13,7 @@
 ## File Structure
 
 ```
-src/main/java/io/brace/
+src/main/java/com/larvalabs/brace/
 ├── Job.java                    # Functional interface for recurring jobs
 ├── JobScheduler.java           # In-memory recurring scheduler
 ├── DurableJob.java             # Interface for persistent jobs
@@ -22,7 +22,7 @@ src/main/java/io/brace/
 ├── JobPoller.java              # Adaptive poller for durable job queue
 ├── Mailer.java                 # Email sending with JTE templates
 ├── Brace.java                  # Updated — every(), daily(), cron(), mailer()
-src/test/java/io/brace/
+src/test/java/com/larvalabs/brace/
 ├── JobSchedulerTest.java
 ├── DurableJobTest.java
 ├── MailerTest.java
@@ -36,15 +36,15 @@ src/test/resources/
 ### Task 1: Job Interface + In-Memory Scheduler
 
 **Files:**
-- Create: `src/main/java/io/brace/Job.java`
-- Create: `src/main/java/io/brace/JobScheduler.java`
-- Modify: `src/main/java/io/brace/Brace.java`
-- Create: `src/test/java/io/brace/JobSchedulerTest.java`
+- Create: `src/main/java/com/larvalabs/brace/Job.java`
+- Create: `src/main/java/com/larvalabs/brace/JobScheduler.java`
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java`
+- Create: `src/test/java/com/larvalabs/brace/JobSchedulerTest.java`
 
 - [ ] **Step 1: Create Job interface**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 @FunctionalInterface
 public interface Job {
@@ -118,13 +118,13 @@ git commit -m "Phase 5 Task 1: In-memory recurring job scheduler"
 ### Task 2: Durable Job Queue
 
 **Files:**
-- Create: `src/main/java/io/brace/DurableJob.java`
-- Create: `src/main/java/io/brace/JobOptions.java`
-- Create: `src/main/java/io/brace/Jobs.java`
-- Create: `src/main/java/io/brace/JobPoller.java`
+- Create: `src/main/java/com/larvalabs/brace/DurableJob.java`
+- Create: `src/main/java/com/larvalabs/brace/JobOptions.java`
+- Create: `src/main/java/com/larvalabs/brace/Jobs.java`
+- Create: `src/main/java/com/larvalabs/brace/JobPoller.java`
 - Create: `src/test/resources/db/migration/V2__create_scheduled_jobs.sql`
-- Create: `src/test/java/io/brace/DurableJobTest.java`
-- Modify: `src/main/java/io/brace/Brace.java`
+- Create: `src/test/java/com/larvalabs/brace/DurableJobTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java`
 
 - [ ] **Step 1: Create migration**
 
@@ -156,7 +156,7 @@ Note: H2 may not support partial indexes (WHERE clause on CREATE INDEX). If so, 
 - [ ] **Step 2: Create DurableJob interface**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 public interface DurableJob {
     String data();
@@ -167,7 +167,7 @@ public interface DurableJob {
 - [ ] **Step 3: Create JobOptions**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.time.Duration;
 
@@ -202,7 +202,7 @@ public class JobOptions {
 - [ ] **Step 4: Create Jobs static API**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -295,9 +295,9 @@ git commit -m "Phase 5 Task 2: Durable job queue with adaptive poller"
 ### Task 3: Mailer
 
 **Files:**
-- Create: `src/main/java/io/brace/Mailer.java`
-- Modify: `src/main/java/io/brace/Brace.java`
-- Create: `src/test/java/io/brace/MailerTest.java`
+- Create: `src/main/java/com/larvalabs/brace/Mailer.java`
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java`
+- Create: `src/test/java/com/larvalabs/brace/MailerTest.java`
 
 - [ ] **Step 1: Implement Mailer**
 
@@ -306,7 +306,7 @@ Mailer has two modes:
 - **Prod mode:** Sends via Jakarta Mail SMTP
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.util.*;
 

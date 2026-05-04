@@ -587,7 +587,7 @@ Write `ai-benchmark/brace-template/pom.xml`:
 
     <dependencies>
         <dependency>
-            <groupId>io.brace</groupId>
+            <groupId>com.larvalabs</groupId>
             <artifactId>brace</artifactId>
             <version>0.1.0-SNAPSHOT</version>
         </dependency>
@@ -792,7 +792,7 @@ var speaker = req.bodyAs(Speaker.class);
 ```java
 package app;
 
-import io.brace.*;
+import com.larvalabs.brace.*;
 import app.model.*;
 import java.util.List;
 
@@ -823,7 +823,7 @@ Write `ai-benchmark/brace-template/src/main/java/app/App.java`:
 ```java
 package app;
 
-import io.brace.*;
+import com.larvalabs.brace.*;
 import java.util.List;
 
 public class App {

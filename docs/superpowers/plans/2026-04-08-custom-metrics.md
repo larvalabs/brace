@@ -15,8 +15,8 @@
 ### Task 1: Counter Support in Stats
 
 **Files:**
-- Modify: `src/main/java/io/brace/Stats.java`
-- Modify: `src/test/java/io/brace/StatsTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Stats.java`
+- Modify: `src/test/java/com/larvalabs/brace/StatsTest.java`
 
 - [ ] **Step 1: Write failing tests for counters**
 
@@ -157,7 +157,7 @@ Expected: All counter tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/Stats.java src/test/java/io/brace/StatsTest.java
+git add src/main/java/com/larvalabs/brace/Stats.java src/test/java/com/larvalabs/brace/StatsTest.java
 git commit -m "Add custom counter support to Stats"
 ```
 
@@ -166,8 +166,8 @@ git commit -m "Add custom counter support to Stats"
 ### Task 2: Gauge Support in Stats
 
 **Files:**
-- Modify: `src/main/java/io/brace/Stats.java`
-- Modify: `src/test/java/io/brace/StatsTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Stats.java`
+- Modify: `src/test/java/com/larvalabs/brace/StatsTest.java`
 
 - [ ] **Step 1: Write failing tests for gauges**
 
@@ -243,7 +243,7 @@ Expected: All gauge tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/Stats.java src/test/java/io/brace/StatsTest.java
+git add src/main/java/com/larvalabs/brace/Stats.java src/test/java/com/larvalabs/brace/StatsTest.java
 git commit -m "Add custom gauge support to Stats"
 ```
 
@@ -252,8 +252,8 @@ git commit -m "Add custom gauge support to Stats"
 ### Task 3: Timer Support in Stats
 
 **Files:**
-- Modify: `src/main/java/io/brace/Stats.java`
-- Modify: `src/test/java/io/brace/StatsTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Stats.java`
+- Modify: `src/test/java/com/larvalabs/brace/StatsTest.java`
 
 - [ ] **Step 1: Write failing tests for timers**
 
@@ -350,7 +350,7 @@ Expected: All timer tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/Stats.java src/test/java/io/brace/StatsTest.java
+git add src/main/java/com/larvalabs/brace/Stats.java src/test/java/com/larvalabs/brace/StatsTest.java
 git commit -m "Add custom timer support to Stats"
 ```
 
@@ -359,9 +359,9 @@ git commit -m "Add custom timer support to Stats"
 ### Task 4: Expose Custom Metrics in /ops/status JSON
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsHandler.java`
-- Modify: `src/main/java/io/brace/Stats.java`
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java`
+- Modify: `src/main/java/com/larvalabs/brace/Stats.java`
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`
 
 - [ ] **Step 1: Write failing integration test**
 
@@ -499,7 +499,7 @@ Expected: All tests PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/main/java/io/brace/Stats.java src/main/java/io/brace/OpsHandler.java src/main/java/io/brace/Brace.java src/test/java/io/brace/OpsIntegrationTest.java
+git add src/main/java/com/larvalabs/brace/Stats.java src/main/java/com/larvalabs/brace/OpsHandler.java src/main/java/com/larvalabs/brace/Brace.java src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "Expose custom metrics in /ops/status JSON"
 ```
 
@@ -508,8 +508,8 @@ git commit -m "Expose custom metrics in /ops/status JSON"
 ### Task 5: Dashboard Sparklines for Custom Metrics
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsDashboard.java`
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/OpsDashboard.java`
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`
 
 - [ ] **Step 1: Write failing test**
 
@@ -643,7 +643,7 @@ Expected: All tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsDashboard.java src/test/java/io/brace/OpsIntegrationTest.java
+git add src/main/java/com/larvalabs/brace/OpsDashboard.java src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "Add custom metric sparklines to ops dashboard"
 ```
 

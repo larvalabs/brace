@@ -269,10 +269,10 @@ Note: JFR `RecordingStream` works fine in test environments (H2, in-process). No
 
 | File | Action |
 |---|---|
-| `src/main/java/io/brace/JfrProfiler.java` | **Create** — new class |
-| `src/main/java/io/brace/OpsHandler.java` | **Modify** — accept JfrProfiler, replace memory section with jvm section |
-| `src/main/java/io/brace/OpsDashboard.java` | **Modify** — add JVM stat cards, hot methods table, allocations table, GC pauses table |
-| `src/main/java/io/brace/Brace.java` | **Modify** — create JfrProfiler in start(), pass to OpsHandler, register flush jobs, close on stop() |
+| `src/main/java/com/larvalabs/brace/JfrProfiler.java` | **Create** — new class |
+| `src/main/java/com/larvalabs/brace/OpsHandler.java` | **Modify** — accept JfrProfiler, replace memory section with jvm section |
+| `src/main/java/com/larvalabs/brace/OpsDashboard.java` | **Modify** — add JVM stat cards, hot methods table, allocations table, GC pauses table |
+| `src/main/java/com/larvalabs/brace/Brace.java` | **Modify** — create JfrProfiler in start(), pass to OpsHandler, register flush jobs, close on stop() |
 | `src/test/resources/db/migration/V4__create_profiling_tables.sql` | **Create** — ops_profiling_snapshots table |
-| `src/test/java/io/brace/JfrProfilerTest.java` | **Create** — unit tests |
-| `src/test/java/io/brace/IntegrationTest.java` | **Modify** — add /ops/status JVM section test |
+| `src/test/java/com/larvalabs/brace/JfrProfilerTest.java` | **Create** — unit tests |
+| `src/test/java/com/larvalabs/brace/IntegrationTest.java` | **Modify** — add /ops/status JVM section test |

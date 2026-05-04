@@ -13,7 +13,7 @@
 ## File Structure
 
 ```
-src/main/java/io/brace/
+src/main/java/com/larvalabs/brace/
 ├── Session.java                # Cookie-based signed session
 ├── Csrf.java                   # CSRF token generation and validation middleware
 ├── Form.java                   # Form<T> wrapper with validation results
@@ -34,7 +34,7 @@ src/main/java/io/brace/
 ├── BraceHandler.java           # Updated — session read/write, CSRF check
 ├── Brace.java                  # Updated — sessions() config
 ├── Request.java                # Updated — form() method
-src/test/java/io/brace/
+src/test/java/com/larvalabs/brace/
 ├── SessionTest.java
 ├── FormTest.java
 ├── CsrfTest.java
@@ -48,8 +48,8 @@ src/test/java/io/brace/
 
 **Files:**
 - Modify: `pom.xml`
-- Create: `src/main/java/io/brace/Passwords.java`
-- Create: `src/test/java/io/brace/PasswordsTest.java`
+- Create: `src/main/java/com/larvalabs/brace/Passwords.java`
+- Create: `src/test/java/com/larvalabs/brace/PasswordsTest.java`
 
 - [ ] **Step 1: Add jBCrypt to pom.xml**
 
@@ -58,7 +58,7 @@ Add `org.mindrot:jbcrypt` (latest 0.4 or similar). Add version property.
 - [ ] **Step 2: Implement Passwords**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.mindrot.jbcrypt.BCrypt;
 
@@ -76,7 +76,7 @@ public class Passwords {
 - [ ] **Step 3: Write tests**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -110,15 +110,15 @@ git commit -m "Phase 4 Task 1: Passwords helper with bcrypt"
 ### Task 2: Session Implementation
 
 **Files:**
-- Create: `src/main/java/io/brace/Session.java`
-- Create: `src/test/java/io/brace/SessionTest.java`
+- Create: `src/main/java/com/larvalabs/brace/Session.java`
+- Create: `src/test/java/com/larvalabs/brace/SessionTest.java`
 
 - [ ] **Step 1: Implement Session**
 
 Session is a `Map<String, String>` wrapper that can serialize/deserialize to a signed cookie.
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -263,7 +263,7 @@ public class Session {
 - [ ] **Step 2: Write tests**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -362,11 +362,11 @@ git commit -m "Phase 4 Task 2: Session — HMAC-SHA256 signed cookie sessions"
 ### Task 3: Update Invoker + BraceHandler for Sessions
 
 **Files:**
-- Modify: `src/main/java/io/brace/Invoker.java`
-- Modify: `src/main/java/io/brace/BraceHandler.java`
-- Modify: `src/main/java/io/brace/Brace.java`
-- Create: `src/main/java/io/brace/SessionHandler.java` (functional interface for handlers needing Session)
-- Create: `src/test/java/io/brace/SessionIntegrationTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Invoker.java`
+- Modify: `src/main/java/com/larvalabs/brace/BraceHandler.java`
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java`
+- Create: `src/main/java/com/larvalabs/brace/SessionHandler.java` (functional interface for handlers needing Session)
+- Create: `src/test/java/com/larvalabs/brace/SessionIntegrationTest.java`
 
 - [ ] **Step 1: Create SessionHandler and DbSessionHandler functional interfaces**
 
@@ -437,19 +437,19 @@ git commit -m "Phase 4 Task 3: Session integration in BraceHandler with cookie r
 ### Task 4: Validation Annotations + FormBinder + Form
 
 **Files:**
-- Create: `src/main/java/io/brace/annotation/Required.java`
-- Create: `src/main/java/io/brace/annotation/MinLength.java`
-- Create: `src/main/java/io/brace/annotation/MaxLength.java`
-- Create: `src/main/java/io/brace/annotation/Min.java`
-- Create: `src/main/java/io/brace/annotation/Max.java`
-- Create: `src/main/java/io/brace/annotation/Email.java`
-- Create: `src/main/java/io/brace/annotation/In.java`
-- Create: `src/main/java/io/brace/annotation/Optional.java`
-- Create: `src/main/java/io/brace/Errors.java`
-- Create: `src/main/java/io/brace/Form.java`
-- Create: `src/main/java/io/brace/FormBinder.java`
-- Modify: `src/main/java/io/brace/Request.java` — add `form()` method
-- Create: `src/test/java/io/brace/FormTest.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/Required.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/MinLength.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/MaxLength.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/Min.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/Max.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/Email.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/In.java`
+- Create: `src/main/java/com/larvalabs/brace/annotation/Optional.java`
+- Create: `src/main/java/com/larvalabs/brace/Errors.java`
+- Create: `src/main/java/com/larvalabs/brace/Form.java`
+- Create: `src/main/java/com/larvalabs/brace/FormBinder.java`
+- Modify: `src/main/java/com/larvalabs/brace/Request.java` — add `form()` method
+- Create: `src/test/java/com/larvalabs/brace/FormTest.java`
 
 - [ ] **Step 1: Create validation annotations**
 
@@ -474,7 +474,7 @@ public @interface MinLength { int value(); }
 - [ ] **Step 2: Implement Errors**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.util.*;
 
@@ -494,7 +494,7 @@ public class Errors {
 - [ ] **Step 3: Implement Form<T>**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.util.*;
 
@@ -559,15 +559,15 @@ git commit -m "Phase 4 Task 4: Form binding with validation annotations"
 ### Task 5: CSRF Protection
 
 **Files:**
-- Create: `src/main/java/io/brace/Csrf.java`
-- Modify: `src/main/java/io/brace/BraceHandler.java` — auto-validate CSRF on POST/PUT/DELETE
-- Modify: `src/main/java/io/brace/View.java` — make csrfField available to templates
-- Create: `src/test/java/io/brace/CsrfTest.java`
+- Create: `src/main/java/com/larvalabs/brace/Csrf.java`
+- Modify: `src/main/java/com/larvalabs/brace/BraceHandler.java` — auto-validate CSRF on POST/PUT/DELETE
+- Modify: `src/main/java/com/larvalabs/brace/View.java` — make csrfField available to templates
+- Create: `src/test/java/com/larvalabs/brace/CsrfTest.java`
 
 - [ ] **Step 1: Implement Csrf**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.security.SecureRandom;
 import java.util.Base64;

@@ -296,7 +296,7 @@ We chose convention (scaffolded templates use semantic HTML) over enforcement (n
 | Custom dependency system (Play 1 style) | Simpler UX | Non-standard, users can't bring existing Maven knowledge |
 | No build tool (just jars) | Simplest possible | No dependency resolution, impractical for real projects |
 
-**Single dependency approach:** `io.brace:brace:0.1.0` transitively brings Jetty, Hibernate, JTE, Flyway, Jackson, jBCrypt, Jakarta Mail, SLF4J/Logback. Users never specify framework library versions. They add their own dependencies (Stripe SDK, S3 client, etc.) in the normal Maven way.
+**Single dependency approach:** `com.larvalabs.brace:brace:0.1.0` transitively brings Jetty, Hibernate, JTE, Flyway, Jackson, jBCrypt, Jakarta Mail, SLF4J/Logback. Users never specify framework library versions. They add their own dependencies (Stripe SDK, S3 client, etc.) in the normal Maven way.
 
 **Two artifacts:**
 - `brace` — runtime framework with all transitive dependencies

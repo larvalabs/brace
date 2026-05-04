@@ -15,13 +15,13 @@
 Capture `heapUsedMB` in each minute snapshot so the dashboard can render a heap sparkline.
 
 **Files:**
-- Modify: `src/main/java/io/brace/Stats.java:97-116` (snapshot method + record)
-- Test: `src/test/java/io/brace/StatsTest.java` (new file)
+- Modify: `src/main/java/com/larvalabs/brace/Stats.java:97-116` (snapshot method + record)
+- Test: `src/test/java/com/larvalabs/brace/StatsTest.java` (new file)
 
 - [ ] **Step 1: Write the failing test**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -114,7 +114,7 @@ Expected: All tests pass (existing code doesn't access `heapUsedMB` yet)
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/main/java/io/brace/Stats.java src/test/java/io/brace/StatsTest.java
+git add src/main/java/com/larvalabs/brace/Stats.java src/test/java/com/larvalabs/brace/StatsTest.java
 git commit -m "Add heapUsedMB to minute snapshots for dashboard sparkline"
 ```
 
@@ -125,7 +125,7 @@ git commit -m "Add heapUsedMB to minute snapshots for dashboard sparkline"
 Replace the entire `<style>` block and restyle the header bar and stat cards with the new TUI design.
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsDashboard.java:50-139`
+- Modify: `src/main/java/com/larvalabs/brace/OpsDashboard.java:50-139`
 
 - [ ] **Step 1: Replace the CSS block**
 
@@ -270,7 +270,7 @@ Expected: Most tests pass. Some tests that check for specific text like `"Brace 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsDashboard.java
+git add src/main/java/com/larvalabs/brace/OpsDashboard.java
 git commit -m "Restyle dashboard CSS, header, and stat cards with TUI theme"
 ```
 
@@ -281,7 +281,7 @@ git commit -m "Restyle dashboard CSS, header, and stat cards with TUI theme"
 Enhance the req/min sparkline with green gradient coloring and add error rate and heap usage sparklines.
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsDashboard.java:142-154` (sparkline section)
+- Modify: `src/main/java/com/larvalabs/brace/OpsDashboard.java:142-154` (sparkline section)
 
 - [ ] **Step 1: Replace the req/min sparkline and add new sparklines**
 
@@ -349,7 +349,7 @@ Expected: PASS (sparkline content is not asserted in tests beyond existence)
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsDashboard.java
+git add src/main/java/com/larvalabs/brace/OpsDashboard.java
 git commit -m "Add error rate and heap sparklines with green gradient bars"
 ```
 
@@ -360,7 +360,7 @@ git commit -m "Add error rate and heap sparklines with green gradient bars"
 Dim package paths, bold class.method, left-ellipsis overflow. Color-code GC pause durations.
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsDashboard.java:157-213` (JVM section)
+- Modify: `src/main/java/com/larvalabs/brace/OpsDashboard.java:157-213` (JVM section)
 
 - [ ] **Step 1: Add the method name formatting helper**
 
@@ -530,7 +530,7 @@ Expected: PASS — tests check for "Hot Methods" and "Top Allocations" which are
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsDashboard.java
+git add src/main/java/com/larvalabs/brace/OpsDashboard.java
 git commit -m "Improve JFR formatting: dim packages, bold methods, color-coded GC"
 ```
 
@@ -541,7 +541,7 @@ git commit -m "Improve JFR formatting: dim packages, bold methods, color-coded G
 Restyle error tracking, jobs, cache, rate limiters, and status codes with the new TUI theme.
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsDashboard.java:247-320` (remaining sections)
+- Modify: `src/main/java/com/larvalabs/brace/OpsDashboard.java:247-320` (remaining sections)
 
 - [ ] **Step 1: Restyle the error tracking section**
 
@@ -716,7 +716,7 @@ Expected: PASS — tests check for "Error Tracking", "Resolve"/"resolve", "Clear
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsDashboard.java
+git add src/main/java/com/larvalabs/brace/OpsDashboard.java
 git commit -m "Restyle errors, jobs, cache, rate limiters, status codes"
 ```
 
@@ -727,7 +727,7 @@ git commit -m "Restyle errors, jobs, cache, rate limiters, status codes"
 Fix any tests that assert on old markup text that changed in the restyle.
 
 **Files:**
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java`
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`
 
 - [ ] **Step 1: Run full test suite to identify failures**
 
@@ -756,7 +756,7 @@ Expected: All tests pass
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/test/java/io/brace/OpsIntegrationTest.java
+git add src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "Update dashboard tests for new TUI-styled markup"
 ```
 

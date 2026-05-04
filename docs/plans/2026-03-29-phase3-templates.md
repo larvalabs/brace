@@ -13,11 +13,11 @@
 ## File Structure
 
 ```
-src/main/java/io/brace/
+src/main/java/com/larvalabs/brace/
 ├── View.java                   # Updated — renders through JTE
 ├── TemplateEngine.java         # JTE wrapper — init, render, hot-reload config
 ├── Brace.java                  # Updated — accepts templates path
-src/test/java/io/brace/
+src/test/java/com/larvalabs/brace/
 ├── TemplateTest.java           # Tests for template rendering
 src/test/resources/
 ├── views/
@@ -56,7 +56,7 @@ git commit -m "Phase 3 Task 1: add JTE template engine dependency"
 ### Task 2: TemplateEngine Wrapper
 
 **Files:**
-- Create: `src/main/java/io/brace/TemplateEngine.java`
+- Create: `src/main/java/com/larvalabs/brace/TemplateEngine.java`
 
 - [ ] **Step 1: Implement TemplateEngine**
 
@@ -69,7 +69,7 @@ TemplateEngine wraps JTE's `gg.jte.TemplateEngine`. It:
 4. For now, always use filesystem-based (dev mode) — precompiled comes later
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import gg.jte.ContentType;
 import gg.jte.TemplateOutput;
@@ -107,10 +107,10 @@ git commit -m "Phase 3 Task 2: TemplateEngine wrapper for JTE"
 ### Task 3: Update View to Use JTE + Tests
 
 **Files:**
-- Modify: `src/main/java/io/brace/View.java`
-- Modify: `src/main/java/io/brace/Brace.java`
-- Modify: `src/main/java/io/brace/BraceHandler.java`
-- Create: `src/test/java/io/brace/TemplateTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/View.java`
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java`
+- Modify: `src/main/java/com/larvalabs/brace/BraceHandler.java`
+- Create: `src/test/java/com/larvalabs/brace/TemplateTest.java`
 - Create: `src/test/resources/views/hello.jte`
 - Create: `src/test/resources/views/params.jte`
 - Create: `src/test/resources/views/layout/main.jte`
@@ -159,7 +159,7 @@ ${content}
 View needs access to the TemplateEngine. Since View is created via static `View.of()`, the engine needs to be set globally (set once by Brace at startup):
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -229,7 +229,7 @@ public Brace templates(String path) {
 - [ ] **Step 4: Write tests**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import java.net.URI;

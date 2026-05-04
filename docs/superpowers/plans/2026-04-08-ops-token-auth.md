@@ -15,15 +15,15 @@
 ### Task 1: OpsToken — Token Creation and Validation
 
 **Files:**
-- Create: `src/main/java/io/brace/OpsToken.java`
-- Create: `src/test/java/io/brace/OpsTokenTest.java`
+- Create: `src/main/java/com/larvalabs/brace/OpsToken.java`
+- Create: `src/test/java/com/larvalabs/brace/OpsTokenTest.java`
 
 This is a self-contained token utility: create tokens with an expiry, sign them with HMAC-SHA256, validate them. Same pattern as Session.java cookie signing.
 
 - [ ] **Step 1: Write failing tests for token creation and validation**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -86,7 +86,7 @@ Expected: Compilation error — `OpsToken` class does not exist.
 - [ ] **Step 3: Implement OpsToken**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -169,7 +169,7 @@ Expected: All 6 tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsToken.java src/test/java/io/brace/OpsTokenTest.java
+git add src/main/java/com/larvalabs/brace/OpsToken.java src/test/java/com/larvalabs/brace/OpsTokenTest.java
 git commit -m "Add OpsToken: HMAC-signed short-lived tokens for ops auth"
 ```
 
@@ -178,15 +178,15 @@ git commit -m "Add OpsToken: HMAC-signed short-lived tokens for ops auth"
 ### Task 2: OpsKeys — Ed25519 Keypair Generation and Authorized Keys Parsing
 
 **Files:**
-- Create: `src/main/java/io/brace/OpsKeys.java`
-- Create: `src/test/java/io/brace/OpsKeysTest.java`
+- Create: `src/main/java/com/larvalabs/brace/OpsKeys.java`
+- Create: `src/test/java/com/larvalabs/brace/OpsKeysTest.java`
 
 Handles Ed25519 keypair generation, authorized keys file parsing, and signature verification.
 
 - [ ] **Step 1: Write failing tests**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -282,7 +282,7 @@ Expected: Compilation error — `OpsKeys` class does not exist.
 - [ ] **Step 3: Implement OpsKeys**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -365,7 +365,7 @@ Expected: All 7 tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsKeys.java src/test/java/io/brace/OpsKeysTest.java
+git add src/main/java/com/larvalabs/brace/OpsKeys.java src/test/java/com/larvalabs/brace/OpsKeysTest.java
 git commit -m "Add OpsKeys: Ed25519 keypair generation and authorized keys parsing"
 ```
 
@@ -374,8 +374,8 @@ git commit -m "Add OpsKeys: Ed25519 keypair generation and authorized keys parsi
 ### Task 3: POST /ops/auth Endpoint
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsHandler.java`
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java`
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`
 
 Add the `POST /ops/auth` endpoint that accepts a signed timestamp and returns a short-lived token.
 
@@ -700,7 +700,7 @@ Expected: All tests PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsHandler.java src/main/java/io/brace/Brace.java src/test/java/io/brace/OpsIntegrationTest.java
+git add src/main/java/com/larvalabs/brace/OpsHandler.java src/main/java/com/larvalabs/brace/Brace.java src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "Replace X-Ops-Key with Ed25519 keypair + token auth for ops endpoints"
 ```
 
@@ -709,8 +709,8 @@ git commit -m "Replace X-Ops-Key with Ed25519 keypair + token auth for ops endpo
 ### Task 4: Dashboard Token Embedding
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsHandler.java`
-- Modify: `src/main/java/io/brace/OpsDashboard.java`
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java`
+- Modify: `src/main/java/com/larvalabs/brace/OpsDashboard.java`
 
 The dashboard needs to embed a token in its JS so HTMX polling requests are authenticated.
 
@@ -776,7 +776,7 @@ Expected: All tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsHandler.java src/main/java/io/brace/OpsDashboard.java
+git add src/main/java/com/larvalabs/brace/OpsHandler.java src/main/java/com/larvalabs/brace/OpsDashboard.java
 git commit -m "Embed Bearer token in dashboard for authenticated HTMX polling"
 ```
 
@@ -785,13 +785,13 @@ git commit -m "Embed Bearer token in dashboard for authenticated HTMX polling"
 ### Task 5: CLI Commands — `brace ops keypair` and `brace ops dashboard`
 
 **Files:**
-- Modify: `src/main/java/io/brace/Cli.java`
-- Create: `src/test/java/io/brace/CliTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Cli.java`
+- Create: `src/test/java/com/larvalabs/brace/CliTest.java`
 
 - [ ] **Step 1: Write failing tests**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -835,7 +835,7 @@ Expected: Should PASS since we're testing the integration of existing OpsKeys. I
 Replace the entire `Cli.java`:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.awt.Desktop;
 import java.net.URI;
@@ -1041,7 +1041,7 @@ Expected: All tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/Cli.java src/test/java/io/brace/CliTest.java
+git add src/main/java/com/larvalabs/brace/Cli.java src/test/java/com/larvalabs/brace/CliTest.java
 git commit -m "Add CLI commands: brace ops keypair and brace ops dashboard"
 ```
 
@@ -1050,13 +1050,13 @@ git commit -m "Add CLI commands: brace ops keypair and brace ops dashboard"
 ### Task 6: Update ProjectGenerator
 
 **Files:**
-- Modify: `src/main/java/io/brace/ProjectGenerator.java`
+- Modify: `src/main/java/com/larvalabs/brace/ProjectGenerator.java`
 
 Update the project generator to use keypair auth instead of shared secret.
 
 - [ ] **Step 1: Read the current ProjectGenerator**
 
-Run: Read `src/main/java/io/brace/ProjectGenerator.java` to understand the current template generation.
+Run: Read `src/main/java/com/larvalabs/brace/ProjectGenerator.java` to understand the current template generation.
 
 - [ ] **Step 2: Update ProjectGenerator**
 
@@ -1098,7 +1098,7 @@ Expected: All tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/main/java/io/brace/ProjectGenerator.java
+git add src/main/java/com/larvalabs/brace/ProjectGenerator.java
 git commit -m "Update ProjectGenerator to use Ed25519 keypair auth for ops"
 ```
 

@@ -79,7 +79,7 @@ The minute ring buffer in `Stats` currently stores: timestamp, requests, errors,
 Display as two styled spans: dimmed package path + bright class.method.
 
 ```
-<span class="pkg">io.brace.</span><span class="method">Database.query</span>
+<span class="pkg">com.larvalabs.brace.</span><span class="method">Database.query</span>
 ```
 
 - `.pkg`: muted color (`#565f89`), `text-overflow: ellipsis` with `direction: rtl` to ellipsis from the left when space is tight

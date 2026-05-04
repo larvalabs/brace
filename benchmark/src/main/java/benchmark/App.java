@@ -1,6 +1,6 @@
 package benchmark;
 
-import io.brace.*;
+import com.larvalabs.brace.*;
 import benchmark.model.*;
 
 import java.util.*;

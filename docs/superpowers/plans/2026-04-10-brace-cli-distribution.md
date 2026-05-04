@@ -21,8 +21,8 @@
 
 **Modified files:**
 - `pom.xml` — add junit-platform-console-standalone as runtime dep, add assembly plugin
-- `src/main/java/io/brace/ProjectGenerator.java` — stop copying per-project brace script, add `lib/` to generated .gitignore
-- `src/main/java/io/brace/Cli.java` — add `--help` for top-level, no behavior changes otherwise
+- `src/main/java/com/larvalabs/brace/ProjectGenerator.java` — stop copying per-project brace script, add `lib/` to generated .gitignore
+- `src/main/java/com/larvalabs/brace/Cli.java` — add `--help` for top-level, no behavior changes otherwise
 
 **Deleted files:**
 - `sample/brace` — replaced by `bin/brace` (keep symlink or stub for back-compat during transition? No — remove outright, the sample dir stays for the sample app)
@@ -339,7 +339,7 @@ brace_deps() {
     mvn dependency:copy-dependencies \
         -DoutputDirectory=lib \
         -DincludeScope=runtime \
-        -DexcludeGroupIds=io.brace \
+        -DexcludeGroupIds=com.larvalabs \
         -q
     success "Dependencies copied to ./lib/"
 }
@@ -426,7 +426,7 @@ brace_dev() {
 
 # --- Java CLI subcommands (new, ops) ---
 run_java_cli() {
-    exec java -cp "$BRACE_HOME/lib/*" io.brace.Cli "$@"
+    exec java -cp "$BRACE_HOME/lib/*" com.larvalabs.brace.Cli "$@"
 }
 
 # --- Help ---
@@ -529,16 +529,16 @@ git commit -m "Write bin/brace launcher with project-context commands"
 Generated projects should no longer include their own copy of `brace`. Users run the global `brace` command.
 
 **Files:**
-- Modify: `src/main/java/io/brace/ProjectGenerator.java`
+- Modify: `src/main/java/com/larvalabs/brace/ProjectGenerator.java`
 
 - [ ] **Step 1: Check what ProjectGenerator currently does re: the brace script**
 
-Run: `grep -n "brace" /Users/matt/code/brace/src/main/java/io/brace/ProjectGenerator.java | head -20`
+Run: `grep -n "brace" /Users/matt/code/brace/src/main/java/com/larvalabs/brace/ProjectGenerator.java | head -20`
 Expected: Confirms whether the generator copies a brace script or not. Current code generates files but does not copy `sample/brace` into new projects (verified during exploration) — so this task is primarily about `.gitignore`.
 
 - [ ] **Step 2: Add `lib/` to the generated `.gitignore`**
 
-Open `src/main/java/io/brace/ProjectGenerator.java`. Find the `.gitignore` generation around line 219:
+Open `src/main/java/com/larvalabs/brace/ProjectGenerator.java`. Find the `.gitignore` generation around line 219:
 
 ```java
             // .gitignore
@@ -592,7 +592,7 @@ Expected: No `brace` file in the project root. `.gitignore` contains `lib/`.
 
 ```bash
 cd /Users/matt/code/brace
-git add src/main/java/io/brace/ProjectGenerator.java
+git add src/main/java/com/larvalabs/brace/ProjectGenerator.java
 git commit -m "Add lib/ to generated .gitignore for brace CLI dep cache"
 ```
 
@@ -826,7 +826,7 @@ Document how agents and developers install and use the brace CLI.
 **Files:**
 - Modify: `CLAUDE.md`
 - Modify: `AGENTS.md`
-- Modify: `src/main/java/io/brace/ClaudeMdGenerator.java` (so generated projects also reference the new install flow)
+- Modify: `src/main/java/com/larvalabs/brace/ClaudeMdGenerator.java` (so generated projects also reference the new install flow)
 
 - [ ] **Step 1: Add an Installation section to AGENTS.md**
 
@@ -887,7 +887,7 @@ cd sample && brace run     # compile and run the sample
 
 - [ ] **Step 3: Update ClaudeMdGenerator to generate install-friendly content**
 
-Open `src/main/java/io/brace/ClaudeMdGenerator.java`. Find the Build & Run section (around lines 23-29):
+Open `src/main/java/com/larvalabs/brace/ClaudeMdGenerator.java`. Find the Build & Run section (around lines 23-29):
 
 ```java
 sb.append("## Build & Run\n\n");
@@ -936,7 +936,7 @@ Expected: Shows the new `brace deps`/`brace dev`/`brace run`/`brace test` comman
 
 ```bash
 cd /Users/matt/code/brace
-git add AGENTS.md CLAUDE.md src/main/java/io/brace/ClaudeMdGenerator.java
+git add AGENTS.md CLAUDE.md src/main/java/com/larvalabs/brace/ClaudeMdGenerator.java
 git commit -m "Document brace CLI install and usage in AGENTS.md, CLAUDE.md, and generator"
 ```
 

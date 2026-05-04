@@ -147,7 +147,7 @@ brace_deps() {
     mvn dependency:copy-dependencies \
         -DoutputDirectory=lib \
         -DincludeScope=runtime \
-        -DexcludeGroupIds=io.brace \
+        -DexcludeGroupIds=com.larvalabs \
         -q
     success "Dependencies copied to ./lib/"
 }
@@ -234,7 +234,7 @@ brace_dev() {
 
 # --- Java CLI subcommands (new, ops) ---
 run_java_cli() {
-    exec java -cp "$BRACE_HOME/lib/*" io.brace.Cli "$@"
+    exec java -cp "$BRACE_HOME/lib/*" com.larvalabs.brace.Cli "$@"
 }
 
 # --- Help ---

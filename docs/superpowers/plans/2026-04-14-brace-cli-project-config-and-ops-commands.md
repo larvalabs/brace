@@ -22,14 +22,14 @@
 ### Task 1: `LogTap` ring buffer
 
 **Files:**
-- Create: `src/main/java/io/brace/LogTap.java`
-- Create: `src/test/java/io/brace/LogTapTest.java`
+- Create: `src/main/java/com/larvalabs/brace/LogTap.java`
+- Create: `src/test/java/com/larvalabs/brace/LogTapTest.java`
 
 - [ ] **Step 1: Write the failing test**
 
-`src/test/java/io/brace/LogTapTest.java`:
+`src/test/java/com/larvalabs/brace/LogTapTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import java.time.Instant;
@@ -123,9 +123,9 @@ Expected: compilation error, `LogTap` does not exist.
 
 - [ ] **Step 3: Implement `LogTap`**
 
-`src/main/java/io/brace/LogTap.java`:
+`src/main/java/com/larvalabs/brace/LogTap.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.time.Instant;
 import java.util.*;
@@ -203,7 +203,7 @@ Expected: PASS, 6 tests.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/LogTap.java src/test/java/io/brace/LogTapTest.java
+git add src/main/java/com/larvalabs/brace/LogTap.java src/test/java/com/larvalabs/brace/LogTapTest.java
 git commit -m "feat: add LogTap in-memory ring buffer for ops logs"
 ```
 
@@ -212,14 +212,14 @@ git commit -m "feat: add LogTap in-memory ring buffer for ops logs"
 ### Task 2: Wire `LogTap` into `Log.println`
 
 **Files:**
-- Modify: `src/main/java/io/brace/Log.java:114-120`
-- Create: `src/test/java/io/brace/LogTapWiringTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/Log.java:114-120`
+- Create: `src/test/java/com/larvalabs/brace/LogTapWiringTest.java`
 
 - [ ] **Step 1: Write the failing test**
 
-`src/test/java/io/brace/LogTapWiringTest.java`:
+`src/test/java/com/larvalabs/brace/LogTapWiringTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import java.util.Map;
@@ -275,7 +275,7 @@ Expected: FAIL — `LogTap.snapshot()` returns empty because nothing wires into 
 
 - [ ] **Step 3: Wire `LogTap.append` into `Log.println`**
 
-In `src/main/java/io/brace/Log.java`, replace the `println` method (currently line 114) with:
+In `src/main/java/com/larvalabs/brace/Log.java`, replace the `println` method (currently line 114) with:
 
 ```java
 private static void println(Map<String, Object> map) {
@@ -296,7 +296,7 @@ Expected: PASS, 4 tests. Also run the full Log-related tests as a sanity check: 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/Log.java src/test/java/io/brace/LogTapWiringTest.java
+git add src/main/java/com/larvalabs/brace/Log.java src/test/java/com/larvalabs/brace/LogTapWiringTest.java
 git commit -m "feat: tee Log.println into LogTap for ops logs endpoint"
 ```
 
@@ -305,13 +305,13 @@ git commit -m "feat: tee Log.println into LogTap for ops logs endpoint"
 ### Task 3: `GET /ops/logs` endpoint
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsHandler.java` (add `logs(Request)` + `levelRank` helper)
-- Modify: `src/main/java/io/brace/Brace.java:418-426` (register route)
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java` (add tests)
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java` (add `logs(Request)` + `levelRank` helper)
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java:418-426` (register route)
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java` (add tests)
 
 - [ ] **Step 1: Add the failing tests**
 
-In `src/test/java/io/brace/OpsIntegrationTest.java`, add at the bottom of the class:
+In `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`, add at the bottom of the class:
 
 ```java
 @Test
@@ -393,7 +393,7 @@ Expected: FAIL with 404 (route not registered).
 
 - [ ] **Step 3: Add the `logs` method to `OpsHandler`**
 
-In `src/main/java/io/brace/OpsHandler.java`, add after the existing `routes(Request)` method (~line 365):
+In `src/main/java/com/larvalabs/brace/OpsHandler.java`, add after the existing `routes(Request)` method (~line 365):
 
 ```java
 public Result logs(Request req) {
@@ -449,7 +449,7 @@ private static int levelRank(String level) {
 
 - [ ] **Step 4: Register the route**
 
-In `src/main/java/io/brace/Brace.java`, immediately after the existing `router.add("GET", "/ops/routes", ...)` line (~line 422), add:
+In `src/main/java/com/larvalabs/brace/Brace.java`, immediately after the existing `router.add("GET", "/ops/routes", ...)` line (~line 422), add:
 
 ```java
 router.add("GET", "/ops/logs", (Handler) opsHandler::logs);
@@ -463,7 +463,7 @@ Expected: PASS — all existing tests plus the four new ones.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsHandler.java src/main/java/io/brace/Brace.java src/test/java/io/brace/OpsIntegrationTest.java
+git add src/main/java/com/larvalabs/brace/OpsHandler.java src/main/java/com/larvalabs/brace/Brace.java src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "feat: GET /ops/logs endpoint backed by LogTap"
 ```
 
@@ -472,9 +472,9 @@ git commit -m "feat: GET /ops/logs endpoint backed by LogTap"
 ### Task 4: `GET /ops/cache` endpoint
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsHandler.java` (add `cacheStats(Request)`)
-- Modify: `src/main/java/io/brace/Brace.java` (register route)
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java` (add test)
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java` (add `cacheStats(Request)`)
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java` (register route)
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java` (add test)
 
 - [ ] **Step 1: Add the failing test**
 
@@ -544,7 +544,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsHandler.java src/main/java/io/brace/Brace.java src/main/java/io/brace/Cache.java src/test/java/io/brace/OpsIntegrationTest.java
+git add src/main/java/com/larvalabs/brace/OpsHandler.java src/main/java/com/larvalabs/brace/Brace.java src/main/java/com/larvalabs/brace/Cache.java src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "feat: GET /ops/cache returns cache stats for brace cache CLI"
 ```
 
@@ -553,10 +553,10 @@ git commit -m "feat: GET /ops/cache returns cache stats for brace cache CLI"
 ### Task 5: `?since=` filter on `/ops/errors`
 
 **Files:**
-- Modify: `src/main/java/io/brace/ErrorStore.java` (add `list(String status, Instant since)` overload)
-- Modify: `src/main/java/io/brace/OpsHandler.java` (forward query param to `ErrorStore`)
-- Modify: `src/test/java/io/brace/ErrorStoreTest.java` (add test)
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java` (add test)
+- Modify: `src/main/java/com/larvalabs/brace/ErrorStore.java` (add `list(String status, Instant since)` overload)
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java` (forward query param to `ErrorStore`)
+- Modify: `src/test/java/com/larvalabs/brace/ErrorStoreTest.java` (add test)
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java` (add test)
 
 - [ ] **Step 1: Add the failing `ErrorStoreTest` case**
 
@@ -587,7 +587,7 @@ Expected: FAIL — `list(String, Instant)` does not exist.
 
 - [ ] **Step 3: Add the overload to `ErrorStore`**
 
-In `src/main/java/io/brace/ErrorStore.java`, after the existing `list(String status)` method:
+In `src/main/java/com/larvalabs/brace/ErrorStore.java`, after the existing `list(String status)` method:
 
 ```java
 public List<Map<String, Object>> list(String status, java.time.Instant since) {
@@ -667,7 +667,7 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/main/java/io/brace/ErrorStore.java src/main/java/io/brace/OpsHandler.java src/test/java/io/brace/ErrorStoreTest.java src/test/java/io/brace/OpsIntegrationTest.java
+git add src/main/java/com/larvalabs/brace/ErrorStore.java src/main/java/com/larvalabs/brace/OpsHandler.java src/test/java/com/larvalabs/brace/ErrorStoreTest.java src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "feat: /ops/errors accepts since= for windowed agent polling"
 ```
 
@@ -676,8 +676,8 @@ git commit -m "feat: /ops/errors accepts since= for windowed agent polling"
 ### Task 6: JSON-friendly responses for resolve and cache-clear
 
 **Files:**
-- Modify: `src/main/java/io/brace/OpsHandler.java` (`resolveError`, `clearCache`)
-- Modify: `src/test/java/io/brace/OpsIntegrationTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/OpsHandler.java` (`resolveError`, `clearCache`)
+- Modify: `src/test/java/com/larvalabs/brace/OpsIntegrationTest.java`
 
 **Why:** today both endpoints return the dashboard HTML (or a redirect to it). CLI commands need a small JSON response. Detect `Accept: application/json` and branch.
 
@@ -753,7 +753,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/OpsHandler.java src/test/java/io/brace/OpsIntegrationTest.java
+git add src/main/java/com/larvalabs/brace/OpsHandler.java src/test/java/com/larvalabs/brace/OpsIntegrationTest.java
 git commit -m "feat: ops mutate endpoints honor Accept: application/json"
 ```
 
@@ -764,14 +764,14 @@ git commit -m "feat: ops mutate endpoints honor Accept: application/json"
 ### Task 7: `CliConfig` — load `.brace` and `.brace.local`
 
 **Files:**
-- Create: `src/main/java/io/brace/CliConfig.java`
-- Create: `src/test/java/io/brace/CliConfigTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CliConfig.java`
+- Create: `src/test/java/com/larvalabs/brace/CliConfigTest.java`
 
 - [ ] **Step 1: Failing test**
 
-`src/test/java/io/brace/CliConfigTest.java`:
+`src/test/java/com/larvalabs/brace/CliConfigTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -849,9 +849,9 @@ Expected: compile error, `CliConfig` does not exist.
 
 - [ ] **Step 3: Implement `CliConfig`**
 
-`src/main/java/io/brace/CliConfig.java`:
+`src/main/java/com/larvalabs/brace/CliConfig.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -931,7 +931,7 @@ Expected: PASS, 7 tests.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliConfig.java src/test/java/io/brace/CliConfigTest.java
+git add src/main/java/com/larvalabs/brace/CliConfig.java src/test/java/com/larvalabs/brace/CliConfigTest.java
 git commit -m "feat: CliConfig loads .brace and .brace.local with precedence"
 ```
 
@@ -940,14 +940,14 @@ git commit -m "feat: CliConfig loads .brace and .brace.local with precedence"
 ### Task 8: `CliOutput` — TTY detection, table renderer, exit codes
 
 **Files:**
-- Create: `src/main/java/io/brace/CliOutput.java`
-- Create: `src/test/java/io/brace/CliOutputTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CliOutput.java`
+- Create: `src/test/java/com/larvalabs/brace/CliOutputTest.java`
 
 - [ ] **Step 1: Failing test**
 
-`src/test/java/io/brace/CliOutputTest.java`:
+`src/test/java/com/larvalabs/brace/CliOutputTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import java.util.*;
@@ -1013,9 +1013,9 @@ Expected: compile error.
 
 - [ ] **Step 3: Implement `CliOutput`**
 
-`src/main/java/io/brace/CliOutput.java`:
+`src/main/java/com/larvalabs/brace/CliOutput.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.util.*;
 
@@ -1125,7 +1125,7 @@ Expected: PASS, 5 tests.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliOutput.java src/test/java/io/brace/CliOutputTest.java
+git add src/main/java/com/larvalabs/brace/CliOutput.java src/test/java/com/larvalabs/brace/CliOutputTest.java
 git commit -m "feat: CliOutput with TTY-aware mode, table renderer, json helpers"
 ```
 
@@ -1134,14 +1134,14 @@ git commit -m "feat: CliOutput with TTY-aware mode, table renderer, json helpers
 ### Task 9: `CliAuth` — bearer token fetch + cache
 
 **Files:**
-- Create: `src/main/java/io/brace/CliAuth.java`
-- Create: `src/test/java/io/brace/CliAuthTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CliAuth.java`
+- Create: `src/test/java/com/larvalabs/brace/CliAuthTest.java`
 
 - [ ] **Step 1: Failing test**
 
-`src/test/java/io/brace/CliAuthTest.java`:
+`src/test/java/com/larvalabs/brace/CliAuthTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -1214,9 +1214,9 @@ Expected: compile error.
 
 - [ ] **Step 3: Implement `CliAuth`**
 
-`src/main/java/io/brace/CliAuth.java`:
+`src/main/java/com/larvalabs/brace/CliAuth.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.net.URI;
@@ -1335,7 +1335,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliAuth.java src/test/java/io/brace/CliAuthTest.java
+git add src/main/java/com/larvalabs/brace/CliAuth.java src/test/java/com/larvalabs/brace/CliAuthTest.java
 git commit -m "feat: CliAuth fetches and caches bearer token via /ops/auth"
 ```
 
@@ -1346,14 +1346,14 @@ git commit -m "feat: CliAuth fetches and caches bearer token via /ops/auth"
 ### Task 10: `brace init` local checks
 
 **Files:**
-- Create: `src/main/java/io/brace/CliInit.java`
-- Create: `src/test/java/io/brace/CliInitTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CliInit.java`
+- Create: `src/test/java/com/larvalabs/brace/CliInitTest.java`
 
 - [ ] **Step 1: Failing test**
 
-`src/test/java/io/brace/CliInitTest.java`:
+`src/test/java/com/larvalabs/brace/CliInitTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -1440,9 +1440,9 @@ Expected: compile error.
 
 - [ ] **Step 3: Implement `CliInit` (local checks only)**
 
-`src/main/java/io/brace/CliInit.java`:
+`src/main/java/com/larvalabs/brace/CliInit.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -1566,7 +1566,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliInit.java src/test/java/io/brace/CliInitTest.java
+git add src/main/java/com/larvalabs/brace/CliInit.java src/test/java/com/larvalabs/brace/CliInitTest.java
 git commit -m "feat: brace init scaffold + local-checks diagnostic"
 ```
 
@@ -1575,8 +1575,8 @@ git commit -m "feat: brace init scaffold + local-checks diagnostic"
 ### Task 11: `brace init` remote checks
 
 **Files:**
-- Modify: `src/main/java/io/brace/CliInit.java` (add `runWithRemote`)
-- Modify: `src/test/java/io/brace/CliInitTest.java` (add tests using `TestApp`)
+- Modify: `src/main/java/com/larvalabs/brace/CliInit.java` (add `runWithRemote`)
+- Modify: `src/test/java/com/larvalabs/brace/CliInitTest.java` (add tests using `TestApp`)
 
 - [ ] **Step 1: Failing test**
 
@@ -1709,7 +1709,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliInit.java src/test/java/io/brace/CliInitTest.java
+git add src/main/java/com/larvalabs/brace/CliInit.java src/test/java/com/larvalabs/brace/CliInitTest.java
 git commit -m "feat: brace init remote checks against ops.prod.url"
 ```
 
@@ -1728,14 +1728,14 @@ git commit -m "feat: brace init remote checks against ops.prod.url"
 ### Task 12: `brace errors`
 
 **Files:**
-- Create: `src/main/java/io/brace/CliCommands.java`
-- Create: `src/test/java/io/brace/CliCommandsTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CliCommands.java`
+- Create: `src/test/java/com/larvalabs/brace/CliCommandsTest.java`
 
 - [ ] **Step 1: Failing test**
 
-`src/test/java/io/brace/CliCommandsTest.java`:
+`src/test/java/com/larvalabs/brace/CliCommandsTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -1805,9 +1805,9 @@ Expected: compile error.
 
 - [ ] **Step 3: Implement `CliCommands.errors`**
 
-`src/main/java/io/brace/CliCommands.java`:
+`src/main/java/com/larvalabs/brace/CliCommands.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.net.URI;
@@ -1916,7 +1916,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliCommands.java src/test/java/io/brace/CliCommandsTest.java
+git add src/main/java/com/larvalabs/brace/CliCommands.java src/test/java/com/larvalabs/brace/CliCommandsTest.java
 git commit -m "feat: brace errors command with --since and --json"
 ```
 
@@ -1925,8 +1925,8 @@ git commit -m "feat: brace errors command with --since and --json"
 ### Task 13: `brace logs` (one-shot + follow)
 
 **Files:**
-- Modify: `src/main/java/io/brace/CliCommands.java` (add `logs`)
-- Modify: `src/test/java/io/brace/CliCommandsTest.java` (add tests)
+- Modify: `src/main/java/com/larvalabs/brace/CliCommands.java` (add `logs`)
+- Modify: `src/test/java/com/larvalabs/brace/CliCommandsTest.java` (add tests)
 
 - [ ] **Step 1: Failing test**
 
@@ -2066,7 +2066,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliCommands.java src/test/java/io/brace/CliCommandsTest.java
+git add src/main/java/com/larvalabs/brace/CliCommands.java src/test/java/com/larvalabs/brace/CliCommandsTest.java
 git commit -m "feat: brace logs command with -f follow mode"
 ```
 
@@ -2075,8 +2075,8 @@ git commit -m "feat: brace logs command with -f follow mode"
 ### Task 14: `brace status`
 
 **Files:**
-- Modify: `src/main/java/io/brace/CliCommands.java` (add `status`)
-- Modify: `src/test/java/io/brace/CliCommandsTest.java` (add test)
+- Modify: `src/main/java/com/larvalabs/brace/CliCommands.java` (add `status`)
+- Modify: `src/test/java/com/larvalabs/brace/CliCommandsTest.java` (add test)
 
 - [ ] **Step 1: Failing test**
 
@@ -2188,7 +2188,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliCommands.java src/test/java/io/brace/CliCommandsTest.java
+git add src/main/java/com/larvalabs/brace/CliCommands.java src/test/java/com/larvalabs/brace/CliCommandsTest.java
 git commit -m "feat: brace status command with health-aware exit code"
 ```
 
@@ -2197,8 +2197,8 @@ git commit -m "feat: brace status command with health-aware exit code"
 ### Task 15: `brace cache` (read + clear)
 
 **Files:**
-- Modify: `src/main/java/io/brace/CliCommands.java` (add `cache`, `cacheClear`)
-- Modify: `src/test/java/io/brace/CliCommandsTest.java` (add tests)
+- Modify: `src/main/java/com/larvalabs/brace/CliCommands.java` (add `cache`, `cacheClear`)
+- Modify: `src/test/java/com/larvalabs/brace/CliCommandsTest.java` (add tests)
 
 - [ ] **Step 1: Failing test**
 
@@ -2311,7 +2311,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliCommands.java src/test/java/io/brace/CliCommandsTest.java
+git add src/main/java/com/larvalabs/brace/CliCommands.java src/test/java/com/larvalabs/brace/CliCommandsTest.java
 git commit -m "feat: brace cache and brace cache clear commands"
 ```
 
@@ -2320,8 +2320,8 @@ git commit -m "feat: brace cache and brace cache clear commands"
 ### Task 16: `brace resolve`
 
 **Files:**
-- Modify: `src/main/java/io/brace/CliCommands.java` (add `resolve`)
-- Modify: `src/test/java/io/brace/CliCommandsTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/CliCommands.java` (add `resolve`)
+- Modify: `src/test/java/com/larvalabs/brace/CliCommandsTest.java`
 
 - [ ] **Step 1: Failing test**
 
@@ -2388,7 +2388,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliCommands.java src/test/java/io/brace/CliCommandsTest.java
+git add src/main/java/com/larvalabs/brace/CliCommands.java src/test/java/com/larvalabs/brace/CliCommandsTest.java
 git commit -m "feat: brace resolve <id> marks an error as resolved"
 ```
 
@@ -2399,15 +2399,15 @@ git commit -m "feat: brace resolve <id> marks an error as resolved"
 ### Task 17: Refactor `Cli.opsDashboard` and `Cli.opsKeypair`
 
 **Files:**
-- Create: `src/main/java/io/brace/CliOps.java`
-- Modify: `src/main/java/io/brace/Cli.java` (delete old `opsDashboard`/`opsKeypair`, dispatch to `CliOps`)
-- Create: `src/test/java/io/brace/CliOpsTest.java`
+- Create: `src/main/java/com/larvalabs/brace/CliOps.java`
+- Modify: `src/main/java/com/larvalabs/brace/Cli.java` (delete old `opsDashboard`/`opsKeypair`, dispatch to `CliOps`)
+- Create: `src/test/java/com/larvalabs/brace/CliOpsTest.java`
 
 - [ ] **Step 1: Failing test**
 
-`src/test/java/io/brace/CliOpsTest.java`:
+`src/test/java/com/larvalabs/brace/CliOpsTest.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -2459,9 +2459,9 @@ Expected: compile error.
 
 - [ ] **Step 3: Implement `CliOps`**
 
-`src/main/java/io/brace/CliOps.java`:
+`src/main/java/com/larvalabs/brace/CliOps.java`:
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.net.URI;
@@ -2555,7 +2555,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/CliOps.java src/test/java/io/brace/CliOpsTest.java
+git add src/main/java/com/larvalabs/brace/CliOps.java src/test/java/com/larvalabs/brace/CliOpsTest.java
 git commit -m "refactor: extract CliOps with CliConfig + CliAuth + Json.mapper"
 ```
 
@@ -2564,15 +2564,15 @@ git commit -m "refactor: extract CliOps with CliConfig + CliAuth + Json.mapper"
 ### Task 18: Wire dispatch in `Cli.java` and update launcher
 
 **Files:**
-- Modify: `src/main/java/io/brace/Cli.java` (entire file — replace with new dispatch)
+- Modify: `src/main/java/com/larvalabs/brace/Cli.java` (entire file — replace with new dispatch)
 - Modify: `bin/brace` (launcher dispatch + help text)
 
 - [ ] **Step 1: Replace `Cli.java`**
 
-Replace the entire contents of `src/main/java/io/brace/Cli.java`:
+Replace the entire contents of `src/main/java/com/larvalabs/brace/Cli.java`:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.nio.file.*;
 import java.util.Arrays;
@@ -2758,7 +2758,7 @@ Expected: PASS — entire suite, including the new and existing tests.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/main/java/io/brace/Cli.java bin/brace
+git add src/main/java/com/larvalabs/brace/Cli.java bin/brace
 git commit -m "feat: dispatch new project subcommands in Cli.java + bin/brace"
 ```
 
@@ -2879,8 +2879,8 @@ git commit -m "docs: add agent ops guide for brace CLI commands"
 ### Task 20: Extend `ClaudeMdGenerator` with ops commands section
 
 **Files:**
-- Modify: `src/main/java/io/brace/ClaudeMdGenerator.java`
-- Modify: `src/test/java/io/brace/ClaudeMdGeneratorTest.java`
+- Modify: `src/main/java/com/larvalabs/brace/ClaudeMdGenerator.java`
+- Modify: `src/test/java/com/larvalabs/brace/ClaudeMdGeneratorTest.java`
 
 - [ ] **Step 1: Failing test**
 
@@ -2910,7 +2910,7 @@ Expected: FAIL — generated file does not contain those strings.
 
 - [ ] **Step 3: Add the ops section to `ClaudeMdGenerator`**
 
-In `src/main/java/io/brace/ClaudeMdGenerator.java`, locate the spot where the generated content is built and add a new section. The exact insertion point depends on the current file structure — find the `String content = ...` or template literal and append:
+In `src/main/java/com/larvalabs/brace/ClaudeMdGenerator.java`, locate the spot where the generated content is built and add a new section. The exact insertion point depends on the current file structure — find the `String content = ...` or template literal and append:
 
 ```java
 content += """
@@ -2947,7 +2947,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/io/brace/ClaudeMdGenerator.java src/test/java/io/brace/ClaudeMdGeneratorTest.java
+git add src/main/java/com/larvalabs/brace/ClaudeMdGenerator.java src/test/java/com/larvalabs/brace/ClaudeMdGeneratorTest.java
 git commit -m "docs: ClaudeMdGenerator includes brace ops commands section"
 ```
 

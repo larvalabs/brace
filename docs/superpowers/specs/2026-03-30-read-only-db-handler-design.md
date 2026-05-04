@@ -12,7 +12,7 @@ Add a `ReadDbHandler` functional interface that signals the handler only reads f
 
 ```java
 // ReadDbHandler.java
-package io.brace;
+package com.larvalabs.brace;
 
 @FunctionalInterface
 public interface ReadDbHandler {
@@ -28,7 +28,7 @@ For handlers that need both a read-only DB and a session:
 
 ```java
 // ReadFullHandler.java
-package io.brace;
+package com.larvalabs.brace;
 
 @FunctionalInterface
 public interface ReadFullHandler {

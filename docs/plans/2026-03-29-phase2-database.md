@@ -13,16 +13,16 @@
 ## File Structure
 
 ```
-src/main/java/io/brace/
+src/main/java/com/larvalabs/brace/
 ├── Database.java              # Thin wrapper over StatelessSession — query API
 ├── DatabaseFactory.java       # Creates SessionFactory, opens sessions, runs Flyway
 ├── Brace.java                 # Updated — accepts database config
 ├── BraceHandler.java          # Updated — per-request session/transaction lifecycle
 ├── Invoker.java               # Updated — recognizes Database.class by type (not name)
-src/test/java/io/brace/
+src/test/java/com/larvalabs/brace/
 ├── DatabaseTest.java          # Unit tests for Database query API (H2 in-memory)
 ├── DatabaseIntegrationTest.java # Full HTTP tests with DB queries
-src/test/java/io/brace/testmodels/
+src/test/java/com/larvalabs/brace/testmodels/
 ├── Post.java                  # Test entity
 src/test/resources/
 ├── db/migration/
@@ -61,7 +61,7 @@ git commit -m "Phase 2 Task 1: add Hibernate 7, H2, HikariCP, Flyway dependencie
 ### Task 2: DatabaseFactory (SessionFactory + Flyway)
 
 **Files:**
-- Create: `src/main/java/io/brace/DatabaseFactory.java`
+- Create: `src/main/java/com/larvalabs/brace/DatabaseFactory.java`
 
 - [ ] **Step 1: Implement DatabaseFactory**
 
@@ -98,16 +98,16 @@ git commit -m "Phase 2 Task 2: DatabaseFactory with Hibernate SessionFactory and
 ### Task 3: Database Wrapper (Query API)
 
 **Files:**
-- Create: `src/main/java/io/brace/Database.java`
-- Create: `src/test/java/io/brace/DatabaseTest.java`
-- Create: `src/test/java/io/brace/testmodels/Post.java`
+- Create: `src/main/java/com/larvalabs/brace/Database.java`
+- Create: `src/test/java/com/larvalabs/brace/DatabaseTest.java`
+- Create: `src/test/java/com/larvalabs/brace/testmodels/Post.java`
 - Create: `src/test/resources/db/migration/V1__create_posts.sql`
 
 - [ ] **Step 1: Create test entity and migration**
 
 ```java
-// src/test/java/io/brace/testmodels/Post.java
-package io.brace.testmodels;
+// src/test/java/com/larvalabs/brace/testmodels/Post.java
+package com.larvalabs.brace.testmodels;
 
 import jakarta.persistence.*;
 import java.time.Instant;
@@ -136,9 +136,9 @@ CREATE TABLE posts (
 - [ ] **Step 2: Write failing tests for Database**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
-import io.brace.testmodels.Post;
+import com.larvalabs.brace.testmodels.Post;
 import org.junit.jupiter.api.*;
 import java.time.Instant;
 import java.util.List;
@@ -345,9 +345,9 @@ git commit -m "Phase 2 Task 3: Database wrapper with query API and test suite"
 ### Task 4: Update Invoker and BraceHandler for Per-Request Database
 
 **Files:**
-- Modify: `src/main/java/io/brace/Invoker.java`
-- Modify: `src/main/java/io/brace/BraceHandler.java`
-- Modify: `src/main/java/io/brace/Brace.java`
+- Modify: `src/main/java/com/larvalabs/brace/Invoker.java`
+- Modify: `src/main/java/com/larvalabs/brace/BraceHandler.java`
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java`
 
 - [ ] **Step 1: Update Invoker to recognize Database.class by type**
 
@@ -379,7 +379,7 @@ var app = Brace.app().port(8080).database(db);
 - [ ] **Step 4: Write integration test with database**
 
 ```java
-// src/test/java/io/brace/DatabaseIntegrationTest.java
+// src/test/java/com/larvalabs/brace/DatabaseIntegrationTest.java
 // Start a Brace app with H2 in-memory, register routes that use Database param,
 // make HTTP requests, verify data is persisted and queried correctly
 ```

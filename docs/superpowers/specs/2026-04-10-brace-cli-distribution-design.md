@@ -4,7 +4,7 @@
 
 Package Brace as a downloadable distribution containing a global `brace` CLI and all pre-resolved framework dependencies, so users can install once and run `brace new`, `brace dev`, `brace test`, etc. from any directory — similar to how Play 1 distributed itself.
 
-Today, Brace has two disjoint pieces: a Java `Cli` class (handles `new` and `ops` commands, invoked via `java -cp brace.jar io.brace.Cli`) and a per-project `sample/brace` bash script (handles `dev`/`test`/`run`, copied into each project). Users have no global `brace` command. Agents and developers cannot discover or run Brace commands without first cloning the framework repo or copying scripts manually.
+Today, Brace has two disjoint pieces: a Java `Cli` class (handles `new` and `ops` commands, invoked via `java -cp brace.jar com.larvalabs.brace.Cli`) and a per-project `sample/brace` bash script (handles `dev`/`test`/`run`, copied into each project). Users have no global `brace` command. Agents and developers cannot discover or run Brace commands without first cloning the framework repo or copying scripts manually.
 
 ## Goals
 
@@ -87,10 +87,10 @@ The same classpath pattern applies to compilation, running, and testing.
 
 | Command | Behavior |
 |---|---|
-| `brace new <name>` | Runs `java -cp $BRACE_HOME/lib/* io.brace.Cli new <name>` — unchanged generator logic. |
-| `brace ops keypair [--label]` | Runs `java -cp $BRACE_HOME/lib/* io.brace.Cli ops keypair`. |
-| `brace ops dashboard [--key] [--url]` | Runs `java -cp $BRACE_HOME/lib/* io.brace.Cli ops dashboard`. |
-| `brace deps` | Runs `mvn dependency:copy-dependencies -DoutputDirectory=lib -DincludeScope=runtime -DexcludeGroupIds=io.brace -q`. Excludes Brace itself since that's already in `$BRACE_HOME/lib`. |
+| `brace new <name>` | Runs `java -cp $BRACE_HOME/lib/* com.larvalabs.brace.Cli new <name>` — unchanged generator logic. |
+| `brace ops keypair [--label]` | Runs `java -cp $BRACE_HOME/lib/* com.larvalabs.brace.Cli ops keypair`. |
+| `brace ops dashboard [--key] [--url]` | Runs `java -cp $BRACE_HOME/lib/* com.larvalabs.brace.Cli ops dashboard`. |
+| `brace deps` | Runs `mvn dependency:copy-dependencies -DoutputDirectory=lib -DincludeScope=runtime -DexcludeGroupIds=com.larvalabs -q`. Excludes Brace itself since that's already in `$BRACE_HOME/lib`. |
 | `brace compile` | Runs `javac -d target/classes -cp "$(classpath)" $(find src/main/java -name '*.java')`. |
 | `brace run` | Compiles, then runs `java -cp "target/classes:$(classpath)" <main-class>`. Main class discovered by grepping for `public static void main` under `src/main/java/`. |
 | `brace test [name]` | Compiles main + test sources, runs `java -jar $BRACE_HOME/lib/junit-platform-console-standalone-*.jar -cp "target/classes:target/test-classes:$(classpath)" --scan-classpath` (with `--select-class` filter if name provided). |

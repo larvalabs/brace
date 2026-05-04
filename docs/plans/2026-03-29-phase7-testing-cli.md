@@ -13,7 +13,7 @@
 ## File Structure
 
 ```
-src/main/java/io/brace/
+src/main/java/com/larvalabs/brace/
 ├── TestApp.java                # Test harness — boots app, HTTP client, assertions
 ├── TestResponse.java           # Response wrapper for test assertions
 ├── Cli.java                    # CLI entry point — brace new, brace routes
@@ -26,17 +26,17 @@ src/main/java/io/brace/
 ### Task 1: TestApp Harness
 
 **Files:**
-- Create: `src/main/java/io/brace/TestApp.java`
-- Create: `src/main/java/io/brace/TestResponse.java`
-- Modify: `src/main/java/io/brace/Brace.java` — add test() factory
-- Create: `src/test/java/io/brace/TestAppTest.java`
+- Create: `src/main/java/com/larvalabs/brace/TestApp.java`
+- Create: `src/main/java/com/larvalabs/brace/TestResponse.java`
+- Modify: `src/main/java/com/larvalabs/brace/Brace.java` — add test() factory
+- Create: `src/test/java/com/larvalabs/brace/TestAppTest.java`
 
 - [ ] **Step 1: Create TestResponse**
 
 Simple wrapper for HTTP response data with convenience methods:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.net.http.HttpResponse;
 
@@ -73,7 +73,7 @@ public class TestResponse {
 TestApp wraps a running Brace instance and provides test utilities:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 import java.net.URI;
 import java.net.http.*;
@@ -225,9 +225,9 @@ public static class TestAppBuilder {
 - [ ] **Step 4: Write TestAppTest**
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
-import io.brace.testmodels.Post;
+import com.larvalabs.brace.testmodels.Post;
 import org.junit.jupiter.api.*;
 import java.time.Instant;
 import java.util.Map;
@@ -333,8 +333,8 @@ git commit -m "Phase 7 Task 1: TestApp harness for in-process integration testin
 ### Task 2: CLI and Project Generator
 
 **Files:**
-- Create: `src/main/java/io/brace/Cli.java`
-- Create: `src/main/java/io/brace/ProjectGenerator.java`
+- Create: `src/main/java/com/larvalabs/brace/Cli.java`
+- Create: `src/main/java/com/larvalabs/brace/ProjectGenerator.java`
 
 - [ ] **Step 1: Create ProjectGenerator**
 
@@ -359,7 +359,7 @@ Each file is generated from a template string in Java. No external template file
 Simple main class that parses command-line args:
 
 ```java
-package io.brace;
+package com.larvalabs.brace;
 
 public class Cli {
     public static void main(String[] args) {

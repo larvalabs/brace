@@ -1,6 +1,6 @@
 package sample;
 
-import io.brace.*;
+import com.larvalabs.brace.*;
 import java.util.Map;
 
 public class App {
