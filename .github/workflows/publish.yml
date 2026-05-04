@@ -31,7 +31,23 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mvn -B versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
 
+      # Skip deploy when a release commit is pushed to main: the tag push (firing
+      # against the same SHA) will handle the actual release deploy. Without this
+      # guard, both runs race on the deploy and the loser gets a 409 Conflict.
+      - name: Decide whether to deploy
+        id: decide
+        run: |
+          VERSION=$(mvn -B -q help:evaluate -Dexpression=project.version -DforceStdout)
+          if [[ "$GITHUB_REF" == "refs/heads/main" && "$VERSION" != *-SNAPSHOT ]]; then
+            echo "Skipping deploy: release version $VERSION on main push — the tag run handles release deploys."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Will deploy version $VERSION (ref $GITHUB_REF)."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy
+        if: steps.decide.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # TODO: re-enable tests once Ubuntu CI env issues are sorted (auth/file-upload tests fail with HTTP 500 on linux runners while passing locally on macOS).
