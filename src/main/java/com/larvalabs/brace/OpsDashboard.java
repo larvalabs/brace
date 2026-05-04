@@ -489,6 +489,10 @@ public class OpsDashboard {
                     sb.append("<tr><td>").append(esc(j.name())).append("</td><td class=\"c-muted\">").append(esc(j.schedule())).append("</td>");
                     sb.append("<td><span class=\"").append(statusDot).append("\">● </span>").append(esc(statusLabel)).append("</td>");
                     sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(esc(lastRun)).append("</td></tr>");
+                    if (j.lastMessage() != null && !j.lastMessage().isEmpty()) {
+                        sb.append("<tr><td colspan=\"4\" class=\"c-muted\" style=\"padding-left:16px;font-style:italic\">↳ ")
+                          .append(esc(j.lastMessage())).append("</td></tr>");
+                    }
                 }
                 sb.append("</table>");
                 sb.append("</div>\n");

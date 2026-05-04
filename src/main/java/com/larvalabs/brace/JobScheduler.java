@@ -2,7 +2,6 @@ package com.larvalabs.brace;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -17,7 +16,7 @@ public class JobScheduler {
     public record JobStatus(
         String name, String schedule, Instant lastRun,
         long lastDurationMs, String lastStatus, String lastError,
-        int failCount, Instant nextRun
+        int failCount, Instant nextRun, String lastMessage
     ) {}
 
     private record RegisteredJob(String name, String schedule, long periodMs, long initialDelayMs, Job job) {}
@@ -31,7 +30,7 @@ public class JobScheduler {
         long periodMs = parseInterval(interval);
         var rj = new RegisteredJob(name, "every " + interval, periodMs, periodMs, job);
         registeredJobs.add(rj);
-        statuses.add(new JobStatus(name, "every " + interval, null, 0, "pending", null, 0, null));
+        statuses.add(new JobStatus(name, "every " + interval, null, 0, "pending", null, 0, null, null));
 
         // If scheduler is already running, schedule immediately
         if (scheduler != null) {
@@ -48,7 +47,7 @@ public class JobScheduler {
         long periodMs = Duration.ofHours(24).toMillis();
         registeredJobs.add(new RegisteredJob(name, "daily at " + time, periodMs, initialDelayMs, job));
         Instant nextRun = Instant.now().plusMillis(initialDelayMs);
-        statuses.add(new JobStatus(name, "daily at " + time, null, 0, "pending", null, 0, nextRun));
+        statuses.add(new JobStatus(name, "daily at " + time, null, 0, "pending", null, 0, nextRun, null));
     }
 
     public void start(DatabaseFactory dbFactory) {
@@ -82,6 +81,7 @@ public class JobScheduler {
 
     private void executeJob(int index, RegisteredJob rj) {
         Instant start = Instant.now();
+        var ctx = new JobContext();
         org.hibernate.StatelessSession session = null;
         try {
             Database db = null;
@@ -91,7 +91,7 @@ public class JobScheduler {
                 session.getTransaction().begin();
             }
 
-            rj.job().run(db);
+            rj.job().run(db, ctx);
 
             if (session != null) {
                 session.getTransaction().commit();
@@ -99,9 +99,11 @@ public class JobScheduler {
 
             long durationMs = Duration.between(start, Instant.now()).toMillis();
             Instant nextRun = Instant.now().plusMillis(rj.periodMs());
+            var msg = ctx.consumeMessage();
             statuses.set(index, new JobStatus(
                 rj.name(), rj.schedule(), start, durationMs, "ok", null,
-                statuses.get(index).failCount(), nextRun
+                statuses.get(index).failCount(), nextRun,
+                msg != null ? msg : statuses.get(index).lastMessage()
             ));
         } catch (Exception e) {
             if (session != null) {
@@ -111,9 +113,11 @@ public class JobScheduler {
             long durationMs = Duration.between(start, Instant.now()).toMillis();
             Instant nextRun = Instant.now().plusMillis(rj.periodMs());
             var prev = statuses.get(index);
+            var msg = ctx.consumeMessage();
             statuses.set(index, new JobStatus(
                 rj.name(), rj.schedule(), start, durationMs, "error", e.getMessage(),
-                prev.failCount() + 1, nextRun
+                prev.failCount() + 1, nextRun,
+                msg != null ? msg : prev.lastMessage()
             ));
         } finally {
             if (session != null) {

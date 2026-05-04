@@ -7,13 +7,24 @@ Brace is a full-stack Java 21+ web framework. No DI container, no classpath scan
 Download the latest release zip, unzip it, and add `bin/` to your PATH:
 
 ```bash
-curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.0.zip
-unzip brace-0.1.0.zip
-export PATH="$PWD/brace-0.1.0/bin:$PATH"
+curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.1.zip
+unzip brace-0.1.1.zip
+export PATH="$PWD/brace-0.1.1/bin:$PATH"
 brace help
 ```
 
 No Maven or per-project scripts needed for the dev loop. Maven is only invoked by `brace deps` to populate a project-local `lib/` folder from `pom.xml`.
+
+## Upgrading
+
+When the brace version in `pom.xml` changes, check the migration guide for that version
+step before recompiling. Each guide lists every breaking change with before/after examples.
+
+- **Online:** https://github.com/larvalabs/brace/tree/main/docs/migrations
+- **Offline:** the dist zip ships them at `brace-X.Y.Z/migrations/brace-FROM-to-TO.md`
+- **Filename convention:** `brace-FROM-to-TO.md` (e.g. `brace-0.1.0-to-0.1.1.md`)
+
+If you skip versions, read every guide between the old and new version in order.
 
 ## Build & Run
 
@@ -440,6 +451,26 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
 
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 
+Job lambdas receive `(Database, JobContext)`. Use `ctx.message(...)` to attach a short
+status string shown on the ops dashboard alongside the job's last run:
+
+```java
+app.every("30s", "fetch-listings", (db, ctx) -> {
+    int n = fetchAndStore(db);
+    ctx.message("Retrieved " + n + " new listings");
+});
+```
+
+Fire-and-forget async tasks (non-scheduled, non-durable, virtual thread per task):
+
+```java
+Jobs.run(() -> sendNotification(userId));     // exceptions caught + logged
+Future<Receipt> f = Jobs.submit(() -> generateReceipt(orderId));
+Receipt r = f.get();                          // exceptions propagate via Future
+```
+
+Inspect via `Jobs.asyncSubmitted()` / `Jobs.asyncFailed()` (counters).
+
 ## Mailer
 
 ```java
@@ -490,6 +521,63 @@ var stored = storage.put("custom/path.jpg", file);  // returns StoredFile(key, u
 Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`.
 
 **StoredFile** record: `key()`, `url()`.
+
+## Asset Fingerprinting
+
+Cache-bust static assets by appending a content-hash query parameter:
+
+```java
+app.staticFiles("/assets", "public");
+
+// In a JTE template (or any code that produces URLs):
+${Assets.url("/assets/app.css")}   // → "/assets/app.css?v=a1b2c3d4"
+```
+
+The hash is the first 8 hex chars of MD5 of the file contents, cached per `(path, mtime)`.
+Unknown URLs (no matching `staticFiles` mapping, missing file, or path traversal) return
+unchanged. Pair with long `Cache-Control: max-age` on static assets so that redeploys with
+unchanged files don't invalidate browser/CDN caches.
+
+## HTTP Client
+
+Outbound HTTP over `java.net.http.HttpClient`:
+
+```java
+// JSON
+var user = Http.get("https://api.example.com/users/42").fetchJson(User.class);
+
+// String / bytes
+String html = Http.get("https://example.com").fetchString();
+byte[] image = Http.get("https://example.com/logo.png").fetchBytes();
+
+// Auth + headers + timeout
+var resp = Http.get(url)
+    .bearer(token)
+    .header("X-Trace-Id", traceId)
+    .timeout(Duration.ofSeconds(5))
+    .fetch();
+if (resp.ok()) { ... }
+
+// JSON request body
+Http.post(url).bodyJson(Map.of("name", "Alice")).fetch();
+
+// Form-encoded
+Http.post(url).bodyForm(Map.of("name", "Bob", "age", "30")).fetch();
+
+// Raw binary upload (S3, R2, image APIs)
+Http.put(uploadUrl).bodyBytes(pngBytes, "image/png").fetch();
+
+// multipart/form-data with text fields and file parts
+Http.post(uploadUrl)
+    .bearer(token)
+    .multipart()
+    .field("name", "avatar")
+    .field("file", bytes, "image.png")           // content-type guessed from extension
+    .field("blob", bytes, "x.bin", "application/x-custom")
+    .fetch();
+```
+
+`Response`: `status()`, `body()`, `header(name)`, `ok()`, `as(Class)`.
 
 ## WebSocket
 

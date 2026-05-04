@@ -52,9 +52,9 @@ Requires JDK 21 or later. JDK 25 LTS is recommended — [JEP 491](https://openjd
 Download the latest release zip, unzip it, and add `bin/` to your PATH:
 
 ```bash
-curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.0.zip
-unzip brace-0.1.0.zip
-export PATH="$PWD/brace-0.1.0/bin:$PATH"
+curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.1.zip
+unzip brace-0.1.1.zip
+export PATH="$PWD/brace-0.1.1/bin:$PATH"
 brace help
 ```
 

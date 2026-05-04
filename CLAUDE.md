@@ -73,7 +73,7 @@ Register with: `app.get("/path", handler)` or `app.get("/path", (DbHandler) (req
 # Framework development (these commands build/test Brace itself)
 mvn compile          # compile brace framework
 mvn test             # run all 410 tests
-mvn package          # build distribution zip (target/brace-0.1.0-SNAPSHOT.zip)
+mvn package          # build distribution zip (target/brace-0.1.1.zip)
 
 # Using brace as an end user (e.g., building the sample app)
 cd sample && brace run
@@ -145,4 +145,4 @@ When changing public API (adding/removing/renaming methods, classes, or handler 
 
 Jetty 12, Hibernate 7, PostgreSQL JDBC (runtime), H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, htmx 2.0.4, JUnit 5.
 
-Single Maven artifact: `com.larvalabs.brace:brace:0.1.0-SNAPSHOT`
+Single Maven artifact: `com.larvalabs.brace:brace:0.1.1`

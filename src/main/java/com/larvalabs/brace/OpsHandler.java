@@ -254,6 +254,7 @@ public class OpsHandler {
                 j.put("lastStatus", js.lastStatus());
                 j.put("lastError", js.lastError());
                 j.put("failCount", js.failCount());
+                j.put("lastMessage", js.lastMessage());
                 scheduled.add(j);
             }
             jobs.put("scheduled", scheduled);

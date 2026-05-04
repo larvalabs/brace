@@ -436,7 +436,9 @@ public class Brace {
         connector.setPort(port);
         server.addConnector(connector);
 
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, List.copyOf(staticFileMappings), maxUploadSize, storage, trustedProxies);
+        var staticMappingsCopy = List.copyOf(staticFileMappings);
+        Assets.init(staticMappingsCopy);
+        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
 
         if (!wsRoutes.isEmpty()) {
             // Wrap with WebSocketUpgradeHandler for WebSocket support
@@ -502,7 +504,7 @@ public class Brace {
 
         // Flush stats to ops_timeseries
         if (databaseFactory != null && opsKeysPath != null) {
-            jobScheduler.every(httpStatsInterval, "ops-flush-http", db -> {
+            jobScheduler.every(httpStatsInterval, "ops-flush-http", (db, ctx) -> {
                 var snapshot = stats.snapshot();
                 if (snapshot.requests() > 0) {
                     var ts = java.sql.Timestamp.from(snapshot.ts());
@@ -520,7 +522,7 @@ public class Brace {
             });
 
             if (cache != null) {
-                jobScheduler.every(cacheStatsInterval, "ops-flush-cache", db -> {
+                jobScheduler.every(cacheStatsInterval, "ops-flush-cache", (db, ctx) -> {
                     long h = cache.drainHits(), m = cache.drainMisses(), e = cache.drainEvictions();
                     if (h > 0 || m > 0 || e > 0) {
                         var ts = java.sql.Timestamp.from(java.time.Instant.now());
@@ -532,7 +534,7 @@ public class Brace {
             }
 
             if (mailer != null) {
-                jobScheduler.every(mailerStatsInterval, "ops-flush-mailer", db -> {
+                jobScheduler.every(mailerStatsInterval, "ops-flush-mailer", (db, ctx) -> {
                     long f = mailer.drainFailCount();
                     if (f > 0) {
                         var ts = java.sql.Timestamp.from(java.time.Instant.now());
@@ -543,7 +545,7 @@ public class Brace {
 
             // JVM metrics flush
             if (profiler != null) {
-                jobScheduler.every(httpStatsInterval, "ops-flush-jvm", db -> {
+                jobScheduler.every(httpStatsInterval, "ops-flush-jvm", (db, ctx) -> {
                     var ts = java.sql.Timestamp.from(java.time.Instant.now());
                     var snap = profiler.snapshot();
                     var heap = (java.util.Map<String, Object>) snap.get("heap");
@@ -569,7 +571,7 @@ public class Brace {
                         ts, "jvm.gc_max_pause_ms", profiler.maxRecentGcPauseMs());
                 });
 
-                jobScheduler.every("5m", "ops-flush-jvm-profiling", db -> {
+                jobScheduler.every("5m", "ops-flush-jvm-profiling", (db, ctx) -> {
                     var ts = java.sql.Timestamp.from(java.time.Instant.now());
                     for (var entry : profiler.topMethods(20)) {
                         db.sql("INSERT INTO ops_profiling_snapshots (ts, type, name, value) VALUES (?, ?, ?, ?)",

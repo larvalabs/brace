@@ -18,6 +18,15 @@
                 <include>brace</include>
             </includes>
         </fileSet>
+
+        <!-- Migration guides — one file per release transition -->
+        <fileSet>
+            <directory>${project.basedir}/docs/migrations</directory>
+            <outputDirectory>migrations</outputDirectory>
+            <includes>
+                <include>brace-*.md</include>
+            </includes>
+        </fileSet>
     </fileSets>
 
     <dependencySets>

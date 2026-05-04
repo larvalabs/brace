@@ -23,6 +23,23 @@ class HttpTest {
 
         app.post("/echo-body", req -> Result.text(req.body()));
 
+        app.post("/echo-meta", req -> Json.of(Map.of(
+            "contentType", req.header("Content-Type") != null ? req.header("Content-Type") : "",
+            "length", req.body() != null ? req.body().length() : 0
+        )));
+
+        app.post("/upload", req -> {
+            var name = req.formParam("name");
+            var file = req.file("file");
+            return Json.of(Map.of(
+                "name", name != null ? name : "",
+                "filename", file != null ? file.filename() : "",
+                "fileContentType", file != null ? file.contentType() : "",
+                "fileSize", file != null ? file.size() : 0,
+                "fileFirstByte", file != null && file.bytes().length > 0 ? (file.bytes()[0] & 0xff) : -1
+            ));
+        });
+
         app.get("/text", req -> Result.text("hello world"));
 
         app.get("/slow", req -> {
@@ -144,6 +161,65 @@ class HttpTest {
     void deleteRequest() {
         var resp = Http.delete(url("/echo-body")).fetch();
         assertNotNull(resp);
+    }
+
+    @Test
+    void postWithBytesBody() {
+        record Meta(String contentType, int length) {}
+        var bytes = new byte[]{1, 2, 3, 4, 5, 6, 7, 8};
+        var meta = Http.post(url("/echo-meta"))
+            .bodyBytes(bytes, "application/octet-stream")
+            .fetchJson(Meta.class);
+        assertEquals("application/octet-stream", meta.contentType());
+        assertEquals(8, meta.length());
+    }
+
+    @Test
+    void bodyBytesRespectsExplicitContentType() {
+        record Meta(String contentType, int length) {}
+        var bytes = "PNG-DATA".getBytes();
+        var meta = Http.post(url("/echo-meta"))
+            .bodyBytes(bytes, "image/png")
+            .fetchJson(Meta.class);
+        assertEquals("image/png", meta.contentType());
+    }
+
+    @Test
+    void multipartTextField() {
+        record Upload(String name, String filename, String fileContentType, long fileSize, int fileFirstByte) {}
+        var upload = Http.post(url("/upload"))
+            .multipart()
+            .field("name", "Alice")
+            .fetchJson(Upload.class);
+        assertEquals("Alice", upload.name());
+        assertEquals("", upload.filename());
+    }
+
+    @Test
+    void multipartFileUpload() {
+        record Upload(String name, String filename, String fileContentType, long fileSize, int fileFirstByte) {}
+        var bytes = new byte[]{(byte) 0x89, 0x50, 0x4E, 0x47};
+        var upload = Http.post(url("/upload"))
+            .multipart()
+            .field("name", "Bob")
+            .field("file", bytes, "logo.png")
+            .fetchJson(Upload.class);
+        assertEquals("Bob", upload.name());
+        assertEquals("logo.png", upload.filename());
+        assertEquals("image/png", upload.fileContentType());
+        assertEquals(4, upload.fileSize());
+        assertEquals(0x89, upload.fileFirstByte());
+    }
+
+    @Test
+    void multipartExplicitContentType() {
+        record Upload(String name, String filename, String fileContentType, long fileSize, int fileFirstByte) {}
+        var bytes = new byte[]{0x42};
+        var upload = Http.post(url("/upload"))
+            .multipart()
+            .field("file", bytes, "weird.xyz", "application/x-custom")
+            .fetchJson(Upload.class);
+        assertEquals("application/x-custom", upload.fileContentType());
     }
 
     private String url(String path) {

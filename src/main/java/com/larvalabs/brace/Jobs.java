@@ -3,10 +3,62 @@ package com.larvalabs.brace;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 
 public class Jobs {
+
+    private static final ExecutorService ASYNC_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+    private static final LongAdder ASYNC_SUBMITTED = new LongAdder();
+    private static final LongAdder ASYNC_FAILED = new LongAdder();
+
+    /**
+     * Fire-and-forget background work on a virtual thread. Exceptions are caught and
+     * logged via {@link Log#error(String, Throwable)} so a failed task never silently
+     * eats the calling thread.
+     *
+     * Non-durable: if the JVM exits before the task completes, the work is lost.
+     * For at-least-once delivery use {@link #schedule(Database, DurableJob, Duration)}.
+     */
+    public static void run(Runnable task) {
+        ASYNC_SUBMITTED.increment();
+        ASYNC_EXECUTOR.execute(() -> {
+            try {
+                task.run();
+            } catch (Throwable t) {
+                ASYNC_FAILED.increment();
+                Log.error("async-task-failed", t);
+            }
+        });
+    }
+
+    /**
+     * Submit a background task and get a {@link Future} for its result. Exceptions
+     * propagate through the future via {@link java.util.concurrent.ExecutionException}.
+     * Non-durable; see {@link #run(Runnable)} for the trade-offs.
+     */
+    public static <T> Future<T> submit(Callable<T> task) {
+        ASYNC_SUBMITTED.increment();
+        return ASYNC_EXECUTOR.submit(() -> {
+            try {
+                return task.call();
+            } catch (Throwable t) {
+                ASYNC_FAILED.increment();
+                throw t;
+            }
+        });
+    }
+
+    /** Total async tasks submitted via {@link #run} or {@link #submit}. */
+    public static long asyncSubmitted() { return ASYNC_SUBMITTED.sum(); }
+
+    /** Total async tasks that threw an exception. */
+    public static long asyncFailed() { return ASYNC_FAILED.sum(); }
 
     public static long schedule(Database db, DurableJob job, Duration delay) {
         return schedule(db, job, delay, new JobOptions());
