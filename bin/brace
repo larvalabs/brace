@@ -244,6 +244,7 @@ brace_help() {
     echo ""
     echo "Global commands:"
     echo -e "  ${CYAN}brace new <name>${NC}           Create a new Brace project"
+    echo -e "  ${CYAN}brace version${NC}              Print the brace version"
     echo ""
     echo "Project commands (run inside a project directory):"
     echo -e "  ${CYAN}brace init${NC}                 Scaffold project config + run readiness checks"
@@ -271,7 +272,8 @@ shift 2>/dev/null || true
 
 case "$COMMAND" in
     # Global (Java CLI)
-    new)     run_java_cli new "$@" ;;
+    new)               run_java_cli new "$@" ;;
+    version|--version|-v) run_java_cli version ;;
 
     # Project (Java CLI — handled by Cli.java with require_project guards)
     init|ops|errors|logs|status|cache|resolve)

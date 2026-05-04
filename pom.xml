@@ -161,6 +161,13 @@
             <resource>
                 <directory>src/main/resources</directory>
             </resource>
+            <!-- META-INF/brace-version.txt is filled with ${project.version} by Maven so
+                 BraceVersion.get() can return the version both when running from the
+                 packaged jar and from target/classes during development. -->
+            <resource>
+                <directory>src/main/resources-filtered</directory>
+                <filtering>true</filtering>
+            </resource>
             <resource>
                 <directory>${project.basedir}</directory>
                 <includes>
@@ -212,6 +219,35 @@
                         <goals>
                             <goal>single</goal>
                         </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Local dev convenience: extract the dist zip alongside it and refresh
+                 the target/brace-current symlink. Lets a stable PATH entry like
+                 `target/brace-current/bin` keep working across version bumps without
+                 re-editing the shell profile. Runs after maven-assembly-plugin. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>extract-dist-and-refresh-symlink</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <unzip src="${project.build.directory}/brace-${project.version}.zip"
+                                       dest="${project.build.directory}"/>
+                                <chmod file="${project.build.directory}/brace-${project.version}/bin/brace"
+                                       perm="755"/>
+                                <symlink link="${project.build.directory}/brace-current"
+                                         resource="brace-${project.version}"
+                                         overwrite="true"/>
+                            </target>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>

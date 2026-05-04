@@ -30,6 +30,10 @@ public class Cli {
                 ProjectGenerator.generate(args[0]);
                 yield 0;
             }
+            case "version", "--version", "-v" -> {
+                System.out.println(BraceVersion.get());
+                yield 0;
+            }
             case "init" -> initCommand(cwd, args);
             case "ops" -> opsCommand(cwd, args);
             case "errors"  -> requireProject(cwd, () -> CliCommands.errors(cwd, args));
@@ -102,10 +106,11 @@ public class Cli {
     }
 
     private static void printUsage() {
-        System.out.println("Brace CLI v0.1.0");
+        System.out.println("Brace CLI v" + BraceVersion.get());
         System.out.println();
         System.out.println("Global commands:");
         System.out.println("  brace new <name>            Create a new Brace project");
+        System.out.println("  brace version               Print the brace version");
         System.out.println();
         System.out.println("Project commands (run inside a project):");
         System.out.println("  brace init                  Scaffold .brace + .brace.local and run readiness checks");

@@ -17,7 +17,8 @@ public class ProjectGenerator {
             Files.createDirectories(root.resolve("views/home"));
             Files.createDirectories(root.resolve("public/css"));
 
-            // pom.xml
+            // pom.xml — pin the brace dependency to whatever version is running
+            // this generator (so `brace new` from a 0.1.1 install pins to 0.1.1).
             Files.writeString(root.resolve("pom.xml"), """
 <?xml version="1.0" encoding="UTF-8"?>
 <project>
@@ -29,7 +30,8 @@ public class ProjectGenerator {
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
-        <brace.version>0.1.0</brace.version>
+        <brace.version>""" + BraceVersion.get() + """
+</brace.version>
     </properties>
     <dependencies>
         <dependency>
