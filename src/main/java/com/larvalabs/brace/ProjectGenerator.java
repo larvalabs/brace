@@ -29,7 +29,7 @@ public class ProjectGenerator {
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
-        <brace.version>0.1.0-SNAPSHOT</brace.version>
+        <brace.version>0.1.0</brace.version>
     </properties>
     <dependencies>
         <dependency>
