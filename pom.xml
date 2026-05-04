@@ -9,6 +9,10 @@
     <version>0.2.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
+    <name>Brace</name>
+    <description>Full-stack Java web framework — HTTP, database, templates, sessions, forms, jobs, mailer, ops dashboard. Plain Java, no DI container, no classpath scanning.</description>
+    <url>https://github.com/larvalabs/brace</url>
+
     <scm>
         <connection>scm:git:https://github.com/larvalabs/brace.git</connection>
         <developerConnection>scm:git:git@github.com:larvalabs/brace.git</developerConnection>
