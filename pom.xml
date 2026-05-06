@@ -13,6 +13,14 @@
     <description>Full-stack Java web framework — HTTP, database, templates, sessions, forms, jobs, mailer, ops dashboard. Plain Java, no DI container, no classpath scanning.</description>
     <url>https://github.com/larvalabs/brace</url>
 
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
     <scm>
         <connection>scm:git:https://github.com/larvalabs/brace.git</connection>
         <developerConnection>scm:git:git@github.com:larvalabs/brace.git</developerConnection>
