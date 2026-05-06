@@ -29,6 +29,8 @@
 - [x] Support all logging levels — add `Log.debug()`, `Log.info()`, `Log.error()` (currently has warn() and event())
 - [x] Binary response support for `Http` client — `Http.get(url).fetchBytes()` → `byte[]` (currently only `fetchString()` / `fetchJson()`)
 - [x] Clean up doc drift — ensure README, AGENTS.md, SECURITY.md are consistent; mark historical design docs with status banners
+- [ ] `brace new` should generate a fresh `session.secret` — match Play 1's behavior of writing a randomized secret into `application.conf` at scaffolding time (e.g. `openssl rand -hex 32` equivalent). Today the template ships `CHANGE-ME-to-a-random-string-at-least-32-chars` and every new project owner has to remember to swap it. Footgun for first-deploys: Brace's secret-strength validator catches the literal placeholder, but a developer who only mostly-rotates it (e.g. trims the prefix) can still ship a weak production secret. Generating once at `brace new` time eliminates the manual step entirely.
+- [ ] Bundle framework-internal migrations in the release jar — `DatabaseFactory.runMigrations()` references `classpath:db/migration` but the v0.1.1 release doesn't actually ship those files (they only exist under `src/test/resources/db/migration/` as test fixtures). On first deploy, apps see an unbroken stream of `relation "scheduled_jobs" does not exist` and `relation "ops_timeseries" does not exist` errors from JobPoller / ops timeseries collectors. Each project has to recreate the V2/V3/V4 schema by hand in their own `migrations/` dir. The fix is one of: (a) move those SQLs to `src/main/resources/db/migration/`, (b) version them as `B1__brace_*.sql` so they can't collide with app migrations, or (c) split into a separate `brace-schema` artifact apps can depend on optionally. Also a Postgres dialect pass — current SQL uses `BIGINT AUTO_INCREMENT` which is H2-only; should be `BIGSERIAL` (or modern Postgres `GENERATED ALWAYS AS IDENTITY`) for cross-DB compatibility.
 
 ## Framework Improvements
 
@@ -61,6 +63,10 @@
 - [x] `db.queryIn()` for IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`)
 - [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
 - [x] Custom message from a job run to show on the ops dashboard (e.g., "Retrieved 4 new listings") — `Jobs.message(...)`
+- [ ] Ops key UX gaps — `brace ops keypair` generates a fresh keypair, prints the private key once to stdout, and appends the public half to `ops-authorized-keys`, but does **not** write `ops-private.key` (only `brace new` ever does). It also has no idempotency check, so re-running it pollutes the authorized list with orphaned keys whose private half exists nowhere. Missing pieces:
+  - `brace ops keypair --save` (or default to saving) — write the new private key to the path in `.brace.local`'s `ops.key` and refuse to overwrite an existing file unless `--force`. Eliminates the manual copy-paste step that's easy to skip and impossible to recover from.
+  - `brace ops authorize <pubkey> [--label <name>]` — register an existing public key (e.g. a coworker's). Today this is a hand-edit of the authorized-keys file with no validation.
+  - `brace ops whoami` — derive the public key from local `ops-private.key`, check whether it appears in `ops-authorized-keys`, and report the matching label. Diagnoses "do I already have access?" without grep gymnastics. Shape: prints `authorized as <label>` (exit 0), `not authorized` (exit 1), or `no local key` (exit 2).
 
 ## Ops Dashboard Polish
 

@@ -653,6 +653,23 @@ Brace ships with CLI commands and HTTP endpoints for inspecting a running app. U
 
 **Setup:** `app.ops("ops-authorized-keys")` in `main()`. Generate keys with `brace ops keypair`. Run `brace init` to scaffold `.brace` config. All commands below use `--env prod` to target production; omit it for local.
 
+### Ops auth — key files and registration
+
+Ops auth uses Ed25519 keypairs. Two files matter:
+
+- **`ops-authorized-keys`** — committed. Public keys allowed to authenticate, one per line as `<base64-pubkey> <label>`. Loaded by `app.ops("ops-authorized-keys")`.
+- **`ops-private.key`** — gitignored, per-developer. Three lines: a comment, the base64 private key, and the matching public key. Path is recorded in `.brace.local` as `ops.key=...`.
+
+`brace new` writes both files at scaffold time (the initial `dev` entry corresponds to the local `ops-private.key`). After that, `brace ops keypair` generates a *new* keypair, prints the private key **once to stdout** (it does **not** write `ops-private.key`), and appends the public half to `ops-authorized-keys`.
+
+Common workflows:
+
+- **New developer joining an existing project:** run `brace ops keypair`, copy the printed private key into a new `ops-private.key` (format: comment line, private key, public key), commit the appended `ops-authorized-keys` line so peers accept the new operator.
+- **Check whether your local key is already authorized:** compare the public line in `ops-private.key` to entries in `ops-authorized-keys`. There is currently no `brace ops whoami` — `grep -F "$(sed -n '3p' ops-private.key)" ops-authorized-keys` is the manual check.
+- **Registering a coworker's existing public key:** there is no CLI for this today; append the line to `ops-authorized-keys` by hand.
+
+Do not run `brace ops keypair` to "verify" or "re-add" an existing key — it always generates a fresh pair and silently appends another authorized entry.
+
 ### CLI commands
 
 | Command | Purpose | Exit code |
