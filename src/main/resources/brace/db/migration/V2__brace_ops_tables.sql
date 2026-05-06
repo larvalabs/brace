@@ -1,5 +1,5 @@
 CREATE TABLE ops_errors (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     error_type VARCHAR(255),
     message TEXT,
     stack_trace TEXT,
