@@ -58,9 +58,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # target/brace-*.jar already matches both the main and -sources jars;
+          # listing target/brace-*-sources.jar explicitly attaches it twice and
+          # GitHub's upload endpoint returns 404 on the duplicate name.
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             target/brace-*.jar \
-            target/brace-*-sources.jar \
             target/brace-*.zip
