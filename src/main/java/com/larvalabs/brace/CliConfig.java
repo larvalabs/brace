@@ -43,7 +43,15 @@ public record CliConfig(String url, String keyPath, String authorizedKeysPath, S
             url = urlFlag;
         } else {
             String key = "ops." + env + ".url";
-            url = values.getOrDefault(key, DEFAULT_LOCAL_URL);
+            String configured = values.get(key);
+            if (configured != null && !configured.isEmpty()) {
+                url = configured;
+            } else if ("local".equals(env)) {
+                url = DEFAULT_LOCAL_URL;
+            } else {
+                throw new IOException(key + " is not set in .brace. "
+                    + "Add `" + key + "=https://your-app` to .brace, or pass --url <url>.");
+            }
         }
 
         String keyPath = keyFlag != null ? keyFlag

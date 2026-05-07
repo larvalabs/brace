@@ -80,10 +80,19 @@ class CliConfigTest {
     }
 
     @Test
-    void unknownEnvFallsBackToLocal() throws Exception {
+    void unknownNonLocalEnvFailsClearly() throws Exception {
         Files.writeString(tmp.resolve(".brace"), "ops.local.url=http://x:1\n");
-        var cfg = CliConfig.load(tmp, new String[]{"--env", "staging"});
-        assertEquals("http://localhost:8080", cfg.url());
+        var ex = assertThrows(java.io.IOException.class,
+            () -> CliConfig.load(tmp, new String[]{"--env", "staging"}));
+        assertTrue(ex.getMessage().contains("ops.staging.url"), ex.getMessage());
+    }
+
+    @Test
+    void unknownEnvWithUrlFlagStillWorks() throws Exception {
+        Files.writeString(tmp.resolve(".brace"), "ops.local.url=http://x:1\n");
+        var cfg = CliConfig.load(tmp,
+            new String[]{"--env", "staging", "--url", "https://staging.example.com"});
+        assertEquals("https://staging.example.com", cfg.url());
         assertEquals("staging", cfg.env());
     }
 }
