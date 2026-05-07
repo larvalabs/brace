@@ -1,4 +1,5 @@
-CREATE TABLE ops_errors (
+-- Idempotent — see note in V1__brace_scheduled_jobs.sql.
+CREATE TABLE IF NOT EXISTS ops_errors (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     error_type VARCHAR(255),
     message TEXT,
@@ -12,7 +13,7 @@ CREATE TABLE ops_errors (
     resolved_at TIMESTAMP
 );
 
-CREATE TABLE ops_timeseries (
+CREATE TABLE IF NOT EXISTS ops_timeseries (
     ts TIMESTAMP NOT NULL,
     metric VARCHAR(100) NOT NULL,
     val BIGINT,

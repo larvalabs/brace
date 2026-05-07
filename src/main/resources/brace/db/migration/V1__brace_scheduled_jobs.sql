@@ -1,4 +1,8 @@
-CREATE TABLE scheduled_jobs (
+-- Idempotent: an app may have created scheduled_jobs in its own migration
+-- sequence before brace started bundling framework migrations (brace 0.1.1
+-- and earlier). On those upgrades the table already exists; IF NOT EXISTS
+-- makes this a no-op rather than aborting the framework Flyway run.
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     job_class VARCHAR(255) NOT NULL,
@@ -16,4 +20,4 @@ CREATE TABLE scheduled_jobs (
     FOREIGN KEY (depends_on_id) REFERENCES scheduled_jobs(id)
 );
 
-CREATE INDEX idx_scheduled_jobs_run_at ON scheduled_jobs(run_at);
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_run_at ON scheduled_jobs(run_at);
