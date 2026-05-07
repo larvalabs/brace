@@ -85,6 +85,52 @@ class CliAuthTest {
     }
 
     @Test
+    void unauthorizedClientThrowsOpsAuthFailureWithCode() throws Exception {
+        // Run a second app whose authorized-keys file does NOT include this client's key.
+        var serverKey = OpsKeys.generateKeypair();
+        Path serverKeysFile = tmp.resolve("server-only-keys");
+        Files.writeString(serverKeysFile, serverKey.publicKey() + " server-only\n");
+
+        var unauthorizedApp = Brace.app().port(0).ops(serverKeysFile.toString());
+        unauthorizedApp.start();
+        try {
+            var cfg = new CliConfig("http://localhost:" + unauthorizedApp.actualPort(),
+                tmp.resolve("ops-private.key").toString(),
+                "authorized-keys", "local", Map.of());
+
+            var ex = assertThrows(CliAuth.OpsAuthFailure.class,
+                () -> CliAuth.bearer(cfg, tmp));
+            assertEquals(401, ex.status);
+            assertNotNull(ex.body);
+            assertTrue(ex.getMessage().contains("401"), ex.getMessage());
+        } finally {
+            unauthorizedApp.stop();
+        }
+    }
+
+    @Test
+    void opsAuthFailureParsesStructuredErrorCode() {
+        var ex = new CliAuth.OpsAuthFailure(403, "{\"error\":\"csrf_required\"}");
+        assertEquals(403, ex.status);
+        assertEquals("csrf_required", ex.code);
+        assertTrue(ex.getMessage().contains("403"));
+    }
+
+    @Test
+    void opsAuthFailureToleratesPlainTextBody() {
+        var ex = new CliAuth.OpsAuthFailure(403, "Forbidden");
+        assertEquals(403, ex.status);
+        assertNull(ex.code, "non-JSON body should not yield a code");
+        assertEquals("Forbidden", ex.body);
+    }
+
+    @Test
+    void opsAuthFailureToleratesEmptyBody() {
+        var ex = new CliAuth.OpsAuthFailure(401, "");
+        assertNull(ex.code);
+    }
+
+    @Test
     void missingKeyFileThrows() {
         var cfg = new CliConfig("http://localhost:" + port,
             tmp.resolve("does-not-exist.key").toString(),

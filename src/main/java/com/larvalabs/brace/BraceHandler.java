@@ -249,7 +249,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         submittedToken = headers.get("X-CSRF-Token");
                     }
                     if (!Csrf.validateToken(csrfSession, submittedToken)) {
-                        writeResult(Result.error(403, "Forbidden"), response, callback);
+                        writeResult(Result.json(java.util.Map.of("error", "csrf_required"), 403),
+                            response, callback);
                         return true;
                     }
                 }

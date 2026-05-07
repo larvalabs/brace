@@ -14,6 +14,33 @@ public class CliAuth {
 
     private CliAuth() {}
 
+    /**
+     * Thrown by {@link #bearer} when /ops/auth returns a non-200. Carries the raw
+     * status code, body, and (if the body is JSON with an "error" field) a parsed
+     * machine-readable code so callers can route remediation.
+     */
+    public static class OpsAuthFailure extends RuntimeException {
+        public final int status;
+        public final String body;
+        public final String code;
+
+        OpsAuthFailure(int status, String body) {
+            super("Authentication failed (" + status + "): " + body);
+            this.status = status;
+            this.body = body;
+            this.code = parseCode(body);
+        }
+
+        private static String parseCode(String body) {
+            if (body == null || body.isEmpty()) return null;
+            try {
+                JsonNode n = Json.mapper().readTree(body);
+                if (n.has("error")) return n.get("error").asText();
+            } catch (Exception ignored) {}
+            return null;
+        }
+    }
+
     public static String bearer(CliConfig cfg, Path projectDir) throws Exception {
         return bearer(cfg, projectDir, false);
     }
@@ -68,7 +95,7 @@ public class CliAuth {
             return bearer(cfg, projectDir, true);
         }
         if (response.statusCode() != 200) {
-            throw new RuntimeException("Authentication failed (" + response.statusCode() + "): " + response.body());
+            throw new OpsAuthFailure(response.statusCode(), response.body());
         }
 
         JsonNode parsed = Json.mapper().readTree(response.body());

@@ -18,6 +18,9 @@ public class Brace {
     private int port = 8080;
     private boolean showBanner = true;
     private final Router router = new Router();
+
+    /** Package-private accessor used by tests that need to inspect/mutate route metadata. */
+    List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
@@ -415,16 +418,18 @@ public class Brace {
             var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
             tokenSecret = OpsToken.generateSecret();
             var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
-            router.add("POST", "/ops/auth", (Handler) opsHandler::auth);
-            router.add("POST", "/ops/auth/login-token", (Handler) opsHandler::loginToken);
+            // Ops POSTs use signed-payload or bearer auth, not cookies — CSRF is the wrong layer
+            // and would block the CLI on any app that also calls .sessions(...).
+            router.add("POST", "/ops/auth", (Handler) opsHandler::auth).setCsrfRequired(false);
+            router.add("POST", "/ops/auth/login-token", (Handler) opsHandler::loginToken).setCsrfRequired(false);
             router.add("GET", "/ops/auth/exchange", (Handler) opsHandler::exchange);
             router.add("GET", "/ops/status", (Handler) opsHandler::status);
             router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
             router.add("GET", "/ops/logs", (Handler) opsHandler::logs);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
             router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
-            router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError);
-            router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache);
+            router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError).setCsrfRequired(false);
+            router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache).setCsrfRequired(false);
             router.add("GET", "/ops/cache", (Handler) opsHandler::cacheStats);
         }
 
