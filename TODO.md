@@ -10,6 +10,37 @@
 - [x] Secret validation — 32-char minimum, rejects weak patterns, startup validation
 - [x] Ops auth uses Jackson — replaced manual JSON parsing with typed OpsAuthRequest record
 
+## Bugs
+
+- [x] **Non-multipart request bodies over ~64 KB intermittently hang 30 s, then 500** — `BraceHandler.handle()` eagerly reads the whole request body for every non-multipart request with the *blocking* `Content.Source.asString(jettyRequest)` (`BraceHandler.java:171`). When the entire body arrives in Jetty's first content read it returns in well under a second; when the body spans more than one chunk the read intermittently never completes, the connection goes idle, and Jetty's 30 s idle timeout fires:
+
+  ```
+  java.io.IOException: java.util.concurrent.TimeoutException: Idle timeout expired: 30000/30000 ms
+    at org.eclipse.jetty.util.Blocker$3.block(Blocker.java:223)
+    at org.eclipse.jetty.io.Content$Source.asString(Content.java:448)
+    at org.eclipse.jetty.io.Content$Source.asString(Content.java:429)
+    at com.larvalabs.brace.BraceHandler.handle(BraceHandler.java:171)
+  ```
+
+  Reproduced with a plain `curl` straight at the origin (no proxy/CDN in the path), single instance, server otherwise idle (heap 88 MB, 41 threads, GC negligible):
+
+  | Body | Result |
+  |---|---|
+  | 9 KB / 63 KB | 200 in ~70–80 ms (10/10) |
+  | 70 KB | 500 after 30.07 s |
+  | 160 KB | 500 after ~30.1 s — 7 of 8 attempts (one squeaked through in 0.11 s) |
+  | 160 KB, forced HTTP/1.1 | 500 after 30.1 s |
+
+  The threshold sits between 63 and 70 KB (≈ one socket-buffer / first-read worth): below it 10/10 succeed, above it ≈ 85 % fail. Not size-deterministic above the threshold and reproduces on both HTTP/2 and HTTP/1.1 — a race in the multi-chunk read path, not a hard limit or a protocol issue. The blocking `asString` overload bridges to the async read via `org.eclipse.jetty.util.Blocker`; blocking a Jetty handler thread on the body read inside `Handler.handle()` — while the network read that would satisfy the next `demand()` needs a thread from the same `AdaptiveExecutionStrategy` pool — is the leading hypothesis for the stall (unverified; for the framework author to confirm).
+
+  Operational impact: **any** POST/PUT with a non-multipart body over ~64 KB — webhooks, large JSON, raw-body uploads — fails ≈ 85 % of the time with a 30 s stall and a 500. Multipart uploads use a separate path (`parseMultipart`, line 167) and are unaffected. The eager read also means handlers that never touch the body still pay the cost and hit the bug.
+
+  Surfaced 2026-05-21 debugging Wendell's inbound-email webhook: forwarded emails carrying a PDF (~120 KB raw → ~160 KB base64 POST body) failed to post to Slack; Cloudflare's webhook retry masked it part of the time, so it presented as flaky end-to-end. Wendell runs `brace-0.1.2-SNAPSHOT`.
+
+  Fix direction: don't block a handler thread on a multi-chunk body read — accumulate chunks asynchronously via `demand()` and dispatch the route only once the body is complete, or run the blocking read off the Jetty thread. Consider also reading the body lazily (on first `req.body()` access) rather than eagerly for every request. Add a regression test that POSTs bodies straddling the chunk boundary (1 KB, 64 KB, 256 KB, 1 MB) and asserts sub-second completion.
+
+  **Resolved 2026-05-21.** Root cause was a one-line server misconfiguration, not the async-read rewrite the fix direction above anticipated. `Brace.start()` passed `Runnable::run` to `QueuedThreadPool.setVirtualThreadsExecutor(...)`. A non-null executor makes `AdaptiveExecutionStrategy.isUseVirtualThreads()` return true, so Jetty assumes blocking a handler is free (a virtual thread would just park) and runs the handler via that executor instead of dispatching a thread to keep producing. But `Runnable::run` runs the handler *inline on the producer thread* — so when `Content.Source.asString` blocks waiting for the next chunk, the only thread that could read that chunk is itself blocked → deadlock until the 30 s idle timeout. Single-chunk bodies never block, hence the ~64 KB threshold. Fix: pass a real virtual-thread executor (`VirtualThreads.getDefaultVirtualThreadsExecutor()`) — the handler then runs on an actual virtual thread that parks and frees its carrier to read the next chunk. The blocking `asString` is fine on a real virtual thread; no async rewrite needed. Handlers now genuinely run on virtual threads, which also benefits the Hibernate/JDBC blocking paths. Regression test: `RequestBodyTest` — POSTs bodies in two halves over a raw socket with a deliberate gap to force the multi-chunk park (a normal loopback client buffers the whole body and never reproduces it).
+
 ## Tier 0 — Critical Security & Ops Hardening
 
 - [x] Ops browser login token — CLI requests short-lived/single-use token, opens browser to exchange endpoint that sets httpOnly cookie and redirects to dashboard (eliminates query-param token from ongoing dashboard URLs)

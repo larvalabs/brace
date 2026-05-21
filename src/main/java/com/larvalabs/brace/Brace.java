@@ -2,6 +2,7 @@ package com.larvalabs.brace;
 
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.util.VirtualThreads;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.eclipse.jetty.websocket.server.WebSocketUpgradeHandler;
 
@@ -434,7 +435,17 @@ public class Brace {
         }
 
         var threadPool = new QueuedThreadPool();
-        threadPool.setVirtualThreadsExecutor(Runnable::run);
+        // Run request handlers on real virtual threads. A blocking call in a handler
+        // (e.g. Content.Source.asString for the request body, or a JDBC query) then
+        // parks the virtual thread and frees its carrier to keep producing — notably
+        // to read the next body chunk. Passing a synchronous executor like
+        // Runnable::run instead makes Jetty believe virtual threads are enabled while
+        // running handlers inline on the producer thread, so a blocking multi-chunk
+        // body read deadlocks the producer until the idle timeout fires.
+        var virtualThreads = VirtualThreads.getDefaultVirtualThreadsExecutor();
+        if (virtualThreads != null) {
+            threadPool.setVirtualThreadsExecutor(virtualThreads);
+        }
 
         server = new Server(threadPool);
         connector = new ServerConnector(server);
