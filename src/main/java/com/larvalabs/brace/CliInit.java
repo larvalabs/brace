@@ -35,7 +35,10 @@ public class CliInit {
             Files.writeString(local1,
                 "# Brace CLI per-developer overrides — gitignored\n" +
                 "ops.key=ops-private.key\n" +
-                "ops.env=local\n");
+                "\n" +
+                "# Default env: prod when ops.prod.url is configured, else local.\n" +
+                "# Uncomment to override.\n" +
+                "# ops.env=local\n");
             local.add(new Check(".brace.local", true, "created"));
             actions.add("Created .brace.local");
         } else {
@@ -63,7 +66,7 @@ public class CliInit {
             local.add(new Check(".gitignore", true, "entries OK"));
         }
 
-        // ops.prod.url — informational; absence doesn't fail init, but blocks `--env prod` commands.
+        // ops.prod.url — informational; absence doesn't fail init, but commands then default to local.
         boolean hasProdUrl = Files.readAllLines(brace).stream()
             .map(String::trim)
             .anyMatch(l -> l.startsWith("ops.prod.url=")
@@ -72,7 +75,7 @@ public class CliInit {
             local.add(new Check("ops.prod.url", true, "configured"));
         } else {
             local.add(new Check("ops.prod.url", true,
-                "not set — uncomment in .brace to enable `--env prod` commands"));
+                "not set — uncomment in .brace to target prod by default"));
         }
 
         // ops-authorized-keys

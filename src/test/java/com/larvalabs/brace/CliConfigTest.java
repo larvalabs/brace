@@ -21,9 +21,29 @@ class CliConfigTest {
     @Test
     void readsBraceFile() throws Exception {
         Files.writeString(tmp.resolve(".brace"),
+            "ops.local.url=http://dev.local:9000\n");
+        var cfg = CliConfig.load(tmp, new String[]{});
+        assertEquals("http://dev.local:9000", cfg.url());
+    }
+
+    @Test
+    void defaultsToProdWhenProdUrlConfigured() throws Exception {
+        Files.writeString(tmp.resolve(".brace"),
             "ops.local.url=http://dev.local:9000\n" +
             "ops.prod.url=https://app.example.com\n");
         var cfg = CliConfig.load(tmp, new String[]{});
+        assertEquals("prod", cfg.env());
+        assertEquals("https://app.example.com", cfg.url());
+    }
+
+    @Test
+    void explicitOpsEnvOverridesProdAutoDefault() throws Exception {
+        Files.writeString(tmp.resolve(".brace"),
+            "ops.env=local\n" +
+            "ops.local.url=http://dev.local:9000\n" +
+            "ops.prod.url=https://app.example.com\n");
+        var cfg = CliConfig.load(tmp, new String[]{});
+        assertEquals("local", cfg.env());
         assertEquals("http://dev.local:9000", cfg.url());
     }
 

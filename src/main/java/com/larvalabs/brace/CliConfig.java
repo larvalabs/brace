@@ -35,8 +35,18 @@ public record CliConfig(String url, String keyPath, String authorizedKeysPath, S
             }
         }
 
-        String env = envFlag != null ? envFlag
-                   : values.getOrDefault("ops.env", DEFAULT_ENV);
+        String env;
+        if (envFlag != null) {
+            env = envFlag;
+        } else if (values.containsKey("ops.env")) {
+            env = values.get("ops.env");
+        } else {
+            // Default to prod when configured, else fall back to local. Once a user has set up
+            // ops.prod.url they almost always want commands to target prod; localhost is right
+            // there in a browser tab.
+            String prodUrl = values.get("ops.prod.url");
+            env = (prodUrl != null && !prodUrl.isEmpty()) ? "prod" : DEFAULT_ENV;
+        }
 
         String url;
         if (urlFlag != null) {

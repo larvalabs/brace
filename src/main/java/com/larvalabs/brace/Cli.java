@@ -125,5 +125,6 @@ public class Cli {
         System.out.println("  brace resolve <id>          Mark an error as resolved");
         System.out.println();
         System.out.println("All project commands accept --env <name>, --json, --pretty.");
+        System.out.println("Default env: prod when ops.prod.url is configured, else local.");
     }
 }
