@@ -1,5 +1,10 @@
 # Brace — Next Steps
 
+This file is the single source of truth for open work. Multi-phase efforts with substantial design get a detailed plan under `docs/YYYY-MM-DD-*.md`; in that case the TODO entry is a one-line pointer to the plan. Don't duplicate plan content into TODO bullets — update the plan instead.
+
+Active plans:
+- [`docs/2026-05-25-brace-deploy-plan.md`](docs/2026-05-25-brace-deploy-plan.md) — `brace deploy` CLI + server-side regression detection (Phase 0–5).
+
 ## Security Hardening — Phase 1 ✅ COMPLETE (409 tests passing)
 
 - [x] Trusted proxy configuration — explicit CIDR-based proxy trust, prevents IP spoofing
@@ -86,7 +91,7 @@
 - [x] Route grouping (`app.group("/admin", admin -> { ... })`)
 - [x] Static file serving (`app.staticFiles("/assets", "public")`)
 - [x] `brace dev` CLI command with file watcher + fast restart (`./brace dev`, `./brace test`, `./brace run`)
-- [ ] Dokploy ops skill (not Brace-specific — deploy status, monitoring, restart, rollback, env vars via Dokploy API)
+- [ ] **`brace deploy` + server-side regression detection** — full design in [`docs/2026-05-25-brace-deploy-plan.md`](docs/2026-05-25-brace-deploy-plan.md). Phase 0 adds `/ops/regressions` (new error kinds since startup) + webhook/email notifiers. Phase 1–5 add the CLI verb with shell + Dokploy adapters, version tracking, agent skill, and rollback. Subsumes the previous "Dokploy ops skill" and "Deploy hooks (app.error.new)" TODO lines.
 - [x] Auto-generated CLAUDE.md (`app.generateClaudeMd(projectName, path)` — capability index with pointers to AGENTS.md for full API reference)
 - [x] `brace init` + `.brace` project config file — store dashboard URL, ops key path, etc. so CLI commands don't need `--url` and other repeated flags
 - [x] Move ops keypair + dashboard CLI config from global to project-scoped (each project has its own keypair and ops URL)
@@ -97,7 +102,6 @@
 - [x] `db.withSession()` for scoped DB access outside request lifecycle
 - [x] `INSERT ... RETURNING id` — fixed via JDBC `getGeneratedKeys()` (works with H2 and PostgreSQL)
 - [x] `db.queryIn()` for IN clause support (e.g., `db.queryIn(Talk.class, "id", idList)`)
-- [ ] Deploy hooks (app.started, app.error.new, app.error.spike webhooks)
 - [x] Custom message from a job run to show on the ops dashboard (e.g., "Retrieved 4 new listings") — `Jobs.message(...)`
 - [ ] Ops key UX gaps — `brace ops keypair` generates a fresh keypair, prints the private key once to stdout, and appends the public half to `ops-authorized-keys`, but does **not** write `ops-private.key` (only `brace new` ever does). It also has no idempotency check, so re-running it pollutes the authorized list with orphaned keys whose private half exists nowhere. Missing pieces:
   - `brace ops keypair --save` (or default to saving) — write the new private key to the path in `.brace.local`'s `ops.key` and refuse to overwrite an existing file unless `--force`. Eliminates the manual copy-paste step that's easy to skip and impossible to recover from.
@@ -110,7 +114,8 @@
 ## Ops Dashboard Polish
 
 - [x] Use a dashboard template/layout (cards, grid, consistent spacing)
-- [ ] Add latency sparkline + custom metric graphs (requires app-level custom metrics)
+- [x] Custom metric graphs — `OpsDashboard.java:229–328` renders sparklines for counters (cyan), gauges (amber), and timers (blue avg ms) using the in-memory minute snapshots from `Stats`.
+- [ ] Dedicated latency sparkline — currently latency only shows as a tooltip on the requests-per-minute sparkline (`OpsDashboard.java:181-183`). Add a standalone sparkline for avg/p95 latency over the 60-minute window so latency trends are visible at a glance, not just on hover.
 - [x] Improve JFR data formatting (readable method names, better table layout, units)
 - [x] Visual polish (typography, color coding, status indicators)
 
@@ -126,7 +131,10 @@
 
 ## Benchmarks (Lower Priority)
 
-- [ ] Re-run runtime benchmarks on JDK 25 — current `benchmark/RESULTS.md` is on Java 23.0.2, pre-JEP 491. Expect tail-latency improvement under load now that virtual threads no longer pin on `synchronized` (Hibernate/JDBC hot paths)
+- [ ] Re-run runtime benchmarks — `benchmark/RESULTS.md` is invalid for two compounding reasons and should not be cited until re-run on `brace` ≥ 0.1.5 / JDK 25. (1) It was measured on Java 23.0.2, pre-JEP 491. (2) More importantly, it ran with virtual threads *accidentally disabled* — `Brace.start()` passed `Runnable::run` to `setVirtualThreadsExecutor` (fixed in 0.1.5), so every handler ran synchronously on a platform thread. There was no virtual-thread pinning to relieve because there were no virtual threads; the real before/after variable is vthreads off → on, not JEP 491. The re-run is **not guaranteed to look better**:
+  - **Plaintext / JSON** (81k req/s, the "1.1–1.2× faster than Spring" headline) may *regress*. `Runnable::run` ran handlers inline on the producer thread — the fastest possible path for non-blocking work. Real virtual threads add per-request allocation/mount overhead for handlers that never block, which can erode that margin.
+  - **DB rows** (Single Query, Fortunes, etc.) may improve modestly. `Runnable::run` capped in-flight requests at the `QueuedThreadPool` ceiling (~200 platform threads) even though HikariCP allowed 256 — Little's law on the Single Query row (15,752 × 16.17ms ≈ 254) shows it running at that cap with queueing. Real vthreads lift the ceiling to HikariCP (256) and the DB itself, but the gain is gated by whether Postgres does useful work at 256 vs ~200 connections; won't close the 2–5× Hibernate/batching gaps.
+  - The ReadDbHandler before/after table was measured under the same buggy config on both sides, so its *relative* 1.85× is roughly fine but absolute numbers are suspect.
 - [ ] Run Spring Boot TFB on same machine for side-by-side comparison
 - [ ] Tune Brace connection pool (HikariCP settings) — DB numbers may improve significantly
 - [ ] Run Brace TFB with H2 embedded for max-performance baseline
@@ -140,7 +148,7 @@
 
 - [x] Constant-time CSRF token comparison — use `MessageDigest.isEqual()` instead of `String.equals()` in Csrf.validateToken()
 - [ ] Upload spooling/streaming — small files in memory, larger files spooled to temp storage, configurable thresholds and limits
-- [ ] CSP helpers — builder API for Content-Security-Policy with nonce support and safe defaults
+- [ ] CSP helpers — `SecurityHeaders.Builder.contentSecurityPolicy(String)` exists as a raw setter (`SecurityHeaders.java:107`), but no structured CSP builder, no per-request nonce generation, no safe defaults preset (`default-src 'self'; script-src 'self' 'nonce-…'`). Adding the builder + a `csp(nonce)` template helper is the missing piece.
 - [ ] Static asset caching — `Cache-Control`, `ETag`, `Last-Modified`, optional immutable asset mode
 - [x] Asset fingerprinting helper + template tag — `Assets.url("/assets/app.css")` → `/assets/app.css?v=<md5-prefix>`. Hash computed from file contents, cached per `(path, mtime)`, so redeploys with unchanged files don't bust browser/CDN caches. Pairs with static-asset caching above: long `max-age` on the origin, cache invalidation via URL change.
 - [ ] WebSocket metrics (active connections, messages sent/received, connections per room)
