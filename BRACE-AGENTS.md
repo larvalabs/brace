@@ -701,6 +701,18 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 
 Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pass `Authorization: Bearer <token>`.
 
+### Storage and retention
+
+| Data | Where it lives | Capacity | Eviction | Survives restart? |
+|---|---|---|---|---|
+| Errors (`/ops/errors`) | `ops_errors` table (Postgres/H2) | 1000 rows (hardcoded in `Brace.start()`) | When count > 1000: deletes resolved rows first (oldest), then oldest unresolved | Yes |
+| Logs (`/ops/logs`) | `LogTap` in-memory ring (`ConcurrentLinkedDeque`) | 1000 entries (configurable via `LogTap.setCapacity`) | Oldest entry dropped when full | No |
+| Stats (`/ops/status`) | `Stats` in-memory counters / ring buffers | Per-route + timeseries window | Rolling | No |
+
+Errors are **deduplicated on `error_type + route`** for unresolved rows — repeated occurrences increment `occurrence_count` on the existing row rather than inserting a new one. This means a noisy app produces few rows, not thousands.
+
+Retention is **count-based, not time-based** for both errors and logs — nothing is dropped purely because it got old.
+
 ### Agent health check (start here)
 
 When asked to check on production, act as on-call, or verify app health, start with this single command:

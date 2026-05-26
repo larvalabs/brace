@@ -88,3 +88,16 @@ brace errors --env prod --since 15m || alert "new errors"
 JSON shapes returned by `--json` are stable within a minor version. Field
 additions are non-breaking. Removals or renames will be flagged in the
 release migration notes.
+
+## Data retention
+
+- **Errors** are persisted in the `ops_errors` table and survive restarts.
+  Capacity is 1000 rows; repeated errors with the same type + route are
+  deduplicated (the row's `occurrence_count` increments instead of inserting).
+  When the cap is hit, resolved rows are pruned first, then oldest unresolved.
+- **Logs** are kept in an in-memory ring buffer (1000 entries by default) and
+  are **lost on restart**. If you need durable logs, capture stdout from the
+  process itself.
+- Neither store evicts based on age — only on count.
+
+See `BRACE-AGENTS.md` → "Storage and retention" for the full table.
