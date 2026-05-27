@@ -160,6 +160,7 @@ Active plans:
 - [x] Migration guides per release — one file per release transition in `docs/migrations/brace-FROM-to-TO.md` (also bundled in dist zip), discoverable via the `Upgrading` section of `BRACE-AGENTS.md`
 - [ ] Golden path sample app — one blessed example showing current best practices end-to-end
 - [ ] Getting started guide — curated walkthrough of routing, forms, auth, database, templates, uploads, ops (consolidate with docs section below)
+- [ ] Publish to Maven Central — JitPack (`com.github.larvalabs:brace:vX.Y.Z`) is the current public dependency path; it requires zero publisher setup but isn't what most Java shops expect. Migrating to Central means claiming `com.larvalabs` namespace on the Central Portal (DNS TXT verify), generating a GPG signing key, publishing sources+javadoc jars, and switching `publish.yml` to deploy to Central instead of (or in addition to) GitHub Packages. Keep GH Packages for SNAPSHOT/Dokploy use. Then dep instructions drop the `<repositories>` block and become just `com.larvalabs:brace:X.Y.Z`.
 
 ## Ops Stats Gaps
 

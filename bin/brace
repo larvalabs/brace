@@ -147,7 +147,7 @@ brace_deps() {
     mvn dependency:copy-dependencies \
         -DoutputDirectory=lib \
         -DincludeScope=runtime \
-        -DexcludeGroupIds=com.larvalabs \
+        -DexcludeGroupIds=com.larvalabs,com.github.larvalabs \
         -q
     success "Dependencies copied to ./lib/"
 }

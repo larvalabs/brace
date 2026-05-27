@@ -70,6 +70,40 @@ brace ops keypair      # generate ops auth keys
 brace ops dashboard    # authenticate and open /ops/dashboard
 ```
 
+### Add Brace to an existing Maven project
+
+Brace is served from [JitPack](https://jitpack.io) — no authentication required. Add the repository and dependency to your `pom.xml`:
+
+```xml
+<repositories>
+    <repository>
+        <id>jitpack.io</id>
+        <url>https://jitpack.io</url>
+    </repository>
+</repositories>
+
+<dependencies>
+    <dependency>
+        <groupId>com.github.larvalabs</groupId>
+        <artifactId>brace</artifactId>
+        <version>v0.1.5</version>
+    </dependency>
+</dependencies>
+```
+
+Gradle:
+
+```kotlin
+repositories {
+    maven { url = uri("https://jitpack.io") }
+}
+dependencies {
+    implementation("com.github.larvalabs:brace:v0.1.5")
+}
+```
+
+Replace `v0.1.5` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
+
 ## Quick Start
 
 Brace wires everything explicitly in `main()`, making the app self-documenting. An agent can read one file and knows every route, middleware, entity, and job. No separate architecture docs to maintain or drift out of sync.

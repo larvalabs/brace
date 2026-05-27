@@ -23,7 +23,9 @@ public class ProjectGenerator {
             Files.createDirectories(root.resolve("public/css"));
 
             // pom.xml — pin the brace dependency to whatever version is running
-            // this generator (so `brace new` from a 0.1.1 install pins to 0.1.1).
+            // this generator (so `brace new` from a 0.1.5 install pins to 0.1.5).
+            // Resolves Brace via JitPack so the project opens cleanly in IDEs and
+            // plain Maven without requiring GitHub Packages auth.
             Files.writeString(root.resolve("pom.xml"), """
 <?xml version="1.0" encoding="UTF-8"?>
 <project>
@@ -35,12 +37,18 @@ public class ProjectGenerator {
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
-        <brace.version>""" + BraceVersion.get() + """
+        <brace.version>v""" + BraceVersion.get() + """
 </brace.version>
     </properties>
+    <repositories>
+        <repository>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
+        </repository>
+    </repositories>
     <dependencies>
         <dependency>
-            <groupId>com.larvalabs</groupId>
+            <groupId>com.github.larvalabs</groupId>
             <artifactId>brace</artifactId>
             <version>${brace.version}</version>
         </dependency>
