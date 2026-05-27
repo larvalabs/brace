@@ -220,16 +220,21 @@ class CliCheckTest {
     @Test
     void checkCommandReturnsZeroForHealthyApp() throws Exception {
         CliAuth.clearCache(integrationProjectDir);
+        // LogTap is process-wide static state — any Log.error()/Log.warn() from
+        // earlier tests in this Surefire JVM lands in the buffer that
+        // /ops/logs?level=warn returns, which would flip checkRecentLogs to fail.
+        LogTap.clear();
         var bout = new ByteArrayOutputStream();
         var prev = System.out;
         System.setOut(new PrintStream(bout));
+        String output;
         try {
             int code = CliCheck.run(integrationProjectDir, new String[]{"--json"});
-            assertEquals(0, code);
+            output = bout.toString();
+            assertEquals(0, code, "Expected exit 0 but got " + code + ". Output:\n" + output);
         } finally {
             System.setOut(prev);
         }
-        String output = bout.toString();
         // Output may contain log lines (JSON per line) before the pretty-printed result.
         // The check result spans multiple lines and contains "healthy"; find it.
         String[] lines = output.split("\n");
