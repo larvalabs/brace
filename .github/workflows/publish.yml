@@ -46,12 +46,11 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Deploy
+      - name: Deploy (runs tests then publishes)
         if: steps.decide.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # TODO: re-enable tests once Ubuntu CI env issues are sorted (auth/file-upload tests fail with HTTP 500 on linux runners while passing locally on macOS).
-        run: mvn -B deploy -DskipTests
+        run: mvn -B deploy
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
