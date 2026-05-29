@@ -63,6 +63,20 @@ class OpsKeysTest {
     }
 
     @Test
+    void loadAuthorizedKeysStripsLegacyEd25519Prefix(@TempDir Path tmpDir) throws Exception {
+        // Older `brace ops keypair` wrote keys as "ed25519:<base64>". Servers running such a file
+        // must still match the raw base64 the client presents, so the prefix is stripped on load.
+        var kp = OpsKeys.generateKeypair();
+        Path file = tmpDir.resolve("authorized-keys");
+        Files.writeString(file, "ed25519:" + kp.publicKey() + "  legacy-bot\n");
+
+        Set<String> keys = OpsKeys.loadAuthorizedKeys(file.toString());
+        assertTrue(keys.contains(kp.publicKey()),
+            "legacy ed25519: prefix must be stripped so the raw key matches");
+        assertFalse(keys.contains("ed25519:" + kp.publicKey()));
+    }
+
+    @Test
     void loadAuthorizedKeysHandlesEmptyFile(@TempDir Path tmpDir) throws Exception {
         Path file = tmpDir.resolve("empty-keys");
         Files.writeString(file, "# only comments\n\n");

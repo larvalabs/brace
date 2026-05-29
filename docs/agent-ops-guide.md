@@ -8,13 +8,49 @@ using the project-scoped `brace` CLI commands.
 Once per project:
 
 ```bash
-brace init       # scaffolds .brace, .brace.local, .gitignore
-brace ops keypair  # generates Ed25519 keypair
+brace init         # scaffolds .brace, .brace.local, .gitignore
+brace ops keypair  # generates an Ed25519 keypair and wires it up
 ```
 
-Then add the printed public key line to the *server's* `ops-authorized-keys`
-file and re-run `brace init` — it will perform a remote check against
-`ops.prod.url` (if configured in `.brace`) and confirm the key is accepted.
+`brace ops keypair` does two things:
+
+- Writes the private half to `ops-private.key` (gitignored — never committed,
+  never leaves your machine). This is the file `ops.key` points at.
+- Adds the public half to `ops-authorized-keys` (committed to git — this is the
+  allow-list the *server* checks), labeled `<git-user.email>@<hostname>` by
+  default so each developer/machine has its own line. Override with `--label`.
+
+You do **not** copy a printed key by hand anymore — both files are written for
+you.
+
+### The deploy-phase loop
+
+Getting ops auth working is inherently a two-machine handshake: the server's URL
+has to come *to* you, and your public key has to get *to* the server. `brace
+init` is idempotent and is the spine of this — run it, do the one thing it asks,
+run it again, until it's green.
+
+1. **Generate your key** (above). Your public line lands in `ops-authorized-keys`.
+2. **Set the prod URL.** Uncomment/add `ops.prod.url=https://your-app...` in
+   `.brace` (you get this once the server exists).
+3. **Get `ops-authorized-keys` onto the server.** It's committed, so this just
+   means deploy — the running app reads it at startup. (A push-to-deploy or
+   `brace deploy` ships it like any other file.)
+4. **Verify.** Re-run `brace init --env prod` (or just `brace init` once
+   `ops.prod.url` is set — prod becomes the default). It performs a remote check:
+   reachability + whether the server accepted your key, and prints the exact next
+   action for whatever is still missing. Repeat from the failing step until every
+   check is ✓.
+
+### Rotating or adding keys
+
+- **Rotate your own key:** `rm ops-private.key && brace ops keypair`, then
+  redeploy. Because the label is stable (`email@host`), the new public key
+  *replaces* your existing line in `ops-authorized-keys` in place — no orphaned,
+  still-trusted key left behind.
+- **Add another developer:** they run `brace ops keypair` on their own machine.
+  Their distinct `email@host` label gets its own line; committing it never
+  clobbers anyone else's entry.
 
 ## Environment selection
 
@@ -78,10 +114,10 @@ brace errors --env prod --since 15m || alert "new errors"
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Authentication failed (401)` | Public key not in server's `ops-authorized-keys` | `brace init --env prod` to see what to add |
+| `Authentication failed (401)` | Server is running an older `ops-authorized-keys` than the one your key is in | Redeploy so the committed `ops-authorized-keys` reaches the server, then `brace init --env prod` to confirm |
 | `Cannot reach <url>` | Server down or wrong URL | Check deployment status |
 | `Run inside a Brace project` | Not in a project directory | `cd` into the project, or `brace init` |
-| `Private key not found` | Missing `ops-private.key` | `brace ops keypair` |
+| `Private key not found` | Missing `ops-private.key` | `brace ops keypair` (writes it for you) |
 
 ## Output stability
 

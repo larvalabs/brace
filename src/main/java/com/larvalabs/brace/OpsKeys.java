@@ -95,6 +95,10 @@ public class OpsKeys {
                 // Key is the first token (label is optional second token)
                 int space = line.indexOf(' ');
                 String key = space > 0 ? line.substring(0, space) : line;
+                // Tolerate a legacy "ed25519:" type prefix written by older `brace ops keypair`.
+                // Base64 never contains ':', so a leading "algo:" is unambiguously a prefix — strip
+                // it so a key file written by a buggy CLI still matches the raw base64 the client sends.
+                if (key.startsWith("ed25519:")) key = key.substring("ed25519:".length());
                 keys.add(key);
             }
             return keys;
