@@ -25,7 +25,7 @@ set -euo pipefail
 # pinned version is read, how toolchains are laid out, how Cli is invoked).
 SHIM_VERSION="2"
 
-BRACE_CACHE="${BRACE_CACHE:-$HOME/.brace/cache}"
+BRACE_CACHE="${BRACE_CACHE:-$HOME/.brace/toolchains}"
 BRACE_RELEASE_BASE="${BRACE_RELEASE_BASE:-https://github.com/larvalabs/brace/releases/download}"
 
 # --- Chrome (all to stderr; stdout is reserved for captured values / the app) ---
@@ -116,7 +116,7 @@ shift 2>/dev/null || true
 
 case "$COMMAND" in
     # No project required → run against the launcher's bundled toolchain.
-    new|version|--version|-v|help|-h|--help)
+    new|version|--version|-v|help|-h|--help|self-update)
         HOME_DIR="$BRACE_HOME"
         ;;
     # Everything else operates on a project → use its pinned version when present,

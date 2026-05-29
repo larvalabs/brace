@@ -5,8 +5,17 @@ import java.util.Arrays;
 
 public class Cli {
 
+    /**
+     * Bootstrap contract version this toolchain expects of the launcher shim. The
+     * shim passes its own version via {@code -Dbrace.launcher}; if an older shim
+     * runs this (newer) toolchain we nudge the user to self-update. Bumped only
+     * when the launcher<->toolchain contract changes (see bin/brace SHIM_VERSION).
+     */
+    private static final int BOOTSTRAP_CONTRACT = 2;
+
     public static void main(String[] args) throws Exception {
         if (args.length == 0) { printUsage(); return; }
+        warnIfStaleLauncher();
         Path cwd = Path.of(".").toAbsolutePath().normalize();
         String cmd = args[0];
         String[] rest = Arrays.copyOfRange(args, 1, args.length);
@@ -17,6 +26,20 @@ public class Cli {
         } catch (Exception e) {
             CliOutput.printError(e.getMessage() != null ? e.getMessage() : e.toString());
             System.exit(1);
+        }
+    }
+
+    /** Nudge if a launcher older than this toolchain's bootstrap contract ran us. */
+    private static void warnIfStaleLauncher() {
+        String launcher = System.getProperty("brace.launcher");
+        if (launcher == null) return;   // run directly / by a pre-contract launcher — stay quiet
+        try {
+            if (Integer.parseInt(launcher.trim()) < BOOTSTRAP_CONTRACT) {
+                CliOutput.printError("Your brace launcher is older than this framework version. "
+                        + "Run `brace self-update` to refresh it.");
+            }
+        } catch (NumberFormatException ignored) {
+            // unrecognised launcher stamp — nothing actionable
         }
     }
 
@@ -34,6 +57,7 @@ public class Cli {
                 System.out.println(BraceVersion.get());
                 yield 0;
             }
+            case "self-update" -> CliSelfUpdate.run(args);
             case "compile" -> requireSrc(cwd, () -> BuildCommands.compile(cwd));
             case "run"     -> requireSrc(cwd, () -> BuildCommands.run(cwd));
             case "dev"     -> requireSrc(cwd, () -> BuildCommands.dev(cwd));
@@ -116,6 +140,7 @@ public class Cli {
         System.out.println("Global commands:");
         System.out.println("  brace new <name>            Create a new Brace project");
         System.out.println("  brace version               Print the brace version");
+        System.out.println("  brace self-update [version]  Update the installed launcher to the latest (or given) version");
         System.out.println();
         System.out.println("Build & run (run inside a project):");
         System.out.println("  brace compile               Compile the project");
