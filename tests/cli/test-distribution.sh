@@ -20,7 +20,10 @@ fail() { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
 step "Building distribution"
 cd "$REPO"
 mvn package -DskipTests -q
-ZIP=$(ls target/brace-*.zip | head -1)
+# Pick the freshly built zip (newest mtime), not the first alphabetically —
+# stale zips from earlier-versioned builds linger in target/ and would otherwise
+# be tested instead of the current one.
+ZIP=$(ls -t target/brace-*.zip | head -1)
 [[ -f "$ZIP" ]] || fail "Distribution zip not built"
 pass "Built $(basename "$ZIP")"
 
@@ -66,12 +69,13 @@ grep -qE "Test run finished|Successful tests|\[ +1 tests successful +\]" "$WORK/
 pass "brace test ran"
 
 step "Running brace ops keypair"
-rm -f ops-authorized-keys  # clear the one from brace new
+rm -f ops-authorized-keys ops-private.key  # clear the ones brace new generated
 "$BRACE_BIN" ops keypair > "$WORK/keypair.out" 2>&1 || fail "brace ops keypair failed"
 grep -q "Public key:" "$WORK/keypair.out" || fail "keypair output missing 'Public key:'"
-grep -q "Private key:" "$WORK/keypair.out" || fail "keypair output missing 'Private key:'"
+grep -q "Wrote ops-private.key" "$WORK/keypair.out" || fail "keypair output missing 'Wrote ops-private.key'"
 [[ -f ops-authorized-keys ]] || fail "ops-authorized-keys not created"
-pass "brace ops keypair generated and wrote file"
+[[ -f ops-private.key ]] || fail "ops-private.key not created"
+pass "brace ops keypair generated and wrote keys"
 
 echo ""
 echo -e "${GREEN}All distribution tests passed.${NC}"

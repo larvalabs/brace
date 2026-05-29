@@ -34,6 +34,11 @@ public class Cli {
                 System.out.println(BraceVersion.get());
                 yield 0;
             }
+            case "compile" -> requireSrc(cwd, () -> BuildCommands.compile(cwd));
+            case "run"     -> requireSrc(cwd, () -> BuildCommands.run(cwd));
+            case "dev"     -> requireSrc(cwd, () -> BuildCommands.dev(cwd));
+            case "test"    -> requireSrc(cwd, () -> BuildCommands.test(cwd, args));
+            case "deps"    -> requireSrc(cwd, () -> BuildCommands.deps(cwd));
             case "init" -> initCommand(cwd, args);
             case "ops" -> opsCommand(cwd, args);
             case "errors"  -> requireProject(cwd, () -> CliCommands.errors(cwd, args));
@@ -111,6 +116,13 @@ public class Cli {
         System.out.println("Global commands:");
         System.out.println("  brace new <name>            Create a new Brace project");
         System.out.println("  brace version               Print the brace version");
+        System.out.println();
+        System.out.println("Build & run (run inside a project):");
+        System.out.println("  brace compile               Compile the project");
+        System.out.println("  brace run                   Compile and run");
+        System.out.println("  brace dev                   Compile, run, and watch for changes");
+        System.out.println("  brace test [class]          Run tests");
+        System.out.println("  brace deps                  Copy dependencies from pom.xml into ./lib/");
         System.out.println();
         System.out.println("Project commands (run inside a project):");
         System.out.println("  brace init                  Scaffold .brace + .brace.local and run readiness checks");

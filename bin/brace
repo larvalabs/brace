@@ -1,269 +1,113 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Brace CLI — global launcher
-# Resolves BRACE_HOME from its own location. Invokes Java subcommands via
-# $BRACE_HOME/lib, and compiles/runs projects using javac/java directly.
+# Brace CLI launcher — thin shim.
+#
+# This script contains no command logic. It resolves WHICH framework version a
+# command should run against, makes sure that version's toolchain is available
+# locally, and execs into its `com.larvalabs.brace.Cli`. All real work (compile,
+# run, dev, test, ops, ...) lives in the framework jar, so the command behaviour
+# matches the project's pinned version — not whatever version this launcher
+# happens to ship with.
+#
+#   brace new|version|help   → run against the launcher's bundled toolchain
+#   brace <anything-else>    → run against the version pinned in ./pom.xml
+#                              (downloaded + cached on first use)
+#
+# Env overrides:
+#   BRACE_HOME          toolchain dir to use as "bundled" (default: derived from
+#                       this script's location)
+#   BRACE_CACHE         where downloaded toolchains are cached
+#                       (default: ~/.brace/cache)
+#   BRACE_RELEASE_BASE  base URL for release downloads
 
-# --- Resolve BRACE_HOME ---
-# Follow symlinks to the real script location, then go up one directory.
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-while [[ -L "$SCRIPT_PATH" ]]; do
-    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
-    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
-    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
-done
-BRACE_HOME="$(cd -P "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+# Bumped only when the launcher<->toolchain bootstrap contract changes (how the
+# pinned version is read, how toolchains are laid out, how Cli is invoked).
+SHIM_VERSION="2"
+
+BRACE_CACHE="${BRACE_CACHE:-$HOME/.brace/cache}"
+BRACE_RELEASE_BASE="${BRACE_RELEASE_BASE:-https://github.com/larvalabs/brace/releases/download}"
+
+# --- Chrome (all to stderr; stdout is reserved for captured values / the app) ---
+info()    { echo "▸ $*" >&2; }
+error()   { echo "✗ $*" >&2; }
+
+# --- Resolve BRACE_HOME (the launcher's own bundled toolchain) ---
+# Honour an explicit env override (handy for running an installed launcher
+# against a local framework build); otherwise derive it from the script path,
+# following symlinks.
+if [[ -z "${BRACE_HOME:-}" ]]; then
+    SCRIPT_PATH="${BASH_SOURCE[0]}"
+    while [[ -L "$SCRIPT_PATH" ]]; do
+        SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+        SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+        [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+    done
+    BRACE_HOME="$(cd -P "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+fi
 
 if [[ ! -d "$BRACE_HOME/lib" ]]; then
-    echo "Error: BRACE_HOME/lib not found at $BRACE_HOME/lib" >&2
+    error "BRACE_HOME/lib not found at $BRACE_HOME/lib"
     exit 1
 fi
 
-# --- Colors ---
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+# --- Version resolution ---
 
-info()    { echo -e "${YELLOW}▸${NC} $*"; }
-success() { echo -e "${GREEN}✓${NC} $*"; }
-error()   { echo -e "${RED}✗${NC} $*" >&2; }
-
-# --- Classpath construction ---
-project_classpath() {
-    local cp="$BRACE_HOME/lib/*"
-    [[ -d lib ]] && cp="$cp:lib/*"
-    [[ -d target/classes ]] && cp="$cp:target/classes"
-    echo "$cp"
+# The framework version bundled with this launcher (from the brace jar name).
+bundled_version() {
+    local jar
+    jar=$(ls "$BRACE_HOME"/lib/brace-*.jar 2>/dev/null | grep -v -- '-sources' | head -1)
+    [[ -z "$jar" ]] && return 1
+    jar="${jar##*/}"; jar="${jar#brace-}"; jar="${jar%.jar}"
+    echo "$jar"
 }
 
-test_classpath() {
-    local cp
-    cp="$(project_classpath)"
-    [[ -d target/test-classes ]] && cp="$cp:target/test-classes"
-    echo "$cp"
+# The framework version pinned by the current project's pom.xml, if any.
+# Tolerant of whitespace/line layout and an optional leading "v" (JitPack tag form).
+pinned_version() {
+    [[ -f pom.xml ]] || return 1
+    local raw
+    raw=$(tr -d '[:space:]' < pom.xml \
+        | sed -n 's/.*<brace\.version>\(.*\)<\/brace\.version>.*/\1/p')
+    raw="${raw#v}"
+    [[ -n "$raw" ]] || return 1
+    echo "$raw"
 }
 
-# --- Ensure we're in a project directory ---
-require_project() {
-    if [[ ! -d src/main/java ]]; then
-        error "No src/main/java directory found. Run this command from a Brace project directory."
-        exit 1
+# Download + unpack the dist zip for a released version into the cache.
+fetch_toolchain() {
+    local v="$1" dest="$BRACE_CACHE/$v"
+    local url="$BRACE_RELEASE_BASE/v$v/brace-$v.zip"
+    command -v curl  >/dev/null || { error "curl is required to download brace $v";  return 1; }
+    command -v unzip >/dev/null || { error "unzip is required to install brace $v"; return 1; }
+    info "Fetching brace $v ..."
+    local tmp; tmp="$(mktemp -d)"
+    if ! curl -fsSL "$url" -o "$tmp/brace.zip"; then
+        rm -rf "$tmp"; error "Could not download brace $v from $url"; return 1
     fi
+    if ! unzip -q "$tmp/brace.zip" -d "$tmp"; then
+        rm -rf "$tmp"; error "Could not unpack brace $v"; return 1
+    fi
+    mkdir -p "$BRACE_CACHE"
+    rm -rf "$dest"
+    # The dist zip unpacks to a top-level brace-<v>/ directory.
+    mv "$tmp/brace-$v" "$dest"
+    rm -rf "$tmp"
+    info "Installed brace $v"
 }
 
-# --- Find main class ---
-find_main_class() {
-    local main_file
-    main_file=$(grep -rl 'public static void main' src/main/java/ --include='*.java' 2>/dev/null | head -1)
-    if [[ -z "$main_file" ]]; then
-        error "No main class found in src/main/java/"
-        exit 1
-    fi
-    local class_name="${main_file#src/main/java/}"
-    class_name="${class_name%.java}"
-    class_name="${class_name//\//.}"
-    echo "$class_name"
-}
-
-# --- Compile main sources ---
-brace_compile() {
-    require_project
-    info "Compiling..."
-    mkdir -p target/classes
-    local sources=()
-    while IFS= read -r -d '' f; do sources+=("$f"); done < <(find src/main/java -name '*.java' -print0 2>/dev/null)
-    if [[ ${#sources[@]} -eq 0 ]]; then
-        error "No Java sources found under src/main/java"
-        exit 1
-    fi
-    if javac -d target/classes -cp "$(project_classpath)" "${sources[@]}"; then
-        success "Compiled"
-    else
-        error "Compilation failed"
+# Echo (only) the toolchain home dir for a version, fetching it if needed.
+resolve_toolchain() {
+    local v="$1"
+    if [[ "$v" == "$(bundled_version || true)" ]]; then echo "$BRACE_HOME"; return 0; fi
+    if [[ -d "$BRACE_CACHE/$v/lib" ]]; then echo "$BRACE_CACHE/$v"; return 0; fi
+    if [[ "$v" == *-SNAPSHOT ]]; then
+        error "Project pins brace $v, but SNAPSHOT builds are not published."
+        error "Install a matching brace build (or set BRACE_HOME to one), or pin a released version."
         return 1
     fi
-}
-
-# --- Compile test sources ---
-brace_compile_tests() {
-    require_project
-    [[ ! -d src/test/java ]] && return 0
-    info "Compiling tests..."
-    mkdir -p target/test-classes
-    local sources=()
-    while IFS= read -r -d '' f; do sources+=("$f"); done < <(find src/test/java -name '*.java' -print0 2>/dev/null)
-    [[ ${#sources[@]} -eq 0 ]] && return 0
-    if javac -d target/test-classes -cp "$(test_classpath)" "${sources[@]}"; then
-        success "Tests compiled"
-    else
-        error "Test compilation failed"
-        return 1
-    fi
-}
-
-# --- Run ---
-brace_run() {
-    brace_compile
-    local main_class
-    main_class=$(find_main_class)
-    info "Starting ${CYAN}${main_class}${NC}"
-    exec java -cp "$(project_classpath)" "$main_class"
-}
-
-# --- Test ---
-brace_test() {
-    brace_compile
-    brace_compile_tests
-    local junit_jar
-    junit_jar=$(ls "$BRACE_HOME"/lib/junit-platform-console-standalone-*.jar 2>/dev/null | head -1)
-    if [[ -z "$junit_jar" ]]; then
-        error "junit-platform-console-standalone not found in $BRACE_HOME/lib"
-        exit 1
-    fi
-    info "Running tests..."
-    if [[ $# -gt 0 ]]; then
-        java -jar "$junit_jar" execute -cp "$(test_classpath)" --select-class "$1" --disable-banner
-    else
-        java -jar "$junit_jar" execute -cp "$(test_classpath)" --scan-classpath target/test-classes --disable-banner
-    fi
-}
-
-# --- Deps (populate project lib/ from pom.xml via mvn) ---
-brace_deps() {
-    require_project
-    if [[ ! -f pom.xml ]]; then
-        error "pom.xml not found — brace deps requires a Maven project"
-        exit 1
-    fi
-    if ! command -v mvn &>/dev/null; then
-        error "Maven is not installed. Install it or drop JARs manually into ./lib/"
-        exit 1
-    fi
-    info "Copying dependencies from pom.xml into ./lib/"
-    mvn dependency:copy-dependencies \
-        -DoutputDirectory=lib \
-        -DincludeScope=runtime \
-        -DexcludeGroupIds=com.larvalabs,com.github.larvalabs \
-        -q
-    success "Dependencies copied to ./lib/"
-}
-
-# --- Dev (compile + run + watch) ---
-PID_FILE="target/.brace-pid"
-
-kill_app() {
-    if [[ -f "$PID_FILE" ]]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            for _ in 1 2 3 4 5; do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.2
-            done
-            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
-        fi
-        rm -f "$PID_FILE"
-    fi
-}
-
-start_app() {
-    local main_class="$1"
-    java -cp "$(project_classpath)" "$main_class" &
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
-    success "Started (PID ${pid})"
-}
-
-brace_dev() {
-    require_project
-    trap 'echo ""; info "Shutting down..."; kill_app; exit 0' INT TERM
-
-    brace_compile || exit 1
-    local main_class
-    main_class=$(find_main_class)
-
-    info "Main class: ${CYAN}${main_class}${NC}"
-    start_app "$main_class"
-
-    info "Watching ${CYAN}src/${NC} for changes..."
-    echo ""
-
-    if [[ "$(uname)" == "Darwin" ]] && command -v fswatch &>/dev/null; then
-        fswatch -0 --include='\.java$' --exclude='.*' -r src/ | while IFS= read -r -d '' _; do
-            while IFS= read -r -d '' -t 0.5 _ 2>/dev/null; do :; done
-            echo ""
-            info "Change detected — recompiling..."
-            kill_app
-            if brace_compile; then
-                start_app "$main_class"
-            else
-                error "Compilation failed — waiting for next change..."
-            fi
-        done
-    else
-        if [[ "$(uname)" == "Darwin" ]] && ! command -v fswatch &>/dev/null; then
-            info "Install ${BOLD}fswatch${NC} for faster file watching: ${CYAN}brew install fswatch${NC}"
-            echo ""
-        fi
-        local marker="target/.brace-watch-marker"
-        mkdir -p target
-        touch "$marker"
-        while true; do
-            sleep 1
-            local changed
-            changed=$(find src/ -name '*.java' -newer "$marker" 2>/dev/null | head -1)
-            if [[ -n "$changed" ]]; then
-                touch "$marker"
-                echo ""
-                info "Change detected — recompiling..."
-                kill_app
-                if brace_compile; then
-                    start_app "$main_class"
-                else
-                    error "Compilation failed — waiting for next change..."
-                fi
-            fi
-        done
-    fi
-}
-
-# --- Java CLI subcommands (new, ops) ---
-run_java_cli() {
-    exec java -cp "$BRACE_HOME/lib/*" com.larvalabs.brace.Cli "$@"
-}
-
-# --- Help ---
-brace_help() {
-    echo ""
-    echo -e "${BOLD}Brace${NC} — Java web framework CLI"
-    echo ""
-    echo "Global commands:"
-    echo -e "  ${CYAN}brace new <name>${NC}           Create a new Brace project"
-    echo -e "  ${CYAN}brace version${NC}              Print the brace version"
-    echo ""
-    echo "Project commands (run inside a project directory):"
-    echo -e "  ${CYAN}brace init${NC}                 Scaffold project config + run readiness checks"
-    echo -e "  ${CYAN}brace ops keypair${NC}          Generate an Ed25519 keypair for ops auth"
-    echo -e "  ${CYAN}brace ops dashboard${NC}        Authenticate and open the ops dashboard"
-    echo -e "  ${CYAN}brace errors${NC} [--since 1h]  List unresolved errors"
-    echo -e "  ${CYAN}brace logs${NC} [-f] [--since]  Tail recent log lines"
-    echo -e "  ${CYAN}brace status${NC}               Show app health snapshot"
-    echo -e "  ${CYAN}brace cache${NC} [clear]        Show cache stats / clear cache"
-    echo -e "  ${CYAN}brace resolve${NC} <id>         Mark an error as resolved"
-    echo -e "  ${CYAN}brace deps${NC}                 Copy dependencies from pom.xml into ./lib/"
-    echo -e "  ${CYAN}brace compile${NC}              Compile the project"
-    echo -e "  ${CYAN}brace run${NC}                  Compile and run"
-    echo -e "  ${CYAN}brace dev${NC}                  Compile, run, and watch for changes"
-    echo -e "  ${CYAN}brace test${NC} [class]         Run tests"
-    echo -e "  ${CYAN}brace help${NC}                 Show this help"
-    echo ""
-    echo "All read commands accept --env <name>, --json, --pretty."
-    echo ""
+    fetch_toolchain "$v" || return 1
+    echo "$BRACE_CACHE/$v"
 }
 
 # --- Dispatch ---
@@ -271,19 +115,25 @@ COMMAND="${1:-help}"
 shift 2>/dev/null || true
 
 case "$COMMAND" in
-    # Global (Java CLI)
-    new)               run_java_cli new "$@" ;;
-    version|--version|-v) run_java_cli version ;;
-
-    # Project (Java CLI — handled by Cli.java with require_project guards)
-    init|ops|errors|logs|status|cache|resolve)
-             run_java_cli "$COMMAND" "$@" ;;
-
-    # Project (bash)
-    deps)    brace_deps ;;
-    compile) brace_compile ;;
-    run)     brace_run ;;
-    test)    brace_test "$@" ;;
-    dev)     brace_dev ;;
-    help|-h|--help|*) brace_help ;;
+    # No project required → run against the launcher's bundled toolchain.
+    new|version|--version|-v|help|-h|--help)
+        HOME_DIR="$BRACE_HOME"
+        ;;
+    # Everything else operates on a project → use its pinned version when present,
+    # else fall back to bundled so Cli can emit its own "run inside a project" error.
+    *)
+        if PINNED="$(pinned_version)"; then
+            HOME_DIR="$(resolve_toolchain "$PINNED")" || exit 1
+        else
+            HOME_DIR="$BRACE_HOME"
+        fi
+        ;;
 esac
+
+# exec (not a child) so Ctrl-C / SIGTERM reach Cli directly and its shutdown
+# hooks (which stop the app JVM in `run`/`dev`) actually fire.
+exec java \
+    -Dbrace.home="$HOME_DIR" \
+    -Dbrace.launcher="$SHIM_VERSION" \
+    -cp "$HOME_DIR/lib/*" \
+    com.larvalabs.brace.Cli "$COMMAND" "$@"

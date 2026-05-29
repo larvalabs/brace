@@ -87,4 +87,8 @@ public class CliOutput {
     public static void printSuccess(String message) {
         System.out.println("✓ " + message);
     }
+
+    public static void printInfo(String message) {
+        System.out.println("▸ " + message);
+    }
 }
