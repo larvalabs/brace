@@ -4,18 +4,27 @@ Brace is a full-stack Java 21+ web framework. No DI container, no classpath scan
 
 ## Installation
 
-Download the latest release zip, unzip it, and add `bin/` to your PATH:
+Install the launcher with the bootstrap script, then add `~/.brace/bin` to your PATH:
 
 ```bash
-curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.1.zip
-unzip brace-0.1.1.zip
-export PATH="$PWD/brace-0.1.1/bin:$PATH"
+curl -fsSL https://github.com/larvalabs/brace/raw/main/install.sh | sh
+export PATH="$HOME/.brace/bin:$PATH"
 brace help
 ```
 
 No Maven or per-project scripts needed for the dev loop. Maven is only invoked by `brace deps` to populate a project-local `lib/` folder from `pom.xml`.
 
+The `brace` launcher is independent of the framework version. Each project pins its
+framework version with `<brace.version>` in `pom.xml`; inside a project, `brace`
+resolves that version (downloading it to `~/.brace/toolchains/<version>` on first
+use) and compiles, runs, and tests against it — so `brace run` matches Maven, the
+IDE, and CI. The launcher version itself rarely matters.
+
 ## Upgrading
+
+Update the launcher with `brace self-update` (latest) or `brace self-update <version>`
+(a specific release). This only changes the launcher; a project's framework version is
+governed by `<brace.version>` in its `pom.xml`.
 
 When the brace version in `pom.xml` changes, check the migration guide for that version
 step before recompiling. Each guide lists every breaking change with before/after examples.

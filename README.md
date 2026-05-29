@@ -49,19 +49,25 @@ AI agents: read [AGENTS.md](AGENTS.md) for the complete framework reference.
 
 Requires JDK 21 or later. JDK 25 LTS is recommended — [JEP 491](https://openjdk.org/jeps/491) removes virtual-thread pinning inside `synchronized` blocks, which materially improves tail latency under load when Hibernate and JDBC drivers are on the hot path.
 
-Download the latest release zip, unzip it, and add `bin/` to your PATH:
+Install the launcher with the bootstrap script, then add `~/.brace/bin` to your PATH:
 
 ```bash
-curl -LO https://github.com/larvalabs/brace/releases/latest/download/brace-0.1.1.zip
-unzip brace-0.1.1.zip
-export PATH="$PWD/brace-0.1.1/bin:$PATH"
+curl -fsSL https://github.com/larvalabs/brace/raw/main/install.sh | sh
+export PATH="$HOME/.brace/bin:$PATH"   # add to your shell rc to persist
 brace help
+```
+
+This installs the latest release under `~/.brace/toolchains/<version>` and links `~/.brace/bin/brace` to it. Update the launcher at any time with:
+
+```bash
+brace self-update            # move to the latest release
+brace self-update 0.1.6      # or switch to a specific version
 ```
 
 No Maven or per-project scripts needed for the dev loop. Maven is only invoked by `brace deps` to populate a project-local `lib/` folder from `pom.xml`.
 
 ```bash
-brace new myapp        # scaffold a new project
+brace new myapp        # scaffold a new project (pins the framework version)
 cd myapp
 brace deps             # populate ./lib/ from pom.xml (one time, requires Maven)
 brace dev              # compile + run + watch for changes
@@ -69,6 +75,16 @@ brace test             # run all tests
 brace ops keypair      # generate ops auth keys
 brace ops dashboard    # authenticate and open /ops/dashboard
 ```
+
+### How versioning works
+
+The `brace` launcher is independent of the framework version it runs. Each project
+pins its framework version with `<brace.version>` in `pom.xml`; inside a project,
+`brace` resolves that version — downloading and caching it under
+`~/.brace/toolchains/<version>` on first use — and compiles, runs, and tests
+against it. So `brace run` always matches what Maven, your IDE, and CI build,
+regardless of which launcher version you happen to have installed. `brace new`
+pins the version it was created with; bump `<brace.version>` to upgrade a project.
 
 ### Add Brace to an existing Maven project
 
@@ -171,7 +187,7 @@ public class App {
 - **htmx** — Bundled htmx 2.0.4, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, JFR profiling, Ed25519 token auth
-- **CLI** — global `brace` command distributed as a downloadable zip: `brace new` scaffolding, `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
+- **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding, `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
 - **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
 
 ## Controllers
