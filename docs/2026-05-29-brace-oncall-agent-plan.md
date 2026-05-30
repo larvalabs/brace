@@ -324,6 +324,87 @@ Once deploy-plan Phase 5 (rollback) exists, the outage tier can *propose* a
 rollback with one-click human approval, attaching the deploy-correlation evidence.
 Execution stays gated. Punt until deploy-plan Phase 5 lands.
 
+## Implementation: `brace-oncall` as a Brace app
+
+The strongest hosting choice (a separate VPS, see "Hosting options") raises the
+question of *what runs on that box*. The answer that fits this codebase: the agent
+host is itself **a Brace app** — which dogfoods the framework, since an on-call
+agent for Brace apps built *as* a Brace app is a flagship example of the "ops
+plumbing" Brace claims to make easy.
+
+The load-bearing precision: **Brace is the control plane (the harness), not the
+brain.** Brace is a JVM web framework; the reasoner is Claude Code / the Agent SDK,
+a Node/CLI process. Brace can't *be* the agent — it *supervises* one. This matches
+the plan's own framing: "most of the work here is ops plumbing and guardrails, not
+AI," and ops plumbing is exactly Brace's job.
+
+### Division of labor
+
+**Brace owns the control plane:**
+
+| Brace primitive | On-call responsibility |
+|---|---|
+| HTTP routes | `POST /incident` (receives each app's notifier webhook), `POST /slack/events` + `/slack/interactivity` (two-way Slack — ack, dig-deeper, approve-rollback buttons), a control UI |
+| `Database` (Postgres) | The persistent state cloud routines can't keep: `incidents` (dedupe key, first-seen, cooldown), `acked_incidents` (resolves open question #1 — a DB beats the "file-local for v1" punt and Brace gives it free), `agent_runs` (audit + `total_cost_usd` per run + PR links), `monitored_apps` (the N-codebase registry) |
+| `JobScheduler` | Hourly heartbeat poll per app — and since it's in-process, **no 1-hour cloud-routine floor**; poll as often as wanted. Another reason the VPS beats routines. |
+| `DurableJob` queue | One incident → one durable job: survives restart, retried, dedupe/cooldown enforced at enqueue. The natural serialization point so a flapping error can't fire 50 agent runs. |
+| `Config` / `.brace` | Per-app registry (ops URL, env, repo path, Slack channel, scoped-token ref); Anthropic key from env |
+| `OpsHandler` + dashboard | The on-call app exposes its own `/ops/*`, so **you watch the watcher** — monitorable like any other Brace app (even by a second instance) |
+| `Mailer` | Page-out fallback when Slack is down |
+
+**Brace spawns the brain:** per incident job, a worker invokes the Claude Agent SDK
+(`query(...)`) or `claude -p --output-format json`, with `cwd` set to that app's
+local checkout, the incident payload + scoped read-only ops token as input, and —
+critically — `--permission-mode dontAsk` + an explicit allow-list (`Read`,
+`Bash(git ...)`, `Bash(gh pr create ...)`) and deny-list (`git push`, `rm`). It
+captures `total_cost_usd`, the action taken, and PR links back into `agent_runs`.
+
+`claude -p` print mode is the simplest first cut (just exec the CLI — no Node
+service to maintain); the Agent SDK buys session resume + programmatic `PreToolUse`
+hooks if richer control is wanted later.
+
+### Multi-server shape
+
+One Brace app, N rows in `monitored_apps`, N persistent checkouts. You operate one
+box and add codebases by config — instead of wiring and allowlisting N separate
+cloud routines. Before triage, the incident job does `git fetch` and checks out the
+*deployed SHA* so source-mapping matches prod.
+
+### Credentials (three narrowly-scoped, never one powerful identity)
+
+- **Anthropic auth: a dedicated API key**, not subscription login. Set
+  `ANTHROPIC_API_KEY` in the VPS env (or an `apiKeyHelper` pulling from a vault for
+  rotation). The Agent SDK and `claude -p` authenticate via the key natively; it's
+  headless with no browser and no expiry. Metered billing matches the
+  dormant-until-incident cost model (you pay only when incidents fire) and lines up
+  with logging `total_cost_usd` per run. Mint it in its own Console workspace for
+  isolated billing/limits, so the agent acts under its *own* identity. **Avoid
+  subscription login / `CLAUDE_CODE_OAUTH_TOKEN`** — it ties an autonomous box to
+  your personal identity and Max-plan rate limits, bills flat-rate for a mostly-idle
+  agent, and is a 1-year token with manual rotation.
+- **GitHub PAT: least-privileged** — PRs to `claude/` branches only.
+- **Ops access: the scoped read-only ops token** per monitored app (the Phase-0
+  prerequisite), never a full ops key.
+
+### The two sharp caveats
+
+1. **It's a polyglot box, by necessity.** JVM (Brace) + Node (Claude Agent SDK /
+   CLI) + `git`/`gh`. Brace is the supervisor; Claude is the subprocess. This is
+   inherent to *any* host since the brain is always Claude — not a Brace-specific
+   cost.
+2. **The exec wrapper is security-critical.** The strongest guardrail (`dontAsk` +
+   deny-list, harness-enforced rather than prompt-requested) is a property of *how
+   the Claude process is spawned*. A bug that spawns it with bypass perms collapses
+   the whole "propose freely, gate prod mutation" model. Keep that invocation in
+   **one audited place** and test it.
+
+### Packaging
+
+Its own (private) repo rather than `sample/` — it needs separate, hardened
+deployment and holds a high-value credential set. Deploys through the existing
+Dokploy + publishing pipeline. The `brace-oncall` skill (Phase 2) is what this app
+invokes per incident; the app is the persistent harness around that skill.
+
 ## What changes in the codebase
 
 Minimal framework changes — this is mostly skill + config + the gating ops items:
@@ -337,10 +418,15 @@ Minimal framework changes — this is mostly skill + config + the gating ops ite
 
 ## Open questions
 
-1. **State store for acknowledged incidents** — agent-local file vs. a server-side
-   `/ops/incidents` ack endpoint. Server-side survives agent restarts and lets
-   multiple agents/humans share ack state, but adds a write endpoint (and thus a
-   control-scope token). Lean file-local for v1.
+1. **State store for acknowledged incidents** — *resolved by the Brace-app-host
+   decision (Implementation section, rationale #8).* Ack state lives in the host's
+   own `acked_incidents` table in *its* Postgres — not an agent-local file, and not
+   a write endpoint on the *monitored* app. This beats both original candidates: it
+   survives restarts and lets multiple humans/agents share ack state (the
+   file-local downside) without adding a control-scope write endpoint or token to
+   the monitored apps (the server-side downside) — the write is to the host's DB,
+   which it already owns. The earlier "lean file-local for v1" punt only applied
+   when the agent had no database of its own; as a Brace app it does.
 2. **Skill distribution** — bundle in the dist zip *and* `~/.claude/skills/`?
    Same question the deploy plan defers to its Phase 4; decide once for both.
 3. **Severity thresholds** — reuse `brace check`'s configurable thresholds as the
@@ -433,3 +519,16 @@ re-litigated when the constraints change. Each notes *what would make us revisit
    dashboard's notion of healthy and the agent's.
    *Revisit if:* the agent needs severity dimensions `brace check` doesn't model
    (e.g. business-impact weighting) — extend `brace check`, don't fork.
+
+8. **The agent host is a Brace app (control plane), reasoning stays a subprocess.**
+   *Why:* the host's work is HTTP endpoints, persistent incident/ack/audit state,
+   scheduling, a durable queue, and an ops dashboard — exactly Brace's
+   batteries-included surface, and building it as a Brace app dogfoods the
+   framework. Brace can't be the reasoner (JVM vs. the Node/CLI Claude process), so
+   it supervises one: spawns `claude -p`/the Agent SDK with harness-enforced
+   permissions. A dedicated metered API key (not subscription login) matches the
+   dormant-until-incident cost model and keeps the agent off the operator's
+   personal identity/limits.
+   *Revisit if:* the polyglot JVM+Node box proves more operational burden than a
+   single-runtime host (e.g. an Agent-SDK-native daemon) would, or the control-plane
+   needs outgrow what Brace gives for free.
