@@ -684,6 +684,8 @@ A line with no `scope:` marker defaults to `control` (backward compatible). Mark
 
 `POST /ops/auth` caps the minted token at the key's ceiling, so a `scope:read` key **cannot** obtain a control token even if it requests one — escalation is impossible by construction. This is what lets you hand an autonomous agent (e.g. `brace-oncall`) a key that can pull `logs`/`errors`/`status` but never clear the cache or resolve errors. Generate one with `brace ops keypair --read-only --label oncall-agent`. Tokens also carry a `kid` (key fingerprint) so ops access can be attributed to a key.
 
+**Audit log.** Every authenticated ops request is recorded as a structured `ops.access` log event (`kid`, scope, method, path, `granted`) — including authenticated-but-scope-denied attempts (`granted=false`). It rides the normal log stream, so a stolen or misused key is visible after the fact via `brace logs` (filter on `event=ops.access`); no separate store and works with or without a database.
+
 `brace new` writes both files at scaffold time (the initial `dev` entry corresponds to the local `ops-private.key`). After that, `brace ops keypair` generates a *new* keypair, prints the private key **once to stdout** (it does **not** write `ops-private.key`), and appends the public half to `ops-authorized-keys`.
 
 Common workflows:

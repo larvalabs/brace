@@ -51,7 +51,7 @@ Active plans:
 
 - [x] Ops browser login token — CLI requests short-lived/single-use token, opens browser to exchange endpoint that sets httpOnly cookie and redirects to dashboard (eliminates query-param token from ongoing dashboard URLs)
 - [ ] Redaction layer — auto-redact sensitive headers/params/keys in logs and ops diagnostics (authorization, cookie, token, secret, password, key patterns). Higher priority because logs are reachable over HTTP via `brace logs` / ops dashboard — a single curl with a stolen ops key pulls the ring buffer, vs. SSH-gated file access on a traditional server. Allowlist-based field-name match; not content-level PII detection.
-- [ ] Ops endpoint audit log — record who accessed `/ops/logs`, `/ops/errors`, `/ops/status` and when (key id + timestamp + endpoint). Makes a stolen ops key at least visible after the fact; pairs with the redaction layer above.
+- [x] Ops endpoint audit log — every authenticated ops request is recorded as a structured `ops.access` log event (`kid` + scope + method + path + granted), attributed to the token's key fingerprint. Rides the normal logging pipeline (durable wherever stdout goes, queryable via `brace logs` / `/ops/logs` filtered on `event=ops.access`) — no separate store or migration, works with or without a database. Records granted access and authenticated-but-scope-denied attempts (the `granted=false` escalation signal); unauthenticated probes surface as 401s in the request log. Implemented in `OpsAudit`, hooked at the `OpsHandler.authorize` choke point. Makes a stolen ops key visible after the fact.
 - [ ] Key rotation — support current + previous keys for sessions and ops auth (allow rotation without forced logout)
 
 ## Tier 1 — API Clarity & AI Ergonomics (Additive, Non-Breaking)

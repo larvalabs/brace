@@ -519,10 +519,17 @@ public class OpsHandler {
         return null;
     }
 
-    /** True if the request carries a valid token whose scope grants {@code required}. */
+    /**
+     * True if the request carries a valid token whose scope grants {@code required}.
+     * Every authenticated request (granted or scope-denied) is recorded to the ops
+     * audit log, attributed to the token's key fingerprint.
+     */
     private boolean authorize(Request req, OpsScope required) {
         var claims = authenticate(req);
-        return claims != null && claims.scope().grants(required);
+        if (claims == null) return false;
+        boolean granted = claims.scope().grants(required);
+        OpsAudit.record(req.method(), req.path(), claims.kid(), claims.scope(), required, granted);
+        return granted;
     }
 
     private static int levelRank(String level) {

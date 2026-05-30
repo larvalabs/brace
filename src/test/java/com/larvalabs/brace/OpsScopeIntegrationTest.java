@@ -119,4 +119,27 @@ class OpsScopeIntegrationTest {
         assertEquals(200, getStatus("/ops/status", control));
         assertEquals(200, postStatus("/ops/cache/clear", control), "control token may clear the cache");
     }
+
+    @Test
+    void authenticatedAccessIsAudited() throws Exception {
+        LogTap.clear();
+        var read = authenticate(readKey, null).token();
+        getStatus("/ops/status", read);               // granted
+        postStatus("/ops/cache/clear", read);         // authenticated but scope-denied
+        String kid = OpsKeys.fingerprint(readKey.publicKey());
+
+        var access = LogTap.snapshot().stream()
+            .filter(e -> "ops.access".equals(e.fields().get("event")))
+            .toList();
+
+        assertTrue(access.stream().anyMatch(e ->
+                "/ops/status".equals(e.fields().get("path"))
+                && Boolean.TRUE.equals(e.fields().get("granted"))
+                && kid.equals(e.fields().get("kid"))),
+            "granted read access must be audited and attributed to the key fingerprint");
+        assertTrue(access.stream().anyMatch(e ->
+                "/ops/cache/clear".equals(e.fields().get("path"))
+                && Boolean.FALSE.equals(e.fields().get("granted"))),
+            "an authenticated but scope-denied control attempt must be audited as granted=false");
+    }
 }
