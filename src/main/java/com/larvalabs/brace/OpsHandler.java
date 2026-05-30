@@ -15,6 +15,7 @@ public class OpsHandler {
     private final ErrorStore errorStore;
     private final Cache cache;
     private final JfrProfiler profiler;
+    private RegressionTracker regressionTracker;
 
     // In-memory store for single-use login tokens (token -> expiry timestamp)
     private final Map<String, Instant> loginTokens = new java.util.concurrent.ConcurrentHashMap<>();
@@ -451,6 +452,38 @@ public class OpsHandler {
             return Json.of(resolved);
         }
         return dashboard(req);
+    }
+
+    public void setRegressionTracker(RegressionTracker tracker) {
+        this.regressionTracker = tracker;
+    }
+
+    /** GET /ops/regressions — new error kinds since startup (the /ops/errors shape + acknowledged). */
+    public Result regressions(Request req) {
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
+        if (regressionTracker == null) return Json.of(List.of());
+        var out = new ArrayList<Map<String, Object>>();
+        for (var r : regressionTracker.list()) {
+            var m = new LinkedHashMap<String, Object>();
+            m.put("id", r.id());
+            m.put("errorType", r.type());
+            m.put("route", r.route());
+            m.put("message", r.message());
+            m.put("firstSeen", r.firstSeen().toString());
+            m.put("count", r.count());
+            m.put("acknowledged", r.acknowledged());
+            out.add(m);
+        }
+        return Json.of(out);
+    }
+
+    /** POST /ops/regressions/{id}/acknowledge — stop flagging a regression (control action). */
+    public Result acknowledgeRegression(Request req) {
+        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
+        if (regressionTracker == null) return Result.notFound();
+        long id = req.longPathParam("id");
+        if (!regressionTracker.acknowledge(id)) return Result.notFound();
+        return Json.of(Map.of("acknowledged", true, "id", id));
     }
 
     public Result clearCache(Request req) {

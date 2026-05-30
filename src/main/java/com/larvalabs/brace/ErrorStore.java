@@ -12,12 +12,28 @@ import java.util.*;
  */
 public class ErrorStore {
 
+    /**
+     * Notified when an error is recorded, so a {@link RegressionTracker} can detect new
+     * error kinds since startup without ErrorStore re-doing the existence check. {@link #onNew}
+     * fires when a brand-new {@code (type, route)} is inserted; {@link #onRepeat} when an
+     * existing one recurs.
+     */
+    public interface RegressionListener {
+        void onNew(String type, String route, String message, Instant firstSeen);
+        void onRepeat(String type, String route);
+    }
+
     private final DatabaseFactory databaseFactory;
     private final int maxErrors;
+    private volatile RegressionListener regressionListener;
 
     public ErrorStore(DatabaseFactory databaseFactory, int maxErrors) {
         this.databaseFactory = databaseFactory;
         this.maxErrors = maxErrors;
+    }
+
+    public void setRegressionListener(RegressionListener listener) {
+        this.regressionListener = listener;
     }
 
     public void record(String type, String message, String route, String stackTrace, String requestDetail) {
@@ -33,20 +49,24 @@ public class ErrorStore {
                        String requestDetail, String queriesBefore, String requestHeaders) {
         var db = new Database(databaseFactory.openSession());
         db.beginTransaction();
+        Instant firstSeen = Instant.now();
+        boolean isNew = false;
+        boolean committed = false;
         try {
             // Look for existing unresolved error with same type+route
             var existing = db.sqlQuery(
                 "SELECT id, occurrence_count FROM ops_errors WHERE error_type = ? AND route = ? AND resolved_at IS NULL",
                 type, route);
 
-            if (!existing.isEmpty()) {
+            isNew = existing.isEmpty();
+            if (!isNew) {
                 Object[] row = existing.get(0);
                 long id = ((Number) row[0]).longValue();
                 int count = ((Number) row[1]).intValue();
                 db.sql("UPDATE ops_errors SET occurrence_count = ?, message = ?, stack_trace = ?, request_detail = ?, queries_before = ?, request_headers = ?, last_seen = ? WHERE id = ?",
-                    count + 1, message, stackTrace, requestDetail, queriesBefore, requestHeaders, Timestamp.from(Instant.now()), id);
+                    count + 1, message, stackTrace, requestDetail, queriesBefore, requestHeaders, Timestamp.from(firstSeen), id);
             } else {
-                var now = Timestamp.from(Instant.now());
+                var now = Timestamp.from(firstSeen);
                 db.sql("INSERT INTO ops_errors (error_type, message, stack_trace, route, request_detail, queries_before, request_headers, first_seen, last_seen, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     type, message, stackTrace, route, requestDetail, queriesBefore, requestHeaders, now, now, 1);
             }
@@ -64,10 +84,18 @@ public class ErrorStore {
             }
 
             db.commitTransaction();
+            committed = true;
         } catch (Exception e) {
             db.rollbackTransaction();
         } finally {
             db.close();
+        }
+
+        // Notify the regression listener only after a successful commit, off the DB path.
+        var listener = regressionListener;
+        if (committed && listener != null) {
+            if (isNew) listener.onNew(type, route, message, firstSeen);
+            else listener.onRepeat(type, route);
         }
     }
 

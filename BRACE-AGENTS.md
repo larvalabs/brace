@@ -721,11 +721,17 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 | `GET /ops/logs[?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=200]` | Recent log entries from in-memory ring buffer |
 | `GET /ops/cache` | Cache stats: size, hits, misses, hitRate, evictions |
 | `GET /ops/routes` | All registered routes |
+| `GET /ops/regressions` | New error kinds since startup (the `/ops/errors` shape + an `acknowledged` flag). The on-call wake signal — empty means no new error types this process lifetime. |
 | `GET /ops/dashboard` | HTML dashboard (browser) |
-| `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) |
-| `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true}` with `Accept: application/json`) |
+| `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) — **control scope** |
+| `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true}` with `Accept: application/json`) — **control scope** |
+| `POST /ops/regressions/{id}/acknowledge` | Stop flagging a regression (returns `{"acknowledged": true}`) — **control scope** |
+
+Read endpoints (the `GET`s above) require a `read`-scope token; the mutating `POST`s require `control`. See "Token scopes" above.
 
 Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pass `Authorization: Bearer <token>`.
+
+**Regression notifications.** When a new error kind first appears since startup, Brace notifies the registered notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl), new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)` (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error store).
 
 ### Storage and retention
 
