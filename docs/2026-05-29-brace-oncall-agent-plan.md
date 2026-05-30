@@ -73,6 +73,63 @@ wanted it has to run as a **desktop scheduled task** or an in-session `/loop`
 (1-minute minimum), both of which require the operator's machine to be on. For a
 true unattended agent: hourly routine heartbeat + push for everything time-sensitive.
 
+### Hosting options
+
+Where the agent physically runs is a real decision, not a detail — it determines
+trigger latency, what the agent can reach, and how the guardrails are enforced. The
+cadence/allowlist constraints above are properties of *one* choice (cloud
+routines), not the design as a whole.
+
+| | Cloud routine | **Self-hosted VPS (headless)** | Desktop scheduled task |
+|---|---|---|---|
+| Runs on | Anthropic cloud | a box you operate | operator's machine |
+| Laptop-off | yes | yes | **no** |
+| Incident latency | push only (poll floors at 1h) | **sub-second, roll-your-own** | 1-min poll |
+| Reach internal `/ops/*` | needs Allowed-domains config | **direct, no allowlist** | direct |
+| Repo + `git`/`gh` + tests | fresh clone, GitHub-App OAuth | **persistent checkout, own PAT** | local checkout |
+| Ack-state store | ephemeral / needs `/ops/incidents` | **local file, free** | local file |
+| Guardrails | prompt + connector scoping | **`dontAsk` + deny-list, harness-enforced** | same as VPS |
+| You operate | nothing | the box (patch, key, monitor) | the machine |
+
+**Recommended for the strongest version: a separate hardened VPS.** It removes the
+two frictions the routine path has to work around — the 1-hour floor and the
+network allowlist — and turns the core guardrail from a prompt instruction into
+enforced config.
+
+- **Build shape.** Either the **Claude Agent SDK** as a small daemon (holds a port,
+  calls `query(...)` on each webhook; gives session resume + programmatic
+  `PreToolUse` permission hooks) or **`claude -p` print mode** behind a tiny
+  listener (Flask/Express shelling out, `--output-format json`). No built-in
+  webhook trigger exists — the listener is roll-your-own, which is exactly what
+  buys sub-second response with no cron floor. Prefer the SDK for a long-running
+  service; `claude -p` is fine for a first cut.
+- **Guardrails become enforced, not requested.** Run with
+  `--permission-mode dontAsk` + an explicit `--allowedTools` allow-list (e.g.
+  `Read`, `Bash(git status *)`, `Bash(git diff *)`, `Bash(gh pr create *)`,
+  `Bash(gh issue *)`) and a `settings.json` `deny` list for `Bash(git push:*)`,
+  `Bash(rm *)`, etc. `dontAsk` auto-denies anything not pre-approved (no interactive
+  prompt exists headless), so the "propose freely, gate production mutation" rule is
+  enforced by the harness — the agent *cannot* force-push or run destructive
+  commands. Stronger than the cloud model's connector scoping.
+- **Auth.** `ANTHROPIC_API_KEY` (simplest, no expiry) or an `apiKeyHelper` script
+  pulling from a vault if rotation is wanted. Avoid `CLAUDE_CODE_OAUTH_TOKEN` — it's
+  a 1-year token with no refresh, i.e. manual rotation.
+- **Put it on a *separate* box from the app.** Same "dies with the app" trap as
+  in-app reasoning: an agent co-located with the host it monitors goes down in the
+  outage it's meant to triage. A distinct small VPS survives the app's bad days.
+- **That box is a high-value target** — it holds repo write + `gh` + an Anthropic
+  key + ops access. Harden it, least-privilege the GitHub PAT (PRs to `claude/`
+  branches only), and hand it the **scoped read-only ops token** (the Phase-0
+  prerequisite), never a full ops key.
+- **Observability/cost are yours.** `--output-format json` carries
+  `total_cost_usd` per run — wrap and log it; there's no built-in dashboard of what
+  the agent did.
+
+Cloud routines remain the **zero-ops** option: no box to run/secure/patch, at the
+cost of push-only fast response, the allowlist step, and ephemeral state. Pick the
+VPS when fast first-party response and native git/gh access matter more than
+avoiding ops work; pick routines when they don't.
+
 ### Trigger wiring
 
 - **Push:** Phase 0 of the deploy plan builds `/ops/regressions` plus
@@ -340,12 +397,21 @@ re-litigated when the constraints change. Each notes *what would make us revisit
    (needs the operator's machine on) or push a dead-man's-switch heartbeat from the
    app so absence, not a poll, signals death.
 
-4. **Cloud routines as the host (1-hour floor accepted).**
-   *Why:* routines run unattended on Anthropic infra, survive laptop-off, and take
-   API/GitHub triggers — the right fit for an on-call agent. The 1-hour cron floor
-   is acceptable *because* fast response comes from push, not poll.
-   *Revisit if:* the routine model gains sub-hourly schedules, or we need local
-   filesystem/tooling the cloud clone can't provide (then desktop scheduled tasks).
+4. **Hosting is a deliberate tradeoff; a separate VPS is the strongest version.**
+   *Why:* see "Hosting options." Cloud routines are the zero-ops choice but pay for
+   it with push-only fast response, the network allowlist, and ephemeral state. A
+   self-hosted headless VPS removes all three — sub-second triggering, direct
+   internal `/ops/*` access, persistent state, native git/gh for the PR tier — and
+   makes the production-mutation gate harness-enforced (`dontAsk` + deny-list)
+   rather than prompt-requested. The cost is operating and securing one box. The
+   VPS must be *separate* from the monitored app (else it dies in the outage it
+   triages) and holds a high-value credential set, so it gets the scoped read-only
+   ops token, a least-privileged GitHub PAT, and hardening. Desktop scheduled tasks
+   are the local-tooling option but need the operator's machine on.
+   *Revisit if:* ops burden of the VPS outweighs its latency/access benefits (fall
+   back to routines), routines gain sub-hourly schedules + first-party network
+   reach (the gap narrows), or compliance/data-residency forces self-hosting
+   (locks in the VPS).
 
 5. **Tiered autonomy with a hard human gate on production mutation.**
    *Why:* proposing (PRs, issues, Slack) is safe and high-value; mutating prod
