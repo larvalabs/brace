@@ -666,8 +666,23 @@ Brace ships with CLI commands and HTTP endpoints for inspecting a running app. U
 
 Ops auth uses Ed25519 keypairs. Two files matter:
 
-- **`ops-authorized-keys`** — committed. Public keys allowed to authenticate, one per line as `<base64-pubkey> <label>`. Loaded by `app.ops("ops-authorized-keys")`.
+- **`ops-authorized-keys`** — committed. Public keys allowed to authenticate, one per line as `<base64-pubkey> [scope:read|scope:control] <label>`. Loaded by `app.ops("ops-authorized-keys")`.
 - **`ops-private.key`** — gitignored, per-developer. Three lines: a comment, the base64 private key, and the matching public key. Path is recorded in `.brace.local` as `ops.key=...`.
+
+### Token scopes (read-only keys)
+
+Each authorized key has a **scope ceiling** that caps every token it can mint. Two scopes:
+
+- **`read`** — read endpoints only: `status`, `errors`, `logs`, `routes`, `cache` stats.
+- **`control`** — everything `read` can do, plus mutating endpoints: `cache/clear`, `errors/{id}/resolve`. `control` implies `read`.
+
+A line with no `scope:` marker defaults to `control` (backward compatible). Mark a key read-only by adding `scope:read`:
+
+```
+<base64-pubkey>  scope:read  oncall-agent
+```
+
+`POST /ops/auth` caps the minted token at the key's ceiling, so a `scope:read` key **cannot** obtain a control token even if it requests one — escalation is impossible by construction. This is what lets you hand an autonomous agent (e.g. `brace-oncall`) a key that can pull `logs`/`errors`/`status` but never clear the cache or resolve errors. Generate one with `brace ops keypair --read-only --label oncall-agent`. Tokens also carry a `kid` (key fingerprint) so ops access can be attributed to a key.
 
 `brace new` writes both files at scaffold time (the initial `dev` entry corresponds to the local `ops-private.key`). After that, `brace ops keypair` generates a *new* keypair, prints the private key **once to stdout** (it does **not** write `ops-private.key`), and appends the public half to `ops-authorized-keys`.
 

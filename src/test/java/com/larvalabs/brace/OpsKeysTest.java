@@ -5,7 +5,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -56,10 +55,41 @@ class OpsKeysTest {
             kp2.publicKey() + "\n" +
             "# Another comment\n");
 
-        Set<String> keys = OpsKeys.loadAuthorizedKeys(file.toString());
+        var keys = OpsKeys.loadAuthorizedKeys(file.toString());
         assertEquals(2, keys.size());
-        assertTrue(keys.contains(kp1.publicKey()));
-        assertTrue(keys.contains(kp2.publicKey()));
+        assertTrue(keys.containsKey(kp1.publicKey()));
+        assertTrue(keys.containsKey(kp2.publicKey()));
+        // Unscoped entries default to the CONTROL ceiling (backward compatible).
+        assertEquals(OpsScope.CONTROL, keys.get(kp1.publicKey()));
+        assertEquals(OpsScope.CONTROL, keys.get(kp2.publicKey()));
+    }
+
+    @Test
+    void loadAuthorizedKeysParsesScopeMarker(@TempDir Path tmpDir) throws Exception {
+        var readKp = OpsKeys.generateKeypair();
+        var controlKp = OpsKeys.generateKeypair();
+        var bareKp = OpsKeys.generateKeypair();
+
+        Path file = tmpDir.resolve("scoped-keys");
+        Files.writeString(file,
+            readKp.publicKey() + "  scope:read  oncall-agent\n" +
+            controlKp.publicKey() + "  scope:control  ops-laptop\n" +
+            bareKp.publicKey() + "  some-label\n");
+
+        var keys = OpsKeys.loadAuthorizedKeys(file.toString());
+        assertEquals(OpsScope.READ, keys.get(readKp.publicKey()));
+        assertEquals(OpsScope.CONTROL, keys.get(controlKp.publicKey()));
+        assertEquals(OpsScope.CONTROL, keys.get(bareKp.publicKey()), "no marker defaults to control");
+    }
+
+    @Test
+    void fingerprintIsStableAndShort() {
+        var kp = OpsKeys.generateKeypair();
+        String fp1 = OpsKeys.fingerprint(kp.publicKey());
+        String fp2 = OpsKeys.fingerprint(kp.publicKey());
+        assertEquals(fp1, fp2, "fingerprint must be deterministic");
+        assertEquals(12, fp1.length());
+        assertNotEquals(fp1, OpsKeys.fingerprint(OpsKeys.generateKeypair().publicKey()));
     }
 
     @Test
@@ -70,10 +100,10 @@ class OpsKeysTest {
         Path file = tmpDir.resolve("authorized-keys");
         Files.writeString(file, "ed25519:" + kp.publicKey() + "  legacy-bot\n");
 
-        Set<String> keys = OpsKeys.loadAuthorizedKeys(file.toString());
-        assertTrue(keys.contains(kp.publicKey()),
+        var keys = OpsKeys.loadAuthorizedKeys(file.toString());
+        assertTrue(keys.containsKey(kp.publicKey()),
             "legacy ed25519: prefix must be stripped so the raw key matches");
-        assertFalse(keys.contains("ed25519:" + kp.publicKey()));
+        assertFalse(keys.containsKey("ed25519:" + kp.publicKey()));
     }
 
     @Test
@@ -81,7 +111,7 @@ class OpsKeysTest {
         Path file = tmpDir.resolve("empty-keys");
         Files.writeString(file, "# only comments\n\n");
 
-        Set<String> keys = OpsKeys.loadAuthorizedKeys(file.toString());
+        var keys = OpsKeys.loadAuthorizedKeys(file.toString());
         assertTrue(keys.isEmpty());
     }
 

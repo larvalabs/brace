@@ -15,8 +15,10 @@ public class CliOps {
 
     public static int keypair(Path projectDir, String[] args) {
         String label = null;
-        for (int i = 0; i < args.length - 1; i++) {
-            if ("--label".equals(args[i])) { label = args[i + 1]; break; }
+        boolean readOnly = false;
+        for (int i = 0; i < args.length; i++) {
+            if ("--label".equals(args[i]) && i + 1 < args.length) { label = args[i + 1]; }
+            else if ("--read-only".equals(args[i])) { readOnly = true; }
         }
         if (label == null || label.isBlank()) label = defaultLabel(projectDir);
         label = sanitizeLabel(label);
@@ -47,7 +49,12 @@ public class CliOps {
         // than leaving an orphaned, still-trusted line. Different developers get different labels
         // (identity@host), so they never clobber each other's entry.
         Path file = projectDir.resolve("ops-authorized-keys");
-        String entry = kp.publicKey() + "  " + label;
+        // A read-only key carries a `scope:read` marker; the server caps any token it mints at
+        // READ, so it can pull status/errors/logs but never hit a control endpoint. Hand this to
+        // an autonomous agent. Without the flag the entry is unscoped (server default: CONTROL).
+        String entry = readOnly
+            ? kp.publicKey() + "  scope:read  " + label
+            : kp.publicKey() + "  " + label;
         boolean replaced = false;
         try {
             if (Files.exists(file)) {
@@ -72,6 +79,7 @@ public class CliOps {
 
         System.out.println("Public key:   " + kp.publicKey());
         System.out.println("Label:        " + label);
+        System.out.println("Scope:        " + (readOnly ? "read (read-only — cannot hit control endpoints)" : "control"));
         System.out.println();
         System.out.println("Wrote ops-private.key (gitignored) and " + (replaced ? "updated" : "added")
             + " the entry for \"" + label + "\" in ops-authorized-keys.");
@@ -127,13 +135,18 @@ public class CliOps {
         return s.strip().replaceAll("\\s+", "-");
     }
 
-    /** The label portion (after the key) of an authorized-keys line, or null for blank/comment lines. */
+    /**
+     * The label portion of an authorized-keys line, or null for blank/comment lines. Skips the
+     * key and an optional {@code scope:...} marker so rotation still matches by label when an
+     * entry carries a scope.
+     */
     private static String labelOf(String line) {
         String t = line.strip();
         if (t.isEmpty() || t.startsWith("#")) return null;
-        int i = 0;
-        while (i < t.length() && !Character.isWhitespace(t.charAt(i))) i++;
-        return i >= t.length() ? "" : t.substring(i).strip();
+        String[] tokens = t.split("\\s+");
+        int i = 1; // skip the key
+        if (i < tokens.length && tokens[i].startsWith("scope:")) i++; // skip optional scope marker
+        return i >= tokens.length ? "" : String.join(" ", java.util.Arrays.copyOfRange(tokens, i, tokens.length));
     }
 
     public static int dashboard(Path projectDir, String[] args) {

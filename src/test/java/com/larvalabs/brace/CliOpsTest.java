@@ -52,7 +52,7 @@ class CliOpsTest {
             OpsKeys.readKeyFile(projectDir.resolve("ops-private.key").toString()).publicKey();
         var authorized =
             OpsKeys.loadAuthorizedKeys(projectDir.resolve("ops-authorized-keys").toString());
-        assertTrue(authorized.contains(clientPublicKey),
+        assertTrue(authorized.containsKey(clientPublicKey),
             "server's authorized-keys set must contain the raw public key the client sends");
     }
 
@@ -71,8 +71,8 @@ class CliOpsTest {
             .map(String::strip).filter(l -> !l.isEmpty() && !l.startsWith("#")).toList();
         assertEquals(1, keyLines.size(), "rotation must replace the prior entry, not orphan it");
         var authorized = OpsKeys.loadAuthorizedKeys(projectDir.resolve("ops-authorized-keys").toString());
-        assertTrue(authorized.contains(secondPub));
-        assertFalse(authorized.contains(firstPub), "the rotated-out key must no longer be trusted");
+        assertTrue(authorized.containsKey(secondPub));
+        assertFalse(authorized.containsKey(firstPub), "the rotated-out key must no longer be trusted");
     }
 
     @Test

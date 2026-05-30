@@ -172,7 +172,7 @@ Active plans:
 
 ## Future Considerations
 
-- [ ] Scoped ops tokens — separate read-only, dashboard, and control/admin token scopes (reduces blast radius of compromised tokens). Particularly valuable for handing a read-only token to an AI agent for `brace logs` / `brace errors` without granting cache-clear or other control endpoints. **Gating prerequisite for the `brace-oncall` on-call agent plan ([`docs/2026-05-29-brace-oncall-agent-plan.md`](docs/2026-05-29-brace-oncall-agent-plan.md)) — promote priority if that direction is greenlit; a full-power ops key on an always-on autonomous agent is an unacceptable blast radius.**
+- [x] Scoped ops tokens — `read` and `control` scopes, enforced per endpoint. Each authorized key has a scope ceiling (`scope:read` marker in `ops-authorized-keys`, default `control`); `/ops/auth` caps the minted token at the ceiling, so a read-only key can never obtain a control token even if it requests one. Read endpoints (`status`/`errors`/`logs`/`routes`/`cache` stats) require `read`; mutating endpoints (`cache/clear`, `errors/{id}/resolve`) require `control`. Tokens carry a `kid` fingerprint for audit attribution. Generate a read-only agent key with `brace ops keypair --read-only`. (Two scopes to start; ordered `OpsScope` enum leaves room for a third `dashboard` tier later.) Unblocks the `brace-oncall` on-call agent plan; see [`docs/2026-05-30-scoped-ops-token-plan.md`](docs/2026-05-30-scoped-ops-token-plan.md). Next: the ops endpoint audit log attaches to the `kid` seam in `OpsHandler.authenticate`.
 - [ ] Cron expression support for jobs (currently only `every()` and `daily()`)
 - [ ] Precompiled JTE templates for production
 - [ ] Multi-database support testing (MySQL, MariaDB)

@@ -127,7 +127,7 @@ public class CliAuth {
         }
         var authorizedKeys = OpsKeys.loadAuthorizedKeys(authPath.toString());
         var testSig = OpsKeys.sign("test", envKey);
-        for (var pub : authorizedKeys) {
+        for (var pub : authorizedKeys.keySet()) {
             if (OpsKeys.verify("test", testSig, pub)) {
                 return new OpsKeys.Keypair(pub, envKey);
             }
