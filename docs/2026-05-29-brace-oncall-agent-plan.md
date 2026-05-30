@@ -51,7 +51,7 @@ incident fires → pull context → correlate with deploys → classify → act 
   fires on new      │                               triage run │  Dormant until a
   error kind/rate   │                                          │  real event fires.
                     │                                          │
-  brace check ◀─────┼─(cron, every 15–30m)──────── heartbeat   │  FALLBACK: poll.
+  brace check ◀─────┼─(cron, hourly floor)──────── heartbeat   │  FALLBACK: poll.
   brace status      │                               run        │  Catches what a
                     │                                          │  webhook can't:
                     │                                          │  process down,
@@ -65,18 +65,35 @@ poll (a `/loop` running `brace check` every N minutes) is the anti-pattern: it
 burns tokens every tick when healthy and makes incident latency equal to the poll
 interval.
 
+**Cadence constraint (cloud routines).** Scheduled remote agents (routines) run on
+Anthropic's cloud infrastructure with a **1-hour minimum cron interval**. So the
+laptop-off heartbeat floor is hourly — fine for "is it alive," since fast incident
+response comes from the push path, not the poll. If a sub-hourly heartbeat is ever
+wanted it has to run as a **desktop scheduled task** or an in-session `/loop`
+(1-minute minimum), both of which require the operator's machine to be on. For a
+true unattended agent: hourly routine heartbeat + push for everything time-sensitive.
+
 ### Trigger wiring
 
 - **Push:** Phase 0 of the deploy plan builds `/ops/regressions` plus
-  webhook/email notifiers. That notifier *is* the wake signal. Wiring:
-  Brace notifier webhook → small endpoint or queue → `RemoteTrigger` kicks a
-  remote agent run with the incident payload as input. The agent stays stateless
-  between incidents; the trigger is the audit record of "what woke it and why."
+  webhook/email notifiers. That notifier *is* the wake signal. Wiring: Brace
+  notifier webhook → **POST to the routine's API trigger** (routines expose an
+  HTTP trigger; there is no separate `RemoteTrigger` primitive — the remote-trigger
+  mechanisms are the API POST and GitHub events) with the incident payload as the
+  run input. The agent stays stateless between incidents; the API trigger is the
+  audit record of "what woke it and why."
 - **Poll:** A scheduled remote agent (the `schedule`/routines skill) runs
-  `brace check --env prod` every 15–30 min. `brace check` already does 9 health
-  checks (errors, latency, cache, mailer, JVM, …) with configurable thresholds —
-  the agent reads its JSON and only escalates to a full triage run on a real
-  failure.
+  `brace check --env prod` on the **hourly floor** (see cadence constraint above).
+  `brace check` already does 9 health checks (errors, latency, cache, mailer, JVM,
+  …) with configurable thresholds — the agent reads its JSON and only escalates to
+  a full triage run on a real failure.
+- **Network reachability.** Routines run in the cloud behind a **Trusted-domains
+  allowlist**; a Brace app's `/ops/*` endpoints are internal, so the routine must
+  add the app's host to **Allowed domains** (or use Full network access) to call
+  back out. The push path sidesteps this when the incident payload carries enough
+  context — but any callback to pull `brace errors`/`logs` needs the host
+  allowlisted. Worth deciding per-deployment whether the agent pulls from `/ops/*`
+  or works purely from the pushed payload + the captured error record (below).
 
 ### The triage loop (per incident)
 
@@ -137,6 +154,44 @@ turn "a cron that runs `brace check`" into a real, safe on-call agent. All three
 are already tracked; the scoped token is the one to promote in priority if we want
 this direction.
 
+### In-app context: capture, not reason
+
+A tempting alternative is to embed a Claude API key in each app and have it
+*self-diagnose* errors in-process. With Brace's ops surface already this rich
+(`/ops/errors` stack traces, `/ops/logs` ring buffer, `/ops/status` metrics, the
+JFR profiler, per-request DB query instrumentation), almost all of the
+"runtime context advantage" an in-process reasoner would have is **already exposed
+over HTTP** — so the external agent can fetch it. An in-app *reasoner* therefore
+buys little while carrying real downsides: it dies with the app (useless in exactly
+the OOM/crash-loop/502 cases you most need it), egresses stack traces + params to
+Anthropic on the failure hot path, multiplies cost in a crash loop, and puts an API
+key in every app.
+
+What the ops endpoints *don't* already expose is the narrow residual that only
+exists at the catch point and was never recorded:
+
+1. **Live locals at the throw** — the request body, the entity that failed
+   validation, the value that was null. Endpoints show what was *logged*, not the
+   full live frame.
+2. **The exact-request join** — in-process the error binds to *the* request
+   (id, params, session); from outside the agent fuzzy-joins by timestamp.
+3. **Ephemeral state that ages out** — the log ring buffer and the 60-minute metric
+   window are bounded, so an agent polling after the fact may find the relevant
+   lines already evicted.
+
+Every one of those is solved by in-app **capture**, not in-app **reasoning**: at
+the catch point, snapshot the relevant locals + exact request + ephemeral state,
+redact, and attach it to the `ops_errors` row. The capture *must* be in-process
+(only the handler is there at the throw); the reasoning does not. The external
+code-aware agent then reads the now-richer error record via `/ops/errors` and gets
+the residual context for free — no second in-process brain, no per-app API key, no
+hot-path egress beyond what redaction already governs.
+
+Design conclusion: **one reasoner, external, with repo access.** The in-app piece
+is purely *richer error capture* (Phase 1.5 below), widening what the ops record
+holds. The thing that never collapses regardless — the app being down — only the
+external reasoner can cover, which is why it stays the single brain.
+
 ### Noise & cost control
 
 - **Dedupe + cooldown** on error kind — a flapping error must not trigger 50 agent
@@ -164,11 +219,21 @@ be prototyped read-only against a full ops key in a staging app before then.
 
 ### Phase 1 — Heartbeat agent (poll only) (~0.5 day)
 
-A scheduled remote agent running `brace check --env prod` on a 15–30 min cron.
-On a non-green result it pulls `brace status`/`brace errors`/`brace logs`,
-diagnoses, and posts a summary to Slack. No autonomous mutation. This is the
-minimum useful version and validates the triage loop against real output before
-wiring push.
+A scheduled remote agent running `brace check --env prod` on the hourly cron floor
+(see cadence constraint). On a non-green result it pulls
+`brace status`/`brace errors`/`brace logs`, diagnoses, and posts a summary to
+Slack. No autonomous mutation. This is the minimum useful version and validates the
+triage loop against real output before wiring push.
+
+### Phase 1.5 — Richer error capture (in-app, no AI) (~0.5–1 day)
+
+Widen what the `ops_errors` record holds so the external agent gets the
+instant-of-failure context the ops endpoints don't already expose (live locals,
+exact-request binding, ephemeral state — see "In-app context: capture, not
+reason"). At the catch point: snapshot the request (method/path/redacted params/id)
++ relevant captured context, run it through the redaction layer, attach to the
+error row. **No Claude call in the process** — capture only. Independent of the
+agent itself; also improves the human dashboard. Gated on the redaction layer.
 
 ### Phase 2 — `brace-oncall` agent skill (~1 day)
 
@@ -181,10 +246,13 @@ severity classification, and the tiered-action policy. Reads project config from
 
 ### Phase 3 — Push trigger (event-driven) (~1 day)
 
-Wire the Phase-0 notifier webhook to a `RemoteTrigger` so incidents wake the agent
-on arrival instead of waiting for the next poll. Incident payload becomes the
-agent's input. The heartbeat poll from Phase 1 stays as the fallback. Add the
-dedupe/cooldown + acknowledged-incident state here.
+Wire the Phase-0 notifier webhook to **POST the routine's API trigger** so
+incidents wake the agent on arrival instead of waiting for the next poll. Incident
+payload (including the Phase 1.5 captured context) becomes the agent's input. The
+heartbeat poll from Phase 1 stays as the fallback. Add the dedupe/cooldown +
+acknowledged-incident state here. Decide here whether the agent works purely from
+the pushed payload or also calls back to `/ops/*` (which requires allowlisting the
+app's host in the routine's Allowed domains).
 
 ### Phase 4 — Propose-a-fix tier (~1–2 days)
 
@@ -203,6 +271,8 @@ Execution stays gated. Punt until deploy-plan Phase 5 lands.
 
 Minimal framework changes — this is mostly skill + config + the gating ops items:
 - Promote/implement scoped read-only ops token (separate TODO item).
+- Richer error capture into `ops_errors` (Phase 1.5) — the one real in-framework
+  change: capture + redact + attach instant-of-failure context. No AI in-process.
 - `brace-oncall` skill bundled in the distribution.
 - `.brace` config: Slack webhook URL, repo path for source mapping, oncall env.
 - Possibly a thin `brace oncall test` to dry-run the triage loop against a
@@ -231,3 +301,69 @@ Minimal framework changes — this is mostly skill + config + the gating ops ite
 - **vs. full autonomy:** the tiered-gate model captures most of the value (fast
   triage, diagnosed PRs) while keeping production mutation human-approved, which
   is the only version that's actually deployable on day one.
+
+## Decision rationale (revisit log)
+
+The reasoning behind the load-bearing choices, recorded so they can be
+re-litigated when the constraints change. Each notes *what would make us revisit*.
+
+1. **One external reasoner, not an in-app self-diagnostician.**
+   *Why:* Brace's ops endpoints already expose the bulk of runtime context (stack
+   traces, logs, metrics, slow queries) over HTTP, so an in-process reasoner adds
+   little. Its downsides are structural: it dies with the app (useless in the OOM /
+   crash-loop / 502 cases you most need it), egresses sensitive data on the failure
+   hot path, multiplies cost in a crash loop, and forces an API key into every app.
+   The genuinely in-process-only value (live locals, exact-request binding,
+   ephemeral state that ages out of bounded buffers) is *capturable* — so we move
+   capture in-process (Phase 1.5) and keep reasoning external.
+   *Revisit if:* errors routinely carry context that's impractical to serialize
+   into `ops_errors` (huge object graphs, streaming state), or per-app API keys
+   become cheap to manage and the apps gain enough isolation that hot-path egress
+   and crash-loop cost stop mattering. Then a thin in-app triage tier could return.
+
+2. **Capture, not reason, is the in-app job.**
+   *Why:* the residual context the ops endpoints miss exists only at the catch
+   point and is cheap to snapshot+redact+attach; reasoning over it does not need to
+   be co-located. Keeps exactly one brain, no per-app key, and improves the human
+   dashboard as a side effect.
+   *Revisit if:* we find capture can't reach the context without unacceptable
+   coupling to handler internals, or redaction-at-capture proves harder than
+   redaction-at-read.
+
+3. **Event-driven primary, poll only as a liveness fallback.**
+   *Why:* polling burns tokens every tick when healthy and bounds incident latency
+   to the poll interval; the push path (notifier → routine API trigger) is both
+   cheaper and faster. The poll exists solely to catch what a webhook can't report
+   — the app being down or the notifier itself wedged.
+   *Revisit if:* a sub-hourly liveness signal becomes necessary (cloud routines
+   floor at 1 hour) — then either accept a local desktop-task/`/loop` heartbeat
+   (needs the operator's machine on) or push a dead-man's-switch heartbeat from the
+   app so absence, not a poll, signals death.
+
+4. **Cloud routines as the host (1-hour floor accepted).**
+   *Why:* routines run unattended on Anthropic infra, survive laptop-off, and take
+   API/GitHub triggers — the right fit for an on-call agent. The 1-hour cron floor
+   is acceptable *because* fast response comes from push, not poll.
+   *Revisit if:* the routine model gains sub-hourly schedules, or we need local
+   filesystem/tooling the cloud clone can't provide (then desktop scheduled tasks).
+
+5. **Tiered autonomy with a hard human gate on production mutation.**
+   *Why:* proposing (PRs, issues, Slack) is safe and high-value; mutating prod
+   (rollback, cache clear, restart) is not, and an always-on autonomous agent with
+   mutation rights is an unacceptable blast radius on day one.
+   *Revisit if:* operational trust and an audit/undo story mature enough to let
+   specific narrow mutations (e.g. one-click-reversible rollback) move inside the
+   gate.
+
+6. **Scoped read-only token treated as a hard prerequisite, not a nicety.**
+   *Why:* an always-on agent holding a full-power ops key is the single largest
+   blast-radius risk in the design; read-only scoping is what makes autonomous
+   operation defensible. This is why the plan promotes that TODO item to gating.
+   *Revisit if:* the agent needs a control action often enough to justify a
+   separate, narrowly-scoped control token (still never the full key).
+
+7. **Reuse `brace check` thresholds rather than a parallel severity config.**
+   *Why:* one source of truth for "what's healthy"; avoids drift between the
+   dashboard's notion of healthy and the agent's.
+   *Revisit if:* the agent needs severity dimensions `brace check` doesn't model
+   (e.g. business-impact weighting) — extend `brace check`, don't fork.
