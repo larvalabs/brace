@@ -354,7 +354,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String errorPath = jettyRequest.getHttpURI().getPath();
             String errorQuery = jettyRequest.getHttpURI().getQuery();
             String routeInfo = errorMethod + " " + errorPath;
-            String requestInfo = errorMethod + " " + errorPath + (errorQuery != null ? "?" + errorQuery : "");
+            // Redact sensitive query params (?token=…, ?password=…) before the request detail
+            // is stored in the error record and served over /ops/errors.
+            String requestInfo = errorMethod + " " + errorPath
+                + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
             if (stats != null) {
                 int qc = db != null ? db.queryCount() : 0;
                 long qu = db != null ? db.queryDurationUs() : 0;
