@@ -130,10 +130,26 @@ case "$COMMAND" in
         ;;
 esac
 
+# For `version`, also surface the project's pinned version (read straight from
+# pom.xml — cheap, no toolchain download) so Cli can report both.
+PINNED=""
+case "$COMMAND" in
+    version|--version|-v) PINNED="$(pinned_version || true)" ;;
+esac
+
 # exec (not a child) so Ctrl-C / SIGTERM reach Cli directly and its shutdown
 # hooks (which stop the app JVM in `run`/`dev`) actually fire.
-exec java \
-    -Dbrace.home="$HOME_DIR" \
-    -Dbrace.launcher="$SHIM_VERSION" \
-    -cp "$HOME_DIR/lib/*" \
-    com.larvalabs.brace.Cli "$COMMAND" "$@"
+if [ -n "$PINNED" ]; then
+    exec java \
+        -Dbrace.home="$HOME_DIR" \
+        -Dbrace.launcher="$SHIM_VERSION" \
+        -Dbrace.pinned="$PINNED" \
+        -cp "$HOME_DIR/lib/*" \
+        com.larvalabs.brace.Cli "$COMMAND" "$@"
+else
+    exec java \
+        -Dbrace.home="$HOME_DIR" \
+        -Dbrace.launcher="$SHIM_VERSION" \
+        -cp "$HOME_DIR/lib/*" \
+        com.larvalabs.brace.Cli "$COMMAND" "$@"
+fi

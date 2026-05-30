@@ -54,7 +54,17 @@ public class Cli {
                 yield 0;
             }
             case "version", "--version", "-v" -> {
-                System.out.println(BraceVersion.get());
+                String launcher = BraceVersion.get();
+                // The shim passes the project's pinned version (from pom.xml) when run
+                // inside a project. Report both so the launcher version isn't mistaken
+                // for the version this project actually compiles/runs against.
+                String pinned = System.getProperty("brace.pinned");
+                if (pinned != null && !pinned.isBlank()) {
+                    System.out.println(launcher + " (launcher)");
+                    System.out.println(pinned + " (project, from pom.xml)");
+                } else {
+                    System.out.println(launcher);
+                }
                 yield 0;
             }
             case "self-update" -> CliSelfUpdate.run(args);
@@ -139,7 +149,7 @@ public class Cli {
         System.out.println();
         System.out.println("Global commands:");
         System.out.println("  brace new <name>            Create a new Brace project");
-        System.out.println("  brace version               Print the brace version");
+        System.out.println("  brace version               Print the launcher version (and the project pin, inside a project)");
         System.out.println("  brace self-update [version]  Update the installed launcher to the latest (or given) version");
         System.out.println();
         System.out.println("Build & run (run inside a project):");

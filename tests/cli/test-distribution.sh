@@ -57,6 +57,16 @@ cd "$WORK/testapp"
 [[ -f target/classes/app/App.class ]] || fail "App.class not produced"
 pass "brace compile succeeded"
 
+step "Running brace version (project-aware)"
+# Inside a project, version reports both the launcher and the project's pin.
+"$BRACE_BIN" version > "$WORK/version.out" 2>&1 || fail "brace version failed"
+grep -q "(launcher)" "$WORK/version.out" || { cat "$WORK/version.out"; fail "version missing launcher line"; }
+grep -q "(project, from pom.xml)" "$WORK/version.out" || { cat "$WORK/version.out"; fail "version missing project pin line"; }
+# Outside a project it is just the bare launcher version (no labels).
+( cd "$WORK" && "$BRACE_BIN" version ) > "$WORK/version-global.out" 2>&1 || fail "global brace version failed"
+grep -q "(project" "$WORK/version-global.out" && fail "global version should not show a project pin"
+pass "brace version reports launcher + project pin"
+
 step "Running brace test"
 "$BRACE_BIN" test > "$WORK/test.out" 2>&1 || {
     cat "$WORK/test.out"
