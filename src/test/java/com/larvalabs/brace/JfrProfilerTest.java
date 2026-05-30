@@ -74,11 +74,18 @@ class JfrProfilerTest {
     }
 
     @Test
-    void resetProfilingClearsMaps() {
-        profiler.resetProfiling();
-        var methods = profiler.topMethods(10);
-        var allocs = profiler.topAllocations(10);
-        assertTrue(methods.isEmpty(), "methods should be empty after reset");
-        assertTrue(allocs.isEmpty(), "allocations should be empty after reset");
+    void resetProfilingClearsMaps() throws Exception {
+        // A live RecordingStream samples jdk.ExecutionSample every ~20ms and writes
+        // into the profiling maps from its own thread. Against the shared (running)
+        // profiler that races with a reset — a sample can land in the fresh map
+        // between resetProfiling() and the emptiness check — which made this test
+        // flaky on busy CI. Use a dedicated profiler and stop its sampling first so
+        // the reset, and the assertion, are deterministic with no concurrent writer.
+        var p = new JfrProfiler();
+        p.close();              // stop async sampling: no more onEvent callbacks
+        Thread.sleep(100);      // let any in-flight callback finish
+        p.resetProfiling();     // swap in fresh maps with nothing writing to them
+        assertTrue(p.topMethods(10).isEmpty(), "methods should be empty after reset");
+        assertTrue(p.topAllocations(10).isEmpty(), "allocations should be empty after reset");
     }
 }
