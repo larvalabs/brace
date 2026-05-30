@@ -21,6 +21,16 @@ public class ErrorStore {
     }
 
     public void record(String type, String message, String route, String stackTrace, String requestDetail) {
+        record(type, message, route, stackTrace, requestDetail, null, null);
+    }
+
+    /**
+     * Record an error with the instant-of-failure context captured at the catch point:
+     * {@code queriesBefore} (a small JSON summary of DB work done before the throw) and
+     * {@code requestHeaders} (the redacted request headers). Both may be null.
+     */
+    public void record(String type, String message, String route, String stackTrace,
+                       String requestDetail, String queriesBefore, String requestHeaders) {
         var db = new Database(databaseFactory.openSession());
         db.beginTransaction();
         try {
@@ -33,12 +43,12 @@ public class ErrorStore {
                 Object[] row = existing.get(0);
                 long id = ((Number) row[0]).longValue();
                 int count = ((Number) row[1]).intValue();
-                db.sql("UPDATE ops_errors SET occurrence_count = ?, message = ?, stack_trace = ?, request_detail = ?, last_seen = ? WHERE id = ?",
-                    count + 1, message, stackTrace, requestDetail, Timestamp.from(Instant.now()), id);
+                db.sql("UPDATE ops_errors SET occurrence_count = ?, message = ?, stack_trace = ?, request_detail = ?, queries_before = ?, request_headers = ?, last_seen = ? WHERE id = ?",
+                    count + 1, message, stackTrace, requestDetail, queriesBefore, requestHeaders, Timestamp.from(Instant.now()), id);
             } else {
                 var now = Timestamp.from(Instant.now());
-                db.sql("INSERT INTO ops_errors (error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    type, message, stackTrace, route, requestDetail, now, now, 1);
+                db.sql("INSERT INTO ops_errors (error_type, message, stack_trace, route, request_detail, queries_before, request_headers, first_seen, last_seen, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    type, message, stackTrace, route, requestDetail, queriesBefore, requestHeaders, now, now, 1);
             }
 
             // Prune if over limit
@@ -67,10 +77,10 @@ public class ErrorStore {
             String sql;
             List<Object[]> rows;
             if ("resolved".equals(status)) {
-                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at FROM ops_errors WHERE resolved_at IS NOT NULL ORDER BY last_seen DESC";
+                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE resolved_at IS NOT NULL ORDER BY last_seen DESC";
                 rows = db.sqlQuery(sql);
             } else {
-                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at FROM ops_errors WHERE resolved_at IS NULL ORDER BY last_seen DESC";
+                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE resolved_at IS NULL ORDER BY last_seen DESC";
                 rows = db.sqlQuery(sql);
             }
 
@@ -87,6 +97,8 @@ public class ErrorStore {
                 map.put("lastSeen", row[7] != null ? row[7].toString() : null);
                 map.put("occurrenceCount", ((Number) row[8]).intValue());
                 map.put("resolvedAt", row[9] != null ? row[9].toString() : null);
+                map.put("queriesBefore", row[10]);
+                map.put("requestHeaders", row[11]);
                 result.add(map);
             }
             return result;
@@ -131,7 +143,7 @@ public class ErrorStore {
 
             // Re-fetch the updated record
             var rows = db.sqlQuery(
-                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at FROM ops_errors WHERE id = ?", id);
+                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE id = ?", id);
 
             if (rows.isEmpty()) return null;
             var row = rows.get(0);
