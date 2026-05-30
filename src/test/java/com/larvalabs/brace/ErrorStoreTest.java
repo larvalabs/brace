@@ -52,6 +52,28 @@ class ErrorStoreTest {
     }
 
     @Test
+    void recordCapturesQueriesBeforeAndRequestHeaders() {
+        errorStore.record("RuntimeException", "boom", "GET /test", "stack",
+            "GET /test", "{\"count\":3,\"durationMs\":12.4}",
+            "{\"user-agent\":\"curl/8\",\"authorization\":\"[REDACTED]\"}");
+
+        var err = errorStore.list(null).get(0);
+        assertEquals("{\"count\":3,\"durationMs\":12.4}", err.get("queriesBefore"));
+        String headers = (String) err.get("requestHeaders");
+        assertNotNull(headers);
+        assertTrue(headers.contains("curl/8"));
+        assertTrue(headers.contains("[REDACTED]"), "sensitive headers must already be redacted at capture");
+    }
+
+    @Test
+    void legacyFiveArgRecordLeavesContextNull() {
+        errorStore.record("RuntimeException", "boom", "GET /test", "stack", "GET /test");
+        var err = errorStore.list(null).get(0);
+        assertNull(err.get("queriesBefore"));
+        assertNull(err.get("requestHeaders"));
+    }
+
+    @Test
     void duplicateErrorsIncrementCount() {
         errorStore.record("RuntimeException", "error 1", "GET /test", "stack1", "req1");
         errorStore.record("RuntimeException", "error 2", "GET /test", "stack2", "req2");

@@ -112,6 +112,11 @@ public class Log {
     }
 
     private static void println(Map<String, Object> map) {
+        // Redact sensitive-named fields once, here, so nothing sensitive reaches either the
+        // ring buffer (served over /ops/logs) or stdout — regardless of which Log method or
+        // which app code produced the entry. Fixed fields (ts, level, message, path…) have
+        // non-sensitive names and pass through untouched.
+        map = Redactor.redact(map);
         LogTap.append(map);
         try {
             System.out.println(Json.mapper().writeValueAsString(map));

@@ -10,35 +10,36 @@ public class OpsHandler {
     private final JobScheduler jobScheduler;
     private final Mailer mailer;
     private final Router router;
-    private final Set<String> authorizedKeys;
+    private final Map<String, OpsScope> authorizedKeys;
     private final String tokenSecret;
     private final ErrorStore errorStore;
     private final Cache cache;
     private final JfrProfiler profiler;
+    private RegressionTracker regressionTracker;
 
     // In-memory store for single-use login tokens (token -> expiry timestamp)
     private final Map<String, Instant> loginTokens = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String OPS_COOKIE_NAME = "__brace_ops_session";
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, Set<String> authorizedKeys, String tokenSecret) {
+                      Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret) {
         this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, null, null, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, Set<String> authorizedKeys, String tokenSecret,
+                      Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret,
                       ErrorStore errorStore) {
         this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, null, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, Set<String> authorizedKeys, String tokenSecret,
+                      Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret,
                       ErrorStore errorStore, Cache cache) {
         this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, null);
     }
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
-                      Router router, Set<String> authorizedKeys, String tokenSecret,
+                      Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret,
                       ErrorStore errorStore, Cache cache, JfrProfiler profiler) {
         this.stats = stats;
         this.jobScheduler = jobScheduler;
@@ -51,7 +52,7 @@ public class OpsHandler {
         this.profiler = profiler;
     }
 
-    public record OpsAuthRequest(String publicKey, String timestamp, String signature, Integer ttlSeconds) {}
+    public record OpsAuthRequest(String publicKey, String timestamp, String signature, Integer ttlSeconds, String scope) {}
 
     /**
      * POST /ops/auth — validate signed timestamp, issue short-lived token.
@@ -66,7 +67,7 @@ public class OpsHandler {
             }
 
             // Check public key is authorized
-            if (!authorizedKeys.contains(auth.publicKey)) {
+            if (!authorizedKeys.containsKey(auth.publicKey)) {
                 return Result.unauthorized("Unknown public key");
             }
 
@@ -90,9 +91,18 @@ public class OpsHandler {
             // Issue token — check for client-requested TTL
             int requestedTtl = auth.ttlSeconds != null ? auth.ttlSeconds : 3600; // default: 1 hour
             int ttl = Math.min(requestedTtl, 86400); // cap at 24 hours
-            String token = OpsToken.create(tokenSecret, ttl);
+
+            // Scope: cap the requested scope at the key's ceiling. A read-only key can
+            // never mint a control token, so the grant is min(requested, ceiling). When
+            // the client requests no scope, it gets the full ceiling.
+            OpsScope ceiling = authorizedKeys.getOrDefault(auth.publicKey, OpsScope.CONTROL);
+            OpsScope requested = OpsScope.parse(auth.scope, ceiling);
+            OpsScope granted = requested.min(ceiling);
+            String kid = OpsKeys.fingerprint(auth.publicKey);
+
+            String token = OpsToken.create(tokenSecret, ttl, granted, kid);
             var expiresAt = java.time.Instant.now().plusSeconds(ttl).toString();
-            return Json.of(Map.of("token", token, "expiresAt", expiresAt));
+            return Json.of(Map.of("token", token, "expiresAt", expiresAt, "scope", granted.wire()));
         } catch (Exception e) {
             return Result.unauthorized("Authentication failed");
         }
@@ -103,7 +113,7 @@ public class OpsHandler {
      * Requires valid Bearer token authentication.
      */
     public Result loginToken(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
 
         // Generate a random login token (5 minute TTL)
         String loginToken = java.util.UUID.randomUUID().toString();
@@ -154,7 +164,7 @@ public class OpsHandler {
     }
 
     public Result status(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
 
         var data = new LinkedHashMap<String, Object>();
 
@@ -346,14 +356,14 @@ public class OpsHandler {
     }
 
     public Result dashboard(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         // Generate a dashboard token with 2h TTL for htmx polling
         String dashboardToken = OpsToken.create(tokenSecret, 7200);
         return Result.html(OpsDashboard.html(dashboardToken, stats, jobScheduler, mailer, errorStore, cache, profiler));
     }
 
     public Result routes(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
 
         var routeList = new ArrayList<Map<String, Object>>();
         for (var route : router.routes()) {
@@ -366,7 +376,7 @@ public class OpsHandler {
     }
 
     public Result logs(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
 
         String sinceStr = req.queryParam("since");
         String sinceTsStr = req.queryParam("since_ts");
@@ -420,7 +430,7 @@ public class OpsHandler {
     }
 
     public Result errors(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Json.of(List.of());
         String status = req.queryParam("status");
         String since = req.queryParam("since");
@@ -433,7 +443,7 @@ public class OpsHandler {
     }
 
     public Result resolveError(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Result.notFound();
         long id = req.longPathParam("id");
         var resolved = errorStore.resolve(id);
@@ -444,8 +454,40 @@ public class OpsHandler {
         return dashboard(req);
     }
 
+    public void setRegressionTracker(RegressionTracker tracker) {
+        this.regressionTracker = tracker;
+    }
+
+    /** GET /ops/regressions — new error kinds since startup (the /ops/errors shape + acknowledged). */
+    public Result regressions(Request req) {
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
+        if (regressionTracker == null) return Json.of(List.of());
+        var out = new ArrayList<Map<String, Object>>();
+        for (var r : regressionTracker.list()) {
+            var m = new LinkedHashMap<String, Object>();
+            m.put("id", r.id());
+            m.put("errorType", r.type());
+            m.put("route", r.route());
+            m.put("message", r.message());
+            m.put("firstSeen", r.firstSeen().toString());
+            m.put("count", r.count());
+            m.put("acknowledged", r.acknowledged());
+            out.add(m);
+        }
+        return Json.of(out);
+    }
+
+    /** POST /ops/regressions/{id}/acknowledge — stop flagging a regression (control action). */
+    public Result acknowledgeRegression(Request req) {
+        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
+        if (regressionTracker == null) return Result.notFound();
+        long id = req.longPathParam("id");
+        if (!regressionTracker.acknowledge(id)) return Result.notFound();
+        return Json.of(Map.of("acknowledged", true, "id", id));
+    }
+
     public Result clearCache(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
         if (cache == null) return Result.notFound();
         cache.clear();
         if (wantsJson(req)) {
@@ -455,7 +497,7 @@ public class OpsHandler {
     }
 
     public Result cacheStats(Request req) {
-        if (!authorize(req)) return Result.unauthorized("Invalid ops key");
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         var out = new LinkedHashMap<String, Object>();
         if (cache == null) {
             out.put("enabled", false);
@@ -478,29 +520,49 @@ public class OpsHandler {
         return accept != null && accept.contains("application/json");
     }
 
-    private boolean authorize(Request req) {
-        if (tokenSecret == null) return false;
+    /**
+     * Verify the request's token (Bearer header, ops session cookie, or {@code ?token=}
+     * fallback) and return its claims, or {@code null} if unauthenticated. This is the
+     * single choke point where a request's identity (kid) and scope are resolved — the
+     * natural place for a future ops audit log to attach.
+     */
+    private OpsToken.Claims authenticate(Request req) {
+        if (tokenSecret == null) return null;
 
         // Check Authorization: Bearer <token> header
         var authHeader = req.header("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
-            if (OpsToken.validate(token, tokenSecret)) return true;
+            var claims = OpsToken.verify(authHeader.substring(7), tokenSecret);
+            if (claims != null) return claims;
         }
 
         // Check ops session cookie (set by /ops/auth/exchange)
         String cookieToken = req.cookie(OPS_COOKIE_NAME);
-        if (cookieToken != null && OpsToken.validate(cookieToken, tokenSecret)) {
-            return true;
+        if (cookieToken != null) {
+            var claims = OpsToken.verify(cookieToken, tokenSecret);
+            if (claims != null) return claims;
         }
 
         // Check ?token= query param (fallback for direct access, but discouraged)
         var tokenParam = req.queryParam("token");
         if (tokenParam != null) {
-            return OpsToken.validate(tokenParam, tokenSecret);
+            return OpsToken.verify(tokenParam, tokenSecret);
         }
 
-        return false;
+        return null;
+    }
+
+    /**
+     * True if the request carries a valid token whose scope grants {@code required}.
+     * Every authenticated request (granted or scope-denied) is recorded to the ops
+     * audit log, attributed to the token's key fingerprint.
+     */
+    private boolean authorize(Request req, OpsScope required) {
+        var claims = authenticate(req);
+        if (claims == null) return false;
+        boolean granted = claims.scope().grants(required);
+        OpsAudit.record(req.method(), req.path(), claims.kid(), claims.scope(), required, granted);
+        return granted;
     }
 
     private static int levelRank(String level) {

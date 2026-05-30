@@ -45,6 +45,8 @@ public class Brace {
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
     private TrustedProxies trustedProxies;
+    private int regressionsWarmupSeconds = 30;
+    private final List<Notifier> regressionNotifiers = new ArrayList<>();
 
     public static Brace app() {
         return new Brace();
@@ -157,6 +159,26 @@ public class Brace {
 
     public Brace ops(String keysPath) {
         this.opsKeysPath = keysPath;
+        return this;
+    }
+
+    /**
+     * Seconds after startup during which a brand-new error kind is <em>not</em> flagged as a
+     * regression — suppresses cold-boot noise (e.g. a transient DB-connect failure). Default 30.
+     */
+    public Brace regressionsWarmup(int seconds) {
+        this.regressionsWarmupSeconds = seconds;
+        return this;
+    }
+
+    /**
+     * Register notifiers fired once when a new error kind first appears since startup
+     * (e.g. {@code new WebhookNotifier(slackUrl)} for Slack, {@code new MailerNotifier(mailer, addr)}).
+     * A {@link LogNotifier} is always attached when ops + a database are enabled, so regressions
+     * are recorded regardless. Additive across calls.
+     */
+    public Brace notifyRegressions(Notifier... notifiers) {
+        this.regressionNotifiers.addAll(List.of(notifiers));
         return this;
     }
 
@@ -419,6 +441,19 @@ public class Brace {
             var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
             tokenSecret = OpsToken.generateSecret();
             var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
+
+            // Server-side regression detection: track new error kinds since startup and notify on
+            // first appearance. Requires the error store (a database); the LogNotifier is always on
+            // so regressions hit the structured log even with no webhook/email configured.
+            if (errorStore != null) {
+                var notifiers = new ArrayList<Notifier>();
+                notifiers.add(new LogNotifier());
+                notifiers.addAll(regressionNotifiers);
+                var regressionTracker = new RegressionTracker(stats.startedAt(), regressionsWarmupSeconds, notifiers);
+                regressionTracker.seed(errorStore);
+                errorStore.setRegressionListener(regressionTracker);
+                opsHandler.setRegressionTracker(regressionTracker);
+            }
             // Ops POSTs use signed-payload or bearer auth, not cookies — CSRF is the wrong layer
             // and would block the CLI on any app that also calls .sessions(...).
             router.add("POST", "/ops/auth", (Handler) opsHandler::auth).setCsrfRequired(false);
@@ -432,6 +467,8 @@ public class Brace {
             router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError).setCsrfRequired(false);
             router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache).setCsrfRequired(false);
             router.add("GET", "/ops/cache", (Handler) opsHandler::cacheStats);
+            router.add("GET", "/ops/regressions", (Handler) opsHandler::regressions);
+            router.add("POST", "/ops/regressions/{id}/acknowledge", (Handler) opsHandler::acknowledgeRegression).setCsrfRequired(false);
         }
 
         var threadPool = new QueuedThreadPool();

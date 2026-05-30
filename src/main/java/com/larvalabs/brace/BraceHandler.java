@@ -354,10 +354,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String errorPath = jettyRequest.getHttpURI().getPath();
             String errorQuery = jettyRequest.getHttpURI().getQuery();
             String routeInfo = errorMethod + " " + errorPath;
-            String requestInfo = errorMethod + " " + errorPath + (errorQuery != null ? "?" + errorQuery : "");
+            // Redact sensitive query params (?token=…, ?password=…) before the request detail
+            // is stored in the error record and served over /ops/errors.
+            String requestInfo = errorMethod + " " + errorPath
+                + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
+            int qc = db != null ? db.queryCount() : 0;
+            long qu = db != null ? db.queryDurationUs() : 0;
             if (stats != null) {
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
                 stats.recordRequest(errorMethod, errorPath, 500, durationUs, qc, qu);
                 stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
                     routeInfo, stackTraceToString(e), requestInfo, "");
@@ -367,7 +370,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 String errorType = e.getClass().getSimpleName();
                 String errorMessage = e.getMessage();
                 String stackTrace = stackTraceToString(e);
-                Thread.startVirtualThread(() -> errorStore.record(errorType, errorMessage, routeInfo, stackTrace, requestInfo));
+                // Instant-of-failure context: how much DB work ran before the throw, and the
+                // redacted request headers. Captured synchronously (the Jetty request isn't safe
+                // to read off-thread), then persisted on a virtual thread.
+                String queriesBefore = "{\"count\":" + qc + ",\"durationMs\":" + (Math.round(qu / 100.0) / 10.0) + "}";
+                String requestHeaders = captureRedactedHeaders(jettyRequest);
+                Thread.startVirtualThread(() -> errorStore.record(
+                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders));
             }
             Result errorResult = Result.error(500, "Internal Server Error");
             writeResult(errorResult, response, callback);
@@ -491,6 +500,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         var sw = new java.io.StringWriter();
         t.printStackTrace(new java.io.PrintWriter(sw));
         return sw.toString();
+    }
+
+    /**
+     * Snapshot the request headers as a redacted JSON object for the error record.
+     * Sensitive headers (authorization, cookie, …) are replaced with [REDACTED] by the
+     * Redactor. Returns null if there are no headers or serialization fails.
+     */
+    private static String captureRedactedHeaders(org.eclipse.jetty.server.Request request) {
+        try {
+            var headers = new LinkedHashMap<String, Object>();
+            for (var field : request.getHeaders()) {
+                headers.put(field.getName(), field.getValue());
+            }
+            if (headers.isEmpty()) return null;
+            return Json.mapper().writeValueAsString(Redactor.redact(headers));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private Map<String, String> parseQuery(String query) {

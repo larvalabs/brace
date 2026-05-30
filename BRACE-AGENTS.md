@@ -666,8 +666,25 @@ Brace ships with CLI commands and HTTP endpoints for inspecting a running app. U
 
 Ops auth uses Ed25519 keypairs. Two files matter:
 
-- **`ops-authorized-keys`** — committed. Public keys allowed to authenticate, one per line as `<base64-pubkey> <label>`. Loaded by `app.ops("ops-authorized-keys")`.
+- **`ops-authorized-keys`** — committed. Public keys allowed to authenticate, one per line as `<base64-pubkey> [scope:read|scope:control] <label>`. Loaded by `app.ops("ops-authorized-keys")`.
 - **`ops-private.key`** — gitignored, per-developer. Three lines: a comment, the base64 private key, and the matching public key. Path is recorded in `.brace.local` as `ops.key=...`.
+
+### Token scopes (read-only keys)
+
+Each authorized key has a **scope ceiling** that caps every token it can mint. Two scopes:
+
+- **`read`** — read endpoints only: `status`, `errors`, `logs`, `routes`, `cache` stats.
+- **`control`** — everything `read` can do, plus mutating endpoints: `cache/clear`, `errors/{id}/resolve`. `control` implies `read`.
+
+A line with no `scope:` marker defaults to `control` (backward compatible). Mark a key read-only by adding `scope:read`:
+
+```
+<base64-pubkey>  scope:read  oncall-agent
+```
+
+`POST /ops/auth` caps the minted token at the key's ceiling, so a `scope:read` key **cannot** obtain a control token even if it requests one — escalation is impossible by construction. This is what lets you hand an autonomous agent (e.g. `brace-oncall`) a key that can pull `logs`/`errors`/`status` but never clear the cache or resolve errors. Generate one with `brace ops keypair --read-only --label oncall-agent`. Tokens also carry a `kid` (key fingerprint) so ops access can be attributed to a key.
+
+**Audit log.** Every authenticated ops request is recorded as a structured `ops.access` log event (`kid`, scope, method, path, `granted`) — including authenticated-but-scope-denied attempts (`granted=false`). It rides the normal log stream, so a stolen or misused key is visible after the fact via `brace logs` (filter on `event=ops.access`); no separate store and works with or without a database.
 
 `brace new` writes both files at scaffold time (the initial `dev` entry corresponds to the local `ops-private.key`). After that, `brace ops keypair` generates a *new* keypair, prints the private key **once to stdout** (it does **not** write `ops-private.key`), and appends the public half to `ops-authorized-keys`.
 
@@ -704,11 +721,17 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 | `GET /ops/logs[?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=200]` | Recent log entries from in-memory ring buffer |
 | `GET /ops/cache` | Cache stats: size, hits, misses, hitRate, evictions |
 | `GET /ops/routes` | All registered routes |
+| `GET /ops/regressions` | New error kinds since startup (the `/ops/errors` shape + an `acknowledged` flag). The on-call wake signal — empty means no new error types this process lifetime. |
 | `GET /ops/dashboard` | HTML dashboard (browser) |
-| `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) |
-| `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true}` with `Accept: application/json`) |
+| `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) — **control scope** |
+| `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true}` with `Accept: application/json`) — **control scope** |
+| `POST /ops/regressions/{id}/acknowledge` | Stop flagging a regression (returns `{"acknowledged": true}`) — **control scope** |
+
+Read endpoints (the `GET`s above) require a `read`-scope token; the mutating `POST`s require `control`. See "Token scopes" above.
 
 Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pass `Authorization: Bearer <token>`.
+
+**Regression notifications.** When a new error kind first appears since startup, Brace notifies the registered notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl), new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)` (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error store).
 
 ### Storage and retention
 
