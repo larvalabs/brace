@@ -4,6 +4,7 @@ This file is the single source of truth for open work. Multi-phase efforts with 
 
 Active plans:
 - [`docs/2026-05-25-brace-deploy-plan.md`](docs/2026-05-25-brace-deploy-plan.md) — `brace deploy` CLI + server-side regression detection (Phase 0–5).
+- [`docs/2026-05-29-brace-oncall-agent-plan.md`](docs/2026-05-29-brace-oncall-agent-plan.md) — `brace-oncall` autonomous on-call AI developer: event-driven incident triage over the ops surface, tiered autonomy, human-gated production mutation. Gated on scoped read-only ops tokens + audit log + redaction layer + deploy-plan Phase 0.
 
 ## Security Hardening — Phase 1 ✅ COMPLETE (409 tests passing)
 
@@ -171,7 +172,7 @@ Active plans:
 
 ## Future Considerations
 
-- [ ] Scoped ops tokens — separate read-only, dashboard, and control/admin token scopes (reduces blast radius of compromised tokens). Particularly valuable for handing a read-only token to an AI agent for `brace logs` / `brace errors` without granting cache-clear or other control endpoints.
+- [ ] Scoped ops tokens — separate read-only, dashboard, and control/admin token scopes (reduces blast radius of compromised tokens). Particularly valuable for handing a read-only token to an AI agent for `brace logs` / `brace errors` without granting cache-clear or other control endpoints. **Gating prerequisite for the `brace-oncall` on-call agent plan ([`docs/2026-05-29-brace-oncall-agent-plan.md`](docs/2026-05-29-brace-oncall-agent-plan.md)) — promote priority if that direction is greenlit; a full-power ops key on an always-on autonomous agent is an unacceptable blast radius.**
 - [ ] Cron expression support for jobs (currently only `every()` and `daily()`)
 - [ ] Precompiled JTE templates for production
 - [ ] Multi-database support testing (MySQL, MariaDB)
