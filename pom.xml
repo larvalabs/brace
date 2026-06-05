@@ -154,6 +154,19 @@
             <artifactId>flyway-core</artifactId>
             <version>${flyway.version}</version>
         </dependency>
+        <!-- Flyway 10 split per-database support out of flyway-core: core bundles only a
+             handful of handlers (H2 among them, which is why the H2 test suite worked), but
+             PostgreSQL — Brace's production database — needs this module or Flyway fails at
+             startup with "No database found to handle jdbc:postgresql". Runtime scope (like the
+             JDBC driver above) so it propagates transitively to downstream apps' runtime
+             classpath. Caught by the Postgres testcontainer tier; H2-only tests never exercised
+             the real prod migration path. -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>${flyway.version}</version>
+            <scope>runtime</scope>
+        </dependency>
 
         <!-- JTE template engine -->
         <dependency>
