@@ -1,89 +1,46 @@
 package com.larvalabs.brace;
 
 import org.flywaydb.core.Flyway;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.DockerClientFactory;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
-import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Phase 0 pilot for the Postgres testcontainer test tier
- * (see {@code docs/2026-06-05-pg-testcontainers.md}).
- *
- * <p>This is an {@code *IT}, so it runs in the {@code integration-test}/{@code verify}
- * phases via maven-failsafe-plugin — {@code mvn test} (surefire, H2) never sees it and
- * stays Docker-free. It exists to de-risk the whole toolchain before any existing test is
- * migrated, by proving three things end-to-end against <em>real</em> Postgres:
+ * The first Postgres testcontainer test (see {@code docs/2026-06-05-pg-testcontainers.md}).
+ * The container + connection + truncation plumbing lives in {@link PostgresTestBase}; this
+ * class adds only what it proves against <em>real</em> Postgres:
  *
  * <ol>
- *   <li><b>Container boots with the test-speed knobs.</b> tmpfs data dir + {@code fsync=off}
- *       + {@code full_page_writes=off} + {@code synchronous_commit=off} — safe only because a
- *       test DB is disposable; never do this in production.</li>
  *   <li><b>The shipped framework migrations (V1–V5) apply on Postgres.</b> Run through Brace's
  *       own Flyway config (same locations + history table as
- *       {@code DatabaseFactory.runFrameworkMigrations}). Note: the pilot deliberately does
- *       <em>not</em> go through {@code DatabaseFactory}, because that also runs the test-app
- *       migration {@code db/migration/V1__create_posts.sql}, which uses H2/MySQL-only
- *       {@code AUTO_INCREMENT} and fails on Postgres — itself an example of the dialect bug
- *       this tier is meant to catch.</li>
+ *       {@code DatabaseFactory.runFrameworkMigrations}). It deliberately does not go through
+ *       {@code DatabaseFactory} — see {@link DatabaseFactoryPostgresIT} for that path — so this
+ *       test stays focused on the raw SKIP LOCKED semantics.</li>
  *   <li><b>{@code FOR UPDATE SKIP LOCKED} hands disjoint batches to concurrent claimers.</b>
- *       This is the property H2 in-memory physically cannot express, and the reason the
- *       multi-server durable-job work (B7, the future batch claim) needs a real Postgres tier:
- *       today those fixes are validated on a DB that can't exhibit the race they fix.</li>
+ *       The property H2 in-memory physically cannot express, and the reason the durable-job
+ *       work (B7, the future batch claim) needs a real-Postgres tier.</li>
  * </ol>
- *
- * <p>Isolation is by truncation (not transaction-rollback): the concurrency test needs really
- * committed rows visible across two separate JDBC connections, which rollback isolation forbids.
  */
-class PostgresSkipLockedClaimIT {
-
-    static PostgreSQLContainer<?> postgres;
+class PostgresSkipLockedClaimIT extends PostgresTestBase {
 
     @BeforeAll
-    static void startContainerAndMigrate() {
-        // Skip cleanly (rather than fail) when Docker is absent — e.g. a contributor running
-        // `mvn verify` on a machine without Docker. CI (ubuntu-latest) has Docker.
-        Assumptions.assumeTrue(DockerClientFactory.instance().isDockerAvailable(),
-                "Docker not available — skipping Postgres integration test");
-
-        postgres = new PostgreSQLContainer<>(DockerImageName.parse("postgres:16-alpine"))
-                .withDatabaseName("bracetest")
-                .withUsername("brace")
-                .withPassword("brace")
-                // Disposable test DB: trade all durability for speed. tmpfs puts the data dir in
-                // RAM; the flags skip the fsync/WAL work Postgres does to survive a crash we don't
-                // care about here. NEVER use any of this in production.
-                .withTmpFs(Map.of("/var/lib/postgresql/data", "rw"))
-                .withCommand("postgres",
-                        "-c", "fsync=off",
-                        "-c", "full_page_writes=off",
-                        "-c", "synchronous_commit=off")
-                // Honored only if ~/.testcontainers.properties has testcontainers.reuse.enable=true;
-                // keeps the container alive across local `mvn verify` runs. Ignored in CI.
-                .withReuse(true);
-        postgres.start();
-
-        // Apply the *framework* migrations (V1–V5) to real Postgres, exactly as
-        // DatabaseFactory.runFrameworkMigrations does. If any shipped framework DDL were
-        // Postgres-incompatible, this would fail here — which is the point.
+    static void migrate() {
+        // Base @BeforeAll has already started the shared container (and skipped the class if
+        // Docker is absent). Apply the framework migrations exactly as DatabaseFactory does; if
+        // any shipped framework DDL were Postgres-incompatible, this would fail here.
         Flyway.configure()
-                .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+                .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
                 .locations("classpath:brace/db/migration")
                 .table("flyway_brace_history")
                 .baselineOnMigrate(true)
@@ -92,21 +49,15 @@ class PostgresSkipLockedClaimIT {
                 .migrate();
     }
 
-    // No @AfterAll stop(): this is the singleton-container pattern. With reuse disabled,
-    // Ryuk reaps the container at JVM exit; with reuse enabled it intentionally lingers for
-    // the next `mvn verify`. Either way we don't tear it down per class.
-
     @BeforeEach
     void cleanTable() throws Exception {
-        try (Connection conn = connect(); var st = conn.createStatement()) {
-            st.execute("TRUNCATE scheduled_jobs RESTART IDENTITY CASCADE");
-        }
+        truncate("scheduled_jobs");
     }
 
     @Test
     void frameworkMigrationsApplyOnPostgres() throws Exception {
-        // The history table records one success row per applied framework migration (V1–V5).
-        // Asserting >= 5 proves the shipped DDL ran on real Postgres, not just H2.
+        // One success row per applied framework migration (V1–V5). >= 5 proves the shipped DDL
+        // ran on real Postgres, not just H2.
         try (Connection conn = connect();
              var st = conn.createStatement();
              var rs = st.executeQuery(
@@ -154,11 +105,6 @@ class PostgresSkipLockedClaimIT {
     }
 
     // --- helpers ---
-
-    private static Connection connect() throws Exception {
-        return DriverManager.getConnection(
-                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
-    }
 
     private static void seedClaimableJobs(int n) throws Exception {
         try (Connection conn = connect();
