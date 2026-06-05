@@ -85,7 +85,10 @@ Testcontainers' JDBC-URL support (`jdbc:tc:postgresql:16:///bracetest`) auto-sta
 
   *Note: the missing `flyway-database-postgresql` module (caught by Phase 0) means real Brace+Postgres apps had been working around it per-app — e.g. `benchmark/pom.xml` declares the module itself. Now that Brace ships it transitively (runtime scope), those explicit declarations are redundant; the generated-app template (`ProjectGenerator`) never needed changing. Documented for upgraders in [`docs/migrations/brace-0.1.6-to-0.1.7.md`](migrations/brace-0.1.6-to-0.1.7.md) (the agent-facing migration-guide system described in `BRACE-AGENTS.md`).*
 
-**Phase 2 — Migrate the DB-sensitive tests.** Port the integration tests whose value depends on real DB semantics (the `DatabaseFactory`/Flyway tests, `DurableJobTest`, `MultiInstanceSchedulerTest`, `ErrorStoreTest`, `RegressionIntegrationTest`, ops integration tests) to also run on the PG tier. Leave the dialect-agnostic majority on H2.
+**Phase 2 — Migrate the DB-sensitive tests.** Port the integration tests whose value depends on real DB semantics to also run on the PG tier. Leave the dialect-agnostic majority on H2.
+
+  - ✅ **Concurrency tests done 2026-06-05** (the ones H2 couldn't truly validate): `MultiInstanceSchedulerPostgresIT` (B1 — coordination over a real `SELECT … FOR UPDATE` row lock) and `DurableJobConcurrencyPostgresIT` (B7 — 80 jobs drained by 4 concurrent pollers, each must run exactly once; this is the real READ COMMITTED claim race). The H2 `MultiInstanceSchedulerTest`/`DurableJobTest` stay as fast Docker-free smoke/functional tests; the ITs add the real-locking fidelity.
+  - ⬜ **Remaining ports:** `ErrorStoreTest` (esp. the check-then-insert that becomes `ON CONFLICT` in postgres-native Tier 2a — a duplicate-row race H2 can't show), `RegressionIntegrationTest`, the ops integration tests. Lower urgency — these are more CRUD/logic than concurrency.
 
 **Phase 3 — Cash in the postgres-native simplifications.** With the tier proving the real path, land the Tier 2 items from the postgres-native doc: full `SKIP LOCKED` batch claim, `ErrorStore` `ON CONFLICT` + partial unique index, `TIMESTAMPTZ` (delete the hand-rolled timestamp parsers), `TEXT[]`+GIN for shared-cache tags, JSONB columns.
 
