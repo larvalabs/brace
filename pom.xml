@@ -57,6 +57,7 @@
         <flyway.version>10.22.0</flyway.version>
         <jte.version>3.2.1</jte.version>
         <jbcrypt.version>0.4</jbcrypt.version>
+        <testcontainers.version>1.21.3</testcontainers.version>
     </properties>
 
     <dependencies>
@@ -120,12 +121,24 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- PostgreSQL JDBC driver (recommended production database) -->
+        <!-- PostgreSQL JDBC driver (recommended production database; also used by the
+             Testcontainers integration-test tier, where runtime scope is on the classpath) -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>${postgresql.version}</version>
             <scope>runtime</scope>
+        </dependency>
+
+        <!-- Testcontainers — real Postgres for the integration-test tier (*IT, `mvn verify`).
+             Lets concurrency behaviors H2 can't reproduce (SKIP LOCKED, lock waits,
+             READ COMMITTED races) and Postgres-native DDL be tested on the real path.
+             See docs/2026-06-05-pg-testcontainers.md. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
         </dependency>
 
         <!-- HikariCP connection pool -->
@@ -197,6 +210,22 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+            </plugin>
+            <!-- Integration-test tier: runs *IT tests (e.g. the Postgres testcontainer
+                 tests) in the integration-test/verify phases. `mvn test` (surefire) stays
+                 H2-only and Docker-free; `mvn verify` additionally runs this tier. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.5.2</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

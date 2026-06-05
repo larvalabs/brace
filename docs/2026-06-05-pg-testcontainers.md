@@ -75,7 +75,9 @@ Testcontainers' JDBC-URL support (`jdbc:tc:postgresql:16:///bracetest`) auto-sta
 
 ## Plan
 
-**Phase 0 — Pilot (de-risk the toolchain).** One `*IT` that: spins up a tmpfs/fsync-off Postgres container, runs the framework Flyway migrations against it, and proves the `SKIP LOCKED` batch claim hands disjoint batches to two concurrent JDBC connections (Tip 5). Validates container + Flyway-on-PG + isolation + the concurrency harness end to end. Gives a real read on per-suite cost before migrating anything. ~1–2 files.
+**Phase 0 — Pilot (de-risk the toolchain). ✅ Built 2026-06-05** — `PostgresSkipLockedClaimIT` (+ pom: `org.testcontainers:postgresql` test dep, maven-failsafe-plugin for the `*IT` tier). Spins up a tmpfs/fsync-off `postgres:16-alpine` singleton, runs the framework Flyway migrations against it, asserts V1–V5 applied, and proves `FOR UPDATE SKIP LOCKED` hands disjoint batches to two concurrent JDBC connections (Tip 5). `mvn test` (surefire/H2) is unchanged and excludes the IT; `mvn verify` runs the tier. Guarded by `assumeTrue(Docker available)` so it skips cleanly without Docker. *Not yet executed against a live container — this machine has no Docker; needs a `mvn verify` run where Docker is present (CI or a Docker host) to confirm green.*
+
+  **Finding surfaced building it:** the test-app migration `src/test/resources/db/migration/V1__create_posts.sql` uses `BIGINT AUTO_INCREMENT` — H2/MySQL-only syntax that **fails on real Postgres** (needs `GENERATED ALWAYS AS IDENTITY`/`BIGSERIAL`). That's exactly the dialect bug this tier catches. It's why the pilot runs the *framework* migrations directly rather than through `DatabaseFactory` (which would also run this H2-only fixture). Worth fixing the fixture to portable DDL in Phase 1 so `DatabaseFactory`-based tests can run on the PG tier.
 
 **Phase 1 — Harness.** Extract a `PostgresTestBase` (singleton container, truncation-between-tests, a `DatabaseFactory` factory pointed at the container). Wire the Maven tier (failsafe `*IT` or `-Ppg`). Add the PG tier to CI.
 
