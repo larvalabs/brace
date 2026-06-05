@@ -116,17 +116,32 @@ public class JobPoller {
         int maxAttempts = ((Number) row[5]).intValue();
         long backoffSeconds = ((Number) row[6]).longValue();
 
-        // Claim the job
+        // Claim the job: proceed only if THIS poller is the one that flipped
+        // started_at — i.e. the claim UPDATE affected exactly 1 row. Branching on
+        // the affected-row count (not merely on "no exception was thrown") closes a
+        // latent double-run (B7): under READ COMMITTED two instances can both commit
+        // this UPDATE without either throwing — one updates 1 row, the other 0 — and
+        // the 0-row loser would otherwise fall through and execute the body too.
         var claimDb = new Database(factory.openSession());
+        boolean claimed;
         try {
             claimDb.beginTransaction();
-            claimDb.sql("UPDATE scheduled_jobs SET started_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id = ? AND started_at IS NULL", id);
+            claimed = claimDb.jdbc(conn -> {
+                try (var ps = conn.prepareStatement(
+                        "UPDATE scheduled_jobs SET started_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id = ? AND started_at IS NULL")) {
+                    ps.setLong(1, id);
+                    return ps.executeUpdate() == 1;
+                }
+            });
             claimDb.commitTransaction();
         } catch (Exception e) {
             claimDb.rollbackTransaction();
-            return; // Another poller claimed it
+            return; // Transient error claiming — a later poll retries
         } finally {
             claimDb.close();
+        }
+        if (!claimed) {
+            return; // Another poller won the claim for this row
         }
 
         // Execute the job

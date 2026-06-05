@@ -139,11 +139,13 @@ public class DatabaseFactory {
             return "org.hibernate.dialect.H2Dialect";
         } else if (url.startsWith("jdbc:postgresql:")) {
             return "org.hibernate.dialect.PostgreSQLDialect";
-        } else if (url.startsWith("jdbc:mysql:")) {
-            return "org.hibernate.dialect.MySQLDialect";
         }
+        // Only Postgres (prod) and H2 (tests) are supported. There is no MySQL
+        // branch on purpose: the bundled migrations are written in Postgres/H2
+        // SQL, so a MySQL URL that resolved a dialect here would only fail later
+        // at migration time with a more confusing error. Fail loudly up front.
         throw new IllegalArgumentException("Unsupported JDBC URL: " + url
-                + " — expected jdbc:h2:, jdbc:postgresql:, or jdbc:mysql:");
+                + " — expected jdbc:h2: or jdbc:postgresql:");
     }
 
     /** Parsed database configuration: a JDBC URL stripped of credentials, plus user/pass. */
