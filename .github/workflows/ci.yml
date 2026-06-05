@@ -1,0 +1,35 @@
+name: CI
+
+# Runs the full test pipeline on PRs and feature-branch pushes so failures are
+# caught before merge — including the Postgres testcontainer tier (`mvn verify`
+# runs failsafe *IT tests), which is what would have caught the missing
+# flyway-database-postgresql module that the H2-only surefire suite never could.
+#
+# main pushes and v* tags are intentionally not handled here: publish.yml runs
+# `mvn deploy` on those, which traverses the integration-test/verify phases and
+# therefore runs the same IT tier before publishing. Skipping main here avoids a
+# redundant second run (and a redundant Postgres image pull) on every release.
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest  # GitHub-hosted ubuntu runners have Docker preinstalled, so Testcontainers works out of the box
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      # `mvn verify` = surefire (H2 unit suite, Docker-free) + failsafe (the
+      # Postgres testcontainer tier). The IT self-skips via assumeTrue(Docker)
+      # if Docker were ever absent, but on ubuntu-latest it is present and runs.
+      - name: Verify (H2 unit suite + Postgres testcontainer tier)
+        run: mvn -B verify
