@@ -1,6 +1,6 @@
 # Plan: Postgres-native simplification
 
-Status: draft
+Status: largely shipped (1a/1b/1c/1d/2a done 2026-06-06); remainder gated on consumers (2b → shared-cache task, 3b → a JSONB reader)
 Date: 2026-06-04
 
 ## Goal
@@ -58,15 +58,15 @@ The wins below are sorted by how much H2 tension they carry, because that tensio
 
 ## Tier 3 — useful, incremental
 
-### 3a. `INSERT … RETURNING id` in `Jobs.schedule`
+### 3a. `INSERT … RETURNING id` in `Jobs.schedule` ❌ assessed 2026-06-06 — not worth it
 - **Location:** `Jobs.java:73-92`.
-- **Today:** raw-JDBC `getGeneratedKeys` to read the new job id, bypassing the instrumented `Database` (so the insert isn't counted in query stats).
-- **Win:** `INSERT … RETURNING id` routed back through `Database`, so the write is counted and the key read is one statement. Postgres supports `RETURNING`; H2 supports it too in recent versions — verify the H2 version in the test pom before relying on it, otherwise a small dialect branch.
+- **Re-assessment:** the stated win doesn't hold up. (1) The premise is stale — `schedule` already runs through `db.jdbc(...)`, which **does** increment `queryCount`, so the insert *is* counted; there's no stats gap to close. (2) The test H2 (2.3.232) **rejects** `INSERT … RETURNING` (`Syntax error … [*]RETURNING`, verified), so routing through `RETURNING` would need a Postgres/H2 dialect branch — *more* code than today. (3) Hibernate's native-query path also misclassifies `INSERT … RETURNING` (the reason `ErrorStore`/`JobPoller` use raw JDBC for their RETURNING statements), and `db.sqlQuery` null-param typing for the nullable `depends_on_id` adds further friction. The current raw-JDBC `getGeneratedKeys` is already the portable, counted, pragmatic form. (Only loose thread: the `PreparedStatement`/`ResultSet` aren't in try-with-resources — minor hygiene, not a postgres-native item.)
 
-### 3b. `JSONB` for `queries_before` / `request_headers` / `job_data`
+### 3b. `JSONB` for `queries_before` / `request_headers` / `job_data` ⏸️ deferred 2026-06-06 — no reader yet
 - **Location:** error capture columns and `scheduled_jobs.job_data` (currently opaque `TEXT`).
 - **Today:** these are serialized blobs the DB can't see into.
-- **Win:** `JSONB` makes error context and job payloads **queryable** (filter errors by a header, index a job-data field). Writes stay portable (you can write a JSON string into a `JSONB` column); only the read-side queries become Postgres-only, so this can land write-first and add query features behind the testcontainer.
+- **Win:** `JSONB` makes error context and job payloads **queryable** (filter errors by a header, index a job-data field).
+- **Why deferred:** the value is entirely on the read side, and there's **no reader** — nothing queries inside these columns today. Converting write-first is pure storage churn with real added cost: `JSONB` is Postgres-only so the DDL must be Postgres-only (`migration_pg`, like `V6`), and writing a Java `String` into a `JSONB` column isn't actually portable — pgjdbc sends `setString` as `varchar` and Postgres won't implicitly cast `text → jsonb` on write, so it needs either `?::jsonb` casts in the write SQL (Postgres-only → a dialect branch across the `ErrorStore`/`Jobs` inserts) or a global `stringtype=unspecified` connection flag. Same shape as the deferred 1c rollup and the shared cache: land it **with** the query feature that consumes it, not before.
 
 ## Explicitly ruled out (not portability scaffolding — leave them)
 
@@ -78,8 +78,10 @@ The wins below are sorted by how much H2 tension they carry, because that tensio
 1. ✅ Tier 1d (drop MySQL branch) and the row-count half of 1a (B7) — shipped 2026-06-04.
 2. ✅ Tier 1c (ops_timeseries batch inserts + retention) — shipped 2026-06-06; rollup deferred until a reader exists. H2-portable, no testcontainer needed.
 3. ✅ Tier 1b (`TIMESTAMPTZ` + delete parsers) — shipped 2026-06-06 (V7 migration; both parsers deleted; proven on the H2 + PG tiers).
-4. ✅ **Decision point resolved:** the Postgres testcontainer suite exists (see [`docs/2026-06-05-pg-testcontainers.md`](2026-06-05-pg-testcontainers.md)). On it, shipped 2026-06-06: Tier 2a (`ErrorStore` `ON CONFLICT`), Tier 1b (`TIMESTAMPTZ` + parser deletion), and the SKIP LOCKED batch-claim half of 1a. The rest of Tier 2 (TEXT[]+GIN, JSONB) lands next, with tests proving the real prod statement.
-5. Tier 3 as opportunistic follow-ups.
+4. ✅ **Decision point resolved:** the Postgres testcontainer suite exists (see [`docs/2026-06-05-pg-testcontainers.md`](2026-06-05-pg-testcontainers.md)). On it, shipped 2026-06-06: Tier 2a (`ErrorStore` `ON CONFLICT`), Tier 1b (`TIMESTAMPTZ` + parser deletion), and the SKIP LOCKED batch-claim half of 1a.
+5. Tier 3 assessed 2026-06-06: 3a not worth it (stale premise + H2 lacks `RETURNING`), 3b deferred (no reader). 
+
+**Status — the simplification pass is effectively complete.** Everything that simplifies or corrects *existing* code has shipped (1a, 1b, 1c, 1d, 2a). What remains is all gated on a consumer that doesn't exist yet: 2b (`TEXT[]`+GIN) is part of the unbuilt shared-cache backend (its own task), and 3b (`JSONB`) should land with the query feature that reads it. No further postgres-native cleanup is worth doing speculatively.
 
 ## Open decision
 
