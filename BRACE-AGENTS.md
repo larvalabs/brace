@@ -462,6 +462,18 @@ Constraints on the shared backend (the in-process default has none of these):
 - **`getOrSet` dogpile is per-server, not global** — a cold key can have one supplier run per server before the first write lands. Accepted; it's a stampede, not a correctness bug.
 - `counterCount()`/`tagCount()` report 0 (use `size()`).
 
+### What `clear` does (data vs. stats)
+
+`clear()` and `POST /ops/cache/clear` empty the cached **data**:
+- **Shared backend:** a single fleet-wide `TRUNCATE` — one call clears every server's view. There is no separate in-memory data tier, so nothing stale is left behind (the near-cache that *would* introduce per-server L1 copies is deferred — see the design doc).
+- **In-process default:** clears only the instance that received the call; other servers keep their copies until TTL.
+
+Two things are **not** cleared fleet-wide, because they live in each instance's memory:
+- **Hit/miss/eviction stats are per-instance.** A clear resets the counters only on the box that handled it; every server reports its own hit rate on the dashboard by design. So after a fleet-wide data clear, other boxes' stat numbers stay until they next drain — that's expected, not a bug.
+- **Only the `Cache` registered via `app.cache(...)`** is touched by the ops endpoint. If you run the two-instance pattern (a separate `new Cache(...)` you hold yourself), clear that one in your own code.
+
+The clear response reports which happened: `{"cleared": true, "scope": "fleet"}` on a shared backend, `"instance"` otherwise. The dashboard shows a `shared`/`in-process` label and a `[clear fleet]` vs `[clear]` button.
+
 ## Jobs
 
 Recurring (in-memory, lost on restart):
@@ -897,6 +909,7 @@ brace cache --env prod --json
 
 - **`hitRate` below 0.5** — cache is missing more than it hits. Check that frequently-accessed data is being cached, TTLs aren't too short, and cache keys match the access pattern.
 - **`evictions` growing fast** — cache is full and dropping entries. Consider whether the working set is too large for the configured size.
+- **Multi-server note.** Check the `"shared"` field. On a shared backend, `size` is fleet-wide (one store) but `hitRate`/`hits`/`misses`/`evictions` are **per-instance** — each box you query reports its own numbers, so hit rate can differ between servers even though they share the same data. On the in-process default (`"shared": false`), everything — data included — is per-instance, so a low hit rate on one box says nothing about the others.
 - **Stale data suspected** — clear and let it repopulate:
   ```bash
   brace cache clear --env prod

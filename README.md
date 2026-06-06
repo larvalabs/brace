@@ -401,6 +401,10 @@ With a shared backend, `clear()` is fleet-wide, `incr` is globally atomic, and a
 one server is served by any other. Values must be Jackson-round-trippable (POJOs, records,
 collections, primitives, String). The default in-process cache has no such restriction.
 
+`clear()` empties the cached **data** (a single fleet-wide `TRUNCATE` on the shared backend; this
+instance only on the default). Hit/miss/eviction **stats stay per-instance** — each server reports
+its own hit rate — so a clear resets counters only on the box that handled it.
+
 ## Static Files
 
 ```java
