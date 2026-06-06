@@ -15,16 +15,28 @@ file is indistinguishable from a *lost* one. Keep the in-progress guide (ending 
 | Step | Guide |
 |---|---|
 | 0.1.0 → 0.1.1 | ✅ `brace-0.1.0-to-0.1.1.md` |
-| 0.1.1 → 0.1.3 | ❌ **missing** (no 0.1.2 release; 0.1.2 was SNAPSHOT-only) |
-| 0.1.3 → 0.1.4 | ❌ **missing** |
-| 0.1.4 → 0.1.5 | ❌ **missing** |
-| 0.1.5 → 0.1.6 | ❌ **missing** |
+| 0.1.1 → 0.1.3 | ✅ `brace-0.1.1-to-0.1.3.md` (no 0.1.2 release; 0.1.2 was SNAPSHOT-only) |
+| 0.1.3 → 0.1.4 | ✅ `brace-0.1.3-to-0.1.4.md` |
+| 0.1.4 → 0.1.5 | ✅ `brace-0.1.4-to-0.1.5.md` |
+| 0.1.5 → 0.1.6 | ✅ `brace-0.1.5-to-0.1.6.md` |
 | 0.1.6 → 0.1.7 | ✅ `brace-0.1.6-to-0.1.7.md` (in progress — 0.1.7 is the current `-SNAPSHOT`) |
 
-## Known gap (tracked, not yet backfilled)
+## Backfill complete
 
-The four `0.1.1 → 0.1.6` guides above were never written. Backfilling them means diffing the public
-API between each tag pair to recover the breaking changes (if any) and writing a guide per step
-(stating "no breaking changes" where that's what the diff shows). This is archival work deliberately
-left separate from feature changes — do it as its own focused pass, not bundled into unrelated work.
-The `CLAUDE.md` authoring rule now requires keeping new steps current so this gap does not grow.
+The four `0.1.1 → 0.1.6` guides were backfilled by diffing the public API between each tag pair
+(`v0.1.1..v0.1.3`, `v0.1.3..v0.1.4`, `v0.1.4..v0.1.5`, `v0.1.5..v0.1.6`) to recover the
+user-visible changes. Notable findings worth flagging for upgraders:
+
+- **0.1.1 → 0.1.3** bundles the framework's Flyway migrations into the jar (separate
+  `flyway_brace_history` table) — apps that hand-created `scheduled_jobs`/`ops_*` tables must
+  reconcile. Also adds PaaS `DATABASE_URL` parsing and `brace version`.
+- **0.1.3 → 0.1.4** has no API changes but carries a Flyway **checksum-mismatch** risk: the
+  bundled migrations were made idempotent, so deployments that already applied them under 0.1.3
+  need a `repair` against `flyway_brace_history`.
+- **0.1.4 → 0.1.5** fixes a large-request-body hang (real virtual threads) and changes the CLI
+  default env to `prod` when `ops.prod.url` is set.
+- **0.1.5 → 0.1.6** reworks CLI install (`~/.brace` launcher, `self-update`, per-project
+  pinning) and switches generated projects to JitPack coordinates.
+
+The `CLAUDE.md` authoring rule requires keeping each new step's guide current so this gap does not
+reopen.
