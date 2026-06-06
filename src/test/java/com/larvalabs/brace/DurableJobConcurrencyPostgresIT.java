@@ -17,13 +17,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * B7 on real Postgres: many durable jobs drained by several concurrent pollers, each job must
  * execute exactly once.
  *
- * <p>The claim is {@code UPDATE scheduled_jobs SET started_at = … WHERE id = ? AND started_at IS
- * NULL}; the fix (B7) is to proceed only when it affects exactly 1 row. Under READ COMMITTED two
- * pollers can both commit that UPDATE without either throwing — one affects 1 row, the other 0 —
- * and the 0-row loser would otherwise fall through and run the body too (double-run). H2
- * in-memory single-process cannot exhibit that race, so the H2 {@code DurableJobTest} can verify
- * functional behavior (schedule/execute/retry/deps) but not this. This IT is what actually guards
- * B7: real Postgres, real concurrent transactions. See {@code docs/2026-06-05-pg-testcontainers.md}.
+ * <p>On Postgres the poller claims a batch in one transaction with
+ * {@code … ORDER BY run_at LIMIT 50 FOR UPDATE SKIP LOCKED}, flipping {@code started_at} in the
+ * same statement (postgres-native doc Tier 1a). SKIP LOCKED hands concurrent pollers disjoint
+ * batches, so each job is claimed — and run — exactly once by construction. This IT guards that
+ * property on real Postgres with real concurrent transactions: the {@code HashSet} size check
+ * would catch any double-claim that SKIP LOCKED failed to prevent. H2 in-memory can't express
+ * SKIP LOCKED at all (it falls back to a select-then-per-row-claim defended by the B7 row-count
+ * guard), so the H2 {@code DurableJobTest} covers functional behavior — schedule/execute/retry/
+ * deps — but not this. See {@code docs/2026-06-05-pg-testcontainers.md}.
  */
 class DurableJobConcurrencyPostgresIT extends PostgresTestBase {
 

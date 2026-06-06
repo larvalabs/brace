@@ -21,11 +21,11 @@ The wins below are sorted by how much H2 tension they carry, because that tensio
 
 ## Tier 1 — cleanest wins (low H2 tension, do first)
 
-### 1a. Durable job claim → `FOR UPDATE SKIP LOCKED` ✅ partially shipped
-- **Location:** `JobPoller.java` poll (`:70-89`) + per-row claim (`:119-130`).
-- **Today:** poll `SELECT`s up to 50 claimable rows in one (committed) transaction, then each `executeJob` re-claims its row with `UPDATE … WHERE started_at IS NULL` in a separate transaction. The latent double-run (B7) was that the claim branched on *not throwing* rather than on the affected-row count.
-- **Shipped 2026-06-04:** the claim now runs through raw JDBC and proceeds only when `executeUpdate() == 1`, so the 0-row loser under READ COMMITTED no longer falls through and executes the body. That closes B7 with a fully H2-portable change — no migration, no dialect branch.
-- **Still on the table (Postgres-native):** fold selection + claim into a *single* transaction whose poll does `… ORDER BY run_at LIMIT 50 FOR UPDATE SKIP LOCKED` and sets `started_at` before releasing the lock. That hands each instance a **disjoint batch** and deletes the per-row re-claim dance entirely (each row is claimed exactly once by construction, not just defended after the fact). The reason this is *not* yet done: H2 does not reliably support `SKIP LOCKED`, so it needs either a dialect branch or a Postgres testcontainer to test the real path — i.e. it is **not** zero-tension, despite the small diff. Park it behind the testcontainer decision.
+### 1a. Durable job claim → `FOR UPDATE SKIP LOCKED` ✅ shipped
+- **Location:** `JobPoller.pollAndExecute` + `claimBatchPostgres` / `selectCandidatesH2` / `claimAndExecute`.
+- **Was:** poll `SELECT`ed up to 50 claimable rows in one (committed) transaction, then each `executeJob` re-claimed its row with `UPDATE … WHERE started_at IS NULL` in a separate transaction. The latent double-run (B7) was that the claim branched on *not throwing* rather than on the affected-row count.
+- **Shipped 2026-06-04 (B7, H2-portable):** the per-row claim runs through raw JDBC and proceeds only when `executeUpdate() == 1`, so the 0-row loser under READ COMMITTED no longer falls through and executes the body.
+- **Shipped 2026-06-06 (Postgres batch claim):** `pollAndExecute` now branches on `DatabaseFactory.isPostgres()`. On Postgres, `claimBatchPostgres` folds selection + claim into a *single* transaction — `UPDATE scheduled_jobs SET started_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id IN (SELECT id … ORDER BY run_at LIMIT 50 FOR UPDATE SKIP LOCKED) RETURNING …` (raw JDBC; `RETURNING attempts - 1` hands back the pre-increment count so the shared `runJobBody` retry math is unchanged). SKIP LOCKED hands each instance a **disjoint batch**, so every row is claimed exactly once by construction and the per-row re-claim is gone on this path. H2 keeps the portable select-then-per-row-claim (`selectCandidatesH2` + `claimAndExecute`, still defended by the B7 row-count guard) because H2 can't express SKIP LOCKED. Proven by `DurableJobConcurrencyPostgresIT` (80 jobs, 4 concurrent pollers, exactly-once) on the real-Postgres tier; the H2 `DurableJobTest` covers functional behavior.
 
 ### 1b. `TIMESTAMP` → `TIMESTAMPTZ` ✅ shipped 2026-06-06
 - **Location:** every framework migration column that stores an instant (`scheduled_jobs.run_at/started_at/completed_at/failed_at/created_at`, `ops_errors.first_seen/last_seen/resolved_at`, `ops_timeseries.ts`, `ops_profiling_snapshots.ts`, `brace_scheduled_runs.last_run_at`).
@@ -75,7 +75,7 @@ The wins below are sorted by how much H2 tension they carry, because that tensio
 1. ✅ Tier 1d (drop MySQL branch) and the row-count half of 1a (B7) — shipped 2026-06-04.
 2. Tier 1c (ops_timeseries batch + rollup + retention) — H2-portable, removes an unbounded-growth foot-gun, no testcontainer needed.
 3. ✅ Tier 1b (`TIMESTAMPTZ` + delete parsers) — shipped 2026-06-06 (V7 migration; both parsers deleted; proven on the H2 + PG tiers).
-4. ✅ **Decision point resolved:** the Postgres testcontainer suite exists (see [`docs/2026-06-05-pg-testcontainers.md`](2026-06-05-pg-testcontainers.md)). Tier 2a (`ErrorStore` `ON CONFLICT`) shipped on it 2026-06-06. The SKIP LOCKED batch-claim half of 1a and the rest of Tier 2 land next, with tests proving the real prod statement.
+4. ✅ **Decision point resolved:** the Postgres testcontainer suite exists (see [`docs/2026-06-05-pg-testcontainers.md`](2026-06-05-pg-testcontainers.md)). On it, shipped 2026-06-06: Tier 2a (`ErrorStore` `ON CONFLICT`), Tier 1b (`TIMESTAMPTZ` + parser deletion), and the SKIP LOCKED batch-claim half of 1a. The rest of Tier 2 (TEXT[]+GIN, JSONB) lands next, with tests proving the real prod statement.
 5. Tier 3 as opportunistic follow-ups.
 
 ## Open decision
