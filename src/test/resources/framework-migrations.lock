@@ -1,0 +1,27 @@
+# Frozen SHA-256 hashes of released framework migrations.
+#
+# Released framework migrations are IMMUTABLE: once a V*.sql file under
+# src/main/resources/brace/db/migration{,_pg} has shipped, its bytes must never
+# change. Editing one — even cosmetically — desynchronizes Flyway's recorded
+# checksum (flyway_brace_history) from the file and breaks every deployment that
+# already applied it on its next startup. To change behavior, add a NEW forward
+# migration; never edit an old one.
+#
+# FrameworkMigrationsFrozenTest enforces this. If it fails:
+#   - You edited a released migration  -> revert it; add a new V* instead.
+#   - You added a new migration        -> add its `name=sha256` line below
+#                                         (the failure message prints the line).
+# This hash is the raw SHA-256 of the file bytes (stricter than Flyway's own
+# checksum on purpose — whitespace counts). Regenerate with:
+#   shasum -a 256 src/main/resources/brace/db/migration{,_pg}/*.sql
+#
+# Lines are `filename=sha256`; order is irrelevant; `#` lines are comments.
+
+V1__brace_scheduled_jobs.sql=c709c61d713dd951e2dcb692e188d8a21ee934703277ca3cbd4e0d0223879ce6
+V2__brace_ops_tables.sql=7384c21a12a5b12f4baa287ca2288959c2964611f3b2974a498cb5795d901a30
+V3__brace_profiling_tables.sql=b2670268f3ce6ab5731fb37b9e196f0cf46a573606b3d6152a6884f8662ae977
+V4__brace_error_context.sql=71133b91937c258048e826458811518eadef765d0f28f3b009e3272a9e7b2de5
+V5__brace_scheduled_runs.sql=9d0016740db8e4368e0f371dffae72f5280c632bd4cdc03d17b013ac7fc7aa14
+V6__brace_ops_errors_dedupe_index.sql=5acfa4a477d1dffbd21aad7bf7f7e12795f894be76d4d69895e7a4e8bd245efe
+V7__brace_timestamptz.sql=e7d5c03e191c79c7e7899d0b133a64b7a12bcbf560aeb2521af547a9804ab04b
+V8__brace_cache.sql=6b7ff700f18ea9d121009cf2bd3c86e3bed4a622ef8f00c8e4846a24eec35bf6

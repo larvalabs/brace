@@ -98,6 +98,7 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 - **Hibernate StatelessSession.** No dirty checking, no persistence context, no lazy loading. Explicit insert/update/delete.
 - **HQL queries with `?` positional params.** Framework converts `?` to `?1`, `?2` for Hibernate 7.
 - **Per-request transactions.** BraceHandler opens/commits/rollbacks automatically. No `@Transactional`.
+- **Framework migrations are immutable.** Files under `src/main/resources/brace/db/migration{,_pg}` ship in the jar and are tracked in their own `flyway_brace_history` table; once released, their bytes must never change. Editing one breaks Flyway checksum validation on every deployment that already applied it. To change behavior, add a new `V*` migration — never edit an old one. `FrameworkMigrationsFrozenTest` enforces this against `src/test/resources/framework-migrations.lock` (add the printed `name=sha256` line when you add a migration). We deliberately do **not** auto-`repair()` the framework history at runtime — preventing the edit is the fix.
 - **CSRF required by default** on POST/PUT/DELETE. Explicitly opt out with `.csrf(false)` for bearer-token APIs.
 - **Session cookie format:** `base64url(12-byte-nonce || aes-gcm-ciphertext || 16-byte-auth-tag)`. Encrypted and authenticated.
 - **Trusted proxies.** IP forwarding headers only respected from configured proxy CIDRs. Prevents IP spoofing.
