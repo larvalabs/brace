@@ -32,10 +32,13 @@ The wins below are sorted by how much H2 tension they carry, because that tensio
 - **Was:** zone-less `TIMESTAMP`. Because different drivers/dialects hand zone-less timestamps back in different shapes, the framework carried **hand-rolled multi-format timestamp parsers** to normalize them — `ErrorStore.parseFirstSeen`, `RegressionTracker.parseInstant` — that existed *only* to paper over this. There was also a latent correctness bug: on a server whose JVM/OS zone isn't UTC, zone-less round-trips can shift instants.
 - **Shipped:** a single shared migration `brace/db/migration/V7__brace_timestamptz.sql` ALTERs every instant column to `TIMESTAMP WITH TIME ZONE` using the SQL-standard `SET DATA TYPE` form, which parses on **both** H2 and Postgres (the Postgres-only `USING … AT TIME ZONE` clause is omitted so one file runs on both tiers; correct on the UTC-session deployments Brace targets). The parse-side audit confirmed the only Java-side timestamp readers were the two parsers, both consuming `ops_errors` timestamps via `ErrorStore.list()`. Both are **deleted**: `ErrorStore.list`/`resolve` now put a typed `Instant` in the result map via a small `toInstant(Object)` type-dispatch helper (handles whatever `OffsetDateTime`/`Timestamp`/`Instant` Hibernate surfaces, and throws loudly on anything else instead of silently returning null), the `since` filter compares `Instant`s directly, and `RegressionTracker.seed` casts the map value straight to `Instant`. `Json` already serializes `Instant` as ISO-8601 (JavaTimeModule, dates-as-timestamps disabled), so the `/ops/errors` JSON is now canonical ISO instead of a driver-shaped string. Numbered V7, not V6, because the Postgres-only `migration_pg/V6` already holds version 6 in the shared `flyway_brace_history` sequence on Postgres. Proven on both tiers (`mvn test` H2 + `mvn verify` PG).
 
-### 1c. `ops_timeseries`: batch inserts, add a rollup, add retention
-- **Location:** the `ops-flush-*` jobs (`Brace.java:560-639`) and the `ops_timeseries` table.
-- **Today:** each flush does ~21 single-row `INSERT`s; the table has **no reader, no retention, and grows unbounded**. (Multi-server double-counting of this table is already fixed by B1 — the flush jobs now run once cluster-wide.)
-- **Win:** batch the per-flush inserts into one multi-row `INSERT`; add a `date_trunc`-based rollup for dashboard reads; add a pruning job that deletes rows past a retention window. Mostly H2-portable (`date_trunc` and multi-row insert both work on H2); the pruning job is plain SQL.
+### 1c. `ops_timeseries`: batch inserts, add retention ✅ shipped 2026-06-06 (rollup deferred)
+- **Location:** the `ops-flush-*` jobs in `Brace.start` + `Brace.insertMetrics`, the new `ops-metrics-prune` job, and the `ops_timeseries` / `ops_profiling_snapshots` tables.
+- **Was:** each flush did up to ~21 single-row `INSERT`s (and the profiling flush up to 40); the tables had no retention and grew unbounded. (Multi-server double-counting was already fixed by B1 — the flush jobs run once cluster-wide.)
+- **Shipped:**
+  - **Batch inserts.** Each flush now emits one multi-row `INSERT`: the `http`/`cache`/`jvm` flushes build a `LinkedHashMap` and go through the `insertMetrics` helper (which renders `VALUES (?,?,?), …` and lets `Database.sql` renumber the `?`s); the profiling flush builds one `INSERT … VALUES (?,?,?,?), …` for its up-to-40 rows. ~21 round-trips/flush → 1; 40 → 1. Covered by `OpsMetricsFlushTest` on H2.
+  - **Retention.** New `ops-metrics-prune` daily job deletes `ops_timeseries` and `ops_profiling_snapshots` rows past a 14-day window — closes the unbounded-growth foot-gun. Runs once cluster-wide via B1 coordination.
+- **Deferred — the `date_trunc` rollup.** `ops_timeseries` has **no reader** anywhere today (the dashboard sparklines use in-memory `Stats.snapshot()`), so a rollup query would be dead code. It belongs with a future "dashboard reads historical metrics from the table" feature, not this DB-simplification pass; revisit when that consumer exists.
 
 ### 1d. Delete the dead MySQL dialect branch ✅ shipped
 - **Location:** `DatabaseFactory.detectDialect` (`:137-147`).
@@ -73,7 +76,7 @@ The wins below are sorted by how much H2 tension they carry, because that tensio
 ## Suggested order
 
 1. ✅ Tier 1d (drop MySQL branch) and the row-count half of 1a (B7) — shipped 2026-06-04.
-2. Tier 1c (ops_timeseries batch + rollup + retention) — H2-portable, removes an unbounded-growth foot-gun, no testcontainer needed.
+2. ✅ Tier 1c (ops_timeseries batch inserts + retention) — shipped 2026-06-06; rollup deferred until a reader exists. H2-portable, no testcontainer needed.
 3. ✅ Tier 1b (`TIMESTAMPTZ` + delete parsers) — shipped 2026-06-06 (V7 migration; both parsers deleted; proven on the H2 + PG tiers).
 4. ✅ **Decision point resolved:** the Postgres testcontainer suite exists (see [`docs/2026-06-05-pg-testcontainers.md`](2026-06-05-pg-testcontainers.md)). On it, shipped 2026-06-06: Tier 2a (`ErrorStore` `ON CONFLICT`), Tier 1b (`TIMESTAMPTZ` + parser deletion), and the SKIP LOCKED batch-claim half of 1a. The rest of Tier 2 (TEXT[]+GIN, JSONB) lands next, with tests proving the real prod statement.
 5. Tier 3 as opportunistic follow-ups.
