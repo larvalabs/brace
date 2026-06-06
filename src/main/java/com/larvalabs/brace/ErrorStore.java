@@ -2,6 +2,7 @@ package com.larvalabs.brace;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.*;
 
 /**
@@ -180,10 +181,10 @@ public class ErrorStore {
                 map.put("stackTrace", row[3]);
                 map.put("route", row[4]);
                 map.put("requestDetail", row[5]);
-                map.put("firstSeen", row[6] != null ? row[6].toString() : null);
-                map.put("lastSeen", row[7] != null ? row[7].toString() : null);
+                map.put("firstSeen", toInstant(row[6]));
+                map.put("lastSeen", toInstant(row[7]));
                 map.put("occurrenceCount", ((Number) row[8]).intValue());
-                map.put("resolvedAt", row[9] != null ? row[9].toString() : null);
+                map.put("resolvedAt", toInstant(row[9]));
                 map.put("queriesBefore", row[10]);
                 map.put("requestHeaders", row[11]);
                 result.add(map);
@@ -199,25 +200,31 @@ public class ErrorStore {
         if (since == null) return all;
         var out = new ArrayList<Map<String, Object>>();
         for (var row : all) {
-            Object firstSeen = row.get("firstSeen");
-            if (firstSeen == null) continue;
-            java.time.Instant ts = parseFirstSeen(firstSeen.toString());
-            if (ts == null || !ts.isBefore(since)) out.add(row);
+            // firstSeen is a typed Instant now (timestamptz column), so the cutoff is a direct
+            // compare — no string parsing. Rows with a null first_seen are dropped, as before.
+            var firstSeen = (Instant) row.get("firstSeen");
+            if (firstSeen != null && !firstSeen.isBefore(since)) out.add(row);
         }
         return out;
     }
 
-    // Unparseable values fall through to null and are kept, to avoid silently
-    // dropping rows if a future storage format appears.
-    private static java.time.Instant parseFirstSeen(String s) {
-        try { return java.time.Instant.parse(s); } catch (java.time.format.DateTimeParseException ignored) {}
-        try { return java.time.OffsetDateTime.parse(s).toInstant(); } catch (java.time.format.DateTimeParseException ignored) {}
-        try {
-            return java.time.LocalDateTime.parse(s.replace(' ', 'T'))
-                .atZone(java.time.ZoneId.systemDefault())
-                .toInstant();
-        } catch (java.time.format.DateTimeParseException ignored) {}
-        return null;
+    /**
+     * Normalize whatever temporal type the JDBC driver surfaces for a {@code TIMESTAMP WITH TIME
+     * ZONE} column into an absolute {@link Instant}. Hibernate native queries hand back an
+     * {@link OffsetDateTime} on both H2 and Postgres, but {@link Timestamp} and {@link Instant} are
+     * accepted too. This replaces the old multi-format string parser ({@code parseFirstSeen}): the
+     * column stores a real instant now, so this is type dispatch, not zone guessing — and an
+     * unexpected type fails loudly rather than silently returning null.
+     */
+    private static Instant toInstant(Object o) {
+        return switch (o) {
+            case null -> null;
+            case Instant i -> i;
+            case OffsetDateTime odt -> odt.toInstant();
+            case Timestamp ts -> ts.toInstant();
+            default -> throw new IllegalStateException(
+                "Unexpected timestamp type from DB: " + o.getClass().getName());
+        };
     }
 
     public Map<String, Object> resolve(long id) {
@@ -241,10 +248,10 @@ public class ErrorStore {
             map.put("stackTrace", row[3]);
             map.put("route", row[4]);
             map.put("requestDetail", row[5]);
-            map.put("firstSeen", row[6] != null ? row[6].toString() : null);
-            map.put("lastSeen", row[7] != null ? row[7].toString() : null);
+            map.put("firstSeen", toInstant(row[6]));
+            map.put("lastSeen", toInstant(row[7]));
             map.put("occurrenceCount", ((Number) row[8]).intValue());
-            map.put("resolvedAt", row[9] != null ? row[9].toString() : null);
+            map.put("resolvedAt", toInstant(row[9]));
             return map;
         } catch (Exception e) {
             db.rollbackTransaction();

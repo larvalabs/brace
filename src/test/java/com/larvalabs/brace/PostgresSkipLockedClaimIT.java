@@ -23,8 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <ol>
  *   <li><b>The shipped framework migrations (V1–V5) apply on Postgres.</b> Run through Brace's
- *       own Flyway config (same locations + history table as
- *       {@code DatabaseFactory.runFrameworkMigrations}). It deliberately does not go through
+ *       own Flyway config (same locations — including the Postgres-only {@code migration_pg} —
+ *       and history table as {@code DatabaseFactory.runFrameworkMigrations}). It deliberately
+ *       does not go through
  *       {@code DatabaseFactory} — see {@link DatabaseFactoryPostgresIT} for that path — so this
  *       test stays focused on the raw SKIP LOCKED semantics.</li>
  *   <li><b>{@code FOR UPDATE SKIP LOCKED} hands disjoint batches to concurrent claimers.</b>
@@ -37,11 +38,17 @@ class PostgresSkipLockedClaimIT extends PostgresTestBase {
     @BeforeAll
     static void migrate() {
         // Base @BeforeAll has already started the shared container (and skipped the class if
-        // Docker is absent). Apply the framework migrations exactly as DatabaseFactory does; if
-        // any shipped framework DDL were Postgres-incompatible, this would fail here.
+        // Docker is absent). Apply the framework migrations exactly as DatabaseFactory does on
+        // Postgres; if any shipped framework DDL were Postgres-incompatible, this would fail here.
+        //
+        // Both locations, not just the base one: DatabaseFactory adds migration_pg on Postgres
+        // (the V6 partial unique index), and the DatabaseFactory-based ITs share this container and
+        // history table. If one of them runs first and applies V6, a base-location-only Flyway here
+        // would fail validation ("applied migration not resolved locally: 6"). Mirroring
+        // DatabaseFactory's location set keeps this hand-rolled migrate faithful and order-robust.
         Flyway.configure()
                 .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
-                .locations("classpath:brace/db/migration")
+                .locations("classpath:brace/db/migration", "classpath:brace/db/migration_pg")
                 .table("flyway_brace_history")
                 .baselineOnMigrate(true)
                 .baselineVersion("0")
