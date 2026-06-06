@@ -413,7 +413,7 @@ app.post("/api/data", req -> {
 
 ## Cache
 
-In-memory with TTL and tag-based invalidation:
+TTL with tag-based invalidation:
 
 ```java
 var cache = Brace.cache();
@@ -436,6 +436,45 @@ app.get("/", cache.wrap("5m", ctrl::index));
 app.get("/posts", cache.wrap("30m", ctrl::list).tags("posts"));
 cache.clearTag("posts");  // invalidate all cached pages with this tag
 ```
+
+Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path/query are cached separately (they don't clobber each other).
+
+### Backends: in-process (default) vs shared
+
+The default cache is **per-process** — fast (a hashmap, no serialization), but each server keeps its own copy. On a multi-server deploy that means `delete`/`clearTag` only invalidate the box that handled the write, `incr` counts per-instance, and a cached page can differ between servers. For cross-server consistency, opt into the **shared, Postgres-backed** backend with one line:
+
+```java
+app.cache(CacheBackend.postgres(dbFactory));   // shared, durable, cross-server-consistent
+// default stays in-process if you never call this
+```
+
+It reuses the database Brace already requires (table `brace_cache`, applied by the framework's own migrations — no setup). `clear()` becomes a fleet-wide `TRUNCATE`, `incr` is a single atomic SQL statement, and a page rendered on one server is served by any other.
+
+Choose **per use case**, not per deployment — you can run both (a default in-process `Cache` for hot read-through pages, plus `new Cache(CacheBackend.postgres(dbFactory))` for counters/rate limits/invalidation that must be consistent):
+
+| Use | Backend |
+|---|---|
+| Single server | in-process (default) |
+| Read-through of expensive compute, per-server copies OK | in-process |
+| Counters / rate limits / invalidation correctness across servers | shared |
+| Cached pages that must match across the fleet | shared |
+
+Constraints on the shared backend (the in-process default has none of these):
+- **Values must be Jackson-round-trippable** (POJOs, records, collections, primitives, String). A non-serializable value (a stream, a live handle) throws at `set` time. A `get` with the wrong `Class` fails loudly (values carry a type header).
+- **`getOrSet` dogpile is per-server, not global** — a cold key can have one supplier run per server before the first write lands. Accepted; it's a stampede, not a correctness bug.
+- `counterCount()`/`tagCount()` report 0 (use `size()`).
+
+### What `clear` does (data vs. stats)
+
+`clear()` and `POST /ops/cache/clear` empty the cached **data**:
+- **Shared backend:** a single fleet-wide `TRUNCATE` — one call clears every server's view. There is no separate in-memory data tier, so nothing stale is left behind (the near-cache that *would* introduce per-server L1 copies is deferred — see the design doc).
+- **In-process default:** clears only the instance that received the call; other servers keep their copies until TTL.
+
+Two things are **not** cleared fleet-wide, because they live in each instance's memory:
+- **Hit/miss/eviction stats are per-instance.** A clear resets the counters only on the box that handled it; every server reports its own hit rate on the dashboard by design. So after a fleet-wide data clear, other boxes' stat numbers stay until they next drain — that's expected, not a bug.
+- **Only the `Cache` registered via `app.cache(...)`** is touched by the ops endpoint. If you run the two-instance pattern (a separate `new Cache(...)` you hold yourself), clear that one in your own code.
+
+The clear response reports which happened: `{"cleared": true, "scope": "fleet"}` on a shared backend, `"instance"` otherwise. The dashboard shows a `shared`/`in-process` label and a `[clear fleet]` vs `[clear]` button.
 
 ## Jobs
 
@@ -719,12 +758,12 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 | `GET /ops/status` | Full system snapshot (app, http, jvm, errors, jobs, cache, metrics, timeseries) |
 | `GET /ops/errors[?status=open&since=<iso8601>]` | Tracked errors, filterable by status and time window |
 | `GET /ops/logs[?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=200]` | Recent log entries from in-memory ring buffer |
-| `GET /ops/cache` | Cache stats: size, hits, misses, hitRate, evictions |
+| `GET /ops/cache` | Cache stats: shared, size, hits, misses, hitRate, evictions |
 | `GET /ops/routes` | All registered routes |
 | `GET /ops/regressions` | New error kinds since startup (the `/ops/errors` shape + an `acknowledged` flag). The on-call wake signal — empty means no new error types this process lifetime. |
 | `GET /ops/dashboard` | HTML dashboard (browser) |
 | `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) — **control scope** |
-| `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true}` with `Accept: application/json`) — **control scope** |
+| `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true, "scope": "instance"|"fleet"}` with `Accept: application/json`; `fleet` when a shared backend is configured) — **control scope** |
 | `POST /ops/regressions/{id}/acknowledge` | Stop flagging a regression (returns `{"acknowledged": true}`) — **control scope** |
 
 Read endpoints (the `GET`s above) require a `read`-scope token; the mutating `POST`s require `control`. See "Token scopes" above.
@@ -872,6 +911,7 @@ brace cache --env prod --json
 
 - **`hitRate` below 0.5** — cache is missing more than it hits. Check that frequently-accessed data is being cached, TTLs aren't too short, and cache keys match the access pattern.
 - **`evictions` growing fast** — cache is full and dropping entries. Consider whether the working set is too large for the configured size.
+- **Multi-server note.** Check the `"shared"` field. On a shared backend, `size` is fleet-wide (one store) but `hitRate`/`hits`/`misses`/`evictions` are **per-instance** — each box you query reports its own numbers, so hit rate can differ between servers even though they share the same data. On the in-process default (`"shared": false`), everything — data included — is per-instance, so a low hit rate on one box says nothing about the others.
 - **Stale data suspected** — clear and let it repopulate:
   ```bash
   brace cache clear --env prod
@@ -905,7 +945,7 @@ brace cache --env prod --json
     }]
   },
   "jobs": { "scheduled": [{ "name": "cleanup", "lastStatus": "ok", "lastError": null }] },
-  "cache": { "entries": 42, "hits": 1200, "misses": 80 },
+  "cache": { "shared": false, "entries": 42, "hits": 1200, "misses": 80 },
   "metrics": { "counters": {...}, "gauges": {...}, "timers": {...} },
   "timeseries": { "minutes": [{ "ts": "...", "requests": 45, "errors": 0, "avgMs": 12.3 }] }
 }

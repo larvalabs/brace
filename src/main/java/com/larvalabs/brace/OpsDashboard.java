@@ -500,10 +500,15 @@ public class OpsDashboard {
 
             if (hasCache) {
                 sb.append("<div class=\"section\">");
-                sb.append("<div class=\"section-head c-amber\">Cache <span style=\"float:right;font-weight:normal;text-transform:none;letter-spacing:0\">");
+                boolean sharedCache = cache.shared();
+                String clearLabel = sharedCache ? "[clear fleet]" : "[clear]";
+                sb.append("<div class=\"section-head c-amber\">Cache");
+                sb.append(" <span class=\"c-muted\" style=\"font-weight:normal;text-transform:none;letter-spacing:0;font-size:9px\">")
+                  .append(sharedCache ? "shared" : "in-process").append("</span>");
+                sb.append(" <span style=\"float:right;font-weight:normal;text-transform:none;letter-spacing:0\">");
                 sb.append("<button class=\"btn btn-danger\" hx-post=\"/ops/cache/clear\"")
                   .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
-                  .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">[clear all]</button>");
+                  .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">").append(clearLabel).append("</button>");
                 sb.append("</span></div>");
                 long hits = cache.hits(), misses = cache.misses();
                 String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";

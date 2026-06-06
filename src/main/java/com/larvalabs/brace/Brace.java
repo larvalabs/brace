@@ -61,6 +61,16 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Configure the cache with a specific backend — e.g.
+     * {@code app.cache(CacheBackend.postgres(dbFactory))} for a shared, cross-server-consistent
+     * cache. Defaults to in-process if never called.
+     */
+    public Brace cache(CacheBackend backend) {
+        this.cache = new Cache(backend);
+        return this;
+    }
+
     public Brace storage(Storage storage) {
         this.storage = storage;
         return this;
@@ -714,6 +724,9 @@ public class Brace {
     public void stop() throws Exception {
         jobPoller.stop();
         jobScheduler.stop();
+        if (cache != null) {
+            cache.close();
+        }
         if (profiler != null) {
             profiler.close();
         }

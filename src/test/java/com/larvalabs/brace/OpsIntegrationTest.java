@@ -313,7 +313,10 @@ class OpsIntegrationTest {
     void dashboardIncludesCacheSection() throws Exception {
         var response = cacheGet("/ops/dashboard");
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("[clear all]"));
+        // In-process (default) cache: clear button is instance-scoped; a shared backend would
+        // render "[clear fleet]" and a "shared" mode label instead.
+        assertTrue(response.body().contains("[clear]"));
+        assertTrue(response.body().contains("in-process"));
     }
 
     @Test
@@ -677,6 +680,7 @@ class OpsIntegrationTest {
         assertEquals(200, response.statusCode());
         String body = response.body();
         assertTrue(body.contains("\"enabled\":true"), body);
+        assertTrue(body.contains("\"shared\":false"), body); // in-process default
         assertTrue(body.contains("\"size\""), body);
         assertTrue(body.contains("\"hits\""), body);
         assertTrue(body.contains("\"misses\""), body);

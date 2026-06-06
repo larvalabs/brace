@@ -177,7 +177,7 @@ public class App {
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE, explicit opt-out with `.csrf(false)` for bearer-token APIs
 - **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware
-- **Cache** — In-memory with TTL, tag-based invalidation, route-level page caching via `cache.wrap()`
+- **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
@@ -389,6 +389,21 @@ app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
 app.get("/team/{id}", cache.wrap("30m", ctrl::team).tags("simulation"));
 cache.clearTag("simulation");  // invalidate all cached pages at once
 ```
+
+The default cache is per-process. For a multi-server deploy, opt into a shared, durable,
+cross-server-consistent backend in one line — it reuses your Postgres database, no new infra:
+
+```java
+app.cache(CacheBackend.postgres(dbFactory));
+```
+
+With a shared backend, `clear()` is fleet-wide, `incr` is globally atomic, and a page rendered on
+one server is served by any other. Values must be Jackson-round-trippable (POJOs, records,
+collections, primitives, String). The default in-process cache has no such restriction.
+
+`clear()` empties the cached **data** (a single fleet-wide `TRUNCATE` on the shared backend; this
+instance only on the default). Hit/miss/eviction **stats stay per-instance** — each server reports
+its own hit rate — so a clear resets counters only on the box that handled it.
 
 ## Static Files
 

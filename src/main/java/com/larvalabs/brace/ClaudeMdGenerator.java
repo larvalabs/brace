@@ -50,7 +50,7 @@ Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check t
 - **Templates** — JTE `.jte` files. `Result.view("path", "key", value)`. Partials use `_` prefix.
 - **Sessions** — AES-256-GCM encrypted cookies. `session.set()`, `.get()`, `.getInt()`, `.remove()`, `.flash()`. Configure via `SessionOptions`.
 - **CSRF** — Required by default on POST/PUT/DELETE. Opt out: `.csrf(false)` for bearer-token APIs.
-- **Cache** — In-memory TTL with tags. `cache.set()`, `.get()`, `.getOrSet()`, `.clearTag()`. Route caching: `cache.wrap("5m", handler)`.
+- **Cache** — TTL with tags; in-process by default, or shared across servers via `app.cache(CacheBackend.postgres(dbFactory))`. `cache.set()`, `.get()`, `.getOrSet()`, `.clearTag()`. Route caching: `cache.wrap("5m", handler)`.
 - **Jobs** — Recurring: `app.every("5m", name, job)`, `app.daily("02:00", name, job)`. Durable: `Jobs.schedule(db, job, delay)`.
 - **Mailer** — `mail.to().subject().html().send()`. Dev mode captures without sending.
 - **Storage** — S3-compatible. `storage.put()`, `.delete()`, `.url()`, `.putGenerated()`.

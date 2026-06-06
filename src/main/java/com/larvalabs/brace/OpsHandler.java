@@ -282,6 +282,7 @@ public class OpsHandler {
         // Cache
         if (cache != null) {
             var cacheData = new LinkedHashMap<String, Object>();
+            cacheData.put("shared", cache.shared());
             cacheData.put("entries", cache.size());
             cacheData.put("counters", cache.counterCount());
             cacheData.put("tags", cache.tagCount());
@@ -491,7 +492,9 @@ public class OpsHandler {
         if (cache == null) return Result.notFound();
         cache.clear();
         if (wantsJson(req)) {
-            return Json.of(Map.of("cleared", true));
+            // A shared backend clears the whole fleet in one call (TRUNCATE); the in-process
+            // default clears only this instance.
+            return Json.of(Map.of("cleared", true, "scope", cache.shared() ? "fleet" : "instance"));
         }
         return dashboard(req);
     }
@@ -507,6 +510,7 @@ public class OpsHandler {
         long misses = cache.misses();
         long total = hits + misses;
         out.put("enabled", true);
+        out.put("shared", cache.shared());
         out.put("size", cache.size());
         out.put("hits", hits);
         out.put("misses", misses);
