@@ -1,7 +1,6 @@
 package com.larvalabs.brace;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
+import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -23,15 +22,15 @@ import java.util.regex.Pattern;
  * <p>When the backend stores bytes ({@link CacheBackend#requiresSerialization()}), values are
  * serialized via Jackson with a class-name header, so a {@code get} with the wrong type fails loudly
  * and a non-Jackson-round-trippable value throws at {@code set} time. The in-memory backend stores
- * live objects, so it has neither cost nor restriction.
+ * live objects, so it has neither cost nor restriction. Values must be non-null on either backend.
  */
 public class Cache {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper().findAndRegisterModules();
     private static final String[] NO_TAGS = new String[0];
 
     private final CacheBackend backend;
     private final boolean serializes;
+    private final Thread cleanupThread;
     private final LongAdder hits = new LongAdder();
     private final LongAdder misses = new LongAdder();
     private final LongAdder evictions = new LongAdder();
@@ -43,7 +42,7 @@ public class Cache {
     public Cache(CacheBackend backend) {
         this.backend = backend;
         this.serializes = backend.requiresSerialization();
-        Thread.ofVirtual().name("cache-cleanup").start(() -> {
+        this.cleanupThread = Thread.ofVirtual().name("cache-cleanup").start(() -> {
             while (true) {
                 try {
                     Thread.sleep(Duration.ofSeconds(30));
@@ -55,6 +54,11 @@ public class Cache {
         });
     }
 
+    /** Stop the background expiry-sweep thread. Called by {@code Brace.stop()}. */
+    public void close() {
+        cleanupThread.interrupt();
+    }
+
     @SuppressWarnings("unchecked")
     public <T> T get(String key, Class<T> type) {
         if (serializes) {
@@ -63,8 +67,17 @@ public class Cache {
                 misses.increment();
                 return null;
             }
-            hits.increment();
-            return deserialize(bytes, type);
+            try {
+                T value = deserialize(bytes, type);
+                hits.increment();
+                return value;
+            } catch (CacheCorruptionException e) {
+                // Unreadable entry (corruption, truncation, or a class removed across deploys):
+                // treat it as a miss rather than crashing the request. A wrong-but-valid type still
+                // fails loudly via ClassCastException (not caught here).
+                misses.increment();
+                return null;
+            }
         }
         Object value = backend.getObject(key);
         if (value == null) {
@@ -90,17 +103,23 @@ public class Cache {
     @SuppressWarnings("unchecked")
     public <T> T getOrSet(String key, String ttl, Supplier<T> supplier) {
         if (!serializes) {
-            var computed = ((InMemoryBackend) backend).getOrCompute(key, parseTtl(ttl), supplier);
+            var computed = ((InMemoryBackend) backend)
+                    .getOrCompute(key, parseTtl(ttl), () -> requireValue(key, supplier.get()));
             if (computed.hit()) hits.increment(); else misses.increment();
             return (T) computed.value();
         }
         byte[] bytes = backend.getBytes(key);
         if (bytes != null) {
-            hits.increment();
-            return deserialize(bytes, null);
+            try {
+                T cached = deserialize(bytes, null);
+                hits.increment();
+                return cached;
+            } catch (CacheCorruptionException e) {
+                // Fall through and recompute, treating the unreadable entry as a miss.
+            }
         }
         misses.increment();
-        T value = supplier.get();
+        T value = requireValue(key, supplier.get());
         backend.setBytes(key, serialize(value), parseTtl(ttl), NO_TAGS);
         return value;
     }
@@ -180,6 +199,7 @@ public class Cache {
     // Internal
 
     private void store(String key, Object value, Duration ttl, String[] tags) {
+        requireValue(key, value);
         if (serializes) {
             backend.setBytes(key, serialize(value), ttl, tags);
         } else {
@@ -191,10 +211,18 @@ public class Cache {
         store(key, value, parseTtl(ttl), tags);
     }
 
+    /** Cache values must be non-null — null is reserved for "missing" and would diverge between backends. */
+    private static <T> T requireValue(String key, T value) {
+        if (value == null) {
+            throw new IllegalArgumentException("Cache value for key '" + key + "' must not be null");
+        }
+        return value;
+    }
+
     private static byte[] serialize(Object value) {
         try {
             byte[] className = value.getClass().getName().getBytes(StandardCharsets.UTF_8);
-            byte[] body = MAPPER.writeValueAsBytes(value);
+            byte[] body = Json.mapper().writeValueAsBytes(value);
             return ByteBuffer.allocate(4 + className.length + body.length)
                     .putInt(className.length).put(className).put(body).array();
         } catch (Exception e) {
@@ -206,22 +234,43 @@ public class Cache {
 
     @SuppressWarnings("unchecked")
     private static <T> T deserialize(byte[] data, Class<T> expected) {
+        if (data.length < 4) {
+            throw new CacheCorruptionException("cached value too short to hold a header");
+        }
         var buffer = ByteBuffer.wrap(data);
         int len = buffer.getInt();
+        if (len < 0 || len > data.length - 4) {
+            throw new CacheCorruptionException("invalid class-name length " + len + " for " + data.length + " bytes");
+        }
         byte[] className = new byte[len];
-        buffer.get(className);
+        try {
+            buffer.get(className);
+        } catch (BufferUnderflowException e) {
+            throw new CacheCorruptionException("truncated class-name header");
+        }
         int offset = 4 + len;
         String storedName = new String(className, StandardCharsets.UTF_8);
+        Class<?> stored;
         try {
-            Class<?> stored = Class.forName(storedName);
-            if (expected != null && !expected.isAssignableFrom(stored)) {
-                throw new ClassCastException("Cached value is a " + storedName
-                        + " but get(...) requested " + expected.getName());
-            }
-            return (T) MAPPER.readValue(data, offset, data.length - offset, stored);
-        } catch (ClassNotFoundException | java.io.IOException e) {
-            throw new RuntimeException("Cache value deserialization failed for " + storedName, e);
+            stored = Class.forName(storedName);
+        } catch (ClassNotFoundException e) {
+            throw new CacheCorruptionException("cached class no longer present: " + storedName);
         }
+        if (expected != null && !expected.isAssignableFrom(stored)) {
+            // Wrong-but-valid type: fail loudly, this is a programming error, not corruption.
+            throw new ClassCastException("Cached value is a " + storedName
+                    + " but get(...) requested " + expected.getName());
+        }
+        try {
+            return (T) Json.mapper().readValue(data, offset, data.length - offset, stored);
+        } catch (java.io.IOException e) {
+            throw new CacheCorruptionException("cached value body did not deserialize as " + storedName);
+        }
+    }
+
+    /** Thrown internally when a stored byte payload is unreadable; the facade treats it as a miss. */
+    private static final class CacheCorruptionException extends RuntimeException {
+        CacheCorruptionException(String message) { super(message); }
     }
 
     private static final Pattern TTL_PATTERN = Pattern.compile("(\\d+)([smhd])");
@@ -264,12 +313,21 @@ public class Cache {
             // serializable snapshot, so a page rendered on one server can be replayed by any other
             // across a shared backend. (Result is eagerly rendered by the time it reaches here —
             // View.of renders at construction — so the snapshot is just its materialized fields.)
-            var key = "page:" + request.method() + ":" + request.path() + queryKey(request);
+            var key = pageKey(request);
             var cached = cache.get(key, RenderedResponse.class);
             if (cached != null) return cached.toResult();
-            var result = handler.apply(request);
-            cache.setInternal(key, RenderedResponse.from(result), ttl, tags);
-            return result;
+            var rendered = RenderedResponse.from(handler.apply(request));
+            cache.setInternal(key, rendered, ttl, tags);
+            // Replay the snapshot (not the original Result) so a miss and a hit return the same
+            // materialized shape — downstream code sees identical bytes either way.
+            return rendered.toResult();
+        }
+
+        private String pageKey(Request request) {
+            // Vary on HX-Request: a handler may return a partial for htmx and a full page otherwise
+            // (the Vary: HX-Request the framework sets), so the two must not share a cache entry.
+            var prefix = request.isHtmx() ? "page:hx:" : "page:";
+            return prefix + request.method() + ":" + request.path() + queryKey(request);
         }
 
         private String queryKey(Request request) {

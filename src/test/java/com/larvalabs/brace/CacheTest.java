@@ -198,6 +198,49 @@ class CacheTest {
     }
 
     @Test
+    void setNullValueThrows() {
+        assertThrows(IllegalArgumentException.class, () -> cache.set("k", null));
+        assertThrows(IllegalArgumentException.class, () -> cache.set("k", null, "5m"));
+    }
+
+    @Test
+    void valueAndCounterShareKeyIndependently() {
+        // A key used as both a value and a counter must not clobber either (separate namespaces).
+        cache.set("k", "v");
+        assertEquals(1, cache.incr("k"));
+        assertEquals("v", cache.get("k", String.class));
+        cache.set("k", "v2");
+        assertEquals(2, cache.incr("k"));
+        assertEquals("v2", cache.get("k", String.class));
+    }
+
+    @Test
+    void htmxAndNonHtmxDoNotShareCacheEntry() {
+        var counter = new AtomicInteger();
+        Handler handler = req -> {
+            counter.incrementAndGet();
+            return Result.text(req.isHtmx() ? "partial" : "full");
+        };
+        var cached = cache.wrap("5m", handler);
+        var full = new Request("GET", "/p", Map.of(), Map.of(), Map.of(), null);
+        var htmx = new Request("GET", "/p", Map.of(), Map.of(), Map.of("HX-Request", "true"), null);
+
+        assertEquals("full", bodyOf(cached.apply(full)));      // miss
+        assertEquals("partial", bodyOf(cached.apply(htmx)));   // separate miss (varies on HX-Request)
+        assertEquals("full", bodyOf(cached.apply(full)));      // hit
+        assertEquals("partial", bodyOf(cached.apply(htmx)));   // hit
+        assertEquals(2, counter.get(), "htmx and non-htmx must not share a cache entry");
+    }
+
+    @Test
+    void closeStopsCleanlyAndIsSafe() {
+        var c = new Cache();
+        c.close();
+        // Idempotent / safe to call; no exception.
+        c.close();
+    }
+
+    @Test
     void parseTtlFormats() {
         assertEquals(30, Cache.parseTtl("30s").toSeconds());
         assertEquals(5 * 60, Cache.parseTtl("5m").toSeconds());

@@ -3,6 +3,7 @@ package com.larvalabs.brace;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -117,5 +118,51 @@ class CacheSerializationTest {
         return result.rawBytes() != null
                 ? new String(result.rawBytes(), StandardCharsets.UTF_8)
                 : result.body();
+    }
+
+    // --- Robustness: corrupt/unreadable stored bytes become a miss, not a crash ---
+
+    @Test
+    void corruptLengthPrefixIsTreatedAsMiss() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        // Inject bytes whose class-name length header (127) exceeds the payload — a truncated/corrupt
+        // row. get() must return null (miss), not throw NegativeArraySize/OOM/BufferUnderflow.
+        backend.setBytes("k", new byte[]{0, 0, 0, 127, 1, 2, 3}, null, new String[0]);
+        assertNull(cache.get("k", String.class));
+        assertEquals(1, cache.misses());
+    }
+
+    @Test
+    void unknownStoredClassIsTreatedAsMiss() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        // Simulates a cross-version deploy: bytes name a class this process no longer has.
+        backend.setBytes("k", craft("com.example.RemovedInThisDeploy", "{}".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        assertNull(cache.get("k", String.class));
+        assertEquals(1, cache.misses());
+    }
+
+    @Test
+    void getOrSetRecomputesOnCorruptEntry() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        backend.setBytes("k", new byte[]{-1, -1, -1, -1}, null, new String[0]);
+        var value = cache.getOrSet("k", "5m", () -> "recomputed");
+        assertEquals("recomputed", value, "a corrupt cached entry must fall through to the supplier");
+    }
+
+    // --- Null values are rejected on both backends (null is reserved for 'missing') ---
+
+    @Test
+    void nullValueRejectedOnSerializingBackend() {
+        var cache = new Cache(new SerializingMapBackend());
+        assertThrows(IllegalArgumentException.class, () -> cache.set("k", null));
+    }
+
+    private static byte[] craft(String className, byte[] body) {
+        byte[] cn = className.getBytes(StandardCharsets.UTF_8);
+        return ByteBuffer.allocate(4 + cn.length + body.length).putInt(cn.length).put(cn).put(body).array();
     }
 }

@@ -46,8 +46,22 @@ class PostgresCacheBackendIT extends PostgresTestBase {
 
     @BeforeEach
     void clean() throws Exception {
-        truncate("brace_cache");
+        truncate("brace_cache", "brace_cache_counters");
         backend = new PostgresBackend(factory);
+    }
+
+    @Test
+    void valueAndCounterWithSameKeyDoNotCollide() {
+        var cache = new Cache(backend);
+        // Values and counters live in separate tables, so a shared key must not clobber either —
+        // parity with the in-memory backend's two maps.
+        cache.set("k", "the-value", "1h");
+        assertEquals(1, cache.incr("k"));
+        assertEquals(2, cache.incr("k"));
+        assertEquals("the-value", cache.get("k", String.class), "incr must not wipe the value");
+        cache.set("k", "new-value", "1h");
+        assertEquals(3, cache.incr("k"), "set must not reset the counter");
+        assertEquals("new-value", cache.get("k", String.class));
     }
 
     @Test

@@ -437,6 +437,8 @@ app.get("/posts", cache.wrap("30m", ctrl::list).tags("posts"));
 cache.clearTag("posts");  // invalidate all cached pages with this tag
 ```
 
+Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path/query are cached separately (they don't clobber each other).
+
 ### Backends: in-process (default) vs shared
 
 The default cache is **per-process** — fast (a hashmap, no serialization), but each server keeps its own copy. On a multi-server deploy that means `delete`/`clearTag` only invalidate the box that handled the write, `incr` counts per-instance, and a cached page can differ between servers. For cross-server consistency, opt into the **shared, Postgres-backed** backend with one line:

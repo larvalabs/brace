@@ -95,7 +95,7 @@ app.cache(Brace.cache());        // or omit entirely — in-process is the defau
 app.cache(CacheBackend.postgres(dbFactory));   // shared, durable, cross-server-consistent
 ```
 
-That's the whole change. The shared backend creates its own table (`brace_cache`) via Brace's
+That's the whole change. The shared backend creates its own tables (`brace_cache`, `brace_cache_counters`) via Brace's
 framework migrations — no migration to write. `clear()` becomes a fleet-wide `TRUNCATE`,
 `incr` is a single atomic statement, and a page rendered on one server is served by any other.
 

@@ -113,35 +113,43 @@ Caveat to document: a cached page captures the rendered per-request output. Do *
 
 ### Postgres backend
 
-A single table, applied via the framework's bundled Flyway instance. **The cache table is only ever touched by the Postgres backend; H2/in-memory apps never create or read it.** So it goes in the Postgres-only migration tier (`src/main/resources/brace/db/migration_pg/`, alongside `V6__brace_ops_errors_dedupe_index.sql`), and we use native `TEXT[]` + GIN freely. This resolves the draft's open question #1 (array vs. portable child table for H2 parity): there is no H2 parity to preserve, because H2 never gets the table — exactly like V6 today. The two migration locations share one `flyway_brace_history` sequence; the latest version is `V7`, so the cache migration is **`V8`**.
+**Two tables** (values and counters), applied via the framework's bundled Flyway instance. **They are only ever touched by the Postgres backend; H2/in-memory apps never create or read them.** So they go in the Postgres-only migration tier (`src/main/resources/brace/db/migration_pg/`, alongside `V6__brace_ops_errors_dedupe_index.sql`), and we use native `TEXT[]` + GIN freely. This resolves the draft's open question #1 (array vs. portable child table for H2 parity): there is no H2 parity to preserve, because H2 never gets the tables — exactly like V6 today. The two migration locations share one `flyway_brace_history` sequence; the latest version is `V7`, so the cache migration is **`V8`**.
+
+Values and counters are **separate tables**, mirroring the in-memory backend's two maps. A single table keyed only by `cache_key` cannot hold both a value and a counter for the same key, so `set` and `incr` on a shared key would clobber each other (the value upsert would null the counter, etc.) — a divergence from the in-memory backend. Splitting the tables makes the two namespaces independent on both backends.
 
 ```sql
 -- src/main/resources/brace/db/migration_pg/V8__brace_cache.sql
 CREATE TABLE IF NOT EXISTS brace_cache (
     cache_key   TEXT PRIMARY KEY,
     value       BYTEA,
-    counter     BIGINT,          -- non-null only for incr/decr keys
     tags        TEXT[],          -- Postgres array; GIN-indexed for clearTag
     expires_at  TIMESTAMPTZ      -- null = no expiry
 );
 CREATE INDEX IF NOT EXISTS idx_brace_cache_expires ON brace_cache (expires_at);
 CREATE INDEX IF NOT EXISTS idx_brace_cache_tags    ON brace_cache USING GIN (tags);
+
+CREATE TABLE IF NOT EXISTS brace_cache_counters (
+    cache_key   TEXT PRIMARY KEY,
+    counter     BIGINT NOT NULL
+);
 ```
 
 `IF NOT EXISTS` guards per the framework-migration idempotency convention.
 
-Operation mapping (native SQL via the established `Database.jdbc(conn -> …)` / `db.sql(...)` patterns from `JobPoller`):
+Operation mapping (native SQL via the established `Database.jdbc(conn -> …)` pattern from `JobPoller`, run through `DatabaseFactory.withSession`):
 
 | `Cache` op | SQL |
 |---|---|
 | `get` | `SELECT value FROM brace_cache WHERE cache_key=? AND (expires_at IS NULL OR expires_at > now())` |
 | `set` | `INSERT ... ON CONFLICT (cache_key) DO UPDATE SET value=?, tags=?, expires_at=?` (upsert) |
-| `incr`/`decr` | `INSERT ... ON CONFLICT (cache_key) DO UPDATE SET counter = brace_cache.counter + ? RETURNING counter` — **atomic, no read-modify-write** |
-| `delete` | `DELETE WHERE cache_key=?` |
-| `deletePrefix` | `DELETE WHERE cache_key LIKE ? || '%'` |
-| `clearTag` | `DELETE WHERE tags @> ARRAY[?]` (GIN index) |
-| `clear` | `TRUNCATE brace_cache` |
-| expiry sweep | the existing 30s cleanup virtual thread, but DB-side: `DELETE WHERE expires_at < now()` |
+| `incr`/`decr` | `INSERT INTO brace_cache_counters ... ON CONFLICT (cache_key) DO UPDATE SET counter = brace_cache_counters.counter + ? RETURNING counter` — **atomic, no read-modify-write** |
+| `delete` | `DELETE FROM brace_cache WHERE cache_key=?` |
+| `deletePrefix` | `DELETE FROM brace_cache WHERE cache_key LIKE ? ESCAPE '\'` (wildcards in the prefix escaped) |
+| `clearTag` | `DELETE FROM brace_cache WHERE tags @> ARRAY[?]::text[]` (GIN index) |
+| `clear` | `TRUNCATE brace_cache, brace_cache_counters` |
+| expiry sweep | the existing 30s cleanup virtual thread, but DB-side: `DELETE FROM brace_cache WHERE expires_at < now()` |
+
+A stored byte payload that is unreadable (truncation, corruption, or a class removed across a rolling deploy) is treated as a **cache miss**, not a crash — the length-prefixed class-name header is bounds-checked and `Class.forName`/Jackson failures are caught. A wrong-but-valid type on `get(key, Class)` still fails loudly (it's a programming error). The shared `size()` (`SELECT count(*)`) is cached for ~5s so repeated dashboard polls don't each scan the table.
 
 #### Why `TEXT[]` + GIN for tags
 

@@ -724,6 +724,9 @@ public class Brace {
     public void stop() throws Exception {
         jobPoller.stop();
         jobScheduler.stop();
+        if (cache != null) {
+            cache.close();
+        }
         if (profiler != null) {
             profiler.close();
         }
