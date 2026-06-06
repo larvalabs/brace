@@ -30,6 +30,11 @@ class PostgresBackend implements CacheBackend {
     }
 
     @Override
+    public boolean shared() {
+        return true;
+    }
+
+    @Override
     public byte[] getBytes(String key) {
         return tx(conn -> {
             try (var ps = conn.prepareStatement(

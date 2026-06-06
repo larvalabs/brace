@@ -27,6 +27,15 @@ public interface CacheBackend {
     /** True when values are stored as bytes (the facade serializes). Shared/custom backends return true. */
     boolean requiresSerialization();
 
+    /**
+     * True when the backend is shared across the fleet (every instance reads/writes one store), so
+     * invalidation and {@code clear} affect all servers at once. False for the per-process default.
+     * Drives ops wording (e.g. that {@code /ops/cache/clear} is fleet-wide).
+     */
+    default boolean shared() {
+        return false;
+    }
+
     // --- Serialized value ops (shared/custom backends implement these) ---
 
     /** @return stored bytes, or null on miss/expiry. */

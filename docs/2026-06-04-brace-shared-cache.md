@@ -1,6 +1,6 @@
 # Plan: Shared cache backend for multi-server consistency
 
-Status: ready
+Status: Phases 1–3 implemented (2026-06-06); Phase 4 deferred
 Date: 2026-06-04 (finalized 2026-06-06)
 
 ## Goal
@@ -181,11 +181,13 @@ The `CacheBackend` SPI is the hedge: an app that outgrows the DB cache adds `Cac
 
 Sequenced simple → composed: ship the two independently-useful single-tier backends first, add the near-cache as a deferred decorator over them.
 
-- **Phase 1 — SPI + Postgres backend.** Extract `CacheBackend`; refactor `Cache` to delegate while keeping `InMemoryBackend` as the default with its no-serialization fast path (`requiresSerialization() == false`). Add `incr(key, delta)` to the SPI, keep `incr`/`decr` on the facade. Add Jackson value serialization with type header (only on byte backends). Add `migration_pg/V8__brace_cache.sql`, `PostgresBackend` (atomic `incr`, GIN-backed `clearTag`, read-time expiry). Add `app.cache(CacheBackend)` overload; keep `app.cache(Cache)`. **Tests:** backend conformance suite run against both backends; cross-server consistency proven by pointing **two `Cache` facades at one backend**. Postgres tests named `*IT` (Testcontainers, `mvn verify`).
+- **Phase 1 — SPI + Postgres backend.** ✅ Done. Extract `CacheBackend`; refactor `Cache` to delegate while keeping `InMemoryBackend` as the default with its no-serialization fast path (`requiresSerialization() == false`). Add `incr(key, delta)` to the SPI, keep `incr`/`decr` on the facade. Add Jackson value serialization with type header (only on byte backends). Add `migration_pg/V8__brace_cache.sql`, `PostgresBackend` (atomic `incr`, GIN-backed `clearTag`, read-time expiry). Add `app.cache(CacheBackend)` overload; keep `app.cache(Cache)`. **Tests:** backend conformance suite run against both backends; cross-server consistency proven by pointing **two `Cache` facades at one backend**. Postgres tests named `*IT` (Testcontainers, `mvn verify`).
 
-- **Phase 2 — Rendered page caching.** Add the internal `RenderedResponse` record and the package-private `Result` rebuild factory. Change `CachedHandler` to snapshot the already-materialized `Result` and replay it (no `BraceHandler` surgery — `View` is eager). Verify a page cached by one facade is served by another. Document the per-user-content caveat.
+- **Phase 2 — Rendered page caching.** ✅ Done. Add the internal `RenderedResponse` record and the package-private `Result` rebuild factory. Change `CachedHandler` to snapshot the already-materialized `Result` and replay it (no `BraceHandler` surgery — `View` is eager). Verify a page cached by one facade is served by another. Document the per-user-content caveat.
 
-- **Phase 3 — Ops + docs.** Confirm fleet-wide `/ops/cache/clear`, `size()` via count, dashboard wording. Document in `BRACE-AGENTS.md` and `README.md` (per the CLAUDE.md "update docs on public API change" rule): the per-use-case framing, the opt-in line, the two-instance escape hatch, the Jackson-round-trippable-values constraint, and the dogpile caveat. Add a migration-guide note.
+- **Phase 3 — Ops + docs.** ✅ Done (added a `shared` flag to `/ops/cache` + `/ops/status`, a
+  `scope: instance|fleet` field on the clear response, and a shared/in-process indicator with a
+  `[clear fleet]` button on the dashboard). Confirm fleet-wide `/ops/cache/clear`, `size()` via count, dashboard wording. Document in `BRACE-AGENTS.md` and `README.md` (per the CLAUDE.md "update docs on public API change" rule): the per-use-case framing, the opt-in line, the two-instance escape hatch, the Jackson-round-trippable-values constraint, and the dogpile caveat. Add a migration-guide note.
 
 - **Phase 4 (deferred) — near-cache + Redis.** `CacheBackend.nearCache(local, shared)` decorator over the SPI, with cross-server L1 invalidation (Postgres `LISTEN/NOTIFY` or short L1 TTL) — built only if profiling shows the L2 round trip is a real hot-path cost. `CacheBackend.redis(...)` alongside.
   - **Phase 4a — immutable-key near-cache.** The carve-out worth pulling forward if a perf need appears first: a near-cache restricted to immutable / content-addressed keys (long or infinite TTL, value never changes per key). Staleness is impossible by construction, so it needs **no invalidation machinery** and incurs **no correctness downgrade** — the cheap, safe slice of Phase 4.

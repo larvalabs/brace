@@ -132,6 +132,9 @@ public class Cache {
         evictions.add(backend.clearTag(tag));
     }
 
+    /** True when a shared (cross-server) backend is configured — invalidation and clear are fleet-wide. */
+    public boolean shared() { return backend.shared(); }
+
     public int size() { return backend.size(); }
     public int counterCount() { return backend.counterCount(); }
     public int tagCount() { return backend.tagCount(); }
