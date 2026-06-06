@@ -134,6 +134,13 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 ### Updating documentation
 When changing public API (adding/removing/renaming methods, classes, or handler types), update `BRACE-AGENTS.md` and `README.md` to reflect the change.
 
+### Migration guides (per version step)
+`docs/migrations/brace-FROM-to-TO.md` is the upgrade path agents and humans follow when bumping `<brace.version>` (see the "Upgrading" section of `BRACE-AGENTS.md`). One guide per released step, named for the version boundary (e.g. `brace-0.1.6-to-0.1.7.md`).
+
+- **While developing toward the next release:** keep the guide for the in-progress step (the one ending at the current `-SNAPSHOT` version in `pom.xml`) up to date as you go. Any user-visible change — a breaking change *or* a notable new/optional capability — gets an entry there, with before/after examples. Create the file the first time a release needs one; don't wait for tag time.
+- **A guide is required even when there are no breaking changes.** State that explicitly ("This release has no breaking changes") so a skipped guide is never ambiguous with a missing one — agents are told to read every guide between two versions in order, so a gap reads as "lost," not "nothing changed."
+- **Don't rename or backfill silently.** If you find a missing guide for an already-released step, surface it rather than reconstructing history as part of an unrelated change.
+
 ### Adding dynamic page updates with htmx
 1. Include `<script src="/__brace/htmx.min.js"></script>` in your layout
 2. Add `hx-get`, `hx-target`, `hx-select`, `hx-trigger` attributes to HTML elements
