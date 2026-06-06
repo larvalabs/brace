@@ -560,17 +560,16 @@ public class Brace {
             jobScheduler.every(httpStatsInterval, "ops-flush-http", (db, ctx) -> {
                 var snapshot = stats.snapshot();
                 if (snapshot.requests() > 0) {
-                    var ts = java.sql.Timestamp.from(snapshot.ts());
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.requests", snapshot.requests());
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.errors", snapshot.errors());
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "http.avg_latency_us", snapshot.totalLatencyUs() / snapshot.requests());
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.max_latency_us", snapshot.maxLatencyUs());
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "http.queries", snapshot.queries());
+                    var metrics = new java.util.LinkedHashMap<String, Object>();
+                    metrics.put("http.requests", snapshot.requests());
+                    metrics.put("http.errors", snapshot.errors());
+                    metrics.put("http.avg_latency_us", snapshot.totalLatencyUs() / snapshot.requests());
+                    metrics.put("http.max_latency_us", snapshot.maxLatencyUs());
+                    metrics.put("http.queries", snapshot.queries());
                     if (snapshot.queries() > 0) {
-                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                            ts, "http.avg_query_us", snapshot.queryUs() / snapshot.queries());
+                        metrics.put("http.avg_query_us", snapshot.queryUs() / snapshot.queries());
                     }
+                    insertMetrics(db, java.sql.Timestamp.from(snapshot.ts()), metrics);
                 }
             });
 
@@ -578,10 +577,11 @@ public class Brace {
                 jobScheduler.every(cacheStatsInterval, "ops-flush-cache", (db, ctx) -> {
                     long h = cache.drainHits(), m = cache.drainMisses(), e = cache.drainEvictions();
                     if (h > 0 || m > 0 || e > 0) {
-                        var ts = java.sql.Timestamp.from(java.time.Instant.now());
-                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "cache.hits", h);
-                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "cache.misses", m);
-                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "cache.evictions", e);
+                        var metrics = new java.util.LinkedHashMap<String, Object>();
+                        metrics.put("cache.hits", h);
+                        metrics.put("cache.misses", m);
+                        metrics.put("cache.evictions", e);
+                        insertMetrics(db, java.sql.Timestamp.from(java.time.Instant.now()), metrics);
                     }
                 });
             }
@@ -599,49 +599,81 @@ public class Brace {
             // JVM metrics flush
             if (profiler != null) {
                 jobScheduler.every(httpStatsInterval, "ops-flush-jvm", (db, ctx) -> {
-                    var ts = java.sql.Timestamp.from(java.time.Instant.now());
                     var snap = profiler.snapshot();
                     var heap = (java.util.Map<String, Object>) snap.get("heap");
                     var cpu = (java.util.Map<String, Object>) snap.get("cpu");
                     var threads = (java.util.Map<String, Object>) snap.get("threads");
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.heap_used_mb", heap.get("usedMB"));
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.heap_max_mb", heap.get("maxMB"));
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.cpu_user", Math.round((double) cpu.get("jvmUser") * 10000)); // basis points (0.01% precision)
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.cpu_system", Math.round((double) cpu.get("jvmSystem") * 10000)); // basis points
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.threads_active", threads.get("active"));
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.threads_peak", threads.get("peak"));
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.gc_count", profiler.gcCount());
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.gc_total_pause_ms", profiler.totalGcPauseMs());
-                    db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)",
-                        ts, "jvm.gc_max_pause_ms", profiler.maxRecentGcPauseMs());
+                    var metrics = new java.util.LinkedHashMap<String, Object>();
+                    metrics.put("jvm.heap_used_mb", heap.get("usedMB"));
+                    metrics.put("jvm.heap_max_mb", heap.get("maxMB"));
+                    metrics.put("jvm.cpu_user", Math.round((double) cpu.get("jvmUser") * 10000)); // basis points (0.01% precision)
+                    metrics.put("jvm.cpu_system", Math.round((double) cpu.get("jvmSystem") * 10000)); // basis points
+                    metrics.put("jvm.threads_active", threads.get("active"));
+                    metrics.put("jvm.threads_peak", threads.get("peak"));
+                    metrics.put("jvm.gc_count", profiler.gcCount());
+                    metrics.put("jvm.gc_total_pause_ms", profiler.totalGcPauseMs());
+                    metrics.put("jvm.gc_max_pause_ms", profiler.maxRecentGcPauseMs());
+                    insertMetrics(db, java.sql.Timestamp.from(java.time.Instant.now()), metrics);
                 });
 
                 jobScheduler.every("5m", "ops-flush-jvm-profiling", (db, ctx) -> {
                     var ts = java.sql.Timestamp.from(java.time.Instant.now());
+                    var rows = new java.util.ArrayList<Object[]>();
                     for (var entry : profiler.topMethods(20)) {
-                        db.sql("INSERT INTO ops_profiling_snapshots (ts, type, name, value) VALUES (?, ?, ?, ?)",
-                            ts, "method", entry.getKey(), entry.getValue());
+                        rows.add(new Object[]{ts, "method", entry.getKey(), entry.getValue()});
                     }
                     for (var entry : profiler.topAllocations(20)) {
-                        db.sql("INSERT INTO ops_profiling_snapshots (ts, type, name, value) VALUES (?, ?, ?, ?)",
-                            ts, "allocation", entry.getKey(), entry.getValue());
+                        rows.add(new Object[]{ts, "allocation", entry.getKey(), entry.getValue()});
+                    }
+                    if (!rows.isEmpty()) {
+                        // One multi-row INSERT instead of up to 40 single-row round-trips.
+                        var sql = new StringBuilder("INSERT INTO ops_profiling_snapshots (ts, type, name, value) VALUES ");
+                        var params = new java.util.ArrayList<Object>(rows.size() * 4);
+                        for (int i = 0; i < rows.size(); i++) {
+                            sql.append(i == 0 ? "(?, ?, ?, ?)" : ", (?, ?, ?, ?)");
+                            java.util.Collections.addAll(params, rows.get(i));
+                        }
+                        db.sql(sql.toString(), params.toArray());
                     }
                     profiler.resetProfiling();
                 });
             }
+
+            // Retention: ops_timeseries and ops_profiling_snapshots are append-only with no reader
+            // today, so without pruning they grow unbounded. Delete rows past a 14-day window once
+            // a day; B1 coordination (brace_scheduled_runs) runs it once cluster-wide.
+            jobScheduler.daily("03:17", "ops-metrics-prune", (db, ctx) -> {
+                var cutoff = java.sql.Timestamp.from(java.time.Instant.now().minus(java.time.Duration.ofDays(14)));
+                db.sql("DELETE FROM ops_timeseries WHERE ts < ?", cutoff);
+                db.sql("DELETE FROM ops_profiling_snapshots WHERE ts < ?", cutoff);
+            });
         }
 
         if (showBanner) {
             printBanner();
         }
+    }
+
+    /**
+     * Write a flush's metrics as one multi-row INSERT into ops_timeseries instead of N single-row
+     * round-trips. The {@code ?} placeholders are renumbered to ?1, ?2… by {@link Database#sql}.
+     * Package-private so {@code OpsMetricsFlushTest} can exercise the dynamic-SQL build directly.
+     */
+    static void insertMetrics(Database db, java.sql.Timestamp ts, java.util.Map<String, Object> metrics) {
+        if (metrics.isEmpty()) {
+            return;
+        }
+        var sql = new StringBuilder("INSERT INTO ops_timeseries (ts, metric, val) VALUES ");
+        var params = new java.util.ArrayList<Object>(metrics.size() * 3);
+        boolean first = true;
+        for (var entry : metrics.entrySet()) {
+            sql.append(first ? "(?, ?, ?)" : ", (?, ?, ?)");
+            first = false;
+            params.add(ts);
+            params.add(entry.getKey());
+            params.add(entry.getValue());
+        }
+        db.sql(sql.toString(), params.toArray());
     }
 
     private void printBanner() {

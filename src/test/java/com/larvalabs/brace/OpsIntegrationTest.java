@@ -499,6 +499,7 @@ class OpsIntegrationTest {
         var body = response.body();
         assertTrue(body.contains("ops-flush-jvm"), "should have ops-flush-jvm job");
         assertTrue(body.contains("ops-flush-jvm-profiling"), "should have ops-flush-jvm-profiling job");
+        assertTrue(body.contains("ops-metrics-prune"), "should have ops-metrics-prune retention job");
     }
 
     @Test

@@ -57,6 +57,7 @@
         <flyway.version>10.22.0</flyway.version>
         <jte.version>3.2.1</jte.version>
         <jbcrypt.version>0.4</jbcrypt.version>
+        <testcontainers.version>1.21.3</testcontainers.version>
     </properties>
 
     <dependencies>
@@ -120,12 +121,24 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- PostgreSQL JDBC driver (recommended production database) -->
+        <!-- PostgreSQL JDBC driver (recommended production database; also used by the
+             Testcontainers integration-test tier, where runtime scope is on the classpath) -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>${postgresql.version}</version>
             <scope>runtime</scope>
+        </dependency>
+
+        <!-- Testcontainers — real Postgres for the integration-test tier (*IT, `mvn verify`).
+             Lets concurrency behaviors H2 can't reproduce (SKIP LOCKED, lock waits,
+             READ COMMITTED races) and Postgres-native DDL be tested on the real path.
+             See docs/2026-06-05-pg-testcontainers.md. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
         </dependency>
 
         <!-- HikariCP connection pool -->
@@ -140,6 +153,19 @@
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
             <version>${flyway.version}</version>
+        </dependency>
+        <!-- Flyway 10 split per-database support out of flyway-core: core bundles only a
+             handful of handlers (H2 among them, which is why the H2 test suite worked), but
+             PostgreSQL — Brace's production database — needs this module or Flyway fails at
+             startup with "No database found to handle jdbc:postgresql". Runtime scope (like the
+             JDBC driver above) so it propagates transitively to downstream apps' runtime
+             classpath. Caught by the Postgres testcontainer tier; H2-only tests never exercised
+             the real prod migration path. -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>${flyway.version}</version>
+            <scope>runtime</scope>
         </dependency>
 
         <!-- JTE template engine -->
@@ -197,6 +223,22 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+            </plugin>
+            <!-- Integration-test tier: runs *IT tests (e.g. the Postgres testcontainer
+                 tests) in the integration-test/verify phases. `mvn test` (surefire) stays
+                 H2-only and Docker-free; `mvn verify` additionally runs this tier. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.5.2</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
