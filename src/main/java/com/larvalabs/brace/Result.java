@@ -32,6 +32,17 @@ public class Result {
             .header("Content-Disposition", "attachment; filename=\"" + filename + "\"");
     }
 
+    /**
+     * Rebuild a fully-materialized response from a cached render (see {@code Cache.RenderedResponse}).
+     * Replays an arbitrary status, content type, body bytes, and headers — the page cache's replay
+     * path, where {@link #bytes} (hardcoded 200) is insufficient.
+     */
+    static Result raw(int status, String contentType, byte[] body, Map<String, String> headers) {
+        var result = new Result(status, contentType, body);
+        if (headers != null) result.headers.putAll(headers);
+        return result;
+    }
+
     public static Result text(String body) {
         return new Result(200, "text/plain", body);
     }

@@ -3,6 +3,9 @@ package com.larvalabs.brace;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -63,5 +66,56 @@ class CacheSerializationTest {
         var stream = InputStream.nullInputStream();
         cache.set("stream", stream);
         assertSame(stream, cache.get("stream", InputStream.class));
+    }
+
+    // --- Phase 2: rendered page caching ---
+
+    @Test
+    void pageCacheServedAcrossInstances() {
+        // Two facades on one shared backend = two servers. A page rendered on one is served by the
+        // other without re-running the handler — the cross-server page-cache guarantee.
+        var backend = new SerializingMapBackend();
+        var serverA = new Cache(backend);
+        var serverB = new Cache(backend);
+
+        var renders = new AtomicInteger();
+        Handler handler = req -> {
+            renders.incrementAndGet();
+            return Result.html("<p>hello</p>");
+        };
+        var onA = serverA.wrap("5m", handler);
+        var onB = serverB.wrap("5m", handler);
+
+        var req = new Request("GET", "/page", Map.of(), Map.of(), Map.of(), null);
+        var first = onA.apply(req);   // miss on A → renders, caches to shared backend
+        var second = onB.apply(req);  // hit on B → served from shared backend, no render
+
+        assertEquals(1, renders.get(), "B must serve A's cached render without re-running the handler");
+        assertEquals("<p>hello</p>", bodyOf(first));
+        assertEquals("<p>hello</p>", bodyOf(second));
+        assertEquals("text/html", second.contentType());
+    }
+
+    @Test
+    void pageCachePreservesStatusAndHeadersThroughSerialization() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        Handler handler = req -> Result.error(503, "down for maintenance").header("Retry-After", "120");
+        var wrapped = cache.wrap("5m", handler);
+
+        var req = new Request("GET", "/status", Map.of(), Map.of(), Map.of(), null);
+        wrapped.apply(req);                 // miss → caches the RenderedResponse as bytes
+        var hit = wrapped.apply(req);       // hit → rebuilt from bytes
+
+        assertEquals(503, hit.status(), "status survives the serialization round-trip");
+        assertEquals("text/plain", hit.contentType());
+        assertEquals("120", hit.header("Retry-After"), "custom headers survive the round-trip");
+        assertEquals("down for maintenance", bodyOf(hit));
+    }
+
+    private static String bodyOf(Result result) {
+        return result.rawBytes() != null
+                ? new String(result.rawBytes(), StandardCharsets.UTF_8)
+                : result.body();
     }
 }

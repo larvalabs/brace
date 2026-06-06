@@ -144,9 +144,18 @@ class CacheTest {
         var result1 = cached.apply(req);
         var result2 = cached.apply(req);
 
-        assertEquals("response", result1.body());
-        assertEquals("response", result2.body());
+        // A cache hit replays a materialized RenderedResponse (raw bytes), so compare the effective
+        // response body rather than the Result.body() String field.
+        assertEquals("response", bodyOf(result1));
+        assertEquals("response", bodyOf(result2));
         assertEquals(1, counter.get());
+    }
+
+    /** The effective response body: raw bytes if materialized (a cache-hit replay), else the String body. */
+    private static String bodyOf(Result result) {
+        return result.rawBytes() != null
+                ? new String(result.rawBytes(), java.nio.charset.StandardCharsets.UTF_8)
+                : result.body();
     }
 
     @Test
@@ -160,13 +169,13 @@ class CacheTest {
         var cached = cache.wrap("5m", handler).tags("simulation");
 
         var req = new Request("GET", "/", Map.of(), Map.of(), Map.of(), null);
-        assertEquals("v1", cached.apply(req).body());
-        assertEquals("v1", cached.apply(req).body());
+        assertEquals("v1", bodyOf(cached.apply(req)));
+        assertEquals("v1", bodyOf(cached.apply(req)));
         assertEquals(1, counter.get());
 
         cache.clearTag("simulation");
 
-        assertEquals("v2", cached.apply(req).body());
+        assertEquals("v2", bodyOf(cached.apply(req)));
         assertEquals(2, counter.get());
     }
 
@@ -183,8 +192,8 @@ class CacheTest {
         var req1 = new Request("GET", "/items", Map.of(), Map.of("page", "1"), Map.of(), null);
         var req2 = new Request("GET", "/items", Map.of(), Map.of("page", "2"), Map.of(), null);
 
-        assertEquals("page1", cached.apply(req1).body());
-        assertEquals("page2", cached.apply(req2).body());
+        assertEquals("page1", bodyOf(cached.apply(req1)));
+        assertEquals("page2", bodyOf(cached.apply(req2)));
         assertEquals(2, counter.get());
     }
 

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
@@ -141,13 +142,36 @@ public class Cache {
     public long drainMisses() { return misses.sumThenReset(); }
     public long drainEvictions() { return evictions.sumThenReset(); }
 
-    /** True when the backend serializes values (i.e. a shared backend is configured). */
-    boolean serializes() { return serializes; }
-
     // Route-level page caching
 
     public CachedHandler wrap(String ttl, Handler handler) {
         return new CachedHandler(this, ttl, handler);
+    }
+
+    /**
+     * A fully-materialized HTTP response — the unit the page cache stores. Unlike a {@code Result}
+     * (which can be lazy or hold non-serializable state), this is a trivially serializable snapshot,
+     * so a page cached by one server can be replayed by any other across a shared backend. It's
+     * Jackson-round-trippable ({@code byte[]} body encodes as base64), so it works on both the
+     * in-memory and serializing backends.
+     */
+    public record RenderedResponse(int status, String contentType, Map<String, String> headers, byte[] body) {
+        static RenderedResponse from(Result result) {
+            byte[] body;
+            if (result.rawBytes() != null) {
+                body = result.rawBytes();
+            } else if (result.body() != null) {
+                body = result.body().getBytes(StandardCharsets.UTF_8);
+            } else {
+                body = new byte[0];
+            }
+            return new RenderedResponse(result.status(), result.contentType(),
+                    new LinkedHashMap<>(result.headers()), body);
+        }
+
+        Result toResult() {
+            return Result.raw(status, contentType, body, headers);
+        }
     }
 
     // Internal
@@ -233,17 +257,15 @@ public class Cache {
 
         @Override
         public Result apply(Request request) {
-            // Page caching of the Result object only works on the in-memory (object) backend.
-            // Shared-backend page caching (caching the rendered response) lands in Phase 2; until
-            // then, a serializing backend bypasses the cache rather than fail on Result.
-            if (cache.serializes()) {
-                return handler.apply(request);
-            }
+            // Cache the rendered response, not the Result object: a RenderedResponse is a
+            // serializable snapshot, so a page rendered on one server can be replayed by any other
+            // across a shared backend. (Result is eagerly rendered by the time it reaches here —
+            // View.of renders at construction — so the snapshot is just its materialized fields.)
             var key = "page:" + request.method() + ":" + request.path() + queryKey(request);
-            var cached = cache.get(key, Result.class);
-            if (cached != null) return cached;
+            var cached = cache.get(key, RenderedResponse.class);
+            if (cached != null) return cached.toResult();
             var result = handler.apply(request);
-            cache.setInternal(key, result, ttl, tags);
+            cache.setInternal(key, RenderedResponse.from(result), ttl, tags);
             return result;
         }
 

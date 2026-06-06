@@ -5,7 +5,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -92,6 +95,30 @@ class PostgresCacheBackendIT extends PostgresTestBase {
         assertNull(cache.get("temp", String.class));
         // The sweep then reclaims the dead row.
         assertTrue(backend.evictExpired() >= 1);
+    }
+
+    @Test
+    void pageCacheServedAcrossInstancesOnPostgres() {
+        // Phase 2: a RenderedResponse round-trips through BYTEA, so a page rendered on one server is
+        // replayed by another from the shared table — without re-running the handler.
+        var serverA = new Cache(backend);
+        var serverB = new Cache(backend);
+        var renders = new AtomicInteger();
+        Handler handler = req -> {
+            renders.incrementAndGet();
+            return Result.html("<h1>shared</h1>").header("X-Page", "home");
+        };
+        var req = new Request("GET", "/home", Map.of(), Map.of(), Map.of(), null);
+
+        var first = serverA.wrap("5m", handler).apply(req);   // miss → render + cache to Postgres
+        var second = serverB.wrap("5m", handler).apply(req);  // hit → replay from Postgres
+
+        assertEquals(1, renders.get(), "B serves A's cached render from Postgres");
+        assertEquals("<h1>shared</h1>", new String(first.rawBytes() != null ? first.rawBytes()
+                : first.body().getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
+        assertEquals("<h1>shared</h1>", new String(second.rawBytes(), StandardCharsets.UTF_8));
+        assertEquals("text/html", second.contentType());
+        assertEquals("home", second.header("X-Page"));
     }
 
     @Test
