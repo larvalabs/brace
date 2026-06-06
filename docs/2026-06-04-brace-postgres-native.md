@@ -43,10 +43,10 @@ The wins below are sorted by how much H2 tension they carry, because that tensio
 
 ## Tier 2 — high payoff, real H2 cost (want a Postgres testcontainer)
 
-### 2a. `ErrorStore` check-then-insert → `INSERT … ON CONFLICT DO UPDATE`
-- **Location:** `ErrorStore.java:55-72`.
-- **Today:** SELECT-then-INSERT-or-UPDATE to fold a recurring error into one row with an occurrence count. Under load two instances (or two threads) can both pass the check and both insert → **duplicate rows + a lost increment**. The race is genuine and worsens with traffic.
-- **Win:** a single `INSERT … ON CONFLICT (…) DO UPDATE SET count = count + 1, last_seen = …` against a **partial unique index** (the dedupe key is conditional, e.g. only for unresolved errors). Atomic, no race, fewer round-trips. H2 cost is real: H2 has no Postgres-style partial unique index and its upsert syntax differs — this is the canonical case for a testcontainer test of the actual prod statement.
+### 2a. `ErrorStore` check-then-insert → `INSERT … ON CONFLICT DO UPDATE` ✅ shipped 2026-06-06
+- **Location:** `ErrorStore.java` (`upsertPostgres` / `upsertH2`).
+- **Was:** SELECT-then-INSERT-or-UPDATE to fold a recurring error into one row with an occurrence count. Under load two instances (or two threads) could both pass the check and both insert → **duplicate rows + a lost increment**. The race was genuine and worsened with traffic.
+- **Shipped:** on Postgres, a single `INSERT … ON CONFLICT (error_type, route) WHERE resolved_at IS NULL DO UPDATE SET occurrence_count = occurrence_count + 1, last_seen = … RETURNING (xmax = 0)` against a **partial unique index** (`ops_errors_unresolved_dedupe`, `migration_pg/V6`) — conditional on `resolved_at IS NULL` so a resolved error recurring still gets a fresh row. Atomic, no race, one round-trip. `ErrorStore` branches on `DatabaseFactory.isPostgres()`; H2 keeps check-then-insert, so the H2 cost (no partial unique index, different upsert syntax) is paid by keeping both branches rather than dialect-translating one statement. The real prod statement is proven by `ErrorStorePostgresIT` (50 concurrent writers fold into exactly one row with an exact count) — the canonical testcontainer payoff. See `docs/2026-06-05-pg-testcontainers.md` Phase 3.
 
 ### 2b. Shared cache: `TEXT[]` + GIN for tag indexing
 - **Location:** the tag-invalidation design in [`docs/2026-06-04-brace-shared-cache.md`](2026-06-04-brace-shared-cache.md).

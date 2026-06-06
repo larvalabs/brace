@@ -20,6 +20,7 @@ public class DatabaseFactory {
 
     private final SessionFactory sessionFactory;
     private final List<Class<?>> entityClasses;
+    private final boolean postgres;
 
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses) {
         this(url, user, password, entityClasses, 10);
@@ -27,6 +28,7 @@ public class DatabaseFactory {
 
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses, int poolSize) {
         var cfg = parseDbConfig(url, user, password);
+        this.postgres = cfg.url() != null && cfg.url().startsWith("jdbc:postgresql:");
         runFrameworkMigrations(cfg.url(), cfg.user(), cfg.pass());
         runAppMigrations(cfg.url(), cfg.user(), cfg.pass());
         this.sessionFactory = buildSessionFactory(cfg.url(), cfg.user(), cfg.pass(), entityClasses, poolSize);
@@ -35,6 +37,16 @@ public class DatabaseFactory {
 
     public List<Class<?>> entityClasses() {
         return entityClasses;
+    }
+
+    /**
+     * True when this factory talks to Postgres (prod), false for H2 (tests). Lets callers pick a
+     * Postgres-native statement over an H2-portable one — e.g. {@link ErrorStore} uses an
+     * {@code INSERT ... ON CONFLICT} upsert (backed by the partial unique index from the
+     * {@code migration_pg} tier) on Postgres and falls back to check-then-insert on H2.
+     */
+    public boolean isPostgres() {
+        return postgres;
     }
 
     public StatelessSession openSession() {
@@ -81,9 +93,20 @@ public class DatabaseFactory {
         // upgrading from a Brace release that didn't ship migrations) from causing V1 to be
         // marked already-applied. Don't customize sqlMigrationPrefix: "B" is reserved by Flyway
         // for baseline migrations and silently breaks multi-file scans.
+        //
+        // Postgres-native DDL that H2 can't parse (currently the V6 partial unique index backing
+        // ErrorStore's upsert) lives in a SEPARATE top-level location, added only on Postgres.
+        // It can't be a subdirectory of brace/db/migration: Flyway scans locations recursively,
+        // so the H2 tier would pick it up too. Both locations share flyway_brace_history, so the
+        // version sequence is shared — keep migration_pg versions distinct from the base dir's.
+        var locations = new ArrayList<String>();
+        locations.add("classpath:brace/db/migration");
+        if (postgres) {
+            locations.add("classpath:brace/db/migration_pg");
+        }
         Flyway.configure()
                 .dataSource(url, user, password)
-                .locations("classpath:brace/db/migration")
+                .locations(locations.toArray(String[]::new))
                 .table("flyway_brace_history")
                 .baselineOnMigrate(true)
                 .baselineVersion("0")
