@@ -1,31 +1,47 @@
 package com.larvalabs.brace;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+/**
+ * Cache facade. Owns hit/miss/eviction stats, TTL parsing, value serialization, and the page-cache
+ * wrapper, and delegates storage to a {@link CacheBackend}.
+ *
+ * <p>Default is in-process ({@link CacheBackend#inMemory()}) with zero serialization — no behavior
+ * change for existing apps. Opt into a shared, cross-server-consistent backend with one line:
+ * {@code app.cache(CacheBackend.postgres(dbFactory))}. See
+ * {@code docs/2026-06-04-brace-shared-cache.md}.
+ *
+ * <p>When the backend stores bytes ({@link CacheBackend#requiresSerialization()}), values are
+ * serialized via Jackson with a class-name header, so a {@code get} with the wrong type fails loudly
+ * and a non-Jackson-round-trippable value throws at {@code set} time. The in-memory backend stores
+ * live objects, so it has neither cost nor restriction.
+ */
 public class Cache {
 
-    private record Entry(Object value, Instant expiry, String[] tags) {
-        boolean expired() {
-            return expiry != null && Instant.now().isAfter(expiry);
-        }
-    }
+    private static final ObjectMapper MAPPER = new ObjectMapper().findAndRegisterModules();
+    private static final String[] NO_TAGS = new String[0];
 
-    private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Set<String>> tagIndex = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, AtomicLong> counters = new ConcurrentHashMap<>();
+    private final CacheBackend backend;
+    private final boolean serializes;
     private final LongAdder hits = new LongAdder();
     private final LongAdder misses = new LongAdder();
     private final LongAdder evictions = new LongAdder();
 
     public Cache() {
+        this(new InMemoryBackend());
+    }
+
+    public Cache(CacheBackend backend) {
+        this.backend = backend;
+        this.serializes = backend.requiresSerialization();
         Thread.ofVirtual().name("cache-cleanup").start(() -> {
             while (true) {
                 try {
@@ -33,107 +49,100 @@ public class Cache {
                 } catch (InterruptedException e) {
                     break;
                 }
-                evictExpired();
+                evictions.add(backend.evictExpired());
             }
         });
     }
 
     @SuppressWarnings("unchecked")
     public <T> T get(String key, Class<T> type) {
-        var entry = store.get(key);
-        if (entry == null) {
-            misses.increment();
-            return null;
+        if (serializes) {
+            byte[] bytes = backend.getBytes(key);
+            if (bytes == null) {
+                misses.increment();
+                return null;
+            }
+            hits.increment();
+            return deserialize(bytes, type);
         }
-        if (entry.expired()) {
-            remove(key);
+        Object value = backend.getObject(key);
+        if (value == null) {
             misses.increment();
             return null;
         }
         hits.increment();
-        return (T) entry.value();
+        return (T) value;
     }
 
     public void set(String key, Object value) {
-        store.put(key, new Entry(value, null, new String[0]));
+        store(key, value, null, NO_TAGS);
     }
 
     public void set(String key, Object value, String ttl) {
-        store.put(key, new Entry(value, Instant.now().plus(parseTtl(ttl)), new String[0]));
+        store(key, value, parseTtl(ttl), NO_TAGS);
     }
 
     public void set(String key, Object value, String ttl, String... tags) {
-        var expiry = Instant.now().plus(parseTtl(ttl));
-        store.put(key, new Entry(value, expiry, tags));
-        for (var tag : tags) {
-            tagIndex.computeIfAbsent(tag, k -> ConcurrentHashMap.newKeySet()).add(key);
-        }
+        store(key, value, parseTtl(ttl), tags);
     }
 
     @SuppressWarnings("unchecked")
     public <T> T getOrSet(String key, String ttl, Supplier<T> supplier) {
-        var current = store.get(key);
-        if (current != null && !current.expired()) {
+        if (!serializes) {
+            var computed = ((InMemoryBackend) backend).getOrCompute(key, parseTtl(ttl), supplier);
+            if (computed.hit()) hits.increment(); else misses.increment();
+            return (T) computed.value();
+        }
+        byte[] bytes = backend.getBytes(key);
+        if (bytes != null) {
             hits.increment();
-            return (T) current.value();
+            return deserialize(bytes, null);
         }
         misses.increment();
-        var entry = store.compute(key, (k, existing) -> {
-            if (existing != null && !existing.expired()) return existing;
-            return new Entry(supplier.get(), Instant.now().plus(parseTtl(ttl)), new String[0]);
-        });
-        return (T) entry.value();
+        T value = supplier.get();
+        backend.setBytes(key, serialize(value), parseTtl(ttl), NO_TAGS);
+        return value;
     }
 
     public void delete(String key) {
-        remove(key);
+        backend.delete(key);
     }
 
     public void deletePrefix(String prefix) {
-        for (var key : store.keySet()) {
-            if (key.startsWith(prefix)) {
-                remove(key);
-            }
-        }
+        backend.deletePrefix(prefix);
     }
 
     public void clear() {
-        store.clear();
-        tagIndex.clear();
-        counters.clear();
+        backend.clear();
         hits.reset();
         misses.reset();
         evictions.reset();
     }
 
     public long incr(String key) {
-        return counters.computeIfAbsent(key, k -> new AtomicLong()).incrementAndGet();
+        return backend.incr(key, 1);
     }
 
     public long decr(String key) {
-        return counters.computeIfAbsent(key, k -> new AtomicLong()).decrementAndGet();
+        return backend.incr(key, -1);
     }
 
     public void clearTag(String tag) {
-        var keys = tagIndex.remove(tag);
-        if (keys != null) {
-            for (var key : keys) {
-                if (store.remove(key) != null) {
-                    evictions.increment();
-                }
-            }
-        }
+        evictions.add(backend.clearTag(tag));
     }
 
-    public int size() { return store.size(); }
-    public int counterCount() { return counters.size(); }
-    public int tagCount() { return tagIndex.size(); }
+    public int size() { return backend.size(); }
+    public int counterCount() { return backend.counterCount(); }
+    public int tagCount() { return backend.tagCount(); }
     public long hits() { return hits.sum(); }
     public long misses() { return misses.sum(); }
     public long evictions() { return evictions.sum(); }
     public long drainHits() { return hits.sumThenReset(); }
     public long drainMisses() { return misses.sumThenReset(); }
     public long drainEvictions() { return evictions.sumThenReset(); }
+
+    /** True when the backend serializes values (i.e. a shared backend is configured). */
+    boolean serializes() { return serializes; }
 
     // Route-level page caching
 
@@ -143,31 +152,48 @@ public class Cache {
 
     // Internal
 
-    private void remove(String key) {
-        var entry = store.remove(key);
-        if (entry != null && entry.tags().length > 0) {
-            for (var tag : entry.tags()) {
-                var keys = tagIndex.get(tag);
-                if (keys != null) keys.remove(key);
-            }
-        }
-    }
-
-    private void evictExpired() {
-        var now = Instant.now();
-        for (var entry : store.entrySet()) {
-            if (entry.getValue().expiry() != null && now.isAfter(entry.getValue().expiry())) {
-                remove(entry.getKey());
-                evictions.increment();
-            }
+    private void store(String key, Object value, Duration ttl, String[] tags) {
+        if (serializes) {
+            backend.setBytes(key, serialize(value), ttl, tags);
+        } else {
+            backend.setObject(key, value, ttl, tags);
         }
     }
 
     void setInternal(String key, Object value, String ttl, String[] tags) {
-        var expiry = Instant.now().plus(parseTtl(ttl));
-        store.put(key, new Entry(value, expiry, tags));
-        for (var tag : tags) {
-            tagIndex.computeIfAbsent(tag, k -> ConcurrentHashMap.newKeySet()).add(key);
+        store(key, value, parseTtl(ttl), tags);
+    }
+
+    private static byte[] serialize(Object value) {
+        try {
+            byte[] className = value.getClass().getName().getBytes(StandardCharsets.UTF_8);
+            byte[] body = MAPPER.writeValueAsBytes(value);
+            return ByteBuffer.allocate(4 + className.length + body.length)
+                    .putInt(className.length).put(className).put(body).array();
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "Cache value of type " + value.getClass().getName() + " is not serializable for "
+                    + "the configured shared cache backend (values must be Jackson-round-trippable)", e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T deserialize(byte[] data, Class<T> expected) {
+        var buffer = ByteBuffer.wrap(data);
+        int len = buffer.getInt();
+        byte[] className = new byte[len];
+        buffer.get(className);
+        int offset = 4 + len;
+        String storedName = new String(className, StandardCharsets.UTF_8);
+        try {
+            Class<?> stored = Class.forName(storedName);
+            if (expected != null && !expected.isAssignableFrom(stored)) {
+                throw new ClassCastException("Cached value is a " + storedName
+                        + " but get(...) requested " + expected.getName());
+            }
+            return (T) MAPPER.readValue(data, offset, data.length - offset, stored);
+        } catch (ClassNotFoundException | java.io.IOException e) {
+            throw new RuntimeException("Cache value deserialization failed for " + storedName, e);
         }
     }
 
@@ -207,6 +233,12 @@ public class Cache {
 
         @Override
         public Result apply(Request request) {
+            // Page caching of the Result object only works on the in-memory (object) backend.
+            // Shared-backend page caching (caching the rendered response) lands in Phase 2; until
+            // then, a serializing backend bypasses the cache rather than fail on Result.
+            if (cache.serializes()) {
+                return handler.apply(request);
+            }
             var key = "page:" + request.method() + ":" + request.path() + queryKey(request);
             var cached = cache.get(key, Result.class);
             if (cached != null) return cached;
