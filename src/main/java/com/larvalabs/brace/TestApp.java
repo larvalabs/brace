@@ -25,6 +25,12 @@ public class TestApp {
         this.app = app;
         this.databaseFactory = databaseFactory;
         this.client = HttpClient.newBuilder()
+            // Brace serves HTTP/1.1 only (see docs/SECURITY.md). The JDK client defaults to
+            // HTTP/2, which over cleartext triggers an h2c upgrade negotiation against a
+            // server that doesn't speak it — a flaky source of garbled responses
+            // ("parsing HTTP/1.1 status line, receiving [binary]") under full-suite load.
+            // Pin the client to match the server.
+            .version(HttpClient.Version.HTTP_1_1)
             .cookieHandler(new CookieManager())
             .followRedirects(HttpClient.Redirect.NEVER)
             .build();
