@@ -652,7 +652,17 @@ app.before("/api/*", RateLimiter.perIp(100, "1m"));
 app.before("/login", RateLimiter.perKey(req -> req.param("email"), 5, "15m"));
 ```
 
-**Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below).
+**Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see Scaling below.
+
+## Scaling horizontally
+
+Brace runs correctly as **N instances behind a load balancer sharing one Postgres** — no sticky sessions. Full contract: **[`docs/scaling.md`](docs/scaling.md)**. Essentials:
+
+- **Requirements:** run on **Postgres**; set the **session secret from config/env identical on every instance** (per-process secrets break cross-box cookies — Brace warns at startup); optionally set a **deploy marker** (`BRACE_DEPLOY` / `app.deploy("<sha>")`) for per-deploy regression baselines.
+- **Automatic on Postgres** (no code change): sessions, CSRF, durable jobs, recurring scheduler (once-per-interval cluster-wide), WebSocket broadcast (`LISTEN`/`NOTIFY`), rate limiter (shared counter), ops console login (shared secret), regression detection (shared table), instance-tagged metrics feed.
+- **Opt-in:** the shared cache backend (`CacheBackend.postgres(dbFactory)`) — per-process by default even on Postgres, since it trades latency for consistency.
+- **Per-instance by design:** `/ops/dashboard`, `/ops/status`, `/ops/logs`, JFR/heap reflect the serving box (`/ops/status` carries `app.instanceId`). Use an external aggregator over the instance-tagged `ops_timeseries` feed + stdout JSON logs for the fleet view.
+- **Watch:** rate-limiter DB load on busy servers (Redis recommended for very high volume / hot keys — see [`docs/2026-06-07-rate-limiter-load.md`](docs/2026-06-07-rate-limiter-load.md)); ephemeral counters reset on crash/failover (by design).
 
 ## Security
 
