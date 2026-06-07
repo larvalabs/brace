@@ -17,9 +17,11 @@ public class OpsHandler {
     private final JfrProfiler profiler;
     private RegressionTracker regressionTracker;
 
-    // In-memory store for single-use login tokens (token -> expiry timestamp)
-    private final Map<String, Instant> loginTokens = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String OPS_COOKIE_NAME = "__brace_ops_session";
+    // Browser login tokens are stateless, short-lived HMAC tokens (no server-side store), so the
+    // issue/exchange handshake works behind a load balancer where the two calls may hit different
+    // instances (B5). Kept very short since the CLI hands the URL straight to the browser.
+    private static final int LOGIN_TOKEN_TTL_SECONDS = 60;
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret) {
@@ -115,13 +117,10 @@ public class OpsHandler {
     public Result loginToken(Request req) {
         if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
 
-        // Generate a random login token (5 minute TTL)
-        String loginToken = java.util.UUID.randomUUID().toString();
-        Instant expiry = Instant.now().plusSeconds(300); // 5 minutes
-        loginTokens.put(loginToken, expiry);
-
-        // Clean up expired tokens
-        cleanupExpiredLoginTokens();
+        // Stateless, short-lived HMAC token — no server-side store, so exchange works on any
+        // instance behind a load balancer (B5). It conveys access the caller already holds.
+        String loginToken = OpsToken.create(tokenSecret, LOGIN_TOKEN_TTL_SECONDS);
+        Instant expiry = Instant.now().plusSeconds(LOGIN_TOKEN_TTL_SECONDS);
 
         return Json.of(Map.of(
             "loginToken", loginToken,
@@ -131,8 +130,11 @@ public class OpsHandler {
     }
 
     /**
-     * GET /ops/auth/exchange?token=... — exchange login token for session cookie.
-     * Validates the single-use token, sets httpOnly cookie, redirects to dashboard.
+     * GET /ops/auth/exchange?token=... — exchange a login token for a session cookie.
+     * Verifies the token's HMAC + expiry (stateless), sets the httpOnly cookie, redirects to the
+     * dashboard. Reusable within the token's short TTL; replay protection is the TTL, not a store —
+     * single-use would need fleet-wide shared state that ops (which can run without a database)
+     * can't assume. See docs/migrations and the multi-server plan (B5).
      */
     public Result exchange(Request req) {
         String loginToken = req.queryParam("token");
@@ -140,27 +142,17 @@ public class OpsHandler {
             return Result.badRequest("Missing token parameter");
         }
 
-        // Check if token exists and is not expired
-        Instant expiry = loginTokens.get(loginToken);
-        if (expiry == null || Instant.now().isAfter(expiry)) {
+        var claims = OpsToken.verify(loginToken, tokenSecret);
+        if (claims == null) {
             return Result.unauthorized("Invalid or expired login token");
         }
 
-        // Consume the single-use token
-        loginTokens.remove(loginToken);
+        // Mint a long-lived (24h) ops session token, preserving the login token's scope.
+        String sessionToken = OpsToken.create(tokenSecret, 86400, claims.scope(), claims.kid());
 
-        // Create a long-lived ops session token (24 hours)
-        String sessionToken = OpsToken.create(tokenSecret, 86400);
-
-        // Set httpOnly cookie and redirect to dashboard
         var result = Redirect.to("/ops/dashboard");
         result.cookie(OPS_COOKIE_NAME, sessionToken, 86400, true, true, "Strict");
         return result;
-    }
-
-    private void cleanupExpiredLoginTokens() {
-        Instant now = Instant.now();
-        loginTokens.entrySet().removeIf(entry -> now.isAfter(entry.getValue()));
     }
 
     public Result status(Request req) {

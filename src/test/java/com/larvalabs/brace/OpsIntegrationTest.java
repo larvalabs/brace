@@ -574,14 +574,24 @@ class OpsIntegrationTest {
         assertEquals(200, dashboardResponse.statusCode());
         assertTrue(dashboardResponse.body().contains("Brace Ops"));
 
-        // Step 4: Verify login token is single-use
+        // Step 4: The login token is now a stateless short-lived HMAC token (no server-side store,
+        // so the flow works behind a load balancer — B5). It is reusable within its short TTL...
         var exchangeAgain = client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
                 .GET()
                 .build(),
             HttpResponse.BodyHandlers.ofString());
-        assertEquals(401, exchangeAgain.statusCode()); // Should fail - token already consumed
+        assertEquals(302, exchangeAgain.statusCode());
+
+        // ...but a tampered/garbage token is rejected.
+        var exchangeBad = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=not-a-real-token"))
+                .GET()
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, exchangeBad.statusCode());
     }
 
     @Test

@@ -733,6 +733,17 @@ A line with no `scope:` marker defaults to `control` (backward compatible). Mark
 
 **Audit log.** Every authenticated ops request is recorded as a structured `ops.access` log event (`kid`, scope, method, path, `granted`) — including authenticated-but-scope-denied attempts (`granted=false`). It rides the normal log stream, so a stolen or misused key is visible after the fact via `brace logs` (filter on `event=ops.access`); no separate store and works with or without a database.
 
+### Ops session secret (multi-instance)
+
+Ops tokens and the browser login cookie are HMAC-signed. The signing secret is resolved at startup in
+this order: an explicit **`app.opsSecret("…")`** → derived from the **session secret** (`app.sessions(…)`)
+→ a per-process random value (with a startup warning). The first two are shared config, identical on
+every instance, so the **browser login works behind a load balancer**: the `login-token` → `exchange`
+handshake is stateless (a short-lived HMAC token, no server-side store) and a session cookie minted on
+one instance validates on any other. The per-process fallback is single-instance only — set
+`opsSecret(…)` (or `sessions(…)`) on any multi-instance deployment, or ops login will fail ~(N−1)/N of
+the time behind an LB. Use `opsSecret(…)` for bearer-token APIs that enable ops without sessions.
+
 `brace new` writes both files at scaffold time (the initial `dev` entry corresponds to the local `ops-private.key`). After that, `brace ops keypair` generates a *new* keypair, prints the private key **once to stdout** (it does **not** write `ops-private.key`), and appends the public half to `ops-authorized-keys`.
 
 Common workflows:

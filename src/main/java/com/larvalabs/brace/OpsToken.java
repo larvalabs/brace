@@ -33,6 +33,19 @@ public class OpsToken {
         return Base64.getEncoder().encodeToString(bytes);
     }
 
+    /**
+     * Derive the ops-token signing secret from a shared base secret (the app session secret),
+     * domain-separated so it is independent of the base secret's other uses. Deterministic: every
+     * instance configured with the same base secret derives the same ops secret, so an ops token
+     * minted on one instance validates on another — the multi-server fix (B5). Unlike
+     * {@link #generateSecret()} (per-process random, breaks behind a load balancer), this is stable
+     * across the fleet.
+     */
+    public static String deriveSecret(String baseSecret) {
+        // HMAC as a PRF: key = the real secret, message = a fixed domain-separation label.
+        return sign("brace-ops-token-secret/v1", baseSecret);
+    }
+
     /** Create a full-scope ({@code CONTROL}) token with no key id. */
     public static String create(String secret, int ttlSeconds) {
         return create(secret, ttlSeconds, OpsScope.CONTROL, null);

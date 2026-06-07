@@ -27,6 +27,7 @@ public class Brace {
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
     private String sessionSecret;
+    private String opsSecret;
     private SessionOptions sessionOptions;
     private TemplateEngine templateEngine;
     private Mailer mailer;
@@ -140,6 +141,38 @@ public class Brace {
         this.sessionSecret = options.secret();
         this.sessionOptions = options;
         return this;
+    }
+
+    /**
+     * Explicitly set the secret used to sign ops session tokens/cookies. Set this when ops is
+     * enabled on a multi-instance deployment that has no session secret (e.g. a bearer-token API);
+     * it must be identical on every instance so an ops login on one box validates on another. When
+     * unset, the ops secret is derived from the session secret if present, else generated per-process
+     * (single-instance only — see {@link #start()}).
+     */
+    public Brace opsSecret(String secret) {
+        validateSecret(secret, "ops");
+        this.opsSecret = secret;
+        return this;
+    }
+
+    /**
+     * Resolve the ops-token signing secret. Priority: explicit {@link #opsSecret(String)} →
+     * derived from the session secret → per-process random (with a warning). The first two are
+     * shared config, identical on every instance, so an ops login on one box validates on another
+     * (B5). The fallback is per-process and breaks the ops login flow behind a load balancer.
+     */
+    private String resolveOpsSecret() {
+        if (opsSecret != null) {
+            return opsSecret;
+        }
+        if (sessionSecret != null) {
+            return OpsToken.deriveSecret(sessionSecret);
+        }
+        Log.warn("Ops is enabled without a shared secret (no .opsSecret(...) or .sessions(...)); " +
+            "the ops token secret is per-process, so the browser login flow will fail behind a load " +
+            "balancer. Set a shared secret for multi-instance deployments.");
+        return OpsToken.generateSecret();
     }
 
     private void validateSecret(String secret, String type) {
@@ -451,7 +484,7 @@ public class Brace {
         String tokenSecret = null;
         if (opsKeysPath != null) {
             var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
-            tokenSecret = OpsToken.generateSecret();
+            tokenSecret = resolveOpsSecret();
             var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
 
             // Server-side regression detection: track new error kinds since startup and notify on
