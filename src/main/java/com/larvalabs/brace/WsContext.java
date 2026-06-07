@@ -5,24 +5,25 @@ import org.eclipse.jetty.websocket.api.StatusCode;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArraySet;
 
 /**
  * WebSocket context wrapping a Jetty WebSocket session.
  * Provides send, room management, broadcast, and session access.
+ *
+ * <p>Room membership and broadcast fan-out live in the per-instance {@link WsRegistry}; this
+ * context just tracks which rooms it has joined (for cleanup on disconnect) and delegates.
  */
 public class WsContext {
 
-    // Global room registry: room name -> set of connected contexts
-    static final ConcurrentHashMap<String, Set<WsContext>> rooms = new ConcurrentHashMap<>();
-
     private final org.eclipse.jetty.websocket.api.Session jettySession;
     private final Session session; // may be null
+    private final WsRegistry registry;
     private final Set<String> joinedRooms = ConcurrentHashMap.newKeySet();
 
-    WsContext(org.eclipse.jetty.websocket.api.Session jettySession, Session session) {
+    WsContext(org.eclipse.jetty.websocket.api.Session jettySession, Session session, WsRegistry registry) {
         this.jettySession = jettySession;
         this.session = session;
+        this.registry = registry;
     }
 
     /**
@@ -37,7 +38,7 @@ public class WsContext {
      */
     public void join(String room) {
         joinedRooms.add(room);
-        rooms.computeIfAbsent(room, k -> new CopyOnWriteArraySet<>()).add(this);
+        registry.join(room, this);
     }
 
     /**
@@ -45,25 +46,15 @@ public class WsContext {
      */
     public void leave(String room) {
         joinedRooms.remove(room);
-        var members = rooms.get(room);
-        if (members != null) {
-            members.remove(this);
-            if (members.isEmpty()) {
-                rooms.remove(room, members);
-            }
-        }
+        registry.leave(room, this);
     }
 
     /**
-     * Broadcast a message to all connections in a room.
+     * Broadcast a message to all connections in a room — across every instance in the fleet, not
+     * just this one (the registry's {@link MessageBus} handles cross-instance fan-out).
      */
     public void broadcast(String room, String message) {
-        var members = rooms.get(room);
-        if (members != null) {
-            for (var ctx : members) {
-                ctx.send(message);
-            }
-        }
+        registry.broadcast(room, message);
     }
 
     /**
@@ -87,13 +78,7 @@ public class WsContext {
      */
     void leaveAllRooms() {
         for (var room : joinedRooms) {
-            var members = rooms.get(room);
-            if (members != null) {
-                members.remove(this);
-                if (members.isEmpty()) {
-                    rooms.remove(room, members);
-                }
-            }
+            registry.leave(room, this);
         }
         joinedRooms.clear();
     }

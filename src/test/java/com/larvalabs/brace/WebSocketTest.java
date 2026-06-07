@@ -107,7 +107,8 @@ class WebSocketTest {
     @BeforeEach
     void resetState() {
         closeEvents.clear();
-        WsContext.rooms.clear();
+        // Room membership is now per-instance registry state, cleaned up when connections close;
+        // no global map to reset.
     }
 
     private WebSocket connect(String path, WsTestClient listener) throws Exception {

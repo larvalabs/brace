@@ -41,6 +41,7 @@ public class Brace {
     private Cache cache;
     private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
+    private WsRegistry wsRegistry;
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
@@ -505,6 +506,12 @@ public class Brace {
         var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
 
         if (!wsRoutes.isEmpty()) {
+            // Room fan-out: shared across the fleet on Postgres (LISTEN/NOTIFY), local otherwise.
+            MessageBus messageBus = (databaseFactory != null && databaseFactory.isPostgres())
+                ? new PostgresMessageBus(databaseFactory)
+                : new InProcessMessageBus();
+            wsRegistry = new WsRegistry(messageBus);
+            final WsRegistry wsRegistryRef = wsRegistry;
             // Wrap with WebSocketUpgradeHandler for WebSocket support
             var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {
                 for (var entry : wsRoutes.entrySet()) {
@@ -522,7 +529,7 @@ public class Brace {
                                 }
                             }
                         }
-                        return new WsHandler(factory, braceSession);
+                        return new WsHandler(factory, braceSession, wsRegistryRef);
                     });
                 }
             });
@@ -737,6 +744,9 @@ public class Brace {
         }
         if (server != null) {
             server.stop();
+        }
+        if (wsRegistry != null) {
+            wsRegistry.close();
         }
     }
 

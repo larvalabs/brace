@@ -21,6 +21,9 @@ public class DatabaseFactory {
     private final SessionFactory sessionFactory;
     private final List<Class<?>> entityClasses;
     private final boolean postgres;
+    private final String jdbcUrl;
+    private final String jdbcUser;
+    private final String jdbcPass;
 
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses) {
         this(url, user, password, entityClasses, 10);
@@ -29,10 +32,23 @@ public class DatabaseFactory {
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses, int poolSize) {
         var cfg = parseDbConfig(url, user, password);
         this.postgres = cfg.url() != null && cfg.url().startsWith("jdbc:postgresql:");
+        this.jdbcUrl = cfg.url();
+        this.jdbcUser = cfg.user();
+        this.jdbcPass = cfg.pass();
         runFrameworkMigrations(cfg.url(), cfg.user(), cfg.pass());
         runAppMigrations(cfg.url(), cfg.user(), cfg.pass());
         this.sessionFactory = buildSessionFactory(cfg.url(), cfg.user(), cfg.pass(), entityClasses, poolSize);
         this.entityClasses = List.copyOf(entityClasses);
+    }
+
+    /**
+     * Open a fresh JDBC connection <em>outside</em> the HikariCP pool, from the same resolved
+     * credentials. Used for long-lived dedicated connections that must not occupy a pool slot —
+     * notably the {@code PostgresMessageBus} listener, which blocks on {@code LISTEN}. The caller
+     * owns the connection and must close it.
+     */
+    java.sql.Connection openRawConnection() throws java.sql.SQLException {
+        return java.sql.DriverManager.getConnection(jdbcUrl, jdbcUser, jdbcPass);
     }
 
     public List<Class<?>> entityClasses() {

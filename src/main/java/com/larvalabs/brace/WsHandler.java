@@ -13,20 +13,23 @@ public class WsHandler implements Session.Listener.AutoDemanding {
 
     private final Function<WsContext, Object> handlerFactory;
     private final com.larvalabs.brace.Session braceSession; // may be null
+    private final WsRegistry registry;
 
     private WsContext wsContext;
     private Object userHandler;
     private Method onMessageMethod;
     private Method onCloseMethod;
 
-    WsHandler(Function<WsContext, Object> handlerFactory, com.larvalabs.brace.Session braceSession) {
+    WsHandler(Function<WsContext, Object> handlerFactory, com.larvalabs.brace.Session braceSession,
+              WsRegistry registry) {
         this.handlerFactory = handlerFactory;
         this.braceSession = braceSession;
+        this.registry = registry;
     }
 
     @Override
     public void onWebSocketOpen(Session session) {
-        this.wsContext = new WsContext(session, braceSession);
+        this.wsContext = new WsContext(session, braceSession, registry);
         this.userHandler = handlerFactory.apply(wsContext);
 
         // Cache reflection lookups for message and close methods
