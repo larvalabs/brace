@@ -28,6 +28,7 @@ public class Brace {
     private DatabaseFactory databaseFactory;
     private String sessionSecret;
     private String opsSecret;
+    private String deployMarker;
     private SessionOptions sessionOptions;
     private TemplateEngine templateEngine;
     private Mailer mailer;
@@ -154,6 +155,25 @@ public class Brace {
         validateSecret(secret, "ops");
         this.opsSecret = secret;
         return this;
+    }
+
+    /**
+     * Set the deploy marker — a value identical on every instance of one deploy and different across
+     * deploys (e.g. a git sha or release tag). It anchors the regression-detection baseline (B6): a
+     * rolling deploy classifies the same error identically on every box, and a new deploy
+     * re-evaluates regressions from a clean baseline. Falls back to the {@code BRACE_DEPLOY} env var,
+     * then {@code "default"} (multi-instance dedup still works; deploy-over-deploy reset does not).
+     */
+    public Brace deploy(String marker) {
+        this.deployMarker = marker;
+        return this;
+    }
+
+    private String resolveDeployMarker() {
+        if (deployMarker != null && !deployMarker.isBlank()) return deployMarker.trim();
+        String env = System.getenv("BRACE_DEPLOY");
+        if (env != null && !env.isBlank()) return env.trim();
+        return "default";
     }
 
     /**
@@ -494,7 +514,8 @@ public class Brace {
                 var notifiers = new ArrayList<Notifier>();
                 notifiers.add(new LogNotifier());
                 notifiers.addAll(regressionNotifiers);
-                var regressionTracker = new RegressionTracker(stats.startedAt(), regressionsWarmupSeconds, notifiers);
+                var regressionTracker = new RegressionTracker(stats.startedAt(), regressionsWarmupSeconds,
+                    notifiers, resolveDeployMarker(), databaseFactory);
                 regressionTracker.seed(errorStore);
                 errorStore.setRegressionListener(regressionTracker);
                 opsHandler.setRegressionTracker(regressionTracker);

@@ -90,7 +90,7 @@ class RegressionIntegrationTest {
         assertEquals("RuntimeException", r.get("errorType").asText());
         assertEquals("GET /boom", r.get("route").asText());
         assertFalse(r.get("acknowledged").asBoolean());
-        long id = r.get("id").asLong();
+        String id = r.get("id").asText();
 
         // Acknowledge it (control action) and confirm it flips.
         var ack = client.send(HttpRequest.newBuilder()

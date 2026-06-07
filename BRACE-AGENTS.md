@@ -791,6 +791,8 @@ Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pas
 
 **Regression notifications.** When a new error kind first appears since startup, Brace notifies the registered notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl), new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)` (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error store).
 
+**Multi-instance.** On Postgres the regression set is shared fleet-wide (table `brace_regressions`): a new error kind notifies **exactly once** across all instances, the `/ops/regressions` list and acknowledge are consistent on every box, and the regression `id` is a stable string (a hash of `type`+`route`+`deploy`) — so an id listed on one instance acknowledges correctly on another. The baseline is anchored to a **deploy marker** set with `app.deploy("<git-sha>")` (or the `BRACE_DEPLOY` env var; defaults to `"default"`): every instance of one deploy shares it, and a new deploy re-evaluates regressions from a clean baseline. Without Postgres the set is per-process (single-server).
+
 ### Storage and retention
 
 | Data | Where it lives | Capacity | Eviction | Survives restart? |

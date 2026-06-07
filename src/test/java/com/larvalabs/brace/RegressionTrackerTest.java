@@ -51,11 +51,11 @@ class RegressionTrackerTest {
         var t = warmTracker(n);
         t.onNew("NullPointerException", "POST /x", "npe", Instant.now());
 
-        long id = t.list().get(0).id();
+        String id = t.list().get(0).id();
         assertFalse(t.list().get(0).acknowledged());
         assertTrue(t.acknowledge(id));
         assertTrue(t.list().get(0).acknowledged());
-        assertFalse(t.acknowledge(99999), "unknown id returns false");
+        assertFalse(t.acknowledge("nonexistent-id"), "unknown id returns false");
     }
 
     @Test

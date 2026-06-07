@@ -474,8 +474,8 @@ public class OpsHandler {
     public Result acknowledgeRegression(Request req) {
         if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
         if (regressionTracker == null) return Result.notFound();
-        long id = req.longPathParam("id");
-        if (!regressionTracker.acknowledge(id)) return Result.notFound();
+        String id = req.pathParam("id");
+        if (id == null || !regressionTracker.acknowledge(id)) return Result.notFound();
         return Json.of(Map.of("acknowledged", true, "id", id));
     }
 
