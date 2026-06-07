@@ -15,6 +15,17 @@ public class RateLimiter {
     // Global registry of all rate limiters for ops visibility
     private static final List<RateLimiter> ALL = new ArrayList<>();
 
+    // Shared cluster-wide counter backend, installed by Brace.start() when the app runs on
+    // Postgres (B4). When set, the window count is enforced across the whole fleet via one atomic
+    // DB counter instead of each instance counting only its own traffic (a limit of 100/min across
+    // N boxes otherwise allows ~100*N/min). Read at request time, so it applies to limiters created
+    // before start(). Null = per-process counting (single-process apps, H2, no database).
+    //
+    // Static like the ALL registry above, matching the framework's one-app-per-JVM assumption for
+    // the rate-limiter subsystem. All instances point their Counters at the same database, so even
+    // across the two-instances-in-one-JVM integration tests the shared count is consistent.
+    private static volatile Counters sharedCounters;
+
     private final ConcurrentHashMap<String, Window> windows = new ConcurrentHashMap<>();
     private final int maxRequests;
     private final Duration windowDuration;
@@ -47,10 +58,29 @@ public class RateLimiter {
         return limiter::check;
     }
 
+    /**
+     * Install the shared cluster-wide counter backend. Called by {@code Brace.start()} when the app
+     * runs on Postgres; afterwards every rate limiter counts fleet-wide. Idempotent.
+     */
+    static void useSharedBackend(Counters counters) {
+        sharedCounters = counters;
+    }
+
+    /** Revert to per-process counting (test teardown). */
+    static void disableSharedBackend() {
+        sharedCounters = null;
+    }
+
     Result check(Request req) {
         var key = keyExtractor.apply(req);
         if (key == null) return null;
 
+        var counters = sharedCounters;
+        return counters != null ? checkShared(key, counters) : checkLocal(key);
+    }
+
+    /** Per-process fixed-window count (default; single-process apps, H2, no database). */
+    private Result checkLocal(String key) {
         var now = Instant.now();
         var window = windows.compute(key, (k, existing) -> {
             if (existing == null || existing.expired(now)) {
@@ -63,11 +93,43 @@ public class RateLimiter {
             blocked.increment();
             long retryAfter = Duration.between(now, window.start.plus(windowDuration)).getSeconds();
             if (retryAfter < 1) retryAfter = 1;
-            return Result.error(429, "Too Many Requests")
-                .header("Retry-After", String.valueOf(retryAfter));
+            return tooMany(retryAfter);
         }
         allowed.increment();
         return null;
+    }
+
+    /**
+     * Cluster-wide fixed-window count backed by a shared atomic counter (B4). Every instance
+     * derives the same window slot from wall-clock — slot = floor(now / window) — so the counter
+     * key is identical across the fleet and the limit is enforced once, globally. Like B1's
+     * scheduler, this needs clocks synced only within one window (NTP-trivial for any real limit).
+     */
+    private Result checkShared(String key, Counters counters) {
+        long windowMillis = Math.max(1, windowDuration.toMillis());
+        long nowMillis = Instant.now().toEpochMilli();
+        long slot = nowMillis / windowMillis;
+        long windowEndMillis = (slot + 1) * windowMillis;
+        // Key must be stable across instances for the same logical limiter: label encodes type +
+        // limit + window, key is the per-client value, slot rotates each window. (Two limiters with
+        // identical type/limit/window on different paths would share a budget — name them apart if
+        // that matters; uncommon, and the failure mode is conservative.)
+        String counterKey = "rl:" + label + ":" + key + ":" + slot;
+        long count = counters.incrementAndGet(counterKey, 1, Instant.ofEpochMilli(windowEndMillis));
+
+        if (count > maxRequests) {
+            blocked.increment();
+            long retryAfter = (windowEndMillis - nowMillis + 999) / 1000; // ceil to seconds
+            if (retryAfter < 1) retryAfter = 1;
+            return tooMany(retryAfter);
+        }
+        allowed.increment();
+        return null;
+    }
+
+    private static Result tooMany(long retryAfterSeconds) {
+        return Result.error(429, "Too Many Requests")
+            .header("Retry-After", String.valueOf(retryAfterSeconds));
     }
 
     /**
@@ -106,6 +168,17 @@ public class RateLimiter {
     private void evictExpired() {
         var now = Instant.now();
         windows.entrySet().removeIf(entry -> entry.getValue().expired(now));
+        // Reap expired shared-counter rows (space reclamation; expiry is enforced on read too). The
+        // delete is global and idempotent, so running it from each limiter's cleanup is redundant
+        // but harmless.
+        var counters = sharedCounters;
+        if (counters != null) {
+            try {
+                counters.sweepExpired();
+            } catch (RuntimeException ignored) {
+                // Transient DB error — next cycle retries; stale rows are corrected on read.
+            }
+        }
     }
 
     // Visible for testing

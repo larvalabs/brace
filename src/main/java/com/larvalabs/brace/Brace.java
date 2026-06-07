@@ -569,6 +569,12 @@ public class Brace {
             jobPoller.start(databaseFactory);
         }
 
+        // On Postgres, rate limiters count cluster-wide via a shared DB counter (B4) so a limit is
+        // enforced across the fleet, not N times too loosely. Off Postgres they stay per-process.
+        if (databaseFactory != null && databaseFactory.isPostgres()) {
+            RateLimiter.useSharedBackend(new Counters(databaseFactory));
+        }
+
         // Snapshot stats for dashboard sparklines (even without a database)
         if (opsKeysPath != null && databaseFactory == null) {
             var snapshotTimer = new java.util.Timer("brace-stats-snapshot", true);
