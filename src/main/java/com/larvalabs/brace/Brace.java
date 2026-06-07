@@ -37,6 +37,7 @@ public class Brace {
     private String opsKeysPath;
     private Stats stats = new Stats();
     private JfrProfiler profiler;
+    private String instanceId;
     private Cache cache;
     private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
@@ -533,6 +534,10 @@ public class Brace {
 
         server.start();
 
+        // Stable per-process identity for the fleet (uses the actually-bound port, known only
+        // after start()). Tags metrics and anchors regression detection across N instances.
+        instanceId = InstanceId.generate(actualPort());
+
         // Capture uncaught exceptions from any thread (e.g., background libraries)
         // so they appear in /ops/status errors.recent and in structured logs.
         Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
@@ -740,6 +745,16 @@ public class Brace {
             return connector.getLocalPort();
         }
         return port;
+    }
+
+    /**
+     * Stable per-process instance id (e.g. {@code web-3:8080-a1b2c3d4}), assigned at
+     * {@link #start()}. Null before the server starts. Identifies this running instance in a
+     * multi-server fleet — used to tag metrics and anchor regression detection. See
+     * {@link InstanceId}.
+     */
+    public String instanceId() {
+        return instanceId;
     }
 
     private static long parseSize(String size) {
