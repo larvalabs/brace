@@ -1,8 +1,10 @@
 # Migrating from Brace 0.1.6 → 0.1.7
 
-This release has **no breaking changes** — no code changes are required. It does fix a
-packaging gap for Postgres (lets most projects **delete a manual dependency**), and adds an
-**optional** shared cache backend for multi-server deploys.
+This release has **no breaking changes** — no code changes are required. It fixes a
+packaging gap for Postgres (lets most projects **delete a manual dependency**), adds an
+**optional** shared cache backend for multi-server deploys, and ships several
+request/response **hardening fixes** (case-insensitive headers, multiple `Set-Cookie`,
+body-read ordering, smarter `?` parameter conversion) covered at the end of this guide.
 
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
@@ -108,6 +110,79 @@ both — keep the in-process default for hot read-through pages and a separate
 **Choose per use case, not per deployment.** Full guidance, including the deferred near-cache
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
+
+## Request/response hardening fixes
+
+These are bug fixes and small capability additions. None require code changes; all are
+strictly more lenient or additive. One subtle behavior change (body-read ordering) is called
+out explicitly below.
+
+### Request headers are now case-insensitive
+
+HTTP header names are case-insensitive, and arrive **lowercased** over HTTP/2. Through 0.1.6,
+Brace matched them case-sensitively, so a client (or an HTTP/2-terminating proxy) sending
+`content-type` or `cookie` in non-canonical case could silently bypass `req.isJson()`,
+session-cookie loading, CSRF header checks, htmx detection, and ops bearer auth.
+
+`req.header(name)` and `req.hasHeader(name)` are now case-insensitive.
+
+```java
+// Before 0.1.7: returned null if the client sent "content-type: application/json"
+req.header("Content-Type");
+// 0.1.7+: any casing works
+req.header("content-type");   // == req.header("Content-Type")
+req.isJson();                 // true regardless of header casing
+```
+
+**Action:** none. If you previously worked around this by checking multiple casings, you can
+simplify.
+
+### Responses can carry multiple `Set-Cookie` headers
+
+`Result` stored headers in a single-value map, so a second cookie overwrote the first — most
+visibly, the framework's session cookie could clobber an application cookie a handler set (or
+vice versa). `Set-Cookie` is now kept in its own list and each value is emitted separately.
+
+```java
+// Now all of these survive to the wire together:
+return Result.text("ok")
+    .cookie("theme", "dark", 3600, false, true, "Lax")   // app cookie
+    .cookie("locale", "en", 3600, false, true, "Lax");   // second app cookie
+// ...plus the framework's brace_session cookie if the session was modified.
+```
+
+`result.header("Set-Cookie", value)` now **appends** rather than replaces; the new
+`result.setCookies()` returns all values. Other headers are unchanged (still single-value).
+
+**Action:** none, unless you relied on the old overwrite behavior (you almost certainly did not).
+
+### Request bodies are read only for matched routes
+
+Through 0.1.6 the request body (including multipart parsing) was read **before** route
+matching, so static files, 404s, and before-middleware short-circuits paid the cost — and an
+unmatched POST with a large multipart body was fully parsed into memory before the 404. The
+body is now read only once a route matches.
+
+**Subtle behavior change:** before-middleware running on a request that matches **no** route
+now sees an empty `req.body()` (and no uploaded files). Middleware that inspects the body on
+otherwise-unmatched paths is the only thing affected — rare, but if you have it, match a route
+(even a catch-all) so the body is read.
+
+### `?` parameter conversion skips literals/comments and supports `??`
+
+The positional-parameter converter (`db.query`, `db.sql`, `db.hql`, …) no longer rewrites a
+`?` that appears inside a single-quoted string literal or a SQL comment. A literal `?` elsewhere
+— notably a Postgres JSONB `?`/`?|`/`?&` operator — can be escaped as `??`:
+
+```java
+db.query(Post.class, "title = 'huh?' AND status = ?", status);   // the ? in 'huh?' is left alone
+db.sql("UPDATE t SET data = data WHERE meta ??| ARRAY['k']");     // ??| -> ?| JSONB operator
+```
+
+For SQL that needs full control, `db.jdbc(...)` remains the raw escape hatch.
+
+**Action:** none, unless you wrote a literal `??` expecting two placeholders (it now means one
+literal `?`) — use two separate `?` instead.
 
 ## Why the Postgres packaging gap went unnoticed until now
 

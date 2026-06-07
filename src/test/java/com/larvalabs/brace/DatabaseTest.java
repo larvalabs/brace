@@ -325,6 +325,46 @@ class DatabaseTest {
     }
 
     @Test
+    void convertSimplePlaceholders() {
+        var db = new Database(null);
+        assertEquals("a = ?1 AND b = ?2", db.convertPositionalParams("a = ? AND b = ?"));
+    }
+
+    @Test
+    void convertSkipsStringLiterals() {
+        // A ? inside a quoted literal is data, not a placeholder, so it must not be renumbered.
+        var db = new Database(null);
+        assertEquals("title = 'a?b' AND x = ?1", db.convertPositionalParams("title = 'a?b' AND x = ?"));
+    }
+
+    @Test
+    void convertHandlesEscapedQuoteInLiteral() {
+        var db = new Database(null);
+        assertEquals("t = 'a''?''b' AND x = ?1", db.convertPositionalParams("t = 'a''?''b' AND x = ?"));
+    }
+
+    @Test
+    void convertSkipsLineComment() {
+        var db = new Database(null);
+        assertEquals("x = ?1 -- not a ? placeholder\nAND y = ?2",
+            db.convertPositionalParams("x = ? -- not a ? placeholder\nAND y = ?"));
+    }
+
+    @Test
+    void convertSkipsBlockComment() {
+        var db = new Database(null);
+        assertEquals("x = ?1 /* keep this ? */ AND y = ?2",
+            db.convertPositionalParams("x = ? /* keep this ? */ AND y = ?"));
+    }
+
+    @Test
+    void convertDoubleQuestionEscapesToLiteral() {
+        // ?? escapes to a single literal ? — e.g. so a Postgres JSONB ?| operator survives.
+        var db = new Database(null);
+        assertEquals("data ?| ?1", db.convertPositionalParams("data ??| ?"));
+    }
+
+    @Test
     void nativeSql() {
         var db = new Database(factory.openSession());
         try {

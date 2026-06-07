@@ -1,6 +1,7 @@
 package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
+import java.util.List;
 import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -107,5 +108,31 @@ class ResultTest {
         var result = Result.text("hello");
         result.header("X-Custom", "value");
         assertEquals("value", result.header("X-Custom"));
+    }
+
+    @Test
+    void multipleCookiesAreKept() {
+        var result = Result.text("ok");
+        result.cookie("a", "1", 3600, true, false, "Lax");
+        result.cookie("b", "2", 3600, true, false, "Lax");
+        assertEquals(2, result.setCookies().size());
+        assertTrue(result.setCookies().get(0).startsWith("a=1"));
+        assertTrue(result.setCookies().get(1).startsWith("b=2"));
+    }
+
+    @Test
+    void setCookieHeaderAppendsRatherThanOverwrites() {
+        var result = Result.text("ok");
+        result.header("Set-Cookie", "x=1");
+        result.header("set-cookie", "y=2");   // case-insensitive name, still appends
+        assertEquals(List.of("x=1", "y=2"), result.setCookies());
+    }
+
+    @Test
+    void setCookieIsNotStoredInTheSingleValueHeaderMap() {
+        var result = Result.text("ok");
+        result.header("Set-Cookie", "x=1");
+        assertFalse(result.headers().containsKey("Set-Cookie"));
+        assertEquals("x=1", result.header("Set-Cookie"));
     }
 }

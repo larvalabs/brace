@@ -34,6 +34,16 @@ class RequestTest {
     }
 
     @Test
+    void headersAreCaseInsensitive() {
+        var req = new Request("GET", "/", Map.of(), Map.of(),
+            Map.of("Content-Type", "application/json"), null);
+        assertEquals("application/json", req.header("content-type"));
+        assertEquals("application/json", req.header("CONTENT-TYPE"));
+        assertTrue(req.hasHeader("content-type"));
+        assertTrue(req.isJson());
+    }
+
+    @Test
     void method() {
         var req = new Request("POST", "/posts", Map.of(), Map.of(), Map.of(), null);
         assertEquals("POST", req.method());

@@ -1,6 +1,8 @@
 package com.larvalabs.brace;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 public class Result {
@@ -10,6 +12,10 @@ public class Result {
     private String body;
     private byte[] rawBytes;
     private final Map<String, String> headers = new LinkedHashMap<>();
+    // Set-Cookie is the one header that legitimately repeats: a response may carry several
+    // cookies (e.g. an app cookie plus the framework session cookie). It is kept out of the
+    // single-value `headers` map — which would collapse repeats — and appended here instead.
+    private final List<String> setCookies = new ArrayList<>();
 
     protected Result(int status, String contentType, String body) {
         this.status = status;
@@ -39,7 +45,8 @@ public class Result {
      */
     static Result raw(int status, String contentType, byte[] body, Map<String, String> headers) {
         var result = new Result(status, contentType, body);
-        if (headers != null) result.headers.putAll(headers);
+        // Route through header() so a replayed Set-Cookie lands in the cookie list, not the map.
+        if (headers != null) headers.forEach(result::header);
         return result;
     }
 
@@ -119,12 +126,22 @@ public class Result {
     public byte[] rawBytes() { return rawBytes; }
     public Map<String, String> headers() { return headers; }
 
+    /** All {@code Set-Cookie} values for this response, in the order they were added. */
+    public List<String> setCookies() { return setCookies; }
+
     public Result header(String name, String value) {
-        headers.put(name, value);
+        if (name.equalsIgnoreCase("Set-Cookie")) {
+            setCookies.add(value);
+        } else {
+            headers.put(name, value);
+        }
         return this;
     }
 
     public String header(String name) {
+        if (name.equalsIgnoreCase("Set-Cookie")) {
+            return setCookies.isEmpty() ? null : setCookies.get(0);
+        }
         return headers.get(name);
     }
 

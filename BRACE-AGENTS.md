@@ -153,8 +153,8 @@ req.formInt("count")          // as int
 req.hasFormParam("optional")  // boolean
 
 // Headers, body, and JSON
-req.header("Accept")          // header value or null
-req.hasHeader("Accept")       // boolean
+req.header("Accept")          // header value or null (header names are case-insensitive)
+req.hasHeader("Accept")       // boolean (case-insensitive)
 req.body()                    // raw body string
 req.bodyAs(MyClass.class)     // JSON body deserialized
 req.json(MyClass.class)       // alias for bodyAs
@@ -212,9 +212,14 @@ Result.json(object, 201)                    // JSON with status
 Result.redirect("/posts")                   // 302 redirect
 Result.redirectPermanent("/new-url")        // 301 redirect
 
-// Headers
-result.header("X-Custom", "value")          // add response header
+// Headers and cookies
+result.header("X-Custom", "value")          // set a response header (single-value)
+result.cookie("theme", "dark", 3600, true, true, "Lax")  // name, value, maxAge, httpOnly, secure, sameSite
 ```
+
+`Set-Cookie` is the one repeatable header: multiple `result.cookie(...)` calls all reach the
+wire (and your app cookies are never clobbered by the framework session cookie). Every other
+header is single-value — setting it again replaces the prior value.
 
 Note: `Json.of()`, `View.of()`, and `Redirect.to()` still work (called by the `Result.*` methods).
 
@@ -252,7 +257,10 @@ db.sqlQueryLong("SELECT count(*) FROM posts")      // native SQL returning Long
 db.jdbc(conn -> { /* raw JDBC */ })                // raw Connection access
 ```
 
-HQL uses `?` positional params — the framework converts to `?1`, `?2` for Hibernate 7.
+HQL/SQL uses `?` positional params — the framework converts to `?1`, `?2` for Hibernate 7.
+The converter leaves alone any `?` inside single-quoted string literals or SQL comments; to
+write a literal `?` operator (e.g. Postgres JSONB `?`/`?|`/`?&`), escape it as `??`. For SQL
+that needs full control, `db.jdbc(...)` is the raw escape hatch.
 
 For DB access outside request lifecycle (jobs, WebSocket):
 

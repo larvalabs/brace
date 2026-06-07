@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
@@ -152,28 +153,34 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Parse query parameters
             Map<String, String> queryParams = parseQuery(jettyRequest.getHttpURI().getQuery());
 
-            // Extract headers
-            Map<String, String> headers = new LinkedHashMap<>();
+            // Extract headers into a case-insensitive map. HTTP header names are
+            // case-insensitive (and arrive lowercased over HTTP/2), so lookups like
+            // headers.get("Cookie") / "Content-Type" must not depend on the wire casing.
+            Map<String, String> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
             for (var field : jettyRequest.getHeaders()) {
                 headers.put(field.getName(), field.getValue());
             }
 
-            // Read request body — multipart or plain
+            // Match route first. Static files, 404s, and before-middleware short-circuits
+            // must not pay request-body or multipart-parsing cost — the body is read only
+            // once we know a route will consume it. (This also keeps an unmatched POST with a
+            // large multipart body from being fully parsed into memory before the 404.)
+            RouteMatch match = router.match(method, path);
+
+            // Read request body — multipart or plain — only for matched routes.
             String body = "";
             Map<String, List<UploadedFile>> uploadedFiles = Map.of();
-            String requestContentType = headers.getOrDefault("Content-Type", "");
-
-            if (requestContentType.contains("multipart/form-data")) {
-                var parsed = parseMultipart(jettyRequest, requestContentType);
-                body = parsed.formBody();
-                uploadedFiles = parsed.files();
-            } else {
-                body = Content.Source.asString(jettyRequest);
-                if (body == null) body = "";
+            if (match != null) {
+                String requestContentType = headers.getOrDefault("Content-Type", "");
+                if (requestContentType.contains("multipart/form-data")) {
+                    var parsed = parseMultipart(jettyRequest, requestContentType);
+                    body = parsed.formBody();
+                    uploadedFiles = parsed.files();
+                } else {
+                    body = Content.Source.asString(jettyRequest);
+                    if (body == null) body = "";
+                }
             }
-
-            // Match route
-            RouteMatch match = router.match(method, path);
 
             // Extract remote address from socket
             String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
@@ -389,6 +396,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         response.getHeaders().put("Content-Type", result.contentType());
         for (var entry : result.headers().entrySet()) {
             response.getHeaders().put(entry.getKey(), entry.getValue());
+        }
+        // Set-Cookie may repeat — append each value so multiple cookies survive to the wire.
+        for (var setCookie : result.setCookies()) {
+            response.getHeaders().add("Set-Cookie", setCookie);
         }
         byte[] bytes;
         if (result.rawBytes() != null) {

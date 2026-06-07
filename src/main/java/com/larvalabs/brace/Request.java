@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 public class Request {
 
@@ -39,7 +40,7 @@ public class Request {
         this.path = path;
         this.pathParams = pathParams;
         this.queryParams = queryParams;
-        this.headers = headers;
+        this.headers = caseInsensitive(headers);
         this.body = body;
         this.uploadedFiles = uploadedFiles;
         this.remoteAddr = remoteAddr;
@@ -145,6 +146,13 @@ public class Request {
 
     public boolean hasHeader(String name) {
         return headers.containsKey(name);
+    }
+
+    /** Copy headers into a case-insensitive map so lookups don't depend on the sender's casing. */
+    private static Map<String, String> caseInsensitive(Map<String, String> source) {
+        var map = new TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER);
+        if (source != null) map.putAll(source);
+        return map;
     }
 
     public boolean isHtmx() {

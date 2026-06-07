@@ -255,14 +255,64 @@ public class Database {
 
     // --- Internal ---
 
-    private String convertPositionalParams(String hql) {
-        var sb = new StringBuilder();
+    /**
+     * Rewrite {@code ?} placeholders to Hibernate-style {@code ?1, ?2, …}, but leave alone any
+     * {@code ?} that isn't actually a placeholder: ones inside single-quoted string literals,
+     * line comments, and block comments. A literal {@code ?} elsewhere (e.g. a Postgres JSONB
+     * {@code ?}/{@code ?|}/{@code ?&} operator) can be escaped as {@code ??}, which emits a single
+     * {@code ?}. For fully hand-written SQL, {@link #jdbc(JdbcConsumer)} is the escape hatch.
+     */
+    String convertPositionalParams(String hql) {   // package-private for direct unit testing
+        var sb = new StringBuilder(hql.length() + 8);
         int paramIndex = 1;
-        for (char c : hql.toCharArray()) {
-            if (c == '?') {
-                sb.append('?').append(paramIndex++);
+        int n = hql.length();
+        int i = 0;
+        while (i < n) {
+            char c = hql.charAt(i);
+            if (c == '\'') {                                              // single-quoted literal
+                sb.append(c);
+                i++;
+                while (i < n) {
+                    char d = hql.charAt(i);
+                    sb.append(d);
+                    i++;
+                    if (d == '\'') {
+                        if (i < n && hql.charAt(i) == '\'') {            // '' escapes a quote
+                            sb.append('\'');
+                            i++;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            } else if (c == '-' && i + 1 < n && hql.charAt(i + 1) == '-') {   // -- line comment
+                while (i < n && hql.charAt(i) != '\n') {
+                    sb.append(hql.charAt(i));
+                    i++;
+                }
+            } else if (c == '/' && i + 1 < n && hql.charAt(i + 1) == '*') {   // /* block comment */
+                sb.append("/*");
+                i += 2;
+                while (i < n) {
+                    if (hql.charAt(i) == '*' && i + 1 < n && hql.charAt(i + 1) == '/') {
+                        sb.append("*/");
+                        i += 2;
+                        break;
+                    }
+                    sb.append(hql.charAt(i));
+                    i++;
+                }
+            } else if (c == '?') {
+                if (i + 1 < n && hql.charAt(i + 1) == '?') {             // ?? -> literal ?
+                    sb.append('?');
+                    i += 2;
+                } else {
+                    sb.append('?').append(paramIndex++);
+                    i++;
+                }
             } else {
                 sb.append(c);
+                i++;
             }
         }
         return sb.toString();

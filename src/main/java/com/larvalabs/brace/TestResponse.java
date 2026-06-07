@@ -1,6 +1,7 @@
 package com.larvalabs.brace;
 
 import java.net.http.HttpResponse;
+import java.util.List;
 
 /**
  * Simple wrapper around java.net.http.HttpResponse with convenience methods
@@ -24,6 +25,11 @@ public class TestResponse {
 
     public String header(String name) {
         return raw.headers().firstValue(name).orElse(null);
+    }
+
+    /** All values for a (case-insensitive) header name, e.g. every {@code Set-Cookie}. */
+    public List<String> headers(String name) {
+        return raw.headers().allValues(name);
     }
 
     public String redirectedTo() {
