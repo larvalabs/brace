@@ -72,6 +72,24 @@ class RateLimiterPostgresIT extends PostgresTestBase {
     }
 
     @Test
+    void counterTablesAreUnloggedForSpeed() throws Exception {
+        // V11 trades durability for speed on the ephemeral counter tables (see
+        // docs/2026-06-07-rate-limiter-load.md). relpersistence 'u' = UNLOGGED.
+        try (var c = connect(); var st = c.createStatement();
+             var rs = st.executeQuery(
+                 "SELECT relname, relpersistence FROM pg_class " +
+                 "WHERE relname IN ('brace_counters','brace_cache_counters') ORDER BY relname")) {
+            int checked = 0;
+            while (rs.next()) {
+                assertEquals("u", rs.getString("relpersistence"),
+                    rs.getString("relname") + " should be UNLOGGED");
+                checked++;
+            }
+            assertEquals(2, checked, "both counter tables should exist");
+        }
+    }
+
+    @Test
     void differentKeysAreCountedIndependently() {
         var instanceA = RateLimiter.perIp(2, "1m");
         var instanceB = RateLimiter.perIp(2, "1m");

@@ -46,42 +46,11 @@ final class Counters {
             db.beginTransaction();
             Instant now = Instant.now();
             Timestamp exp = expiresAt == null ? null : Timestamp.from(expiresAt);
-            long result = db.jdbc(conn -> {
-                long current = 0;
-                boolean exists = false;
-                try (var ps = conn.prepareStatement(
-                        "SELECT n, expires_at FROM brace_counters WHERE counter_key = ? FOR UPDATE")) {
-                    ps.setString(1, key);
-                    try (var rs = ps.executeQuery()) {
-                        if (rs.next()) {
-                            exists = true;
-                            Timestamp rowExp = rs.getTimestamp(2);
-                            // An already-expired row starts over rather than continuing a stale count.
-                            boolean expired = rowExp != null && !rowExp.toInstant().isAfter(now);
-                            current = expired ? 0 : rs.getLong(1);
-                        }
-                    }
-                }
-                long next = current + delta;
-                if (exists) {
-                    try (var ps = conn.prepareStatement(
-                            "UPDATE brace_counters SET n = ?, expires_at = ? WHERE counter_key = ?")) {
-                        ps.setLong(1, next);
-                        setNullableTimestamp(ps, 2, exp);
-                        ps.setString(3, key);
-                        ps.executeUpdate();
-                    }
-                } else {
-                    try (var ps = conn.prepareStatement(
-                            "INSERT INTO brace_counters (counter_key, n, expires_at) VALUES (?, ?, ?)")) {
-                        ps.setString(1, key);
-                        ps.setLong(2, next);
-                        setNullableTimestamp(ps, 3, exp);
-                        ps.executeUpdate();
-                    }
-                }
-                return next;
-            });
+            Timestamp nowTs = Timestamp.from(now);
+            long result = db.jdbc(conn ->
+                dbFactory.isPostgres()
+                    ? incrementPostgres(conn, key, delta, exp, nowTs)
+                    : incrementPortable(conn, key, delta, exp, now));
             db.commitTransaction();
             return result;
         } catch (RuntimeException e) {
@@ -93,6 +62,72 @@ final class Counters {
         } finally {
             db.close();
         }
+    }
+
+    /**
+     * Postgres fast path: a single atomic upsert — one round trip, lock held only for the statement,
+     * HOT-update-friendly (the PK never changes). The expiry reset folds into the {@code CASE} so an
+     * already-expired counter starts over rather than continuing a stale count. This is the hot path
+     * for the rate limiter on a busy server; see {@code docs/2026-06-07-rate-limiter-load.md}.
+     */
+    private static long incrementPostgres(java.sql.Connection conn, String key, long delta,
+                                          Timestamp exp, Timestamp now) throws java.sql.SQLException {
+        try (var ps = conn.prepareStatement(
+                "INSERT INTO brace_counters AS c (counter_key, n, expires_at) VALUES (?, ?, ?) " +
+                "ON CONFLICT (counter_key) DO UPDATE SET " +
+                "n = CASE WHEN c.expires_at IS NOT NULL AND c.expires_at <= ? THEN ? ELSE c.n + ? END, " +
+                "expires_at = EXCLUDED.expires_at " +
+                "RETURNING n")) {
+            ps.setString(1, key);
+            ps.setLong(2, delta);
+            setNullableTimestamp(ps, 3, exp);
+            ps.setTimestamp(4, now);   // expiry comparison uses the same Timestamp basis as storage
+            ps.setLong(5, delta);      // reset value when the prior window had expired
+            ps.setLong(6, delta);      // otherwise increment the live count
+            try (var rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    /** Portable path (H2 and any non-Postgres): SELECT ... FOR UPDATE then UPDATE/INSERT. */
+    private static long incrementPortable(java.sql.Connection conn, String key, long delta,
+                                          Timestamp exp, Instant now) throws java.sql.SQLException {
+        long current = 0;
+        boolean exists = false;
+        try (var ps = conn.prepareStatement(
+                "SELECT n, expires_at FROM brace_counters WHERE counter_key = ? FOR UPDATE")) {
+            ps.setString(1, key);
+            try (var rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    exists = true;
+                    Timestamp rowExp = rs.getTimestamp(2);
+                    // An already-expired row starts over rather than continuing a stale count.
+                    boolean expired = rowExp != null && !rowExp.toInstant().isAfter(now);
+                    current = expired ? 0 : rs.getLong(1);
+                }
+            }
+        }
+        long next = current + delta;
+        if (exists) {
+            try (var ps = conn.prepareStatement(
+                    "UPDATE brace_counters SET n = ?, expires_at = ? WHERE counter_key = ?")) {
+                ps.setLong(1, next);
+                setNullableTimestamp(ps, 2, exp);
+                ps.setString(3, key);
+                ps.executeUpdate();
+            }
+        } else {
+            try (var ps = conn.prepareStatement(
+                    "INSERT INTO brace_counters (counter_key, n, expires_at) VALUES (?, ?, ?)")) {
+                ps.setString(1, key);
+                ps.setLong(2, next);
+                setNullableTimestamp(ps, 3, exp);
+                ps.executeUpdate();
+            }
+        }
+        return next;
     }
 
     /**
