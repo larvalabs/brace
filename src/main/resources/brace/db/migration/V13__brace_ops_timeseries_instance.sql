@@ -1,0 +1,13 @@
+-- Instance-tag the ops metric feed for multi-server observability (P3)
+-- (docs/2026-06-06-brace-0.1.7-multiserver-plan.md).
+--
+-- ops_timeseries is an append-only metric feed (consumed by external dashboards). Without an
+-- instance label, a fleet's rows are indistinguishable — silently summed, or (with the recurring
+-- scheduler's cluster-wide dedupe) only one box's data. Each instance now flushes its OWN
+-- instance-tagged rows; readers aggregate across instance_id (fleet total) or filter to one box.
+--
+-- Base tier (runs on H2 + Postgres): the column must exist everywhere the flush writes. The Postgres
+-- tier additionally widens the primary key to include instance_id (V14) so multiple instances can
+-- write the same (ts, metric); H2 is single-process, so its (ts, metric) key is never contended.
+-- ADD COLUMN IF NOT EXISTS for upgrade-safety, consistent with the other framework migrations.
+ALTER TABLE ops_timeseries ADD COLUMN IF NOT EXISTS instance_id VARCHAR(128);

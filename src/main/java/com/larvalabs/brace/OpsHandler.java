@@ -16,6 +16,7 @@ public class OpsHandler {
     private final Cache cache;
     private final JfrProfiler profiler;
     private RegressionTracker regressionTracker;
+    private volatile String instanceId = "unknown";
 
     private static final String OPS_COOKIE_NAME = "__brace_ops_session";
     // Browser login tokens are stateless, short-lived HMAC tokens (no server-side store), so the
@@ -163,6 +164,7 @@ public class OpsHandler {
         // App info
         var app = new LinkedHashMap<String, Object>();
         app.put("framework", "brace");
+        app.put("instanceId", instanceId);   // which box served this snapshot (P3, fleet visibility)
         app.put("uptime", formatDuration(Duration.between(stats.startedAt(), Instant.now())));
         app.put("startedAt", stats.startedAt().toString());
         app.put("javaVersion", System.getProperty("java.version"));
@@ -449,6 +451,11 @@ public class OpsHandler {
 
     public void setRegressionTracker(RegressionTracker tracker) {
         this.regressionTracker = tracker;
+    }
+
+    /** Identify which instance is serving ops responses (set once the server has bound — P3). */
+    public void setInstanceId(String instanceId) {
+        if (instanceId != null) this.instanceId = instanceId;
     }
 
     /** GET /ops/regressions — new error kinds since startup (the /ops/errors shape + acknowledged). */

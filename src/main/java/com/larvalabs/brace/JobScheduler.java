@@ -20,7 +20,8 @@ public class JobScheduler {
         int failCount, Instant nextRun, String lastMessage
     ) {}
 
-    private record RegisteredJob(String name, String schedule, long periodMs, long initialDelayMs, Job job) {}
+    private record RegisteredJob(String name, String schedule, long periodMs, long initialDelayMs,
+                                Job job, boolean local) {}
 
     private final CopyOnWriteArrayList<RegisteredJob> registeredJobs = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<JobStatus> statuses = new CopyOnWriteArrayList<>();
@@ -28,15 +29,29 @@ public class JobScheduler {
     private DatabaseFactory dbFactory;
 
     public void every(String interval, String name, Job job) {
+        register(interval, name, job, false);
+    }
+
+    /**
+     * Like {@link #every}, but runs on <em>every</em> instance each interval rather than once
+     * cluster-wide (no leader claim). For framework per-instance work — notably the ops metric
+     * flush (P3), where each instance must write its own instance-tagged {@code ops_timeseries}
+     * rows. Not for user jobs with external side effects (those want the deduped {@link #every}).
+     */
+    void everyLocal(String interval, String name, Job job) {
+        register(interval, name, job, true);
+    }
+
+    private void register(String interval, String name, Job job, boolean local) {
         long periodMs = parseInterval(interval);
-        var rj = new RegisteredJob(name, "every " + interval, periodMs, periodMs, job);
+        var rj = new RegisteredJob(name, "every " + interval, periodMs, periodMs, job, local);
         registeredJobs.add(rj);
         statuses.add(new JobStatus(name, "every " + interval, null, 0, "pending", null, 0, null, null));
 
         // If scheduler is already running, schedule immediately
         if (scheduler != null) {
             final int index = registeredJobs.size() - 1;
-            seedRunRow(name);
+            if (!local) seedRunRow(name);
             scheduler.scheduleAtFixedRate(() -> {
                 Thread.startVirtualThread(() -> executeJob(index, rj));
             }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
@@ -47,7 +62,7 @@ public class JobScheduler {
         LocalTime targetTime = LocalTime.parse(time);
         long initialDelayMs = computeDelayUntil(targetTime);
         long periodMs = Duration.ofHours(24).toMillis();
-        registeredJobs.add(new RegisteredJob(name, "daily at " + time, periodMs, initialDelayMs, job));
+        registeredJobs.add(new RegisteredJob(name, "daily at " + time, periodMs, initialDelayMs, job, false));
         Instant nextRun = Instant.now().plusMillis(initialDelayMs);
         statuses.add(new JobStatus(name, "daily at " + time, null, 0, "pending", null, 0, nextRun, null));
     }
@@ -59,7 +74,7 @@ public class JobScheduler {
         for (int i = 0; i < registeredJobs.size(); i++) {
             var rj = registeredJobs.get(i);
             final int index = i;
-            seedRunRow(rj.name());
+            if (!rj.local()) seedRunRow(rj.name());
             scheduler.scheduleAtFixedRate(() -> {
                 Thread.startVirtualThread(() -> executeJob(index, rj));
             }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
@@ -86,8 +101,8 @@ public class JobScheduler {
         // Cluster-wide dedupe: when a database is configured, only the instance
         // that claims this interval runs the job. Without a database (single
         // process, e.g. tests) the scheduler runs unconditionally as before.
-        if (dbFactory != null && !claimRun(rj)) {
-            return; // another instance already ran this interval
+        if (!rj.local() && dbFactory != null && !claimRun(rj)) {
+            return; // another instance already ran this interval (cluster-wide dedupe)
         }
 
         Instant start = Instant.now();

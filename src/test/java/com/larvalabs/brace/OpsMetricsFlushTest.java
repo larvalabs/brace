@@ -46,7 +46,7 @@ class OpsMetricsFlushTest {
         metrics.put("http.errors", 2L);
         metrics.put("http.queries", 5L);
 
-        tx(db -> Brace.insertMetrics(db, ts, metrics));
+        tx(db -> Brace.insertMetrics(db, ts, "test-instance", metrics));
 
         var rows = read(db -> db.sqlQuery("SELECT metric, val FROM ops_timeseries ORDER BY metric"));
         assertEquals(3, rows.size(), "all three metrics land from one multi-row INSERT");
@@ -63,14 +63,14 @@ class OpsMetricsFlushTest {
         var metrics = new LinkedHashMap<String, Object>();
         metrics.put("mailer.failures", 1L);
 
-        tx(db -> Brace.insertMetrics(db, Timestamp.from(Instant.now()), metrics));
+        tx(db -> Brace.insertMetrics(db, Timestamp.from(Instant.now()), "test-instance", metrics));
 
         assertEquals(1L, count());
     }
 
     @Test
     void emptyMetricsIsANoOp() {
-        tx(db -> Brace.insertMetrics(db, Timestamp.from(Instant.now()), new LinkedHashMap<>()));
+        tx(db -> Brace.insertMetrics(db, Timestamp.from(Instant.now()), "test-instance", new LinkedHashMap<>()));
 
         assertEquals(0L, count(), "an empty flush must not emit an INSERT");
     }

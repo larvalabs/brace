@@ -793,6 +793,10 @@ Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pas
 
 **Multi-instance.** On Postgres the regression set is shared fleet-wide (table `brace_regressions`): a new error kind notifies **exactly once** across all instances, the `/ops/regressions` list and acknowledge are consistent on every box, and the regression `id` is a stable string (a hash of `type`+`route`+`deploy`) — so an id listed on one instance acknowledges correctly on another. The baseline is anchored to a **deploy marker** set with `app.deploy("<git-sha>")` (or the `BRACE_DEPLOY` env var; defaults to `"default"`): every instance of one deploy shares it, and a new deploy re-evaluates regressions from a clean baseline. Without Postgres the set is per-process (single-server).
 
+### Multi-instance observability
+
+Behind a load balancer, `/ops/status`, `/ops/logs`, and the JFR/heap figures are **per-instance** — each reflects the box that served the request, so consecutive dashboard refreshes (which self-poll every ~5s) may land on different instances and show different numbers. `/ops/status` includes the serving box's `app.instanceId` (`<host>:<port>-<rand>`) so you can tell which one you hit. The durable metric feed `ops_timeseries` is **instance-tagged**: every instance flushes its own rows (column `instance_id`, primary key `(ts, metric, instance_id)`), so an external dashboard (Grafana, etc.) can sum across instances for a fleet total or filter to one box — they are no longer silently summed or limited to a single instance. The authoritative fleet picture is an external metrics/log aggregator over that feed and the stdout JSON logs (which go to every instance's stdout).
+
 ### Storage and retention
 
 | Data | Where it lives | Capacity | Eviction | Survives restart? |

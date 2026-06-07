@@ -40,6 +40,7 @@ public class Brace {
     private Stats stats = new Stats();
     private JfrProfiler profiler;
     private String instanceId;
+    private OpsHandler opsHandler;
     private Cache cache;
     private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
@@ -505,7 +506,7 @@ public class Brace {
         if (opsKeysPath != null) {
             var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
             tokenSecret = resolveOpsSecret();
-            var opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
+            opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on
@@ -598,6 +599,9 @@ public class Brace {
         // Stable per-process identity for the fleet (uses the actually-bound port, known only
         // after start()). Tags metrics and anchors regression detection across N instances.
         instanceId = InstanceId.generate(actualPort());
+        if (opsHandler != null) {
+            opsHandler.setInstanceId(instanceId);
+        }
 
         // Capture uncaught exceptions from any thread (e.g., background libraries)
         // so they appear in /ops/status errors.recent and in structured logs.
@@ -639,7 +643,10 @@ public class Brace {
 
         // Flush stats to ops_timeseries
         if (databaseFactory != null && opsKeysPath != null) {
-            jobScheduler.every(httpStatsInterval, "ops-flush-http", (db, ctx) -> {
+            // Per-instance flush (everyLocal): each instance writes its OWN instance-tagged rows so
+            // the fleet's metrics are all captured and distinguishable (P3), rather than the recurring
+            // scheduler's cluster-wide dedupe leaving only one box's data.
+            jobScheduler.everyLocal(httpStatsInterval, "ops-flush-http", (db, ctx) -> {
                 var snapshot = stats.snapshot();
                 if (snapshot.requests() > 0) {
                     var metrics = new java.util.LinkedHashMap<String, Object>();
@@ -651,36 +658,37 @@ public class Brace {
                     if (snapshot.queries() > 0) {
                         metrics.put("http.avg_query_us", snapshot.queryUs() / snapshot.queries());
                     }
-                    insertMetrics(db, java.sql.Timestamp.from(snapshot.ts()), metrics);
+                    insertMetrics(db, java.sql.Timestamp.from(snapshot.ts()), instanceId, metrics);
                 }
             });
 
             if (cache != null) {
-                jobScheduler.every(cacheStatsInterval, "ops-flush-cache", (db, ctx) -> {
+                jobScheduler.everyLocal(cacheStatsInterval, "ops-flush-cache", (db, ctx) -> {
                     long h = cache.drainHits(), m = cache.drainMisses(), e = cache.drainEvictions();
                     if (h > 0 || m > 0 || e > 0) {
                         var metrics = new java.util.LinkedHashMap<String, Object>();
                         metrics.put("cache.hits", h);
                         metrics.put("cache.misses", m);
                         metrics.put("cache.evictions", e);
-                        insertMetrics(db, java.sql.Timestamp.from(java.time.Instant.now()), metrics);
+                        insertMetrics(db, java.sql.Timestamp.from(java.time.Instant.now()), instanceId, metrics);
                     }
                 });
             }
 
             if (mailer != null) {
-                jobScheduler.every(mailerStatsInterval, "ops-flush-mailer", (db, ctx) -> {
+                jobScheduler.everyLocal(mailerStatsInterval, "ops-flush-mailer", (db, ctx) -> {
                     long f = mailer.drainFailCount();
                     if (f > 0) {
                         var ts = java.sql.Timestamp.from(java.time.Instant.now());
-                        db.sql("INSERT INTO ops_timeseries (ts, metric, val) VALUES (?, ?, ?)", ts, "mailer.failures", f);
+                        db.sql("INSERT INTO ops_timeseries (ts, metric, val, instance_id) VALUES (?, ?, ?, ?)",
+                            ts, "mailer.failures", f, instanceId);
                     }
                 });
             }
 
-            // JVM metrics flush
+            // JVM metrics flush (per-instance: heap/CPU/threads are inherently per-JVM)
             if (profiler != null) {
-                jobScheduler.every(httpStatsInterval, "ops-flush-jvm", (db, ctx) -> {
+                jobScheduler.everyLocal(httpStatsInterval, "ops-flush-jvm", (db, ctx) -> {
                     var snap = profiler.snapshot();
                     var heap = (java.util.Map<String, Object>) snap.get("heap");
                     var cpu = (java.util.Map<String, Object>) snap.get("cpu");
@@ -695,7 +703,7 @@ public class Brace {
                     metrics.put("jvm.gc_count", profiler.gcCount());
                     metrics.put("jvm.gc_total_pause_ms", profiler.totalGcPauseMs());
                     metrics.put("jvm.gc_max_pause_ms", profiler.maxRecentGcPauseMs());
-                    insertMetrics(db, java.sql.Timestamp.from(java.time.Instant.now()), metrics);
+                    insertMetrics(db, java.sql.Timestamp.from(java.time.Instant.now()), instanceId, metrics);
                 });
 
                 jobScheduler.every("5m", "ops-flush-jvm-profiling", (db, ctx) -> {
@@ -741,19 +749,21 @@ public class Brace {
      * round-trips. The {@code ?} placeholders are renumbered to ?1, ?2… by {@link Database#sql}.
      * Package-private so {@code OpsMetricsFlushTest} can exercise the dynamic-SQL build directly.
      */
-    static void insertMetrics(Database db, java.sql.Timestamp ts, java.util.Map<String, Object> metrics) {
+    static void insertMetrics(Database db, java.sql.Timestamp ts, String instanceId,
+                              java.util.Map<String, Object> metrics) {
         if (metrics.isEmpty()) {
             return;
         }
-        var sql = new StringBuilder("INSERT INTO ops_timeseries (ts, metric, val) VALUES ");
-        var params = new java.util.ArrayList<Object>(metrics.size() * 3);
+        var sql = new StringBuilder("INSERT INTO ops_timeseries (ts, metric, val, instance_id) VALUES ");
+        var params = new java.util.ArrayList<Object>(metrics.size() * 4);
         boolean first = true;
         for (var entry : metrics.entrySet()) {
-            sql.append(first ? "(?, ?, ?)" : ", (?, ?, ?)");
+            sql.append(first ? "(?, ?, ?, ?)" : ", (?, ?, ?, ?)");
             first = false;
             params.add(ts);
             params.add(entry.getKey());
             params.add(entry.getValue());
+            params.add(instanceId);
         }
         db.sql(sql.toString(), params.toArray());
     }
