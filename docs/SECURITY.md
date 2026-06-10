@@ -469,6 +469,52 @@ location /ops/ {
 
 ---
 
+## Error Store Redaction
+
+Brace scrubs error records at capture time (before they reach the database or
+`/ops/errors`). Two redaction passes run inside `BraceHandler` at the point the
+exception is caught:
+
+### Name-based redaction (query params and request headers)
+
+Query-string parameters and request headers whose names look sensitive
+(`token`, `password`, `authorization`, `cookie`, `secret`, `api-key`, and
+several others — see `Redactor.SENSITIVE`) have their values replaced with
+`[REDACTED]`. Matching is on the normalized name (lowercased, hyphens and
+underscores stripped), so it deliberately over-redacts: a field named
+`token_count` is also redacted.
+
+### Value-shaped redaction (path segments and exception message tokens)
+
+High-entropy tokens are detected by shape and replaced with `[redacted]`,
+regardless of field name. The heuristic (applied in `Redactor.redactPath` and
+`Redactor.redactMessage`) treats a segment or whitespace/punctuation-delimited
+token as a secret when **all** of these hold:
+
+1. Length ≥ 16 characters.
+2. Every character is in the base64url-or-hex alphabet (`[A-Za-z0-9_\-+/=]`).
+3. Contains at least one ASCII digit **and** at least one ASCII letter (rules
+   out purely numeric IDs and purely alphabetic slugs).
+
+JWTs (two dots dividing three base64url parts) are also caught as a special
+case.
+
+**What is intentionally kept visible:**
+
+| What | Why |
+|---|---|
+| UUIDs (`8-4-4-4-12` hex) | Usually record identifiers, not bearer secrets; needed for debugging |
+| Purely numeric segments | Page IDs, order numbers, user IDs |
+| Short slugs (< 16 chars) | Route labels, action names |
+| Exception message text without high-entropy tokens | Needed to diagnose the error |
+
+The heuristic is conservative by design. An over-eager redactor makes error
+records useless. If your application routes embed raw bearer tokens or reset
+secrets in path positions, consider moving them to opaque database-lookup keys
+so the route retains meaning even after redaction.
+
+---
+
 ## Secrets Management
 
 ### Secret Quality

@@ -169,7 +169,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     Don't change global mapper visibility — too breaking.
   - **Model: Haiku 4.5** (docs) — escalate to Sonnet 4.6 if adding the dev-mode warning.
 
-- [ ] **M10: Error store keeps URL paths + exception messages unredacted** — `BraceHandler.java:367,546`, `OpsDashboard.java:594`
+- [x] **M10: Error store keeps URL paths + exception messages unredacted** — `BraceHandler.java:367,546`, `OpsDashboard.java:594`
   - Redaction covers query params and headers, but path segments (password-reset
     tokens) and `e.getMessage()` (frequently contains credentials/PII) are stored and
     rendered in the dashboard.

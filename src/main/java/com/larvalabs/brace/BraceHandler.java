@@ -410,10 +410,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String errorMethod = jettyRequest.getMethod();
             String errorPath = jettyRequest.getHttpURI().getPath();
             String errorQuery = jettyRequest.getHttpURI().getQuery();
-            String routeInfo = errorMethod + " " + errorPath;
+            // Redact high-entropy path segments (reset tokens, invite tokens, etc.) so they
+            // are not persisted in the error store or surfaced on /ops/errors.
+            String redactedPath = Redactor.redactPath(errorPath);
+            String routeInfo = errorMethod + " " + redactedPath;
             // Redact sensitive query params (?token=…, ?password=…) before the request detail
             // is stored in the error record and served over /ops/errors.
-            String requestInfo = errorMethod + " " + errorPath
+            String requestInfo = errorMethod + " " + redactedPath
                 + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
             int qc = db != null ? db.queryCount() : 0;
             long qu = db != null ? db.queryDurationUs() : 0;
@@ -425,7 +428,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             if (errorStore != null) {
                 String errorType = e.getClass().getSimpleName();
-                String errorMessage = e.getMessage();
+                // Redact the exception message: name-based pass (via Redactor.isSensitive on
+                // tokens that look like key=value) is not applicable here, so we run the
+                // value-shaped pass to strip embedded bearer tokens, SQL literals, etc.
+                String errorMessage = Redactor.redactMessage(e.getMessage());
                 String stackTrace = stackTraceToString(e);
                 // Instant-of-failure context: how much DB work ran before the throw, and the
                 // redacted request headers. Captured synchronously (the Jetty request isn't safe

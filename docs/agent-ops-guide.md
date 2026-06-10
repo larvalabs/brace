@@ -216,3 +216,32 @@ release migration notes.
 - Neither store evicts based on age — only on count.
 
 See `BRACE-AGENTS.md` → "Storage and retention" for the full table.
+
+## Redaction in error records
+
+Error records are scrubbed before storage — the data you see via `brace errors`
+or `/ops/errors` has already been cleaned. Two passes run at capture time:
+
+**Name-based (query params and headers):** fields whose name looks sensitive
+(`token`, `password`, `authorization`, `cookie`, `secret`, `api-key`, etc.) have
+their values replaced with `[REDACTED]`. This is a deliberate over-redact — a
+field named `token_count` is also redacted.
+
+**Value-shaped (path segments and exception message tokens):** high-entropy
+tokens are detected by their shape and replaced with `[redacted]`, regardless of
+field name. A segment or whitespace-delimited token is redacted when it is 16+
+characters long, consists entirely of base64url/hex characters, and contains at
+least one digit and at least one letter. JWTs (two-dot three-part base64url
+tokens) are also caught.
+
+What remains visible (intentionally):
+- **UUIDs** (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) — these are usually record
+  identifiers, not secrets, and are needed for debugging.
+- **Numeric IDs** and **short slugs** (below the 16-char threshold).
+- Exception message text that does not contain high-entropy tokens.
+
+If your app routes carry user-supplied secrets in path positions, prefer opaque
+non-entropic route parameters (e.g. a lookup key in a database rather than a raw
+token in the URL) so the route is meaningful even after redaction. The redaction
+heuristic is conservative by design — an over-eager redactor makes error records
+useless. See `docs/SECURITY.md` → "Error Store Redaction" for details.

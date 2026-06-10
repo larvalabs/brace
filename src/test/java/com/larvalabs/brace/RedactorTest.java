@@ -77,4 +77,144 @@ class RedactorTest {
         assertEquals(Redactor.PLACEHOLDER, entry.fields().get("password"));
         assertEquals("bob", entry.fields().get("user"));
     }
+
+    // ---- redactPath tests ----
+
+    @Test
+    void redactPathLeaves32HexTokenRedacted() {
+        // 32-char hex token with mixed letters+digits — should be redacted
+        String path = "/password-reset/a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String result = Redactor.redactPath(path);
+        assertEquals("/password-reset/[redacted]", result);
+    }
+
+    @Test
+    void redactPathLeavesNumericIdUntouched() {
+        assertEquals("/users/42/profile", Redactor.redactPath("/users/42/profile"));
+    }
+
+    @Test
+    void redactPathLeavesShortSlugUntouched() {
+        assertEquals("/blog/hello-world", Redactor.redactPath("/blog/hello-world"));
+    }
+
+    @Test
+    void redactPathLeavesUuidUntouched() {
+        // UUIDs are identifiers, not secrets — needed for debugging
+        String path = "/items/550e8400-e29b-41d4-a716-446655440000";
+        assertEquals(path, Redactor.redactPath(path));
+    }
+
+    @Test
+    void redactPathRedactsJwtShapedSegment() {
+        // JWT: header.payload.signature
+        String jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        String path = "/api/" + jwt;
+        String result = Redactor.redactPath(path);
+        assertEquals("/api/[redacted]", result);
+    }
+
+    @Test
+    void redactPathHandlesRootAndEmptyPath() {
+        assertEquals("/", Redactor.redactPath("/"));
+        assertNull(Redactor.redactPath(null));
+        assertEquals("", Redactor.redactPath(""));
+    }
+
+    @Test
+    void redactPathRedactsBase64urlToken() {
+        // 24-char base64url token (invite token style): mixed letters+digits
+        String path = "/invite/abc123DEF456ghi789JKL0";
+        assertEquals("/invite/[redacted]", Redactor.redactPath(path));
+    }
+
+    @Test
+    void redactPathLeavesNormalWordSegmentsUntouched() {
+        assertEquals("/admin/dashboard", Redactor.redactPath("/admin/dashboard"));
+        assertEquals("/health", Redactor.redactPath("/health"));
+    }
+
+    // ---- redactMessage tests ----
+
+    @Test
+    void redactMessageRedactsBearerTokenInMessage() {
+        // Simulated exception message containing a long token
+        String token = "a3f9bc2d8ef14a5b6c7d8e9f01234567";   // 32-char hex
+        String message = "Failed to validate token: " + token;
+        String result = Redactor.redactMessage(message);
+        assertFalse(result.contains(token), "token should be redacted");
+        assertTrue(result.contains("[redacted]"));
+        assertTrue(result.contains("Failed"));
+    }
+
+    @Test
+    void redactMessageLeavesNormalMessageUntouched() {
+        String message = "User not found for email: bob@example.com";
+        // No high-entropy token here — email address contains dots and @ which are
+        // outside the base64url charset, so it won't match the heuristic.
+        assertEquals(message, Redactor.redactMessage(message));
+    }
+
+    @Test
+    void redactMessageRedactsJwtInMessage() {
+        String jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        String message = "Invalid JWT: " + jwt;
+        String result = Redactor.redactMessage(message);
+        assertFalse(result.contains(jwt), "JWT should be redacted from message");
+        assertTrue(result.contains("[redacted]"));
+    }
+
+    @Test
+    void redactMessageHandlesNullAndEmpty() {
+        assertNull(Redactor.redactMessage(null));
+        assertEquals("", Redactor.redactMessage(""));
+    }
+
+    @Test
+    void redactMessageLeavesShortTokensUntouched() {
+        // All tokens here are well below MIN_SECRET_LENGTH — nothing should be redacted.
+        // Note: the colon after "NullPointerException" is a delimiter, so the reconstructed
+        // message won't contain it, but no token should be replaced with [redacted].
+        String message = "NullPointerException: field was null";
+        String result = Redactor.redactMessage(message);
+        assertFalse(result.contains("[redacted]"), "no token should be redacted in: " + result);
+        // All original words should still be present
+        assertTrue(result.contains("NullPointerException"));
+        assertTrue(result.contains("field"));
+        assertTrue(result.contains("null"));
+    }
+
+    // ---- isSecretShaped tests ----
+
+    @Test
+    void isSecretShapedReturnsTrueForLongMixedToken() {
+        assertTrue(Redactor.isSecretShaped("a3f9bc2d8ef14a5b6c7d8e9f01234567"));
+    }
+
+    @Test
+    void isSecretShapedReturnsFalseForNumericId() {
+        assertFalse(Redactor.isSecretShaped("1234567890123456")); // all digits
+    }
+
+    @Test
+    void isSecretShapedReturnsFalseForPurelyAlphaSlug() {
+        assertFalse(Redactor.isSecretShaped("thisisaverylongslugwithnumbers")); // no digits
+        // actually has no digits so should return false
+    }
+
+    @Test
+    void isSecretShapedReturnsFalseForUuid() {
+        assertFalse(Redactor.isSecretShaped("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    @Test
+    void isSecretShapedReturnsTrueForJwt() {
+        assertTrue(Redactor.isSecretShaped(
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"));
+    }
+
+    @Test
+    void isSecretShapedReturnsFalseForShortToken() {
+        assertFalse(Redactor.isSecretShaped("abc123")); // below MIN_SECRET_LENGTH
+    }
 }
