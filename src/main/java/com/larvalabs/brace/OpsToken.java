@@ -46,7 +46,22 @@ public class OpsToken {
         return sign("brace-ops-token-secret/v1", baseSecret);
     }
 
-    /** Create a full-scope ({@code CONTROL}) token with no key id. */
+    /**
+     * Create a full-scope ({@code CONTROL}) token with no key id.
+     *
+     * <p><strong>WARNING — this mints an unattributed {@code CONTROL} token, the most
+     * privileged kind.</strong> It must never be called on behalf of an authenticated
+     * caller — in particular never from a READ-gated endpoint — because it silently
+     * escalates the caller to CONTROL and drops key attribution ({@code kid=null}).
+     * That exact misuse was security finding H1 (2026-06-09): the dashboard embedded a
+     * CONTROL token in HTML served to read-only callers. Always use
+     * {@link #create(String, int, OpsScope, String)} with the verified caller's
+     * {@code claims.scope()} and {@code claims.kid()} instead.
+     *
+     * @deprecated CONTROL is the wrong default. Use
+     *             {@link #create(String, int, OpsScope, String)} with an explicit scope.
+     */
+    @Deprecated
     public static String create(String secret, int ttlSeconds) {
         return create(secret, ttlSeconds, OpsScope.CONTROL, null);
     }

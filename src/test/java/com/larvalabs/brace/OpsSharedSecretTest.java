@@ -82,7 +82,7 @@ class OpsSharedSecretTest {
         assertEquals(a, b, "same base secret must derive the same ops secret (cross-instance interop)");
         assertNotEquals(a, other, "different base secret must derive a different ops secret");
 
-        String token = OpsToken.create(a, 60);
+        String token = OpsToken.create(a, 60, OpsScope.READ, null);
         assertNotNull(OpsToken.verify(token, b), "token validates under the same derived secret");
         assertNull(OpsToken.verify(token, other), "token must not validate under a different secret");
     }

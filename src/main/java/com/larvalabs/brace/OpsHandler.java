@@ -116,11 +116,16 @@ public class OpsHandler {
      * Requires valid Bearer token authentication.
      */
     public Result loginToken(Request req) {
-        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
+        var claims = authorizedClaims(req, OpsScope.READ);
+        if (claims == null) return Result.unauthorized("Invalid ops key");
 
         // Stateless, short-lived HMAC token — no server-side store, so exchange works on any
-        // instance behind a load balancer (B5). It conveys access the caller already holds.
-        String loginToken = OpsToken.create(tokenSecret, LOGIN_TOKEN_TTL_SECONDS);
+        // instance behind a load balancer (B5). It conveys exactly the access the caller
+        // already holds: minted at the caller's scope and key id (H1), which exchange()
+        // preserves into the browser session cookie — a read key yields a read-only,
+        // attributed browser session. READ-gated because the dashboard itself is READ;
+        // no escalation is possible since the minted token never exceeds the caller's scope.
+        String loginToken = OpsToken.create(tokenSecret, LOGIN_TOKEN_TTL_SECONDS, claims.scope(), claims.kid());
         Instant expiry = Instant.now().plusSeconds(LOGIN_TOKEN_TTL_SECONDS);
 
         return Json.of(Map.of(
@@ -351,10 +356,13 @@ public class OpsHandler {
     }
 
     public Result dashboard(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
-        // Generate a dashboard token with 2h TTL for htmx polling
-        String dashboardToken = OpsToken.create(tokenSecret, 7200);
-        return Result.html(OpsDashboard.html(dashboardToken, stats, jobScheduler, mailer, errorStore, cache, profiler));
+        var claims = authorizedClaims(req, OpsScope.READ);
+        if (claims == null) return Result.unauthorized("Invalid ops key");
+        // Generate a dashboard token with 2h TTL for htmx polling. Minted at the caller's
+        // own scope and key id — never above it (H1: this token is embedded in the page
+        // HTML, so a CONTROL default would hand every read-only caller a control token).
+        String dashboardToken = OpsToken.create(tokenSecret, 7200, claims.scope(), claims.kid());
+        return Result.html(OpsDashboard.html(dashboardToken, claims.scope(), stats, jobScheduler, mailer, errorStore, cache, profiler));
     }
 
     public Result routes(Request req) {
@@ -561,11 +569,22 @@ public class OpsHandler {
      * audit log, attributed to the token's key fingerprint.
      */
     private boolean authorize(Request req, OpsScope required) {
+        return authorizedClaims(req, required) != null;
+    }
+
+    /**
+     * Like {@link #authorize}, but returns the verified claims on success so the caller
+     * can act at the token's <em>actual</em> scope — e.g. re-mint a derived token capped
+     * at the caller's scope and attributed to the caller's key (H1: a READ caller must
+     * never receive a CONTROL token). Returns {@code null} when unauthenticated or
+     * scope-denied. Audited identically to {@link #authorize}.
+     */
+    private OpsToken.Claims authorizedClaims(Request req, OpsScope required) {
         var claims = authenticate(req);
-        if (claims == null) return false;
+        if (claims == null) return null;
         boolean granted = claims.scope().grants(required);
         OpsAudit.record(req.method(), req.path(), claims.kid(), claims.scope(), required, granted);
-        return granted;
+        return granted ? claims : null;
     }
 
     private static int levelRank(String level) {
