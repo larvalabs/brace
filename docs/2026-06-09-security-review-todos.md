@@ -84,7 +84,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     or single cached entry keyed by secret). Pure caching, no KDF change.
   - **Model: Haiku 4.5**
 
-- [ ] **M2: No server-side session expiry** — `Session.java` (whole class), `SessionOptions`
+- [x] **M2: No server-side session expiry** — `Session.java` (whole class), `SessionOptions`
   - Encrypted payload has no issued-at/expiry; `Max-Age` is client-enforced only, so a
     stolen cookie is valid until secret rotation.
   - **Fix:** write `_exp` (epoch seconds, derived from `SessionOptions.maxAge`, with a

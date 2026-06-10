@@ -351,6 +351,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Write session cookie to the surviving Result after after-middleware has run.
             if (session != null && session.isModified() && sessionSecret != null) {
+                session.maxAgeSeconds(sessionMaxAgeSeconds());
                 String cookieValue = session.toCookie(sessionSecret);
                 if (sessionOptions != null) {
                     result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
@@ -365,6 +366,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // and ensureToken minted a fresh token.  The handler-session block above and this
             // block are mutually exclusive: csrfOnlySession is null whenever session != null.
             if (csrfOnlySession != null && sessionSecret != null) {
+                csrfOnlySession.maxAgeSeconds(sessionMaxAgeSeconds());
                 String cookieValue = csrfOnlySession.toCookie(sessionSecret);
                 if (sessionOptions != null) {
                     result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
@@ -524,6 +526,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             case "pdf"         -> "application/pdf";
             default            -> "application/octet-stream";
         };
+    }
+
+    /**
+     * Expiry horizon (seconds) stamped into the encrypted session payload (_exp), derived from
+     * the app's SessionOptions.maxAge when positive; otherwise 0, which tells Session to use its
+     * 14-day default. This is the server-enforced session lifetime (M2), independent of the
+     * client-side Max-Age cookie hint. Expiry is fixed from last write — there is no sliding
+     * refresh, so a session re-mints (and its window extends) only when a handler modifies it.
+     */
+    private long sessionMaxAgeSeconds() {
+        if (sessionOptions != null && sessionOptions.maxAge() != null
+                && sessionOptions.maxAge().getSeconds() > 0) {
+            return sessionOptions.maxAge().getSeconds();
+        }
+        return 0;
     }
 
     private String parseCookieValue(String cookieHeader, String name) {

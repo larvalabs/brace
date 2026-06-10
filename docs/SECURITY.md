@@ -47,7 +47,34 @@ Cookies have a **4KB size limit**. For large session data:
 - **Algorithm:** AES-256-GCM (Galois/Counter Mode)
 - **Key Derivation:** PBKDF2-HMAC-SHA256 (100,000 iterations)
 - **Authentication:** GCM mode provides built-in authentication (no separate HMAC needed)
-- **Nonce:** Random 12-byte nonce per cookie (prevents replay attacks)
+- **Nonce:** Random 12-byte nonce per cookie. This prevents **keystream reuse** (the GCM
+  security requirement of a unique nonce per key) — it does **not** prevent replay. A
+  captured cookie can be replayed until it expires; replay is bounded by `_exp` (below).
+
+### Session expiry
+
+Every session cookie carries a server-enforced absolute expiry, `_exp` (epoch seconds),
+**inside the encrypted payload**. On each read Brace rejects a cookie whose `_exp` is in
+the past, returning an empty session. This is what bounds the lifetime of a *stolen*
+cookie: the cookie's `Max-Age` attribute is only a client-side hint (a client can ignore
+it and keep replaying the cookie), whereas `_exp` is checked by the server and cannot be
+altered without the secret.
+
+- **Horizon:** `SessionOptions.maxAge()` when set to a positive duration; otherwise a
+  **14-day** default (so even "session-lifetime" cookies, which set no `Max-Age`, still
+  expire server-side).
+- **Fixed expiry from last write — no sliding window.** A session is only re-minted when a
+  handler modifies it (`session.isModified()`), so the expiry is measured from the last
+  write, not the last request. An active user whose session is never modified will be
+  logged out when the horizon elapses even with continuous activity. This is intentional;
+  there is no per-response sliding refresh. To extend an active session, write to it
+  (e.g. bump a `lastSeen` value) on the requests that should renew it.
+- **Reserved key.** `_exp` is server-managed: `session.set("_exp", …)` is silently
+  ignored, and `_exp` is stripped from the decrypted data so it never appears via
+  `get`/`has`.
+- **Back-compat (0.1.7):** cookies minted by ≤0.1.6 have no `_exp` and are **accepted**
+  this release (re-minted with `_exp` on the next write). A future release will reject
+  expiry-less cookies — see the 0.1.6→0.1.7 migration guide.
 
 ### Example: Storing User Session Data
 

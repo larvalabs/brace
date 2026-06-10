@@ -52,6 +52,28 @@ public class Session {
     private boolean modified = false;
 
     /**
+     * Reserved key holding the server-enforced absolute expiry (epoch seconds) inside the
+     * encrypted payload. Written by {@link #toCookie(String)} and checked by
+     * {@link #fromCookie(String, String)}; it is stripped from the user-visible data on read
+     * and cannot be set through the public {@link #set} API (server-managed only).
+     */
+    static final String EXPIRY_KEY = "_exp";
+
+    /**
+     * Default expiry horizon when no positive {@link SessionOptions#maxAge()} is configured.
+     * Bounds replay of a stolen cookie even for "session-lifetime" cookies, whose Max-Age is
+     * only a client hint. 14 days.
+     */
+    static final long DEFAULT_MAX_AGE_SECONDS = 14L * 24 * 60 * 60;
+
+    /**
+     * Expiry horizon in seconds used when minting a cookie. 0 means "use the default".
+     * Set at construction (or via {@link #maxAgeSeconds(long)}) so {@link #toCookie(String)}
+     * can stamp {@code _exp} without changing its public signature.
+     */
+    private long maxAgeSeconds = 0;
+
+    /**
      * Cache for derived PBKDF2 keys. Since the session secret is fixed for process
      * lifetime, we memoize the derived SecretKeySpec to avoid re-running 100,000 PBKDF2
      * iterations on every session cookie read/write. The PBKDF2 derivation is deterministic
@@ -82,8 +104,23 @@ public class Session {
     }
 
     public void set(String key, String value) {
+        // _exp is server-managed (written at serialize time, enforced at read time). Silently
+        // reserve it so a handler can't forge or extend its own expiry via session.set("_exp", ...).
+        if (EXPIRY_KEY.equals(key)) {
+            return;
+        }
         data.put(key, value);
         modified = true;
+    }
+
+    /**
+     * Set the expiry horizon (seconds) stamped into the encrypted payload by {@link #toCookie}.
+     * A value &le; 0 means "use the {@link #DEFAULT_MAX_AGE_SECONDS default}". Package-visible:
+     * BraceHandler plumbs the app's {@code SessionOptions.maxAge()} through here. Does not mark
+     * the session modified — it only affects serialization, not user data.
+     */
+    void maxAgeSeconds(long seconds) {
+        this.maxAgeSeconds = seconds;
     }
 
     public void set(String key, int value) {
@@ -145,7 +182,14 @@ public class Session {
      */
     public String toCookie(String secret) {
         try {
-            String json = toJson(data);
+            // Stamp a server-enforced absolute expiry into the payload. Max-Age on the cookie is
+            // only a client hint; _exp is what bounds replay of a stolen cookie (M2). The horizon
+            // is the configured SessionOptions.maxAge (when positive), else a 14-day default.
+            long horizon = maxAgeSeconds > 0 ? maxAgeSeconds : DEFAULT_MAX_AGE_SECONDS;
+            var payload = new LinkedHashMap<>(data);
+            payload.put(EXPIRY_KEY, String.valueOf(System.currentTimeMillis() / 1000 + horizon));
+
+            String json = toJson(payload);
             byte[] jsonBytes = json.getBytes(StandardCharsets.UTF_8);
 
             // Derive AES-256 key from secret
@@ -206,6 +250,25 @@ public class Session {
             String json = new String(jsonBytes, StandardCharsets.UTF_8);
             Session session = new Session();
             parseJson(json, session.data);
+
+            // Server-side expiry enforcement (M2). _exp is an absolute epoch-seconds deadline.
+            // - Present and in the past  → reject: return an empty session (stolen cookie expires
+            //   regardless of the client-side Max-Age hint).
+            // - Present and in the future → strip _exp so it is never visible via get/has/keys, then
+            //   keep the data.
+            // - Absent (legacy ≤0.1.6 cookie) → accepted for this release; re-minted with _exp on the
+            //   next write. A future release will reject expiry-less cookies (see migration guide).
+            String exp = session.data.remove(EXPIRY_KEY);
+            if (exp != null) {
+                try {
+                    if (Long.parseLong(exp.strip()) <= System.currentTimeMillis() / 1000) {
+                        return new Session();
+                    }
+                } catch (NumberFormatException e) {
+                    // Malformed _exp — treat as expired/invalid rather than indefinitely valid.
+                    return new Session();
+                }
+            }
             return session;
         } catch (Exception e) {
             // Any decryption or authentication failure returns empty session

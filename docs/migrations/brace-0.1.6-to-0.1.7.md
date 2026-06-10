@@ -4,7 +4,11 @@ This release has **no breaking changes** — no code changes are required. It fi
 packaging gap for Postgres (lets most projects **delete a manual dependency**), adds an
 **optional** shared cache backend for multi-server deploys, and ships several
 request/response **hardening fixes** (case-insensitive headers, multiple `Set-Cookie`,
-body-read ordering, smarter `?` parameter conversion) covered at the end of this guide.
+body-read ordering, smarter `?` parameter conversion) plus several **security fixes**
+(bounded request bodies, rightmost-untrusted `req.ip()`, CSRF token persistence, and a
+new **server-enforced session expiry**) covered at the end of this guide. None require a
+code change, but the session-expiry change alters how long a stolen cookie stays valid —
+see "sessions now carry a server-enforced expiry" below.
 
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
@@ -305,3 +309,76 @@ token). This was previously missing; if any code or test explicitly asserted tha
 Also in this release: PATCH requests are now treated as mutating for CSRF purposes
 (alongside POST/PUT/DELETE). There is no `patch()` route registration method today, so
 this only affects applications that register PATCH routes through lower-level APIs.
+
+## Security fix: sessions now carry a server-enforced expiry (`_exp`)
+
+**Who is affected:** every application that uses sessions. No code change is required, but
+the behavior of long-lived/stolen cookies changes, so read the back-compat and
+fixed-expiry notes below.
+
+**What changed.** Through 0.1.6 the encrypted session payload carried **no expiry**. The
+cookie's `Max-Age` attribute is enforced only by the client, so a copied or stolen session
+cookie stayed valid **indefinitely** — until the global `session.secret` was rotated.
+
+0.1.7 stamps a server-enforced absolute expiry, `_exp` (epoch seconds), **inside the
+encrypted payload** on every write. On read, Brace rejects a cookie whose `_exp` is in the
+past and returns an empty session. The expiry horizon is `SessionOptions.maxAge()` when set
+to a positive duration; otherwise a **14-day default** (so even "session-lifetime" cookies
+that set no `Max-Age` still expire server-side).
+
+```java
+// Default 14-day server-side horizon — nothing to configure:
+app.sessions(SessionOptions.secure(secret));
+
+// Explicit horizon flows through to _exp as well as the Max-Age cookie hint:
+app.sessions(SessionOptions.secure(secret).maxAgeDays(30));   // _exp = now + 30d
+```
+
+`_exp` is a **reserved, server-managed key**: `session.set("_exp", …)` is silently ignored
+(a handler can't forge or extend its own expiry), and `_exp` is stripped from the decrypted
+data so it never shows up via `session.get("_exp")` / `session.has("_exp")`.
+
+### Back-compat: legacy cookies are accepted this release, rejected in a future one
+
+Cookies minted by **≤0.1.6 have no `_exp`**. To avoid logging out every user on the deploy,
+this release **accepts** expiry-less cookies and **re-mints them with `_exp` on the next
+write** (e.g. the next request that modifies the session). This closes the
+indefinite-validity hole for all *new* cookies immediately while letting existing sessions
+roll over naturally.
+
+**A future release will reject cookies without `_exp`.** At that point any session that has
+not been written since upgrading to 0.1.7 will be treated as expired (the user re-logs in).
+Plan for a one-time logout of still-legacy sessions when you take that upgrade.
+
+**Before (≤0.1.6):**
+
+```
+brace_session = encrypt({ "userId": "42", "_csrf": "…" })
+// no expiry in the payload → valid forever until secret rotation
+```
+
+**After (0.1.7+):**
+
+```
+brace_session = encrypt({ "userId": "42", "_csrf": "…", "_exp": "1718064000" })
+// server rejects the cookie once now > _exp, regardless of the client-side Max-Age
+```
+
+### Fixed expiry from last write — there is no sliding window
+
+A session is only re-minted when a handler **modifies** it (`session.isModified()`), so the
+expiry is measured from the **last write**, not the last request. An active user whose
+session is never modified can therefore be logged out when the horizon elapses (e.g. 14 days
+after login) **even with daily activity**. This is intentional — Brace does **not** refresh
+the cookie on every response (that would add a `Set-Cookie` to every request and defeat
+response caching).
+
+If you want sessions to renew with activity, write to the session on the requests that
+should extend it — for example bump a value so `isModified()` becomes true:
+
+```java
+session.set("lastSeen", String.valueOf(System.currentTimeMillis()));  // re-mints _exp
+```
+
+**Code change required:** none. **Visible behavior change:** sessions now expire server-side
+(default 14 days from last write); a stolen cookie is no longer valid until secret rotation.
