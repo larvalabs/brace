@@ -14,6 +14,7 @@ import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Session data stored in an encrypted and authenticated cookie.
@@ -49,6 +50,16 @@ public class Session {
     private final Map<String, String> data = new LinkedHashMap<>();
     private final Map<String, String> flashData = new LinkedHashMap<>();
     private boolean modified = false;
+
+    /**
+     * Cache for derived PBKDF2 keys. Since the session secret is fixed for process
+     * lifetime, we memoize the derived SecretKeySpec to avoid re-running 100,000 PBKDF2
+     * iterations on every session cookie read/write. The PBKDF2 derivation is deterministic
+     * (fixed salt, iterations, key length), so caching is safe: same secret always produces
+     * the same key. Bounded to ~16 entries to prevent unbounded growth in test suites.
+     */
+    private static final ConcurrentHashMap<String, SecretKeySpec> keyCache = new ConcurrentHashMap<>();
+    private static final int MAX_KEY_CACHE_SIZE = 16;
 
     // -------------------------------------------------------------------------
     // Accessors
@@ -319,8 +330,23 @@ public class Session {
     /**
      * Derive a 256-bit AES key from the session secret using PBKDF2-HMAC-SHA256.
      * Uses a fixed salt "brace-session" since the secret itself should be random.
+     * Results are cached to avoid re-running 100,000 iterations on every request.
      */
     private static SecretKeySpec deriveKey(String secret) {
+        // Check cache first. computeIfAbsent ensures thread-safe insertion on miss.
+        return keyCache.computeIfAbsent(secret, s -> {
+            // Bound the cache to prevent unbounded growth in test suites.
+            if (keyCache.size() >= MAX_KEY_CACHE_SIZE) {
+                keyCache.clear();
+            }
+            return computeDerivedKey(s);
+        });
+    }
+
+    /**
+     * Compute the PBKDF2-derived AES key (without caching).
+     */
+    private static SecretKeySpec computeDerivedKey(String secret) {
         try {
             SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
             PBEKeySpec spec = new PBEKeySpec(
@@ -334,5 +360,20 @@ public class Session {
         } catch (Exception e) {
             throw new RuntimeException("Key derivation failed", e);
         }
+    }
+
+    /**
+     * For testing: return the cached key spec (same object identity) when called twice.
+     * Package-visible for test use only.
+     */
+    static SecretKeySpec getCachedKey(String secret) {
+        return deriveKey(secret);
+    }
+
+    /**
+     * For testing: clear the key cache. Package-visible for test use only.
+     */
+    static void clearKeyCache() {
+        keyCache.clear();
     }
 }

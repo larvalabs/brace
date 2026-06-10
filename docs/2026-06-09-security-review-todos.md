@@ -77,7 +77,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
 
 ## Medium
 
-- [ ] **M1: PBKDF2 runs 100k iterations on every request** — `Session.java:141,188,323-337`
+- [x] **M1: PBKDF2 runs 100k iterations on every request** — `Session.java:141,188,323-337`
   - `deriveKey()` is called per cookie read/write with no cache; secret is fixed for
     process lifetime. CPU amplification under request flood + hot-path latency.
   - **Fix:** memoize the derived `SecretKeySpec` (static `ConcurrentHashMap<String,SecretKeySpec>`

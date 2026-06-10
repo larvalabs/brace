@@ -125,4 +125,42 @@ class SessionTest {
         assertNull(restored.flash("success"));
         assertTrue(restored.flashData().isEmpty());
     }
+
+    @Test
+    void derivedKeyIsCached() {
+        // Clear cache to start fresh
+        Session.clearKeyCache();
+
+        // Get the same key twice for the same secret
+        var key1 = Session.getCachedKey(SECRET);
+        var key2 = Session.getCachedKey(SECRET);
+
+        // Verify object identity: caching returns the same instance
+        assertSame(key1, key2, "Derived keys for the same secret should return the same cached instance");
+    }
+
+    @Test
+    void cookieRoundTripWithCachedKey() {
+        // Clear cache to start fresh
+        Session.clearKeyCache();
+
+        var session = new Session();
+        session.set("userId", 123);
+        session.set("role", "user");
+
+        // First cookie creation (fills cache)
+        var cookie1 = session.toCookie(SECRET);
+
+        // Second cookie creation (uses cache)
+        var cookie2 = session.toCookie(SECRET);
+
+        // Both should decrypt successfully
+        var restored1 = Session.fromCookie(cookie1, SECRET);
+        var restored2 = Session.fromCookie(cookie2, SECRET);
+
+        assertEquals("123", restored1.get("userId"));
+        assertEquals("user", restored1.get("role"));
+        assertEquals("123", restored2.get("userId"));
+        assertEquals("user", restored2.get("role"));
+    }
 }
