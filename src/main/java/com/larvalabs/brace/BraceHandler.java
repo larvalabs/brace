@@ -330,7 +330,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.clearFlash();
             }
 
-            // Write session cookie if modified
+            // Run after middleware first — after-middleware may return a brand-new Result
+            // instance (e.g. a wrapper that rewrites the body). Attaching the session cookie
+            // before this step would silently discard it whenever the instance changed (M6).
+            for (var after : afterMiddleware) {
+                result = after.apply(braceRequest, result);
+            }
+
+            // Write session cookie to the surviving Result after after-middleware has run.
             if (session != null && session.isModified() && sessionSecret != null) {
                 String cookieValue = session.toCookie(sessionSecret);
                 if (sessionOptions != null) {
@@ -340,11 +347,6 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     result.header("Set-Cookie",
                         "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
                 }
-            }
-
-            // Run after middleware
-            for (var after : afterMiddleware) {
-                result = after.apply(braceRequest, result);
             }
 
             // Add Vary header for htmx requests (caching correctness)

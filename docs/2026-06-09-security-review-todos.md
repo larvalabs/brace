@@ -134,7 +134,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     succeeds.
   - **Model: Sonnet 4.6** — (c) touches the request lifecycle; (a)+(b) are trivial riders.
 
-- [ ] **M6: After-middleware can drop the session cookie** — `BraceHandler.java:313-327`
+- [x] **M6: After-middleware can drop the session cookie** — `BraceHandler.java:313-327`
   - Session `Set-Cookie` is attached before after-middleware runs; middleware returning
     a *new* `Result` discards it (logins silently don't stick).
   - **Fix:** run after-middleware first, then attach the session cookie to the surviving
