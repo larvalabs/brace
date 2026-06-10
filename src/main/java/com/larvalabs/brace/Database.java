@@ -5,6 +5,7 @@ import org.hibernate.query.MutationQuery;
 import org.hibernate.query.Query;
 
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Thin wrapper over Hibernate StatelessSession providing a simple query API.
@@ -76,7 +77,17 @@ public class Database {
         return result;
     }
 
+    /**
+     * Batch-fetch all rows of {@code type} where {@code field} is one of the given {@code values}.
+     *
+     * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
+     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * argument. Doing so is an HQL injection risk. The value is validated against the safe
+     * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
+     * and rejected with {@link IllegalArgumentException} if it does not match.
+     */
     public <T> List<T> queryIn(Class<T> type, String field, List<?> values) {
+        requireValidFieldIdentifier(field);
         if (values.isEmpty()) {
             return List.of();
         }
@@ -125,23 +136,74 @@ public class Database {
 
     // --- Constrained helpers (single-field queries) ---
 
+    /**
+     * Find the first row of {@code type} where {@code field} equals {@code value}, or {@code null}.
+     *
+     * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
+     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * argument. Doing so is an HQL injection risk. The value is validated against the safe
+     * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
+     * and rejected with {@link IllegalArgumentException} if it does not match.
+     */
     public <T> T findBy(Class<T> type, String field, Object value) {
+        requireValidFieldIdentifier(field);
         return queryOne(type, field + " = ?", value);
     }
 
+    /**
+     * Find all rows of {@code type} where {@code field} equals {@code value}.
+     *
+     * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
+     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * argument. Doing so is an HQL injection risk. The value is validated against the safe
+     * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
+     * and rejected with {@link IllegalArgumentException} if it does not match.
+     */
     public <T> List<T> findAllBy(Class<T> type, String field, Object value) {
+        requireValidFieldIdentifier(field);
         return query(type, field + " = ?", value);
     }
 
+    /**
+     * Count rows of {@code type} where {@code field} equals {@code value}.
+     *
+     * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
+     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * argument. Doing so is an HQL injection risk. The value is validated against the safe
+     * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
+     * and rejected with {@link IllegalArgumentException} if it does not match.
+     */
     public <T> long countBy(Class<T> type, String field, Object value) {
+        requireValidFieldIdentifier(field);
         return count(type, field + " = ?", value);
     }
 
+    /**
+     * Return {@code true} if any row of {@code type} has {@code field} equal to {@code value}.
+     *
+     * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
+     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * argument. Doing so is an HQL injection risk. The value is validated against the safe
+     * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
+     * and rejected with {@link IllegalArgumentException} if it does not match.
+     */
     public <T> boolean existsBy(Class<T> type, String field, Object value) {
+        // requireValidFieldIdentifier delegated to countBy
         return countBy(type, field, value) > 0;
     }
 
+    /**
+     * Delete all rows of {@code type} where {@code field} equals {@code value}.
+     * Returns the number of rows deleted.
+     *
+     * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
+     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * argument. Doing so is an HQL injection risk. The value is validated against the safe
+     * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
+     * and rejected with {@link IllegalArgumentException} if it does not match.
+     */
     public <T> int deleteBy(Class<T> type, String field, Object value) {
+        requireValidFieldIdentifier(field);
         long start = System.nanoTime();
         String hql = "DELETE FROM " + type.getSimpleName() + " WHERE " + field + " = ?1";
         MutationQuery query = session.createMutationQuery(hql);
@@ -254,6 +316,29 @@ public class Database {
     }
 
     // --- Internal ---
+
+    /**
+     * Identifier pattern for HQL field names: a simple Java-style identifier or a dot-separated
+     * embedded path (e.g. {@code id}, {@code address.city}). Only ASCII letters, digits, {@code _},
+     * and {@code $} are accepted. Reflecting over entity attributes would be stricter but adds
+     * startup machinery — this regex gate kills identifier-injection while keeping helpers zero-config.
+     */
+    private static final Pattern FIELD_IDENTIFIER =
+            Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*");
+
+    /**
+     * Validate that {@code field} is a safe HQL attribute identifier (simple name or dotted
+     * embedded path). Throws {@link IllegalArgumentException} if not, naming the offending value.
+     */
+    static void requireValidFieldIdentifier(String field) {
+        if (field == null || !FIELD_IDENTIFIER.matcher(field).matches()) {
+            throw new IllegalArgumentException(
+                    "Invalid field identifier: \"" + field + "\". " +
+                    "Must match [A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)* " +
+                    "(e.g. \"id\", \"title\", \"address.city\"). " +
+                    "Never pass user-controlled input as a field name.");
+        }
+    }
 
     /**
      * Rewrite {@code ?} placeholders to Hibernate-style {@code ?1, ?2, …}, but leave alone any

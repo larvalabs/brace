@@ -364,6 +364,81 @@ class DatabaseTest {
         assertEquals("data ?| ?1", db.convertPositionalParams("data ??| ?"));
     }
 
+    // --- L4: field identifier validation ---
+
+    @Test
+    void fieldIdentifierSimpleNameAccepted() {
+        // Simple names like "id", "title", "createdAt" must pass without throwing.
+        Database.requireValidFieldIdentifier("id");
+        Database.requireValidFieldIdentifier("title");
+        Database.requireValidFieldIdentifier("createdAt");
+        Database.requireValidFieldIdentifier("_count");
+        Database.requireValidFieldIdentifier("$value");
+    }
+
+    @Test
+    void fieldIdentifierDottedPathAccepted() {
+        // Embedded paths like "address.city" must pass without throwing.
+        Database.requireValidFieldIdentifier("address.city");
+        Database.requireValidFieldIdentifier("author.profile.name");
+    }
+
+    @Test
+    void fieldIdentifierWithSemicolonRejected() {
+        // "id; drop" is an injection attempt — must throw.
+        assertThrows(IllegalArgumentException.class,
+                () -> Database.requireValidFieldIdentifier("id; drop"));
+    }
+
+    @Test
+    void fieldIdentifierWithParenRejected() {
+        // "id) OR (1=1" is an injection attempt — must throw.
+        assertThrows(IllegalArgumentException.class,
+                () -> Database.requireValidFieldIdentifier("id) OR (1=1"));
+    }
+
+    @Test
+    void fieldIdentifierSpaceRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Database.requireValidFieldIdentifier("my field"));
+    }
+
+    @Test
+    void fieldIdentifierNullRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Database.requireValidFieldIdentifier(null));
+    }
+
+    @Test
+    void findAllByRejectsInjectionField() {
+        var db = new Database(factory.openSession());
+        try {
+            assertThrows(IllegalArgumentException.class,
+                    () -> db.findAllBy(Post.class, "id) OR (1=1", "x"));
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryInRejectsInjectionField() {
+        var db = new Database(factory.openSession());
+        try {
+            assertThrows(IllegalArgumentException.class,
+                    () -> db.queryIn(Post.class, "id; drop", List.of(1L)));
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void fieldIdentifierDottedPathValidatesOk() {
+        // Dotted paths must pass requireValidFieldIdentifier without throwing — the validator
+        // is called before Hibernate sees the HQL, so we test it in isolation.
+        Database.requireValidFieldIdentifier("address.city");
+        Database.requireValidFieldIdentifier("author.profile.name");
+    }
+
     @Test
     void nativeSql() {
         var db = new Database(factory.openSession());

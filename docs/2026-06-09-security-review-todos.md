@@ -200,7 +200,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   E-strings** — `Database.java:265-319`. Developer-authored SQL only (correctness, not
   injection). Either teach the scanner `$tag$...$tag$` and `"..."`, or document as
   unsupported → use `db.jdbc(...)`. **Sonnet 4.6**
-- [ ] **L4: `findBy`/`queryIn` concatenate the `field` identifier into HQL** —
+- [x] **L4: `findBy`/`queryIn` concatenate the `field` identifier into HQL** —
   `Database.java:79-153`. Latent injection if an app passes `req.param("sort")`.
   Validate `field` against the entity's attribute names at call time (reflect once,
   cache), or at minimum add loud Javadoc. **Sonnet 4.6**
