@@ -33,7 +33,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   - **Model: Fable 5** — touches the scope-ceiling invariant across token mint, login
     exchange, and dashboard rendering; getting the default wrong reopens the hole.
 
-- [ ] **H2: X-Forwarded-For trusts the leftmost (spoofable) entry** — `Request.java:194-231`
+- [x] **H2: X-Forwarded-For trusts the leftmost (spoofable) entry** — `Request.java:194-231`
   - `forwarded.split(",")[0]` returns the client-supplied entry; real proxies append the
     true client on the right. Defeats `RateLimiter.perIp`, IP allowlists, audit logs.
     The RFC 7239 `Forwarded` parser has the same leftmost bug and mangles multi-element

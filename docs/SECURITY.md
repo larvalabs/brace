@@ -141,10 +141,36 @@ app.trustedProxies("10.0.0.0/8");
 - **Without configuration:** `req.ip()` uses socket remote address only (ignores headers)
 - **With configuration:** `req.ip()` parses `X-Forwarded-For` / `Forwarded` **only if** the immediate peer is trusted
 
+When forwarding headers are consulted, Brace uses **rightmost-untrusted** semantics: it walks
+the `X-Forwarded-For` list from right to left, skips any entry whose address falls inside a
+trusted CIDR, and returns the first untrusted address. This is the correct algorithm because
+real proxies **append** the connecting client's address — the leftmost entries were written by
+the client and can be forged.
+
+Examples:
+
+| `X-Forwarded-For` | Trusted CIDRs | `req.ip()` |
+|---|---|---|
+| `1.2.3.4` | `10.0.0.0/8` | `1.2.3.4` |
+| `spoofed, 9.9.9.9` | `10.0.0.0/8` | `9.9.9.9` (rightmost untrusted, not attacker-supplied leftmost) |
+| `client, 10.0.0.2, 10.0.0.1` | `10.0.0.0/8` | `client` (both proxies trusted) |
+| `10.0.0.1, 10.0.0.2` | `10.0.0.0/8` | `10.0.0.1` (all trusted → leftmost) |
+
+**Dual-stack / representation mismatch.** `TrustedProxies` matches addresses by binary value
+after resolution, but it **fails closed** when the address family differs — a CIDR expressed as
+an IPv4 address does not match the IPv6-mapped form `::ffff:a.b.c.d`, and `127.0.0.1` does not
+match `::1` on a dual-stack bind. If your proxy can connect over both IPv4 and IPv6, list both
+representations explicitly:
+
+```java
+app.trustedProxies("127.0.0.1", "::1");
+app.trustedProxies("10.0.0.0/8", "::ffff:10.0.0.0/104");  // if proxies may use IPv6-mapped addresses
+```
+
 ### Supported Headers
 
 - `X-Forwarded-For` (most common)
-- `Forwarded` (RFC 7239)
+- `Forwarded` (RFC 7239) — elements correctly split on `,`, parameters on `;`
 
 ---
 

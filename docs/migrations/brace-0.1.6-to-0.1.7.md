@@ -184,6 +184,59 @@ For SQL that needs full control, `db.jdbc(...)` remains the raw escape hatch.
 **Action:** none, unless you wrote a literal `??` expecting two placeholders (it now means one
 literal `?`) — use two separate `?` instead.
 
+## Security fix: `req.ip()` now returns the rightmost-untrusted address
+
+**Who is affected:** any application using `RateLimiter.perIp`, IP-based access control, or
+`req.ip()` for audit/logging **behind a trusted reverse proxy**. If you do not call
+`app.trustedProxies(...)`, `req.ip()` always returns the socket address and this change has
+no effect.
+
+**What changed.** Through 0.1.6, `req.ip()` returned the **leftmost** entry in the
+`X-Forwarded-For` header — the entry the client itself wrote. Because real proxies *append*
+the connecting client's address, the leftmost entry is attacker-controlled and spoofable. A
+malicious client could send `X-Forwarded-For: 1.2.3.4` to appear to come from any address,
+bypassing rate limiting, IP allowlists, and audit logs.
+
+0.1.7 implements **rightmost-untrusted** semantics: walk the chain from right to left, skip
+any entry inside a trusted CIDR, return the first untrusted address.
+
+**Before (leftmost — spoofable):**
+
+```
+X-Forwarded-For: spoofed-ip, real-client, 10.0.0.1  (trusted proxy appended last)
+
+// Before 0.1.7: req.ip() → "spoofed-ip"   ← attacker-controlled
+```
+
+**After (rightmost-untrusted — correct):**
+
+```
+X-Forwarded-For: spoofed-ip, real-client, 10.0.0.1  (trusted proxy appended last)
+
+// 0.1.7+: req.ip() → "real-client"   ← first untrusted entry from the right
+```
+
+**Code change required:** none — the API is unchanged. However, if your application code or
+tests explicitly asserted that `req.ip()` returns the leftmost header entry in a multi-hop
+scenario, those assertions now encode the wrong (spoofable) behavior and should be updated.
+
+**Dual-stack note.** `TrustedProxies` fails closed when the address family does not match
+(`127.0.0.1` does not match `::1`). If your proxy can connect via both IPv4 and IPv6, list
+both representations:
+
+```java
+// Before (may miss the IPv6 loopback in dual-stack):
+app.trustedProxies("127.0.0.1");
+
+// After (covers both):
+app.trustedProxies("127.0.0.1", "::1");
+```
+
+See the "Trusted Proxies" section of `docs/SECURITY.md` for a full behavioral table and
+IPv6-mapped address guidance.
+
+---
+
 ## Why the Postgres packaging gap went unnoticed until now
 
 Brace's test suite ran entirely on in-memory H2, whose Flyway handler *is* bundled in
