@@ -5,10 +5,12 @@ packaging gap for Postgres (lets most projects **delete a manual dependency**), 
 **optional** shared cache backend for multi-server deploys, and ships several
 request/response **hardening fixes** (case-insensitive headers, multiple `Set-Cookie`,
 body-read ordering, smarter `?` parameter conversion) plus several **security fixes**
-(bounded request bodies, rightmost-untrusted `req.ip()`, CSRF token persistence, and a
-new **server-enforced session expiry**) covered at the end of this guide. None require a
-code change, but the session-expiry change alters how long a stolen cookie stays valid —
-see "sessions now carry a server-enforced expiry" below.
+(bounded request bodies, rightmost-untrusted `req.ip()`, CSRF token persistence, a
+new **server-enforced session expiry**, and a **replay-resistant ops auth protocol, v2**)
+covered at the end of this guide. None require a code change, but the session-expiry change
+alters how long a stolen cookie stays valid — see "sessions now carry a server-enforced
+expiry" below — and the old ops auth protocol (v1) is now deprecated — see "ops auth
+protocol v2" below.
 
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
@@ -382,3 +384,59 @@ session.set("lastSeen", String.valueOf(System.currentTimeMillis()));  // re-mint
 
 **Code change required:** none. **Visible behavior change:** sessions now expire server-side
 (default 14 days from last write); a stolen cookie is no longer valid until secret rotation.
+
+## Security fix: ops auth protocol v2 (key-bound, nonce'd signature); v1 deprecated
+
+**Who is affected:** every user of the `brace` CLI ops commands (`brace status`, `errors`,
+`logs`, …) — **no action needed**, the 0.1.7 CLI speaks v2 automatically. Action is only
+required if you implemented the `/ops/auth` handshake yourself (e.g. a custom agent or
+script signing requests directly).
+
+**What changed.** Through 0.1.6, the `/ops/auth` client signed **only the ISO timestamp**,
+and the server accepted it within ±30 seconds. The signature was not bound to the public
+key and carried no nonce, so anyone who observed one auth request — a proxy log, a packet
+capture on a mis-terminated hop — could replay the `(publicKey, timestamp, signature)`
+tuple within 30 seconds and mint a fresh bearer token at any scope up to that key's
+ceiling.
+
+0.1.7 introduces **protocol v2**: the request body carries `v: "2"` and a fresh random
+`nonce` (base64url, 16+ bytes, new on every attempt), and the signature is computed over
+
+```
+publicKey + "\n" + timestamp + "\n" + nonce
+```
+
+Binding the public key into the signed message means a captured signature is only ever
+valid for the key that produced it, and the server rejects a reused nonce — a captured
+request can no longer be replayed against the same instance.
+
+**Before (≤0.1.6, v1):**
+
+```json
+{ "publicKey": "…", "timestamp": "2026-06-09T12:00:00Z",
+  "signature": Ed25519(timestamp) }
+```
+
+**After (0.1.7+, v2):**
+
+```json
+{ "v": "2", "publicKey": "…", "timestamp": "2026-06-09T12:00:00Z",
+  "nonce": "<base64url, 16+ random bytes per attempt>",
+  "signature": Ed25519(publicKey + "\n" + timestamp + "\n" + nonce) }
+```
+
+The full wire format is documented in `docs/agent-ops-guide.md` → "Auth protocol (v2)".
+
+### v1 is accepted this release, rejected in a future one
+
+Because v1 shipped in 0.1.6, a 0.1.7 server still **accepts v1 requests** (a body with no
+`v` field) so existing CLIs keep working across the upgrade — each v1 auth logs a
+deprecation warning naming the key fingerprint. **A future release will reject v1** with
+`ops auth protocol v2 required; upgrade the brace CLI`. Upgrade your CLI (and any
+hand-rolled clients) before taking that release.
+
+**Known limitation (unchanged risk posture for v1, by design for v2):** the server's
+seen-nonce set is per-instance and in-memory — ops works without shared fleet state — so
+behind a load balancer a captured v2 request remains replayable against a *different*
+instance within the ±30s timestamp window. HTTPS on every hop to `/ops/*` remains the
+primary control; see `docs/SECURITY.md` → "Ops Endpoints".

@@ -52,6 +52,58 @@ run it again, until it's green.
   Their distinct `email@host` label gets its own line; committing it never
   clobbers anyone else's entry.
 
+## Auth protocol (v2)
+
+The CLI handles this for you. It matters only if you implement the handshake
+yourself (an agent talking to `/ops/*` over raw HTTP).
+
+`POST /ops/auth` with a JSON body:
+
+```json
+{
+  "v": "2",
+  "publicKey": "<base64 Ed25519 public key>",
+  "timestamp": "<ISO-8601 instant, e.g. 2026-06-09T12:00:00Z>",
+  "nonce": "<base64url of 16+ random bytes, fresh per attempt>",
+  "signature": "<base64 Ed25519 signature>",
+  "ttlSeconds": 3600
+}
+```
+
+The signature is computed over exactly:
+
+```
+publicKey + "\n" + timestamp + "\n" + nonce
+```
+
+(newline-delimited; none of the three components can contain a newline). A
+200 response carries `{"token": "...", "expiresAt": "...", "scope": "..."}` —
+pass the token as `Authorization: Bearer <token>` on every `/ops/*` call.
+Optional `scope` in the request body (`read`/`control`) caps the minted token
+below your key's ceiling.
+
+Rules the server enforces:
+
+- **Timestamp freshness:** the timestamp must be within ±30 seconds of server
+  time, or you get `401 Stale timestamp`.
+- **Nonce single-use:** generate a fresh random nonce (16+ bytes, base64url)
+  for every attempt. A reused nonce gets `401 Nonce already used`.
+- **Key binding:** the public key is part of the signed message, so a
+  signature is only valid for the key that produced it.
+
+**Replay caveat (per-instance, best-effort):** the seen-nonce set is held in
+memory on each server instance — ops works without shared fleet state, so it
+cannot be fleet-global. Behind a load balancer, a captured auth request could
+still be replayed against a *different* instance within the ±30s window. Keep
+`/ops/*` behind HTTPS (the protocol assumes the request body is not observable
+in transit); see `docs/SECURITY.md` → "Ops Endpoints".
+
+**Protocol v1 is deprecated.** The pre-0.1.7 format (no `v`, no `nonce`,
+signature over the timestamp alone) is still accepted this release — the
+server logs a deprecation warning — and will be **rejected in a future
+release** with `ops auth protocol v2 required; upgrade the brace CLI`. If you
+implemented v1 by hand, switch to the v2 signing payload above.
+
 ## Environment selection
 
 `.brace` defines URLs:

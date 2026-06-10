@@ -797,7 +797,7 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 
 Read endpoints (the `GET`s above) require a `read`-scope token; the mutating `POST`s require `control`. See "Token scopes" above.
 
-Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pass `Authorization: Bearer <token>`.
+Authenticate with `POST /ops/auth` (protocol v2: Ed25519 signature over `publicKey + "\n" + timestamp + "\n" + nonce`, fresh random nonce per attempt → Bearer token), then pass `Authorization: Bearer <token>`. The full handshake, including the per-instance replay caveat, is in `docs/agent-ops-guide.md` → "Auth protocol (v2)". The pre-0.1.7 v1 format (signed timestamp only) is deprecated and will be rejected in a future release.
 
 **Regression notifications.** When a new error kind first appears since startup, Brace notifies the registered notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl), new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)` (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error store).
 

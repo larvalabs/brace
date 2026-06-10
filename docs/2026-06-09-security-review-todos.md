@@ -96,7 +96,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   - **Model: Opus 4.8** — small code change but a compat/rollout decision with a
     security invariant; the migration-guide story has to be right.
 
-- [ ] **M3: `/ops/auth` signature replayable within ±30s** — `OpsHandler.java:77-92`, `OpsKeys.java:69`
+- [x] **M3: `/ops/auth` signature replayable within ±30s** — `OpsHandler.java:77-92`, `OpsKeys.java:69`
   - Client signs only the ISO timestamp; no nonce, no challenge, signature doesn't bind
     the public key. Anyone observing one auth request can replay it for a fresh token at
     any scope up to the key ceiling.

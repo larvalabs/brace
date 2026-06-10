@@ -55,11 +55,31 @@ public class OpsHandler {
         this.profiler = profiler;
     }
 
-    public record OpsAuthRequest(String publicKey, String timestamp, String signature, Integer ttlSeconds, String scope) {}
+    public record OpsAuthRequest(String v, String publicKey, String timestamp, String signature,
+                                 String nonce, Integer ttlSeconds, String scope) {}
+
+    // Replay suppression for v2 auth nonces. Per-instance, in-memory, best-effort: ops must work
+    // without shared fleet state (B5 — no database, no cross-instance store), so this CANNOT be
+    // fleet-global. Residual window: a captured v2 auth request can still be replayed against a
+    // DIFFERENT instance behind the load balancer within the ±30s timestamp window. Documented in
+    // docs/SECURITY.md ("Ops Endpoints"). TTL is 2 minutes — comfortably above the 60s total
+    // acceptance window — and the map is size-bounded (entries are only recorded after a valid
+    // signature, so only holders of an authorized key can occupy slots).
+    private final NonceCache seenNonces = new NonceCache(120_000, 100_000);
 
     /**
-     * POST /ops/auth — validate signed timestamp, issue short-lived token.
-     * Body: JSON with "publicKey", "timestamp", "signature", and optional "ttlSeconds" fields.
+     * POST /ops/auth — validate a signed auth request, issue a short-lived bearer token.
+     *
+     * <p>Protocol v2 (current): body carries {@code v:"2"}, {@code publicKey}, {@code timestamp},
+     * a per-attempt random {@code nonce} (base64url, 16+ bytes), and a {@code signature} over
+     * {@link OpsKeys#v2AuthMessage publicKey + "\n" + timestamp + "\n" + nonce}. Binding the key
+     * into the signed message kills cross-key confusion; the nonce (rejected on reuse, see
+     * {@link #seenNonces}) makes a captured tuple single-purpose on this instance.
+     *
+     * <p>Protocol v1 (deprecated, shipped in 0.1.6): no {@code v}/{@code nonce}, signature over
+     * the timestamp alone — replayable within the ±30s window. Accepted this release with a
+     * deprecation warning; will be rejected in a future release (see the 0.1.6→0.1.7 migration
+     * guide). Optional fields for both: {@code ttlSeconds}, {@code scope}.
      */
     public Result auth(Request req) {
         try {
@@ -86,9 +106,31 @@ public class OpsHandler {
                 return Result.unauthorized("Stale timestamp");
             }
 
-            // Verify signature
-            if (!OpsKeys.verify(auth.timestamp, auth.signature, auth.publicKey)) {
-                return Result.unauthorized("Invalid signature");
+            // Verify signature per protocol version
+            if ("2".equals(auth.v)) {
+                if (auth.nonce == null || auth.nonce.length() < 16 || auth.nonce.length() > 256) {
+                    return Result.unauthorized("Missing or invalid nonce (base64url of 16+ random bytes required)");
+                }
+                String message = OpsKeys.v2AuthMessage(auth.publicKey, auth.timestamp, auth.nonce);
+                if (!OpsKeys.verify(message, auth.signature, auth.publicKey)) {
+                    return Result.unauthorized("Invalid signature");
+                }
+                // Replay check last, so only validly-signed requests consume nonce slots.
+                if (!seenNonces.checkAndRecord(auth.nonce, System.currentTimeMillis())) {
+                    return Result.unauthorized("Nonce already used");
+                }
+            } else if (auth.v == null || "1".equals(auth.v)) {
+                // Legacy v1: signature over the timestamp only — not bound to the key, no nonce,
+                // replayable within the ±30s window. Kept for one release because v1 shipped in
+                // 0.1.6; removal is documented in the migration guide.
+                Log.warn("ops auth protocol v1 is deprecated and will be rejected in a future release"
+                    + " — upgrade the brace CLI (key " + OpsKeys.fingerprint(auth.publicKey) + ")");
+                if (!OpsKeys.verify(auth.timestamp, auth.signature, auth.publicKey)) {
+                    return Result.unauthorized("Invalid signature");
+                }
+            } else {
+                return Result.unauthorized("Unsupported ops auth protocol version \"" + auth.v
+                    + "\" — this server accepts v2 (and v1, deprecated)");
             }
 
             // Issue token — check for client-requested TTL
@@ -605,5 +647,45 @@ public class OpsHandler {
         if (days > 0) return days + "d " + hours + "h " + mins + "m";
         if (hours > 0) return hours + "h " + mins + "m";
         return mins + "m";
+    }
+
+    /**
+     * Per-instance, best-effort seen-nonce set for v2 ops auth replay suppression.
+     * Maps nonce → expiry (epoch millis); expired entries are swept opportunistically on
+     * each call (the auth endpoint is low-rate, so a full sweep per call is cheap). The
+     * set is size-bounded and fails closed: when full (after sweeping), new nonces are
+     * rejected rather than evicting live ones. Entries are only recorded after signature
+     * verification, so only holders of an authorized key can fill it.
+     *
+     * <p>Deliberately NOT fleet-global (B5: ops must work without shared state), so a
+     * captured request remains replayable against a different instance within the
+     * timestamp acceptance window — see docs/SECURITY.md.
+     */
+    static final class NonceCache {
+        private final java.util.concurrent.ConcurrentHashMap<String, Long> seen =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private final long ttlMillis;
+        private final int maxSize;
+
+        NonceCache(long ttlMillis, int maxSize) {
+            this.ttlMillis = ttlMillis;
+            this.maxSize = maxSize;
+        }
+
+        /**
+         * Record the nonce if it is fresh. Returns {@code false} when the nonce was
+         * already seen (replay) or the cache is at capacity (fail closed).
+         */
+        boolean checkAndRecord(String nonce, long nowMillis) {
+            seen.entrySet().removeIf(e -> e.getValue() < nowMillis);
+            if (seen.size() >= maxSize) {
+                return false;
+            }
+            return seen.putIfAbsent(nonce, nowMillis + ttlMillis) == null;
+        }
+
+        int size() {
+            return seen.size();
+        }
     }
 }

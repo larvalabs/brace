@@ -332,6 +332,22 @@ app.ops("authorized-keys");
 
 The `authorized-keys` file contains public keys of clients allowed to access ops endpoints.
 
+Clients mint a bearer token via `POST /ops/auth` (protocol v2): an Ed25519 signature over
+`publicKey + "\n" + timestamp + "\n" + nonce`, where the timestamp must be within ±30 seconds
+of server time and the nonce is fresh random (16+ bytes, base64url) per attempt. Binding the
+public key into the signed message means a captured signature is only valid for the key that
+produced it; the nonce makes each signed request single-use. The exact wire format is in
+`docs/agent-ops-guide.md`.
+
+**Replay suppression is per-instance, best-effort.** Used nonces are tracked in memory on each
+server instance, never fleet-wide — ops deliberately works without shared state (no database
+required), so behind a load balancer a captured auth request remains replayable against a
+*different* instance until the ±30s timestamp window closes. This residual window is accepted;
+the mitigations are HTTPS (an attacker should never observe the request body) plus the
+recommendations below. The deprecated v1 protocol (signature over the timestamp alone, no
+nonce — replayable as-is within the window) is accepted for one release with a logged
+deprecation warning and will then be rejected; see the 0.1.6 → 0.1.7 migration guide.
+
 ### Security Recommendations
 
 1. **HTTPS only:** Never expose ops endpoints over HTTP
