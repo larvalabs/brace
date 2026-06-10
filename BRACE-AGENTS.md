@@ -207,7 +207,25 @@ View.render("emails/welcome", "user", user)     // render to String (for emails)
 // JSON
 Result.json(object)                         // 200 JSON
 Result.json(object, 201)                    // JSON with status
+```
 
+**⚠️ JSON and JPA entities:** Never return a JPA entity from `Json.of()` — all public fields are serialized, leaking
+`passwordHash`, API keys, or any other sensitive column. Return a record or DTO instead:
+
+```java
+// ❌ Dangerous: serializes passwordHash
+var user = db.find(User.class, id);
+return Result.json(user);
+
+// ✅ Safe: only public fields from the record
+public record UserResponse(long id, String email) {}
+var user = db.find(User.class, id);
+return Result.json(new UserResponse(user.id, user.email));
+```
+
+Brace logs a warning (once per entity class) when `Json.of()` detects an `@Entity`-annotated object, to help catch this pattern early.
+
+```java
 // Redirects
 Result.redirect("/posts")                   // 302 redirect
 Result.redirectPermanent("/new-url")        // 301 redirect

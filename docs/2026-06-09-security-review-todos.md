@@ -161,7 +161,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     warn on interior `*` at registration time instead of failing open silently.
   - **Model: Haiku 4.5** — small, but write the matcher tests first.
 
-- [ ] **M9: `Json.of(entity)` serializes every public field** — `Json.java:9-27`
+- [x] **M9: `Json.of(entity)` serializes every public field** — `Json.java:9-27`
   - With the public-fields entity convention, `Json.of(user)` leaks `passwordHash`.
   - **Fix:** document prominently (BRACE-AGENTS.md + SECURITY.md): respond with records/
     DTOs, never entities. Consider a framework nudge: warn (dev mode) when `Json.of`

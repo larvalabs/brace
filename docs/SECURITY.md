@@ -6,6 +6,7 @@ This document describes Brace's security features and best practices for buildin
 
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
+- [Serialization](#serialization)
 - [Trusted Proxies](#trusted-proxies)
 - [Cookie Security](#cookie-security)
 - [File Uploads](#file-uploads)
@@ -143,6 +144,42 @@ tokens with `.csrf(false)`.
    - Send the CSRF token in the `X-CSRF-Token` request header
    - Use bearer token authentication and call `.csrf(false)` on those routes
 3. **For public APIs:** Use API keys or OAuth, not cookie-based sessions
+
+---
+
+## Serialization
+
+### JPA Entities and JSON Responses
+
+Brace entities follow the convention of **public fields** for simplicity. When serializing objects to JSON with `Json.of()` or `Result.json()`, all public fields are included in the response — including sensitive columns like `passwordHash`, API keys, or PII.
+
+**⚠️ Never return a JPA entity directly from a JSON response handler.** Always use a DTO (data transfer object) or record that exposes only the fields you intend to share:
+
+```java
+// ❌ Dangerous: serializes all public fields, including passwordHash
+@Entity
+public class User {
+    public Long id;
+    public String email;
+    public String passwordHash;
+}
+
+var user = db.find(User.class, id);
+return Result.json(user);  // Leaks passwordHash to HTTP response
+```
+
+**✅ Safe: DTO exposes only intended fields**
+
+```java
+public record UserResponse(long id, String email) {}
+
+var user = db.find(User.class, id);
+return Result.json(new UserResponse(user.id, user.email));  // Only public fields from record
+```
+
+### Detection
+
+Brace logs a **WARN** message (once per entity class per process) when `Json.of()` detects an `@Entity`-annotated object being serialized, to help catch this pattern in development. Enable production log monitoring to detect any misuse — the message includes the entity class name and hints at the likely leaked field name.
 
 ---
 

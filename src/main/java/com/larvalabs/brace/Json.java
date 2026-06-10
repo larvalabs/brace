@@ -3,12 +3,18 @@ package com.larvalabs.brace;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import jakarta.persistence.Entity;
+import java.util.Collection;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Json extends Result {
 
     private static final ObjectMapper MAPPER = new ObjectMapper()
         .registerModule(new JavaTimeModule())
         .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
+    private static final ConcurrentHashMap.KeySetView<Class<?>, Boolean> warnedClasses =
+        ConcurrentHashMap.newKeySet();
 
     private Json(int status, String body) {
         super(status, "application/json", body);
@@ -19,6 +25,7 @@ public class Json extends Result {
     }
 
     public static Json of(Object value, int status) {
+        warnIfEntity(value);
         try {
             return new Json(status, MAPPER.writeValueAsString(value));
         } catch (Exception e) {
@@ -28,5 +35,46 @@ public class Json extends Result {
 
     public static ObjectMapper mapper() {
         return MAPPER;
+    }
+
+    /**
+     * Check if the value or its first element (if a collection) is a JPA entity, and warn once
+     * per class if so. This helps catch the common mistake of returning an entity (with public
+     * fields like passwordHash) instead of a DTO.
+     */
+    private static void warnIfEntity(Object value) {
+        if (value == null) return;
+
+        Class<?> clazz = value.getClass();
+
+        // If it's a collection, check the first element
+        if (value instanceof Collection<?> col) {
+            if (!col.isEmpty()) {
+                Object first = col.iterator().next();
+                if (first != null) {
+                    clazz = first.getClass();
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+
+        // Check if the class is annotated @Entity and warn once per class
+        if (clazz.isAnnotationPresent(Entity.class)) {
+            if (warnedClasses.add(clazz)) {
+                Log.warn("Json.of() serializing a JPA entity (" + clazz.getSimpleName() +
+                    ") — public fields like passwordHash will leak to HTTP responses. " +
+                    "Use a DTO or record instead (see BRACE-AGENTS.md § Responses).");
+            }
+        }
+    }
+
+    /**
+     * Package-private accessor for tests to inspect which classes have been warned about.
+     */
+    static ConcurrentHashMap.KeySetView<Class<?>, Boolean> warnedClassesForTesting() {
+        return warnedClasses;
     }
 }

@@ -123,6 +123,7 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 ### Adding a new endpoint
 1. Add handler method to controller class
 2. Register route in `main()`: `app.get("/path", ctrl::method)`
+3. For JSON responses: return records or DTOs, never entities (see "JPA Entities and JSON Responses" in `docs/SECURITY.md`)
 
 ### Adding a new entity
 1. Create JPA entity class with `@Entity`, public fields
