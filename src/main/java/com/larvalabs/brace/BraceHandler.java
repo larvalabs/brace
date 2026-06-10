@@ -177,8 +177,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     body = parsed.formBody();
                     uploadedFiles = parsed.files();
                 } else {
-                    body = Content.Source.asString(jettyRequest);
-                    if (body == null) body = "";
+                    // Fast-reject on Content-Length before reading any bytes.
+                    String contentLengthHeader = headers.get("Content-Length");
+                    if (contentLengthHeader != null) {
+                        try {
+                            long declaredLength = Long.parseLong(contentLengthHeader.strip());
+                            if (declaredLength > maxUploadSize) {
+                                writeResult(Result.error(413, "Payload Too Large"), response, callback);
+                                return true;
+                            }
+                        } catch (NumberFormatException ignored) {
+                            // malformed Content-Length — fall through and let the read cap it
+                        }
+                    }
+                    // Bounded incremental read: cap at maxUploadSize bytes regardless of
+                    // Content-Length (which clients can lie about or omit for chunked bodies).
+                    // Read maxUploadSize+1 bytes: if we get more than maxUploadSize the body
+                    // is too large and we return 413.
+                    byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
+                    if (bodyBytes == null) {
+                        writeResult(Result.error(413, "Payload Too Large"), response, callback);
+                        return true;
+                    }
+                    body = new String(bodyBytes, StandardCharsets.UTF_8);
                 }
             }
 
@@ -545,6 +566,31 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         return params;
+    }
+
+    /**
+     * Reads the request body up to {@code limit} bytes, returning the raw bytes.
+     * Returns {@code null} if the body exceeds the limit (caller should send 413).
+     * Reads incrementally via an InputStream so chunked/absent-length bodies are
+     * bounded too — we never buffer more than {@code limit + 1} bytes.
+     */
+    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit) throws java.io.IOException {
+        try (var in = Content.Source.asInputStream(jettyRequest)) {
+            // Read up to limit+1 bytes: if we get limit+1 the body is too large.
+            long cap = limit + 1;
+            var out = new java.io.ByteArrayOutputStream((int) Math.min(cap, 64 * 1024));
+            byte[] buf = new byte[8192];
+            long total = 0;
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                total += n;
+                if (total > limit) {
+                    return null; // exceeded limit
+                }
+                out.write(buf, 0, n);
+            }
+            return out.toByteArray();
+        }
     }
 
     private record MultipartResult(String formBody, Map<String, List<UploadedFile>> files) {}

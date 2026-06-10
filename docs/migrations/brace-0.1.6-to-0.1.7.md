@@ -184,6 +184,33 @@ For SQL that needs full control, `db.jdbc(...)` remains the raw escape hatch.
 **Action:** none, unless you wrote a literal `??` expecting two placeholders (it now means one
 literal `?`) — use two separate `?` instead.
 
+## Security fix: non-multipart request bodies are now capped at `maxUploadSize`
+
+**Who is affected:** any application that accepts POST/PUT requests with plain (non-multipart)
+bodies and has not called `app.maxUploadSize(...)`. The default cap is 10 MB — the same limit
+that already applied to multipart uploads.
+
+**What changed.** Through 0.1.6, `maxUploadSize` only bounded the multipart parser. A plain
+POST body (JSON, URL-encoded form, raw text) was read into a single `String` with no size
+limit. A client sending a chunked multi-hundred-MB body would buffer the entire payload in
+heap before the handler ran, risking OOM under load.
+
+0.1.7 enforces the same `maxUploadSize` cap on all plain bodies. When a request exceeds the
+limit the server returns **413 Payload Too Large** immediately — for requests with a
+`Content-Length` header that exceeds the limit, the rejection happens before reading any bytes.
+For chunked (or absent-Content-Length) bodies the read is bounded incrementally.
+
+**Code change required:** none. If your routes intentionally accept bodies larger than 10 MB,
+set the limit explicitly:
+
+```java
+app.maxUploadSize("50MB");   // or app.maxUploadSize(50 * 1024 * 1024L)
+```
+
+**Visible behavior change:** routes that previously accepted arbitrarily large plain bodies now
+return 413 for bodies over the configured limit. If you have clients or integration tests that
+POST very large bodies and expect 200, increase `maxUploadSize` to cover the intended maximum.
+
 ## Security fix: `req.ip()` now returns the rightmost-untrusted address
 
 **Who is affected:** any application using `RateLimiter.perIp`, IP-based access control, or

@@ -48,7 +48,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     Forwarded header, untrusted peer ignores headers entirely (existing behavior).
   - **Model: Sonnet 4.6** — well-specified algorithm, success is fully testable.
 
-- [ ] **H3: Unbounded request-body read (OOM DoS)** — `BraceHandler.java:171-183`
+- [x] **H3: Unbounded request-body read (OOM DoS)** — `BraceHandler.java:171-183`
   - `maxUploadSize` only caps the multipart branch; the plain branch does
     `Content.Source.asString()` with no limit and no `setMaxRequestContentLength`
     anywhere. A chunked multi-hundred-MB POST buffers into one String.
