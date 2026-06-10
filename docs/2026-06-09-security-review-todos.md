@@ -59,7 +59,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     full buffering; body at exactly the limit succeeds.
   - **Model: Sonnet 4.6** — needs care with Jetty's Content.Source API and chunked reads.
 
-- [ ] **H4: `brace new` ships a placeholder session secret that evades the weak-secret check** — `ProjectGenerator.java:160`, `Brace.java:199-213`
+- [x] **H4: `brace new` ships a placeholder session secret that evades the weak-secret check** — `ProjectGenerator.java:160`, `Brace.java:199-213`
   - `session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars` is a public constant
     (it's in this repo), 46 chars so it passes the length gate, and the hyphen in
     "change-me" defeats every pattern in `validateSecret`. `application.conf` is not in
