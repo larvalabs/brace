@@ -339,10 +339,36 @@ public key into the signed message means a captured signature is only valid for 
 produced it; the nonce makes each signed request single-use. The exact wire format is in
 `docs/agent-ops-guide.md`.
 
-**Replay suppression is per-instance, best-effort.** Used nonces are tracked in memory on each
-server instance, never fleet-wide — ops deliberately works without shared state (no database
-required), so behind a load balancer a captured auth request remains replayable against a
-*different* instance until the ±30s timestamp window closes. This residual window is accepted;
+**Credential channels (general endpoints).** All ops endpoints except the browser exchange
+handoff accept credentials through exactly two channels:
+
+1. `Authorization: Bearer <token>` header — the standard channel for the CLI and the
+   dashboard's htmx polling.
+2. The `__brace_ops_session` httpOnly cookie — set by the browser exchange flow below.
+
+`?token=` query-parameter credentials are **not accepted** on general ops endpoints. Tokens in
+URLs leak into proxy access logs, browser history, and the `Referer` header of outbound links.
+Pass credentials via the `Authorization` header or the session cookie.
+
+**Browser exchange flow.** The `brace dashboard` CLI command calls `POST /ops/auth/login-token`
+(requires Bearer auth), receives a short-lived (60s), scope-capped login token, and opens the
+browser at `/ops/auth/exchange?token=<loginToken>`. The exchange endpoint is the only place
+`?token=` is accepted — it is the browser-redirect handoff, and there is no other channel that
+can carry a credential into a plain GET redirect. On success, the server sets an 8h httpOnly
+session cookie and redirects to the dashboard. The exchange response carries
+`Referrer-Policy: no-referrer` and `Cache-Control: no-store` so the token-bearing URL is
+not forwarded to any outbound link and is not stored in proxy or browser caches.
+
+**Replay trade-off (exchange).** The login token is stateless and HMAC-verified — no
+server-side store is needed, so the exchange works behind a load balancer even if the redirect
+hits a different instance than the one that issued the token (B5). Within the 60s TTL the same
+login token can be exchanged more than once; single-use would require fleet-wide shared state
+that ops can't assume. The TTL is kept very short to limit the replay window.
+
+**Replay suppression (auth, per-instance, best-effort).** Used nonces are tracked in memory on
+each server instance, never fleet-wide — ops deliberately works without shared state (no
+database required), so behind a load balancer a captured auth request remains replayable against
+a *different* instance until the ±30s timestamp window closes. This residual window is accepted;
 the mitigations are HTTPS (an attacker should never observe the request body) plus the
 recommendations below. The deprecated v1 protocol (signature over the timestamp alone, no
 nonce — replayable as-is within the window) is accepted for one release with a logged

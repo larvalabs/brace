@@ -110,7 +110,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   - **Model: Fable 5** — auth protocol change across server + CLI with a fleet/state
     constraint; design judgment required.
 
-- [ ] **M4: Ops tokens travel in URLs** — `OpsHandler.java:126-130,140-157,549-553`
+- [x] **M4: Ops tokens travel in URLs** — `OpsHandler.java:126-130,140-157,549-553`
   - `?token=` accepted for full auth; `exchangeUrl` carries the login token in a GET
     query string (proxy logs, history, Referer); 60s exchange token is replayable into a
     24h session.

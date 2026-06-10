@@ -614,12 +614,12 @@ class OpsIntegrationTest {
         assertEquals(302, exchangeResponse.statusCode());
         assertEquals("/ops/dashboard", exchangeResponse.headers().firstValue("Location").orElse(""));
 
-        // Should set httpOnly cookie
+        // Should set httpOnly cookie with 8h TTL (M4: shortened from 24h)
         String setCookie = exchangeResponse.headers().firstValue("Set-Cookie").orElse("");
         assertTrue(setCookie.contains("__brace_ops_session="));
         assertTrue(setCookie.contains("HttpOnly"));
         assertTrue(setCookie.contains("SameSite=Strict"));
-        assertTrue(setCookie.contains("Max-Age=86400"));
+        assertTrue(setCookie.contains("Max-Age=28800"));
 
         // Extract cookie value for Step 3
         int cookieStart = setCookie.indexOf("=") + 1;
@@ -655,6 +655,71 @@ class OpsIntegrationTest {
                 .build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(401, exchangeBad.statusCode());
+    }
+
+    // --- M4: ?token= query-param auth removed from general endpoints ---
+
+    @Test
+    void queryParamTokenRejectedOnGeneralEndpoints() throws Exception {
+        // A valid token in ?token= must be rejected (401) on general endpoints (M4).
+        // Tokens belong in the Authorization: Bearer header, not the URL.
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/status?token=" + token))
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode(),
+            "?token= query param must not authenticate general ops endpoints (M4)");
+    }
+
+    @Test
+    void sameBearerTokenAuthenticatesViaHeader() throws Exception {
+        // Sanity: the same token accepted as Bearer header proves the token itself is valid —
+        // the 401 above is from the removed fallback, not an invalid token.
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/status"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(),
+            "the same token must succeed via Authorization: Bearer header");
+    }
+
+    @Test
+    void exchangeResponseHasSecurityHeaders() throws Exception {
+        // The exchange redirect carries Referrer-Policy and Cache-Control to prevent the
+        // token-bearing URL leaking to outbound links or caches (M4).
+        String token = authenticate();
+        var loginTokenResponse = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/login-token"))
+                .header("Authorization", "Bearer " + token)
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, loginTokenResponse.statusCode());
+
+        String body = loginTokenResponse.body();
+        int start = body.indexOf("\"loginToken\":\"") + 14;
+        int end = body.indexOf("\"", start);
+        String loginToken = body.substring(start, end);
+
+        var exchangeResponse = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
+                .GET()
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(302, exchangeResponse.statusCode());
+        assertEquals("no-referrer",
+            exchangeResponse.headers().firstValue("Referrer-Policy").orElse(""),
+            "exchange response must set Referrer-Policy: no-referrer to prevent token URL leaking via Referer");
+        assertEquals("no-store",
+            exchangeResponse.headers().firstValue("Cache-Control").orElse(""),
+            "exchange response must set Cache-Control: no-store to prevent token URL being cached");
     }
 
     @Test

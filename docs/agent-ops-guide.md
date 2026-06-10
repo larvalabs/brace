@@ -52,6 +52,33 @@ run it again, until it's green.
   Their distinct `email@host` label gets its own line; committing it never
   clobbers anyone else's entry.
 
+## Credential channels
+
+All ops endpoints accept credentials through exactly two channels:
+
+1. `Authorization: Bearer <token>` header — the standard channel for the CLI,
+   scripts, and the dashboard's htmx polling.
+2. The `__brace_ops_session` httpOnly cookie — set automatically by the
+   browser exchange flow (`brace dashboard` → `/ops/auth/exchange`).
+
+**`?token=` query-parameter auth is not accepted on general ops endpoints.**
+Tokens in URLs leak into proxy access logs, browser history, and the `Referer`
+header on outbound links. Always pass credentials in the `Authorization: Bearer`
+header:
+
+```bash
+# Correct
+curl -H "Authorization: Bearer $TOKEN" https://app.example.com/ops/status
+
+# Wrong — 401
+curl "https://app.example.com/ops/status?token=$TOKEN"
+```
+
+The only exception is `/ops/auth/exchange?token=...`, which is the browser-redirect
+handoff from the CLI. That endpoint accepts `?token=` because there is no other
+channel that can carry a credential into a plain GET redirect. The token it accepts
+is short-lived (60s) and scope-capped. See `docs/SECURITY.md` → "Ops Endpoints".
+
 ## Auth protocol (v2)
 
 The CLI handles this for you. It matters only if you implement the handshake

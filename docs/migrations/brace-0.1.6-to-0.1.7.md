@@ -385,6 +385,52 @@ session.set("lastSeen", String.valueOf(System.currentTimeMillis()));  // re-mint
 **Code change required:** none. **Visible behavior change:** sessions now expire server-side
 (default 14 days from last write); a stolen cookie is no longer valid until secret rotation.
 
+## Security fix: `?token=` query-param auth removed from general ops endpoints
+
+**Who is affected:** any script, agent, or client that authenticates to `/ops/*` endpoints by
+appending `?token=<bearer-token>` to the URL rather than sending an `Authorization: Bearer`
+header. **`brace` CLI users are not affected** — the CLI has always used `Authorization: Bearer`.
+
+**What changed.** Through 0.1.6, general ops endpoints accepted a bearer token via a
+`?token=` query parameter as a fallback authentication channel. This fallback was removed
+because query-parameter tokens leak in:
+
+- Reverse-proxy and CDN **access logs** (the full URL, including query string, is logged by
+  default)
+- **Browser history** (any browser that follows a link or redirect containing `?token=`)
+- **Referer headers** sent with any outbound requests the dashboard page makes
+
+The `?token=` channel survives on `/ops/auth/exchange` only (the browser-redirect handoff from
+the CLI), where it is the only viable channel — you cannot put a credential in the headers of a
+plain GET redirect. The exchange token is short-lived (60s) and scope-capped; the exchange
+response now carries `Referrer-Policy: no-referrer` and `Cache-Control: no-store` to limit
+further leakage.
+
+Additionally, the ops browser session TTL was shortened from **24h to 8h** (one workday).
+With scope-preservation (H1), the session is already bounded to the caller's key ceiling; 8h
+limits the damage window of a stolen cookie without meaningfully affecting normal usage.
+
+**Before (≤0.1.6 — leaks token into proxy logs and browser history):**
+
+```bash
+# Wrong: token in URL is logged by every proxy, CDN, and nginx in the path
+curl "https://app.example.com/ops/status?token=$TOKEN"
+```
+
+**After (0.1.7+ — token only in the Authorization header):**
+
+```bash
+# Correct: token in the Authorization header is not logged by standard proxy configs
+curl -H "Authorization: Bearer $TOKEN" https://app.example.com/ops/status
+```
+
+**Code change required:** any script or agent that appended `?token=` to `/ops/*` URLs must be
+updated to pass the token as `Authorization: Bearer <token>`. This is a **breaking change** for
+such callers. The bearer token itself is obtained the same way — via `POST /ops/auth` — only
+the delivery channel changes.
+
+---
+
 ## Security fix: ops auth protocol v2 (key-bound, nonce'd signature); v1 deprecated
 
 **Who is affected:** every user of the `brace` CLI ops commands (`brace status`, `errors`,

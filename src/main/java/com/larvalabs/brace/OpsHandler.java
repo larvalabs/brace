@@ -23,6 +23,10 @@ public class OpsHandler {
     // issue/exchange handshake works behind a load balancer where the two calls may hit different
     // instances (B5). Kept very short since the CLI hands the URL straight to the browser.
     private static final int LOGIN_TOKEN_TTL_SECONDS = 60;
+    // Session TTL: one workday. Shorter than the former 24h; with H1 scope-preservation the
+    // session is already bounded to the caller's ceiling, so 8h is sufficient and limits the
+    // damage window of a stolen cookie.
+    private static final int SESSION_TTL_SECONDS = 28800; // 8 hours
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret) {
@@ -183,6 +187,16 @@ public class OpsHandler {
      * dashboard. Reusable within the token's short TTL; replay protection is the TTL, not a store —
      * single-use would need fleet-wide shared state that ops (which can run without a database)
      * can't assume. See docs/migrations and the multi-server plan (B5).
+     *
+     * <p>Why {@code ?token=} survives here and nowhere else: the exchange endpoint is the
+     * browser-redirect handoff — the CLI hands the URL straight to the browser, and there is no
+     * other channel that can carry a credential into a plain GET redirect. The token is
+     * short-lived (60s, {@link #LOGIN_TOKEN_TTL_SECONDS}) and scope-capped at the caller's
+     * ceiling (H1), so the exposure window is narrow. All other ops endpoints accept credentials
+     * via {@code Authorization: Bearer} header or the session cookie only — see
+     * {@link #authenticate}. The response carries {@code Referrer-Policy: no-referrer} and
+     * {@code Cache-Control: no-store} so the token-bearing URL is not forwarded to any
+     * outbound link on the dashboard and is not stored in proxy or browser caches.
      */
     public Result exchange(Request req) {
         String loginToken = req.queryParam("token");
@@ -195,11 +209,17 @@ public class OpsHandler {
             return Result.unauthorized("Invalid or expired login token");
         }
 
-        // Mint a long-lived (24h) ops session token, preserving the login token's scope.
-        String sessionToken = OpsToken.create(tokenSecret, 86400, claims.scope(), claims.kid());
+        // Mint an 8h ops session token (one workday), preserving the login token's scope (H1).
+        // 8h rather than 24h: with scope-preservation the session is already bound to the
+        // caller's ceiling; shorter TTL limits the damage window of a stolen cookie further.
+        String sessionToken = OpsToken.create(tokenSecret, SESSION_TTL_SECONDS, claims.scope(), claims.kid());
 
         var result = Redirect.to("/ops/dashboard");
-        result.cookie(OPS_COOKIE_NAME, sessionToken, 86400, true, true, "Strict");
+        result.cookie(OPS_COOKIE_NAME, sessionToken, SESSION_TTL_SECONDS, true, true, "Strict");
+        // no-referrer: the token is in our URL — prevent it leaking to any outbound link the
+        // dashboard renders. no-store: prevent proxy / browser caches from recording the URL.
+        result.header("Referrer-Policy", "no-referrer");
+        result.header("Cache-Control", "no-store");
         return result;
     }
 
@@ -574,10 +594,23 @@ public class OpsHandler {
     }
 
     /**
-     * Verify the request's token (Bearer header, ops session cookie, or {@code ?token=}
-     * fallback) and return its claims, or {@code null} if unauthenticated. This is the
-     * single choke point where a request's identity (kid) and scope are resolved — the
-     * natural place for a future ops audit log to attach.
+     * Verify the request's token and return its claims, or {@code null} if unauthenticated.
+     * Two credential channels are accepted:
+     * <ol>
+     *   <li>{@code Authorization: Bearer <token>} header — the standard machine-to-machine
+     *       channel used by the CLI and the dashboard's htmx polling.</li>
+     *   <li>The {@code __brace_ops_session} httpOnly cookie — set by the
+     *       {@code /ops/auth/exchange} browser handoff.</li>
+     * </ol>
+     * {@code ?token=} query-param credentials are intentionally NOT accepted here. Tokens in
+     * URLs leak via proxy access logs, browser history, and the {@code Referer} header on
+     * outbound links. The exchange endpoint ({@code /ops/auth/exchange}) is the only endpoint
+     * that reads {@code ?token=} because it is the browser-redirect handoff — there is no other
+     * channel to carry a credential into a plain GET redirect — and the login token it accepts
+     * is short-lived (60s) and scope-capped. See {@link #exchange} for the full rationale.
+     *
+     * <p>This is the single choke point where a request's identity (kid) and scope are resolved —
+     * the natural place for a future ops audit log to attach.
      */
     private OpsToken.Claims authenticate(Request req) {
         if (tokenSecret == null) return null;
@@ -594,12 +627,6 @@ public class OpsHandler {
         if (cookieToken != null) {
             var claims = OpsToken.verify(cookieToken, tokenSecret);
             if (claims != null) return claims;
-        }
-
-        // Check ?token= query param (fallback for direct access, but discouraged)
-        var tokenParam = req.queryParam("token");
-        if (tokenParam != null) {
-            return OpsToken.verify(tokenParam, tokenSecret);
         }
 
         return null;
