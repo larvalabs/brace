@@ -271,3 +271,37 @@ Brace's test suite ran entirely on in-memory H2, whose Flyway handler *is* bundl
 path and never saw the gap. 0.1.7 adds a Postgres testcontainer test tier (`mvn verify`)
 that runs the shipped migrations against real Postgres, which is what surfaced this. See
 `docs/2026-06-05-pg-testcontainers.md`.
+
+## Security fix: CSRF token now persists when rendered through a plain Handler
+
+**Who is affected:** any route whose handler does **not** take a `Session` parameter (a
+plain `Handler` or `DbHandler`), renders the CSRF hidden field via `${csrfField}`, and
+POSTs the resulting form back to a CSRF-protected endpoint.
+
+**What changed.** Through 0.1.6, Brace correctly minted a fresh CSRF token and exposed
+it to the template (via `${csrfField}`) even for handlers that did not request a `Session`
+parameter. However, the token was held in a transient local session object that was never
+written back as a `brace_session` cookie on the response. The client had no cookie, so the
+subsequent POST could not verify the token and always returned **403 CSRF required**.
+
+The practical workaround was to add a `Session` parameter to every handler that rendered a
+form — or to call `.csrf(false)` on the POST endpoint — even when the handler itself had
+no other need for the session.
+
+0.1.7 fixes this: when a fresh CSRF token is minted for a plain `Handler`, the session
+cookie is written on that response automatically, so the POST can verify the token without
+any change to application code.
+
+**Code change required:** none — this is a pure fix. If your handlers already take a
+`Session` parameter only to work around this bug, you may now remove that parameter if the
+session is otherwise unused. Handlers that already took `Session` for other reasons are
+unaffected.
+
+**Visible behavior change:** plain `Handler` routes that render `${csrfField}` will now
+produce a `Set-Cookie: brace_session=...` header on the GET response (establishing the
+token). This was previously missing; if any code or test explicitly asserted that no
+`Set-Cookie` header was present on such a response, that assertion should be removed.
+
+Also in this release: PATCH requests are now treated as mutating for CSRF purposes
+(alongside POST/PUT/DELETE). There is no `patch()` route registration method today, so
+this only affects applications that register PATCH routes through lower-level APIs.

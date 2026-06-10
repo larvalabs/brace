@@ -97,16 +97,24 @@ Brace automatically validates CSRF tokens on mutating requests (POST, PUT, DELET
 
 CSRF validation is **skipped** for:
 - GET, HEAD, OPTIONS requests (safe methods)
-- Requests with `Content-Type: application/json` (assumed to be APIs)
+- Routes explicitly opted out with `.csrf(false)`
 
-**⚠️ Security Note:** If you use JSON APIs with cookie-based authentication, you should **require explicit CSRF validation** or use bearer token authentication instead. JSON + cookies is still CSRF-vulnerable.
+CSRF validation is **not** bypassed by `Content-Type: application/json`. All mutating
+methods on CSRF-required routes are validated regardless of content type. If your API
+uses bearer-token authentication (no cookies), call `.csrf(false)` on those routes to
+opt out explicitly.
+
+**⚠️ JSON + cookies is still CSRF-vulnerable.** A cross-origin page can trigger a JSON
+`POST` with credentials. If your JSON endpoint authenticates via session cookies, either
+validate the CSRF token (e.g. via the `X-CSRF-Token` request header) or use bearer
+tokens with `.csrf(false)`.
 
 ### Best Practices
 
 1. **For HTML forms:** Include the CSRF token field (automatically available in templates)
 2. **For JSON APIs with cookies:** Either:
-   - Require CSRF token in request header
-   - Use bearer token authentication (no cookies)
+   - Send the CSRF token in the `X-CSRF-Token` request header
+   - Use bearer token authentication and call `.csrf(false)` on those routes
 3. **For public APIs:** Use API keys or OAuth, not cookie-based sessions
 
 ---

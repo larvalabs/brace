@@ -51,9 +51,14 @@ class HeadersCookiesIntegrationTest {
             HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/two-cookies")).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         var cookies = resp.headers().allValues("Set-Cookie");
-        assertEquals(2, cookies.size(), "Both cookies should be present, got: " + cookies);
-        assertTrue(cookies.stream().anyMatch(c -> c.startsWith("a=1")));
-        assertTrue(cookies.stream().anyMatch(c -> c.startsWith("b=2")));
+        // Since M5c: plain Handler routes on a sessions-enabled app now also receive a
+        // brace_session Set-Cookie when the framework mints a fresh CSRF token — so there
+        // may be 2 app cookies + 1 CSRF session cookie = 3 total.  Assert the two app
+        // cookies are both present; do not assert an exact count.
+        assertTrue(cookies.stream().anyMatch(c -> c.startsWith("a=1")),
+            "Cookie 'a' missing from: " + cookies);
+        assertTrue(cookies.stream().anyMatch(c -> c.startsWith("b=2")),
+            "Cookie 'b' missing from: " + cookies);
     }
 
     @Test

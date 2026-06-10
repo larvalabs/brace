@@ -120,7 +120,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     trade-off but move it from a code comment into SECURITY.md.
   - **Model: Sonnet 4.6**
 
-- [ ] **M5: CSRF gaps (three related)** — `BraceHandler.java:245,267-281`, `docs/SECURITY.md:96-102`
+- [x] **M5: CSRF gaps (three related)** — `BraceHandler.java:245,267-281`, `docs/SECURITY.md:96-102`
   - (a) `isMutating` omits PATCH — unroutable today (no `patch()` registration exists)
     but a landmine; (b) SECURITY.md documents a JSON content-type exemption that does
     not exist in code (code is stricter — fix the doc, don't add the exemption);

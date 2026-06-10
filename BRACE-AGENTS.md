@@ -89,7 +89,7 @@ app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Req
 // getSession, postSession, putSession, deleteSession
 // getFull, postFull, putFull, deleteFull
 
-// CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
+// CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);
 ```
 
@@ -380,7 +380,7 @@ session.flashData();                      // all flash data as Map
 
 ## CSRF
 
-CSRF protection is **required by default** on POST/PUT/DELETE requests when sessions are enabled. Explicitly opt out with `.csrf(false)` for bearer-token APIs.
+CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Explicitly opt out with `.csrf(false)` for bearer-token APIs. Content-Type does **not** affect CSRF enforcement — `application/json` requests are validated the same as form submissions.
 
 **Form submission:**
 

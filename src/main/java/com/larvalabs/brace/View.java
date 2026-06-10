@@ -11,6 +11,7 @@ public class View extends Result {
 
     static void setCsrfField(String field) { currentCsrfField.set(field); }
     static void clearCsrfField() { currentCsrfField.remove(); }
+    static String getCsrfField() { return currentCsrfField.get(); }
     static void setFlash(Map<String, String> flash) { currentFlash.set(flash); }
     static void clearFlash() { currentFlash.remove(); }
 
