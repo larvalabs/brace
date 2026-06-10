@@ -22,7 +22,7 @@ import java.time.Instant;
  * it is treated as a fresh start (reset to {@code delta}), so a reused key never continues a stale
  * count even before the sweep runs.
  */
-final class Counters {
+class Counters {
 
     private final DatabaseFactory dbFactory;
 

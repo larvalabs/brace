@@ -307,9 +307,46 @@ app.before("/login", RateLimiter.perKey(
 ));
 ```
 
+### Key normalization (DoS protection)
+
+Rate-limit keys extracted from requests (usernames, tokens, IP addresses, custom headers) are
+normalized before use:
+
+- **Null or blank extractor result → `"(none)"`** bucket. Requests with a missing header or null
+  key are counted together rather than silently bypassing the limiter.
+- **Keys longer than 64 characters → SHA-256 hex digest** (always exactly 64 chars). Long
+  user-controlled values (e.g. bearer tokens, forged headers) would otherwise create unbounded
+  storage — millions of bytes of map entries locally, or arbitrarily large rows in
+  `brace_counters`. Hashing caps the key size while preserving the collision-resistance needed
+  for correct bucketing.
+
+The cap is applied before any prefix or window-slot decoration, so it holds equally in
+per-process and shared (Postgres) modes.
+
+### Trusted proxies and IP spoofing
+
+`RateLimiter.perIp` uses `req.ip()`, which respects trusted-proxy configuration. Without
+`app.trustedProxies(...)`, `req.ip()` returns the direct socket peer — headers are ignored. With
+trusted proxies configured, Brace uses **rightmost-untrusted** semantics on `X-Forwarded-For`
+(walking right to left, skipping trusted CIDR entries) so spoofed leftmost entries are ignored.
+
+See the [Trusted Proxies](#trusted-proxies) section for configuration. Configuring trusted proxies
+correctly is a prerequisite for effective IP-based rate limiting — without it an attacker can
+bypass per-IP limits by forging `X-Forwarded-For`.
+
+### Database failure posture
+
+When Postgres is in use (multi-server mode), every rate-limited request increments a shared
+counter. If the shared counter fails (connection pool exhausted, DB outage), Brace **falls back
+to per-instance counting** for that request rather than returning a 500 or admitting the request
+without any check. During an outage the effective limit across a fleet of N instances becomes
+approximately `limit × N`, so brief over-admission is possible — this is intentional: the
+alternative (turning every rate-limited endpoint into a 500) is worse. A warning is logged at
+`WARN` level for each request that falls back.
+
 ### Best Practices
 
-1. **Configure trusted proxies** first (otherwise IP-based limiting is ineffective)
+1. **Configure trusted proxies** first (otherwise IP-based limiting is ineffective — see above)
 2. **Use different limits** for different endpoints:
    - Login: 5 attempts per 15 minutes
    - API: 100-1000 requests per hour

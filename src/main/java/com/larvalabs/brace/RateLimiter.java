@@ -1,8 +1,12 @@
 package com.larvalabs.brace;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +29,20 @@ public class RateLimiter {
     // the rate-limiter subsystem. All instances point their Counters at the same database, so even
     // across the two-instances-in-one-JVM integration tests the shared count is consistent.
     private static volatile Counters sharedCounters;
+
+    /**
+     * Maximum raw key length before the key is replaced by its SHA-256 hex digest.
+     *
+     * <p>User-controlled values (usernames, bearer tokens, IP addresses, custom headers) flow into
+     * the key extractor and ultimately into the counter key string stored in {@code brace_counters}
+     * (shared backend) or the in-process window map (local backend). Without a cap an attacker can
+     * craft arbitrarily long values — a 1 MB header field repeated across requests creates millions
+     * of bytes of map-key storage or 1 MB rows in Postgres. Replacing the raw key with its SHA-256
+     * hex digest (64 chars, fixed length) eliminates this DoS vector at the cost of a negligible
+     * hash computation per request. Two distinct long keys are astronomically unlikely to produce
+     * the same digest, so the bucketing is functionally identical to using the raw key.
+     */
+    static final int MAX_KEY_LENGTH = 64;
 
     private final ConcurrentHashMap<String, Window> windows = new ConcurrentHashMap<>();
     private final int maxRequests;
@@ -72,11 +90,60 @@ public class RateLimiter {
     }
 
     Result check(Request req) {
-        var key = keyExtractor.apply(req);
-        if (key == null) return null;
+        var rawKey = keyExtractor.apply(req);
+
+        // Normalize the key before it reaches either backend:
+        //   - null/blank → single "(none)" bucket rather than silently bypassing the limiter.
+        //   - keys longer than MAX_KEY_LENGTH → SHA-256 hex digest (fixed 64 chars) to prevent
+        //     DoS via unbounded brace_counters rows / local map entries with huge key strings.
+        var key = normalizeKey(rawKey);
 
         var counters = sharedCounters;
-        return counters != null ? checkShared(key, counters) : checkLocal(key);
+        if (counters != null) {
+            try {
+                return checkShared(key, counters);
+            } catch (RuntimeException e) {
+                // Postgres (or any shared-counter) failure: fall back to per-instance counting
+                // rather than returning a 500 or silently admitting every request.  A brief DB
+                // blip causes per-instance approximation (across a fleet the effective limit
+                // becomes limit × N for the duration of the outage), which is far better than
+                // turning every rate-limited endpoint into an error.
+                Log.warn("rate-limiter: shared-counter DB error, falling back to local counting — " + e.getMessage());
+                return checkLocal(key);
+            }
+        }
+        return checkLocal(key);
+    }
+
+    /**
+     * Normalize a raw key value extracted from the request.
+     *
+     * <ul>
+     *   <li>null or blank → {@code "(none)"} — groups unauthenticated / header-missing requests
+     *       into one bucket so they still consume from a shared limit rather than bypassing it.
+     *   <li>length &gt; {@link #MAX_KEY_LENGTH} → SHA-256 hex digest — caps storage at 64 chars,
+     *       preventing DoS via arbitrarily long user-controlled strings (see field javadoc).
+     * </ul>
+     *
+     * Applied before any prefix/window-slot decoration so the cap holds in both the local and
+     * shared backends.
+     */
+    static String normalizeKey(String rawKey) {
+        if (rawKey == null || rawKey.isBlank()) {
+            return "(none)";
+        }
+        if (rawKey.length() <= MAX_KEY_LENGTH) {
+            return rawKey;
+        }
+        // Replace long keys with their SHA-256 hex digest (exactly 64 chars, fixed).
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            var hash = digest.digest(rawKey.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is mandatory in every Java SE implementation — unreachable.
+            throw new AssertionError("SHA-256 not available", e);
+        }
     }
 
     /** Per-process fixed-window count (default; single-process apps, H2, no database). */

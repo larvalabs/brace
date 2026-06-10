@@ -142,7 +142,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     interactions with M5(c) — same code region, do these together.
   - **Model: Sonnet 4.6**
 
-- [ ] **M7: Rate limiter — unbounded keys + fail-closed 500** — `RateLimiter.java:74-118`, `Counters.java:43-65`
+- [x] **M7: Rate limiter — unbounded keys + fail-closed 500** — `RateLimiter.java:74-118`, `Counters.java:43-65`
   - User-controlled `perKey` extractors (and spoofed IPs, until H2 lands) create
     unbounded `brace_counters` rows / local map entries with arbitrarily long keys; and
     any Postgres error propagates out of the before-middleware as a 500, so a DB blip
