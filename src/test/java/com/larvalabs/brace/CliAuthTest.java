@@ -5,7 +5,10 @@ import org.junit.jupiter.api.io.TempDir;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.file.*;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Map;
+import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CliAuthTest {
@@ -53,9 +56,13 @@ class CliAuthTest {
             tmp.resolve("ops-private.key").toString(),
             "authorized-keys", "local", Map.of());
         String first = CliAuth.bearer(cfg, tmp);
-        assertTrue(Files.exists(tmp.resolve("target/.brace-token")), "token should be cached on disk");
+        Path tokenFile = tmp.resolve("target/.brace-token");
+        assertTrue(Files.exists(tokenFile), "token should be cached on disk");
         String second = CliAuth.bearer(cfg, tmp);
         assertEquals(first, second);
+
+        // Token cache file must be written with owner-only permissions
+        assertTokenFileHasOwnerOnlyPermissions(tokenFile);
     }
 
     @Test
@@ -137,5 +144,26 @@ class CliAuthTest {
             "authorized-keys", "local", Map.of());
         var ex = assertThrows(Exception.class, () -> CliAuth.bearer(cfg, tmp));
         assertTrue(ex.getMessage().toLowerCase().contains("key"));
+    }
+
+    private void assertTokenFileHasOwnerOnlyPermissions(Path tokenFile) {
+        Assumptions.assumeTrue(isPosixFileSystem(), "test requires POSIX file system support");
+        try {
+            Set<PosixFilePermission> perms = Files.getPosixFilePermissions(tokenFile);
+            // Owner-only permissions should be: OWNER_READ, OWNER_WRITE (no others)
+            assertEquals(PosixFilePermissions.fromString("rw-------"), perms,
+                "Token file must have owner-only permissions (rw-------)");
+        } catch (Exception e) {
+            Assumptions.abort("POSIX file system not supported");
+        }
+    }
+
+    private boolean isPosixFileSystem() {
+        try {
+            Files.getPosixFilePermissions(tmp);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

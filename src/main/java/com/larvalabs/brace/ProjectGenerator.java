@@ -80,7 +80,7 @@ public class ProjectGenerator {
             Files.writeString(root.resolve("ops-authorized-keys"),
                 "# Authorized public keys for ops dashboard access\n" +
                 opsKeypair.publicKey() + " dev\n");
-            Files.writeString(root.resolve("ops-private.key"),
+            SecretFiles.writeStringWithOwnerOnlyPermissions(root.resolve("ops-private.key"),
                 "# Private key for ops dashboard access (do not commit)\n" +
                 opsKeypair.privateKey() + "\n" +
                 opsKeypair.publicKey() + "\n");

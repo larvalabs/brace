@@ -153,7 +153,7 @@ public class CliAuth {
             Path target = projectDir.resolve("target");
             Files.createDirectories(target);
             String json = Json.mapper().writeValueAsString(Map.of("token", token, "expiresAt", expiresAt));
-            Files.writeString(target.resolve(".brace-token"), json);
+            SecretFiles.writeStringWithOwnerOnlyPermissions(target.resolve(".brace-token"), json);
         } catch (Exception e) {
             // Caching is best-effort
         }

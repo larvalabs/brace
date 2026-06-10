@@ -1,10 +1,14 @@
 package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -112,6 +116,16 @@ class ProjectGeneratorTest {
         assertDoesNotThrow(() -> app3.sessions("my-secret-changeme-at-least-32-characters-long"));
     }
 
+    @Test
+    void generatedOpsPrivateKeyHasOwnerOnlyPermissions(@TempDir Path tempDir) throws Exception {
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        Path opsKeyFile = projDir.resolve("ops-private.key");
+        assertTrue(Files.exists(opsKeyFile), "ops-private.key should be generated");
+        assertPrivateKeyHasOwnerOnlyPermissions(opsKeyFile);
+    }
+
     /**
      * Extract session.secret value from application.conf content.
      */
@@ -122,5 +136,32 @@ class ProjectGeneratorTest {
             }
         }
         return null;
+    }
+
+    private void assertPrivateKeyHasOwnerOnlyPermissions(Path privKey) {
+        Assumptions.assumeTrue(isPosixFileSystem(), "test requires POSIX file system support");
+        try {
+            Set<PosixFilePermission> perms = Files.getPosixFilePermissions(privKey);
+            // Owner-only permissions should be: OWNER_READ, OWNER_WRITE (no others)
+            assertEquals(PosixFilePermissions.fromString("rw-------"), perms,
+                "Private key must have owner-only permissions (rw-------)");
+        } catch (Exception e) {
+            Assumptions.abort("POSIX file system not supported");
+        }
+    }
+
+    private boolean isPosixFileSystem() {
+        try {
+            // Test with a temporary file to check if POSIX is supported
+            Path testFile = Files.createTempFile("posix-test-", ".tmp");
+            try {
+                Files.getPosixFilePermissions(testFile);
+                return true;
+            } finally {
+                Files.deleteIfExists(testFile);
+            }
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

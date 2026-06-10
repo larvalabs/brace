@@ -179,7 +179,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     storage.
   - **Model: Sonnet 4.6**
 
-- [ ] **M11: Secrets written world-readable** — `CliOps.java:37`, `ProjectGenerator.java:70`, `CliAuth.java:156`
+- [x] **M11: Secrets written world-readable** — `CliOps.java:37`, `ProjectGenerator.java:70`, `CliAuth.java:156`
   - `ops-private.key` (Ed25519, authenticates to prod control plane) and
     `target/.brace-token` (live bearer token) written via `Files.writeString` with
     umask-default perms.
