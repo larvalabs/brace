@@ -40,10 +40,21 @@ public class Middleware {
         }
 
         public static PathPattern compile(String pattern) {
+            // Reject interior wildcards at registration time.
+            // Valid patterns are: /path/exact or /path/* (trailing only).
+            if (pattern.contains("*")) {
+                if (!pattern.endsWith("/*")) {
+                    throw new IllegalArgumentException(
+                        "Interior wildcards are not supported; only a trailing /* is allowed: " + pattern
+                    );
+                }
+            }
+
             String regex;
             if (pattern.endsWith("/*")) {
                 var prefix = pattern.substring(0, pattern.length() - 2);
-                regex = "^" + Pattern.quote(prefix) + "/.+$";
+                // Match bare prefix, prefix/, and prefix/anything
+                regex = "^" + Pattern.quote(prefix) + "(/.*)?$";
             } else {
                 regex = "^" + Pattern.quote(pattern) + "$";
             }

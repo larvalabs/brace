@@ -486,3 +486,48 @@ seen-nonce set is per-instance and in-memory — ops works without shared fleet 
 behind a load balancer a captured v2 request remains replayable against a *different*
 instance within the ±30s timestamp window. HTTPS on every hop to `/ops/*` remains the
 primary control; see `docs/SECURITY.md` → "Ops Endpoints".
+
+## Security fix: middleware trailing `/*` now matches the bare prefix
+
+**Who is affected:** applications using `before("/path/*", ...)` or `after("/path/*", ...)`
+patterns to guard a section or inject headers.
+
+**What changed.** Through 0.1.6, a middleware pattern `/admin/*` matched `/admin/users` and
+`/admin/secret` but **not** `/admin` or `/admin/` itself. A developer guarding a section
+with `before("/admin/*", auth)` left the index route at `/admin` unauthenticated. Interior
+wildcards (e.g., `/api/*/edit`) silently never matched anything.
+
+0.1.7 fixes both:
+
+1. **Trailing `/*` now matches the bare prefix:** `/admin/*` now matches `/admin`, `/admin/`,
+   and `/admin/anything`. This is a **behavior change** — if you relied on the `/admin` gap,
+   you must now explicitly add a matching route or `before("/admin", ...)`.
+2. **Interior wildcards are rejected at registration:** patterns like `/api/*/edit` now throw
+   `IllegalArgumentException` at startup instead of failing silently. Only a trailing `/*`
+   is supported.
+
+**Before (0.1.6):**
+
+```java
+app.before("/admin/*", auth);
+// /admin/dashboard  → blocked by middleware ✓
+// /admin             → skipped middleware ✗ (bug)
+```
+
+**After (0.1.7+):**
+
+```java
+app.before("/admin/*", auth);
+// /admin/dashboard  → blocked by middleware ✓
+// /admin             → blocked by middleware ✓ (fixed)
+// /admin/           → blocked by middleware ✓ (fixed)
+```
+
+**Action:** review any middleware patterns. If you have a handler on the bare prefix
+(`app.get("/admin", ...)`) and you want it guarded, the middleware will now apply —
+usually correct, but double-check that your logic is right. If you have an interior
+wildcard like `/api/*/edit`, change it to guard at the `/api/*` level (match the prefix)
+and check the matched path in your handler if you need per-segment control.
+
+**No action needed** if your middleware patterns already used only trailing `/*` or exact
+paths (no `*` at all).

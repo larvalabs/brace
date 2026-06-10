@@ -153,7 +153,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
     in SECURITY.md and `docs/scaling.md`.
   - **Model: Sonnet 4.6**
 
-- [ ] **M8: `/prefix/*` middleware doesn't match `/prefix` itself** — `Middleware.java:44-46`
+- [x] **M8: `/prefix/*` middleware doesn't match `/prefix` itself** — `Middleware.java:44-46`
   - `before("/admin/*", auth)` leaves `/admin` unauthenticated; interior wildcards
     (`/api/*/edit`) silently never match.
   - **Fix:** make trailing `/*` also match the bare prefix (`^\Q/admin\E(/.*)?$`).
