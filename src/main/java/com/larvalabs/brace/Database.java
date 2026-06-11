@@ -109,9 +109,17 @@ public class Database {
     }
 
     public <T> T queryOne(Class<T> type, String hqlWhere, Object... params) {
-        // Delegates to query() which already instruments
-        List<T> results = query(type, hqlWhere, params);
-        return results.isEmpty() ? null : results.get(0);
+        // Mirrors query() but caps the result set at one row: without setMaxResults(1),
+        // a non-unique predicate fetched and hydrated every matching row to return the first.
+        long start = System.nanoTime();
+        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        Query<T> query = session.createQuery(hql, type);
+        bindParams(query, params);
+        query.setMaxResults(1);
+        List<T> result = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result.isEmpty() ? null : result.get(0);
     }
 
     public <T> long count(Class<T> type) {
