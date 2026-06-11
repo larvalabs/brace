@@ -511,3 +511,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for comprehensive security documentatio
 - Rate limiting
 - File upload security
 - Ops endpoint hardening
+
+## Periodic Model Reviews
+
+Brace is re-reviewed end to end whenever a notably more capable AI model becomes available — each new model generation can find real issues the previous one missed, so the review repeats even when the code hasn't changed. Reviews run in three categories: **Security**, **Token Efficiency**, and **Runtime Performance**. Each produces a findings doc, a fix branch with one commit per finding, and a permanent record you can audit — see the [review process and index](docs/reviews/README.md). The first completed review is the [Fable 5 security review](docs/reviews/2026-06-security-fable-5.md) (June 2026): 25 findings, all fixed, each traceable to its commit.
