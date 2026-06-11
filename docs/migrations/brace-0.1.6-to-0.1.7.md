@@ -897,3 +897,40 @@ collected.
 Related fix in the same change: on ops-enabled apps **without a database**, the JFR
 method/allocation sample maps were never reset and grew for the life of the JVM; they
 now reset every 5 minutes, matching the cadence of the DB-backed metrics flush.
+
+## Changed: stdout logging is now asynchronous (single writer thread)
+
+**Who is affected:** apps that consume Brace's structured stdout logs, and tests that
+assert on captured stdout immediately after a request.
+
+Through earlier 0.1.7 snapshots, every `Log.*` call serialized JSON and wrote it to
+`System.out` inline on the calling thread — one global `PrintStream` lock and one write
+syscall per line, on every request. Under load this was the framework's main contention
+point (and a virtual-thread carrier-pinning hazard on JDK 21–24).
+
+Log entries are now placed on a bounded in-memory queue (8,192 entries) and written in
+batches by a dedicated `brace-log-writer` daemon thread.
+
+What this means in practice:
+
+- **Ordering and content are unchanged** — same JSON shape, same redaction, still stdout.
+- **Lines can trail the event by a few milliseconds.** Log processors are unaffected;
+  tests that assert on captured stdout right after a request should call `Brace.stop()`
+  first (which flushes) or assert via `/ops/logs` — the in-memory ring buffer is still
+  written synchronously and is the more precise tool.
+- **Overflow drops oldest lines, counted.** If more than ~8k lines back up (sustained
+  faster than stdout can drain), the oldest are dropped and a
+  `{"event":"log.dropped","count":N}` WARN is emitted with the next batch.
+- **JVM exit and `Brace.stop()` flush the queue**, so shutdown logs are not lost.
+
+## New: minimum log level
+
+`Log` now supports a minimum level — `DEBUG` (default, logs everything: the previous
+behavior), `INFO`, `WARN`, `ERROR`. Entries below the level are skipped before any
+formatting work and reach neither stdout nor `/ops/logs`.
+
+```java
+Log.level("INFO");               // in code
+// or: BRACE_LOG_LEVEL=INFO      (env var)
+// or: -Dbrace.log.level=INFO    (system property)
+```

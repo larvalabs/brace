@@ -3,10 +3,121 @@ package com.larvalabs.brace;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class Log {
 
+    public enum Level { DEBUG, INFO, WARN, ERROR }
+
+    /**
+     * Minimum level written to stdout and the /ops/logs ring buffer. Entries below it are
+     * skipped before the entry map is even built. Defaults to DEBUG (everything, the
+     * historical behavior); set via {@code -Dbrace.log.level=INFO}, the
+     * {@code BRACE_LOG_LEVEL} env var, or {@link #level(String)}.
+     */
+    private static volatile Level minLevel = initLevel();
+
+    private static Level initLevel() {
+        String configured = System.getProperty("brace.log.level",
+            System.getenv().getOrDefault("BRACE_LOG_LEVEL", "DEBUG"));
+        try {
+            return Level.valueOf(configured.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return Level.DEBUG;
+        }
+    }
+
+    public static void level(String level) {
+        minLevel = Level.valueOf(level.trim().toUpperCase());
+    }
+
+    static boolean enabled(Level level) {
+        return level.ordinal() >= minLevel.ordinal();
+    }
+
+    // ---- Async writer (H1) ----
+    //
+    // Stdout is a shared, synchronized, line-flushing PrintStream: writing one JSON line per
+    // request from every request thread serializes the whole app on one monitor and performs
+    // a write syscall inline (and pins virtual-thread carriers on JDK < 25). Instead, request
+    // threads enqueue the redacted entry map and a single daemon thread serializes and writes
+    // batches — one locked print + flush per batch, not per line. The queue is bounded;
+    // when full the OLDEST entry is dropped (recent context matters most for debugging) and
+    // a synthetic WARN with the drop count is emitted with the next batch.
+    //
+    // LogTap.append still happens synchronously on the caller's thread, so /ops/logs sees
+    // entries immediately and in caller order regardless of stdout batching.
+
+    private static final int QUEUE_CAPACITY = 8192;
+    private static final int MAX_BATCH = 512;
+    private static final ArrayBlockingQueue<Map<String, Object>> queue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static final AtomicLong dropped = new AtomicLong();
+
+    static {
+        Thread t = new Thread(Log::writeLoop, "brace-log-writer");
+        t.setDaemon(true);
+        t.start();
+        // Daemon thread: flush whatever is queued when the JVM exits normally.
+        Runtime.getRuntime().addShutdownHook(new Thread(Log::flush, "brace-log-flush"));
+    }
+
+    private static void writeLoop() {
+        while (true) {
+            try {
+                Map<String, Object> first = queue.take();
+                var batch = new StringBuilder();
+                appendLine(batch, first);
+                Map<String, Object> next;
+                int n = 1;
+                while (n < MAX_BATCH && (next = queue.poll()) != null) {
+                    appendLine(batch, next);
+                    n++;
+                }
+                long d = dropped.getAndSet(0);
+                if (d > 0) {
+                    batch.append("{\"ts\":\"").append(Instant.now())
+                        .append("\",\"level\":\"WARN\",\"event\":\"log.dropped\",\"count\":").append(d)
+                        .append("}\n");
+                }
+                // One synchronized write + flush per batch, from this thread only.
+                // (PrintStream auto-flushes a print(String) containing '\n'.)
+                System.out.print(batch);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Throwable ignored) {
+                // Never let the writer die; the next take() continues.
+            }
+        }
+    }
+
+    private static void appendLine(StringBuilder batch, Map<String, Object> map) {
+        try {
+            batch.append(Json.mapper().writeValueAsString(map)).append('\n');
+        } catch (Exception e) {
+            batch.append(map).append('\n');
+        }
+    }
+
+    /**
+     * Drains and writes everything currently queued. Called from the JVM shutdown hook and
+     * {@code Brace.stop()}; also useful in tests that assert on captured stdout.
+     */
+    static void flush() {
+        var batch = new StringBuilder();
+        Map<String, Object> entry;
+        while ((entry = queue.poll()) != null) {
+            appendLine(batch, entry);
+        }
+        if (!batch.isEmpty()) {
+            System.out.print(batch);
+        }
+        System.out.flush();
+    }
+
     public static void event(String event, Map<String, Object> data) {
+        if (!enabled(Level.INFO)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "INFO");
@@ -17,6 +128,7 @@ public class Log {
 
     static void request(String method, String path, int status, long durationUs,
                         int queryCount, long queryUs) {
+        if (!enabled(status >= 500 ? Level.ERROR : Level.INFO)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", status >= 500 ? "ERROR" : "INFO");
@@ -33,6 +145,7 @@ public class Log {
     }
 
     static void error(String method, String path, Throwable error) {
+        if (!enabled(Level.ERROR)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "ERROR");
@@ -47,6 +160,7 @@ public class Log {
     }
 
     public static void warn(String message) {
+        if (!enabled(Level.WARN)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "WARN");
@@ -55,6 +169,7 @@ public class Log {
     }
 
     public static void debug(String message) {
+        if (!enabled(Level.DEBUG)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "DEBUG");
@@ -63,6 +178,7 @@ public class Log {
     }
 
     public static void debug(String message, Map<String, Object> data) {
+        if (!enabled(Level.DEBUG)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "DEBUG");
@@ -72,6 +188,7 @@ public class Log {
     }
 
     public static void info(String message) {
+        if (!enabled(Level.INFO)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "INFO");
@@ -80,6 +197,7 @@ public class Log {
     }
 
     public static void info(String message, Map<String, Object> data) {
+        if (!enabled(Level.INFO)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "INFO");
@@ -89,6 +207,7 @@ public class Log {
     }
 
     public static void error(String message) {
+        if (!enabled(Level.ERROR)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "ERROR");
@@ -97,6 +216,7 @@ public class Log {
     }
 
     public static void error(String message, Throwable throwable) {
+        if (!enabled(Level.ERROR)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "ERROR");
@@ -107,6 +227,7 @@ public class Log {
     }
 
     public static void error(String message, Map<String, Object> data) {
+        if (!enabled(Level.ERROR)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
         entry.put("level", "ERROR");
@@ -121,11 +242,18 @@ public class Log {
         // which app code produced the entry. Fixed fields (ts, level, message, path…) have
         // non-sensitive names and pass through untouched.
         map = Redactor.redact(map);
-        LogTap.append(map);
-        try {
-            System.out.println(Json.mapper().writeValueAsString(map));
-        } catch (Exception e) {
-            System.out.println(map);
+        // redact() returned a fresh private map: the tap may adopt it without copying, and
+        // the writer thread may serialize it later without racing the caller.
+        LogTap.appendTrusted(map);
+        if (!queue.offer(map)) {
+            // Full: drop the oldest queued entry to make room (recent context wins). The
+            // race between concurrent droppers is benign; if the retry still loses, the new
+            // entry is lost instead — either way every lost line is counted.
+            queue.poll();
+            dropped.incrementAndGet();
+            if (!queue.offer(map)) {
+                dropped.incrementAndGet();
+            }
         }
     }
 }

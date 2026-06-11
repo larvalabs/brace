@@ -1081,6 +1081,16 @@ Structured JSON to stdout:
 Log.event("user.signup", Map.of("userId", user.id, "email", user.email));
 ```
 
+Stdout writes are asynchronous: entries go through a bounded queue drained by a single
+writer thread (batched writes, no per-request lock contention). Lines may trail the
+request by a few ms under load; `/ops/logs` sees entries immediately. If the queue
+overflows (sustained > ~8k lines buffered), oldest lines are dropped and a
+`log.dropped` WARN reports the count. `Brace.stop()` and JVM exit flush the queue.
+
+Minimum level (default `DEBUG` = everything): set `BRACE_LOG_LEVEL=INFO`,
+`-Dbrace.log.level=INFO`, or `Log.level("INFO")`. Entries below the level are skipped
+entirely — they reach neither stdout nor `/ops/logs`.
+
 ## htmx
 
 Bundled htmx 2.0.4 served from `/__brace/htmx.min.js`. Add to layout:

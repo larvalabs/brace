@@ -17,7 +17,7 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
 
 ## High
 
-- [ ] **H1 — Per-request logging serializes through the `System.out` lock, flushed per line**
+- [x] **H1 — Per-request logging serializes through the `System.out` lock, flushed per line**
   - Severity: High. Files: `Log.java:118-130` (`println`), call sites `BraceHandler.java:390,405,427`; `LogTap.java:54`.
   - Every request builds a `LinkedHashMap`, calls `Instant.now().toString()`, deep-copies via `Redactor.redact`, copies *again* in `LogTap.append` (the redacted map is already a fresh private instance), Jackson-serializes, then `System.out.println` — a synchronized, autoflushing `PrintStream`: one global monitor + a write syscall per request. On JDK 21–24 a virtual thread blocked in that synchronized write pins its carrier (AGENTS.md JEP 491 note). At a few thousand rps this is plausibly the framework's top contention point. There is also no level filter: `Log.debug` always formats and prints.
   - Fix: single writer thread draining a bounded queue (drop-oldest), or at minimum a dedicated `BufferedOutputStream` (non-autoflush, size/interval flush). Drop the redundant copy in `LogTap.append` for the `Log.println` path. Add a minimum-level check before building the entry map.

@@ -843,6 +843,9 @@ public class Brace {
         if (wsRegistry != null) {
             wsRegistry.close();
         }
+        // Drain any structured log lines still queued in the async writer (H1) so a stop()
+        // immediately followed by assertions (tests) or process exit loses nothing.
+        Log.flush();
     }
 
     public int actualPort() {
