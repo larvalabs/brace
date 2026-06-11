@@ -43,7 +43,33 @@ public class Log {
         entry.put("path", Redactor.redactPath(path));
         entry.put("error", error.getClass().getSimpleName());
         entry.put("message", Redactor.redactMessage(error.getMessage()));
+        String at = appFrame(error);
+        if (at != null) entry.put("at", at);
         println(entry);
+    }
+
+    /**
+     * The first stack frame outside the framework and the JDK/server libraries — the
+     * line of app code that threw. Frame class/method/line are code locations, not
+     * user data, so no redaction pass is needed.
+     */
+    private static final String[] NON_APP_PACKAGES = {
+        "com.larvalabs.brace.", "java.", "javax.", "jdk.", "sun.", "jakarta.",
+        "org.eclipse.jetty.", "org.hibernate.", "org.flywaydb.", "org.h2.",
+        "org.postgresql.", "org.junit.", "com.fasterxml.", "com.zaxxer."
+    };
+
+    static String appFrame(Throwable error) {
+        for (var frame : error.getStackTrace()) {
+            String cls = frame.getClassName();
+            boolean library = false;
+            for (var prefix : NON_APP_PACKAGES) {
+                if (cls.startsWith(prefix)) { library = true; break; }
+            }
+            if (!library) return frame.toString();
+        }
+        // Framework-internal failure (no app frame): fall back to the top frame.
+        return error.getStackTrace().length > 0 ? error.getStackTrace()[0].toString() : null;
     }
 
     public static void warn(String message) {

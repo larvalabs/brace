@@ -307,7 +307,9 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** e2e: command rewrites the file from the jar.
   - **Model: Sonnet 4.6.**
 
-- [ ] **M11: Dev-loop 500s carry no location — cheapest next step is H5's 6–9k-token dump** — `BraceHandler.java:408-446`, `Log.java:35-47`
+- [x] **M11: Dev-loop 500s carry no location — cheapest next step is H5's 6–9k-token dump** — `BraceHandler.java:408-446`, `Log.java:35-47`
+  *(Done: `at` field with first-app-frame heuristic that doesn't filter `org.*` app
+  packages. The optional dev-gated 500 body was NOT pursued — deferred.)*
   - HTTP body is `"Internal Server Error"`; the console `http.error` line carries
     only exception class + message — zero frames, not even file:line. Three tool
     reads to learn one location.
