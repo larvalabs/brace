@@ -1,5 +1,6 @@
 package com.larvalabs.brace;
 
+import java.net.URLEncoder;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -344,25 +345,16 @@ public class Cache {
         }
 
         /**
-         * Percent-encodes a string for use in cache keys, preventing collisions when
-         * parameter values contain special characters like &amp; or =. Uses application/x-www-form-urlencoded
-         * encoding (all unreserved chars are passed through; &amp;, =, %, and spaces are escaped).
+         * Encodes a query parameter for use in cache keys, preventing collisions when
+         * values contain separator characters (&amp;, =, %) or non-ASCII text. Standard
+         * application/x-www-form-urlencoded via {@link URLEncoder} — UTF-8 byte-wise
+         * and therefore injective: distinct values can never encode to the same key.
+         * (A hand-rolled {@code %%%02X} formatter here previously emitted 4-hex-digit
+         * escapes for non-ASCII chars, which collided with adjacent-character escapes.)
          */
         private static String percentEncode(String value) {
             if (value == null || value.isEmpty()) return value;
-            var sb = new StringBuilder();
-            for (char c : value.toCharArray()) {
-                // Unreserved characters: A-Z a-z 0-9 - _ . ~
-                // Also allow common URL-safe chars not in our key format: / : ? # [ ] @ ! $ ' ( ) * + , ;
-                // Encode only &, =, %, and space which could affect cache key parsing
-                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '.' || c == '~') {
-                    sb.append(c);
-                } else {
-                    sb.append(String.format("%%%02X", (int) c));
-                }
-            }
-            return sb.toString();
+            return URLEncoder.encode(value, StandardCharsets.UTF_8);
         }
     }
 }

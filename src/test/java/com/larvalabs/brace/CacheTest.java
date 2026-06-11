@@ -413,6 +413,30 @@ class CacheTest {
         assertEquals(2, counter.get(), "Literal % and encoded %25 should produce different cache keys");
     }
 
+    @Test
+    void pageKeyWithNonAsciiParamValuesDoesNotCollide() {
+        // The old hand-rolled encoder emitted variable-width hex escapes for non-ASCII
+        // chars: '中' (U+4E2D) → "%4E2D", and "ӢD" ('Ӣ' U+04E2 → "%4E2", then literal
+        // 'D') → "%4E2D" — identical keys. URLEncoder is UTF-8 byte-wise and injective.
+        var counter = new AtomicInteger();
+        Handler handler = req -> {
+            counter.incrementAndGet();
+            return Result.text("v" + counter.get());
+        };
+        var cached = cache.wrap("5m", handler);
+
+        var req1 = new Request("GET", "/search", Map.of(), Map.of("q", "中"), Map.of(), null);
+        assertEquals("v1", bodyOf(cached.apply(req1))); // miss
+
+        var req2 = new Request("GET", "/search", Map.of(), Map.of("q", "ӢD"), Map.of(), null);
+        assertEquals("v2", bodyOf(cached.apply(req2))); // miss — must not share req1's key
+
+        assertEquals(2, counter.get(), "Distinct non-ASCII values must produce distinct cache keys");
+
+        assertEquals("v1", bodyOf(cached.apply(req1)));
+        assertEquals(2, counter.get(), "Re-requesting should hit cache");
+    }
+
     /** A simple test record for cache serialization. */
     public static class TestRecord {
         public String name;

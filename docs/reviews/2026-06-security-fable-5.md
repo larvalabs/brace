@@ -84,8 +84,9 @@ Confirmed but deferred (lower severity):
 - `SecurityHeaders.defaults()` (after-middleware) never applies to responses written
   outside the after loop: static files (nosniff only), framework 404, CSRF 403, 500,
   and the new 413s.
-- `Cache.percentEncode` is non-injective for non-ASCII (`'中'` and `"ӢD"` collide) and
-  its comment contradicts the code — use `URLEncoder.encode(v, UTF_8)`.
+- ~~`Cache.percentEncode` is non-injective for non-ASCII (`'中'` and `"ӢD"` collide) and
+  its comment contradicts the code — use `URLEncoder.encode(v, UTF_8)`.~~
+  **Fixed on main post-merge**, with the colliding pair as a regression test.
 - ~~0.1.7 CLI sends ops-auth v2 only; against a 0.1.6 server Jackson rejects the unknown
   fields → CLI-first upgrades break, and the migration guide says "no action".~~
   **Fixed on main post-merge:** CLI falls back to v1 when a server 401s the v2 body.
