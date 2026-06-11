@@ -59,6 +59,62 @@ class DatabaseTest {
     }
 
     @Test
+    void findOr404ReturnsRowWhenPresent() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "Found";
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var found = db.findOr404(Post.class, post.id);
+            assertEquals("Found", found.title);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void findOr404ThrowsNotFoundForMissing() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            assertThrows(NotFoundException.class, () -> db.findOr404(Post.class, 99999L));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryOneOr404ReturnsRowAndThrowsForMissing() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "QueryOne404";
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var found = db.queryOneOr404(Post.class, "title = ?", "QueryOne404");
+            assertEquals(post.id, found.id);
+            assertThrows(NotFoundException.class,
+                () -> db.queryOneOr404(Post.class, "title = ?", "no-such-title"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void queryWithCondition() {
         var db = new Database(factory.openSession());
         try {

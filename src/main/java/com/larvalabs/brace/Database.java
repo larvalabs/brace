@@ -114,6 +114,27 @@ public class Database {
         return results.isEmpty() ? null : results.get(0);
     }
 
+    /**
+     * Like {@link #find(Class, Object)}, but throws {@link NotFoundException} (rendered as a
+     * 404 response) when no row exists. The canonical handler lookup:
+     * {@code var post = db.findOr404(Post.class, req.longPathParam("id"));}
+     */
+    public <T> T findOr404(Class<T> type, Object id) {
+        T result = find(type, id);
+        if (result == null) throw new NotFoundException();
+        return result;
+    }
+
+    /**
+     * Like {@link #queryOne(Class, String, Object...)}, but throws {@link NotFoundException}
+     * (rendered as a 404 response) when no row matches.
+     */
+    public <T> T queryOneOr404(Class<T> type, String hqlWhere, Object... params) {
+        T result = queryOne(type, hqlWhere, params);
+        if (result == null) throw new NotFoundException();
+        return result;
+    }
+
     public <T> long count(Class<T> type) {
         long start = System.nanoTime();
         String hql = "SELECT count(*) FROM " + type.getSimpleName();

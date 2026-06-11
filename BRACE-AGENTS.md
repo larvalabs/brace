@@ -253,6 +253,7 @@ Thin wrapper over Hibernate StatelessSession. No dirty checking, no lazy loading
 ```java
 // Basic CRUD
 db.find(Post.class, id)                          // by ID, or null
+db.findOr404(Post.class, id)                      // by ID, or throws 404 — the canonical handler lookup
 db.insert(post)                                   // INSERT
 db.update(post)                                   // UPDATE
 db.delete(post)                                   // DELETE
@@ -261,6 +262,7 @@ db.delete(post)                                   // DELETE
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause, returns List
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
+db.queryOneOr404(Post.class, "slug = ?", slug)    // single result, or throws 404
 db.queryIn(Post.class, "id", List.of(1, 2, 3))   // IN clause batch lookup
 db.count(Post.class)                              // count all
 db.count(Post.class, "published = ?", true)       // count with condition

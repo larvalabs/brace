@@ -183,7 +183,7 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Model: Fable 5 / Opus 4.8** — touches the session/CSRF/cookie write-back
     lifecycle (the security review's M5/M6 region).
 
-- [ ] **M2: `db.findOr404` + make it the canonical lookup in docs** — `Database.java`, `Result.java:61-64`
+- [x] **M2: `db.findOr404` + make it the canonical lookup in docs** — `Database.java`, `Result.java:61-64`
   - `Result.notFoundIfNull` exists and is documented, but the benchmark agent never
     discovered it: **32×** `find`/null-check/`Result.notFound()` preambles (~96
     lines) in the final app (the earlier TODO estimate of ~10× undercounted 3×).

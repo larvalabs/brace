@@ -127,6 +127,27 @@ both — keep the in-process default for hot read-through pages and a separate
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
 
+## New (optional): `db.findOr404` / `db.queryOneOr404` lookup helpers
+
+**Nothing to do** — purely additive. The find/null-check/404 preamble that every
+show/update/delete handler starts with collapses to one line; the helpers throw
+`NotFoundException`, which Brace already renders as a 404 response.
+
+**Before (all versions, still works):**
+
+```java
+var post = db.find(Post.class, req.longPathParam("id"));
+if (post == null) return Result.notFound();
+```
+
+**After (0.1.7+, the canonical lookup):**
+
+```java
+var post = db.findOr404(Post.class, req.longPathParam("id"));
+// and for non-ID lookups:
+var bySlug = db.queryOneOr404(Post.class, "slug = ?", slug);
+```
+
 ## New (optional): scoped read-only ops keys
 
 **Nothing to do** — existing keys and tokens keep working unchanged. 0.1.7 adds a

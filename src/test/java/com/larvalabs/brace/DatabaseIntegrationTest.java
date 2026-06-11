@@ -48,6 +48,10 @@ class DatabaseIntegrationTest {
             return Json.of(p);
         });
 
+        // findOr404: NotFoundException from the helper renders as a 404 response
+        app.get("/posts404/{id}", (DbHandler) (req, db2) ->
+            Json.of(db2.findOr404(Post.class, req.longPathParam("id"))));
+
         // Route that does NOT use Database
         app.get("/health", req -> Result.text("ok"));
 
@@ -124,6 +128,16 @@ class DatabaseIntegrationTest {
     void getPostNotFound() throws Exception {
         var response = get("/posts/99999");
         assertEquals(404, response.statusCode());
+    }
+
+    @Test
+    void findOr404RendersAs404EndToEnd() throws Exception {
+        var hit = get("/posts404/1");
+        assertEquals(200, hit.statusCode());
+        assertTrue(hit.body().contains("Test Post"));
+
+        var miss = get("/posts404/99999");
+        assertEquals(404, miss.statusCode());
     }
 
     @Test
