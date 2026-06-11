@@ -361,7 +361,7 @@ expensive round**, exactly when the re-read corpus is largest).
     already match. (Cross-filed in `../ai-benchmark/TODO.md`.)
   - **Model: Haiku 4.5.**
 
-- [ ] **M16: FormBinder type coverage stops at primitives** — `FormBinder.java:45-71,116-124`
+- [x] **M16: FormBinder type coverage stops at primitives** — `FormBinder.java:45-71,116-124`
   - No enum / `LocalDate` / `Instant` / `BigDecimal`: unknown types fall through to
     the raw string and explode reflectively → 500. `<input type="date">` forces
     String fields + ~4 lines of hand-parse/validate per field.

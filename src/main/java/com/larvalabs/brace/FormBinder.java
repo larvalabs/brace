@@ -52,6 +52,26 @@ public class FormBinder {
             return null;
         }
 
+        if (type.isEnum()) {
+            return convertEnum(raw, type, name, errors);
+        }
+        if (type == java.time.LocalDate.class) {
+            try {
+                return java.time.LocalDate.parse(raw);
+            } catch (java.time.format.DateTimeParseException e) {
+                errors.add(name, "must be a date (yyyy-MM-dd)");
+                return null;
+            }
+        }
+        if (type == java.time.Instant.class) {
+            try {
+                return java.time.Instant.parse(raw);
+            } catch (java.time.format.DateTimeParseException e) {
+                errors.add(name, "must be an ISO-8601 timestamp (e.g. 2026-06-11T12:00:00Z)");
+                return null;
+            }
+        }
+
         try {
             if (type == String.class) return raw;
             if (type == int.class || type == Integer.class) return Integer.parseInt(raw);
@@ -59,6 +79,7 @@ public class FormBinder {
             if (type == double.class || type == Double.class) return Double.parseDouble(raw);
             if (type == float.class || type == Float.class) return Float.parseFloat(raw);
             if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(raw);
+            if (type == java.math.BigDecimal.class) return new java.math.BigDecimal(raw);
             return raw;
         } catch (NumberFormatException e) {
             errors.add(name, "invalid number");
@@ -66,6 +87,20 @@ public class FormBinder {
             if (type == long.class) return 0L;
             if (type == double.class) return 0.0;
             if (type == float.class) return 0.0f;
+            return null;
+        }
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Object convertEnum(String raw, Class<?> type, String name, Errors errors) {
+        try {
+            return Enum.valueOf((Class<Enum>) type, raw);
+        } catch (IllegalArgumentException e) {
+            var names = new ArrayList<String>();
+            for (var constant : type.getEnumConstants()) {
+                names.add(((Enum<?>) constant).name());
+            }
+            errors.add(name, "must be one of: " + String.join(", ", names));
             return null;
         }
     }

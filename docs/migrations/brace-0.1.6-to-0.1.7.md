@@ -127,6 +127,27 @@ both — keep the in-process default for hot read-through pages and a separate
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
 
+## New (optional): form binding for enums, `LocalDate`, `Instant`, `BigDecimal`
+
+**Nothing to do** — purely additive. Form (and `jsonForm`) records can now declare
+enum, `LocalDate`, `Instant`, and `BigDecimal` components directly; previously these
+types fell through the binder and crashed record construction with a 500. Unparseable
+input becomes a field error (`"must be a date (yyyy-MM-dd)"`, `"must be one of: DRAFT,
+PUBLISHED"`, …) — same `hasErrors()` handling as every other validation failure.
+
+**Before (all versions, still works):**
+
+```java
+public record EventForm(@Required String name, String startDate) {}
+// ...then hand-parse: LocalDate.parse(form.value().startDate()) wrapped in try/catch
+```
+
+**After (0.1.7+):**
+
+```java
+public record EventForm(@Required String name, LocalDate startDate) {}
+```
+
 ## New (optional): `Json.obj` — one-line ad-hoc JSON shapes
 
 **Nothing to do** — purely additive. For one-off response shapes, `Json.obj` replaces

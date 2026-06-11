@@ -351,6 +351,11 @@ public record PostForm(
 
 Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@In({"a","b"})`, `@Optional`.
 
+Component types that bind automatically: `String`, `int`/`long`/`double`/`float`/`boolean`
+(+ boxed), enums (bad value → "must be one of: …" field error), `LocalDate` (yyyy-MM-dd),
+`Instant` (ISO-8601), `BigDecimal`. Unparseable input becomes a field error, never an
+exception — no hand-parsing `<input type="date">` into String components.
+
 Usage in a handler:
 
 ```java

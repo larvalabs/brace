@@ -22,6 +22,15 @@ class FormTest {
         @In({"draft", "published"}) String status
     ) {}
 
+    public enum Status { DRAFT, PUBLISHED }
+
+    public record RichTypesForm(
+        Status status,
+        java.time.LocalDate startDate,
+        java.time.Instant publishedAt,
+        java.math.BigDecimal price
+    ) {}
+
     public record CustomValidationForm(
         @Required String password,
         @Required String passwordConfirm
@@ -116,5 +125,47 @@ class FormTest {
         assertFalse(form.hasErrors());
         assertEquals("Hello", form.value().title());
         assertEquals("This is long enough content", form.value().body());
+    }
+
+    @Test
+    void richTypesBindFromStrings() {
+        var form = FormBinder.bind(RichTypesForm.class, Map.of(
+            "status", "PUBLISHED",
+            "startDate", "2026-06-11",
+            "publishedAt", "2026-06-11T12:00:00Z",
+            "price", "19.99"));
+        assertFalse(form.hasErrors());
+        assertEquals(Status.PUBLISHED, form.value().status());
+        assertEquals(java.time.LocalDate.of(2026, 6, 11), form.value().startDate());
+        assertEquals(java.time.Instant.parse("2026-06-11T12:00:00Z"), form.value().publishedAt());
+        assertEquals(new java.math.BigDecimal("19.99"), form.value().price());
+    }
+
+    @Test
+    void invalidEnumIsFieldErrorListingConstants() {
+        var form = FormBinder.bind(RichTypesForm.class, Map.of("status", "bogus"));
+        assertTrue(form.hasErrors());
+        assertEquals("must be one of: DRAFT, PUBLISHED", form.errors("status").get(0));
+    }
+
+    @Test
+    void invalidDateAndTimestampAndDecimalAreFieldErrorsNot500() {
+        var form = FormBinder.bind(RichTypesForm.class, Map.of(
+            "startDate", "junk",
+            "publishedAt", "junk",
+            "price", "junk"));
+        assertTrue(form.hasErrors());
+        assertTrue(form.errors("startDate").get(0).contains("date"));
+        assertTrue(form.errors("publishedAt").get(0).contains("ISO-8601"));
+        assertEquals("invalid number", form.errors("price").get(0));
+    }
+
+    @Test
+    void emptyRichTypesAreNull() {
+        var form = FormBinder.bind(RichTypesForm.class, Map.of());
+        assertFalse(form.hasErrors());
+        assertNull(form.value().status());
+        assertNull(form.value().startDate());
+        assertNull(form.value().price());
     }
 }
