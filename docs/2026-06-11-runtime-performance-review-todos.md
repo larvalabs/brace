@@ -219,6 +219,27 @@ already saturating CPU shared with wrk on the same machine, so the freed lock ti
 mostly went to wrk itself. Conclusion: H1 was the throughput/tail ceiling for DB-backed
 routes, as predicted.
 
+### After H2 + batch A (M5, M9, L3, L5, L10, L12) — framework `8b495d5`
+
+Quiet-window run (1-min load 5.8/10 cores, verified before firing; mds_stores spike from
+earlier in the day had settled). Raw output:
+`benchmark/baselines/2026-06-11-wrk-post-H2-batchA-8b495d5.txt`.
+
+| Test | Req/sec | vs post-H1 | p99 | vs post-H1 |
+|---|---|---|---|---|
+| Plaintext | 67,292 | +2% (noise) | 21.6ms | −7% |
+| JSON | 66,321 | +1% (noise) | 19.8ms | −61% |
+| Single Query | 26,915 | flat | 28.9ms | −43% |
+| Multiple Queries (20) | 1,761 | +7% | 227ms | **−44%** |
+| Fortunes | 27,454 | **+13%** | 38.9ms | −23% |
+| Updates (20) | 1,445 | flat | 296ms | flat |
+
+Consistent with H2's mechanism: throughput moves are modest (the 64KB/request was GC
+pressure, not lock contention) but p99s tightened across the board — fewer young-gen
+pauses landing in the tail. Fortunes (largest responses, most allocation-sensitive)
+gained the most throughput. Cumulative vs the pre-fix baseline: Fortunes 19,920 → 27,454
+req/s (+38%) with p99 1.23s → 39ms; Queries(20) +37%; Updates(20) +29%.
+
 ## Gaps / what to add for this review
 
 1. ~~**Baseline first (required)**~~ — captured above. `--latency` added to `run-brace.sh`; benchmark module repointed at the current framework version (was a stale unresolvable `0.2.0-SNAPSHOT`) and its `req.param` call updated to the current `req.queryParam` API; script default JDK moved to 25 per AGENTS.md recommendation.
