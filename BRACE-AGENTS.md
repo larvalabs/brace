@@ -599,8 +599,8 @@ The clear response reports which happened: `{"cleared": true, "scope": "fleet"}`
 Recurring (in-memory, lost on restart):
 
 ```java
-app.every("5m", "cleanup", db -> db.sql("DELETE FROM expired WHERE ts < NOW()"));
-app.daily("02:00", "digest", db -> sendDigest(db));
+app.every("5m", "cleanup", (db, ctx) -> db.sql("DELETE FROM expired WHERE ts < NOW()"));
+app.daily("02:00", "digest", (db, ctx) -> sendDigest(db));
 ```
 
 Durable (database-backed, survives restarts):
