@@ -105,4 +105,55 @@ public class TrustedProxiesTest {
         assertFalse(trusted.isTrusted("10.0.0.1"));
         assertFalse(trusted.isTrusted("192.168.1.1"));
     }
+
+    // -----------------------------------------------------------------------
+    // CR1: isIpLiteral validator — hostname input must never trigger DNS
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void testIsIpLiteralValidIPv4() {
+        assertTrue(TrustedProxies.isIpLiteral("1.2.3.4"));
+        assertTrue(TrustedProxies.isIpLiteral("0.0.0.0"));
+        assertTrue(TrustedProxies.isIpLiteral("255.255.255.255"));
+        assertTrue(TrustedProxies.isIpLiteral("10.0.0.1"));
+        assertTrue(TrustedProxies.isIpLiteral("192.168.1.100"));
+    }
+
+    @Test
+    public void testIsIpLiteralValidIPv6() {
+        assertTrue(TrustedProxies.isIpLiteral("::1"));
+        assertTrue(TrustedProxies.isIpLiteral("2001:db8::1"));
+        assertTrue(TrustedProxies.isIpLiteral("0:0:0:0:0:0:0:1"));
+        assertTrue(TrustedProxies.isIpLiteral("fe80::1"));
+        assertTrue(TrustedProxies.isIpLiteral("::ffff:192.0.2.1")); // IPv4-mapped
+    }
+
+    @Test
+    public void testIsIpLiteralRejectsHostnames() {
+        assertFalse(TrustedProxies.isIpLiteral("a1.attacker.com"));
+        assertFalse(TrustedProxies.isIpLiteral("localhost"));
+        assertFalse(TrustedProxies.isIpLiteral("evil.example.org"));
+        assertFalse(TrustedProxies.isIpLiteral("proxy.internal"));
+    }
+
+    @Test
+    public void testIsIpLiteralRejectsGarbage() {
+        assertFalse(TrustedProxies.isIpLiteral(""));
+        assertFalse(TrustedProxies.isIpLiteral(null));
+        assertFalse(TrustedProxies.isIpLiteral("not-an-ip"));
+        assertFalse(TrustedProxies.isIpLiteral("999.999.999.999"));
+        assertFalse(TrustedProxies.isIpLiteral("1.2.3"));
+        assertFalse(TrustedProxies.isIpLiteral("1.2.3.4.5"));
+        assertFalse(TrustedProxies.isIpLiteral("01.2.3.4"));   // leading zero
+        assertFalse(TrustedProxies.isIpLiteral("1.2.3.256"));  // octet out of range
+    }
+
+    @Test
+    public void testIsTrustedRejectsHostname() {
+        // CR1: isTrusted must return false for hostname-shaped strings — no DNS lookup attempted.
+        var trusted = new TrustedProxies("10.0.0.0/8");
+        assertFalse(trusted.isTrusted("a1.attacker.com"));
+        assertFalse(trusted.isTrusted("localhost"));
+        assertFalse(trusted.isTrusted("evil.example.org"));
+    }
 }
