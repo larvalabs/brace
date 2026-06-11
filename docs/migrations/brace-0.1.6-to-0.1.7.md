@@ -798,3 +798,36 @@ app.trustedProxies("127.0.0.1", "::1");
 
 **Impact:** none, unless you have a dual-stack proxy setup. For IPv6-mapped addresses (`::ffff:a.b.c.d`),
 see the "Trusted Proxies" section of `docs/SECURITY.md` for examples.
+
+---
+
+## Security fix: high-entropy path segments redacted in access logs and ops stats
+
+**Who is affected:** anyone consuming Brace's structured logs or `/ops/status` route
+stats — for example, parsing the `path` field of `http.request` entries.
+
+**What changed.** Through 0.1.6 (and earlier 0.1.7 snapshots), the per-request access
+log, the `/ops/logs` ring buffer, and the per-route stats on `/ops/status` recorded the
+raw request path. A secret carried in a path position — a password-reset token, an
+invite link — was persisted on every **successful** request, even though error records
+already redacted it. Exception messages flowing to `Log.error` and the `/ops/status`
+error list had the same gap.
+
+0.1.7 runs the value-shaped redaction pass (same heuristic as the error store — see
+"Error Store Redaction" in `docs/SECURITY.md`) in the sinks themselves:
+
+```json
+// Before
+{"event":"http.request","method":"GET","path":"/password-reset/a3f9Bc2d8eF1g4h5","status":200}
+
+// After
+{"event":"http.request","method":"GET","path":"/password-reset/[redacted]","status":200}
+```
+
+Route keys on `/ops/status` collapse the same way (`GET /password-reset/[redacted]`),
+which also stops token-bearing routes from growing the per-route stats map per request.
+
+**Impact:** purely numeric IDs, short slugs, and UUIDs are untouched, so typical REST
+paths log exactly as before. Only segments that look like secrets (≥16 chars,
+base64url/hex alphabet, mixed letters and digits) are replaced with `[redacted]`. If
+your log tooling matched on such paths, match on the `[redacted]` placeholder instead.

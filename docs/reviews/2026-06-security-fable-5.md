@@ -75,10 +75,12 @@ Confirmed but deferred (lower severity):
 - `Json.of` entity warning (M9) misses Map wrappers, arrays, and nested/DTO-field
   entities; SECURITY.md/BRACE-AGENTS.md oversell it. Consider a Jackson
   `BeanSerializerModifier` on the shared mapper, or document the limitation.
-- M10 redaction covers the error store only: raw `e.getMessage()` still flows to
+- ~~M10 redaction covers the error store only: raw `e.getMessage()` still flows to
   `Stats.recordError` (served on `/ops/status`) and `Log.error` (stdout); access logs
   record raw paths (the Redactor Javadoc's own `/password-reset/<token>` example leaks
-  on every successful request).
+  on every successful request).~~ **Fixed on main post-merge:** value-shaped redaction
+  now runs in the sinks — `Log.request`/`Log.error` (path + message) and
+  `Stats.recordRequest` (route key) / `Stats.recordError` (message).
 - `SecurityHeaders.defaults()` (after-middleware) never applies to responses written
   outside the after loop: static files (nosniff only), framework 404, CSRF 403, 500,
   and the new 413s.

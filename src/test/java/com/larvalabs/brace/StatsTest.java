@@ -31,6 +31,32 @@ class StatsTest {
     }
 
     @Test
+    void routeKeysRedactHighEntropyPathSegments() {
+        var stats = new Stats();
+        stats.recordRequest("GET", "/password-reset/a3f9Bc2d8eF1g4h5", 200, 500, 0, 0);
+        stats.recordRequest("GET", "/password-reset/Zz8x7Ww6Vv5Uu4Tt", 200, 300, 0, 0);
+
+        var routes = stats.routeStats();
+        var redacted = routes.get("GET /password-reset/[redacted]");
+        assertNotNull(redacted, "token-bearing paths should collapse into one redacted route key");
+        assertEquals(2, redacted.count());
+        assertTrue(routes.keySet().stream().noneMatch(k -> k.contains("a3f9Bc2d8eF1g4h5")),
+            "raw reset token must not appear in /ops/status route keys");
+    }
+
+    @Test
+    void errorMessagesRedactedAtSink() {
+        var stats = new Stats();
+        stats.recordError("RuntimeException",
+            "auth failed for bearer sk_live_a3f9Bc2d8eF1g4h5J6k7", "GET /api", "stack", "{}", "[]");
+
+        var errors = stats.recentErrors();
+        assertEquals(1, errors.size());
+        assertFalse(errors.get(0).message.contains("sk_live_a3f9Bc2d8eF1g4h5J6k7"),
+            "embedded secret must be redacted before the message is served on /ops/status");
+    }
+
+    @Test
     void deduplicatesErrors() {
         var stats = new Stats();
         stats.recordError("NullPointerException", "oops", "GET /test", "stack1", "{}", "[]");

@@ -68,13 +68,18 @@ public class Stats {
             current = maxLatencyUs.get();
         }
 
-        // Per-route stats
-        String routeKey = method + " " + path;
+        // Per-route stats. Redact high-entropy path segments so secrets never reach
+        // /ops/status and token-bearing paths collapse into one route key instead of
+        // growing the map per request.
+        String routeKey = method + " " + Redactor.redactPath(path);
         routes.computeIfAbsent(routeKey, k -> new RouteStats()).record(latencyUs);
     }
 
     public void recordError(String type, String message, String route,
                             String stackTrace, String requestDetail, String queriesBefore) {
+        // This record is served on /ops/status; exception messages can carry embedded
+        // credentials or SQL literals, so run the value-shaped pass at the sink.
+        message = Redactor.redactMessage(message);
         synchronized (errorsLock) {
             String dedupeKey = type + "|" + route;
             for (ErrorRecord rec : errors) {

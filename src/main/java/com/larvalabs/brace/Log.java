@@ -22,7 +22,9 @@ public class Log {
         entry.put("level", status >= 500 ? "ERROR" : "INFO");
         entry.put("event", "http.request");
         entry.put("method", method);
-        entry.put("path", path);
+        // Value-shaped redaction at the sink: high-entropy path segments (reset tokens,
+        // invite links) must not reach stdout or the log ring buffer on any request.
+        entry.put("path", Redactor.redactPath(path));
         entry.put("status", status);
         entry.put("durationMs", Math.round(durationUs / 100.0) / 10.0);
         entry.put("queries", queryCount);
@@ -36,9 +38,11 @@ public class Log {
         entry.put("level", "ERROR");
         entry.put("event", "http.error");
         entry.put("method", method);
-        entry.put("path", path);
+        // Same value-shaped pass as the error store: paths and exception messages can
+        // embed bearer tokens or SQL literals and this entry goes to stdout + /ops/logs.
+        entry.put("path", Redactor.redactPath(path));
         entry.put("error", error.getClass().getSimpleName());
-        entry.put("message", error.getMessage());
+        entry.put("message", Redactor.redactMessage(error.getMessage()));
         println(entry);
     }
 

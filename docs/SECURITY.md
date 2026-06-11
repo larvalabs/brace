@@ -473,7 +473,14 @@ location /ops/ {
 
 Brace scrubs error records at capture time (before they reach the database or
 `/ops/errors`). Two redaction passes run inside `BraceHandler` at the point the
-exception is caught:
+exception is caught.
+
+The same value-shaped pass also runs **in the log and stats sinks themselves**:
+`Log.request`/`Log.error` redact the request path (and the exception message)
+before the entry reaches stdout or the `/ops/logs` ring buffer, and `Stats`
+redacts route keys and error messages before they are served on `/ops/status`.
+A reset token in a URL path is therefore scrubbed on every request — including
+successful ones — not only when an exception is thrown.
 
 ### Name-based redaction (query params and request headers)
 

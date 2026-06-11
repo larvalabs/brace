@@ -26,6 +26,21 @@ class LogTapTest {
     }
 
     @Test
+    void requestAndErrorLogEntriesRedactPathsAndMessages() {
+        Log.request("GET", "/password-reset/a3f9Bc2d8eF1g4h5", 200, 1000, 0, 0);
+        Log.error("GET", "/invite/Zz8x7Ww6Vv5Uu4Tt",
+            new RuntimeException("token sk_live_a3f9Bc2d8eF1g4h5J6k7 rejected"));
+
+        var snap = LogTap.snapshot();
+        assertEquals("/password-reset/[redacted]", snap.get(0).fields().get("path"),
+            "access-log paths must have high-entropy segments redacted");
+        assertEquals("/invite/[redacted]", snap.get(1).fields().get("path"));
+        assertFalse(String.valueOf(snap.get(1).fields().get("message"))
+                .contains("sk_live_a3f9Bc2d8eF1g4h5J6k7"),
+            "exception messages must be value-shape redacted before reaching the log sinks");
+    }
+
+    @Test
     void idsAreMonotonicAndUnique() {
         LogTap.append(Map.of("message", "a"));
         LogTap.append(Map.of("message", "b"));
