@@ -81,7 +81,7 @@ public class Session {
      * the same key. Bounded to ~16 entries to prevent unbounded growth in test suites.
      */
     private static final ConcurrentHashMap<String, SecretKeySpec> keyCache = new ConcurrentHashMap<>();
-    private static final int MAX_KEY_CACHE_SIZE = 16;
+    static final int MAX_KEY_CACHE_SIZE = 16;
 
     // -------------------------------------------------------------------------
     // Accessors
@@ -394,16 +394,21 @@ public class Session {
      * Derive a 256-bit AES key from the session secret using PBKDF2-HMAC-SHA256.
      * Uses a fixed salt "brace-session" since the secret itself should be random.
      * Results are cached to avoid re-running 100,000 iterations on every request.
+     *
+     * <p>The ConcurrentHashMap contract forbids mutating the map inside a
+     * {@code computeIfAbsent} mapping function (silent entry loss / size-counter corruption /
+     * bin-lock stalls while PBKDF2 runs). The bound check is therefore performed
+     * <em>outside</em> the lambda, before the {@code computeIfAbsent} call. The small race
+     * where two threads both observe size &ge; limit and both call {@code clear()} is
+     * benign — the same key is simply re-derived once.
      */
     private static SecretKeySpec deriveKey(String secret) {
-        // Check cache first. computeIfAbsent ensures thread-safe insertion on miss.
-        return keyCache.computeIfAbsent(secret, s -> {
-            // Bound the cache to prevent unbounded growth in test suites.
-            if (keyCache.size() >= MAX_KEY_CACHE_SIZE) {
-                keyCache.clear();
-            }
-            return computeDerivedKey(s);
-        });
+        // Bound the cache BEFORE entering computeIfAbsent to avoid mutating the map
+        // from inside its own mapping function (CHM contract violation).
+        if (keyCache.size() >= MAX_KEY_CACHE_SIZE) {
+            keyCache.clear();
+        }
+        return keyCache.computeIfAbsent(secret, Session::computeDerivedKey);
     }
 
     /**

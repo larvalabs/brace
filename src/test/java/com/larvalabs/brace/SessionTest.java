@@ -279,4 +279,28 @@ class SessionTest {
         assertEquals("123", restored2.get("userId"));
         assertEquals("user", restored2.get("role"));
     }
+
+    /**
+     * Exercises the key-cache eviction path: deriving more than MAX_KEY_CACHE_SIZE distinct
+     * secrets must trigger a cache clear without throwing or corrupting results. This validates
+     * the fix for CR4 — eviction moved outside computeIfAbsent to avoid a CHM contract
+     * violation (mutating the map from inside its own mapping function).
+     */
+    @Test
+    void keyCacheEvictionPath() {
+        Session.clearKeyCache();
+
+        // Derive MAX_KEY_CACHE_SIZE + several extra distinct secrets to cross the eviction
+        // threshold more than once. Each derived key must still produce a valid cookie.
+        int count = Session.MAX_KEY_CACHE_SIZE + 5;
+        for (int i = 0; i < count; i++) {
+            String secret = "test-secret-key-at-least-32-characters-" + i;
+            var session = new Session();
+            session.set("i", String.valueOf(i));
+            var cookie = session.toCookie(secret);
+            var restored = Session.fromCookie(cookie, secret);
+            assertEquals(String.valueOf(i), restored.get("i"),
+                "round-trip must succeed even after cache eviction at index " + i);
+        }
+    }
 }
