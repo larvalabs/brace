@@ -934,3 +934,31 @@ Log.level("INFO");               // in code
 // or: BRACE_LOG_LEVEL=INFO      (env var)
 // or: -Dbrace.log.level=INFO    (system property)
 ```
+
+## Changed: CSRF token minting is lazy; `.csrf(false)` routes skip session crypto entirely
+
+**Who is affected:** log/traffic tooling that expected a `brace_session` Set-Cookie on
+every response, and (rare) templates that render `${csrfField}` from a route marked
+`.csrf(false)`.
+
+Two behavior refinements on apps with sessions enabled:
+
+1. **`.csrf(false)` routes do no CSRF work at all.** Previously even opted-out routes
+   (bearer-token APIs) decrypted the session cookie and minted a token on every request,
+   and cookieless clients received a fresh `Set-Cookie` on every response. Such routes
+   now skip the decrypt, the mint, and the cookie — `${csrfField}` is no longer populated
+   for them (they never validated it anyway). If an opted-out route really needs the
+   hidden field, take a `Session` parameter and call `Csrf.ensureToken(session)` +
+   `Csrf.hiddenField(session)` directly.
+
+2. **On CSRF-required routes the token is minted when first consumed, not per request.**
+   Rendering a view (or calling `View.getCsrfField()`) mints the token and writes the
+   session cookie exactly as before — form flows are unchanged. But JSON/redirect/text
+   responses that never render the field no longer mint tokens, so cookieless clients
+   (health checks, bots, API consumers hitting HTML routes) no longer trigger an
+   encrypt + `Set-Cookie` per request. Handlers that need the token programmatically
+   without rendering can call `Csrf.ensureToken(session)` themselves.
+
+CSRF **validation** of mutating requests is completely unchanged. Performance: the
+session cookie is now decrypted at most once per request (mutating requests on
+no-session routes previously decrypted it twice).

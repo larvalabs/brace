@@ -272,19 +272,28 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.setFlash(session.flashData());
             }
 
-            // CSRF validation for routes that require it when sessions are enabled.
-            // M5a: PATCH is mutating — added alongside POST/PUT/DELETE.
+            // CSRF for routes that require it when sessions are enabled. Routes that opted
+            // out (.csrf(false), e.g. bearer-token APIs) skip ALL of this, including the
+            // cookie decrypt — they pay zero session crypto unless the handler itself takes
+            // a Session (H5; previously the token-ensure ran for every matched route).
+            // The CSRF session is resolved AT MOST ONCE per request: the handler's session
+            // when present, otherwise the cookie session decrypted here. (Previously a
+            // mutating request on a no-session route decrypted the cookie twice — once for
+            // validation, once for token-ensure.)
+            Session csrfSession = null;
             if (sessionSecret != null && match.route().csrfRequired()) {
+                if (session != null) {
+                    csrfSession = session;
+                } else {
+                    String cookieHeader = headers.get("Cookie");
+                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
+                    csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
+                }
+
+                // M5a: PATCH is mutating — added alongside POST/PUT/DELETE.
                 boolean isMutating = method.equals("POST") || method.equals("PUT")
                     || method.equals("DELETE") || method.equals("PATCH");
                 if (isMutating) {
-                    // Ensure a session object exists for CSRF check even if handler doesn't use sessions
-                    Session csrfSession = session;
-                    if (csrfSession == null) {
-                        String cookieHeader = headers.get("Cookie");
-                        String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                        csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
-                    }
                     String submittedToken = parseFormParam(body, "_csrf");
                     if (submittedToken == null) {
                         submittedToken = headers.get("X-CSRF-Token");
@@ -295,33 +304,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         return true;
                     }
                 }
-            }
 
-            // Ensure a CSRF token exists in session and expose it to templates.
-            // M5c: when the handler doesn't take a Session, build a local csrfSession to
-            // hold the token.  If ensureToken mints a fresh token (csrfSession.isModified()),
-            // we persist it as a cookie below just like a handler-session cookie — otherwise
-            // the rendered token is orphaned and every subsequent POST 403s.
-            // handlerSession is the session the handler itself was given (may be null); it is
-            // written separately via the handler-session cookie block below.
-            // csrfOnlySession is non-null only when the handler had no Session param AND a
-            // fresh token was minted; it must never shadow a real handler session.
-            Session csrfOnlySession = null;
-            if (sessionSecret != null) {
-                if (session == null) {
-                    String cookieHeader = headers.get("Cookie");
-                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    Session localCsrfSession = Session.fromCookie(sessionCookie, sessionSecret);
-                    Csrf.ensureToken(localCsrfSession);
-                    View.setCsrfField(Csrf.hiddenField(localCsrfSession));
-                    // Track so we can write the cookie after the handler runs (M5c).
-                    if (localCsrfSession.isModified()) {
-                        csrfOnlySession = localCsrfSession;
-                    }
-                } else {
-                    Csrf.ensureToken(session);
-                    View.setCsrfField(Csrf.hiddenField(session));
-                }
+                // Lazy token mint (H5): ensureToken used to run eagerly here on every
+                // matched request, minting a token — and forcing a Set-Cookie below — even
+                // for responses that never render a form (JSON, redirects) and for clients
+                // that never return cookies. The supplier mints and builds the hidden field
+                // only when something consumes it: View.of() putting csrfField into a
+                // template, or a handler calling View.getCsrfField(). ensureToken is
+                // idempotent, so repeated consumption within a request is safe.
+                final Session tokenSession = csrfSession;
+                View.setCsrfField(() -> {
+                    Csrf.ensureToken(tokenSession);
+                    return Csrf.hiddenField(tokenSession);
+                });
             }
 
             // Invoke with per-request database lifecycle if needed
@@ -373,12 +368,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
-            // M5c: write the CSRF-only session cookie when the handler had no Session param
-            // and ensureToken minted a fresh token.  The handler-session block above and this
-            // block are mutually exclusive: csrfOnlySession is null whenever session != null.
-            if (csrfOnlySession != null && sessionSecret != null) {
-                csrfOnlySession.maxAgeSeconds(sessionMaxAgeSeconds());
-                String cookieValue = csrfOnlySession.toCookie(sessionSecret);
+            // M5c invariant: when the handler had no Session param and the lazy mint fired
+            // during the handler's render (csrfSession.isModified()), persist the minted
+            // token as a cookie — otherwise the rendered token is orphaned and every
+            // subsequent POST 403s. Mutually exclusive with the handler-session block above:
+            // when a handler session exists, csrfSession IS that session and was written there.
+            if (session == null && csrfSession != null && csrfSession.isModified() && sessionSecret != null) {
+                csrfSession.maxAgeSeconds(sessionMaxAgeSeconds());
+                String cookieValue = csrfSession.toCookie(sessionSecret);
                 if (sessionOptions != null) {
                     result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
                 } else {

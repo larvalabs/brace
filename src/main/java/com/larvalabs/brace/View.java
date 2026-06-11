@@ -2,16 +2,29 @@ package com.larvalabs.brace;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 public class View extends Result {
 
     private static TemplateEngine engine;
-    private static final ThreadLocal<String> currentCsrfField = new ThreadLocal<>();
+    // Supplier, not a materialized string (H5): the CSRF token is minted — and the
+    // session cookie consequently written — only when a render (or a handler via
+    // getCsrfField()) actually consumes the field, not on every matched request.
+    private static final ThreadLocal<Supplier<String>> currentCsrfField = new ThreadLocal<>();
     private static final ThreadLocal<Map<String, String>> currentFlash = new ThreadLocal<>();
 
-    static void setCsrfField(String field) { currentCsrfField.set(field); }
+    static void setCsrfField(Supplier<String> fieldSupplier) { currentCsrfField.set(fieldSupplier); }
     static void clearCsrfField() { currentCsrfField.remove(); }
-    static String getCsrfField() { return currentCsrfField.get(); }
+
+    /**
+     * Resolves the CSRF hidden field for the current request, minting the token on first
+     * use. Null when CSRF is not active for the route ({@code .csrf(false)}, or sessions
+     * not configured).
+     */
+    static String getCsrfField() {
+        Supplier<String> supplier = currentCsrfField.get();
+        return supplier != null ? supplier.get() : null;
+    }
     static void setFlash(Map<String, String> flash) { currentFlash.set(flash); }
     static void clearFlash() { currentFlash.remove(); }
 
@@ -33,7 +46,7 @@ public class View extends Result {
         for (int i = 0; i < keyValues.length - 1; i += 2) {
             params.put((String) keyValues[i], keyValues[i + 1]);
         }
-        String csrfField = currentCsrfField.get();
+        String csrfField = getCsrfField();
         if (csrfField != null) {
             params.put("csrfField", csrfField);
         }
