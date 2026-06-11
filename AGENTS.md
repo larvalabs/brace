@@ -138,6 +138,13 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 ### Updating documentation
 When changing public API (adding/removing/renaming methods, classes, or handler types), update `BRACE-AGENTS.md` and `README.md` to reflect the change.
 
+### Periodic model reviews
+Brace gets a full-codebase review in each of three categories — **Security**, **Token
+Efficiency**, **Runtime Performance** — whenever a notably more capable model becomes
+available. Process, conventions (findings doc, one commit per finding, merge gates), and
+the index of completed reviews live in `docs/reviews/README.md`. If you're asked to run
+or resume one of these reviews, read that file first.
+
 ### Migration guides (per version step)
 `docs/migrations/brace-FROM-to-TO.md` is the upgrade path agents and humans follow when bumping `<brace.version>` (see the "Upgrading" section of `BRACE-AGENTS.md`). One guide per released step, named for the version boundary (e.g. `brace-0.1.6-to-0.1.7.md`).
 
