@@ -625,3 +625,41 @@ store untrusted class names in either table, that is itself a security issue; se
 before. If you have custom code that directly calls `Class.forName` on stored class names,
 apply the same pattern: disable initializers with the `false` parameter and validate the
 loaded class before instantiation.
+
+## Security fix: page-cache keys now percent-encode query parameters
+
+**Who is affected:** applications using `cache.wrap(...)` on routes that accept query parameters.
+
+**What changed.** Page cache keys are now percent-encoded to prevent collisions when query
+parameter values contain special characters like `&`, `=`, or `%`. This fixes a cache-collision
+vulnerability where two semantically different requests (e.g., `/search?q=a&b` vs. `/search?q=a%26b`)
+could share the same cache entry, causing one user to see another user's cached response.
+
+**Cache format change:** the percent-encoding changes cache key format. Existing cached pages
+keyed under the old format will simply **cache-miss** on the first request after upgrade — a
+benign degradation for a cache. The miss rate normalizes as the cache repopulates. No manual
+cache invalidation is needed.
+
+**Before (0.1.6):** Param values are concatenated unescaped into the key.
+
+```java
+// Request: /search?q=a&filter=b
+// Key: page:GET:/search?q=a&filter=b   ← ambiguous if 'a' contains literal &
+
+// Request: /search?q=a%26filter=b       ← looks different in URL, same in cache!
+// Key: page:GET:/search?q=a%26filter=b  ← same as above → collision
+```
+
+**After (0.1.7+):** Param names and values are percent-encoded before insertion.
+
+```java
+// Request: /search?q=a&filter=b
+// Key: page:GET:/search?q=a&filter=b   ← (& and = in keys are literal, safe)
+
+// Request: /search?q=a%26filter=b
+// Key: page:GET:/search?q=a%2526filter%3Db  ← different (the & and = are encoded)
+```
+
+**Action:** none. The fix is transparent — existing code works unchanged. Cached entries from
+0.1.6 will expire naturally or via `cache.clear()` when you upgrade; cache hits resume after
+repopulation.

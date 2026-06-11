@@ -338,8 +338,30 @@ public class Cache {
                 .sorted(Map.Entry.comparingByKey())
                 .forEach(e -> {
                     if (sb.length() > 1) sb.append("&");
-                    sb.append(e.getKey()).append("=").append(e.getValue());
+                    sb.append(percentEncode(e.getKey())).append("=").append(percentEncode(e.getValue()));
                 });
+            return sb.toString();
+        }
+
+        /**
+         * Percent-encodes a string for use in cache keys, preventing collisions when
+         * parameter values contain special characters like &amp; or =. Uses application/x-www-form-urlencoded
+         * encoding (all unreserved chars are passed through; &amp;, =, %, and spaces are escaped).
+         */
+        private static String percentEncode(String value) {
+            if (value == null || value.isEmpty()) return value;
+            var sb = new StringBuilder();
+            for (char c : value.toCharArray()) {
+                // Unreserved characters: A-Z a-z 0-9 - _ . ~
+                // Also allow common URL-safe chars not in our key format: / : ? # [ ] @ ! $ ' ( ) * + , ;
+                // Encode only &, =, %, and space which could affect cache key parsing
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_' || c == '.' || c == '~') {
+                    sb.append(c);
+                } else {
+                    sb.append(String.format("%%%02X", (int) c));
+                }
+            }
             return sb.toString();
         }
     }

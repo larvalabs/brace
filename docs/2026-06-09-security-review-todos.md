@@ -208,7 +208,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   Not request-reachable, but static initializers run before the `DurableJob` cast.
   Use `Class.forName(name, false, loader)` + `isAssignableFrom` check before
   instantiation; document the trust boundary on `scheduled_jobs`/`brace_cache`. **Haiku 4.5**
-- [ ] **L6: Page-cache keys collision-prone** — `Cache.java:326-344`. Param values inserted
+- [x] **L6: Page-cache keys collision-prone** — `Cache.java:326-344`. Param values inserted
   unescaped (`&`/`=` injection collides keys); no identity vary. Percent-encode key
   parts; document that `wrap()` is for identity-independent responses only. **Haiku 4.5**
 - [x] **L7: Static responses lack `nosniff`; SVG served inline** — `BraceHandler.java:459-479`.
