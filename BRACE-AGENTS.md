@@ -872,7 +872,8 @@ Common workflows:
 |---|---|---|
 | `brace status [--env prod]` | Full system snapshot | 0 healthy / 1 errors exist / 2 unreachable |
 | `brace check [--env prod]` | Run all health checks, return structured verdict | 0 all pass / 1 issues / 2 unreachable |
-| `brace errors [--since 1h] [--env prod]` | List unresolved errors | 0 none / 1 some / 2 unreachable |
+| `brace errors [--since 1h] [--full] [--env prod]` | List unresolved error summaries (`--full` for the per-row detail shape) | 0 none / 1 some / 2 unreachable |
+| `brace errors <id> [--env prod]` | Full detail for one error (stack trace, request context, headers, queries) | 0 / 1 not found / 2 unreachable |
 | `brace logs [-f] [--since 10m] [--level warn] [--env prod]` | Tail structured log entries | 0 |
 | `brace cache [--env prod]` | Cache size, hit rate, evictions | 0 / 2 unreachable |
 | `brace cache clear [--env prod]` | Empty the cache | 0 / 2 unreachable |
@@ -887,7 +888,8 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 | Endpoint | Returns |
 |---|---|
 | `GET /ops/status` | Full system snapshot (app, http, jvm, errors, jobs, cache, metrics, timeseries) |
-| `GET /ops/errors[?status=open&since=<iso8601>]` | Tracked errors, filterable by status and time window |
+| `GET /ops/errors[?status=open&since=<iso8601>&full=true]` | Tracked error **summaries** (`id, errorType, message, route, occurrenceCount, firstSeen, lastSeen, at`), filterable by status and time window; `?full=true` returns the pre-0.1.7 full-detail rows |
+| `GET /ops/errors/{id}` | Full detail for one error: `stackTrace`, `requestDetail`, `queriesBefore`, `requestHeaders` plus the summary fields; 404 for unknown ids |
 | `GET /ops/logs[?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=200]` | Recent log entries from in-memory ring buffer |
 | `GET /ops/cache` | Cache stats: shared, size, hits, misses, hitRate, evictions |
 | `GET /ops/routes` | All registered routes |
@@ -994,11 +996,14 @@ When users report errors or `brace status` shows a non-zero error count:
 brace errors --env prod --json
 ```
 
-Each error includes: `id`, `errorType`, `message`, `route`, `stackTrace`, `occurrenceCount`, `firstSeen`, `lastSeen`.
+Each summary includes: `id`, `errorType`, `message`, `route`, `occurrenceCount`, `firstSeen`, `lastSeen`, and `at` — the first stack frame in app code. That is usually enough to locate the bug without pulling the full trace.
 
 **Triage by route and count.** High-count errors on critical routes are the priority. Then:
 
-1. **Read the stack trace** — identify the exception type and the line in your code where it originates.
+1. **Start from `at`** — it names the app class/method/line that threw. If you need the full stack trace and request context, fetch one error's detail:
+   ```bash
+   brace errors <id> --env prod --json
+   ```
 2. **Check recent logs around the error time:**
    ```bash
    brace logs --env prod --since 30m --level warn --json

@@ -174,25 +174,43 @@ public class ErrorStore {
 
             var result = new ArrayList<Map<String, Object>>();
             for (var row : rows) {
-                var map = new LinkedHashMap<String, Object>();
-                map.put("id", ((Number) row[0]).longValue());
-                map.put("errorType", row[1]);
-                map.put("message", row[2]);
-                map.put("stackTrace", row[3]);
-                map.put("route", row[4]);
-                map.put("requestDetail", row[5]);
-                map.put("firstSeen", toInstant(row[6]));
-                map.put("lastSeen", toInstant(row[7]));
-                map.put("occurrenceCount", ((Number) row[8]).intValue());
-                map.put("resolvedAt", toInstant(row[9]));
-                map.put("queriesBefore", row[10]);
-                map.put("requestHeaders", row[11]);
-                result.add(map);
+                result.add(mapRow(row));
             }
             return result;
         } finally {
             db.close();
         }
+    }
+
+    /** Fetch one error by id with full detail (any status), or null if the id is unknown. */
+    public Map<String, Object> find(long id) {
+        var db = new Database(databaseFactory.openSession());
+        try {
+            var rows = db.sqlQuery(
+                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE id = ?", id);
+            if (rows.isEmpty()) return null;
+            return mapRow(rows.get(0));
+        } finally {
+            db.close();
+        }
+    }
+
+    /** Map a full SELECT row (the column order used by {@link #list} and {@link #find}). */
+    private static Map<String, Object> mapRow(Object[] row) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("id", ((Number) row[0]).longValue());
+        map.put("errorType", row[1]);
+        map.put("message", row[2]);
+        map.put("stackTrace", row[3]);
+        map.put("route", row[4]);
+        map.put("requestDetail", row[5]);
+        map.put("firstSeen", toInstant(row[6]));
+        map.put("lastSeen", toInstant(row[7]));
+        map.put("occurrenceCount", ((Number) row[8]).intValue());
+        map.put("resolvedAt", toInstant(row[9]));
+        map.put("queriesBefore", row[10]);
+        map.put("requestHeaders", row[11]);
+        return map;
     }
 
     public List<Map<String, Object>> list(String status, java.time.Instant since) {

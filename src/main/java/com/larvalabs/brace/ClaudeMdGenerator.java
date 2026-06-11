@@ -88,7 +88,8 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 |---|---|
 | `brace check` | Run all health checks — the first move for production health |
 | `brace status [--env prod]` | App health snapshot — exits non-zero on degradation |
-| `brace errors [--since 1h]` | List unresolved errors — exits non-zero if any exist |
+| `brace errors [--since 1h]` | List unresolved error summaries — exits non-zero if any exist |
+| `brace errors <id>` | Full detail (stack trace, request context) for one error |
 | `brace logs [-f] [--since 10m]` | Tail recent structured log entries |
 | `brace cache` / `brace cache clear` | Cache stats; clear cache |
 | `brace resolve <id>` | Mark an error as resolved |
@@ -96,7 +97,8 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | Endpoint | Returns |
 |---|---|
 | `GET /ops/status` | Full system snapshot — HTTP stats, JVM heap/GC/threads, errors, jobs, cache, metrics, timeseries |
-| `GET /ops/errors` | Tracked errors with stack traces, request details, and DB queries that ran before failure |
+| `GET /ops/errors` | Tracked error summaries (id, type, message, route, counts, `at` app frame); `?full=true` for full detail |
+| `GET /ops/errors/{id}` | Full detail for one error — stack trace, request detail, headers, queries before failure |
 | `GET /ops/logs` | Recent structured log entries (filter by level and time) |
 | `GET /ops/cache` | Cache stats (`POST /ops/cache/clear` to clear) |
 | `GET /ops/regressions` | New error kinds since startup |

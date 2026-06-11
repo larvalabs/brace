@@ -9,7 +9,7 @@ body-read ordering, smarter `?` parameter conversion) plus several **security fi
 new **server-enforced session expiry**, and a **replay-resistant ops auth protocol, v2**)
 covered at the end of this guide.
 
-Two narrow cases **are breaking** and need action:
+Three narrow cases **are breaking** and need action:
 
 - Middleware patterns with an **interior wildcard** (e.g. `/api/*/admin`) are now
   rejected at startup with an `IllegalArgumentException` — see "middleware trailing
@@ -17,6 +17,10 @@ Two narrow cases **are breaking** and need action:
 - Scripts that authenticated to `/ops/*` endpoints with a **`?token=` query parameter**
   must switch to the `Authorization: Bearer` header — see "`?token=` query-param auth
   removed" below.
+- Scripts that parse **`GET /ops/errors`** (or `brace errors --json`) and read
+  `stackTrace`/`requestDetail` from the rows must add `?full=true` (CLI: `--full`) —
+  the default response is now a compact summary per error. See "`/ops/errors` now
+  returns summaries" below.
 
 Also note: the session-expiry change alters how long a stolen cookie stays valid — see
 "sessions now carry a server-enforced expiry" below — and the old ops auth protocol (v1)
@@ -450,6 +454,100 @@ app.generateClaudeMd("myapp", java.nio.file.Path.of("CLAUDE.md"));
 
 Tip: `git diff CLAUDE.md` afterwards makes it easy to restore hand-written sections
 while keeping the refreshed capability index.
+
+## Breaking for scripted consumers: `/ops/errors` now returns summaries
+
+**Who is affected:** anything that parses the JSON from `GET /ops/errors` or
+`brace errors --json` and reads `stackTrace`, `requestDetail`, `queriesBefore`, or
+`requestHeaders` off the rows. The dashboard, `brace check`, and the human `brace errors`
+table are unaffected. The fields a script most likely keys on (`id`, `errorType`,
+`message`, `route`, `occurrenceCount`, `firstSeen`, `lastSeen`) are all still present.
+
+**Why.** Each full error row carries a complete stack trace plus request context —
+roughly 500 tokens per error, re-read on every iteration of an agent's fix loop. The
+common consumer (triage) needs the list; only the error being worked on needs the trace.
+
+**What changed.** `GET /ops/errors` returns one **summary** per error, with a new `at`
+field — the first stack frame of the stored trace that is in *app* code (framework, JDK,
+and library frames are skipped), which usually pinpoints the bug without the full trace:
+
+**Before (0.1.6):**
+
+```json
+[
+  {
+    "id": 7,
+    "errorType": "NullPointerException",
+    "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+    "stackTrace": "java.lang.NullPointerException: ...\n\tat app.controllers.UserController.show(UserController.java:42)\n\tat ... (dozens of frames)",
+    "route": "GET /users/{id}",
+    "requestDetail": "GET /users/123",
+    "firstSeen": "2026-06-10T09:14:02Z",
+    "lastSeen": "2026-06-11T08:01:55Z",
+    "occurrenceCount": 14,
+    "resolvedAt": null,
+    "queriesBefore": "{\"count\":2,\"durationMs\":3.1}",
+    "requestHeaders": "{...}"
+  }
+]
+```
+
+**After (0.1.7 default):**
+
+```json
+[
+  {
+    "id": 7,
+    "errorType": "NullPointerException",
+    "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+    "route": "GET /users/{id}",
+    "occurrenceCount": 14,
+    "firstSeen": "2026-06-10T09:14:02Z",
+    "lastSeen": "2026-06-11T08:01:55Z",
+    "at": "app.controllers.UserController.show(UserController.java:42)"
+  }
+]
+```
+
+**Getting the full detail.** Two ways:
+
+- **Per error (preferred):** new endpoint `GET /ops/errors/{id}` (read scope) returns the
+  complete pre-0.1.7 record for one error — `stackTrace`, `requestDetail`,
+  `queriesBefore`, `requestHeaders`, `resolvedAt` and all summary fields. 404 for an
+  unknown id. CLI: `brace errors <id>`.
+- **Whole list (compat escape hatch):** `GET /ops/errors?full=true` returns the exact
+  pre-0.1.7 shape, combinable with the existing `status`/`since` params. CLI:
+  `brace errors --full`.
+
+**Mechanical fix for an existing script:**
+
+```bash
+# before (0.1.6)
+brace errors --env prod --json | jq -r '.[0].stackTrace'
+
+# after (0.1.7) — either keep the old shape:
+brace errors --env prod --full --json | jq -r '.[0].stackTrace'
+# or, better, fetch only the error you need:
+brace errors 7 --env prod --json | jq -r '.stackTrace'
+```
+
+**CLI changes** (`brace errors`):
+
+- `brace errors` — unchanged invocation; JSON mode now emits the summary shape. The human
+  table and the exit-code contract (0 no errors / 1 errors exist / 2 unreachable) are
+  unchanged.
+- `brace errors <id>` — **new**; prints one error's full detail (human-readable, or the
+  detail JSON object in `--json`/piped mode). Exits 0 found / 1 not found / 2 unreachable.
+- `brace errors --full` — **new**; requests `?full=true` for the pre-0.1.7 list shape.
+
+**Version skew.** A 0.1.7 CLI running `brace errors <id>` against a **pre-0.1.7 server**
+gets a 404 (the server has no `/ops/errors/{id}` route) and reports "not found"; use
+`brace errors --full` there instead — `?full=true` is ignored by old servers, which
+always returned the full shape anyway. Conversely, a pre-0.1.7 CLI against a 0.1.7
+server keeps working but sees summaries; pass `?full=true` server-side consumers need
+explicitly.
+
+`GET /ops/regressions` is unaffected — it never carried stack traces.
 
 ## Request/response hardening fixes
 

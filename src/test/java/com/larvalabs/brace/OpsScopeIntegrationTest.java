@@ -121,6 +121,16 @@ class OpsScopeIntegrationTest {
     }
 
     @Test
+    void readTokenCanReadErrorSummariesAndDetail() throws Exception {
+        var read = authenticate(readKey, null).token();
+        var list = Json.mapper().readTree(getBody("/ops/errors", read));
+        assertTrue(list.size() > 0, "the seeded /boom error should be listed for a read token");
+        long id = list.get(0).path("id").asLong();
+        assertEquals(200, getStatus("/ops/errors/" + id, read),
+            "read token may fetch full error detail (READ scope endpoint)");
+    }
+
+    @Test
     void controlTokenCanControl() throws Exception {
         var control = authenticate(controlKey, null).token();
         assertEquals("control", authenticate(controlKey, null).scope());

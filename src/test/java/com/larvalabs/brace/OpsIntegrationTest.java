@@ -871,6 +871,91 @@ class OpsIntegrationTest {
         assertTrue(response.body().contains("resolvedAt"), response.body());
     }
 
+    // --- /ops/errors summary + detail (H5) ---
+
+    /**
+     * Trigger /cacheboom and wait for the (async) error record to land, then return the
+     * unresolved errors list. Resilient to test order: other tests may have resolved the
+     * seeded error, so this always provokes a fresh occurrence.
+     */
+    private com.fasterxml.jackson.databind.JsonNode awaitUnresolvedErrors() throws Exception {
+        client.send(
+            HttpRequest.newBuilder().uri(URI.create("http://localhost:" + cachePort + "/cacheboom")).GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        for (int i = 0; i < 50; i++) {
+            var response = cacheGet("/ops/errors");
+            assertEquals(200, response.statusCode());
+            var root = Json.mapper().readTree(response.body());
+            if (root.size() > 0) return root;
+            Thread.sleep(100);
+        }
+        throw new AssertionError("error never appeared on /ops/errors");
+    }
+
+    @Test
+    void opsErrorsReturnsSummaryShapeWithoutStackTrace() throws Exception {
+        var root = awaitUnresolvedErrors();
+        var e = root.get(0);
+        assertTrue(e.has("id"), e.toString());
+        assertTrue(e.has("errorType"), e.toString());
+        assertTrue(e.has("message"), e.toString());
+        assertTrue(e.has("route"), e.toString());
+        assertTrue(e.has("occurrenceCount"), e.toString());
+        assertTrue(e.has("firstSeen"), e.toString());
+        assertTrue(e.has("lastSeen"), e.toString());
+        assertTrue(e.has("at"), "summary should carry the first app frame: " + e);
+        assertFalse(e.has("stackTrace"), "summary must not carry stackTrace: " + e);
+        assertFalse(e.has("requestDetail"), e.toString());
+        assertFalse(e.has("queriesBefore"), e.toString());
+        assertFalse(e.has("requestHeaders"), e.toString());
+    }
+
+    @Test
+    void opsErrorsFullParamReturnsLegacyDetailShape() throws Exception {
+        awaitUnresolvedErrors();
+        var response = cacheGet("/ops/errors?full=true");
+        assertEquals(200, response.statusCode());
+        var root = Json.mapper().readTree(response.body());
+        assertTrue(root.size() > 0, response.body());
+        var e = root.get(0);
+        assertTrue(e.has("stackTrace"), e.toString());
+        assertTrue(e.has("requestDetail"), e.toString());
+        assertTrue(e.has("queriesBefore"), e.toString());
+        assertTrue(e.has("requestHeaders"), e.toString());
+    }
+
+    @Test
+    void opsErrorDetailByIdReturnsFullRecord() throws Exception {
+        var root = awaitUnresolvedErrors();
+        long id = root.get(0).path("id").asLong();
+
+        var response = cacheGet("/ops/errors/" + id);
+        assertEquals(200, response.statusCode());
+        var e = Json.mapper().readTree(response.body());
+        assertEquals(id, e.path("id").asLong());
+        assertTrue(e.has("stackTrace"), e.toString());
+        assertTrue(e.has("requestDetail"), e.toString());
+        assertTrue(e.has("queriesBefore"), e.toString());
+        assertTrue(e.has("requestHeaders"), e.toString());
+        assertTrue(e.path("stackTrace").asText().contains("cache test error"), e.toString());
+    }
+
+    @Test
+    void opsErrorDetailUnknownIdIs404() throws Exception {
+        var response = cacheGet("/ops/errors/999999999");
+        assertEquals(404, response.statusCode());
+    }
+
+    @Test
+    void opsErrorDetailRequiresAuth() throws Exception {
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/errors/1"))
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
+    }
+
     @Test
     void dashboardEscapesSingleQuotesInToken() throws Exception {
         // Regression test for L2: OpsDashboard.esc() must escape single quotes

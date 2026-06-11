@@ -60,6 +60,19 @@ class CliCommandsTest {
         assertTrue(out.startsWith("[") || out.startsWith("{"), "got: " + out);
     }
 
+    @Test
+    void errorsFullFlagSucceedsWithEmptyList() throws Exception {
+        int code = CliCommands.errors(projectDir, new String[]{"--full", "--json"});
+        assertEquals(0, code);
+    }
+
+    @Test
+    void errorsDetailUnknownIdReturnsNonZero() throws Exception {
+        // No error store on this app — /ops/errors/{id} 404s, the CLI reports not-found.
+        int code = CliCommands.errors(projectDir, new String[]{"999999", "--json"});
+        assertEquals(1, code);
+    }
+
     // --- Task 13: logs ---
 
     @Test

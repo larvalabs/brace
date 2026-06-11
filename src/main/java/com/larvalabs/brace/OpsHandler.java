@@ -494,6 +494,12 @@ public class OpsHandler {
         return Json.of(out);
     }
 
+    /**
+     * GET /ops/errors — one summary row per error: {@code id, errorType, message, route,
+     * occurrenceCount, firstSeen, lastSeen} plus {@code at}, the first app frame of the
+     * stored trace. Full detail (stackTrace, requestDetail, queriesBefore, requestHeaders)
+     * via {@code ?full=true} (the pre-0.1.7 shape) or per-error via /ops/errors/{id}.
+     */
     public Result errors(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         if (errorStore == null) return Json.of(List.of());
@@ -504,7 +510,38 @@ public class OpsHandler {
             try { sinceTs = Instant.parse(since); }
             catch (java.time.format.DateTimeParseException e) { return Result.badRequest("Invalid since timestamp"); }
         }
-        return Json.of(errorStore.list(status, sinceTs));
+        var rows = errorStore.list(status, sinceTs);
+        if ("true".equals(req.queryParam("full"))) return Json.of(rows);
+        var out = new ArrayList<Map<String, Object>>();
+        for (var row : rows) {
+            var m = new LinkedHashMap<String, Object>();
+            m.put("id", row.get("id"));
+            m.put("errorType", row.get("errorType"));
+            m.put("message", row.get("message"));
+            m.put("route", row.get("route"));
+            m.put("occurrenceCount", row.get("occurrenceCount"));
+            m.put("firstSeen", row.get("firstSeen"));
+            m.put("lastSeen", row.get("lastSeen"));
+            String at = Log.appFrame((String) row.get("stackTrace"));
+            if (at != null) m.put("at", at);
+            out.add(m);
+        }
+        return Json.of(out);
+    }
+
+    /** GET /ops/errors/{id} — full detail for one tracked error; 404 for unknown ids. */
+    public Result errorDetail(Request req) {
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
+        if (errorStore == null) return Result.notFound();
+        long id;
+        try {
+            id = req.longPathParam("id");
+        } catch (NumberFormatException e) {
+            return Result.notFound();
+        }
+        var detail = errorStore.find(id);
+        if (detail == null) return Result.notFound();
+        return Json.of(detail);
     }
 
     public Result resolveError(Request req) {

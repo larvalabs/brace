@@ -98,7 +98,11 @@ expensive round**, exactly when the re-read corpus is largest).
     only the guide's correct copy); prune the shipped half of the TODO entry.
   - **Model: Sonnet 4.6** — must read source to write truth.
 
-- [ ] **H5: `brace errors` agent default dumps every error's full stack trace, headers, and request detail** — `ErrorStore.java:162-196`, `OpsHandler.java:497-508`, `CliCommands.java:38-45`
+- [x] **H5: `brace errors` agent default dumps every error's full stack trace, headers, and request detail** — `ErrorStore.java:162-196`, `OpsHandler.java:497-508`, `CliCommands.java:38-45`
+  *(Done: summary-by-default `/ops/errors` with `at` app-frame field via a `Log.appFrame(String)`
+  sibling of the M11 helper; `?full=true` compat shape; new `GET /ops/errors/{id}` +
+  `brace errors <id>` / `--full`; dashboard untouched — it reads ErrorStore directly
+  server-side, not the JSON endpoint.)*
   - `/ops/errors` returns all unresolved rows (no LIMIT) each carrying `stackTrace`,
     `requestDetail`, `queriesBefore`, `requestHeaders`; in non-TTY (= agent) mode the
     CLI prints the full payload pretty-printed, while the human TTY mode gets a

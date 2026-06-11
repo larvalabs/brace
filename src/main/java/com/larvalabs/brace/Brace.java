@@ -594,6 +594,7 @@ public class Brace {
             router.add("GET", "/ops/logs", (Handler) opsHandler::logs);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
             router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
+            router.add("GET", "/ops/errors/{id}", (Handler) opsHandler::errorDetail);
             router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError).setCsrfRequired(false);
             router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache).setCsrfRequired(false);
             router.add("GET", "/ops/cache", (Handler) opsHandler::cacheStats);

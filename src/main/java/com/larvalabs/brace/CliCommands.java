@@ -15,13 +15,20 @@ public class CliCommands {
 
     public static int errors(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
+        var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
+
+        // brace errors <id> — fetch full detail for one error from /ops/errors/{id}
+        if (args.length > 0 && !args[0].startsWith("--")) {
+            return errorDetail(cfg, projectDir, args[0], mode);
+        }
 
         String url = cfg.url() + "/ops/errors";
+        var params = new ArrayList<String>();
         String since = parseFlag(args, "--since");
-        if (since != null) {
-            Instant cutoff = parseDuration(since);
-            url += "?since=" + cutoff.toString();
-        }
+        if (since != null) params.add("since=" + parseDuration(since));
+        // --full: the pre-0.1.7 detail shape (stackTrace etc. on every row)
+        if (hasFlag(args, "--full")) params.add("full=true");
+        if (!params.isEmpty()) url += "?" + String.join("&", params);
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
@@ -35,7 +42,6 @@ public class CliCommands {
         }
 
         JsonNode root = Json.mapper().readTree(response.body());
-        var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
 
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(root));
@@ -43,6 +49,57 @@ public class CliCommands {
             renderErrorsTable(root);
         }
         return root.size() == 0 ? 0 : 1;
+    }
+
+    private static int errorDetail(CliConfig cfg, Path projectDir, String id, CliOutput.Mode mode) throws Exception {
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
+            HttpRequest.newBuilder()
+                .uri(URI.create(cfg.url() + "/ops/errors/" + id))
+                .header("Accept", "application/json")
+                .GET());
+
+        if (response.statusCode() == 404) {
+            CliOutput.printError("error " + id + " not found"
+                + " (unknown id, or the server predates the 0.1.7 /ops/errors/{id} endpoint)");
+            return 1;
+        }
+        if (response.statusCode() != 200) {
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            return 2;
+        }
+
+        JsonNode detail = Json.mapper().readTree(response.body());
+        if (mode == CliOutput.Mode.JSON) {
+            System.out.println(CliOutput.json(detail));
+        } else {
+            renderErrorDetail(detail);
+        }
+        return 0;
+    }
+
+    private static void renderErrorDetail(JsonNode e) {
+        System.out.println(e.path("errorType").asText("?") + ": " + e.path("message").asText(""));
+        System.out.println("  id          " + e.path("id").asText("?"));
+        System.out.println("  route       " + e.path("route").asText(""));
+        System.out.println("  count       " + e.path("occurrenceCount").asInt(0));
+        System.out.println("  first seen  " + e.path("firstSeen").asText(""));
+        System.out.println("  last seen   " + e.path("lastSeen").asText(""));
+        if (!e.path("resolvedAt").isNull() && !e.path("resolvedAt").isMissingNode()) {
+            System.out.println("  resolved    " + e.path("resolvedAt").asText(""));
+        }
+        printTextSection("Request", e.path("requestDetail"));
+        printTextSection("Request headers", e.path("requestHeaders"));
+        printTextSection("Queries before failure", e.path("queriesBefore"));
+        printTextSection("Stack trace", e.path("stackTrace"));
+    }
+
+    private static void printTextSection(String title, JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) return;
+        String text = value.asText("");
+        if (text.isBlank()) return;
+        System.out.println();
+        System.out.println(title + ":");
+        for (var line : text.split("\n")) System.out.println("  " + line);
     }
 
     private static void renderErrorsTable(JsonNode errors) {

@@ -72,6 +72,41 @@ public class Log {
         return error.getStackTrace().length > 0 ? error.getStackTrace()[0].toString() : null;
     }
 
+    /**
+     * Same first-app-frame heuristic as {@link #appFrame(Throwable)}, but over a stored
+     * stack-trace <em>string</em> (the {@code printStackTrace} text persisted in the error
+     * store). Scans the {@code \tat ...} lines with the same {@link #NON_APP_PACKAGES} list;
+     * falls back to the first frame when every line is framework/library, null when the
+     * string has no frames at all.
+     */
+    static String appFrame(String stackTrace) {
+        if (stackTrace == null) return null;
+        String firstFrame = null;
+        for (var line : stackTrace.split("\n")) {
+            String t = line.trim();
+            if (!t.startsWith("at ")) continue;
+            String frame = t.substring(3).trim();
+            if (firstFrame == null) firstFrame = frame;
+            if (!isLibraryFrame(frame)) return frame;
+        }
+        return firstFrame;
+    }
+
+    private static boolean isLibraryFrame(String frame) {
+        String cls = frame;
+        int paren = cls.indexOf('(');
+        if (paren >= 0) cls = cls.substring(0, paren);
+        // printStackTrace can prefix a frame with classloader/module info
+        // ("java.base/java.lang.Thread.run"). Hidden-class suffixes also use '/'
+        // ("Foo$$Lambda$1/0x0000...") — those start with "0x", so don't strip them.
+        int slash = cls.lastIndexOf('/');
+        if (slash >= 0 && !cls.startsWith("0x", slash + 1)) cls = cls.substring(slash + 1);
+        for (var prefix : NON_APP_PACKAGES) {
+            if (cls.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
     public static void warn(String message) {
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());

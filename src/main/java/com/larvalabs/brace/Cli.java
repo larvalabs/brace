@@ -163,7 +163,8 @@ public class Cli {
         System.out.println("  brace init                  Scaffold .brace + .brace.local and run readiness checks");
         System.out.println("  brace ops keypair           Generate an Ed25519 keypair for ops auth");
         System.out.println("  brace ops dashboard         Open the ops dashboard in a browser");
-        System.out.println("  brace errors [--since 1h]   List unresolved errors");
+        System.out.println("  brace errors [--since 1h]   List unresolved errors (summaries; --full for detail)");
+        System.out.println("  brace errors <id>           Show full detail for one error");
         System.out.println("  brace logs [-f] [--since]   Tail recent log lines");
         System.out.println("  brace status                Show app health snapshot");
         System.out.println("  brace check                 Run all health checks");

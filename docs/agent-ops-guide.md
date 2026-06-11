@@ -154,7 +154,8 @@ Override per command with `--env prod`. All commands below accept `--env`.
 | Command | Purpose | Exit code |
 |---|---|---|
 | `brace status` | App health snapshot | 0 healthy / 1 errors > 0 / 2 unreachable |
-| `brace errors [--since 1h]` | List unresolved errors | 0 none / 1 some / 2 unreachable |
+| `brace errors [--since 1h] [--full]` | List unresolved error summaries (`--full` for per-row detail) | 0 none / 1 some / 2 unreachable |
+| `brace errors <id>` | Full detail for one error (stack trace, request context) | 0 / 1 not found / 2 unreachable |
 | `brace logs [-f] [--since 10m]` | Tail recent structured log entries | always 0 |
 | `brace cache` | Cache size / hit rate / evictions | 0 / 2 unreachable |
 | `brace cache clear` | Empty the cache | 0 / 2 unreachable |
@@ -177,9 +178,14 @@ brace logs --env prod --since 5m     # what did it say?
 
 ```bash
 brace errors --env prod --json | jq '.[] | select(.route == "/checkout")'
+brace errors <id> --env prod      # full stack trace + request context for one error
 brace logs --env prod --since 1h --level warn
 brace resolve <id>
 ```
+
+The list shows summaries — each row carries `at`, the first app-code stack
+frame, which usually pinpoints the bug. Fetch `brace errors <id>` only when
+you need the full trace, request detail, headers, or pre-failure queries.
 
 ### Scheduled health check (cron / agent)
 
