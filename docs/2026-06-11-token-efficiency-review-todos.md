@@ -116,7 +116,15 @@ expensive round**, exactly when the re-read corpus is largest).
     dashboard still renders.
   - **Model: Sonnet 4.6.**
 
-- [ ] **H6: `/ops/status` payload bloat + `brace status` always reports "Errors 0" (broken exit-code contract)** — `OpsHandler.java:226-418`, `CliCommands.java:163-200`
+- [x] **H6: `/ops/status` payload bloat + `brace status` always reports "Errors 0" (broken exit-code contract)** — `OpsHandler.java:226-418`, `CliCommands.java:163-200`
+  *(Done: `errors` → `{count, recent[≤5]}` (DB-backed `ErrorStore.countUnresolved()` /
+  `recentUnresolved(5)` when a database exists, in-memory Stats fallback otherwise);
+  `timeseries` + `jvm.profiling` behind `?include=timeseries,profiling`; zero stubs
+  dropped. Deviations: (1) the dashboard needed no change — it renders server-side from
+  Stats/profiler and polls `/ops/dashboard`, never the status JSON; (2) summary entries
+  additionally carry `id` when DB-backed, linking to `/ops/errors/{id}`; (3) the CLI
+  falls back to `errors.recent.length` against pre-0.1.7 servers, so the exit-code fix
+  works across the version skew too.)*
   - Status embeds up to 50 recent errors **with full stack traces**, 60 per-minute
     timeseries snapshots, 20+20 JFR hot-method/allocation entries, and a hardcoded
     all-zeros `cpu`/`gc`/`profiling` stub when no profiler — tens of KB per poll,

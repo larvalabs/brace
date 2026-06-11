@@ -887,7 +887,7 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 
 | Endpoint | Returns |
 |---|---|
-| `GET /ops/status` | Full system snapshot (app, http, jvm, errors, jobs, cache, metrics, timeseries) |
+| `GET /ops/status` | System snapshot (app, http, jvm, error summary, jobs, cache, metrics); `?include=timeseries,profiling` for the bulky blocks |
 | `GET /ops/errors[?status=open&since=<iso8601>&full=true]` | Tracked error **summaries** (`id, errorType, message, route, occurrenceCount, firstSeen, lastSeen, at`), filterable by status and time window; `?full=true` returns the pre-0.1.7 full-detail rows |
 | `GET /ops/errors/{id}` | Full detail for one error: `stackTrace`, `requestDetail`, `queriesBefore`, `requestHeaders` plus the summary fields; 404 for unknown ids |
 | `GET /ops/logs[?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=200]` | Recent log entries from in-memory ring buffer |
@@ -1027,7 +1027,7 @@ When `brace status` shows a route with high average latency:
    ```
    Look at `durationMs` and `queries` / `queryMs` fields in the structured log entries.
 3. **If `queryMs` dominates `durationMs`** — the database is the bottleneck. Look at the handler code for N+1 queries, missing indexes, or full table scans.
-4. **If `durationMs` is high but `queryMs` is low** — the handler is CPU-bound or waiting on an external service. Check `jvm.profiling.hotMethods` in status output.
+4. **If `durationMs` is high but `queryMs` is low** — the handler is CPU-bound or waiting on an external service. Check `jvm.profiling.hotMethods` in status output (opt-in: `GET /ops/status?include=profiling`).
 5. **Check for GC pauses** — `jvm.gc.avgPauseMs` above 50ms can cause latency spikes across all routes.
 6. **Check heap pressure** — if heap usage is near max, GC runs more frequently and takes longer.
 
@@ -1072,26 +1072,35 @@ brace cache --env prod --json
     "heap": { "usedMB": 128, "maxMB": 512 },
     "cpu": { "jvmUser": 0.12 },
     "threads": { "active": 42 },
-    "gc": { "totalCount": 15, "avgPauseMs": 2.1, "recentPauses": [...] },
-    "profiling": { "hotMethods": [...], "topAllocations": [...] }
+    "gc": { "totalCount": 15, "avgPauseMs": 2.1, "recentPauses": [...] }
   },
   "errors": {
+    "count": 3,
     "recent": [{
-      "type": "NullPointerException",
+      "id": 7,
+      "errorType": "NullPointerException",
       "message": "Cannot invoke method on null",
       "route": "GET /posts/{id}",
-      "count": 3,
-      "stackTrace": "...",
-      "requestDetail": "...",
-      "queriesBefore": "..."
+      "occurrenceCount": 3,
+      "lastSeen": "..."
     }]
   },
   "jobs": { "scheduled": [{ "name": "cleanup", "lastStatus": "ok", "lastError": null }] },
   "cache": { "shared": false, "entries": 42, "hits": 1200, "misses": 80 },
-  "metrics": { "counters": {...}, "gauges": {...}, "timers": {...} },
-  "timeseries": { "minutes": [{ "ts": "...", "requests": 45, "errors": 0, "avgMs": 12.3 }] }
+  "metrics": { "counters": {...}, "gauges": {...}, "timers": {...} }
 }
 ```
+
+Notes on the shape:
+
+- `errors.count` is the unresolved error count (database-backed when one is configured)
+  and `errors.recent` the 5 most recent summaries — no stack traces. Drill into one error
+  with `GET /ops/errors/{id}` / `brace errors <id>`. `id` is present when a database backs
+  the error store.
+- Two bulky blocks are **opt-in** via `?include=timeseries,profiling`:
+  `timeseries.minutes` (60 per-minute snapshots: `ts`, `requests`, `errors`, `avgMs`) and
+  `jvm.profiling` (JFR `hotMethods` + `topAllocations`). `jvm.cpu` and `jvm.gc` appear
+  only when the JFR profiler is attached (it always is when ops is enabled).
 
 ## Custom Metrics
 

@@ -226,8 +226,20 @@ public class CliCommands {
             renderStatus(root);
         }
 
-        int errorCount = root.path("errors").path("count").asInt(0);
-        return errorCount > 0 ? 1 : 0;
+        return errorCount(root) > 0 ? 1 : 0;
+    }
+
+    /**
+     * Unresolved error count from a /ops/status payload. 0.1.7+ servers emit
+     * {@code errors.count}; pre-0.1.7 servers never did (so `brace status` always reported
+     * 0 errors and exited 0 — the bug this fixes), but they do emit {@code errors.recent},
+     * whose length is the correct fallback there.
+     */
+    private static long errorCount(JsonNode root) {
+        var errors = root.path("errors");
+        var count = errors.path("count");
+        if (count.isNumber()) return count.asLong();
+        return errors.path("recent").size();
     }
 
     private static void renderStatus(JsonNode root) {
@@ -249,8 +261,7 @@ public class CliCommands {
             }
         }
         System.out.println();
-        var errors = root.path("errors");
-        System.out.println("Errors    " + errors.path("count").asInt(0));
+        System.out.println("Errors    " + errorCount(root));
         System.out.println();
         var jvm = root.path("jvm");
         if (!jvm.isMissingNode()) {

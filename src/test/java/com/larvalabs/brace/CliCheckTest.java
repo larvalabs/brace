@@ -31,7 +31,7 @@ class CliCheckTest {
             "heap", Map.of("usedMB", 100, "maxMB", 512),
             "gc", Map.of("avgPauseMs", 5.0)
         ));
-        status.put("errors", Map.of("recent", List.of()));
+        status.put("errors", Map.of("count", 0, "recent", List.of()));
         status.put("jobs", Map.of("scheduled", List.of(
             Map.of("name", "cleanup", "lastStatus", "ok", "failCount", 0)
         )));
@@ -104,6 +104,15 @@ class CliCheckTest {
         var status = json(Map.of("jvm", Map.of("gc", Map.of("avgPauseMs", 75.0))));
         var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS);
         assertEquals("fail", check.status());
+    }
+
+    @Test
+    void gcPressurePassesWhenGcSectionAbsent() {
+        // H6: status from a profiler-less app no longer emits an all-zeros gc stub —
+        // the gc key is simply absent, and the check must treat that as healthy.
+        var status = json(Map.of("jvm", Map.of("heap", Map.of("usedMB", 100, "maxMB", 512))));
+        var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS);
+        assertEquals("pass", check.status());
     }
 
     @Test

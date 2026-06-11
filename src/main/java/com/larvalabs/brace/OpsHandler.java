@@ -223,8 +223,28 @@ public class OpsHandler {
         return result;
     }
 
+    /**
+     * GET /ops/status — system snapshot: app info, HTTP stats, JVM, error summary, jobs,
+     * mailer, cache, rate limiters, custom metrics.
+     *
+     * <p>The {@code errors} block is {@code {count, recent}}: {@code count} is the unresolved
+     * error count (DB-backed via {@link ErrorStore} when a database is configured, else the
+     * in-memory recent-error list), and {@code recent} is the top 5 most recent — summary
+     * fields only, no stack traces. Full detail lives at {@code /ops/errors/{id}}.
+     *
+     * <p>Bulky blocks are opt-in via {@code ?include=timeseries,profiling}: {@code timeseries}
+     * adds the per-minute snapshot ring (60 entries), {@code profiling} adds
+     * {@code jvm.profiling} (JFR hot methods + top allocations, 20 each). Neither is emitted
+     * by default — they dominated the payload while most pollers only read the scalars.
+     */
     public Result status(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
+
+        var include = new HashSet<String>();
+        String includeParam = req.queryParam("include");
+        if (includeParam != null) {
+            for (var part : includeParam.split(",")) include.add(part.trim());
+        }
 
         var data = new LinkedHashMap<String, Object>();
 
@@ -255,9 +275,13 @@ public class OpsHandler {
         http.put("slowestRoutes", routeList);
         data.put("http", http);
 
-        // JVM (from JFR profiler or fallback to runtime)
+        // JVM (from JFR profiler or fallback to runtime). The profiling block (hot methods +
+        // top allocations) is opt-in via ?include=profiling; without a profiler there is no
+        // cpu/gc/profiling data, so those keys are simply absent (no all-zeros stubs).
         if (profiler != null) {
-            data.put("jvm", profiler.snapshot());
+            var jvm = profiler.snapshot();
+            if (!include.contains("profiling")) jvm.remove("profiling");
+            data.put("jvm", jvm);
         } else {
             var jvm = new LinkedHashMap<String, Object>();
             var heap = new LinkedHashMap<String, Object>();
@@ -266,12 +290,6 @@ public class OpsHandler {
             heap.put("maxMB", runtime.maxMemory() / (1024 * 1024));
             jvm.put("heap", heap);
 
-            var cpu = new LinkedHashMap<String, Object>();
-            cpu.put("jvmUser", 0.0);
-            cpu.put("jvmSystem", 0.0);
-            cpu.put("machineTotal", 0.0);
-            jvm.put("cpu", cpu);
-
             var threads = new LinkedHashMap<String, Object>();
             var threadBean = java.lang.management.ManagementFactory.getThreadMXBean();
             threads.put("active", threadBean.getThreadCount());
@@ -279,36 +297,35 @@ public class OpsHandler {
             threads.put("peak", threadBean.getPeakThreadCount());
             jvm.put("threads", threads);
 
-            var gc = new LinkedHashMap<String, Object>();
-            gc.put("totalCount", 0L);
-            gc.put("totalPauseMs", 0L);
-            gc.put("avgPauseMs", 0.0);
-            gc.put("recentPauses", List.of());
-            jvm.put("gc", gc);
-
-            var profiling = new LinkedHashMap<String, Object>();
-            profiling.put("windowSeconds", 0);
-            profiling.put("hotMethods", List.of());
-            profiling.put("topAllocations", List.of());
-            jvm.put("profiling", profiling);
-
             data.put("jvm", jvm);
         }
 
-        // Errors
+        // Errors: unresolved count + top-5 recent summaries (no stack traces — detail is at
+        // /ops/errors/{id}). DB-backed when an ErrorStore exists (that's what "unresolved"
+        // means across restarts); the in-memory Stats list is the no-database fallback.
         var errors = new LinkedHashMap<String, Object>();
+        long errorCount;
         var recentErrors = new ArrayList<Map<String, Object>>();
-        for (var err : stats.recentErrors()) {
-            var e = new LinkedHashMap<String, Object>();
-            e.put("type", err.type);
-            e.put("message", err.message);
-            e.put("route", err.route);
-            e.put("count", err.count);
-            e.put("firstSeen", err.firstSeen.toString());
-            e.put("lastSeen", err.lastSeen.toString());
-            e.put("stackTrace", err.stackTrace);
-            recentErrors.add(e);
+        if (errorStore != null) {
+            errorCount = errorStore.countUnresolved();
+            recentErrors.addAll(errorStore.recentUnresolved(5));
+        } else {
+            var inMemory = stats.recentErrors();
+            errorCount = inMemory.size();
+            inMemory.stream()
+                .sorted((a, b) -> b.lastSeen.compareTo(a.lastSeen))
+                .limit(5)
+                .forEach(err -> {
+                    var e = new LinkedHashMap<String, Object>();
+                    e.put("errorType", err.type);
+                    e.put("message", err.message);
+                    e.put("route", err.route);
+                    e.put("occurrenceCount", err.count);
+                    e.put("lastSeen", err.lastSeen.toString());
+                    recentErrors.add(e);
+                });
         }
+        errors.put("count", errorCount);
         errors.put("recent", recentErrors);
         data.put("errors", errors);
 
@@ -400,19 +417,22 @@ public class OpsHandler {
             data.put("metrics", metrics);
         }
 
-        // Timeseries
-        var timeseries = new LinkedHashMap<String, Object>();
-        var minutes = new ArrayList<Map<String, Object>>();
-        for (var snap : stats.minuteSnapshots()) {
-            var m = new LinkedHashMap<String, Object>();
-            m.put("ts", snap.ts().toString());
-            m.put("requests", snap.requests());
-            m.put("errors", snap.errors());
-            m.put("avgMs", Math.round(snap.avgLatencyMs() * 100.0) / 100.0);
-            minutes.add(m);
+        // Timeseries — opt-in (?include=timeseries): 60 per-minute snapshots that only a
+        // charting consumer wants.
+        if (include.contains("timeseries")) {
+            var timeseries = new LinkedHashMap<String, Object>();
+            var minutes = new ArrayList<Map<String, Object>>();
+            for (var snap : stats.minuteSnapshots()) {
+                var m = new LinkedHashMap<String, Object>();
+                m.put("ts", snap.ts().toString());
+                m.put("requests", snap.requests());
+                m.put("errors", snap.errors());
+                m.put("avgMs", Math.round(snap.avgLatencyMs() * 100.0) / 100.0);
+                minutes.add(m);
+            }
+            timeseries.put("minutes", minutes);
+            data.put("timeseries", timeseries);
         }
-        timeseries.put("minutes", minutes);
-        data.put("timeseries", timeseries);
 
         return Json.of(data);
     }

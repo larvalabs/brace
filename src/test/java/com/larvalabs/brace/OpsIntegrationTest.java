@@ -155,23 +155,65 @@ class OpsIntegrationTest {
 
     @Test
     void errorTracking() throws Exception {
-        // Trigger an error
+        // Trigger an error — this app has no database, so the count falls back to the
+        // in-memory Stats list. Summary entries carry no stack trace (H6).
         get("/error");
-        var response = getWithToken("/ops/status");
-        assertTrue(response.body().contains("\"errors\""));
+        var root = Json.mapper().readTree(getWithToken("/ops/status").body());
+        var errors = root.path("errors");
+        assertTrue(errors.path("count").asLong(0) >= 1, errors.toString());
+        var first = errors.path("recent").get(0);
+        assertNotNull(first, errors.toString());
+        assertTrue(first.has("errorType"), first.toString());
+        assertTrue(first.has("message"), first.toString());
+        assertTrue(first.has("route"), first.toString());
+        assertTrue(first.has("occurrenceCount"), first.toString());
+        assertTrue(first.has("lastSeen"), first.toString());
+        assertFalse(first.has("stackTrace"), "status summaries must not carry stackTrace: " + first);
     }
 
     @Test
     void opsStatusJvmSectionHasExpectedFields() throws Exception {
-        var response = getWithToken("/ops/status");
-        var body = response.body();
-        assertTrue(body.contains("\"heap\""));
-        assertTrue(body.contains("\"cpu\""));
-        assertTrue(body.contains("\"threads\""));
-        assertTrue(body.contains("\"gc\""));
-        assertTrue(body.contains("\"profiling\""));
-        assertTrue(body.contains("\"usedMB\""));
-        assertTrue(body.contains("\"maxMB\""));
+        // Profiler is attached (ops enabled), so heap/cpu/threads/gc are real data — but
+        // profiling (hot methods + allocations) is opt-in via ?include=profiling (H6).
+        var jvm = Json.mapper().readTree(getWithToken("/ops/status").body()).path("jvm");
+        assertTrue(jvm.has("heap"), jvm.toString());
+        assertTrue(jvm.has("cpu"), jvm.toString());
+        assertTrue(jvm.has("threads"), jvm.toString());
+        assertTrue(jvm.has("gc"), jvm.toString());
+        assertFalse(jvm.has("profiling"), "profiling must be opt-in: " + jvm);
+        assertTrue(jvm.path("heap").has("usedMB"), jvm.toString());
+        assertTrue(jvm.path("heap").has("maxMB"), jvm.toString());
+    }
+
+    @Test
+    void opsStatusTimeseriesIsOptIn() throws Exception {
+        var defaultBody = Json.mapper().readTree(getWithToken("/ops/status").body());
+        assertFalse(defaultBody.has("timeseries"), "timeseries must be opt-in");
+
+        var withInclude = Json.mapper().readTree(getWithToken("/ops/status?include=timeseries").body());
+        assertTrue(withInclude.has("timeseries"), withInclude.toString());
+        assertTrue(withInclude.path("timeseries").has("minutes"), withInclude.toString());
+    }
+
+    @Test
+    void opsStatusWithoutProfilerOmitsCpuGcProfilingStubs() throws Exception {
+        // Direct handler construction is the only no-profiler path — Brace always attaches a
+        // JfrProfiler when ops is enabled. Pre-H6 this branch emitted all-zeros cpu/gc/profiling
+        // stubs; now the keys are simply absent and `brace check` tolerates that (.path defaults).
+        String secret = OpsToken.generateSecret();
+        var handler = new OpsHandler(new Stats(), null, null, new Router(), java.util.Map.of(), secret);
+        String token = OpsToken.create(secret, 60, OpsScope.READ, "test");
+        var req = new Request("GET", "/ops/status", java.util.Map.of(), java.util.Map.of(),
+            java.util.Map.of("Authorization", "Bearer " + token), null);
+        var result = handler.status(req);
+        var root = Json.mapper().readTree(result.body());
+        var jvm = root.path("jvm");
+        assertTrue(jvm.has("heap"), jvm.toString());
+        assertTrue(jvm.has("threads"), jvm.toString());
+        assertFalse(jvm.has("cpu"), "no profiler -> no cpu stub: " + jvm);
+        assertFalse(jvm.has("gc"), "no profiler -> no gc stub: " + jvm);
+        assertFalse(jvm.has("profiling"), "no profiler -> no profiling stub: " + jvm);
+        assertEquals(0, root.path("errors").path("count").asLong(-1), root.path("errors").toString());
     }
 
     // --- Auth endpoint tests ---
@@ -537,9 +579,10 @@ class OpsIntegrationTest {
                 HttpResponse.BodyHandlers.ofString());
         }
         String token = authenticate(jfrPort, jfrKeypair);
+        // Profiling (hot methods + allocations) is opt-in via ?include=profiling (H6).
         var response = client.send(
             HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + jfrPort + "/ops/status"))
+                .uri(URI.create("http://localhost:" + jfrPort + "/ops/status?include=profiling"))
                 .header("Authorization", "Bearer " + token).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
@@ -552,6 +595,14 @@ class OpsIntegrationTest {
         assertTrue(body.contains("\"profiling\""));
         assertTrue(body.contains("\"hotMethods\""));
         assertTrue(body.contains("\"topAllocations\""));
+
+        var withoutInclude = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + jfrPort + "/ops/status"))
+                .header("Authorization", "Bearer " + token).GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        var jvm = Json.mapper().readTree(withoutInclude.body()).path("jvm");
+        assertFalse(jvm.has("profiling"), "profiling must be opt-in: " + jvm);
     }
 
     @Test
@@ -938,6 +989,25 @@ class OpsIntegrationTest {
         assertTrue(e.has("queriesBefore"), e.toString());
         assertTrue(e.has("requestHeaders"), e.toString());
         assertTrue(e.path("stackTrace").asText().contains("cache test error"), e.toString());
+    }
+
+    @Test
+    void opsStatusErrorsCountIsDbBackedAndSummaryShaped() throws Exception {
+        // This app has a database, so errors.count comes from the ErrorStore's unresolved
+        // count and errors.recent from its top-5 summary query (H6).
+        awaitUnresolvedErrors();
+        var root = Json.mapper().readTree(cacheGet("/ops/status").body());
+        var errors = root.path("errors");
+        assertTrue(errors.path("count").asLong(0) >= 1, errors.toString());
+        var first = errors.path("recent").get(0);
+        assertNotNull(first, errors.toString());
+        assertTrue(first.has("id"), "DB-backed rows carry the id for /ops/errors/{id}: " + first);
+        assertTrue(first.has("errorType"), first.toString());
+        assertTrue(first.has("message"), first.toString());
+        assertTrue(first.has("route"), first.toString());
+        assertTrue(first.has("occurrenceCount"), first.toString());
+        assertTrue(first.has("lastSeen"), first.toString());
+        assertFalse(first.has("stackTrace"), "status summaries must not carry stackTrace: " + first);
     }
 
     @Test

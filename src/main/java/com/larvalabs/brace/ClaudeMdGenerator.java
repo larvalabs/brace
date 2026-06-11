@@ -96,7 +96,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 
 | Endpoint | Returns |
 |---|---|
-| `GET /ops/status` | Full system snapshot — HTTP stats, JVM heap/GC/threads, errors, jobs, cache, metrics, timeseries |
+| `GET /ops/status` | System snapshot — HTTP stats, JVM heap/GC/threads, error summary, jobs, cache, metrics; `?include=timeseries,profiling` for the bulky blocks |
 | `GET /ops/errors` | Tracked error summaries (id, type, message, route, counts, `at` app frame); `?full=true` for full detail |
 | `GET /ops/errors/{id}` | Full detail for one error — stack trace, request detail, headers, queries before failure |
 | `GET /ops/logs` | Recent structured log entries (filter by level and time) |
@@ -106,9 +106,9 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | `GET /ops/dashboard` | HTML dashboard |
 
 **Debugging workflow:**
-1. **Errors?** → `errors.recent` has stack trace, route, request details, and queries before failure
-2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU
-3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations`
+1. **Errors?** → `errors.count` + `errors.recent` summaries in status; full detail (stack trace, request, queries before failure) via `brace errors <id>` / `GET /ops/errors/{id}`
+2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU (`?include=profiling`)
+3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations` (`?include=profiling`)
 4. **Job failing?** → `jobs.scheduled` shows `lastStatus`, `lastError`, `failCount`
 5. **Cache miss rate?** → `cache.hits` vs `cache.misses`
 """.formatted(projectName);

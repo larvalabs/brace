@@ -9,7 +9,7 @@ body-read ordering, smarter `?` parameter conversion) plus several **security fi
 new **server-enforced session expiry**, and a **replay-resistant ops auth protocol, v2**)
 covered at the end of this guide.
 
-Three narrow cases **are breaking** and need action:
+Four narrow cases **are breaking** and need action:
 
 - Middleware patterns with an **interior wildcard** (e.g. `/api/*/admin`) are now
   rejected at startup with an `IllegalArgumentException` — see "middleware trailing
@@ -21,6 +21,12 @@ Three narrow cases **are breaking** and need action:
   `stackTrace`/`requestDetail` from the rows must add `?full=true` (CLI: `--full`) —
   the default response is now a compact summary per error. See "`/ops/errors` now
   returns summaries" below.
+- Scripts that parse **`GET /ops/status`** (or `brace status --json`) and read
+  `timeseries`, `jvm.profiling`, or fields of `errors.recent` beyond the summary set
+  must add `?include=timeseries,profiling` (for the first two) or fetch
+  `/ops/errors/{id}` (for stack traces). Also note `brace status` now actually exits
+  non-zero when unresolved errors exist — a bug fix, but a behavior change for scripts.
+  See "`/ops/status` is now a compact snapshot" below.
 
 Also note: the session-expiry change alters how long a stolen cookie stays valid — see
 "sessions now carry a server-enforced expiry" below — and the old ops auth protocol (v1)
@@ -696,6 +702,120 @@ server keeps working but sees summaries; pass `?full=true` server-side consumers
 explicitly.
 
 `GET /ops/regressions` is unaffected — it never carried stack traces.
+
+## Breaking for scripted consumers: `/ops/status` is now a compact snapshot
+
+**Who is affected:** anything that parses the JSON from `GET /ops/status` (or
+`brace status --json`) and reads `timeseries`, `jvm.profiling` (hot methods / top
+allocations), or per-error detail fields (`stackTrace`, `firstSeen`, or the old
+`type`/`count` key names) off `errors.recent`. The dashboard, `brace check`, and the
+human `brace status` table are unaffected. The scalar blocks most pollers key on
+(`app`, `http`, `jvm.heap`/`threads`, `jobs`, `cache`, `metrics`) are unchanged.
+
+**Why.** Status is the highest-frequency poll in the fix loop, and most of its bytes
+went to blocks nobody read: up to 50 recent errors **with full stack traces** (the
+status copy of what `/ops/errors` already serves in summary form), 60 per-minute
+timeseries snapshots, and 20+20 JFR hot-method/allocation entries — tens of KB per
+call. Worse, the payload never carried the one number the CLI's documented exit-code
+contract depends on: `brace status` read `errors.count`, the server never emitted it,
+so the command **always printed "Errors 0" and exited 0**, even with unresolved errors.
+
+**What changed.**
+
+1. **`errors` is now `{count, recent}`.** `count` is the unresolved error count
+   (database-backed via the error store when one is configured; the in-memory recent
+   list otherwise) and `recent` holds the **top 5** most recent summaries — using the
+   same field names as `/ops/errors` (`errorType`, `occurrenceCount`), with **no
+   `stackTrace`**. When a database backs the store, each entry carries `id` for the
+   `/ops/errors/{id}` drill-down.
+2. **`timeseries` and `jvm.profiling` are opt-in** via `?include=timeseries,profiling`
+   (comma-separated; either alone works). Their shapes are unchanged when requested.
+3. **No more all-zeros stubs.** A profiler-less app previously emitted hardcoded
+   `jvm.cpu`/`jvm.gc`/`jvm.profiling` blocks full of zeros; those keys are now simply
+   absent. (In practice the JFR profiler is always attached when ops is enabled, so
+   `cpu`/`gc` remain present with real data; only `profiling` moves behind `?include=`.)
+
+**Before (0.1.6):**
+
+```json
+{
+  "app": { "...": "..." },
+  "http": { "...": "..." },
+  "jvm": {
+    "heap": { "...": "..." }, "cpu": { "...": "..." }, "threads": { "...": "..." },
+    "gc": { "...": "..." },
+    "profiling": { "windowSeconds": 300, "hotMethods": ["... 20 entries ..."], "topAllocations": ["... 20 entries ..."] }
+  },
+  "errors": {
+    "recent": [{
+      "type": "NullPointerException",
+      "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+      "route": "GET /users/{id}",
+      "count": 14,
+      "firstSeen": "2026-06-10T09:14:02Z",
+      "lastSeen": "2026-06-11T08:01:55Z",
+      "stackTrace": "java.lang.NullPointerException: ...\n\tat ... (dozens of frames)"
+    }, "... up to 50 of these ..."]
+  },
+  "jobs": { "...": "..." }, "cache": { "...": "..." },
+  "timeseries": { "minutes": ["... 60 snapshots ..."] }
+}
+```
+
+**After (0.1.7 default):**
+
+```json
+{
+  "app": { "...": "..." },
+  "http": { "...": "..." },
+  "jvm": {
+    "heap": { "...": "..." }, "cpu": { "...": "..." }, "threads": { "...": "..." },
+    "gc": { "...": "..." }
+  },
+  "errors": {
+    "count": 3,
+    "recent": [{
+      "id": 7,
+      "errorType": "NullPointerException",
+      "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+      "route": "GET /users/{id}",
+      "occurrenceCount": 14,
+      "lastSeen": "2026-06-11T08:01:55Z"
+    }, "... at most 5 ..."]
+  },
+  "jobs": { "...": "..." }, "cache": { "...": "..." }
+}
+```
+
+**Getting the trimmed blocks back (escape hatch):**
+
+```bash
+# timeseries and/or profiling, unchanged shapes, on demand:
+curl -H "Authorization: Bearer $TOKEN" "https://app.example.com/ops/status?include=timeseries,profiling"
+```
+
+Stack traces never come back through status — fetch the error you care about instead:
+`GET /ops/errors/{id}` / `brace errors <id>` (full pre-0.1.7 record), or
+`GET /ops/errors?full=true` for the whole list.
+
+**Behavior change worth knowing — the `brace status` exit code now works.** The
+documented contract was always "exit 0 healthy / 1 errors exist / 2 unreachable", but
+due to the missing `errors.count` the command **never** exited 1: cron jobs and CI
+gates like `brace status --env prod || alert` have silently never fired on unresolved
+errors. From 0.1.7 they will. If a script relied on `brace status` always succeeding,
+use the exit code's documented meaning (or `--json` and inspect the fields you mean).
+The human table is unchanged except the `Errors` row now shows the real count.
+
+**Version skew.** A 0.1.7 CLI against a **pre-0.1.7 server** falls back to counting the
+server's `errors.recent` list, so the exit code and `Errors` row are correct there too
+(bounded by that list's 50-entry cap). `?include=` is ignored by old servers, which
+always sent `timeseries`/`profiling` anyway. A pre-0.1.7 CLI against a 0.1.7 server
+keeps printing "Errors 0" and exiting 0 — its bug, fixed by upgrading the CLI.
+
+**The dashboard is unaffected** — it renders server-side from `Stats`/the profiler
+directly and polls `/ops/dashboard`, not the status JSON. `brace check` is unaffected —
+it reads the scalar blocks via `.path()` with defaults and gets error counts from
+`/ops/errors`, not status.
 
 ## Behavior change: CLI JSON output is now compact (one line)
 

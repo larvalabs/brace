@@ -6,6 +6,7 @@ import java.io.*;
 import java.nio.file.*;
 import static org.junit.jupiter.api.Assertions.*;
 
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CliCommandsTest {
 
     static Brace app;
@@ -23,6 +24,7 @@ class CliCommandsTest {
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
         app = Brace.app().port(0).ops(keysFile.toString());
+        app.get("/boom", req -> { throw new RuntimeException("cli status test error"); });
         app.start();
         port = app.actualPort();
 
@@ -110,8 +112,11 @@ class CliCommandsTest {
     }
 
     // --- Task 14: status ---
+    // The two status tests are ordered: the healthy check must run before /boom puts an
+    // error into the (no-database) app's in-memory recent-error list.
 
     @Test
+    @Order(1)
     void statusCommandReturnsZeroAgainstHealthyApp() throws Exception {
         var bout = new ByteArrayOutputStream();
         var prev = System.out;
@@ -123,6 +128,33 @@ class CliCommandsTest {
             System.setOut(prev);
         }
         assertTrue(bout.toString().contains("\"app\""));
+    }
+
+    @Test
+    @Order(2)
+    void statusCommandExitsNonZeroWhenErrorsExist() throws Exception {
+        // Pre-H6 /ops/status never emitted errors.count, so `brace status` always exited 0
+        // even with unresolved errors. Provoke one and verify the contract works now.
+        java.net.http.HttpClient.newHttpClient().send(
+            java.net.http.HttpRequest.newBuilder()
+                .uri(java.net.URI.create("http://localhost:" + port + "/boom")).GET().build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
+
+        var bout = new ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new PrintStream(bout));
+        int code;
+        try {
+            code = CliCommands.status(projectDir, new String[]{"--json"});
+        } finally {
+            System.setOut(prev);
+        }
+        assertEquals(1, code, bout.toString());
+        // The redirected System.out also catches the app's own log lines; the status JSON
+        // is the last line the command printed.
+        var lines = bout.toString().trim().split("\n");
+        var root = Json.mapper().readTree(lines[lines.length - 1]);
+        assertTrue(root.path("errors").path("count").asLong(0) >= 1, bout.toString());
     }
 
     // --- Task 15: cache ---

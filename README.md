@@ -33,7 +33,7 @@ The greenfield build is roughly tied — both frameworks are cheap when the code
 
 No existing framework exposes a structured diagnostics API designed for AI agents. Brace does.
 
-`GET /ops/status` returns everything an agent needs to diagnose any problem: request stats, slow routes, recent errors with full context (stack trace, request details, queries that ran before the error), custom metrics, JFR profiling (heap, CPU, GC pauses, hot methods, allocations), job statuses, cache hit rates, and per-minute timeseries. The built-in dashboard shows the same data visually.
+`GET /ops/status` returns everything an agent needs to triage any problem in one compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. Drill-downs stay one call away — `GET /ops/errors/{id}` for a full error (stack trace, request details, queries that ran before the error), `?include=timeseries,profiling` for per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data visually.
 
 Ops endpoints use Ed25519 keypair authentication with short-lived tokens — agents authenticate securely without shared secrets. An AI agent can deploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
 
