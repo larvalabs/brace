@@ -187,6 +187,10 @@ req.storage()                 // Storage instance
 
 **UploadedFile:** `filename()`, `contentType()`, `bytes()`, `size()`, `saveTo(Path)`.
 
+**Body size cap:** `maxUploadSize` (builder, default 10MB) bounds **every** request body, not
+just file uploads — a non-multipart body (JSON, form post, raw bytes) over the limit is
+rejected with `413 Payload Too Large` before your handler runs.
+
 ## Responses
 
 All response factory methods are on the `Result` class:
@@ -247,6 +251,12 @@ Brace logs a warning (once per entity class) when `Json.of()` detects an `@Entit
 // Redirects
 Result.redirect("/posts")                   // 302 redirect
 Result.redirectPermanent("/new-url")        // 301 redirect
+Redirect.toLocal(req.queryParam("next"))    // 302, local paths only — use for user-derived
+                                            // paths: rejects absolute and protocol-relative
+                                            // URLs (open redirect). 301: Redirect.permanentLocal
+
+// URL generation from route patterns
+Url.to("/users/{id}", 42)                   // "/users/42"
 
 // Headers and cookies
 result.header("X-Custom", "value")          // set a response header (single-value)
@@ -415,6 +425,12 @@ Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
 ## Sessions
 
 AES-256-GCM encrypted cookies. Stateless — no server-side storage. Safe to store emails, roles, and permissions.
+
+Sessions carry a **server-enforced absolute expiry** (`_exp`, stamped inside the encrypted
+payload on every write): a cookie past its expiry is rejected server-side regardless of the
+client's `Max-Age`. The horizon is `SessionOptions.maxAge()` when set, otherwise 14 days.
+`_exp` is a reserved, server-managed key — `session.set("_exp", …)` is silently ignored.
+(Details: the 0.1.6→0.1.7 migration guide's session-expiry section.)
 
 ```java
 session.set("userId", user.id);        // store int
@@ -743,6 +759,8 @@ app.trustedProxies("192.168.1.0/24");               // trust specific CIDR
 ```
 
 Once configured, `req.ip()` will extract the real client IP from `X-Forwarded-For` when the immediate peer is trusted. Without trusted proxies, `req.ip()` always returns the socket's remote address.
+
+With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
 
 ### Security Headers
 
@@ -1120,7 +1138,13 @@ boolean ok = Passwords.check("secret", hash);
 Structured JSON to stdout:
 
 ```java
-Log.event("user.signup", Map.of("userId", user.id, "email", user.email));
+Log.event("user.signup", Map.of("userId", user.id, "email", user.email));  // named event
+
+// Leveled logging — each takes (message) or (message, Map<String,Object> data):
+Log.debug("cache warm start");
+Log.info("import finished", Map.of("rows", n));
+Log.warn("retrying smtp connection");
+Log.error("payment failed", exception);    // error also takes (message, Throwable)
 ```
 
 ## htmx

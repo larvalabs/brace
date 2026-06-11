@@ -417,7 +417,7 @@ expensive round**, exactly when the re-read corpus is largest).
     BRACE-AGENTS.md; or keep and add "README API sections" to the release
     checklist. **Model: Fable/Opus for the trim decision; Haiku to execute.**
 
-- [ ] **L7: BRACE-AGENTS.md currency sweep (0.1.7 behaviors + undocumented security helpers)** — various
+- [x] **L7: BRACE-AGENTS.md currency sweep (0.1.7 behaviors + undocumented security helpers)** *(also documented `Log.warn`, which exists alongside debug/info/error; SECURITY.md upload-limits framing fixed in place and a new "Open Redirects" section added with a TOC entry)* — various
   - Missing/stale: the 413 cap now applies to *all* non-multipart bodies (docs frame
     it upload-only); server-enforced session expiry absent from §Sessions;
     `Url.to()` absent; Logging section shows only `Log.event` (no

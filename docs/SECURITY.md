@@ -7,6 +7,7 @@ This document describes Brace's security features and best practices for buildin
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
 - [Serialization](#serialization)
+- [Open Redirects](#open-redirects)
 - [Trusted Proxies](#trusted-proxies)
 - [Cookie Security](#cookie-security)
 - [File Uploads](#file-uploads)
@@ -183,6 +184,36 @@ Brace logs a **WARN** message (once per entity class per process) when `Json.of(
 
 ---
 
+## Open Redirects
+
+### The Vulnerability
+
+A handler that redirects to a user-supplied destination is an **open redirect** — an attacker crafts a link on your domain that lands users on a phishing site, with your domain's credibility behind the link they clicked:
+
+```java
+// ❌ Dangerous: ?next=https://evil.example sends the user to the attacker's site
+return Redirect.to(req.queryParam("next"));
+```
+
+`Redirect.to()` (and `Result.redirect()`) deliberately accept any location — absolute URLs, protocol-relative URLs (`//evil.example`), anything — because server-controlled redirects legitimately need all of those. The vulnerability is feeding them **untrusted input**.
+
+### The Fix: Redirect.toLocal
+
+```java
+// ✅ Safe: only local paths accepted; throws IllegalArgumentException otherwise
+return Redirect.toLocal(req.queryParam("next"));
+```
+
+`Redirect.toLocal(path)` — and `Redirect.permanentLocal(path)` for 301s — validate with an allowlist: the path must start with exactly one `/`. Rejected: null/empty, absolute URLs (`https://evil.example`), protocol-relative URLs (`//evil.example`), backslash bypasses (`/\evil.example` — browsers normalize `\` to `/`), and literal ASCII control characters.
+
+### Best Practices
+
+1. **Any redirect target derived from request data** (query param, form field, header) goes through `toLocal` / `permanentLocal`
+2. **Server-controlled destinations** (string literals, paths built with `Url.to()`) can use `Redirect.to()` / `Result.redirect()` freely
+3. **Catch the `IllegalArgumentException`** if you want a fallback (e.g. redirect to `/`) instead of a 500 on a tampered `next` parameter
+
+---
+
 ## Trusted Proxies
 
 When running behind a reverse proxy (nginx, Caddy, load balancer), you must explicitly configure trusted proxies.
@@ -295,7 +326,10 @@ This sets: `HttpOnly=true`, `Secure=true`, `SameSite=Lax`, `Max-Age=1209600` (14
 
 ### Upload Size Limits
 
-Configure maximum upload size to prevent DoS:
+`maxUploadSize` bounds **every** request body, not just multipart uploads: a non-multipart
+body (JSON, form post, raw bytes) larger than the limit is rejected with `413 Payload Too
+Large` before the handler runs, and multipart parsing enforces the same cap. Configure it
+to prevent DoS:
 
 ```java
 app.maxUploadSize("10M");  // 10 megabytes (default)
