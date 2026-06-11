@@ -465,13 +465,22 @@ static TestApp app = Brace.test()
     app.withDb(db -> { db.insert(newPost("Hello")); });
     var response = app.get("/posts");
     assertEquals(200, response.status());
-    assertTrue(response.body().contains("Hello"));
+    assertEquals("Hello", response.json().get(0).get("title").asText());
 }
 
 @Test void showPost() {
     var response = app.get("/posts/42");
     assertEquals(200, response.status());
 }
+```
+
+Custom headers (e.g. bearer-token APIs) via the request builder; CSRF-protected routes via `postWithCsrf`:
+
+```java
+var res = app.request("GET", "/api/items").header("Authorization", "Bearer " + token).send();
+
+var session = Session.of("userId", "1");
+var created = app.postWithCsrf("/posts", Map.of("title", "Hi"), session);  // mints + sends the CSRF token
 ```
 
 ## Configuration

@@ -239,7 +239,16 @@ expensive round**, exactly when the re-read corpus is largest).
     API: `db.exists(Class, where, params...)`.
   - **Model: Sonnet 4.6** — must choose canonical idioms consistently.
 
-- [ ] **M6: TestApp surface gaps: headers, session variants, CSRF, JSON assertions** — `TestApp.java:41-129`, `TestResponse.java:39-45`
+- [x] **M6: TestApp surface gaps: headers, session variants, CSRF, JSON assertions** — `TestApp.java:41-129`, `TestResponse.java:39-45`
+  - *Implementation notes: added `putWithCsrf` (form-param token) and `deleteWithCsrf`
+    (`X-CSRF-Token` header — DELETE has no form body; validation accepts both). New
+    explicit-session sends evict any jar-held `brace_session` first — TestApp's shared
+    cookie jar captures framework-minted CSRF sessions, and two `brace_session` cookies
+    race nondeterministically (observed as flaky 403s); pre-existing
+    `post(path, params, session)` behavior untouched. The CsrfPlainHandlerTest token
+    scrape was kept (it verifies the M5c framework-minted-token round-trip, which
+    `postWithCsrf` would bypass) and commented as deliberate with a pointer to
+    `postWithCsrf`; the `body().contains` migrations landed in TestAppTest instead.*
   - No custom headers (bearer-token APIs untestable via the harness → agents
     hand-roll `HttpClient`, ~10 lines/class); `get`/`postJson`/`put`/`delete` lack
     session variants (`post(path, params, session)` exists at `:67`); no CSRF

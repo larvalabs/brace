@@ -180,6 +180,11 @@ class CsrfPlainHandlerTest {
     // Helper
     // -------------------------------------------------------------------------
 
+    // Deliberate token scrape: these tests verify the framework-MINTED token round-trip
+    // (M5c — token rendered by a plain Handler must persist via Set-Cookie), so the token
+    // must come from the server's response, not be fabricated client-side. App tests
+    // should NOT copy this pattern — use TestApp.postWithCsrf(path, params, session),
+    // which mints the token via Csrf.ensureToken and injects it automatically (M6).
     private static String extractCsrfToken(String hiddenField) {
         // Parses: <input type="hidden" name="_csrf" value="TOKEN">
         int valueIndex = hiddenField.indexOf("value=\"");

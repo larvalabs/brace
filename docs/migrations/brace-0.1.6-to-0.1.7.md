@@ -288,6 +288,77 @@ fetching rows and loop-summing in Java:
 var row = db.hql("SELECT AVG(r.score), COUNT(r) FROM Rating r WHERE r.talkId = ?", id).get(0);
 ```
 
+## New (optional): TestApp request builder, CSRF helpers, session variants, JSON assertions
+
+**Nothing to do** — purely additive; every existing `TestApp`/`TestResponse` method keeps
+its exact behavior. 0.1.6's harness had four gaps that forced boilerplate: no way to set
+request headers (bearer-token APIs were untestable through `TestApp`, so tests hand-rolled
+an `HttpClient`), no session variants for `get`/`postJson`/`put`/`delete`, no CSRF helper
+(the first mutating-route test under `.sessions(...)` 403s, and tests scraped the token out
+of rendered HTML), and JSON assertions limited to `bodyAs(Class)` (so tests fell back to
+fragile `body().contains(...)`).
+
+**Before (all versions, still works) — hand-rolled client + token scrape:**
+
+```java
+// Bearer-token API: TestApp couldn't set headers, so every API test class carried this:
+var client = HttpClient.newBuilder().cookieHandler(new CookieManager()).build();
+var resp = client.send(
+    HttpRequest.newBuilder()
+        .uri(URI.create("http://localhost:" + app.port() + "/api/items"))
+        .header("Authorization", "Bearer " + token)
+        .GET().build(),
+    HttpResponse.BodyHandlers.ofString());
+
+// CSRF-protected POST: GET a page, regex-scrape the token out of the HTML, replay it:
+var page = client.send(/* GET /posts/new ... */, HttpResponse.BodyHandlers.ofString());
+String csrf = scrapeHiddenField(page.body());   // ~10 lines of string surgery
+client.send(HttpRequest.newBuilder()
+    .uri(URI.create("http://localhost:" + app.port() + "/posts"))
+    .POST(HttpRequest.BodyPublishers.ofString("_csrf=" + csrf + "&title=Hi"))
+    .header("Content-Type", "application/x-www-form-urlencoded")
+    .build(), HttpResponse.BodyHandlers.ofString());
+```
+
+**After (0.1.7+) — one-liners on the harness:**
+
+```java
+// Bearer-token API via the request builder (.header is repeatable; .body/.session too):
+var res = app.request("GET", "/api/items").header("Authorization", "Bearer " + token).send();
+
+// CSRF-protected mutating routes — token minted via Csrf.ensureToken and sent automatically:
+var session = Session.of("userId", "1");
+app.postWithCsrf("/posts", Map.of("title", "Hi"), session);     // _csrf form param
+app.putWithCsrf("/posts/1", Map.of("title", "New"), session);   // _csrf form param
+app.deleteWithCsrf("/posts/1", session);                        // X-CSRF-Token header (no form body)
+
+// Session variants now exist for every verb:
+app.get("/me", session);
+app.postJson("/api/notes", Map.of("text", "hi"), session);
+app.put("/posts/1", Map.of("title", "New"), session);           // csrf(false) routes
+app.delete("/posts/1", session);
+
+// JSON assertions instead of body().contains(...):
+assertEquals("Hi", res.json().get(0).get("title").asText());            // Jackson JsonNode
+List<Post> posts = res.bodyAs(new TypeReference<List<Post>>() {});      // typed generics
+```
+
+Two behaviors worth knowing:
+
+- **`post(...)` still never auto-injects a CSRF token.** With `.sessions(...)` enabled,
+  every mutating route requires CSRF by default, so a plain `post`/`put`/`delete` to such a
+  route 403s — that's deliberate (missing-token regressions stay testable). Reach for the
+  `*WithCsrf` helpers in app tests.
+- **Explicit sessions evict the shared cookie jar's `brace_session`.** `TestApp`'s
+  HttpClient keeps a cookie jar, and with sessions enabled the framework Set-Cookies a
+  minted CSRF session on the first request. When you pass a `Session` to the new builder or
+  helpers, any jar-held `brace_session` is evicted at send time so the server sees exactly
+  the session you passed (previously two cookies raced nondeterministically). The
+  pre-existing `post(path, params, session)` is untouched and keeps its old behavior.
+
+The Testing section of `BRACE-AGENTS.md` documents all of it, including the CSRF-in-tests
+rule that was previously undocumented.
+
 ## New (optional): scoped read-only ops keys
 
 **Nothing to do** — existing keys and tokens keep working unchanged. 0.1.7 adds a

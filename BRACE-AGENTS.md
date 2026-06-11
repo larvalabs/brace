@@ -1103,11 +1103,55 @@ static TestApp app = Brace.test()
 }
 ```
 
-`TestApp` methods: `get(path)`, `post(path, formParams)`, `post(path, formParams, session)`, `postJson(path, body)`, `put(path, formParams)`, `delete(path)`, `withDb(consumer)`, `db()`, `resetDatabase()`, `mailer()`.
+Create a session for authenticated test requests: `Session.of("userId", 1)`. Every HTTP verb has a session variant — `get(path, session)`, `post(path, params, session)`, `postJson(path, body, session)`, `put(path, params, session)`, `delete(path, session)` — that sends the session as an encrypted cookie.
 
-`TestResponse` methods: `status()`, `body()`, `header(name)`, `redirectedTo()`, `bodyAs(Class)`.
+### CSRF in tests
 
-Create a session for authenticated test requests: `Session.of("userId", 1)`.
+With `.sessions(...)` enabled, **every mutating route (POST/PUT/DELETE/PATCH) requires a CSRF token by default** — a plain `post(...)` to such a route returns 403 `{"error":"csrf_required"}`, even for JSON bodies. Use the `*WithCsrf` helpers, which mint a token into the session (`Csrf.ensureToken`) and send it with the request:
+
+```java
+var session = Session.of("userId", "1");
+var res = app.postWithCsrf("/posts", Map.of("title", "Hi"), session);  // 200
+app.putWithCsrf("/posts/1", Map.of("title", "New"), session);
+app.deleteWithCsrf("/posts/1", session);
+
+// post(...) never auto-injects a token, so missing-token 403s stay testable:
+assertEquals(403, app.post("/posts", Map.of("title", "Hi"), session).status());
+```
+
+`postWithCsrf`/`putWithCsrf` send the token as the `_csrf` form param; `deleteWithCsrf` sends it in the `X-CSRF-Token` header (DELETE has no form body — Brace accepts either). Routes registered with `.csrf(false)` (bearer-token APIs) need no token.
+
+### Request builder — custom headers, bearer-token APIs
+
+For anything the fixed methods don't cover (auth headers, raw bodies, unusual verbs):
+
+```java
+var res = app.request("GET", "/api/items")
+    .header("Authorization", "Bearer " + token)     // repeatable
+    .send();
+
+var created = app.request("POST", "/api/items")
+    .header("Authorization", "Bearer " + token)
+    .body("{\"title\":\"Hi\"}", "application/json")
+    .send();
+```
+
+The builder also takes `.session(session)` to send an encrypted session cookie.
+
+### JSON assertions
+
+Prefer structural assertions over `body().contains(...)` substring checks:
+
+```java
+var res = app.get("/api/posts");
+assertEquals("Hello", res.json().get(0).get("title").asText());     // Jackson JsonNode tree
+List<Post> posts = res.bodyAs(new TypeReference<List<Post>>() {});  // typed generic lists
+Post post = app.get("/api/posts/1").bodyAs(Post.class);             // typed single values
+```
+
+`TestApp` methods: `request(method, path)` (builder: `.header(name, value)`, `.session(session)`, `.body(body, contentType)`, `.send()`), `get(path[, session])`, `post(path, formParams[, session])`, `postWithCsrf(path, formParams, session)`, `postJson(path, body[, session])`, `put(path, formParams[, session])`, `putWithCsrf(path, formParams, session)`, `delete(path[, session])`, `deleteWithCsrf(path, session)`, `withDb(consumer)`, `db()`, `resetDatabase()`, `mailer()`.
+
+`TestResponse` methods: `status()`, `body()`, `json()`, `bodyAs(Class)`, `bodyAs(TypeReference)`, `header(name)`, `headers(name)`, `redirectedTo()`.
 
 ## Config
 
