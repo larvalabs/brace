@@ -83,10 +83,53 @@ class ResultTest {
     }
 
     @Test
-    void localRedirectAcceptsRelativePath() {
-        var result = Redirect.toLocal("login");
+    void localRedirectRejectsBackslashBypass() {
+        // "/\evil.com" passes the old "://" / "//" denylist but browsers normalize
+        // the backslash to "/" yielding "//evil.com" — must be rejected.
+        assertThrows(IllegalArgumentException.class, () -> Redirect.toLocal("/\\evil.com"));
+    }
+
+    @Test
+    void localRedirectRejectsSingleSlashAbsoluteUrl() {
+        // "https:/evil.com" has no "://" but parses as an absolute URL per WHATWG.
+        assertThrows(IllegalArgumentException.class, () -> Redirect.toLocal("https:/evil.com"));
+    }
+
+    @Test
+    void localRedirectRejectsSchemeBareUrl() {
+        // "https:evil.com" also parses as absolute — does not start with "/".
+        assertThrows(IllegalArgumentException.class, () -> Redirect.toLocal("https:evil.com"));
+    }
+
+    @Test
+    void localRedirectRejectsRelativePath() {
+        // Bare relative paths like "dashboard" were accepted by the old denylist but are
+        // now rejected — toLocal/permanentLocal require a leading "/".
+        assertThrows(IllegalArgumentException.class, () -> Redirect.toLocal("dashboard"));
+    }
+
+    @Test
+    void localRedirectRejectsLiteralControlChar() {
+        // A literal tab character in the path must be rejected.
+        assertThrows(IllegalArgumentException.class, () -> Redirect.toLocal("/path/\t/x"));
+    }
+
+    @Test
+    void localRedirectAcceptsPercentEncodedTab() {
+        // Percent-encoded sequences are NOT decoded here — "/%09/x" is just three path
+        // segments and must be accepted.
+        var result = Redirect.toLocal("/%09/x");
         assertEquals(302, result.status());
-        assertEquals("login", result.header("Location"));
+        assertEquals("/%09/x", result.header("Location"));
+    }
+
+    @Test
+    void localRedirectAcceptsPathWithQueryContainingDoubleSlash() {
+        // "//x" appears only inside the query string — the path itself starts with exactly
+        // one "/", so this must be accepted.
+        var result = Redirect.toLocal("/path?next=//x");
+        assertEquals(302, result.status());
+        assertEquals("/path?next=//x", result.header("Location"));
     }
 
     @Test
@@ -104,6 +147,21 @@ class ResultTest {
     @Test
     void permanentLocalRedirectRejectsProtocolRelativeUrl() {
         assertThrows(IllegalArgumentException.class, () -> Redirect.permanentLocal("//attacker.com"));
+    }
+
+    @Test
+    void permanentLocalRedirectRejectsBackslashBypass() {
+        assertThrows(IllegalArgumentException.class, () -> Redirect.permanentLocal("/\\evil.com"));
+    }
+
+    @Test
+    void permanentLocalRedirectRejectsSingleSlashAbsoluteUrl() {
+        assertThrows(IllegalArgumentException.class, () -> Redirect.permanentLocal("https:/evil.com"));
+    }
+
+    @Test
+    void permanentLocalRedirectRejectsSchemeBareUrl() {
+        assertThrows(IllegalArgumentException.class, () -> Redirect.permanentLocal("https:evil.com"));
     }
 
     @Test

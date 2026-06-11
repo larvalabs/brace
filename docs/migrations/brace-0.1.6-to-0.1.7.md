@@ -542,23 +542,47 @@ protocol-relative URLs, and local paths. When used with untrusted input (e.g.,
 `Redirect.to(req.queryParam("next"))`), this enables open-redirect vulnerabilities: an
 attacker can pass `next=https://attacker.com` to craft a phishing link.
 
-0.1.7 introduces two new helpers that validate the path is local:
+0.1.7 introduces two new helpers that validate the path is local using an **allowlist** rule:
 
 ```java
 // 0.1.7+ — safe for user input
 return Redirect.toLocal(req.queryParam("next"));      // throws if not local
 return Redirect.permanentLocal(req.queryParam("next"));
-
-// Both throw IllegalArgumentException if the path contains "://" or starts with "//"
 ```
+
+The validation rule (all must hold):
+
+1. Path is non-null and non-empty.
+2. First character is `'/'`.
+3. Second character (if present) is neither `'/'` nor `'\\'` — rejects `//evil.com` (protocol-relative)
+   and `/\evil.com` (browsers normalize the backslash to `/`, yielding `//evil.com`).
+4. No backslash anywhere in the string.
+5. No literal ASCII control characters (code points `< 0x20`) anywhere. Percent-encoded sequences
+   like `/%09/x` are **not** decoded and are accepted as-is.
+
+This allowlist approach is secure against the common bypass patterns:
+
+| Input | Old denylist | New allowlist |
+|---|---|---|
+| `https://attacker.com` | rejected (`://`) | rejected (no leading `/`) |
+| `//attacker.com` | rejected (`//`) | rejected (second char `/`) |
+| `/\evil.com` | **accepted** (bypass) | rejected (backslash) |
+| `https:/evil.com` | **accepted** (no `://`) | rejected (no leading `/`) |
+| `https:evil.com` | **accepted** | rejected (no leading `/`) |
+| `dashboard` | accepted | **rejected** (no leading `/`) |
+| `/dashboard` | accepted | accepted |
+| `/path?next=//x` | accepted | accepted (`//` only in query) |
+
+**Behavior change:** bare relative paths without a leading `/` (e.g., `"dashboard"`) were accepted
+by the old denylist but are now rejected. `toLocal` / `permanentLocal` are new in 0.1.7 (not
+present in 0.1.6), so no 0.1.6 code calls them — there is no compatibility concern.
 
 **Code change required:** none. The original `Redirect.to()` and `Redirect.permanent()`
 remain unchanged and work as before. Use the new `toLocal()` variants **only when the path
 is derived from user input** (query params, form fields, etc.). For paths you control,
 continue using `Redirect.to()`.
 
-**Documentation note:** the class Javadoc now warns against using `to()` with user input and
-documents the `toLocal()` safety guarantee.
+**Documentation note:** the class Javadoc documents the exact allowlist rule.
 
 ## Security fix: middleware trailing `/*` now matches the bare prefix
 
