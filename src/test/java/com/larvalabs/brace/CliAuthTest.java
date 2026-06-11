@@ -1,12 +1,15 @@
 package com.larvalabs.brace;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.file.*;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
@@ -89,6 +92,51 @@ class CliAuthTest {
 
         assertEquals(200, response.statusCode(),
             "helper should clear the stale token, re-auth, and retry");
+    }
+
+    @Test
+    void fallsBackToV1AgainstPre017Server() throws Exception {
+        // Simulate a 0.1.6 /ops/auth: its OpsAuthRequest record has no v/nonce fields,
+        // so Jackson fails on the unknown properties and the endpoint answers a plain
+        // 401. A v1 body (signature over the timestamp only) is verified and accepted.
+        var server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/ops/auth", exchange -> {
+            int status;
+            byte[] resp;
+            try {
+                JsonNode n = Json.mapper().readTree(exchange.getRequestBody().readAllBytes());
+                if (n.has("v") || n.has("nonce")) {
+                    status = 401;
+                    resp = "Authentication failed".getBytes();
+                } else if (keypair.publicKey().equals(n.get("publicKey").asText())
+                        && OpsKeys.verify(n.get("timestamp").asText(),
+                            n.get("signature").asText(), n.get("publicKey").asText())) {
+                    status = 200;
+                    resp = Json.mapper().writeValueAsString(Map.of(
+                        "token", "v1-fallback-token",
+                        "expiresAt", Instant.now().plusSeconds(3600).toString())).getBytes();
+                } else {
+                    status = 401;
+                    resp = "Invalid signature".getBytes();
+                }
+            } catch (Exception e) {
+                status = 500;
+                resp = new byte[0];
+            }
+            exchange.sendResponseHeaders(status, resp.length);
+            exchange.getResponseBody().write(resp);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var cfg = new CliConfig("http://localhost:" + server.getAddress().getPort(),
+                tmp.resolve("ops-private.key").toString(),
+                "authorized-keys", "local", Map.of());
+            assertEquals("v1-fallback-token", CliAuth.bearer(cfg, tmp),
+                "CLI should fall back to v1 auth against a pre-0.1.7 server");
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test

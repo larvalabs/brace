@@ -90,26 +90,53 @@ public class CliAuth {
             "signature", signature,
             "ttlSeconds", DEFAULT_TTL_SECONDS);
 
-        var response = http.send(
+        var response = postAuth(cfg, body);
+
+        if (response.statusCode() == 401 && !retried) {
+            clearCache(projectDir);
+            return bearer(cfg, projectDir, true);
+        }
+        if (response.statusCode() == 401) {
+            // A pre-0.1.7 server cannot parse the v2 body at all — its OpsAuthRequest
+            // record lacks the v/nonce fields, so Jackson throws and the server answers a
+            // plain 401 — meaning a 401 here can be "old server", not "bad key". Retry
+            // once with the v1 protocol (signature over the timestamp only); if that also
+            // fails, report the original v2 failure. Drop this fallback together with
+            // server-side v1 support.
+            String v1Timestamp = Instant.now().toString();
+            var v1Response = postAuth(cfg, Map.of(
+                "publicKey", kp.publicKey(),
+                "timestamp", v1Timestamp,
+                "signature", OpsKeys.sign(v1Timestamp, kp.privateKey()),
+                "ttlSeconds", DEFAULT_TTL_SECONDS));
+            if (v1Response.statusCode() == 200) {
+                System.err.println("Warning: ops server accepted only deprecated v1 auth — "
+                    + "it is running a Brace version older than this CLI. Upgrade the server; "
+                    + "v1 auth will be removed in a future release.");
+                return cacheToken(projectDir, v1Response);
+            }
+            throw new OpsAuthFailure(response.statusCode(), response.body());
+        }
+        if (response.statusCode() != 200) {
+            throw new OpsAuthFailure(response.statusCode(), response.body());
+        }
+        return cacheToken(projectDir, response);
+    }
+
+    private static HttpResponse<String> postAuth(CliConfig cfg, Map<String, ?> body) throws Exception {
+        return http.send(
             HttpRequest.newBuilder()
                 .uri(URI.create(cfg.url() + "/ops/auth"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(Json.mapper().writeValueAsString(body)))
                 .build(),
             HttpResponse.BodyHandlers.ofString());
+    }
 
-        if (response.statusCode() == 401 && !retried) {
-            clearCache(projectDir);
-            return bearer(cfg, projectDir, true);
-        }
-        if (response.statusCode() != 200) {
-            throw new OpsAuthFailure(response.statusCode(), response.body());
-        }
-
+    private static String cacheToken(Path projectDir, HttpResponse<String> response) throws Exception {
         JsonNode parsed = Json.mapper().readTree(response.body());
         String token = parsed.get("token").asText();
         String expiresAt = parsed.get("expiresAt").asText();
-
         writeCache(projectDir, token, expiresAt);
         return token;
     }

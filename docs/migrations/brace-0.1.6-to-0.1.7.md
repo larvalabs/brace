@@ -448,9 +448,13 @@ the delivery channel changes.
 ## Security fix: ops auth protocol v2 (key-bound, nonce'd signature); v1 deprecated
 
 **Who is affected:** every user of the `brace` CLI ops commands (`brace status`, `errors`,
-`logs`, …) — **no action needed**, the 0.1.7 CLI speaks v2 automatically. Action is only
-required if you implemented the `/ops/auth` handshake yourself (e.g. a custom agent or
-script signing requests directly).
+`logs`, …) — **no action needed**, the 0.1.7 CLI speaks v2 automatically, and when it
+talks to a server still running ≤0.1.6 (which cannot parse a v2 body) it detects the
+rejection and falls back to v1 for that request, printing a warning to upgrade the
+server. Mixed-version fleets work in both directions during the upgrade window; the
+fallback goes away when v1 support is removed. Action is only required if you
+implemented the `/ops/auth` handshake yourself (e.g. a custom agent or script signing
+requests directly).
 
 **What changed.** Through 0.1.6, the `/ops/auth` client signed **only the ISO timestamp**,
 and the server accepted it within ±30 seconds. The signature was not bound to the public

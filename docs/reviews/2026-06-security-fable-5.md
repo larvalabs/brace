@@ -84,8 +84,9 @@ Confirmed but deferred (lower severity):
   and the new 413s.
 - `Cache.percentEncode` is non-injective for non-ASCII (`'中'` and `"ӢD"` collide) and
   its comment contradicts the code — use `URLEncoder.encode(v, UTF_8)`.
-- 0.1.7 CLI sends ops-auth v2 only; against a 0.1.6 server Jackson rejects the unknown
-  fields → CLI-first upgrades break, and the migration guide says "no action".
+- ~~0.1.7 CLI sends ops-auth v2 only; against a 0.1.6 server Jackson rejects the unknown
+  fields → CLI-first upgrades break, and the migration guide says "no action".~~
+  **Fixed on main post-merge:** CLI falls back to v1 when a server 401s the v2 body.
 - Migration guide intro claims "no breaking changes" while the M8 section documents a
   new startup `IllegalArgumentException` for interior-wildcard patterns.
 - Ops auth accepts `ttlSeconds <= 0` (mints an already-expired token; fail-closed).
@@ -120,6 +121,8 @@ note, entity-serialization guidance, redaction trade-offs, nonce wording).
    `RegressionIntegrationTest`, `OpsSharedSecretTest` still authenticate v1-style and
    double as v1 coverage; migrate them to v2 when v1 is dropped.
    `OpsIntegrationTest.authV1StillAcceptedThisRelease` has a comment to flip it to 401.
+   Also remove the CLI's v1 fallback (`CliAuth.bearer` retries v1 when a pre-0.1.7
+   server 401s the v2 body; test `CliAuthTest.fallsBackToV1AgainstPre017Server`).
 3. **Multiple X-Forwarded-For header instances:** the request header map is
    last-one-wins (BraceHandler builds a single-value map), not comma-joined. Last-wins
    keeps the proxy-appended header, but the comment in `Request.ip()` overstates the
