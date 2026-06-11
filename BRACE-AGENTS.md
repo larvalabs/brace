@@ -786,15 +786,14 @@ one instance validates on any other. The per-process fallback is single-instance
 `opsSecret(…)` (or `sessions(…)`) on any multi-instance deployment, or ops login will fail ~(N−1)/N of
 the time behind an LB. Use `opsSecret(…)` for bearer-token APIs that enable ops without sessions.
 
-`brace new` writes both files at scaffold time (the initial `dev` entry corresponds to the local `ops-private.key`). After that, `brace ops keypair` generates a *new* keypair, prints the private key **once to stdout** (it does **not** write `ops-private.key`), and appends the public half to `ops-authorized-keys`.
+`brace new` writes both files at scaffold time (the initial `dev` entry corresponds to the local `ops-private.key`). After that, `brace ops keypair` generates a new keypair and writes **both halves itself**: it creates `ops-private.key` (owner-only permissions, gitignored) and adds the public entry to `ops-authorized-keys`. It is safe to re-run: it **refuses to overwrite** an existing `ops-private.key` (delete it first to rotate), and the authorized entry is keyed by label — re-running with the same label *replaces* that line rather than appending an orphan. Different developers get different labels (`identity@host`), so they never clobber each other's entries.
 
 Common workflows:
 
-- **New developer joining an existing project:** run `brace ops keypair`, copy the printed private key into a new `ops-private.key` (format: comment line, private key, public key), commit the appended `ops-authorized-keys` line so peers accept the new operator.
-- **Check whether your local key is already authorized:** compare the public line in `ops-private.key` to entries in `ops-authorized-keys`. There is currently no `brace ops whoami` — `grep -F "$(sed -n '3p' ops-private.key)" ops-authorized-keys` is the manual check.
-- **Registering a coworker's existing public key:** there is no CLI for this today; append the line to `ops-authorized-keys` by hand.
-
-Do not run `brace ops keypair` to "verify" or "re-add" an existing key — it always generates a fresh pair and silently appends another authorized entry.
+- **New developer joining an existing project:** run `brace ops keypair` — it writes their `ops-private.key` and adds their labeled entry. Commit the updated `ops-authorized-keys` so servers accept the new operator.
+- **Rotating your key:** delete `ops-private.key`, re-run `brace ops keypair` (same label → the old authorized entry is replaced in place), commit and deploy `ops-authorized-keys`.
+- **Check whether your local key is already authorized:** there is currently no `brace ops whoami` — `grep -F "$(sed -n '3p' ops-private.key)" ops-authorized-keys` is the manual check.
+- **Registering a coworker's existing public key:** there is no CLI for this today; append the line to `ops-authorized-keys` by hand (raw base64 public key, optional `scope:read` marker, then the label).
 
 ### CLI commands
 

@@ -82,7 +82,7 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** none (docs); verify no section is lost (diff of section headings).
   - **Model: Fable 5 / Opus 4.8** — structure-sensitive; the dedup-merge needs judgment.
 
-- [ ] **H4: BRACE-AGENTS.md ops-keypair section is actively wrong — contradicts the shipped CLI** — `BRACE-AGENTS.md:785-799` vs `CliOps.java:25-90`
+- [x] **H4: BRACE-AGENTS.md ops-keypair section is actively wrong — contradicts the shipped CLI** — `BRACE-AGENTS.md:785-799` vs `CliOps.java:25-90`
   - The doc claims `brace ops keypair` "prints the private key once to stdout (it
     does **not** write `ops-private.key`)", tells users to hand-copy keys, and warns
     it "always generates a fresh pair and silently appends another authorized
