@@ -19,6 +19,7 @@ public class Request {
     private final String remoteAddr;
     private final TrustedProxies trustedProxies;
     private Storage storage;
+    private String rawQuery;
 
     public Request(String method, String path, Map<String, String> pathParams,
                    Map<String, String> queryParams, Map<String, String> headers,
@@ -118,6 +119,24 @@ public class Request {
         return queryParams.containsKey(name);
     }
 
+    /**
+     * All values of a query parameter, URL-decoded, in order of appearance — for
+     * {@code <select multiple>} / checkbox-group submissions like {@code ?tag=a&tag=b}.
+     * Returns an empty list when the parameter is absent. The single-value
+     * {@link #queryParam(String)} (last value wins) is unchanged.
+     */
+    public List<String> queryParams(String name) {
+        if (rawQuery == null) {
+            // No raw query string available (e.g. a hand-constructed Request in a unit
+            // test): fall back to the single-value map.
+            var single = queryParams.get(name);
+            return single != null ? List.of(single) : List.of();
+        }
+        // Mirror BraceHandler.parseQuery's split rules: a pair without '=' (or starting
+        // with '=') is a bare key with an empty value.
+        return valuesOf(rawQuery, name, true);
+    }
+
     // Form parameter accessors
 
     public String formParam(String name) {
@@ -130,6 +149,44 @@ public class Request {
 
     public boolean hasFormParam(String name) {
         return parseFormBody(body).containsKey(name);
+    }
+
+    /**
+     * All values of a form parameter, URL-decoded, in order of appearance in the
+     * {@code application/x-www-form-urlencoded} body — for {@code <select multiple>} /
+     * checkbox-group submissions like {@code tag=a&tag=b}. Returns an empty list when
+     * the parameter is absent. The single-value {@link #formParam(String)} (last value
+     * wins) is unchanged.
+     */
+    public List<String> formParams(String name) {
+        // Mirror parseFormBody's split rules: a pair without '=' is a bare key with an
+        // empty value; a leading '=' means an empty-string key.
+        return valuesOf(body, name, false);
+    }
+
+    /**
+     * Collect every value of {@code name} from an {@code &}-separated, URL-encoded pair
+     * string. {@code bareKeyOnLeadingEq} selects the edge-case rule for a pair starting
+     * with '=': {@code true} matches {@link BraceHandler}'s query parsing (whole pair is
+     * the key), {@code false} matches {@link #parseFormBody} (empty key, rest is value).
+     */
+    private static List<String> valuesOf(String raw, String name, boolean bareKeyOnLeadingEq) {
+        if (raw == null || raw.isEmpty()) return List.of();
+        var values = new java.util.ArrayList<String>();
+        for (var pair : raw.split("&")) {
+            var eq = pair.indexOf('=');
+            String key;
+            String value;
+            if (eq < 0 || (eq == 0 && bareKeyOnLeadingEq)) {
+                key = URLDecoder.decode(pair, StandardCharsets.UTF_8);
+                value = "";
+            } else {
+                key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
+                value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+            }
+            if (key.equals(name)) values.add(value);
+        }
+        return values.isEmpty() ? List.of() : List.copyOf(values);
     }
 
     // JSON request helpers
@@ -397,6 +454,11 @@ public class Request {
 
     void setStorage(Storage storage) {
         this.storage = storage;
+    }
+
+    /** Raw (still URL-encoded) query string, set by {@link BraceHandler}; backs {@link #queryParams(String)}. */
+    void setRawQuery(String rawQuery) {
+        this.rawQuery = rawQuery;
     }
 
     public Storage storage() {

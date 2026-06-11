@@ -162,8 +162,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
 
-            // Parse query parameters
-            Map<String, String> queryParams = parseQuery(jettyRequest.getHttpURI().getQuery());
+            // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
+            String rawQuery = jettyRequest.getHttpURI().getQuery();
+            Map<String, String> queryParams = parseQuery(rawQuery);
 
             // Extract headers into a case-insensitive map. HTTP header names are
             // case-insensitive (and arrive lowercased over HTTP/2), so lookups like
@@ -221,6 +222,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
             Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles, remoteAddr, trustedProxies);
+            braceRequest.setRawQuery(rawQuery);
             if (storage != null) {
                 braceRequest.setStorage(storage);
             }

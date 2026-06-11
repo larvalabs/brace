@@ -181,12 +181,14 @@ req.queryInt("page", 1)       // with default — returns the default on missing
 req.queryLong("offset")       // as long (throws NumberFormatException on bad input)
 req.queryLong("offset", 0)    // with default — returns the default on missing OR unparseable input
 req.hasQueryParam("filter")   // boolean
-req.queryParams()             // Map<String, String>
+req.queryParams()             // Map<String, String> (repeated keys: last value wins)
+req.queryParams("tag")        // List<String> of ALL values (?tag=a&tag=b), order preserved — multi-selects/checkbox groups
 
 // Form parameters (from POST body application/x-www-form-urlencoded)
 req.formParam("title")        // form param as String
 req.formInt("count")          // as int
 req.hasFormParam("optional")  // boolean
+req.formParams("tag")         // List<String> of ALL values of a repeated field, order preserved
 
 // Headers, body, and JSON
 req.header("Accept")          // header value or null (header names are case-insensitive)

@@ -356,6 +356,35 @@ boolean rated = !db.query(Rating.class, "talkId = ? AND attendeeId = ?", talkId,
 boolean rated = db.exists(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId);
 ```
 
+## New (optional): multi-value query/form params — `req.queryParams(name)` / `req.formParams(name)`
+
+The single-value maps behind `req.queryParam(name)` / `req.formParam(name)` are
+last-value-wins, so `<select multiple>` and checkbox-group submissions
+(`?tag=a&tag=b`, or the same shape in a form body) were unrepresentable without
+hand-parsing `req.body()`. Two additive accessors return ALL values of a repeated
+parameter as a `List<String>` (URL-decoded, order preserved, empty list when absent):
+
+```html
+<select name="tag" multiple>
+    <option>java</option>
+    <option>web</option>
+</select>
+```
+
+```java
+// Before: only the last selected value survived
+String last = req.formParam("tag");           // "web"
+
+// After: every selected value
+List<String> tags = req.formParams("tag");    // ["java", "web"]
+List<String> fromQuery = req.queryParams("tag"); // same for ?tag=java&tag=web
+```
+
+All existing single-value methods (and the no-arg `req.queryParams()` map) are
+unchanged — repeated keys still resolve last-value-wins there. `FormBinder` does not
+bind `List<String>` record components yet; read repeated fields through these
+accessors for now.
+
 ## New (optional): TestApp request builder, CSRF helpers, session variants, JSON assertions
 
 **Nothing to do** — purely additive; every existing `TestApp`/`TestResponse` method keeps

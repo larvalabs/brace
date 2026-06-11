@@ -531,11 +531,14 @@ expensive round**, exactly when the re-read corpus is largest).
     name; document/branch the reset. Costs surface as flaky-test debugging tokens.
     **Model: Sonnet 4.6.**
 
-- [ ] **L11: Multi-value form/query params are unrepresentable** — `BraceHandler.java:607-616`, `Request.java:323-337`, `FormBinder.java:10`
+- [x] **L11: Multi-value form/query params are unrepresentable** — `BraceHandler.java:607-616`, `Request.java:323-337`, `FormBinder.java:10`
   - Last-value-wins maps: `<select multiple>`/checkbox groups force hand-parsing
     `req.body()`. Fix (additive): `req.queryParams(name)`/`req.formParams(name)` →
     `List<String>`; later, `List<String>` components in FormBinder.
     **Model: Sonnet 4.6.**
+  - *Shipped the two `List<String>` accessors (re-parse the raw query string / form
+    body per call; single-value maps untouched). `List<String>` components in
+    FormBinder deliberately deferred to a later pass.*
 
 ## Considered and rejected
 
