@@ -194,7 +194,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
 - [x] **L1: No safe-redirect helper** — `Redirect.java:5-16`. Add `Redirect.toLocal(path)`
   (rejects absolute URLs and `//` protocol-relative) and document the
   `Redirect.to(req.queryParam("next"))` hazard. **Haiku 4.5**
-- [ ] **L2: `OpsDashboard.esc()` doesn't escape single quotes** — `OpsDashboard.java:621-624`,
+- [x] **L2: `OpsDashboard.esc()` doesn't escape single quotes** — `OpsDashboard.java:621-624`,
   used inside single-quoted `hx-headers` attributes. Add `'` → `&#39;`. **Haiku 4.5**
 - [x] **L3: HQL `?`-converter miscounts in dollar-quoted strings / quoted identifiers /
   E-strings** — `Database.java:265-319`. Developer-authored SQL only (correctness, not

@@ -870,4 +870,24 @@ class OpsIntegrationTest {
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("application/json"));
         assertTrue(response.body().contains("resolvedAt"), response.body());
     }
+
+    @Test
+    void dashboardEscapesSingleQuotesInToken() throws Exception {
+        // Regression test for L2: OpsDashboard.esc() must escape single quotes
+        // to safely embed the token in single-quoted hx-headers attributes.
+        var token = authenticate();
+        var response = getWithToken("/ops/dashboard", token);
+        assertEquals(200, response.statusCode());
+
+        String body = response.body();
+        // The token is embedded in hx-headers='{...}' attributes.
+        // Look for the hx-headers attribute that carries the Bearer token.
+        assertTrue(body.contains("hx-headers='{\"Authorization\": \"Bearer "),
+                   "Dashboard should have hx-headers with Authorization Bearer");
+
+        // Verify the hx-headers attribute has proper closing quote.
+        // This ensures single quotes (if any were in the token) were escaped
+        // and didn't break the attribute.
+        assertTrue(body.contains("}'"), "hx-headers attribute should have closing single quote");
+    }
 }

@@ -631,9 +631,17 @@ public class OpsDashboard {
           .append("</div><div class=\"detail\">").append(esc(detail)).append("</div></div>");
     }
 
+    /**
+     * Escape HTML entities for safe inclusion in HTML attributes and content.
+     * Escapes: &, <, >, ", and ' (for use in both double-quoted and single-quoted attributes).
+     */
     private static String esc(String s) {
         if (s == null) return "";
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
     }
 
     private static String str(Object o) {
