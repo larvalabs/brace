@@ -62,6 +62,7 @@ summary; this is the scan/jump table.
 | Scoped read-only ops keys | new-optional | none — keys without marker stay `control` | [§](#new-optional-scoped-read-only-ops-keys) |
 | Refreshed `CLAUDE.md` generator | new-optional | optional — regenerate and diff | [§](#new-optional-refreshed-claudemd-capability-index) |
 | `brace agents-md` doc refresh | new-optional | run after bumping `<brace.version>` | [§](#new-optional-brace-agents-md--refresh-brace-agentsmd-after-an-upgrade) |
+| `BRACE-OPS.md` ops reference split | new-optional | none — `brace agents-md` writes it; ops content moved out of `BRACE-AGENTS.md` | [§](#new-optional-brace-opsmd--ops-reference-split-out-of-brace-agentsmd) |
 | `/ops/errors` returns summaries | breaking | scripts reading `stackTrace` etc.: add `?full=true` or fetch `/ops/errors/{id}` | [§](#breaking-for-scripted-consumers-opserrors-now-returns-summaries) |
 | `/ops/status` compact snapshot | breaking | scripts reading `timeseries`/`profiling`: add `?include=`; exit code now real | [§](#breaking-for-scripted-consumers-opsstatus-is-now-a-compact-snapshot) |
 | Per-test H2 database | behavior change | suites relying on the shared DB: set an explicit URL | [§](#behavior-change-each-bracetest-gets-its-own-h2-database) |
