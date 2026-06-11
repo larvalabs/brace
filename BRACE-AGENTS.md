@@ -712,7 +712,7 @@ Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 
 ```java
 app.before("/api/*", RateLimiter.perIp(100, "1m"));
-app.before("/login", RateLimiter.perKey(req -> req.param("email"), 5, "15m"));
+app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
 ```
 
 **Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see Scaling below.

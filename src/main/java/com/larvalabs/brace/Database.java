@@ -81,7 +81,7 @@ public class Database {
      * Batch-fetch all rows of {@code type} where {@code field} is one of the given {@code values}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -161,7 +161,7 @@ public class Database {
      * Find the first row of {@code type} where {@code field} equals {@code value}, or {@code null}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -175,7 +175,7 @@ public class Database {
      * Find all rows of {@code type} where {@code field} equals {@code value}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -189,7 +189,7 @@ public class Database {
      * Count rows of {@code type} where {@code field} equals {@code value}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -203,7 +203,7 @@ public class Database {
      * Return {@code true} if any row of {@code type} has {@code field} equal to {@code value}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -218,7 +218,7 @@ public class Database {
      * Returns the number of rows deleted.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.

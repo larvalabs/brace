@@ -105,7 +105,7 @@ class RateLimiterTest {
      *
      * <p>A null key means "no identity established yet" (e.g., a GET to a login page before the
      * user has entered an email). Bucketing all such requests together would cause site-wide
-     * lockout — the documented login example {@code RateLimiter.perKey(req -> req.param("email"), …)}
+     * lockout — the documented login example {@code RateLimiter.perKey(req -> req.formParam("email"), …)}
      * would drain the "(none)" bucket on every unauthenticated GET and lock out the page.
      */
     @Test

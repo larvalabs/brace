@@ -338,7 +338,7 @@ app.before("/api", RateLimiter.perKey(
 
 // Custom key function
 app.before("/login", RateLimiter.perKey(
-    req -> req.param("username"),
+    req -> req.formParam("username"),
     5,
     "15m"
 ));

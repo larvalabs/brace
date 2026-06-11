@@ -373,11 +373,14 @@ expensive round**, exactly when the re-read corpus is largest).
 
 ## Low
 
-- [ ] **L1: Docs/javadoc reference a `req.param()` that doesn't exist** — `BRACE-AGENTS.md:675`, `RateLimiter.java:87`, 6 `Database.java` javadocs
+- [x] **L1: Docs/javadoc reference a `req.param()` that doesn't exist** — `BRACE-AGENTS.md:675`, `RateLimiter.java:87`, 6 `Database.java` javadocs
   - Copying the documented rate-limit example is a compile error. Fix: correct the 8
     references to `formParam`/`queryParam` (minimum), or add a unified
     `req.param(name)` with pathParam → queryParam → formParam precedence (token-
     efficient option; needs a precedence test). **Model: Haiku 4.5.**
+    *Fixed with option (a): the repo deliberately replaced a unified accessor with
+    source-specific ones ("eliminates ambiguity", Tier 1), so reintroducing
+    `req.param` would undo that decision. Historical docs left as-is.*
 
 - [ ] **L2: Defaulted numeric accessors throw on unparseable input** — `Request.java:61,83-86`
   - `queryInt("page", 1)` with `?page=abc` → NumberFormatException → 500. The
