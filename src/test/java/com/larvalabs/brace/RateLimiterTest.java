@@ -101,45 +101,48 @@ class RateLimiterTest {
     }
 
     /**
-     * Null key → "(none)" bucket: requests with a missing/null extractor value are counted
-     * together rather than silently bypassing the limiter.
+     * Null key → request is not rate-limited (intentional exemption).
+     *
+     * <p>A null key means "no identity established yet" (e.g., a GET to a login page before the
+     * user has entered an email). Bucketing all such requests together would cause site-wide
+     * lockout — the documented login example {@code RateLimiter.perKey(req -> req.param("email"), …)}
+     * would drain the "(none)" bucket on every unauthenticated GET and lock out the page.
      */
     @Test
-    void nullKeyIsBucketedAsNone() {
+    void nullKeyIsAllowed() {
         var limiter = RateLimiter.perKey(req -> req.header("X-Missing"), 2, "1m");
         var req = fakeRequest("10.0.0.4");
-        // First two succeed (the "(none)" bucket has limit 2)
-        assertNull(limiter.handle(req));
-        assertNull(limiter.handle(req));
-        // Third request hits the "(none)" bucket limit
-        var result = limiter.handle(req);
-        assertNotNull(result, "null-key requests should be bucketed and rate-limited together");
-        assertEquals(429, result.status());
+        // All requests pass — null key is exempted, no bucket is consumed.
+        for (int i = 0; i < 10; i++) {
+            assertNull(limiter.handle(req), "null-key request should be exempt from rate limiting");
+        }
     }
 
     /**
-     * Blank key (all whitespace) → "(none)" bucket, same as null.
+     * Blank key (all whitespace) → request is not rate-limited (same exemption as null).
      */
     @Test
-    void blankKeyIsBucketedAsNone() {
+    void blankKeyIsAllowed() {
         var limiter = RateLimiter.perKey(req -> "   ", 1, "1m");
         var req = fakeRequest("10.0.0.5");
-        assertNull(limiter.handle(req));
-        var result = limiter.handle(req);
-        assertNotNull(result, "blank-key requests should be bucketed and rate-limited");
-        assertEquals(429, result.status());
+        // All requests pass — blank key is treated like null.
+        for (int i = 0; i < 5; i++) {
+            assertNull(limiter.handle(req), "blank-key request should be exempt from rate limiting");
+        }
     }
 
     // ---- Key normalization (M7a) ----
 
     @Test
-    void normalizeKey_nullReturnedNone() {
-        assertEquals("(none)", RateLimiter.normalizeKey(null));
+    void normalizeKey_nullReturnsNull() {
+        // null/blank keys are exempted by check() before normalizeKey() is called;
+        // normalizeKey handles them defensively by returning null.
+        assertNull(RateLimiter.normalizeKey(null));
     }
 
     @Test
-    void normalizeKey_blankReturnedNone() {
-        assertEquals("(none)", RateLimiter.normalizeKey("   "));
+    void normalizeKey_blankReturnsNull() {
+        assertNull(RateLimiter.normalizeKey("   "));
     }
 
     @Test

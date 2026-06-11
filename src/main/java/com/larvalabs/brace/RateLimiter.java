@@ -70,6 +70,23 @@ public class RateLimiter {
         return limiter::check;
     }
 
+    /**
+     * Rate-limit requests by an arbitrary key extracted from the request.
+     *
+     * <p>If the key extractor returns {@code null} or a blank string, the request is
+     * <strong>not</strong> rate-limited and passes through immediately. This is an intentional
+     * escape hatch: a {@code null} key means "no identity established yet" (e.g., a GET to
+     * the login page before the user has typed their email), and bucketing those requests
+     * together with a shared limit would cause site-wide lockout of the guarded endpoint.
+     *
+     * <p>Example: rate-limit login attempts by email address. GET requests to the login page
+     * (which have no email parameter) return {@code null} from the extractor and are exempted;
+     * only POST submissions with a concrete email value are counted.
+     *
+     * <pre>{@code
+     * app.before("/login", RateLimiter.perKey(req -> req.param("email"), 5, "15m"));
+     * }</pre>
+     */
     public static Middleware.Before perKey(Function<Request, String> keyExtractor, int maxRequests, String duration) {
         var limiter = new RateLimiter(maxRequests, Cache.parseTtl(duration), keyExtractor,
             "perKey(" + maxRequests + "/" + duration + ")");
@@ -92,10 +109,17 @@ public class RateLimiter {
     Result check(Request req) {
         var rawKey = keyExtractor.apply(req);
 
+        // null or blank key → request is not rate-limited (intentional exemption).
+        // See perKey() Javadoc for the rationale: a null key means "no identity established
+        // yet" (e.g., a GET to the login page before the email field is submitted). Bucketing
+        // all such requests together would cause site-wide lockout of the endpoint.
+        if (rawKey == null || rawKey.isBlank()) {
+            return null;
+        }
+
         // Normalize the key before it reaches either backend:
-        //   - null/blank → single "(none)" bucket rather than silently bypassing the limiter.
-        //   - keys longer than MAX_KEY_LENGTH → SHA-256 hex digest (fixed 64 chars) to prevent
-        //     DoS via unbounded brace_counters rows / local map entries with huge key strings.
+        //   keys longer than MAX_KEY_LENGTH → SHA-256 hex digest (fixed 64 chars) to prevent
+        //   DoS via unbounded brace_counters rows / local map entries with huge key strings.
         var key = normalizeKey(rawKey);
 
         var counters = sharedCounters;
@@ -116,13 +140,12 @@ public class RateLimiter {
     }
 
     /**
-     * Normalize a raw key value extracted from the request.
+     * Normalize a non-null, non-blank raw key value extracted from the request.
      *
      * <ul>
-     *   <li>null or blank → {@code "(none)"} — groups unauthenticated / header-missing requests
-     *       into one bucket so they still consume from a shared limit rather than bypassing it.
      *   <li>length &gt; {@link #MAX_KEY_LENGTH} → SHA-256 hex digest — caps storage at 64 chars,
      *       preventing DoS via arbitrarily long user-controlled strings (see field javadoc).
+     *   <li>null or blank keys are handled by the caller ({@link #check}) before this is called.
      * </ul>
      *
      * Applied before any prefix/window-slot decoration so the cap holds in both the local and
@@ -130,7 +153,8 @@ public class RateLimiter {
      */
     static String normalizeKey(String rawKey) {
         if (rawKey == null || rawKey.isBlank()) {
-            return "(none)";
+            // Callers should have exempted null/blank keys already; treat defensively the same way.
+            return null;
         }
         if (rawKey.length() <= MAX_KEY_LENGTH) {
             return rawKey;
