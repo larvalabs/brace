@@ -55,6 +55,7 @@ public class Brace {
     private final List<Notifier> regressionNotifiers = new ArrayList<>();
 
     public static Brace app() {
+        JulLogging.init();
         return new Brace();
     }
 

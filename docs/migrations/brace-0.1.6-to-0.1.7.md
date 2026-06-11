@@ -1035,6 +1035,96 @@ it — you may see raw output in edge cases, never less.
 pass `--verbose` to keep the old format. Prefer checking the **exit code** over parsing
 output.
 
+## Behavior change: third-party startup log noise is quieted by default
+
+**Who is affected:** everyone, positively — startup (and every `brace dev` restart) drops
+from ~80 lines of third-party logging to the Brace banner plus genuine warnings. Action is
+only needed if you *relied* on the Hibernate/Flyway INFO chatter (use the override below)
+or if your app ships its own slf4j provider (see the two-providers note).
+
+**What changed.** Through 0.1.6, Brace shipped no slf4j provider, so Jetty printed the
+`No SLF4J providers were found` warning (and its own logs went nowhere), while Hibernate
+(via jboss-logging) and Flyway fell back to java.util.logging, whose default console
+handler prints **two lines per record** on stderr. A real 0.1.6 boot (H2, empty app
+schema), captured verbatim — 80+ lines of this on stderr:
+
+```
+Jun 11, 2026 5:02:38 PM org.flywaydb.core.FlywayExecutor execute
+INFO: Database: jdbc:h2:mem:scratch (H2 2.3)
+Jun 11, 2026 5:02:38 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "PUBLIC" to version "1 - brace scheduled jobs"
+...30 more two-line records...
+Jun 11, 2026 5:02:38 PM org.hibernate.Version logVersion
+INFO: HHH000412: Hibernate ORM core version 7.0.10.Final
+SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+...
+```
+
+In 0.1.7, Brace ships `org.slf4j:slf4j-jdk14` (so every library funnels into the one JUL
+sink — the no-provider warning is gone) and configures JUL once, at `Brace.app()` or the
+first `new DatabaseFactory(...)`, whichever runs first: single-line format, and level
+`WARNING` for `org.hibernate`, `org.flywaydb`, `com.zaxxer.hikari`, and
+`org.eclipse.jetty`. The same boot now prints, in full:
+
+```
+17:06:15 WARN org.flywaydb.core.internal.command.DbValidate No migrations found. Are your locations set up correctly?
+17:06:15 WARN org.hibernate.orm.deprecation HHH90000025: H2Dialect does not need to be specified explicitly using 'hibernate.dialect' (remove the property setting and it will be selected by default)
+```
+
+plus the unchanged Brace banner and route list on stdout. WARN/ERROR from those libraries
+still print (as above); only INFO-and-below is filtered. The framework's own `mvn test`
+output benefits the same way. (`org.eclipse.jetty` is quieted too because the new provider
+would otherwise *surface* Jetty INFO lines that the NOP logger used to swallow.)
+
+**Restoring the verbose output.** The override is a **system property** (not an
+`application.conf` key — your config file is loaded by *your* `main`, after the noisy
+libraries have already booted): `-Dlog.level.<logger>=<level>`, where level is an slf4j
+name (`ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`) or a JUL name (`SEVERE`, `WARNING`,
+`FINE`, …), plus `OFF`/`ALL`. It works for any logger, not just the four defaults:
+
+```bash
+# before/0.1.6-style verbosity for migrations and the ORM:
+java -Dlog.level.org.flywaydb=INFO -Dlog.level.org.hibernate=INFO -jar app.jar
+
+# or debug a single subsystem:
+java -Dlog.level.com.zaxxer.hikari=DEBUG -jar app.jar
+```
+
+Apps that configure JUL themselves (`-Djava.util.logging.config.file` or
+`-Djava.util.logging.config.class`) are detected and left completely alone.
+
+**If your app already ships an slf4j provider** (logback, slf4j-simple, log4j-slf4j2-impl,
+…), the classpath now contains two. This is harmless but noisy and was verified directly:
+slf4j 2.x prints
+
+```
+SLF4J(W): Class path contains multiple SLF4J providers.
+SLF4J(W): Found provider [org.slf4j.simple.SimpleServiceProvider@...]
+SLF4J(W): Found provider [org.slf4j.jul.JULServiceProvider@...]
+SLF4J(I): Actual provider is of type [org.slf4j.simple.SimpleServiceProvider@...]
+```
+
+and binds **whichever provider it finds first on the classpath** — if that's yours, your
+logging config wins and Brace's JUL quieting simply doesn't apply to slf4j-routed logs
+(you'll get your provider's verbosity back, e.g. Flyway INFO via logback). To keep your
+provider *and* silence the warning, exclude Brace's:
+
+```xml
+<dependency>
+    <groupId>com.larvalabs</groupId>
+    <artifactId>brace</artifactId>
+    <version>0.1.7</version>
+    <exclusions>
+        <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-jdk14</artifactId>
+        </exclusion>
+    </exclusions>
+</dependency>
+```
+
 ## Request/response hardening fixes
 
 These are bug fixes and small capability additions. None require code changes; all are

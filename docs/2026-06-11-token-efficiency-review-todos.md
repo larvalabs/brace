@@ -390,7 +390,7 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** update `tests/cli/` expectations.
   - **Model: Haiku 4.5.**
 
-- [ ] **M13: Startup/restart log noise from third-party logging is unmanaged** — `pom.xml` (no slf4j provider), `Brace.java:773-794`
+- [x] **M13: Startup/restart log noise from third-party logging is unmanaged** *(verified by booting a real app first: 80+ two-line JUL records on stderr plus the SLF4J no-provider warning; after the fix the same boot prints 2 single-line WARNs. Deviations: (1) `org.eclipse.jetty` added to the quiet list — shipping `slf4j-jdk14` would otherwise surface Jetty INFO lines the NOP logger used to swallow; (2) override is the system property `-Dlog.level.<logger>=<level>`, not a Config key — apps load `Config` in their own `main` and the noisy libs boot inside `new DatabaseFactory(...)` before any Brace API ever sees config; (3) the boot test asserts via a recording JUL handler on the root logger instead of swapping `System.err`, because `ConsoleHandler` binds the real stderr at LogManager init, long before any test runs; (4) apps shipping `-Djava.util.logging.config.file/.class` are detected and left alone)* — `pom.xml` (no slf4j provider), `Brace.java:773-794`
   - No slf4j binding → Jetty prints the "No SLF4J providers" warning; Hibernate/
     Flyway fall back to JUL's two-line-per-record console handler (banners, dialect
     info, migration progress) — replayed on every `brace dev` restart the agent

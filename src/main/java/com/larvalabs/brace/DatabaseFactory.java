@@ -30,6 +30,9 @@ public class DatabaseFactory {
     }
 
     public DatabaseFactory(String url, String user, String password, List<Class<?>> entityClasses, int poolSize) {
+        // Apps typically construct DatabaseFactory before Brace.app(), so quiet third-party
+        // startup logging here too — before Flyway/Hibernate/HikariCP emit anything.
+        JulLogging.init();
         var cfg = parseDbConfig(url, user, password);
         this.postgres = cfg.url() != null && cfg.url().startsWith("jdbc:postgresql:");
         this.jdbcUrl = cfg.url();
