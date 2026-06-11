@@ -10,7 +10,7 @@ Current web frameworks were designed for human developers. They avoid boilerplat
 
 Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
 
-Brace is both simple and complete. ~20 core types, ~4,000 lines of framework code, 410 tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+Brace is both simple and complete. A compact set of core types, ~15k lines of framework code (CLI included), 800+ tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
 
 ### AI Token Efficiency
 
@@ -503,7 +503,7 @@ session.secret=change-me
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~4,000 lines of framework code. 409 tests.**
+**~15k lines of framework code (CLI included). 800+ tests.**
 
 ## Security
 

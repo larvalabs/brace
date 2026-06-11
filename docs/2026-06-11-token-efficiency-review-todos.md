@@ -349,7 +349,7 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** boot test asserting no INFO-level third-party lines on stdout.
   - **Model: Sonnet 4.6.**
 
-- [ ] **M14: AGENTS.md / README carry stale size+test counts and an incomplete core-types table** — `AGENTS.md`, `README.md:13,502`
+- [x] **M14: AGENTS.md / README carry stale size+test counts and an incomplete core-types table** *(completed the table rather than trimming; also de-precisioned README's "~20 core types" — the table now has ~40 rows)* — `AGENTS.md`, `README.md:13,502`
   - "~4,000 lines" vs 15,275 actual; "410 tests" and "409 tests" (mutually
     inconsistent in the same file) vs 822 `@Test` methods. Core-types table omits
     ~17 shipped public types (`Cache`, `Storage`, `Http`, `RateLimiter`, `Assets`,

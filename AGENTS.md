@@ -7,7 +7,7 @@ Brace is a full-stack Java web framework. Requires JDK 21+; JDK 25 LTS recommend
 ## Project Structure
 
 ```
-src/main/java/com/larvalabs/brace/     # Framework source (~4,000 lines)
+src/main/java/com/larvalabs/brace/     # Framework source (~15k lines including the CLI)
 src/test/java/com/larvalabs/brace/     # Tests (run with `mvn test`)
 src/test/resources/          # Test templates, migrations
 src/assembly/distribution.xml # Assembly descriptor for the brace CLI zip
@@ -55,6 +55,20 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Config` | File + env var config with mode prefixes |
 | `Passwords` | bcrypt hash/check |
 | `Csrf` | CSRF token generation and validation |
+| `Cache` | Cache facade (stats, TTL, serialization, page cache) over a `CacheBackend` |
+| `CacheBackend` | Storage SPI behind `Cache` — in-process default or shared Postgres |
+| `Storage` | S3-compatible object storage client (AWS Sig V4, no SDK) |
+| `Http` | Fluent outbound HTTP client over `java.net.http` |
+| `RateLimiter` | Per-IP / per-key rate-limiting middleware |
+| `Assets` | Asset URL fingerprinting for cache busting |
+| `Url` | URL generation from route patterns (`Url.to("/users/{id}", 42)`) |
+| `WsContext` | WebSocket session wrapper (send, rooms, broadcast) |
+| `UploadedFile` | Multipart upload (filename, content type, bytes) |
+| `Notifier` | Regression notification hook — `LogNotifier`, `WebhookNotifier`, `MailerNotifier` |
+| `RegressionTracker` | Tracks new error kinds per deploy, backs `/ops/regressions` |
+| `ErrorStore` | Persists exception data to the `ops_errors` table |
+| `OpsAudit` | Logs authenticated ops-endpoint access as `ops.access` events |
+| `OpsKeys` | Ed25519 keygen, signing, verification, authorized-keys parsing |
 | `TestApp` | In-process test harness |
 
 ### Handler Interfaces
