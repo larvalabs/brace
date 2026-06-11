@@ -194,7 +194,7 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** missing id → 404 end-to-end.
   - **Model: Haiku 4.5.**
 
-- [ ] **M3: Hand-built `LinkedHashMap` response shapes — add `Json.obj(...)` + bless records** — benchmark: 16 `LinkedHashMap` builds ≈ 120 lines
+- [x] **M3: Hand-built `LinkedHashMap` response shapes — add `Json.obj(...)` + bless records** — benchmark: 16 `LinkedHashMap` builds ≈ 120 lines
   - Worst ratio: a single-key response costs 3 lines (`new LinkedHashMap` / `.put` /
     `Json.of`). Agents avoid `Map.of` for valid reasons (null values rejected,
     unstable order).

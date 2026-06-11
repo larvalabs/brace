@@ -219,7 +219,13 @@ View.render("emails/welcome", "user", user)     // render to String (for emails)
 // JSON
 Result.json(object)                         // 200 JSON
 Result.json(object, 201)                    // JSON with status
+Result.json(Json.obj("count", n, "avg", avg)) // one-off shape: ordered, null-tolerant pairs
 ```
+
+For one-off response shapes use `Json.obj(k1, v1, k2, v2, …)` — never a
+LinkedHashMap-and-put block (`Map.of` rejects nulls and scrambles key order). For named
+or reused shapes, prefer a 1-line local record: it self-documents the schema and
+serializes in declaration order.
 
 **⚠️ JSON and JPA entities:** Never return a JPA entity from `Json.of()` — all public fields are serialized, leaking
 `passwordHash`, API keys, or any other sensitive column. Return a record or DTO instead:

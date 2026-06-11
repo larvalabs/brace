@@ -127,6 +127,27 @@ both — keep the in-process default for hot read-through pages and a separate
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
 
+## New (optional): `Json.obj` — one-line ad-hoc JSON shapes
+
+**Nothing to do** — purely additive. For one-off response shapes, `Json.obj` replaces
+the LinkedHashMap-and-put block. It preserves key order and allows `null` values
+(the two reasons `Map.of` doesn't work for JSON responses).
+
+**Before (all versions, still works):**
+
+```java
+var response = new LinkedHashMap<String, Object>();
+response.put("talkId", id);
+response.put("averageRating", avg);   // may be null — Map.of would throw
+return Json.of(response);
+```
+
+**After (0.1.7+):**
+
+```java
+return Json.of(Json.obj("talkId", id, "averageRating", avg));
+```
+
 ## New (optional): `req.jsonForm` — declarative validation for JSON bodies
 
 **Nothing to do** — purely additive. The `@Required`/`@Min`/`@Email` annotation

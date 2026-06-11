@@ -38,6 +38,29 @@ public class Json extends Result {
     }
 
     /**
+     * Build an insertion-ordered map for one-off JSON response shapes:
+     * {@code Json.obj("talkId", id, "averageRating", avg)} — one line instead of a
+     * LinkedHashMap-and-put block. Unlike {@code Map.of}, preserves key order and allows
+     * {@code null} values ({@code "averageRating": null} is often required output).
+     * For named or reused shapes, prefer a local record — it self-documents the schema.
+     */
+    public static java.util.Map<String, Object> obj(Object... keysAndValues) {
+        if (keysAndValues.length % 2 != 0) {
+            throw new IllegalArgumentException(
+                "Json.obj takes key/value pairs — got " + keysAndValues.length + " arguments");
+        }
+        var map = new java.util.LinkedHashMap<String, Object>();
+        for (int i = 0; i < keysAndValues.length; i += 2) {
+            if (!(keysAndValues[i] instanceof String key)) {
+                throw new IllegalArgumentException(
+                    "Json.obj key at position " + i + " is not a String: " + keysAndValues[i]);
+            }
+            map.put(key, keysAndValues[i + 1]);
+        }
+        return map;
+    }
+
+    /**
      * Check if the value or its first element (if a collection) is a JPA entity, and warn once
      * per class if so. This helps catch the common mistake of returning an entity (with public
      * fields like passwordHash) instead of a DTO.
