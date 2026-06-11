@@ -284,7 +284,7 @@ expensive round**, exactly when the re-read corpus is largest).
     `docker build` (or at least `mvn package` + `java -jar`) works.
   - **Model: Sonnet 4.6.**
 
-- [ ] **M9: `app.generateClaudeMd()` omissions and stale facts** — `ClaudeMdGenerator.java`
+- [x] **M9: `app.generateClaudeMd()` omissions and stale facts** — `ClaudeMdGenerator.java`
   - Omits: the entire `Http` client (largest gap — agents reach for raw
     `HttpClient`), `Assets.url()` fingerprinting (seed item), `Url.to()`,
     `Log.debug/info/error` (shows only `Log.event`), `Redirect.toLocal`,

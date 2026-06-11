@@ -317,6 +317,37 @@ fingerprint), and every authenticated ops request is logged as a structured
 intended use is handing an autonomous agent a key that can observe production but
 cannot act on it. Details in `BRACE-AGENTS.md` → "Token scopes (read-only keys)".
 
+## New (optional): refreshed `CLAUDE.md` capability index
+
+**Nothing breaks if you skip this** — but your project's `CLAUDE.md` is a snapshot
+written at `brace new` time and does not update on upgrade, so it goes stale silently.
+0.1.7's generator fixes errors and fills the largest gaps in the emitted file:
+
+- **New capability entries:** the `Http` client (`Http.get(url).fetchJson(Class)`,
+  `.bearer(token)`, `.bodyJson(obj)` — previously absent entirely, which sent agents
+  to raw `java.net.http`), `Assets.url("/path")` content-hash fingerprinting,
+  `Url.to("/users/{id}", 42)`, `Log.debug/info/error` levels (previously only
+  `Log.event` was shown), `Redirect.toLocal(path)` for user-derived redirect targets.
+- **This release's API additions reflected:** `db.findOr404`/`db.queryOneOr404`,
+  `req.jsonForm(Class)`, `Json.obj(...)`, and the typed read-only route methods
+  (`app.getRead(...)`/`getReadFull`) as the canonical routing style.
+- **Stale facts fixed:** the repo link now points at `github.com/larvalabs/brace`
+  (was a dead `matth` URL); the CSRF line now lists PATCH alongside POST/PUT/DELETE.
+- **Ops sections merged:** the two overlapping ops sections are now one, with a
+  `brace check` row (the documented first move for production health) and the
+  previously missing `/ops/logs`, `/ops/cache`, and `/ops/regressions` endpoint rows.
+
+To refresh, re-run the generator and review the diff (it overwrites the file, so
+re-apply any project-specific edits — e.g. your filled-in **Deploy** section):
+
+```java
+// anywhere you have the app builder, e.g. a one-off main or jshell:
+app.generateClaudeMd("myapp", java.nio.file.Path.of("CLAUDE.md"));
+```
+
+Tip: `git diff CLAUDE.md` afterwards makes it easy to restore hand-written sections
+while keeping the refreshed capability index.
+
 ## Request/response hardening fixes
 
 These are bug fixes and small capability additions. None require code changes; all are
