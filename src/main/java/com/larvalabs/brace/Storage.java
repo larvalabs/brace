@@ -109,10 +109,8 @@ public class Storage {
     public String put(String key, byte[] data, String contentType) {
         try {
             var now = Instant.now();
-            var amzDate = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
-                    .withZone(ZoneOffset.UTC).format(now);
-            var dateStamp = DateTimeFormatter.ofPattern("yyyyMMdd")
-                    .withZone(ZoneOffset.UTC).format(now);
+            var amzDate = AMZ_DATE_FORMAT.format(now);
+            var dateStamp = DATE_STAMP_FORMAT.format(now);
 
             var payloadHash = sha256Hex(data);
             var auth = buildAuthHeader("PUT", key, contentType, payloadHash, amzDate, dateStamp);
@@ -195,10 +193,8 @@ public class Storage {
     public void delete(String key) {
         try {
             var now = Instant.now();
-            var amzDate = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
-                    .withZone(ZoneOffset.UTC).format(now);
-            var dateStamp = DateTimeFormatter.ofPattern("yyyyMMdd")
-                    .withZone(ZoneOffset.UTC).format(now);
+            var amzDate = AMZ_DATE_FORMAT.format(now);
+            var dateStamp = DATE_STAMP_FORMAT.format(now);
 
             var payloadHash = sha256Hex(new byte[0]);
             var auth = buildAuthHeader("DELETE", key, null, payloadHash, amzDate, dateStamp);
@@ -255,8 +251,7 @@ public class Storage {
             var stringToSign = algorithm + "\n" + amzDate + "\n" + credentialScope + "\n"
                     + sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
 
-            var signingKey = getSignatureKey(secretKey, dateStamp, region, "s3");
-            var signature = bytesToHex(hmacSha256(signingKey, stringToSign));
+            var signature = bytesToHex(hmacSha256(signingKey(dateStamp), stringToSign));
 
             return algorithm + " Credential=" + accessKeyId + "/" + credentialScope
                     + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature;
@@ -266,6 +261,31 @@ public class Storage {
     }
 
     // --- Internal helpers ---
+
+    // DateTimeFormatter is immutable and thread-safe; building one per put/delete was waste.
+    private static final DateTimeFormatter AMZ_DATE_FORMAT =
+        DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter DATE_STAMP_FORMAT =
+        DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
+
+    private static final java.util.HexFormat HEX = java.util.HexFormat.of();
+
+    // SigV4 signing keys depend only on (secret, dateStamp, region, service), all fixed per
+    // instance except dateStamp, which changes once per UTC day — cache the derived key per
+    // day instead of re-running the 4-step HMAC chain on every request. Benign race: two
+    // threads may derive the same key concurrently and one wins the volatile swap.
+    private record DayKey(String dateStamp, byte[] key) {}
+    private volatile DayKey signingKeyCache;
+
+    private byte[] signingKey(String dateStamp) {
+        DayKey cached = signingKeyCache;
+        if (cached != null && cached.dateStamp().equals(dateStamp)) {
+            return cached.key();
+        }
+        byte[] key = getSignatureKey(secretKey, dateStamp, region, "s3");
+        signingKeyCache = new DayKey(dateStamp, key);
+        return key;
+    }
 
     private String buildUploadUrl(String key) {
         var encoded = uriEncodePath(key);
@@ -320,11 +340,7 @@ public class Storage {
     }
 
     static String bytesToHex(byte[] bytes) {
-        var sb = new StringBuilder(bytes.length * 2);
-        for (var b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
+        return HEX.formatHex(bytes);
     }
 
     /**

@@ -96,11 +96,8 @@ public class Assets {
                 while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
             }
             var digest = md.digest();
-            var sb = new StringBuilder(8);
-            for (int i = 0; i < 4; i++) {
-                sb.append(String.format("%02x", digest[i] & 0xff));
-            }
-            return sb.toString();
+            // First 4 bytes as lowercase hex, same output as the old %02x loop.
+            return java.util.HexFormat.of().formatHex(digest, 0, 4);
         } catch (NoSuchAlgorithmException e) {
             throw new IOException(e);
         }
