@@ -35,6 +35,11 @@ step before recompiling. Each guide lists every breaking change with before/afte
 
 If you skip versions, read every guide between the old and new version in order.
 
+After bumping `<brace.version>`, run `brace agents-md` to refresh this file. It is
+written once at `brace new` time and does not update itself, so without the refresh it
+silently documents the old version's API. (`brace agents-md --stdout` prints instead of
+overwriting; requires a 0.1.7+ toolchain.)
+
 ## Build & Run
 
 ```bash
@@ -46,6 +51,7 @@ brace test                                      # run all tests (concise when pi
 brace test app.HomeControllerTest               # run one test class
 brace dev                                       # run with auto-restart on file changes
 brace run                                       # run without watching
+brace agents-md                                 # refresh this file from the pinned framework version (--stdout to print instead)
 ```
 
 ## App Setup

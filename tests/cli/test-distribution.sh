@@ -62,6 +62,18 @@ cd "$WORK/testapp"
 [[ -f target/classes/app/App.class ]] || fail "App.class not produced"
 pass "brace compile succeeded"
 
+step "Running brace agents-md"
+[[ -f BRACE-AGENTS.md ]] || fail "brace new did not write BRACE-AGENTS.md"
+echo "stale copy" > BRACE-AGENTS.md
+"$BRACE_BIN" agents-md > "$WORK/agentsmd.out" 2>&1 || {
+    cat "$WORK/agentsmd.out"
+    fail "brace agents-md failed"
+}
+grep -q "Brace Framework Reference" BRACE-AGENTS.md || fail "agents-md did not rewrite BRACE-AGENTS.md from the jar"
+grep -q "stale copy" BRACE-AGENTS.md && fail "agents-md left the stale copy in place"
+"$BRACE_BIN" agents-md --stdout 2>/dev/null | grep -q "Brace Framework Reference" || fail "agents-md --stdout missing doc content"
+pass "brace agents-md refreshed BRACE-AGENTS.md"
+
 step "Running brace version (project-aware)"
 # Inside a project, version reports both the launcher and the project's pin.
 "$BRACE_BIN" version > "$WORK/version.out" 2>&1 || fail "brace version failed"

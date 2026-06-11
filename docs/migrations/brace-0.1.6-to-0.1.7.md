@@ -609,6 +609,26 @@ app.generateClaudeMd("myapp", java.nio.file.Path.of("CLAUDE.md"));
 Tip: `git diff CLAUDE.md` afterwards makes it easy to restore hand-written sections
 while keeping the refreshed capability index.
 
+## New (optional): `brace agents-md` — refresh `BRACE-AGENTS.md` after an upgrade
+
+**Nothing breaks if you skip this** — but `BRACE-AGENTS.md` is written once at
+`brace new` time and never updates itself, so after bumping `<brace.version>` your
+project's API reference silently describes the *old* version. From 0.1.7 the upgrade
+flow has a final step:
+
+```bash
+# 1. bump <brace.version> in pom.xml
+# 2. read the migration guide(s) for the version step — like this one
+# 3. refresh the project's framework docs to match the new pin:
+brace agents-md
+```
+
+The command resolves the project's pinned toolchain (same mechanism as
+`brace compile`/`run`), extracts the `BRACE-AGENTS.md` packaged inside that version's
+framework jar, and overwrites the project copy. `brace agents-md --stdout` prints the
+doc instead of writing it. Requires a 0.1.7+ pin: pre-0.1.7 framework jars don't carry
+the command (or the packaged doc), and you'll get a friendly error saying so.
+
 ## Breaking for scripted consumers: `/ops/errors` now returns summaries
 
 **Who is affected:** anything that parses the JSON from `GET /ops/errors` or

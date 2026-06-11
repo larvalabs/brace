@@ -343,7 +343,12 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** `ClaudeMdGeneratorTest` asserting presence of the new entries.
   - **Model: Sonnet 4.6.**
 
-- [ ] **M10: `brace agents-md` — version-matched agent docs refresh** — `pom.xml:205-212`, `ProjectGenerator.java:265-268`, `src/assembly/distribution.xml`
+- [x] **M10: `brace agents-md` — version-matched agent docs refresh** — `pom.xml:205-212`, `ProjectGenerator.java:265-268`, `src/assembly/distribution.xml`
+  *(Done: new `CliAgentsMd` extracts `/brace/BRACE-AGENTS.md` from the brace jar in the
+  launcher-resolved toolchain lib dir — classpath fallback when running from
+  target/classes during framework dev — overwrites the project copy; `--stdout` prints;
+  friendly errors for not-in-project and pre-0.1.7 jars. Dist zip also ships the file at
+  the zip root. Unit tests build jars in-test; e2e step added to test-distribution.sh.)*
   - More is shipped than the seed assumed: BRACE-AGENTS.md is packaged in the jar at
     `/brace/BRACE-AGENTS.md` and written into every `brace new` project. The gap is
     **post-upgrade refresh**: after bumping `<brace.version>` the project copy goes

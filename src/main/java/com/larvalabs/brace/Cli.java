@@ -73,6 +73,8 @@ public class Cli {
             case "dev"     -> requireSrc(cwd, () -> BuildCommands.dev(cwd));
             case "test"    -> requireSrc(cwd, () -> BuildCommands.test(cwd, args));
             case "deps"    -> requireSrc(cwd, () -> BuildCommands.deps(cwd));
+            // No requireSrc here: --stdout works anywhere; the write path checks itself.
+            case "agents-md" -> CliAgentsMd.run(cwd, args);
             case "init" -> initCommand(cwd, args);
             case "ops" -> opsCommand(cwd, args);
             case "errors"  -> requireProject(cwd, () -> CliCommands.errors(cwd, args));
@@ -158,6 +160,7 @@ public class Cli {
         System.out.println("  brace dev                   Compile, run, and watch for changes");
         System.out.println("  brace test [class]          Run tests (concise output when piped; --verbose for full, --quiet to force concise)");
         System.out.println("  brace deps                  Copy dependencies from pom.xml into ./lib/");
+        System.out.println("  brace agents-md             Refresh BRACE-AGENTS.md from the pinned framework version (--stdout to print)");
         System.out.println();
         System.out.println("Project commands (run inside a project):");
         System.out.println("  brace init                  Scaffold .brace + .brace.local and run readiness checks");

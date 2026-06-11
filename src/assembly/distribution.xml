@@ -27,6 +27,17 @@
                 <include>brace-*.md</include>
             </includes>
         </fileSet>
+
+        <!-- Agent-facing framework reference — also packaged inside the brace jar at
+             /brace/BRACE-AGENTS.md (which `brace agents-md` extracts); shipped here too
+             so the doc is browsable without opening the jar. -->
+        <fileSet>
+            <directory>${project.basedir}</directory>
+            <outputDirectory></outputDirectory>
+            <includes>
+                <include>BRACE-AGENTS.md</include>
+            </includes>
+        </fileSet>
     </fileSets>
 
     <dependencySets>

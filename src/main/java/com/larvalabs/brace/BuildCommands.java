@@ -489,8 +489,10 @@ final class BuildCommands {
      * The directory holding the framework jars. Set by the launcher via
      * {@code -Dbrace.home}; falls back to the directory of the running jar so
      * that {@code java -cp brace.jar Cli run} works without the launcher.
+     * Package-visible: {@link CliAgentsMd} extracts the packaged BRACE-AGENTS.md
+     * from the brace jar found here.
      */
-    private static Path frameworkLibDir() {
+    static Path frameworkLibDir() {
         String home = System.getProperty("brace.home");
         if (home != null && !home.isBlank()) return Path.of(home, "lib");
         try {
