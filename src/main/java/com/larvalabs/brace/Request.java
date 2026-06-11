@@ -200,7 +200,8 @@ public class Request {
             // as concatenated by Jetty (which joins multi-occurrence headers with ", ") is available.
             var forwarded = header("X-Forwarded-For");
             if (forwarded != null && !forwarded.isEmpty()) {
-                return rightmostUntrusted(forwarded.split(","));
+                var result = rightmostUntrusted(forwarded.split(","));
+                if (result != null) return result;
             }
 
             // Check Forwarded header (RFC 7239)
@@ -219,8 +220,13 @@ public class Request {
      * Rightmost-untrusted walk: given an ordered array of IP entries (left = client-appended,
      * right = most-recently-appended by a trusted proxy), walk from the right, skip any entry
      * whose address is trusted, and return the first untrusted one. If every entry is trusted
-     * (fully internal infrastructure chain), return the leftmost to preserve the original
-     * client address.
+     * (fully internal infrastructure chain), return the leftmost non-blank entry to preserve
+     * the original client address.
+     *
+     * <p>Blank/whitespace-only entries are skipped in both directions. If the array is empty or
+     * contains only blank entries, {@code null} is returned so callers fall back to the socket
+     * remote address — this prevents returning an empty string and prevents an
+     * {@link ArrayIndexOutOfBoundsException} on a header value of exactly {@code ","}.
      *
      * <p>Port suffixes are stripped before trust evaluation:
      * <ul>
@@ -230,14 +236,24 @@ public class Request {
      * </ul>
      */
     private String rightmostUntrusted(String[] entries) {
+        // Right-to-left: skip blank segments; return the first untrusted non-blank entry.
         for (int i = entries.length - 1; i >= 0; i--) {
-            var addr = stripPort(entries[i].trim());
+            var trimmed = entries[i].trim();
+            if (trimmed.isEmpty()) continue;
+            var addr = stripPort(trimmed);
             if (!trustedProxies.isTrusted(addr)) {
                 return addr;
             }
         }
-        // All entries are trusted (fully internal chain) — return the leftmost.
-        return stripPort(entries[0].trim());
+        // All non-blank entries are trusted (fully internal chain) — return the leftmost non-blank.
+        for (int i = 0; i < entries.length; i++) {
+            var trimmed = entries[i].trim();
+            if (!trimmed.isEmpty()) {
+                return stripPort(trimmed);
+            }
+        }
+        // No non-blank entries at all — signal to the caller to fall back to remoteAddr.
+        return null;
     }
 
     /**

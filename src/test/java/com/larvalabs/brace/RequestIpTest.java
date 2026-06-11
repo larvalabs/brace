@@ -230,6 +230,67 @@ public class RequestIpTest {
     }
 
     // -----------------------------------------------------------------------
+    // CR5: blank/whitespace XFF segments skipped; no empty ip(), no crash on bare comma
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void testIpXffBareComma() {
+        // Header of exactly "," splits to ["", ""] — all blank — must not crash and must fall
+        // back to remoteAddr, not throw ArrayIndexOutOfBoundsException.
+        var trusted = new TrustedProxies("10.0.0.0/8");
+        var headers = Map.of("X-Forwarded-For", ",");
+        var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
+        assertEquals("10.0.0.1", req.ip());
+    }
+
+    @Test
+    public void testIpXffEmbeddedBlankSegment() {
+        // "1.2.3.4,,10.0.0.5" — middle segment is blank; with 10/8 trusted, must return 1.2.3.4.
+        var trusted = new TrustedProxies("10.0.0.0/8");
+        var headers = Map.of("X-Forwarded-For", "1.2.3.4,,10.0.0.5");
+        var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
+        assertEquals("1.2.3.4", req.ip());
+    }
+
+    @Test
+    public void testIpXffWhitespaceOnlySegment() {
+        // "1.2.3.4,   ,10.0.0.5" — middle segment is whitespace-only; same expectation.
+        var trusted = new TrustedProxies("10.0.0.0/8");
+        var headers = Map.of("X-Forwarded-For", "1.2.3.4,   ,10.0.0.5");
+        var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
+        assertEquals("1.2.3.4", req.ip());
+    }
+
+    @Test
+    public void testIpXffAllBlankSegments() {
+        // " , , " — all blank — must fall back to remoteAddr, never return "".
+        var trusted = new TrustedProxies("10.0.0.0/8");
+        var headers = Map.of("X-Forwarded-For", " , , ");
+        var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
+        assertEquals("10.0.0.1", req.ip());
+        assertFalse(req.ip().isEmpty());
+    }
+
+    @Test
+    public void testIpForwardedBareComma() {
+        // Forwarded header of exactly "," — no "for=" values extracted, must fall back to remoteAddr.
+        var trusted = new TrustedProxies("10.0.0.0/8");
+        var headers = Map.of("Forwarded", ",");
+        var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
+        assertEquals("10.0.0.1", req.ip());
+    }
+
+    @Test
+    public void testIpForwardedBlankElementSkipped() {
+        // "for=1.2.3.4, , for=10.0.0.5" — blank element in the middle contributes no "for=";
+        // with 10/8 trusted the walk returns 1.2.3.4.
+        var trusted = new TrustedProxies("10.0.0.0/8");
+        var headers = Map.of("Forwarded", "for=1.2.3.4, , for=10.0.0.5");
+        var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
+        assertEquals("1.2.3.4", req.ip());
+    }
+
+    // -----------------------------------------------------------------------
     // Unit tests for the stripPort helper
     // -----------------------------------------------------------------------
 
