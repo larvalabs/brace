@@ -118,6 +118,11 @@ app.before(req -> req.path().startsWith("/admin") && !isAdmin(req) ? Result.unau
 app.before("/admin/*", req -> isAdmin(req) ? null : Redirect.to("/login"));
 ```
 
+Pattern semantics: a trailing `/*` matches the bare prefix too — `/admin/*` covers
+`/admin`, `/admin/`, and `/admin/anything` — so a guard cannot be bypassed by requesting
+the prefix itself. Only a trailing wildcard is allowed; an interior wildcard
+(`/api/*/admin`) throws `IllegalArgumentException` at startup.
+
 After middleware can transform the response:
 
 ```java

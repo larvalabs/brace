@@ -118,9 +118,10 @@ note, entity-serialization guidance, redaction trade-offs, nonce wording).
 
 ## Follow-ups surfaced during the work (not in the original findings)
 
-1. **0.1.7 migration guide gap (pre-existing):** the ops token *scoping feature itself*
+1. ~~**0.1.7 migration guide gap (pre-existing):** the ops token *scoping feature itself*
    (shipped this cycle in `eb93e70`) was never documented in
-   `docs/migrations/brace-0.1.6-to-0.1.7.md`. Add before tagging 0.1.7.
+   `docs/migrations/brace-0.1.6-to-0.1.7.md`. Add before tagging 0.1.7.~~
+   **Done on main post-merge** ("New (optional): scoped read-only ops keys" section).
 2. **v1 ops auth removal (next release):** M3 accepts v1 with a deprecation warning
    (v1 shipped in 0.1.6). `OpsScopeIntegrationTest`, `ErrorStoreTest`, `OpsCsrfTest`,
    `RegressionIntegrationTest`, `OpsSharedSecretTest` still authenticate v1-style and
@@ -137,8 +138,11 @@ note, entity-serialization guidance, redaction trade-offs, nonce wording).
 5. **Stack traces in error records are deliberately unredacted** (M10 trade-off:
    primary diagnostic signal; only exposed via READ-gated `/ops/errors` JSON). The
    rendered message/route/path fields are scrubbed. Documented in SECURITY.md.
-6. **M8 doc sweep may be incomplete:** README.md / BRACE-AGENTS.md may still describe
-   the old `/*` middleware semantics — grep for `/*"` pattern docs.
+6. ~~**M8 doc sweep may be incomplete:** README.md / BRACE-AGENTS.md may still describe
+   the old `/*` middleware semantics — grep for `/*"` pattern docs.~~
+   **Swept on main post-merge:** neither file stated the old semantics; BRACE-AGENTS.md
+   now documents the new rules (trailing `/*` covers the bare prefix; interior
+   wildcards rejected at startup).
 7. **Cosmetic:** `ClaudeMdGenerator.java:17` links `github.com/matth/brace`; everything
    else uses `larvalabs/brace`.
 8. **`Counters` is no longer `final`** (M7 made it subclassable for a test stub) —

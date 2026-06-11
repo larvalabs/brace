@@ -127,6 +127,35 @@ both — keep the in-process default for hot read-through pages and a separate
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
 
+## New (optional): scoped read-only ops keys
+
+**Nothing to do** — existing keys and tokens keep working unchanged. 0.1.7 adds a
+**scope ceiling** per authorized ops key: `read` (status, errors, logs, routes — all
+`GET`s) or `control` (everything, including `POST /ops/cache/clear` and
+`POST /ops/errors/{id}/resolve`). A line in `ops-authorized-keys` with no marker
+defaults to `control`, so existing files are backward compatible.
+
+Mark a key read-only with a `scope:read` marker (or generate one directly):
+
+```
+# ops-authorized-keys — before (full control, and still valid in 0.1.7)
+<base64-pubkey>  deploy-agent
+
+# after — this key can read status/errors/logs but never mutate
+<base64-pubkey>  scope:read  oncall-agent
+```
+
+```bash
+brace ops keypair --read-only --label oncall-agent
+```
+
+`POST /ops/auth` caps every minted token at its key's ceiling, so a `scope:read` key
+cannot obtain a control token even if it asks for one. Tokens carry a `kid` (key
+fingerprint), and every authenticated ops request is logged as a structured
+`ops.access` event (`kid`, scope, path, `granted`) for after-the-fact audit. The
+intended use is handing an autonomous agent a key that can observe production but
+cannot act on it. Details in `BRACE-AGENTS.md` → "Token scopes (read-only keys)".
+
 ## Request/response hardening fixes
 
 These are bug fixes and small capability additions. None require code changes; all are
