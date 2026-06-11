@@ -244,7 +244,21 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** ORDER BY honored; page 2 slice correct; aggregate example compiles.
   - **Model: Sonnet 4.6.**
 
-- [ ] **M5: "Token-minimizing patterns" doc section — canonical idioms agents copy** — folds the former TODO style-guidance item
+- [x] **M5: "Token-minimizing patterns" doc section — canonical idioms agents copy** — folds the former TODO style-guidance item
+  - *Implementation notes: the optional API was added — `db.exists(Class, hqlWhere,
+    params...)` (`count(where) > 0` internally; Javadoc carries the where-fragment
+    security note) since 11 of the 15 benchmark checks were two-field, which
+    `existsBy` can't express. Doc pass landed as a "Token-minimizing patterns" block
+    extending BRACE-AGENTS.md §Common Patterns: findOr404 canonical lookup,
+    shared-validation-in-the-record rule (pointing at `req.jsonForm`), records /
+    `Json.obj` over LinkedHashMap-and-put, `exists`/`existsBy` over
+    `query(...).isEmpty()`, the 3-line `queryIn` + `Collectors.toMap` batch-fetch,
+    and one-line cross-references to §Database for ORDER BY-in-query and
+    `db.hql` aggregates (already documented there by M4 — not duplicated). The
+    notification all-args-constructor convention was not added as a separate rule
+    (out of the directed rule list for this batch; `entity.apply(form)` is already
+    the documented §Forms convention). Migration-guide `## New (optional)` entry
+    added for `db.exists`.*
   - The benchmark app re-derived verbose forms of things the framework already has:
     15 `db.query(...).isEmpty()` existence checks (where `existsBy`/`count(where)>0`
     is 1 line; 11 of 15 are two-field — document the `count` idiom or add

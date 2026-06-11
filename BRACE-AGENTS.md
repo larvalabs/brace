@@ -322,6 +322,7 @@ db.findBy(Post.class, "slug", "hello")            // find one by field
 db.findAllBy(Post.class, "authorId", 42)          // find all by field
 db.countBy(Post.class, "published", true)         // count by field
 db.existsBy(Post.class, "email", "user@ex.com")   // check existence (boolean)
+db.exists(Post.class, "talkId = ? AND userId = ?", talkId, userId) // multi-field existence via where-fragment
 db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns count)
 
 // Raw queries
@@ -1278,3 +1279,37 @@ return View.of("posts/index", "posts", posts);
 1. Add `hx-get`, `hx-target`, `hx-select`, `hx-trigger` to HTML elements
 2. Handler returns full page; htmx extracts what it needs via `hx-select`
 3. Optimize: check `req.isHtmx()` and return `_partial.jte` directly
+
+**Token-minimizing patterns** — the framework already has a 1-line form of each of these;
+use it instead of re-deriving the verbose version:
+
+- **Lookups:** `db.findOr404` is the canonical handler lookup — never write a
+  find / null-check / `Result.notFound()` preamble.
+  ```java
+  var post = db.findOr404(Post.class, req.longPathParam("id"));
+  ```
+- **Shared validation:** rules shared by create and update live in the form record
+  (annotations + `validate`), bound with `req.jsonForm(MyForm.class)` for JSON bodies;
+  cross-entity checks go in one static helper both handlers call (see §Forms & Validation).
+- **Response shapes:** a 1-line local record for named/reused shapes, `Json.obj(k, v, …)`
+  for one-offs — never a LinkedHashMap-and-put block (see §Responses).
+  ```java
+  record TalkStats(long talkId, double averageRating) {}      // named/reused shape
+  return Result.json(Json.obj("count", n, "avg", avg));       // one-off shape
+  ```
+- **Existence checks:** `db.existsBy` (single field) or `db.exists` (multi-field
+  where-fragment) — never `db.query(...).isEmpty()`.
+  ```java
+  if (db.exists(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId)) ...
+  ```
+- **Batch-fetch related entities:** one `db.queryIn` + `Collectors.toMap`, not a
+  find-per-item loop (N+1).
+  ```java
+  var speakerIds = talks.stream().map(t -> t.speakerId).distinct().toList();
+  var speakers = db.queryIn(Speaker.class, "id", speakerIds).stream()
+      .collect(Collectors.toMap(s -> s.id, s -> s));
+  ```
+- **Sorting/paging:** ORDER BY belongs inside the query's where-fragment
+  (`db.query`/`db.queryPage`), not in-memory sorts — see §Database.
+- **Aggregates:** one `db.hql` projection (`SELECT AVG(...), COUNT(...) ...`), not
+  fetch-rows-and-loop-sum — see §Database.

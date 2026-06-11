@@ -336,6 +336,26 @@ fetching rows and loop-summing in Java:
 var row = db.hql("SELECT AVG(r.score), COUNT(r) FROM Rating r WHERE r.talkId = ?", id).get(0);
 ```
 
+## New (optional): `db.exists` — multi-field existence check
+
+**Nothing to do** — purely additive. `db.existsBy(Class, field, value)` covers
+single-field checks; `db.exists(Class, hqlWhere, params...)` is its multi-field
+counterpart (internally `count(type, hqlWhere, params) > 0`). Same security rule as
+the rest of the `query` family: the where-fragment must be a trusted, hard-coded
+string — user input goes in `?` bind params.
+
+**Before (all versions, still works — but fetches rows just to test emptiness):**
+
+```java
+boolean rated = !db.query(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId).isEmpty();
+```
+
+**After (0.1.7+):**
+
+```java
+boolean rated = db.exists(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId);
+```
+
 ## New (optional): TestApp request builder, CSRF helpers, session variants, JSON assertions
 
 **Nothing to do** — purely additive; every existing `TestApp`/`TestResponse` method keeps

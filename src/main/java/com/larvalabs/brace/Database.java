@@ -190,6 +190,22 @@ public class Database {
         return result;
     }
 
+    /**
+     * Return {@code true} if any row of {@code type} matches the HQL where-fragment — the
+     * multi-field counterpart of {@link #existsBy(Class, String, Object)}. Equivalent to
+     * {@code count(type, hqlWhere, params) > 0} in one call:
+     * {@code db.exists(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId)}.
+     *
+     * <p><strong>Security:</strong> {@code hqlWhere} is concatenated into the generated HQL,
+     * same as {@link #query(Class, String, Object...)} — it must be a trusted, hard-coded
+     * fragment. User-controlled values belong in {@code ?} bind params, never in the
+     * fragment itself.
+     */
+    public <T> boolean exists(Class<T> type, String hqlWhere, Object... params) {
+        // count() already instruments
+        return count(type, hqlWhere, params) > 0;
+    }
+
     // --- Constrained helpers (single-field queries) ---
 
     /**

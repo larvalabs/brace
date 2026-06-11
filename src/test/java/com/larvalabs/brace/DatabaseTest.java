@@ -315,6 +315,48 @@ class DatabaseTest {
     }
 
     @Test
+    void existsTrueAndFalse() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "Exists Check";
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            assertTrue(db.exists(Post.class, "title = ?", "Exists Check"));
+            assertFalse(db.exists(Post.class, "title = ?", "no-such-title"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void existsWithMultipleParams() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "Multi Exists";
+            post.body = "Multi Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            assertTrue(db.exists(Post.class, "title = ? AND body = ?", "Multi Exists", "Multi Body"));
+            assertFalse(db.exists(Post.class, "title = ? AND body = ?", "Multi Exists", "Wrong Body"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void update() {
         var db = new Database(factory.openSession());
         try {
