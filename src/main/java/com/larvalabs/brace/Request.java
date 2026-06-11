@@ -80,18 +80,38 @@ public class Request {
         return Integer.parseInt(queryParams.get(name));
     }
 
+    /**
+     * Returns the query param parsed as an int, or {@code defaultValue} when the param is
+     * missing OR present but unparseable ({@code ?page=abc}). The defaulted variants never
+     * throw — a caller that supplies a default has already said what a bad value means.
+     * Use {@link #queryInt(String)} when an unparseable value should surface as an error.
+     */
     public int queryInt(String name, int defaultValue) {
         var value = queryParams.get(name);
-        return value != null ? Integer.parseInt(value) : defaultValue;
+        if (value == null) return defaultValue;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public long queryLong(String name) {
         return Long.parseLong(queryParams.get(name));
     }
 
+    /**
+     * Returns the query param parsed as a long, or {@code defaultValue} when the param is
+     * missing OR present but unparseable. See {@link #queryInt(String, int)}.
+     */
     public long queryLong(String name, long defaultValue) {
         var value = queryParams.get(name);
-        return value != null ? Long.parseLong(value) : defaultValue;
+        if (value == null) return defaultValue;
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public boolean hasQueryParam(String name) {

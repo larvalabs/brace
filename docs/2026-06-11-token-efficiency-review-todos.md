@@ -457,10 +457,14 @@ expensive round**, exactly when the re-read corpus is largest).
     source-specific ones ("eliminates ambiguity", Tier 1), so reintroducing
     `req.param` would undo that decision. Historical docs left as-is.*
 
-- [ ] **L2: Defaulted numeric accessors throw on unparseable input** — `Request.java:61,83-86`
+- [x] **L2: Defaulted numeric accessors throw on unparseable input** — `Request.java:61,83-86`
   - `queryInt("page", 1)` with `?page=abc` → NumberFormatException → 500. The
     *defaulted* variants should return the default (documented behavior change;
     migration-guide entry); non-defaulted keep throwing. **Model: Haiku 4.5.**
+    *Fixed: `queryInt(name, def)` and `queryLong(name, def)` now return the default on
+    unparseable input (these are the only defaulted numeric accessors — `formInt` and
+    the path-param accessors have no defaulted variants). Non-defaulted variants
+    unchanged. Migration-guide entry + BRACE-AGENTS.md accessor notes added.*
 
 - [ ] **L3: 404s carry no route context in dev** — `Result.java:57-59`, `BraceHandler.java:232`
   - Dev-mode only: list same-method registered patterns sharing a prefix

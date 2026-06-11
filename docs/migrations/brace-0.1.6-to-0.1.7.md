@@ -1145,6 +1145,34 @@ provider *and* silence the warning, exclude Brace's:
 </dependency>
 ```
 
+## Behavior change: defaulted numeric query accessors no longer throw on unparseable input
+
+**Who is affected:** handlers calling the *defaulted* variants `req.queryInt(name, default)`
+or `req.queryLong(name, default)` with input that doesn't parse as a number.
+
+**What changed.** Through 0.1.6, the default only covered a *missing* parameter — a present
+but unparseable value threw `NumberFormatException`, which surfaced as a 500:
+
+```java
+// before (0.1.6): GET /posts?page=abc
+req.queryInt("page", 1)   // → NumberFormatException → 500 Internal Server Error
+
+// after (0.1.7): GET /posts?page=abc
+req.queryInt("page", 1)   // → 1 (the default)
+```
+
+A caller that supplies a default has already said what a bad value means, so garbage input
+from a client should not be able to trigger a server error on those call sites.
+
+**Unchanged:** the non-defaulted variants — `req.queryInt(name)`, `req.queryLong(name)`,
+`req.intPathParam(name)`, `req.longPathParam(name)`, `req.formInt(name)` — still throw on
+unparseable input. That's a real client error the handler may want to surface or handle
+explicitly.
+
+**Action:** none for most apps. If a handler *relied* on the 500 (or caught
+`NumberFormatException` around a defaulted call) to detect bad input, switch it to the
+non-defaulted variant and handle the exception yourself.
+
 ## Request/response hardening fixes
 
 These are bug fixes and small capability additions. None require code changes; all are

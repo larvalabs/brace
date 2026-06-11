@@ -176,10 +176,10 @@ req.pathParams()              // Map<String, String>
 // Query parameters (from ?key=value)
 req.queryParam("page")        // query param as String or null
 req.queryParam("page", "1")   // with default value
-req.queryInt("page")          // as int
-req.queryInt("page", 1)       // with default
-req.queryLong("offset")       // as long
-req.queryLong("offset", 0)    // with default
+req.queryInt("page")          // as int (throws NumberFormatException on bad input)
+req.queryInt("page", 1)       // with default — returns the default on missing OR unparseable input
+req.queryLong("offset")       // as long (throws NumberFormatException on bad input)
+req.queryLong("offset", 0)    // with default — returns the default on missing OR unparseable input
 req.hasQueryParam("filter")   // boolean
 req.queryParams()             // Map<String, String>
 
