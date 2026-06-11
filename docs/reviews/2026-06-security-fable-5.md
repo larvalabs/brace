@@ -89,8 +89,10 @@ Confirmed but deferred (lower severity):
 - ~~0.1.7 CLI sends ops-auth v2 only; against a 0.1.6 server Jackson rejects the unknown
   fields → CLI-first upgrades break, and the migration guide says "no action".~~
   **Fixed on main post-merge:** CLI falls back to v1 when a server 401s the v2 body.
-- Migration guide intro claims "no breaking changes" while the M8 section documents a
-  new startup `IllegalArgumentException` for interior-wildcard patterns.
+- ~~Migration guide intro claims "no breaking changes" while the M8 section documents a
+  new startup `IllegalArgumentException` for interior-wildcard patterns.~~
+  **Fixed on main post-merge:** intro now calls out the two breaking cases
+  (interior-wildcard middleware patterns, `?token=` removal).
 - Ops auth accepts `ttlSeconds <= 0` (mints an already-expired token; fail-closed).
 - Dead weak-secret check: `Brace.java:210` tests a mixed-case literal against a
   lowercased string — can never match.

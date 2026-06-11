@@ -1,16 +1,26 @@
 # Migrating from Brace 0.1.6 → 0.1.7
 
-This release has **no breaking changes** — no code changes are required. It fixes a
+For most applications this release requires **no code changes**. It fixes a
 packaging gap for Postgres (lets most projects **delete a manual dependency**), adds an
 **optional** shared cache backend for multi-server deploys, and ships several
 request/response **hardening fixes** (case-insensitive headers, multiple `Set-Cookie`,
 body-read ordering, smarter `?` parameter conversion) plus several **security fixes**
 (bounded request bodies, rightmost-untrusted `req.ip()`, CSRF token persistence, a
 new **server-enforced session expiry**, and a **replay-resistant ops auth protocol, v2**)
-covered at the end of this guide. None require a code change, but the session-expiry change
-alters how long a stolen cookie stays valid — see "sessions now carry a server-enforced
-expiry" below — and the old ops auth protocol (v1) is now deprecated — see "ops auth
-protocol v2" below.
+covered at the end of this guide.
+
+Two narrow cases **are breaking** and need action:
+
+- Middleware patterns with an **interior wildcard** (e.g. `/api/*/admin`) are now
+  rejected at startup with an `IllegalArgumentException` — see "middleware trailing
+  `/*` now matches the bare prefix" below.
+- Scripts that authenticated to `/ops/*` endpoints with a **`?token=` query parameter**
+  must switch to the `Authorization: Bearer` header — see "`?token=` query-param auth
+  removed" below.
+
+Also note: the session-expiry change alters how long a stolen cookie stays valid — see
+"sessions now carry a server-enforced expiry" below — and the old ops auth protocol (v1)
+is now deprecated — see "ops auth protocol v2" below.
 
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
