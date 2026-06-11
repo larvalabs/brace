@@ -39,7 +39,7 @@ branch with one commit per finding, and a permanent record in this directory.
 | Date | Category | Model | Record | Findings doc |
 |---|---|---|---|---|
 | 2026-06 | Security | Fable 5 | [2026-06-security-fable-5.md](2026-06-security-fable-5.md) | [security-review-todos](../2026-06-09-security-review-todos.md) |
-| 2026-06 | Token Efficiency | Fable 5 | _in progress — branch `token-efficiency-review-2026-06`_ | [token-efficiency-review-todos](../2026-06-11-token-efficiency-review-todos.md) |
+| 2026-06 | Token Efficiency | Fable 5 | [2026-06-token-efficiency-fable-5.md](2026-06-token-efficiency-fable-5.md) | [token-efficiency-review-todos](../2026-06-11-token-efficiency-review-todos.md) |
 | — | Runtime Performance | _none yet_ | — | — |
 
 The 2026-06-11 token-efficiency review formalizes and supersedes an informal 2026-06-10
