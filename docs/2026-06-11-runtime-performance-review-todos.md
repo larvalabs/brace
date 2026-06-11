@@ -194,6 +194,31 @@ fixes. Plaintext/JSON p99s (28/46ms vs ~3ms p50) likely carry the H1 + H2 (GC ch
 signal too. Numbers are not comparable to `benchmark/RESULTS.md` (different JDK and
 machine conditions); within-review comparisons only.
 
+## Re-measurements
+
+### After H1 (async log writer) — framework `f65fd12`
+
+Same environment and protocol as the baseline; raw output
+`benchmark/baselines/2026-06-11-wrk-post-H1-f65fd12.txt`. Caveat: run on a developer
+laptop alongside other workloads, so treat single-digit-percent deltas as noise.
+
+| Test | Req/sec | vs baseline | p99 | vs baseline |
+|---|---|---|---|---|
+| Plaintext | 66,096 | −2% (noise) | 23.3ms | −16% |
+| JSON | 65,754 | −5% (noise) | 50.2ms | ~flat |
+| Single Query | 27,014 | +4% | 51.1ms | ~flat |
+| Multiple Queries (20) | 1,648 | **+29%** | 408ms | −12% |
+| Fortunes | 24,378 | **+22%** | **50.8ms** | **−96% (was 1.23s)** |
+| Updates (20) | 1,464 | **+30%** | 290ms | −54% |
+
+The baseline's tail-stall signature is gone: Fortunes p99 collapsed from 1.23s to 51ms
+and its 51 socket timeouts dropped to **zero**; max latency fell from 1.57s to 152ms.
+The DB-backed endpoints (which all log one line per request while holding a pooled
+connection) gained 22–30% throughput. Plaintext/JSON moved within noise — they were
+already saturating CPU shared with wrk on the same machine, so the freed lock time
+mostly went to wrk itself. Conclusion: H1 was the throughput/tail ceiling for DB-backed
+routes, as predicted.
+
 ## Gaps / what to add for this review
 
 1. ~~**Baseline first (required)**~~ — captured above. `--latency` added to `run-brace.sh`; benchmark module repointed at the current framework version (was a stale unresolvable `0.2.0-SNAPSHOT`) and its `req.param` call updated to the current `req.queryParam` API; script default JDK moved to 25 per AGENTS.md recommendation.
