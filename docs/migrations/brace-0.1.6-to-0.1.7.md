@@ -856,6 +856,35 @@ keeps printing "Errors 0" and exiting 0 — its bug, fixed by upgrading the CLI.
 directly and polls `/ops/dashboard`, not the status JSON. `brace check` is unaffected —
 it reads the scalar blocks via `.path()` with defaults and gets error counts from
 `/ops/errors`, not status.
+## Behavior change: each `Brace.test()` gets its own H2 database
+
+**Who is affected:** test suites where one test class (accidentally or deliberately)
+reads data that another test class wrote. Suites whose classes are self-contained — each
+seeds its own data, or resets via `resetDatabase()` — see no difference.
+
+**What changed.** Through 0.1.6, every `Brace.test()` builder defaulted to the same URL
+(`jdbc:h2:mem:test;DB_CLOSE_DELAY=-1`), so all test classes in one JVM shared one
+database and leaked rows across classes unless each remembered to reset. In 0.1.7 the
+default URL is unique per builder (`jdbc:h2:mem:test-1`, `test-2`, … via a per-JVM
+counter), so test classes are isolated by default.
+
+**Before (0.1.6):** a row inserted by `FirstTest` was still visible to `SecondTest`
+running later in the same JVM.
+
+**After (0.1.7):** each test class's TestApp sees only its own data. If your suite
+relied on the shared database, opt back in explicitly:
+
+```java
+static TestApp app = Brace.test()
+    .database("jdbc:h2:mem:shared;DB_CLOSE_DELAY=-1")   // restore 0.1.6 sharing
+    .entities(Post.class)
+    .start(...);
+```
+
+Related: `TestApp.resetDatabase()` is now documented as H2-only and throws
+`UnsupportedOperationException` with a clear message when the JDBC URL isn't H2
+(previously it failed with a cryptic SQL error on Postgres). Use explicit fixtures on
+the Postgres/Testcontainers tier.
 
 ## Behavior change: CLI JSON output is now compact (one line)
 

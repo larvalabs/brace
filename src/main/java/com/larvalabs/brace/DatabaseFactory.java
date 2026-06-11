@@ -58,6 +58,11 @@ public class DatabaseFactory {
         return entityClasses;
     }
 
+    /** Resolved JDBC URL this factory connects with. Package-private; used by {@link TestApp}. */
+    String jdbcUrl() {
+        return jdbcUrl;
+    }
+
     /**
      * True when this factory talks to Postgres (prod), false for H2 (tests). Lets callers pick a
      * Postgres-native statement over an H2-portable one — e.g. {@link ErrorStore} uses an

@@ -1202,6 +1202,13 @@ Post post = app.get("/api/posts/1").bodyAs(Post.class);             // typed sin
 
 `TestApp` methods: `request(method, path)` (builder: `.header(name, value)`, `.session(session)`, `.body(body, contentType)`, `.send()`), `get(path[, session])`, `post(path, formParams[, session])`, `postWithCsrf(path, formParams, session)`, `postJson(path, body[, session])`, `put(path, formParams[, session])`, `putWithCsrf(path, formParams, session)`, `delete(path[, session])`, `deleteWithCsrf(path, session)`, `withDb(consumer)`, `db()`, `resetDatabase()`, `mailer()`.
 
+Each `Brace.test()` builder gets its own in-memory H2 database by default, so test
+classes are isolated from each other without any reset. `resetDatabase()` (truncates all
+non-Flyway tables) is for isolation *within* a class — call it from `@BeforeEach` when
+tests share one TestApp. It is H2-only and throws `UnsupportedOperationException` on
+Postgres; use explicit fixtures there. To deliberately share one database across
+TestApps, pass an explicit URL: `.database("jdbc:h2:mem:shared;DB_CLOSE_DELAY=-1")`.
+
 `TestResponse` methods: `status()`, `body()`, `json()`, `bodyAs(Class)`, `bodyAs(TypeReference)`, `header(name)`, `headers(name)`, `redirectedTo()`.
 
 ## Config

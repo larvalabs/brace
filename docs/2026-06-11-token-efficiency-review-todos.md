@@ -524,7 +524,7 @@ expensive round**, exactly when the re-read corpus is largest).
     form + TestApp test) or relabel in AGENTS.md as a minimal smoke app pointing at
     BRACE-AGENTS.md. **Model: Fable/Opus if expanding; Haiku if relabeling.**
 
-- [ ] **L10: Shared H2 URL across test classes; `resetDatabase()` is H2-only** — `Brace.java:857`, `TestApp.java:153-175`
+- [x] **L10: Shared H2 URL across test classes; `resetDatabase()` is H2-only** — `Brace.java:857`, `TestApp.java:153-175`
   - Every TestAppBuilder defaults to `jdbc:h2:mem:test;DB_CLOSE_DELAY=-1` → data
     leaks across classes in one JVM unless each resets; `resetDatabase` uses
     H2-only SQL (fails on the PG/Testcontainers tier). Fix: per-builder unique DB

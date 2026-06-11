@@ -229,7 +229,23 @@ public class TestApp {
         }
     }
 
+    /**
+     * Truncates every non-Flyway table. <strong>H2-only:</strong> uses H2-specific SQL
+     * ({@code SET REFERENTIAL_INTEGRITY} and the {@code PUBLIC}-schema
+     * {@code INFORMATION_SCHEMA} filter) and throws {@link UnsupportedOperationException}
+     * on any other database — on the Postgres/Testcontainers tier, manage test data with
+     * explicit fixtures instead. Note each {@code Brace.test()} builder gets its own
+     * in-memory H2 database by default, so this is only needed for isolation <em>within</em>
+     * a test class (e.g. a {@code @BeforeEach} reset), not between classes.
+     */
     public void resetDatabase() {
+        var url = databaseFactory.jdbcUrl();
+        if (url == null || !url.startsWith("jdbc:h2:")) {
+            throw new UnsupportedOperationException(
+                "resetDatabase() is H2-only (it relies on H2's SET REFERENTIAL_INTEGRITY and "
+                + "INFORMATION_SCHEMA layout) but the JDBC URL is " + url
+                + ". On Postgres, set up and tear down test data with explicit fixtures.");
+        }
         var db = new Database(databaseFactory.openSession());
         db.beginTransaction();
         try {

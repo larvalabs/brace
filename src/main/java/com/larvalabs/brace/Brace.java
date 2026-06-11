@@ -918,7 +918,18 @@ public class Brace {
     }
 
     public static class TestAppBuilder {
-        private String dbUrl = "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1";
+        /**
+         * Gives each builder its own in-memory H2 database by default. A fixed shared name
+         * (the old {@code jdbc:h2:mem:test}) meant every test class in one JVM (Surefire
+         * reuses forks) wrote into the same database, leaking data across classes unless
+         * each remembered to reset. A monotonic counter (not random/time-based) keeps URLs
+         * deterministic per JVM run. Call {@link #database(String)} to opt back into a
+         * shared database explicitly.
+         */
+        private static final java.util.concurrent.atomic.AtomicInteger DB_COUNTER =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+        private String dbUrl = "jdbc:h2:mem:test-" + DB_COUNTER.incrementAndGet() + ";DB_CLOSE_DELAY=-1";
         private String templatesPath;
         private String secret;
         private final List<Class<?>> entityClasses = new ArrayList<>();
