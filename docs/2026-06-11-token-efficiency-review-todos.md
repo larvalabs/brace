@@ -489,7 +489,7 @@ expensive round**, exactly when the re-read corpus is largest).
     (server supports `?limit=`, default 200). `brace new` next-steps text says
     `mvn compile exec:java -D...` instead of `brace dev`. **Model: Haiku 4.5.**
 
-- [ ] **L5: README API drift** — `README.md:46,178,235,434,457`
+- [x] **L5: README API drift** *(also fixed the Jobs example's single-arg `db -> ...` lambdas — `Job` is `(db, ctx)`, so they didn't compile; the cast-style examples were already fixed by H1)* — `README.md:46,178,235,434,457`
   - CSRF described as "POST/PUT/DELETE" (PATCH missing, twice); ":46" points readers
     to AGENTS.md as "the complete framework reference" (wrong file — that's the
     contributor doc; the reference is BRACE-AGENTS.md); two examples still use cast

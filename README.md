@@ -43,7 +43,7 @@ The same design choices that help AI also eliminate runtime overhead. No DI cont
 
 For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33μs vs ~125μs), no ORM lifecycle tax, compiled templates (~180μs vs ~480μs for Thymeleaf).
 
-AI agents: read [AGENTS.md](AGENTS.md) for the complete framework reference.
+AI agents: read [BRACE-AGENTS.md](BRACE-AGENTS.md) for the complete framework reference.
 
 ## Install
 
@@ -175,7 +175,7 @@ public class App {
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
-- **CSRF** — Required by default on POST/PUT/DELETE, explicit opt-out with `.csrf(false)` for bearer-token APIs
+- **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs
 - **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
@@ -234,7 +234,7 @@ app.getDb("/posts", (req, db) -> ...);          // getDb, postDb, putDb, deleteD
 app.getSession("/profile", (req, session) -> ...); // getSession, postSession, putSession, deleteSession
 app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull (+ getReadFull, ...)
 
-// CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
+// CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API
 ```
 
@@ -315,8 +315,8 @@ app.sessions(SessionOptions.secure("secret")
 
 ```java
 // Recurring (in-memory)
-app.every("5m", "cleanup", db -> db.sql("DELETE FROM sessions WHERE expired < NOW()"));
-app.daily("02:00", "digest", db -> sendDigestEmails(db));
+app.every("5m", "cleanup", (db, ctx) -> db.sql("DELETE FROM sessions WHERE expired < NOW()"));
+app.daily("02:00", "digest", (db, ctx) -> sendDigestEmails(db));
 
 // Durable (database-backed, survives restarts)
 Jobs.schedule(db, new SendReceipt(orderId), Duration.ofMinutes(5));
