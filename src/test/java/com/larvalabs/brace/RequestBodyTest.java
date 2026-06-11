@@ -48,6 +48,9 @@ class RequestBodyTest {
         // Echo the received body straight back so the test can assert the
         // handler saw every byte, not just a 200 status.
         app.post("/echo", req -> Result.text(req.body()));
+        // Prefixed echo for the H2 gating tests: distinguishes "handler ran with empty
+        // body" from "no response body".
+        app.get("/echo", req -> Result.text("got:" + req.body()));
         app.start();
         port = app.actualPort();
 
@@ -236,6 +239,55 @@ class RequestBodyTest {
         byte[] body = buildBody(SMALL_LIMIT);
         int status = sendRawPost(limitedPort, "/echo", body, null);
         assertEquals(200, status, "Body at exactly the limit should succeed");
+    }
+
+    // --- H2: the body read is skipped for requests that declare no body, but the
+    // gating is on declared content (Content-Length/Transfer-Encoding), not method ---
+
+    /** Sends a raw HTTP/1.1 request and returns the full response (headers + body). */
+    private String sendRaw(int targetPort, String request) throws Exception {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("localhost", targetPort), 8_000);
+            socket.setSoTimeout(8_000);
+            OutputStream out = socket.getOutputStream();
+            out.write(request.getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            return readAll(socket.getInputStream());
+        }
+    }
+
+    private static String responseBody(String raw) {
+        int headerEnd = raw.indexOf("\r\n\r\n");
+        assertTrue(headerEnd >= 0, "no complete response: " + raw);
+        return raw.substring(headerEnd + 4);
+    }
+
+    @Test
+    void postWithContentLengthZeroReachesHandlerWithEmptyBody() throws Exception {
+        String raw = sendRaw(port, "POST /echo HTTP/1.1\r\n"
+            + "Host: localhost\r\nContent-Type: text/plain\r\n"
+            + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+        assertEquals(200, Integer.parseInt(raw.substring(9, 12)));
+        assertEquals("", responseBody(raw), "explicit empty body should reach the handler as \"\"");
+    }
+
+    @Test
+    void getWithoutBodyReachesHandlerWithEmptyBody() throws Exception {
+        String raw = sendRaw(port, "GET /echo HTTP/1.1\r\n"
+            + "Host: localhost\r\nConnection: close\r\n\r\n");
+        assertEquals(200, Integer.parseInt(raw.substring(9, 12)));
+        assertEquals("got:", responseBody(raw), "bodyless GET sees empty string, not null");
+    }
+
+    @Test
+    void getWithDeclaredBodyIsStillRead() throws Exception {
+        // The skip is keyed on declared content, not on the method: a GET that carries
+        // Content-Length must still have its body read (unusual but legal clients exist).
+        String raw = sendRaw(port, "GET /echo HTTP/1.1\r\n"
+            + "Host: localhost\r\nContent-Type: text/plain\r\n"
+            + "Content-Length: 5\r\nConnection: close\r\n\r\nhello");
+        assertEquals(200, Integer.parseInt(raw.substring(9, 12)));
+        assertEquals("got:hello", responseBody(raw), "GET with declared body must read it");
     }
 
 }

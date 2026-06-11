@@ -24,7 +24,7 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
   - Measure: wrk plaintext/json before/after; expect this to move the throughput ceiling, not just shave µs.
   - Model: frontier (concurrency + shutdown/flush semantics).
 
-- [ ] **H2 — ~72KB allocated per matched request to read the body, including bodyless GETs**
+- [x] **H2 — ~72KB allocated per matched request to read the body, including bodyless GETs**
   - Severity: High. Files: `BraceHandler.java:171-204` (body read for every matched route), `:629-646` (`readBoundedBody`).
   - `readBoundedBody` allocates `new ByteArrayOutputStream((int) Math.min(cap, 64 * 1024))`; with the default 10MB `maxUploadSize` that's a 64KB backing array, plus an 8KB read buffer, per matched request — there is no method or Content-Length gate, so every GET pays it. ~700MB/s of pure garbage at 10k rps.
   - Fix: skip the body read entirely for GET/HEAD/OPTIONS and when `Content-Length: 0`/absent with no `Transfer-Encoding`; when Content-Length is present, size the BAOS from it (clamped); default initial size 1–8KB otherwise.
