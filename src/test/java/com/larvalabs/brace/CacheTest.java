@@ -335,4 +335,93 @@ class CacheTest {
         assertEquals(0, cache.hits());
         assertEquals(0, cache.misses());
     }
+
+    @Test
+    void decomposeAndRecomposeCacheEntry() {
+        // This test ensures that Class.forName with initialize=false works correctly
+        // by caching and retrieving a value without triggering static initializers.
+        cache.set("record", new TestRecord("hello", 42));
+        TestRecord retrieved = cache.get("record", TestRecord.class);
+        assertNotNull(retrieved);
+        assertEquals("hello", retrieved.name);
+        assertEquals(42, retrieved.id);
+    }
+
+    @Test
+    void pageKeyWithSpecialCharactersInParamValues() {
+        // Test that param values with special characters (&, =, %) don't collide with other keys.
+        // For example, "a=b&c=d" and "a=b%26c=d" should produce different cache keys.
+        var counter = new AtomicInteger();
+        Handler handler = req -> {
+            counter.incrementAndGet();
+            return Result.text("response" + counter.get());
+        };
+        var cached = cache.wrap("5m", handler);
+
+        // First request: a=b, c=d
+        var req1 = new Request("GET", "/test", Map.of(), Map.of("a", "b", "c", "d"), Map.of(), null);
+        assertEquals("response1", bodyOf(cached.apply(req1))); // miss, counter=1
+
+        // Second request: a="b&c", d=d (note the & in the value)
+        var req2 = new Request("GET", "/test", Map.of(), Map.of("a", "b&c", "d", "d"), Map.of(), null);
+        assertEquals("response2", bodyOf(cached.apply(req2))); // miss, counter=2
+
+        // Verify cache differentiation
+        assertEquals(2, counter.get(), "Requests with different param values (one with &) should not share cache");
+
+        // Re-request first should hit cache
+        assertEquals("response1", bodyOf(cached.apply(req1)));
+        assertEquals(2, counter.get(), "Re-requesting should hit cache");
+    }
+
+    @Test
+    void pageKeyWithEqualsSignInParamValue() {
+        // Test that an = sign in a param value doesn't collide with other keys.
+        var counter = new AtomicInteger();
+        Handler handler = req -> {
+            counter.incrementAndGet();
+            return Result.text("v" + counter.get());
+        };
+        var cached = cache.wrap("5m", handler);
+
+        // Request with key=value containing = sign
+        var req1 = new Request("GET", "/search", Map.of(), Map.of("q", "a=b"), Map.of(), null);
+        assertEquals("v1", bodyOf(cached.apply(req1))); // miss
+
+        var req2 = new Request("GET", "/search", Map.of(), Map.of("q", "a", "b", ""), Map.of(), null);
+        assertEquals("v2", bodyOf(cached.apply(req2))); // miss (different params)
+
+        assertEquals(2, counter.get(), "Different params should create different cache keys");
+    }
+
+    @Test
+    void pageKeyWithPercentSignInParamValue() {
+        // Test that a percent sign in a param value doesn't create ambiguity.
+        var counter = new AtomicInteger();
+        Handler handler = req -> {
+            counter.incrementAndGet();
+            return Result.text("v" + counter.get());
+        };
+        var cached = cache.wrap("5m", handler);
+
+        var req1 = new Request("GET", "/items", Map.of(), Map.of("filter", "50%"), Map.of(), null);
+        assertEquals("v1", bodyOf(cached.apply(req1))); // miss
+
+        var req2 = new Request("GET", "/items", Map.of(), Map.of("filter", "50%25"), Map.of(), null);
+        assertEquals("v2", bodyOf(cached.apply(req2))); // miss (different because one has literal %, other has literal %2 and 5)
+
+        assertEquals(2, counter.get(), "Literal % and encoded %25 should produce different cache keys");
+    }
+
+    /** A simple test record for cache serialization. */
+    public static class TestRecord {
+        public String name;
+        public int id;
+
+        public TestRecord() {} // Jackson needs a no-arg constructor
+        public TestRecord(String name, int id) {
+            this.name = name;
+            this.id = id;
+        }
+    }
 }

@@ -177,8 +177,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     body = parsed.formBody();
                     uploadedFiles = parsed.files();
                 } else {
-                    body = Content.Source.asString(jettyRequest);
-                    if (body == null) body = "";
+                    // Fast-reject on Content-Length before reading any bytes.
+                    String contentLengthHeader = headers.get("Content-Length");
+                    if (contentLengthHeader != null) {
+                        try {
+                            long declaredLength = Long.parseLong(contentLengthHeader.strip());
+                            if (declaredLength > maxUploadSize) {
+                                writeResult(Result.error(413, "Payload Too Large"), response, callback);
+                                return true;
+                            }
+                        } catch (NumberFormatException ignored) {
+                            // malformed Content-Length — fall through and let the read cap it
+                        }
+                    }
+                    // Bounded incremental read: cap at maxUploadSize bytes regardless of
+                    // Content-Length (which clients can lie about or omit for chunked bodies).
+                    // Read maxUploadSize+1 bytes: if we get more than maxUploadSize the body
+                    // is too large and we return 413.
+                    byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
+                    if (bodyBytes == null) {
+                        writeResult(Result.error(413, "Payload Too Large"), response, callback);
+                        return true;
+                    }
+                    body = new String(bodyBytes, StandardCharsets.UTF_8);
                 }
             }
 
@@ -240,9 +261,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.setFlash(session.flashData());
             }
 
-            // CSRF validation for routes that require it when sessions are enabled
+            // CSRF validation for routes that require it when sessions are enabled.
+            // M5a: PATCH is mutating — added alongside POST/PUT/DELETE.
             if (sessionSecret != null && match.route().csrfRequired()) {
-                boolean isMutating = method.equals("POST") || method.equals("PUT") || method.equals("DELETE");
+                boolean isMutating = method.equals("POST") || method.equals("PUT")
+                    || method.equals("DELETE") || method.equals("PATCH");
                 if (isMutating) {
                     // Ensure a session object exists for CSRF check even if handler doesn't use sessions
                     Session csrfSession = session;
@@ -263,17 +286,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
-            // Ensure a CSRF token exists in session and expose it to templates
+            // Ensure a CSRF token exists in session and expose it to templates.
+            // M5c: when the handler doesn't take a Session, build a local csrfSession to
+            // hold the token.  If ensureToken mints a fresh token (csrfSession.isModified()),
+            // we persist it as a cookie below just like a handler-session cookie — otherwise
+            // the rendered token is orphaned and every subsequent POST 403s.
+            // handlerSession is the session the handler itself was given (may be null); it is
+            // written separately via the handler-session cookie block below.
+            // csrfOnlySession is non-null only when the handler had no Session param AND a
+            // fresh token was minted; it must never shadow a real handler session.
+            Session csrfOnlySession = null;
             if (sessionSecret != null) {
-                Session csrfSession = session;
-                if (csrfSession == null) {
+                if (session == null) {
                     String cookieHeader = headers.get("Cookie");
                     String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
-                    // keep a reference for later cookie write — but since handler doesn't
-                    // need the session, we only need the token for the View ThreadLocal
-                    Csrf.ensureToken(csrfSession);
-                    View.setCsrfField(Csrf.hiddenField(csrfSession));
+                    Session localCsrfSession = Session.fromCookie(sessionCookie, sessionSecret);
+                    Csrf.ensureToken(localCsrfSession);
+                    View.setCsrfField(Csrf.hiddenField(localCsrfSession));
+                    // Track so we can write the cookie after the handler runs (M5c).
+                    if (localCsrfSession.isModified()) {
+                        csrfOnlySession = localCsrfSession;
+                    }
                 } else {
                     Csrf.ensureToken(session);
                     View.setCsrfField(Csrf.hiddenField(session));
@@ -309,8 +342,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.clearFlash();
             }
 
-            // Write session cookie if modified
+            // Run after middleware first — after-middleware may return a brand-new Result
+            // instance (e.g. a wrapper that rewrites the body). Attaching the session cookie
+            // before this step would silently discard it whenever the instance changed (M6).
+            for (var after : afterMiddleware) {
+                result = after.apply(braceRequest, result);
+            }
+
+            // Write session cookie to the surviving Result after after-middleware has run.
             if (session != null && session.isModified() && sessionSecret != null) {
+                session.maxAgeSeconds(sessionMaxAgeSeconds());
                 String cookieValue = session.toCookie(sessionSecret);
                 if (sessionOptions != null) {
                     result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
@@ -321,9 +362,18 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
-            // Run after middleware
-            for (var after : afterMiddleware) {
-                result = after.apply(braceRequest, result);
+            // M5c: write the CSRF-only session cookie when the handler had no Session param
+            // and ensureToken minted a fresh token.  The handler-session block above and this
+            // block are mutually exclusive: csrfOnlySession is null whenever session != null.
+            if (csrfOnlySession != null && sessionSecret != null) {
+                csrfOnlySession.maxAgeSeconds(sessionMaxAgeSeconds());
+                String cookieValue = csrfOnlySession.toCookie(sessionSecret);
+                if (sessionOptions != null) {
+                    result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
+                } else {
+                    result.header("Set-Cookie",
+                        "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
+                }
             }
 
             // Add Vary header for htmx requests (caching correctness)
@@ -360,10 +410,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String errorMethod = jettyRequest.getMethod();
             String errorPath = jettyRequest.getHttpURI().getPath();
             String errorQuery = jettyRequest.getHttpURI().getQuery();
-            String routeInfo = errorMethod + " " + errorPath;
+            // Redact high-entropy path segments (reset tokens, invite tokens, etc.) so they
+            // are not persisted in the error store or surfaced on /ops/errors.
+            String redactedPath = Redactor.redactPath(errorPath);
+            String routeInfo = errorMethod + " " + redactedPath;
             // Redact sensitive query params (?token=…, ?password=…) before the request detail
             // is stored in the error record and served over /ops/errors.
-            String requestInfo = errorMethod + " " + errorPath
+            String requestInfo = errorMethod + " " + redactedPath
                 + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
             int qc = db != null ? db.queryCount() : 0;
             long qu = db != null ? db.queryDurationUs() : 0;
@@ -375,7 +428,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             if (errorStore != null) {
                 String errorType = e.getClass().getSimpleName();
-                String errorMessage = e.getMessage();
+                // Redact the exception message: name-based pass (via Redactor.isSensitive on
+                // tokens that look like key=value) is not applicable here, so we run the
+                // value-shaped pass to strip embedded bearer tokens, SQL literals, etc.
+                String errorMessage = Redactor.redactMessage(e.getMessage());
                 String stackTrace = stackTraceToString(e);
                 // Instant-of-failure context: how much DB work ran before the throw, and the
                 // redacted request headers. Captured synchronously (the Jetty request isn't safe
@@ -414,7 +470,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     private Result serveStaticFile(String requestPath) {
         if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
-            return Result.bytes(htmxJs, "text/javascript; charset=utf-8");
+            return Result.bytes(htmxJs, "text/javascript; charset=utf-8")
+                .header("X-Content-Type-Options", "nosniff");
         }
         for (var mapping : staticFileMappings) {
             String prefix = mapping.urlPrefix();
@@ -448,7 +505,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             try {
                 byte[] fileBytes = Files.readAllBytes(filePath);
                 String contentType = contentTypeForPath(filePath.toString());
-                return Result.bytes(fileBytes, contentType);
+                return Result.bytes(fileBytes, contentType)
+                    .header("X-Content-Type-Options", "nosniff");
             } catch (Exception e) {
                 return Result.error(500, "Internal Server Error");
             }
@@ -476,6 +534,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             case "pdf"         -> "application/pdf";
             default            -> "application/octet-stream";
         };
+    }
+
+    /**
+     * Expiry horizon (seconds) stamped into the encrypted session payload (_exp), derived from
+     * the app's SessionOptions.maxAge when positive; otherwise 0, which tells Session to use its
+     * 14-day default. This is the server-enforced session lifetime (M2), independent of the
+     * client-side Max-Age cookie hint. Expiry is fixed from last write — there is no sliding
+     * refresh, so a session re-mints (and its window extends) only when a handler modifies it.
+     */
+    private long sessionMaxAgeSeconds() {
+        if (sessionOptions != null && sessionOptions.maxAge() != null
+                && sessionOptions.maxAge().getSeconds() > 0) {
+            return sessionOptions.maxAge().getSeconds();
+        }
+        return 0;
     }
 
     private String parseCookieValue(String cookieHeader, String name) {
@@ -545,6 +618,31 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         return params;
+    }
+
+    /**
+     * Reads the request body up to {@code limit} bytes, returning the raw bytes.
+     * Returns {@code null} if the body exceeds the limit (caller should send 413).
+     * Reads incrementally via an InputStream so chunked/absent-length bodies are
+     * bounded too — we never buffer more than {@code limit + 1} bytes.
+     */
+    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit) throws java.io.IOException {
+        try (var in = Content.Source.asInputStream(jettyRequest)) {
+            // Read up to limit+1 bytes: if we get limit+1 the body is too large.
+            long cap = limit + 1;
+            var out = new java.io.ByteArrayOutputStream((int) Math.min(cap, 64 * 1024));
+            byte[] buf = new byte[8192];
+            long total = 0;
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                total += n;
+                if (total > limit) {
+                    return null; // exceeded limit
+                }
+                out.write(buf, 0, n);
+            }
+            return out.toByteArray();
+        }
     }
 
     private record MultipartResult(String formBody, Map<String, List<UploadedFile>> files) {}

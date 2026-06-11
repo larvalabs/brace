@@ -43,28 +43,44 @@ class OpsIntegrationTest {
         app.stop();
     }
 
-    /** Authenticate via POST /ops/auth and return a Bearer token. */
+    /** Authenticate via POST /ops/auth (protocol v2) and return a Bearer token. */
     private static String authenticate() throws Exception {
         return authenticate(port, keypair);
     }
 
     private static String authenticate(int targetPort, OpsKeys.Keypair kp) throws Exception {
-        String timestamp = java.time.Instant.now().toString();
-        String signature = OpsKeys.sign(timestamp, kp.privateKey());
-        String body = "{\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
-        var response = client.send(
-            HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + targetPort + "/ops/auth"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
+        var response = postAuth(targetPort, v2AuthBody(kp));
         assertEquals(200, response.statusCode(), "Auth should succeed: " + response.body());
         // Extract token from {"token":"..."}
         String respBody = response.body();
         int start = respBody.indexOf("\"token\":\"") + 9;
         int end = respBody.indexOf("\"", start);
         return respBody.substring(start, end);
+    }
+
+    /** Build a v2 auth request body: signature over publicKey + "\n" + timestamp + "\n" + nonce. */
+    private static String v2AuthBody(OpsKeys.Keypair kp) {
+        String timestamp = java.time.Instant.now().toString();
+        String nonce = freshNonce();
+        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(kp.publicKey(), timestamp, nonce), kp.privateKey());
+        return "{\"v\":\"2\",\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
+    }
+
+    private static String freshNonce() {
+        byte[] bytes = new byte[16];
+        new java.security.SecureRandom().nextBytes(bytes);
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    private static HttpResponse<String> postAuth(int targetPort, String body) throws Exception {
+        return client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + targetPort + "/ops/auth"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> get(String path) throws Exception {
@@ -171,46 +187,93 @@ class OpsIntegrationTest {
     @Test
     void authRejectsUnknownPublicKey() throws Exception {
         var unknownKp = OpsKeys.generateKeypair();
-        String timestamp = java.time.Instant.now().toString();
-        String signature = OpsKeys.sign(timestamp, unknownKp.privateKey());
-        String body = "{\"publicKey\":\"" + unknownKp.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
-        var response = client.send(
-            HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/ops/auth"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
+        var response = postAuth(port, v2AuthBody(unknownKp));
         assertEquals(401, response.statusCode());
     }
 
     @Test
     void authRejectsStaleTimestamp() throws Exception {
         String timestamp = java.time.Instant.now().minusSeconds(60).toString(); // 1 minute ago, outside ±30s window
-        String signature = OpsKeys.sign(timestamp, keypair.privateKey());
-        String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"" + signature + "\"}";
-        var response = client.send(
-            HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/ops/auth"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
+        String nonce = freshNonce();
+        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(keypair.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
+        var response = postAuth(port, body);
         assertEquals(401, response.statusCode());
     }
 
     @Test
     void authRejectsInvalidSignature() throws Exception {
         String timestamp = java.time.Instant.now().toString();
-        String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp + "\",\"signature\":\"badsignature\"}";
-        var response = client.send(
-            HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/ops/auth"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
+        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"nonce\":\"" + freshNonce() + "\",\"signature\":\"badsignature\"}";
+        var response = postAuth(port, body);
         assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void authV2ReplayRejected() throws Exception {
+        // The exact same signed body succeeds once, then is rejected — the nonce is single-use
+        // on this instance (M3 replay suppression).
+        String body = v2AuthBody(keypair);
+        var first = postAuth(port, body);
+        assertEquals(200, first.statusCode(), "first use should succeed: " + first.body());
+        var replay = postAuth(port, body);
+        assertEquals(401, replay.statusCode(), "replayed nonce must be rejected");
+        assertTrue(replay.body().contains("Nonce already used"), replay.body());
+    }
+
+    @Test
+    void authV2SignatureMustBindPublicKey() throws Exception {
+        // Sign a v2 message embedding a DIFFERENT public key, then present it with the
+        // authorized key — the signature no longer verifies because the key is part of
+        // the signed message (M3 cross-key binding).
+        var other = OpsKeys.generateKeypair();
+        String timestamp = java.time.Instant.now().toString();
+        String nonce = freshNonce();
+        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(other.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
+        var response = postAuth(port, body);
+        assertEquals(401, response.statusCode());
+    }
+
+    @Test
+    void authV2RequiresNonce() throws Exception {
+        String timestamp = java.time.Instant.now().toString();
+        // v2 envelope, v1-style signature over the timestamp alone, no nonce — must be rejected.
+        String signature = OpsKeys.sign(timestamp, keypair.privateKey());
+        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"signature\":\"" + signature + "\"}";
+        var response = postAuth(port, body);
+        assertEquals(401, response.statusCode());
+        assertTrue(response.body().contains("nonce"), response.body());
+    }
+
+    @Test
+    void authV1StillAcceptedThisRelease() throws Exception {
+        // v1 (no "v" field, signature over the timestamp alone) shipped in 0.1.6, so it is
+        // accepted for one release with a deprecation warning. Removal is documented in the
+        // 0.1.6 -> 0.1.7 migration guide; flip this test to expect 401 when v1 is dropped.
+        String timestamp = java.time.Instant.now().toString();
+        String signature = OpsKeys.sign(timestamp, keypair.privateKey());
+        String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"signature\":\"" + signature + "\"}";
+        var response = postAuth(port, body);
+        assertEquals(200, response.statusCode(), "v1 auth should still succeed this release: " + response.body());
+        assertTrue(response.body().contains("\"token\""));
+    }
+
+    @Test
+    void authRejectsUnsupportedProtocolVersion() throws Exception {
+        String timestamp = java.time.Instant.now().toString();
+        String nonce = freshNonce();
+        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(keypair.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"3\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
+        var response = postAuth(port, body);
+        assertEquals(401, response.statusCode());
+        assertTrue(response.body().contains("Unsupported ops auth protocol version"), response.body());
     }
 
     @Test
@@ -551,12 +614,12 @@ class OpsIntegrationTest {
         assertEquals(302, exchangeResponse.statusCode());
         assertEquals("/ops/dashboard", exchangeResponse.headers().firstValue("Location").orElse(""));
 
-        // Should set httpOnly cookie
+        // Should set httpOnly cookie with 8h TTL (M4: shortened from 24h)
         String setCookie = exchangeResponse.headers().firstValue("Set-Cookie").orElse("");
         assertTrue(setCookie.contains("__brace_ops_session="));
         assertTrue(setCookie.contains("HttpOnly"));
         assertTrue(setCookie.contains("SameSite=Strict"));
-        assertTrue(setCookie.contains("Max-Age=86400"));
+        assertTrue(setCookie.contains("Max-Age=28800"));
 
         // Extract cookie value for Step 3
         int cookieStart = setCookie.indexOf("=") + 1;
@@ -592,6 +655,71 @@ class OpsIntegrationTest {
                 .build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(401, exchangeBad.statusCode());
+    }
+
+    // --- M4: ?token= query-param auth removed from general endpoints ---
+
+    @Test
+    void queryParamTokenRejectedOnGeneralEndpoints() throws Exception {
+        // A valid token in ?token= must be rejected (401) on general endpoints (M4).
+        // Tokens belong in the Authorization: Bearer header, not the URL.
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/status?token=" + token))
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode(),
+            "?token= query param must not authenticate general ops endpoints (M4)");
+    }
+
+    @Test
+    void sameBearerTokenAuthenticatesViaHeader() throws Exception {
+        // Sanity: the same token accepted as Bearer header proves the token itself is valid —
+        // the 401 above is from the removed fallback, not an invalid token.
+        String token = authenticate();
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/status"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(),
+            "the same token must succeed via Authorization: Bearer header");
+    }
+
+    @Test
+    void exchangeResponseHasSecurityHeaders() throws Exception {
+        // The exchange redirect carries Referrer-Policy and Cache-Control to prevent the
+        // token-bearing URL leaking to outbound links or caches (M4).
+        String token = authenticate();
+        var loginTokenResponse = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/login-token"))
+                .header("Authorization", "Bearer " + token)
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, loginTokenResponse.statusCode());
+
+        String body = loginTokenResponse.body();
+        int start = body.indexOf("\"loginToken\":\"") + 14;
+        int end = body.indexOf("\"", start);
+        String loginToken = body.substring(start, end);
+
+        var exchangeResponse = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
+                .GET()
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(302, exchangeResponse.statusCode());
+        assertEquals("no-referrer",
+            exchangeResponse.headers().firstValue("Referrer-Policy").orElse(""),
+            "exchange response must set Referrer-Policy: no-referrer to prevent token URL leaking via Referer");
+        assertEquals("no-store",
+            exchangeResponse.headers().firstValue("Cache-Control").orElse(""),
+            "exchange response must set Cache-Control: no-store to prevent token URL being cached");
     }
 
     @Test
@@ -741,5 +869,25 @@ class OpsIntegrationTest {
         assertEquals(200, response.statusCode());
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("application/json"));
         assertTrue(response.body().contains("resolvedAt"), response.body());
+    }
+
+    @Test
+    void dashboardEscapesSingleQuotesInToken() throws Exception {
+        // Regression test for L2: OpsDashboard.esc() must escape single quotes
+        // to safely embed the token in single-quoted hx-headers attributes.
+        var token = authenticate();
+        var response = getWithToken("/ops/dashboard", token);
+        assertEquals(200, response.statusCode());
+
+        String body = response.body();
+        // The token is embedded in hx-headers='{...}' attributes.
+        // Look for the hx-headers attribute that carries the Bearer token.
+        assertTrue(body.contains("hx-headers='{\"Authorization\": \"Bearer "),
+                   "Dashboard should have hx-headers with Authorization Bearer");
+
+        // Verify the hx-headers attribute has proper closing quote.
+        // This ensures single quotes (if any were in the token) were escaped
+        // and didn't break the attribute.
+        assertTrue(body.contains("}'"), "hx-headers attribute should have closing single quote");
     }
 }

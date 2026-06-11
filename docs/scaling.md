@@ -50,7 +50,7 @@ database each is trivially correct (one instance).
 | **Durable jobs** (`Jobs`/`JobPoller`) | Claimed via Postgres `SELECT … FOR UPDATE SKIP LOCKED`; the DB is the coordination point. |
 | **Recurring scheduler** (`every`/`daily`) | A wall-clock time-slot claim runs each job **once per interval cluster-wide**, not once per instance — so `daily("09:00", …)` sends one digest, not N. |
 | **WebSocket broadcast** (`ws.broadcast`) | Fans out across instances via Postgres `LISTEN`/`NOTIFY`, so a room split across boxes still receives every message. |
-| **Rate limiter** (`RateLimiter.perIp`/`perKey`) | Counts through one shared atomic counter, so a limit is enforced once across the fleet (not N× too loose). See the load note below. |
+| **Rate limiter** (`RateLimiter.perIp`/`perKey`) | Counts through one shared atomic counter, so a limit is enforced once across the fleet (not N× too loose). Keys longer than 64 chars are hashed (SHA-256 hex) to prevent unbounded row growth. On DB failure the limiter falls back to per-instance counting (brief over-admission is possible; see the caveats below). See the load note below. |
 | **Ops console login** | Stateless HMAC login token + a shared ops secret, so the browser login handshake works on any instance and the session cookie validates fleet-wide. |
 | **Regression detection** (`/ops/regressions`) | A shared table (keyed by `type`+`route`+`deploy`) gives one fleet-wide set: notify **exactly once**, consistent list/acknowledge, a stable id, deploy-anchored baseline. |
 | **Metrics feed** (`ops_timeseries`) | Each instance writes its own **instance-tagged** rows; an external dashboard sums across instances or filters to one. |
@@ -91,6 +91,23 @@ fleet dashboard (instance picker + liveness) is a planned follow-up.
   volume or hot keys, Redis is the right tool — see
   [`2026-06-07-rate-limiter-load.md`](2026-06-07-rate-limiter-load.md) (a Redis backend is a
   documented future option, not yet implemented).
+- **Rate-limiter DB failure → per-instance fallback.** If the shared counter backend is unavailable
+  (connection pool exhausted, Postgres outage), the rate limiter falls back to per-instance counting
+  for that request rather than returning a 500. During an outage the effective fleet-wide limit
+  becomes approximately `limit × N` (where N = running instances), so a brief burst past the
+  intended limit is possible. This is deliberate — fail-open-with-local-limiting is far better than
+  making every rate-limited endpoint return a 500. A `WARN` log line is emitted for each fallback
+  request; alert on sustained warn-rate spikes to catch DB connectivity problems early.
+- **Rate-limiter key cap.** Keys longer than 64 characters (user-controlled header values, bearer
+  tokens, usernames) are replaced by their SHA-256 hex digest before being stored in the counter
+  table or local map. This prevents a DoS via unbounded key-string storage. Two distinct long keys
+  are astronomically unlikely to hash to the same digest, so bucketing is functionally identical to
+  using the raw key.
+- **IP spoofing and perIp.** `RateLimiter.perIp` uses `req.ip()`, which applies
+  rightmost-untrusted semantics when `TrustedProxies` is configured — forged `X-Forwarded-For`
+  leftmost entries are ignored. Without `app.trustedProxies(...)`, `req.ip()` is the raw socket
+  peer (headers ignored entirely). Configure trusted proxies before deploying IP-based rate limiting.
+  See [`SECURITY.md`](SECURITY.md) for details.
 - **Clock sync.** The recurring scheduler and rate limiter derive their time slot from wall-clock, so
   instance clocks need to agree within one interval/window — NTP handles this trivially for any real
   interval.

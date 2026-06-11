@@ -34,7 +34,7 @@ public class CliOps {
             return 1;
         }
         try {
-            Files.writeString(keyFile,
+            SecretFiles.writeStringWithOwnerOnlyPermissions(keyFile,
                 "# Brace ops private key — keep secret (gitignored)\n"
                 + kp.privateKey() + "\n" + kp.publicKey() + "\n");
         } catch (Exception e) {

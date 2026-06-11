@@ -3,6 +3,9 @@ package com.larvalabs.brace;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+// The deprecated 2-arg OpsToken.create(secret, ttl) is exercised deliberately: its legacy
+// CONTROL-default behavior must stay stable for tokens minted before scoping existed (H1).
+@SuppressWarnings("deprecation")
 class OpsTokenTest {
     @Test
     void createsAndValidatesToken() {

@@ -89,7 +89,7 @@ app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Req
 // getSession, postSession, putSession, deleteSession
 // getFull, postFull, putFull, deleteFull
 
-// CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
+// CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);
 ```
 
@@ -207,7 +207,25 @@ View.render("emails/welcome", "user", user)     // render to String (for emails)
 // JSON
 Result.json(object)                         // 200 JSON
 Result.json(object, 201)                    // JSON with status
+```
 
+**⚠️ JSON and JPA entities:** Never return a JPA entity from `Json.of()` — all public fields are serialized, leaking
+`passwordHash`, API keys, or any other sensitive column. Return a record or DTO instead:
+
+```java
+// ❌ Dangerous: serializes passwordHash
+var user = db.find(User.class, id);
+return Result.json(user);
+
+// ✅ Safe: only public fields from the record
+public record UserResponse(long id, String email) {}
+var user = db.find(User.class, id);
+return Result.json(new UserResponse(user.id, user.email));
+```
+
+Brace logs a warning (once per entity class) when `Json.of()` detects an `@Entity`-annotated object, to help catch this pattern early.
+
+```java
 // Redirects
 Result.redirect("/posts")                   // 302 redirect
 Result.redirectPermanent("/new-url")        // 301 redirect
@@ -380,7 +398,7 @@ session.flashData();                      // all flash data as Map
 
 ## CSRF
 
-CSRF protection is **required by default** on POST/PUT/DELETE requests when sessions are enabled. Explicitly opt out with `.csrf(false)` for bearer-token APIs.
+CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Explicitly opt out with `.csrf(false)` for bearer-token APIs. Content-Type does **not** affect CSRF enforcement — `application/json` requests are validated the same as form submissions.
 
 **Form submission:**
 
@@ -797,7 +815,7 @@ The CLI commands call these under the hood. Use them directly when you need raw 
 
 Read endpoints (the `GET`s above) require a `read`-scope token; the mutating `POST`s require `control`. See "Token scopes" above.
 
-Authenticate with `POST /ops/auth` (signed timestamp → Bearer token), then pass `Authorization: Bearer <token>`.
+Authenticate with `POST /ops/auth` (protocol v2: Ed25519 signature over `publicKey + "\n" + timestamp + "\n" + nonce`, fresh random nonce per attempt → Bearer token), then pass `Authorization: Bearer <token>`. The full handshake, including the per-instance replay caveat, is in `docs/agent-ops-guide.md` → "Auth protocol (v2)". The pre-0.1.7 v1 format (signed timestamp only) is deprecated and will be rejected in a future release.
 
 **Regression notifications.** When a new error kind first appears since startup, Brace notifies the registered notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl), new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)` (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error store).
 

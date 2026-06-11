@@ -40,8 +40,16 @@ class OpsScopeIntegrationTest {
             "jdbc:h2:mem:scopedb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null, List.of());
 
         app = Brace.app().port(0).ops(keysFile.toString()).cache(cache).database(db);
+        app.get("/boom", req -> { throw new RuntimeException("scope test error"); });
         app.start();
         port = app.actualPort();
+
+        // Trigger a persisted error so the dashboard renders the resolve button (for CONTROL).
+        client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/boom")).GET().build(),
+            HttpResponse.BodyHandlers.discarding());
+        Thread.sleep(200);
     }
 
     @AfterAll
@@ -118,6 +126,140 @@ class OpsScopeIntegrationTest {
         assertEquals("control", authenticate(controlKey, null).scope());
         assertEquals(200, getStatus("/ops/status", control));
         assertEquals(200, postStatus("/ops/cache/clear", control), "control token may clear the cache");
+    }
+
+    private String getBody(String path, String token) throws Exception {
+        return client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + path))
+                .header("Authorization", "Bearer " + token).GET().build(),
+            HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    /** Pull the htmx polling token embedded in the dashboard HTML (hx-headers Bearer value). */
+    private static String extractEmbeddedToken(String dashboardHtml) {
+        var m = java.util.regex.Pattern.compile("Bearer ([A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+)")
+            .matcher(dashboardHtml);
+        assertTrue(m.find(), "dashboard should embed a Bearer token for htmx polling");
+        return m.group(1);
+    }
+
+    // --- H1: the dashboard must mint its embedded token at the caller's scope ---
+
+    @Test
+    void dashboardTokenForReadCallerCannotControl() throws Exception {
+        var read = authenticate(readKey, null).token();
+        String html = getBody("/ops/dashboard", read);
+        String embedded = extractEmbeddedToken(html);
+
+        // The embedded token exists for the 5s polling refresh — it must still read...
+        assertEquals(200, getStatus("/ops/dashboard", embedded),
+            "embedded dashboard token must work for the htmx refresh");
+        // ...but scraped from a READ caller's page, it must NOT reach control endpoints (H1).
+        assertEquals(401, postStatus("/ops/cache/clear", embedded),
+            "token embedded in a READ caller's dashboard must be rejected by CONTROL endpoints");
+        assertEquals(401, postStatus("/ops/errors/1/resolve", embedded),
+            "token embedded in a READ caller's dashboard must not resolve errors");
+    }
+
+    @Test
+    void dashboardHidesMutatingControlsAtReadScope() throws Exception {
+        var read = authenticate(readKey, null).token();
+        String html = getBody("/ops/dashboard", read);
+        assertFalse(html.contains("hx-post"),
+            "READ dashboard must render no mutating controls at all");
+        assertFalse(html.contains(">resolve</button>"),
+            "READ dashboard must not render error resolve buttons");
+        assertTrue(html.contains("read-only"),
+            "READ dashboard should indicate the cache section is read-only");
+    }
+
+    @Test
+    void dashboardShowsMutatingControlsAtControlScope() throws Exception {
+        var control = authenticate(controlKey, null).token();
+        String html = getBody("/ops/dashboard", control);
+        assertTrue(html.contains("hx-post=\"/ops/cache/clear\""),
+            "CONTROL dashboard must render the cache clear button");
+        assertTrue(html.contains(">resolve</button>"),
+            "CONTROL dashboard must render error resolve buttons");
+    }
+
+    // --- H1: loginToken → exchange must preserve the caller's scope end to end ---
+
+    @Test
+    void loginExchangePreservesReadScopeEndToEnd() throws Exception {
+        var read = authenticate(readKey, null).token();
+
+        // A READ caller may obtain a browser login token (the dashboard is a READ surface)...
+        var loginResp = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/login-token"))
+                .header("Authorization", "Bearer " + read)
+                .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, loginResp.statusCode(), "READ key should be able to start a browser login");
+        var loginToken = Json.mapper().readTree(loginResp.body()).get("loginToken").asText();
+
+        // ...exchange it for the session cookie...
+        var exchange = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(302, exchange.statusCode());
+        String setCookie = exchange.headers().firstValue("Set-Cookie").orElse("");
+        assertTrue(setCookie.contains("__brace_ops_session="));
+        String cookie = setCookie.substring(0, setCookie.indexOf(';'));
+
+        // ...the resulting browser session can view the dashboard...
+        var dash = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/dashboard"))
+                .header("Cookie", cookie).GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, dash.statusCode(), "READ browser session may view the dashboard");
+
+        // ...but it must NOT reach control endpoints: scope was preserved across the whole chain.
+        var clear = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/cache/clear"))
+                .header("Cookie", cookie)
+                .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, clear.statusCode(),
+            "session cookie obtained from a READ key must be rejected by CONTROL endpoints");
+    }
+
+    @Test
+    void loginExchangePreservesControlScope() throws Exception {
+        var control = authenticate(controlKey, null).token();
+        var loginResp = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/login-token"))
+                .header("Authorization", "Bearer " + control)
+                .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, loginResp.statusCode());
+        var loginToken = Json.mapper().readTree(loginResp.body()).get("loginToken").asText();
+
+        var exchange = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(302, exchange.statusCode());
+        String setCookie = exchange.headers().firstValue("Set-Cookie").orElse("");
+        String cookie = setCookie.substring(0, setCookie.indexOf(';'));
+
+        // A CONTROL key's browser session retains control (no privilege loss either).
+        var clear = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/cache/clear"))
+                .header("Cookie", cookie)
+                .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, clear.statusCode(),
+            "session cookie obtained from a CONTROL key must keep control access");
     }
 
     @Test

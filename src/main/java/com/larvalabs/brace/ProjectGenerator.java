@@ -2,12 +2,33 @@ package com.larvalabs.brace;
 
 import java.io.IOException;
 import java.nio.file.*;
+import java.security.SecureRandom;
+import java.util.Base64;
 
 public class ProjectGenerator {
+
+    /**
+     * Generate a cryptographically random session secret (32+ bytes, base64url-encoded).
+     * Used at scaffold time to replace the placeholder with a real value.
+     */
+    private static String generateSessionSecret() {
+        var random = new SecureRandom();
+        var bytes = new byte[32];
+        random.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
 
     public static void generate(String name) {
         try {
             var root = Path.of(name);
+
+            // Validate project name: extract the last path component and check it
+            // Prevents path traversal and pom.xml injection
+            var projectName = root.getFileName().toString();
+            if (!projectName.matches("[A-Za-z0-9_-]+")) {
+                System.err.println("Failed to create project: name must contain only letters, numbers, underscores, and hyphens.");
+                System.exit(1);
+            }
 
             if (Files.exists(root)) {
                 System.err.println("Failed to create project: " + root.toAbsolutePath() + " already exists.");
@@ -67,7 +88,7 @@ public class ProjectGenerator {
             Files.writeString(root.resolve("ops-authorized-keys"),
                 "# Authorized public keys for ops dashboard access\n" +
                 opsKeypair.publicKey() + " dev\n");
-            Files.writeString(root.resolve("ops-private.key"),
+            SecretFiles.writeStringWithOwnerOnlyPermissions(root.resolve("ops-private.key"),
                 "# Private key for ops dashboard access (do not commit)\n" +
                 opsKeypair.privateKey() + "\n" +
                 opsKeypair.publicKey() + "\n");
@@ -151,8 +172,25 @@ class HomeControllerTest {
 }
 """);
 
-            // application.conf
+            // application.conf with a real random session secret
+            var sessionSecret = generateSessionSecret();
             Files.writeString(root.resolve("application.conf"),
+                "port=8080\n" +
+                "db.url=jdbc:postgresql://localhost:5432/" + name + "\n" +
+                "db.user=" + name + "\n" +
+                "db.pass=\n" +
+                "session.secret=" + sessionSecret + "\n" +
+                "\n" +
+                "%dev.port=9000\n" +
+                "%dev.db.url=jdbc:h2:mem:dev\n" +
+                "%dev.db.user=\n" +
+                "%dev.db.pass=\n");
+
+            // application.conf.example with placeholder for documentation
+            Files.writeString(root.resolve("application.conf.example"),
+                "# Copy this file to application.conf and set real values, especially session.secret.\n" +
+                "# Never commit application.conf with real secrets; use env vars in production:\n" +
+                "#   SESSION_SECRET=<random-string> java -jar app.jar\n" +
                 "port=8080\n" +
                 "db.url=jdbc:postgresql://localhost:5432/" + name + "\n" +
                 "db.user=" + name + "\n" +
@@ -213,11 +251,12 @@ h1 { margin-bottom: 1rem; }
                 "FROM eclipse-temurin:21-jre\n" +
                 "WORKDIR /app\n" +
                 "COPY target/*.jar app.jar\n" +
-                "COPY application.conf .\n" +
+                "COPY application.conf.example application.conf\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +
                 "COPY migrations/ migrations/\n" +
                 "EXPOSE 8080\n" +
+                "# Pass secrets via env vars: docker run -e SESSION_SECRET=... -e DB_PASS=...\n" +
                 "CMD [\"java\", \"-jar\", \"app.jar\"]\n");
 
             // CLAUDE.md — capability index with pointers to full reference
@@ -240,6 +279,7 @@ jte-classes/
 *.iml
 .DS_Store
 *.key
+application.conf
 """);
 
             System.out.println("Created new Brace project: " + name);

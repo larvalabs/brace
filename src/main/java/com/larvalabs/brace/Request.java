@@ -194,17 +194,19 @@ public class Request {
     public String ip() {
         // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            // Check X-Forwarded-For first (most common)
+            // Check X-Forwarded-For first (most common).
+            // NOTE: Request.headers is a single-value map (TreeMap, case-insensitive), so multiple
+            // X-Forwarded-For header instances from the wire are not visible here — only the value
+            // as concatenated by Jetty (which joins multi-occurrence headers with ", ") is available.
             var forwarded = header("X-Forwarded-For");
             if (forwarded != null && !forwarded.isEmpty()) {
-                // Return the first (client) IP in the chain
-                return forwarded.split(",")[0].trim();
+                var result = rightmostUntrusted(forwarded.split(","));
+                if (result != null) return result;
             }
 
             // Check Forwarded header (RFC 7239)
             var forwardedRfc = header("Forwarded");
             if (forwardedRfc != null && !forwardedRfc.isEmpty()) {
-                // Parse "for=..." from Forwarded header
                 var forPart = extractForwardedFor(forwardedRfc);
                 if (forPart != null) return forPart;
             }
@@ -214,20 +216,100 @@ public class Request {
         return remoteAddr != null ? remoteAddr : "unknown";
     }
 
-    private String extractForwardedFor(String forwarded) {
-        // Simple parser for Forwarded: for=1.2.3.4, for="[::1]", etc.
-        var parts = forwarded.split(";");
-        for (var part : parts) {
-            var trimmed = part.trim();
-            if (trimmed.startsWith("for=")) {
-                var value = trimmed.substring(4);
-                // Remove quotes and brackets if present
-                value = value.replaceAll("^\"|\"$", "");
-                value = value.replaceAll("^\\[|\\]$", "");
-                return value;
+    /**
+     * Rightmost-untrusted walk: given an ordered array of IP entries (left = client-appended,
+     * right = most-recently-appended by a trusted proxy), walk from the right, skip any entry
+     * whose address is trusted, and return the first untrusted one. If every entry is trusted
+     * (fully internal infrastructure chain), return the leftmost non-blank entry to preserve
+     * the original client address.
+     *
+     * <p>Blank/whitespace-only entries are skipped in both directions. If the array is empty or
+     * contains only blank entries, {@code null} is returned so callers fall back to the socket
+     * remote address — this prevents returning an empty string and prevents an
+     * {@link ArrayIndexOutOfBoundsException} on a header value of exactly {@code ","}.
+     *
+     * <p>Port suffixes are stripped before trust evaluation:
+     * <ul>
+     *   <li>{@code 1.2.3.4:5678} → {@code 1.2.3.4} (IPv4 with port)</li>
+     *   <li>{@code [2001:db8::1]:443} → {@code 2001:db8::1} (bracketed IPv6 with port)</li>
+     *   <li>{@code ::1} → {@code ::1} (bare IPv6, colons are part of the address — no stripping)</li>
+     * </ul>
+     */
+    private String rightmostUntrusted(String[] entries) {
+        // Right-to-left: skip blank segments; return the first untrusted non-blank entry.
+        for (int i = entries.length - 1; i >= 0; i--) {
+            var trimmed = entries[i].trim();
+            if (trimmed.isEmpty()) continue;
+            var addr = stripPort(trimmed);
+            if (!trustedProxies.isTrusted(addr)) {
+                return addr;
             }
         }
+        // All non-blank entries are trusted (fully internal chain) — return the leftmost non-blank.
+        for (int i = 0; i < entries.length; i++) {
+            var trimmed = entries[i].trim();
+            if (!trimmed.isEmpty()) {
+                return stripPort(trimmed);
+            }
+        }
+        // No non-blank entries at all — signal to the caller to fall back to remoteAddr.
         return null;
+    }
+
+    /**
+     * Strip a port suffix from an IP address string, handling IPv4, bracketed IPv6 ({@code
+     * [::1]:443}), and bare IPv6 ({@code ::1}) correctly.
+     */
+    static String stripPort(String addr) {
+        if (addr.startsWith("[")) {
+            // Bracketed IPv6: "[addr]:port" — drop the brackets and port
+            int closingBracket = addr.indexOf(']');
+            if (closingBracket > 0) {
+                return addr.substring(1, closingBracket);
+            }
+            return addr; // malformed — return as-is
+        }
+        // Count colons: more than one means bare IPv6 (no port to strip)
+        long colonCount = addr.chars().filter(c -> c == ':').count();
+        if (colonCount > 1) {
+            return addr; // bare IPv6 address — colons are part of the address
+        }
+        // IPv4 with optional port: "a.b.c.d:port"
+        if (colonCount == 1) {
+            int colon = addr.lastIndexOf(':');
+            var portPart = addr.substring(colon + 1);
+            // Only strip if the suffix looks like a decimal port number
+            if (portPart.matches("\\d+")) {
+                return addr.substring(0, colon);
+            }
+        }
+        return addr;
+    }
+
+    private String extractForwardedFor(String forwarded) {
+        // RFC 7239 parser: each list-element is separated by ","; within each element,
+        // parameters are separated by ";". Extract "for=" values and apply rightmost-untrusted walk.
+        var elements = forwarded.split(",");
+        var forValues = new java.util.ArrayList<String>(elements.length);
+        for (var element : elements) {
+            // Split the element's parameters on ";"
+            for (var param : element.split(";")) {
+                var trimmed = param.trim();
+                if (trimmed.toLowerCase().startsWith("for=")) {
+                    var value = trimmed.substring(4);
+                    // Remove surrounding quotes if present (RFC 7239 allows quoted-string)
+                    if (value.startsWith("\"") && value.endsWith("\"") && value.length() >= 2) {
+                        value = value.substring(1, value.length() - 1);
+                    }
+                    // Strip port suffix (handles IPv4:port and [IPv6]:port forms)
+                    value = stripPort(value);
+                    forValues.add(value);
+                    break; // only one "for=" per list-element
+                }
+            }
+        }
+        if (forValues.isEmpty()) return null;
+        return rightmostUntrusted(forValues.toArray(new String[0]));
     }
 
     public <T> Form<T> form(Class<T> type) {

@@ -52,6 +52,85 @@ run it again, until it's green.
   Their distinct `email@host` label gets its own line; committing it never
   clobbers anyone else's entry.
 
+## Credential channels
+
+All ops endpoints accept credentials through exactly two channels:
+
+1. `Authorization: Bearer <token>` header — the standard channel for the CLI,
+   scripts, and the dashboard's htmx polling.
+2. The `__brace_ops_session` httpOnly cookie — set automatically by the
+   browser exchange flow (`brace dashboard` → `/ops/auth/exchange`).
+
+**`?token=` query-parameter auth is not accepted on general ops endpoints.**
+Tokens in URLs leak into proxy access logs, browser history, and the `Referer`
+header on outbound links. Always pass credentials in the `Authorization: Bearer`
+header:
+
+```bash
+# Correct
+curl -H "Authorization: Bearer $TOKEN" https://app.example.com/ops/status
+
+# Wrong — 401
+curl "https://app.example.com/ops/status?token=$TOKEN"
+```
+
+The only exception is `/ops/auth/exchange?token=...`, which is the browser-redirect
+handoff from the CLI. That endpoint accepts `?token=` because there is no other
+channel that can carry a credential into a plain GET redirect. The token it accepts
+is short-lived (60s) and scope-capped. See `docs/SECURITY.md` → "Ops Endpoints".
+
+## Auth protocol (v2)
+
+The CLI handles this for you. It matters only if you implement the handshake
+yourself (an agent talking to `/ops/*` over raw HTTP).
+
+`POST /ops/auth` with a JSON body:
+
+```json
+{
+  "v": "2",
+  "publicKey": "<base64 Ed25519 public key>",
+  "timestamp": "<ISO-8601 instant, e.g. 2026-06-09T12:00:00Z>",
+  "nonce": "<base64url of 16+ random bytes, fresh per attempt>",
+  "signature": "<base64 Ed25519 signature>",
+  "ttlSeconds": 3600
+}
+```
+
+The signature is computed over exactly:
+
+```
+publicKey + "\n" + timestamp + "\n" + nonce
+```
+
+(newline-delimited; none of the three components can contain a newline). A
+200 response carries `{"token": "...", "expiresAt": "...", "scope": "..."}` —
+pass the token as `Authorization: Bearer <token>` on every `/ops/*` call.
+Optional `scope` in the request body (`read`/`control`) caps the minted token
+below your key's ceiling.
+
+Rules the server enforces:
+
+- **Timestamp freshness:** the timestamp must be within ±30 seconds of server
+  time, or you get `401 Stale timestamp`.
+- **Nonce single-use:** generate a fresh random nonce (16+ bytes, base64url)
+  for every attempt. A reused nonce gets `401 Nonce already used`.
+- **Key binding:** the public key is part of the signed message, so a
+  signature is only valid for the key that produced it.
+
+**Replay caveat (per-instance, best-effort):** the seen-nonce set is held in
+memory on each server instance — ops works without shared fleet state, so it
+cannot be fleet-global. Behind a load balancer, a captured auth request could
+still be replayed against a *different* instance within the ±30s window. Keep
+`/ops/*` behind HTTPS (the protocol assumes the request body is not observable
+in transit); see `docs/SECURITY.md` → "Ops Endpoints".
+
+**Protocol v1 is deprecated.** The pre-0.1.7 format (no `v`, no `nonce`,
+signature over the timestamp alone) is still accepted this release — the
+server logs a deprecation warning — and will be **rejected in a future
+release** with `ops auth protocol v2 required; upgrade the brace CLI`. If you
+implemented v1 by hand, switch to the v2 signing payload above.
+
 ## Environment selection
 
 `.brace` defines URLs:
@@ -137,3 +216,32 @@ release migration notes.
 - Neither store evicts based on age — only on count.
 
 See `BRACE-AGENTS.md` → "Storage and retention" for the full table.
+
+## Redaction in error records
+
+Error records are scrubbed before storage — the data you see via `brace errors`
+or `/ops/errors` has already been cleaned. Two passes run at capture time:
+
+**Name-based (query params and headers):** fields whose name looks sensitive
+(`token`, `password`, `authorization`, `cookie`, `secret`, `api-key`, etc.) have
+their values replaced with `[REDACTED]`. This is a deliberate over-redact — a
+field named `token_count` is also redacted.
+
+**Value-shaped (path segments and exception message tokens):** high-entropy
+tokens are detected by their shape and replaced with `[redacted]`, regardless of
+field name. A segment or whitespace-delimited token is redacted when it is 16+
+characters long, consists entirely of base64url/hex characters, and contains at
+least one digit and at least one letter. JWTs (two-dot three-part base64url
+tokens) are also caught.
+
+What remains visible (intentionally):
+- **UUIDs** (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) — these are usually record
+  identifiers, not secrets, and are needed for debugging.
+- **Numeric IDs** and **short slugs** (below the 16-char threshold).
+- Exception message text that does not contain high-entropy tokens.
+
+If your app routes carry user-supplied secrets in path positions, prefer opaque
+non-entropic route parameters (e.g. a lookup key in a database rather than a raw
+token in the URL) so the route is meaningful even after redaction. The redaction
+heuristic is conservative by design — an over-eager redactor makes error records
+useless. See `docs/SECURITY.md` → "Error Store Redaction" for details.

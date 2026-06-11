@@ -387,4 +387,104 @@ class ErrorStoreTest {
             app.stop();
         }
     }
+
+    /**
+     * End-to-end: a route that throws with a secret-bearing path and an exception
+     * message that contains a long token — the stored error record must not contain
+     * the raw secret in either the route/requestDetail or the message field.
+     */
+    @Test
+    void secretBearingPathAndMessageAreRedactedInStoredError(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + "\n");
+
+        // A 32-char hex-like secret that should trigger value-shaped redaction
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+
+        app = Brace.app().port(0)
+            .database(new DatabaseFactory(
+                "jdbc:h2:mem:redacttest" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+                List.of(Post.class)))
+            .ops(keysFile.toString());
+
+        // Route whose path contains a secret token and whose exception message does too
+        app.get("/password-reset/{token}", req ->
+            { throw new RuntimeException("invalid token: " + secret); });
+
+        app.start();
+        try {
+            port = app.actualPort();
+
+            // Hit the route with the secret in the path
+            var errorResp = client.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/password-reset/" + secret))
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(500, errorResp.statusCode());
+
+            // Wait for the virtual thread to persist
+            Thread.sleep(200);
+
+            // Fetch the stored error record via /ops/errors
+            String token = authenticateOps(port, kp);
+            var listResp = client.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors"))
+                    .header("Authorization", "Bearer " + token)
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, listResp.statusCode());
+            String body = listResp.body();
+
+            // The redaction placeholder must be present
+            assertTrue(body.contains("[redacted]"),
+                "redaction placeholder must appear in stored error record; body: " + body);
+
+            // Parse out the specific fields we care about — route, requestDetail, and message
+            // must not contain the raw secret. (The stackTrace field contains the original
+            // exception message verbatim, which is expected — we redact message, not the trace.)
+            String routeField = extractJsonStringField(body, "route");
+            String requestDetailField = extractJsonStringField(body, "requestDetail");
+            String messageField = extractJsonStringField(body, "message");
+
+            assertFalse(routeField != null && routeField.contains(secret),
+                "route field must not contain raw secret: " + routeField);
+            assertFalse(requestDetailField != null && requestDetailField.contains(secret),
+                "requestDetail field must not contain raw secret: " + requestDetailField);
+            assertFalse(messageField != null && messageField.contains(secret),
+                "message field must not contain raw secret: " + messageField);
+        } finally {
+            app.stop();
+        }
+    }
+
+    /**
+     * Minimal JSON string-field extractor — finds the value of the first occurrence
+     * of {@code "fieldName":"<value>"} in the given JSON string. Returns null if the
+     * field is not found.
+     */
+    private static String extractJsonStringField(String json, String fieldName) {
+        String key = "\"" + fieldName + "\":\"";
+        int start = json.indexOf(key);
+        if (start < 0) return null;
+        start += key.length();
+        // Walk forward, treating \" as an escaped quote inside the value
+        var sb = new StringBuilder();
+        int i = start;
+        while (i < json.length()) {
+            char c = json.charAt(i);
+            if (c == '\\' && i + 1 < json.length()) {
+                char next = json.charAt(i + 1);
+                if (next == '"') { sb.append('"'); i += 2; continue; }
+                if (next == '\\') { sb.append('\\'); i += 2; continue; }
+                if (next == 'n') { sb.append('\n'); i += 2; continue; }
+            }
+            if (c == '"') break; // end of string value
+            sb.append(c);
+            i++;
+        }
+        return sb.toString();
+    }
 }

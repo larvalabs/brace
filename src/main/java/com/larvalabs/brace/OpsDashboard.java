@@ -9,8 +9,15 @@ import java.util.Map;
 
 public class OpsDashboard {
 
-    public static String html(String token, Stats stats, JobScheduler jobScheduler,
+    /**
+     * Render the dashboard for a caller holding {@code scope}. The embedded {@code token}
+     * must be minted at that same scope (see {@code OpsHandler.dashboard}); mutating
+     * controls (cache clear, error resolve) are only rendered when the scope grants
+     * {@link OpsScope#CONTROL} — read tokens can view the dashboard but never mutate (H1).
+     */
+    public static String html(String token, OpsScope scope, Stats stats, JobScheduler jobScheduler,
                               Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler) {
+        boolean canControl = scope != null && scope.grants(OpsScope.CONTROL);
         var sb = new StringBuilder();
         var now = Instant.now();
 
@@ -460,11 +467,11 @@ public class OpsDashboard {
             sb.append("</div>\n");
 
             sb.append("<div id=\"tab-unresolved\" class=\"tab-content\" style=\"display:block\">");
-            renderPersistedErrors(sb, unresolvedErrors, token, false);
+            renderPersistedErrors(sb, unresolvedErrors, token, false, canControl);
             sb.append("</div>\n");
 
             sb.append("<div id=\"tab-resolved\" class=\"tab-content\" style=\"display:none\">");
-            renderPersistedErrors(sb, resolvedErrors, token, true);
+            renderPersistedErrors(sb, resolvedErrors, token, true, canControl);
             sb.append("</div>\n");
         }
 
@@ -506,9 +513,13 @@ public class OpsDashboard {
                 sb.append(" <span class=\"c-muted\" style=\"font-weight:normal;text-transform:none;letter-spacing:0;font-size:9px\">")
                   .append(sharedCache ? "shared" : "in-process").append("</span>");
                 sb.append(" <span style=\"float:right;font-weight:normal;text-transform:none;letter-spacing:0\">");
-                sb.append("<button class=\"btn btn-danger\" hx-post=\"/ops/cache/clear\"")
-                  .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
-                  .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">").append(clearLabel).append("</button>");
+                if (canControl) {
+                    sb.append("<button class=\"btn btn-danger\" hx-post=\"/ops/cache/clear\"")
+                      .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
+                      .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">").append(clearLabel).append("</button>");
+                } else {
+                    sb.append("<span class=\"c-muted\" style=\"font-size:9px\">read-only</span>");
+                }
                 sb.append("</span></div>");
                 long hits = cache.hits(), misses = cache.misses();
                 String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";
@@ -580,7 +591,7 @@ public class OpsDashboard {
     }
 
     private static void renderPersistedErrors(StringBuilder sb, List<Map<String, Object>> errors,
-                                               String token, boolean resolved) {
+                                               String token, boolean resolved, boolean canControl) {
         if (errors.isEmpty()) {
             sb.append("<p class=\"").append(resolved ? "c-muted" : "c-green").append("\">None</p>");
             return;
@@ -595,11 +606,13 @@ public class OpsDashboard {
             sb.append("<td style=\"text-align:right\">").append(e.get("occurrenceCount")).append("</td>");
             sb.append("<td class=\"c-muted\">").append(esc(str(e.get("firstSeen"), "-"))).append("</td>");
             sb.append("<td class=\"c-muted\">").append(esc(str(e.get("lastSeen"), "-"))).append("</td>");
-            if (!resolved) {
+            if (!resolved && canControl) {
                 sb.append("<td><button class=\"btn btn-resolve\" hx-post=\"/ops/errors/").append(id)
                   .append("/resolve\"")
                   .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
                   .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">resolve</button></td>");
+            } else if (!resolved) {
+                sb.append("<td></td>");
             } else {
                 sb.append("<td class=\"c-muted\">").append(esc(str(e.get("resolvedAt"), ""))).append("</td>");
             }
@@ -618,9 +631,17 @@ public class OpsDashboard {
           .append("</div><div class=\"detail\">").append(esc(detail)).append("</div></div>");
     }
 
+    /**
+     * Escape HTML entities for safe inclusion in HTML attributes and content.
+     * Escapes: &, <, >, ", and ' (for use in both double-quoted and single-quoted attributes).
+     */
     private static String esc(String s) {
         if (s == null) return "";
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
     }
 
     private static String str(Object o) {

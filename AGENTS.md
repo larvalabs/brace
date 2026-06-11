@@ -99,7 +99,7 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 - **HQL queries with `?` positional params.** Framework converts `?` to `?1`, `?2` for Hibernate 7. The converter skips `?` inside single-quoted string literals and SQL comments; a literal `?` elsewhere (e.g. a Postgres JSONB `?`/`?|`/`?&` operator) is escaped as `??`. For fully hand-written SQL, `db.jdbc(...)` is the raw escape hatch.
 - **Per-request transactions.** BraceHandler opens/commits/rollbacks automatically. No `@Transactional`.
 - **Framework migrations are immutable.** Files under `src/main/resources/brace/db/migration{,_pg}` ship in the jar and are tracked in their own `flyway_brace_history` table; once released, their bytes must never change. Editing one breaks Flyway checksum validation on every deployment that already applied it. To change behavior, add a new `V*` migration — never edit an old one. `FrameworkMigrationsFrozenTest` enforces this against `src/test/resources/framework-migrations.lock` (add the printed `name=sha256` line when you add a migration). We deliberately do **not** auto-`repair()` the framework history at runtime — preventing the edit is the fix.
-- **CSRF required by default** on POST/PUT/DELETE. Explicitly opt out with `.csrf(false)` for bearer-token APIs.
+- **CSRF required by default** on POST/PUT/DELETE/PATCH. Explicitly opt out with `.csrf(false)` for bearer-token APIs. Content-Type does not affect CSRF enforcement — JSON requests are validated like any other mutating request.
 - **Session cookie format:** `base64url(12-byte-nonce || aes-gcm-ciphertext || 16-byte-auth-tag)`. Encrypted and authenticated.
 - **Case-insensitive request headers.** Header names are matched case-insensitively (HTTP names are case-insensitive and arrive lowercased over HTTP/2), so `req.header("content-type")` and `req.header("Content-Type")` are equivalent. Brace itself serves HTTP/1.1 only — TLS and HTTP/2 are expected to be terminated by a reverse proxy (see `docs/SECURITY.md`).
 - **Multi-value `Set-Cookie`.** `Result` keeps `Set-Cookie` in a separate list (not the single-value header map), so a response can carry several cookies — e.g. an application cookie set by a handler plus the framework session cookie — without one clobbering the other. Use `result.cookie(...)` (repeatable) or `result.header("Set-Cookie", ...)`.
@@ -123,6 +123,7 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 ### Adding a new endpoint
 1. Add handler method to controller class
 2. Register route in `main()`: `app.get("/path", ctrl::method)`
+3. For JSON responses: return records or DTOs, never entities (see "JPA Entities and JSON Responses" in `docs/SECURITY.md`)
 
 ### Adding a new entity
 1. Create JPA entity class with `@Entity`, public fields
@@ -136,6 +137,13 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 
 ### Updating documentation
 When changing public API (adding/removing/renaming methods, classes, or handler types), update `BRACE-AGENTS.md` and `README.md` to reflect the change.
+
+### Periodic model reviews
+Brace gets a full-codebase review in each of three categories — **Security**, **Token
+Efficiency**, **Runtime Performance** — whenever a notably more capable model becomes
+available. Process, conventions (findings doc, one commit per finding, merge gates), and
+the index of completed reviews live in `docs/reviews/README.md`. If you're asked to run
+or resume one of these reviews, read that file first.
 
 ### Migration guides (per version step)
 `docs/migrations/brace-FROM-to-TO.md` is the upgrade path agents and humans follow when bumping `<brace.version>` (see the "Upgrading" section of `BRACE-AGENTS.md`). One guide per released step, named for the version boundary (e.g. `brace-0.1.6-to-0.1.7.md`).

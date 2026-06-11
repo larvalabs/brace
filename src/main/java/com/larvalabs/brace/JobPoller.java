@@ -222,7 +222,11 @@ public class JobPoller {
         var execDb = new Database(factory.openSession());
         try {
             execDb.beginTransaction();
-            DurableJob job = (DurableJob) Class.forName(jobClass).getDeclaredConstructor().newInstance();
+            Class<?> loadedClass = Class.forName(jobClass, false, Thread.currentThread().getContextClassLoader());
+            if (!DurableJob.class.isAssignableFrom(loadedClass)) {
+                throw new ClassCastException("Class " + jobClass + " does not implement DurableJob");
+            }
+            DurableJob job = (DurableJob) loadedClass.getDeclaredConstructor().newInstance();
             job.run(jobData, execDb);
             execDb.commitTransaction();
 

@@ -3,6 +3,9 @@ package com.larvalabs.brace;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.*;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CliOpsTest {
@@ -32,6 +35,9 @@ class CliOpsTest {
         String content = Files.readString(authKeys);
         assertTrue(content.contains("ci"));
         assertFalse(content.contains("ed25519:"), "must not write a legacy algorithm prefix");
+
+        // Private key must be written with owner-only permissions (rw-------)
+        assertPrivateKeyHasOwnerOnlyPermissions(privKey);
     }
 
     @Test
@@ -147,6 +153,27 @@ class CliOpsTest {
             Process p = new ProcessBuilder("git", "--version").redirectErrorStream(true).start();
             p.getInputStream().readAllBytes();
             return p.waitFor() == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void assertPrivateKeyHasOwnerOnlyPermissions(Path privKey) {
+        Assumptions.assumeTrue(isPosixFileSystem(), "test requires POSIX file system support");
+        try {
+            Set<PosixFilePermission> perms = Files.getPosixFilePermissions(privKey);
+            // Owner-only permissions should be: OWNER_READ, OWNER_WRITE (no others)
+            assertEquals(PosixFilePermissions.fromString("rw-------"), perms,
+                "Private key must have owner-only permissions (rw-------)");
+        } catch (Exception e) {
+            Assumptions.abort("POSIX file system not supported");
+        }
+    }
+
+    private boolean isPosixFileSystem() {
+        try {
+            Files.getPosixFilePermissions(projectDir);
+            return true;
         } catch (Exception e) {
             return false;
         }

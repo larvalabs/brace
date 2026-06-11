@@ -204,9 +204,11 @@ public class Brace {
             throw new IllegalArgumentException(
                 type + " secret must be at least 32 characters (current: " + secret.length() + ")");
         }
-        // Warn about obvious placeholder values
+        // Warn about obvious placeholder values (including old scaffolds)
         String lower = secret.toLowerCase();
-        if (lower.contains("changeme") || lower.contains("secret") || lower.contains("password") ||
+        if (lower.contains("changeme") || lower.contains("change-me") || lower.contains("change_me") ||
+            lower.contains("CHANGE-ME-to-a-random-string-at-least-32-chars") ||
+            lower.contains("secret") || lower.contains("password") ||
             lower.contains("test") || lower.equals("placeholder") || lower.matches("^[a-z]+$")) {
             Log.warn("Weak " + type + " secret detected - use a cryptographically random value in production");
         }

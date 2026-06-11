@@ -65,6 +65,21 @@ public class OpsKeys {
         }
     }
 
+    /**
+     * Canonical message signed by the v2 ops auth protocol:
+     * {@code publicKey + "\n" + timestamp + "\n" + nonce}.
+     *
+     * <p>Newline-delimited concatenation is unambiguous here because none of the three
+     * components can contain a newline: the public key is base64, the timestamp is
+     * ISO-8601, and the nonce is base64url. Binding the public key into the signed
+     * message means a captured signature is only ever valid for the key that produced
+     * it, and the per-attempt nonce makes each signed tuple single-purpose (see
+     * {@code OpsHandler.auth} for the server-side replay check).
+     */
+    public static String v2AuthMessage(String publicKey, String timestamp, String nonce) {
+        return publicKey + "\n" + timestamp + "\n" + nonce;
+    }
+
     /** Verify a signature against a message and public key (base64-encoded). */
     public static boolean verify(String message, String signatureBase64, String publicKeyBase64) {
         try {

@@ -14,6 +14,7 @@ import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Session data stored in an encrypted and authenticated cookie.
@@ -50,6 +51,38 @@ public class Session {
     private final Map<String, String> flashData = new LinkedHashMap<>();
     private boolean modified = false;
 
+    /**
+     * Reserved key holding the server-enforced absolute expiry (epoch seconds) inside the
+     * encrypted payload. Written by {@link #toCookie(String)} and checked by
+     * {@link #fromCookie(String, String)}; it is stripped from the user-visible data on read
+     * and cannot be set through the public {@link #set} API (server-managed only).
+     */
+    static final String EXPIRY_KEY = "_exp";
+
+    /**
+     * Default expiry horizon when no positive {@link SessionOptions#maxAge()} is configured.
+     * Bounds replay of a stolen cookie even for "session-lifetime" cookies, whose Max-Age is
+     * only a client hint. 14 days.
+     */
+    static final long DEFAULT_MAX_AGE_SECONDS = 14L * 24 * 60 * 60;
+
+    /**
+     * Expiry horizon in seconds used when minting a cookie. 0 means "use the default".
+     * Set at construction (or via {@link #maxAgeSeconds(long)}) so {@link #toCookie(String)}
+     * can stamp {@code _exp} without changing its public signature.
+     */
+    private long maxAgeSeconds = 0;
+
+    /**
+     * Cache for derived PBKDF2 keys. Since the session secret is fixed for process
+     * lifetime, we memoize the derived SecretKeySpec to avoid re-running 100,000 PBKDF2
+     * iterations on every session cookie read/write. The PBKDF2 derivation is deterministic
+     * (fixed salt, iterations, key length), so caching is safe: same secret always produces
+     * the same key. Bounded to ~16 entries to prevent unbounded growth in test suites.
+     */
+    private static final ConcurrentHashMap<String, SecretKeySpec> keyCache = new ConcurrentHashMap<>();
+    static final int MAX_KEY_CACHE_SIZE = 16;
+
     // -------------------------------------------------------------------------
     // Accessors
     // -------------------------------------------------------------------------
@@ -71,8 +104,23 @@ public class Session {
     }
 
     public void set(String key, String value) {
+        // _exp is server-managed (written at serialize time, enforced at read time). Silently
+        // reserve it so a handler can't forge or extend its own expiry via session.set("_exp", ...).
+        if (EXPIRY_KEY.equals(key)) {
+            return;
+        }
         data.put(key, value);
         modified = true;
+    }
+
+    /**
+     * Set the expiry horizon (seconds) stamped into the encrypted payload by {@link #toCookie}.
+     * A value &le; 0 means "use the {@link #DEFAULT_MAX_AGE_SECONDS default}". Package-visible:
+     * BraceHandler plumbs the app's {@code SessionOptions.maxAge()} through here. Does not mark
+     * the session modified — it only affects serialization, not user data.
+     */
+    void maxAgeSeconds(long seconds) {
+        this.maxAgeSeconds = seconds;
     }
 
     public void set(String key, int value) {
@@ -134,7 +182,14 @@ public class Session {
      */
     public String toCookie(String secret) {
         try {
-            String json = toJson(data);
+            // Stamp a server-enforced absolute expiry into the payload. Max-Age on the cookie is
+            // only a client hint; _exp is what bounds replay of a stolen cookie (M2). The horizon
+            // is the configured SessionOptions.maxAge (when positive), else a 14-day default.
+            long horizon = maxAgeSeconds > 0 ? maxAgeSeconds : DEFAULT_MAX_AGE_SECONDS;
+            var payload = new LinkedHashMap<>(data);
+            payload.put(EXPIRY_KEY, String.valueOf(System.currentTimeMillis() / 1000 + horizon));
+
+            String json = toJson(payload);
             byte[] jsonBytes = json.getBytes(StandardCharsets.UTF_8);
 
             // Derive AES-256 key from secret
@@ -195,6 +250,25 @@ public class Session {
             String json = new String(jsonBytes, StandardCharsets.UTF_8);
             Session session = new Session();
             parseJson(json, session.data);
+
+            // Server-side expiry enforcement (M2). _exp is an absolute epoch-seconds deadline.
+            // - Present and in the past  → reject: return an empty session (stolen cookie expires
+            //   regardless of the client-side Max-Age hint).
+            // - Present and in the future → strip _exp so it is never visible via get/has/keys, then
+            //   keep the data.
+            // - Absent (legacy ≤0.1.6 cookie) → accepted for this release; re-minted with _exp on the
+            //   next write. A future release will reject expiry-less cookies (see migration guide).
+            String exp = session.data.remove(EXPIRY_KEY);
+            if (exp != null) {
+                try {
+                    if (Long.parseLong(exp.strip()) <= System.currentTimeMillis() / 1000) {
+                        return new Session();
+                    }
+                } catch (NumberFormatException e) {
+                    // Malformed _exp — treat as expired/invalid rather than indefinitely valid.
+                    return new Session();
+                }
+            }
             return session;
         } catch (Exception e) {
             // Any decryption or authentication failure returns empty session
@@ -319,8 +393,28 @@ public class Session {
     /**
      * Derive a 256-bit AES key from the session secret using PBKDF2-HMAC-SHA256.
      * Uses a fixed salt "brace-session" since the secret itself should be random.
+     * Results are cached to avoid re-running 100,000 iterations on every request.
+     *
+     * <p>The ConcurrentHashMap contract forbids mutating the map inside a
+     * {@code computeIfAbsent} mapping function (silent entry loss / size-counter corruption /
+     * bin-lock stalls while PBKDF2 runs). The bound check is therefore performed
+     * <em>outside</em> the lambda, before the {@code computeIfAbsent} call. The small race
+     * where two threads both observe size &ge; limit and both call {@code clear()} is
+     * benign — the same key is simply re-derived once.
      */
     private static SecretKeySpec deriveKey(String secret) {
+        // Bound the cache BEFORE entering computeIfAbsent to avoid mutating the map
+        // from inside its own mapping function (CHM contract violation).
+        if (keyCache.size() >= MAX_KEY_CACHE_SIZE) {
+            keyCache.clear();
+        }
+        return keyCache.computeIfAbsent(secret, Session::computeDerivedKey);
+    }
+
+    /**
+     * Compute the PBKDF2-derived AES key (without caching).
+     */
+    private static SecretKeySpec computeDerivedKey(String secret) {
         try {
             SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
             PBEKeySpec spec = new PBEKeySpec(
@@ -334,5 +428,20 @@ public class Session {
         } catch (Exception e) {
             throw new RuntimeException("Key derivation failed", e);
         }
+    }
+
+    /**
+     * For testing: return the cached key spec (same object identity) when called twice.
+     * Package-visible for test use only.
+     */
+    static SecretKeySpec getCachedKey(String secret) {
+        return deriveKey(secret);
+    }
+
+    /**
+     * For testing: clear the key cache. Package-visible for test use only.
+     */
+    static void clearKeyCache() {
+        keyCache.clear();
     }
 }

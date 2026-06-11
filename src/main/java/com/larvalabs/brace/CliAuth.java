@@ -74,11 +74,19 @@ public class CliAuth {
 
         var kp = loadKeypair(cfg);
 
+        // Ops auth protocol v2: sign publicKey + "\n" + timestamp + "\n" + nonce, where the
+        // nonce is fresh random per attempt. Binds the signature to our key and lets the
+        // server reject replays of a captured request (see OpsHandler.auth).
         String timestamp = Instant.now().toString();
-        String signature = OpsKeys.sign(timestamp, kp.privateKey());
+        byte[] nonceBytes = new byte[16];
+        new java.security.SecureRandom().nextBytes(nonceBytes);
+        String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
+        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(kp.publicKey(), timestamp, nonce), kp.privateKey());
         var body = Map.of(
+            "v", "2",
             "publicKey", kp.publicKey(),
             "timestamp", timestamp,
+            "nonce", nonce,
             "signature", signature,
             "ttlSeconds", DEFAULT_TTL_SECONDS);
 
@@ -153,7 +161,7 @@ public class CliAuth {
             Path target = projectDir.resolve("target");
             Files.createDirectories(target);
             String json = Json.mapper().writeValueAsString(Map.of("token", token, "expiresAt", expiresAt));
-            Files.writeString(target.resolve(".brace-token"), json);
+            SecretFiles.writeStringWithOwnerOnlyPermissions(target.resolve(".brace-token"), json);
         } catch (Exception e) {
             // Caching is best-effort
         }

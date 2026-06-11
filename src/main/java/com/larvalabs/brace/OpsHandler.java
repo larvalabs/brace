@@ -23,6 +23,10 @@ public class OpsHandler {
     // issue/exchange handshake works behind a load balancer where the two calls may hit different
     // instances (B5). Kept very short since the CLI hands the URL straight to the browser.
     private static final int LOGIN_TOKEN_TTL_SECONDS = 60;
+    // Session TTL: one workday. Shorter than the former 24h; with H1 scope-preservation the
+    // session is already bounded to the caller's ceiling, so 8h is sufficient and limits the
+    // damage window of a stolen cookie.
+    private static final int SESSION_TTL_SECONDS = 28800; // 8 hours
 
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret) {
@@ -55,11 +59,31 @@ public class OpsHandler {
         this.profiler = profiler;
     }
 
-    public record OpsAuthRequest(String publicKey, String timestamp, String signature, Integer ttlSeconds, String scope) {}
+    public record OpsAuthRequest(String v, String publicKey, String timestamp, String signature,
+                                 String nonce, Integer ttlSeconds, String scope) {}
+
+    // Replay suppression for v2 auth nonces. Per-instance, in-memory, best-effort: ops must work
+    // without shared fleet state (B5 — no database, no cross-instance store), so this CANNOT be
+    // fleet-global. Residual window: a captured v2 auth request can still be replayed against a
+    // DIFFERENT instance behind the load balancer within the ±30s timestamp window. Documented in
+    // docs/SECURITY.md ("Ops Endpoints"). TTL is 2 minutes — comfortably above the 60s total
+    // acceptance window — and the map is size-bounded (entries are only recorded after a valid
+    // signature, so only holders of an authorized key can occupy slots).
+    private final NonceCache seenNonces = new NonceCache(120_000, 100_000);
 
     /**
-     * POST /ops/auth — validate signed timestamp, issue short-lived token.
-     * Body: JSON with "publicKey", "timestamp", "signature", and optional "ttlSeconds" fields.
+     * POST /ops/auth — validate a signed auth request, issue a short-lived bearer token.
+     *
+     * <p>Protocol v2 (current): body carries {@code v:"2"}, {@code publicKey}, {@code timestamp},
+     * a per-attempt random {@code nonce} (base64url, 16+ bytes), and a {@code signature} over
+     * {@link OpsKeys#v2AuthMessage publicKey + "\n" + timestamp + "\n" + nonce}. Binding the key
+     * into the signed message kills cross-key confusion; the nonce (rejected on reuse, see
+     * {@link #seenNonces}) makes a captured tuple single-purpose on this instance.
+     *
+     * <p>Protocol v1 (deprecated, shipped in 0.1.6): no {@code v}/{@code nonce}, signature over
+     * the timestamp alone — replayable within the ±30s window. Accepted this release with a
+     * deprecation warning; will be rejected in a future release (see the 0.1.6→0.1.7 migration
+     * guide). Optional fields for both: {@code ttlSeconds}, {@code scope}.
      */
     public Result auth(Request req) {
         try {
@@ -86,9 +110,31 @@ public class OpsHandler {
                 return Result.unauthorized("Stale timestamp");
             }
 
-            // Verify signature
-            if (!OpsKeys.verify(auth.timestamp, auth.signature, auth.publicKey)) {
-                return Result.unauthorized("Invalid signature");
+            // Verify signature per protocol version
+            if ("2".equals(auth.v)) {
+                if (auth.nonce == null || auth.nonce.length() < 16 || auth.nonce.length() > 256) {
+                    return Result.unauthorized("Missing or invalid nonce (base64url of 16+ random bytes required)");
+                }
+                String message = OpsKeys.v2AuthMessage(auth.publicKey, auth.timestamp, auth.nonce);
+                if (!OpsKeys.verify(message, auth.signature, auth.publicKey)) {
+                    return Result.unauthorized("Invalid signature");
+                }
+                // Replay check last, so only validly-signed requests consume nonce slots.
+                if (!seenNonces.checkAndRecord(auth.nonce, System.currentTimeMillis())) {
+                    return Result.unauthorized("Nonce already used");
+                }
+            } else if (auth.v == null || "1".equals(auth.v)) {
+                // Legacy v1: signature over the timestamp only — not bound to the key, no nonce,
+                // replayable within the ±30s window. Kept for one release because v1 shipped in
+                // 0.1.6; removal is documented in the migration guide.
+                Log.warn("ops auth protocol v1 is deprecated and will be rejected in a future release"
+                    + " — upgrade the brace CLI (key " + OpsKeys.fingerprint(auth.publicKey) + ")");
+                if (!OpsKeys.verify(auth.timestamp, auth.signature, auth.publicKey)) {
+                    return Result.unauthorized("Invalid signature");
+                }
+            } else {
+                return Result.unauthorized("Unsupported ops auth protocol version \"" + auth.v
+                    + "\" — this server accepts v2 (and v1, deprecated)");
             }
 
             // Issue token — check for client-requested TTL
@@ -116,11 +162,16 @@ public class OpsHandler {
      * Requires valid Bearer token authentication.
      */
     public Result loginToken(Request req) {
-        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
+        var claims = authorizedClaims(req, OpsScope.READ);
+        if (claims == null) return Result.unauthorized("Invalid ops key");
 
         // Stateless, short-lived HMAC token — no server-side store, so exchange works on any
-        // instance behind a load balancer (B5). It conveys access the caller already holds.
-        String loginToken = OpsToken.create(tokenSecret, LOGIN_TOKEN_TTL_SECONDS);
+        // instance behind a load balancer (B5). It conveys exactly the access the caller
+        // already holds: minted at the caller's scope and key id (H1), which exchange()
+        // preserves into the browser session cookie — a read key yields a read-only,
+        // attributed browser session. READ-gated because the dashboard itself is READ;
+        // no escalation is possible since the minted token never exceeds the caller's scope.
+        String loginToken = OpsToken.create(tokenSecret, LOGIN_TOKEN_TTL_SECONDS, claims.scope(), claims.kid());
         Instant expiry = Instant.now().plusSeconds(LOGIN_TOKEN_TTL_SECONDS);
 
         return Json.of(Map.of(
@@ -136,6 +187,16 @@ public class OpsHandler {
      * dashboard. Reusable within the token's short TTL; replay protection is the TTL, not a store —
      * single-use would need fleet-wide shared state that ops (which can run without a database)
      * can't assume. See docs/migrations and the multi-server plan (B5).
+     *
+     * <p>Why {@code ?token=} survives here and nowhere else: the exchange endpoint is the
+     * browser-redirect handoff — the CLI hands the URL straight to the browser, and there is no
+     * other channel that can carry a credential into a plain GET redirect. The token is
+     * short-lived (60s, {@link #LOGIN_TOKEN_TTL_SECONDS}) and scope-capped at the caller's
+     * ceiling (H1), so the exposure window is narrow. All other ops endpoints accept credentials
+     * via {@code Authorization: Bearer} header or the session cookie only — see
+     * {@link #authenticate}. The response carries {@code Referrer-Policy: no-referrer} and
+     * {@code Cache-Control: no-store} so the token-bearing URL is not forwarded to any
+     * outbound link on the dashboard and is not stored in proxy or browser caches.
      */
     public Result exchange(Request req) {
         String loginToken = req.queryParam("token");
@@ -148,11 +209,17 @@ public class OpsHandler {
             return Result.unauthorized("Invalid or expired login token");
         }
 
-        // Mint a long-lived (24h) ops session token, preserving the login token's scope.
-        String sessionToken = OpsToken.create(tokenSecret, 86400, claims.scope(), claims.kid());
+        // Mint an 8h ops session token (one workday), preserving the login token's scope (H1).
+        // 8h rather than 24h: with scope-preservation the session is already bound to the
+        // caller's ceiling; shorter TTL limits the damage window of a stolen cookie further.
+        String sessionToken = OpsToken.create(tokenSecret, SESSION_TTL_SECONDS, claims.scope(), claims.kid());
 
         var result = Redirect.to("/ops/dashboard");
-        result.cookie(OPS_COOKIE_NAME, sessionToken, 86400, true, true, "Strict");
+        result.cookie(OPS_COOKIE_NAME, sessionToken, SESSION_TTL_SECONDS, true, true, "Strict");
+        // no-referrer: the token is in our URL — prevent it leaking to any outbound link the
+        // dashboard renders. no-store: prevent proxy / browser caches from recording the URL.
+        result.header("Referrer-Policy", "no-referrer");
+        result.header("Cache-Control", "no-store");
         return result;
     }
 
@@ -351,10 +418,13 @@ public class OpsHandler {
     }
 
     public Result dashboard(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
-        // Generate a dashboard token with 2h TTL for htmx polling
-        String dashboardToken = OpsToken.create(tokenSecret, 7200);
-        return Result.html(OpsDashboard.html(dashboardToken, stats, jobScheduler, mailer, errorStore, cache, profiler));
+        var claims = authorizedClaims(req, OpsScope.READ);
+        if (claims == null) return Result.unauthorized("Invalid ops key");
+        // Generate a dashboard token with 2h TTL for htmx polling. Minted at the caller's
+        // own scope and key id — never above it (H1: this token is embedded in the page
+        // HTML, so a CONTROL default would hand every read-only caller a control token).
+        String dashboardToken = OpsToken.create(tokenSecret, 7200, claims.scope(), claims.kid());
+        return Result.html(OpsDashboard.html(dashboardToken, claims.scope(), stats, jobScheduler, mailer, errorStore, cache, profiler));
     }
 
     public Result routes(Request req) {
@@ -524,10 +594,23 @@ public class OpsHandler {
     }
 
     /**
-     * Verify the request's token (Bearer header, ops session cookie, or {@code ?token=}
-     * fallback) and return its claims, or {@code null} if unauthenticated. This is the
-     * single choke point where a request's identity (kid) and scope are resolved — the
-     * natural place for a future ops audit log to attach.
+     * Verify the request's token and return its claims, or {@code null} if unauthenticated.
+     * Two credential channels are accepted:
+     * <ol>
+     *   <li>{@code Authorization: Bearer <token>} header — the standard machine-to-machine
+     *       channel used by the CLI and the dashboard's htmx polling.</li>
+     *   <li>The {@code __brace_ops_session} httpOnly cookie — set by the
+     *       {@code /ops/auth/exchange} browser handoff.</li>
+     * </ol>
+     * {@code ?token=} query-param credentials are intentionally NOT accepted here. Tokens in
+     * URLs leak via proxy access logs, browser history, and the {@code Referer} header on
+     * outbound links. The exchange endpoint ({@code /ops/auth/exchange}) is the only endpoint
+     * that reads {@code ?token=} because it is the browser-redirect handoff — there is no other
+     * channel to carry a credential into a plain GET redirect — and the login token it accepts
+     * is short-lived (60s) and scope-capped. See {@link #exchange} for the full rationale.
+     *
+     * <p>This is the single choke point where a request's identity (kid) and scope are resolved —
+     * the natural place for a future ops audit log to attach.
      */
     private OpsToken.Claims authenticate(Request req) {
         if (tokenSecret == null) return null;
@@ -546,12 +629,6 @@ public class OpsHandler {
             if (claims != null) return claims;
         }
 
-        // Check ?token= query param (fallback for direct access, but discouraged)
-        var tokenParam = req.queryParam("token");
-        if (tokenParam != null) {
-            return OpsToken.verify(tokenParam, tokenSecret);
-        }
-
         return null;
     }
 
@@ -561,11 +638,22 @@ public class OpsHandler {
      * audit log, attributed to the token's key fingerprint.
      */
     private boolean authorize(Request req, OpsScope required) {
+        return authorizedClaims(req, required) != null;
+    }
+
+    /**
+     * Like {@link #authorize}, but returns the verified claims on success so the caller
+     * can act at the token's <em>actual</em> scope — e.g. re-mint a derived token capped
+     * at the caller's scope and attributed to the caller's key (H1: a READ caller must
+     * never receive a CONTROL token). Returns {@code null} when unauthenticated or
+     * scope-denied. Audited identically to {@link #authorize}.
+     */
+    private OpsToken.Claims authorizedClaims(Request req, OpsScope required) {
         var claims = authenticate(req);
-        if (claims == null) return false;
+        if (claims == null) return null;
         boolean granted = claims.scope().grants(required);
         OpsAudit.record(req.method(), req.path(), claims.kid(), claims.scope(), required, granted);
-        return granted;
+        return granted ? claims : null;
     }
 
     private static int levelRank(String level) {
@@ -586,5 +674,45 @@ public class OpsHandler {
         if (days > 0) return days + "d " + hours + "h " + mins + "m";
         if (hours > 0) return hours + "h " + mins + "m";
         return mins + "m";
+    }
+
+    /**
+     * Per-instance, best-effort seen-nonce set for v2 ops auth replay suppression.
+     * Maps nonce → expiry (epoch millis); expired entries are swept opportunistically on
+     * each call (the auth endpoint is low-rate, so a full sweep per call is cheap). The
+     * set is size-bounded and fails closed: when full (after sweeping), new nonces are
+     * rejected rather than evicting live ones. Entries are only recorded after signature
+     * verification, so only holders of an authorized key can fill it.
+     *
+     * <p>Deliberately NOT fleet-global (B5: ops must work without shared state), so a
+     * captured request remains replayable against a different instance within the
+     * timestamp acceptance window — see docs/SECURITY.md.
+     */
+    static final class NonceCache {
+        private final java.util.concurrent.ConcurrentHashMap<String, Long> seen =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private final long ttlMillis;
+        private final int maxSize;
+
+        NonceCache(long ttlMillis, int maxSize) {
+            this.ttlMillis = ttlMillis;
+            this.maxSize = maxSize;
+        }
+
+        /**
+         * Record the nonce if it is fresh. Returns {@code false} when the nonce was
+         * already seen (replay) or the cache is at capacity (fail closed).
+         */
+        boolean checkAndRecord(String nonce, long nowMillis) {
+            seen.entrySet().removeIf(e -> e.getValue() < nowMillis);
+            if (seen.size() >= maxSize) {
+                return false;
+            }
+            return seen.putIfAbsent(nonce, nowMillis + ttlMillis) == null;
+        }
+
+        int size() {
+            return seen.size();
+        }
     }
 }

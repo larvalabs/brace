@@ -10,7 +10,6 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -38,6 +37,11 @@ class RequestBodyTest {
     static Brace app;
     static int port;
 
+    // A second app with a very small upload limit for the 413 tests.
+    static Brace limitedApp;
+    static int limitedPort;
+    static final int SMALL_LIMIT = 100; // bytes
+
     @BeforeAll
     static void startApp() throws Exception {
         app = Brace.app().port(0).banner(false);
@@ -46,11 +50,17 @@ class RequestBodyTest {
         app.post("/echo", req -> Result.text(req.body()));
         app.start();
         port = app.actualPort();
+
+        limitedApp = Brace.app().port(0).banner(false).maxUploadSize(SMALL_LIMIT);
+        limitedApp.post("/echo", req -> Result.text(req.body()));
+        limitedApp.start();
+        limitedPort = limitedApp.actualPort();
     }
 
     @AfterAll
     static void stopApp() throws Exception {
         app.stop();
+        limitedApp.stop();
     }
 
     /**
@@ -137,4 +147,95 @@ class RequestBodyTest {
     void largeBodyRoundTrips() throws Exception {
         assertRoundTripsChunked(1024 * 1024);
     }
+
+    // --- H3: maxUploadSize enforcement on plain (non-multipart) bodies ---
+
+    /**
+     * Sends an HTTP/1.1 request to the limited app using a raw socket, returning the
+     * status code parsed from the response line. Sends the body as a single chunk so
+     * there is no ambiguity about delivery.
+     */
+    private int sendRawPost(int targetPort, String path, byte[] bodyBytes,
+                            String contentLengthOverride) throws Exception {
+        String clHeader = contentLengthOverride != null
+            ? contentLengthOverride
+            : String.valueOf(bodyBytes.length);
+        String headers = "POST " + path + " HTTP/1.1\r\n"
+            + "Host: localhost\r\n"
+            + "Content-Type: text/plain\r\n"
+            + "Content-Length: " + clHeader + "\r\n"
+            + "Connection: close\r\n"
+            + "\r\n";
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("localhost", targetPort), 8_000);
+            socket.setSoTimeout(8_000);
+            OutputStream out = socket.getOutputStream();
+            out.write(headers.getBytes(StandardCharsets.US_ASCII));
+            out.write(bodyBytes);
+            out.flush();
+            String raw = readAll(socket.getInputStream());
+            // HTTP/1.1 status line: "HTTP/1.1 NNN ..."
+            return Integer.parseInt(raw.substring(9, 12));
+        }
+    }
+
+    /**
+     * Sends an HTTP/1.1 chunked-transfer-encoding request to bypass the
+     * Content-Length fast-reject path and exercise the bounded-read accumulator.
+     */
+    private int sendChunkedPost(int targetPort, String path, byte[] bodyBytes) throws Exception {
+        // Build the chunked body: one chunk carrying all the bytes, then a terminal chunk.
+        String chunkSizeHex = Integer.toHexString(bodyBytes.length);
+        byte[] chunkHeader = (chunkSizeHex + "\r\n").getBytes(StandardCharsets.US_ASCII);
+        byte[] chunkTrailer = "\r\n0\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
+
+        String headers = "POST " + path + " HTTP/1.1\r\n"
+            + "Host: localhost\r\n"
+            + "Content-Type: text/plain\r\n"
+            + "Transfer-Encoding: chunked\r\n"
+            + "Connection: close\r\n"
+            + "\r\n";
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("localhost", targetPort), 8_000);
+            socket.setSoTimeout(8_000);
+            OutputStream out = socket.getOutputStream();
+            out.write(headers.getBytes(StandardCharsets.US_ASCII));
+            out.write(chunkHeader);
+            out.write(bodyBytes);
+            out.write(chunkTrailer);
+            out.flush();
+            String raw = readAll(socket.getInputStream());
+            return Integer.parseInt(raw.substring(9, 12));
+        }
+    }
+
+    @Test
+    void oversizedContentLengthRejectedWith413() throws Exception {
+        // Body is SMALL_LIMIT+1 bytes; Content-Length tells the server the true size.
+        // The fast-reject path should return 413 without reading the body.
+        byte[] body = buildBody(SMALL_LIMIT + 1);
+        int status = sendRawPost(limitedPort, "/echo", body, null);
+        assertEquals(413, status, "Content-Length over limit should return 413");
+    }
+
+    @Test
+    void oversizedChunkedBodyRejectedWith413() throws Exception {
+        // Body is SMALL_LIMIT+1 bytes sent with Transfer-Encoding: chunked (no Content-Length).
+        // The Content-Length fast-reject path is bypassed; the bounded-read accumulator must
+        // catch the overflow.
+        byte[] body = buildBody(SMALL_LIMIT + 1);
+        int status = sendChunkedPost(limitedPort, "/echo", body);
+        assertEquals(413, status, "Chunked body over limit should return 413");
+    }
+
+    @Test
+    void bodyAtExactLimitSucceeds() throws Exception {
+        // Body is exactly SMALL_LIMIT bytes — should be accepted (200).
+        byte[] body = buildBody(SMALL_LIMIT);
+        int status = sendRawPost(limitedPort, "/echo", body, null);
+        assertEquals(200, status, "Body at exactly the limit should succeed");
+    }
+
 }
