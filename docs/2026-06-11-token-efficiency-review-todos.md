@@ -511,7 +511,7 @@ expensive round**, exactly when the re-read corpus is largest).
     writing `Redirect.to(req.queryParam("next"))`, the exact pattern the API was
     built to kill. **Model: Haiku 4.5** with this list as spec.
 
-- [ ] **L8: Migration guides: add a machine-scannable checklist table; compress the 872-line 0.1.7 guide** — `docs/migrations/`
+- [x] **L8: Migration guides: add a machine-scannable checklist table; compress the 872-line 0.1.7 guide** *(guide had grown to 1963 lines by now; added a 44-row "Index" table — change | type | action required | anchor — right after the intro, anchors computed per GitHub slug rules. Compressions: Flyway 10 background prose 21→13 lines; the standalone "Why the Postgres packaging gap went unnoticed" section (10 lines) folded into the Flyway cleanup as a 4-line parenthetical; the verbatim 0.1.6 boot-log capture in the log-noise section 19→12 lines. Before/after code examples and breaking-section details untouched. Intro's four breaking bullets verified to match the four breaking sections; intro CLI paragraph now also mentions compact `--json`. The `brace agents-md` upgrade step from M10 is present. NOTE: H3's forthcoming migration-guide section needs its table row added at integration.)* — `docs/migrations/`
   - Shape is right (breaking-verdict-first, before/after); weight is per-upgrade,
     not per-session. Add a top table (change | breaking? | action | anchor),
     compress historical narration (40-line Flyway 10 background), add the

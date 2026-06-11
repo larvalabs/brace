@@ -33,32 +33,77 @@ Also note: the session-expiry change alters how long a stolen cookie stays valid
 is now deprecated — see "ops auth protocol v2" below.
 
 If anything **parses brace CLI output**: `brace compile` failure diagnostics are now
-condensed and deduplicated, and `brace test` prints a condensed summary when stdout is
-not a TTY — see "`brace compile` prints condensed, deduplicated diagnostics" and
-"`brace test` prints condensed output when stdout is not a TTY" below. Exit codes are
-unchanged, and `brace test --verbose` restores the old output.
+condensed and deduplicated, `brace test` prints a condensed summary when stdout is not
+a TTY, and every command's `--json` output is now compact single-line (identical bytes
+to a JSON parser; only text-layout greps notice) — see the corresponding sections below.
+Exit codes are unchanged, and `brace test --verbose` restores the old output.
+
+## Index
+
+One row per section of this guide, in document order. The bullets above are the prose
+summary; this is the scan/jump table.
+
+| Change | Type | Action required | Anchor |
+|---|---|---|---|
+| Drop manual `flyway-database-postgresql` dep | cleanup | optional — delete hand-added Postgres deps | [§](#recommended-cleanup-drop-the-manual-flyway-database-postgresql-dependency) |
+| Shared cache backend | new-optional | none — additive | [§](#new-optional-shared-cache-backend-for-multi-server-consistency) |
+| Form binding: enums, `LocalDate`, `Instant`, `BigDecimal` | new-optional | none — additive | [§](#new-optional-form-binding-for-enums-localdate-instant-bigdecimal) |
+| `Json.obj` ad-hoc JSON shapes | new-optional | none — additive | [§](#new-optional-jsonobj--one-line-ad-hoc-json-shapes) |
+| `req.jsonForm` JSON-body validation | new-optional | none — additive | [§](#new-optional-reqjsonform--declarative-validation-for-json-bodies) |
+| Typed read-only route methods (`getRead`, …) | new-optional | none — additive | [§](#new-optional-typed-read-only-route-methods-getread-getreadfull-) |
+| Session-aware `before` + `requireSession` | new-optional | none — additive | [§](#new-optional-session-aware-before-middleware--requiresession-auth-guard) |
+| `db.findOr404` / `db.queryOneOr404` | new-optional | none — additive | [§](#new-optional-dbfindor404--dbqueryoneor404-lookup-helpers) |
+| `db.queryPage` + ORDER BY in where-fragments | new-optional | none — additive | [§](#new-optional-dbquerypage-pagination--order-by-in-where-fragments-is-now-documented-behavior) |
+| `db.exists` multi-field check | new-optional | none — additive | [§](#new-optional-dbexists--multi-field-existence-check) |
+| Multi-value `req.queryParams` / `req.formParams` | new-optional | none — additive | [§](#new-optional-multi-value-queryform-params--reqqueryparamsname--reqformparamsname) |
+| TestApp builder, CSRF helpers, JSON assertions | new-optional | none — additive | [§](#new-optional-testapp-request-builder-csrf-helpers-session-variants-json-assertions) |
+| Scaffold extracts `App.routes(Brace)` | new-optional | none — new scaffolds only; adopt if useful | [§](#new-optional-scaffold-extracts-route-wiring-into-approutesbrace) |
+| Scaffold fix: surefire pin + fat jar | cleanup | older scaffolds: paste `<build>` section, fix Dockerfile COPY | [§](#fixed-scaffold-generated-pom-ran-zero-tests-dockerfile-couldnt-run-the-jar) |
+| Scoped read-only ops keys | new-optional | none — keys without marker stay `control` | [§](#new-optional-scoped-read-only-ops-keys) |
+| Refreshed `CLAUDE.md` generator | new-optional | optional — regenerate and diff | [§](#new-optional-refreshed-claudemd-capability-index) |
+| `brace agents-md` doc refresh | new-optional | run after bumping `<brace.version>` | [§](#new-optional-brace-agents-md--refresh-brace-agentsmd-after-an-upgrade) |
+| `/ops/errors` returns summaries | breaking | scripts reading `stackTrace` etc.: add `?full=true` or fetch `/ops/errors/{id}` | [§](#breaking-for-scripted-consumers-opserrors-now-returns-summaries) |
+| `/ops/status` compact snapshot | breaking | scripts reading `timeseries`/`profiling`: add `?include=`; exit code now real | [§](#breaking-for-scripted-consumers-opsstatus-is-now-a-compact-snapshot) |
+| Per-test H2 database | behavior change | suites relying on the shared DB: set an explicit URL | [§](#behavior-change-each-bracetest-gets-its-own-h2-database) |
+| CLI JSON output compact | behavior change | none if parsing as JSON; fix text-layout greps | [§](#behavior-change-cli-json-output-is-now-compact-one-line) |
+| Unknown CLI commands exit 1 | behavior change | none — fix typos | [§](#behavior-change-unknown-cli-commands-now-exit-1) |
+| `brace compile` condensed diagnostics | behavior change | update parsers of javac failure output | [§](#changed-brace-compile-prints-condensed-deduplicated-diagnostics) |
+| `brace test` condensed when piped | behavior change | scripts grepping raw JUnit output: match summary line or `--verbose` | [§](#changed-brace-test-prints-condensed-output-when-stdout-is-not-a-tty) |
+| Startup log noise quieted | behavior change | none; `-Dlog.level.*` restores; exclude `slf4j-jdk14` if you ship a provider | [§](#behavior-change-third-party-startup-log-noise-is-quieted-by-default) |
+| Defaulted numeric accessors no longer throw | behavior change | none unless relying on the 500 | [§](#behavior-change-defaulted-numeric-query-accessors-no-longer-throw-on-unparseable-input) |
+| Dev-mode 404s list near-miss routes | new-optional | relax exact-body 404 asserts in dev-mode tests | [§](#new-dev-mode-only-404s-list-near-miss-routes) |
+| Request/response hardening (headers, cookies, body order, `?` escaping) | behavior change | none; note body-read ordering on unmatched routes | [§](#requestresponse-hardening-fixes) |
+| Non-multipart bodies capped at `maxUploadSize` (413) | behavior change | raise `maxUploadSize` if >10 MB bodies intended | [§](#security-fix-non-multipart-request-bodies-are-now-capped-at-maxuploadsize) |
+| `req.ip()` rightmost-untrusted | behavior change | update tests asserting leftmost XFF | [§](#security-fix-reqip-now-returns-the-rightmost-untrusted-address) |
+| CSRF token persists on plain `Handler` | behavior change | none; workaround `Session` params removable | [§](#security-fix-csrf-token-now-persists-when-rendered-through-a-plain-handler) |
+| Server-enforced session expiry `_exp` | behavior change | none; note 14-day default from last write | [§](#security-fix-sessions-now-carry-a-server-enforced-expiry-_exp) |
+| `?token=` ops auth removed | breaking | switch scripts to `Authorization: Bearer` | [§](#security-fix-token-query-param-auth-removed-from-general-ops-endpoints) |
+| Ops auth protocol v2; v1 deprecated | behavior change | none for CLI; update hand-rolled `/ops/auth` clients | [§](#security-fix-ops-auth-protocol-v2-key-bound-nonced-signature-v1-deprecated) |
+| Static files send `nosniff` | behavior change | none | [§](#security-fix-static-files-now-carry-x-content-type-options-nosniff) |
+| OpsDashboard escapes single quotes | cleanup | none | [§](#security-fix-opsdashboard-html-escaping-now-handles-single-quotes) |
+| `Redirect.toLocal` open-redirect helper | new-optional | use for user-derived redirect targets | [§](#security-fix-open-redirect-helper-safe-redirect-for-user-input) |
+| Middleware `/*` matches bare prefix; interior wildcards rejected | breaking | fix interior-wildcard patterns; review bare-prefix guards | [§](#security-fix-middleware-trailing--now-matches-the-bare-prefix) |
+| `Class.forName` initializer control | cleanup | none | [§](#security-fix-classforname-initializer-control-on-durable-jobs-and-cache-entries) |
+| Page-cache keys percent-encoded | behavior change | none — one-time cache misses after upgrade | [§](#security-fix-page-cache-keys-now-percent-encode-query-parameters) |
+| `brace new` validates project names | behavior change | use `[A-Za-z0-9_-]` names | [§](#security-fix-brace-new-validates-project-names) |
+| `Passwords.dummyCheck` timing helper | new-optional | add to user-not-found login path | [§](#security-fix-bcrypt-helper-for-constant-time-enumeration-timing-mitigation) |
+| TrustedProxies dual-stack guidance (docs) | cleanup | list both `127.0.0.1` and `::1` on dual-stack | [§](#security-fix-trustedproxies-dual-stack-ipv6-representation-mismatch-documentation) |
+| High-entropy path segments redacted in logs/stats | behavior change | log tooling matching token paths: match `[redacted]` | [§](#security-fix-high-entropy-path-segments-redacted-in-access-logs-and-ops-stats) |
 
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
-**Background.** Flyway 10 (which Brace uses) split per-database support out of
-`flyway-core` into separate modules. `flyway-core` bundles only a few handlers — H2 among
-them — but **not** PostgreSQL. Through 0.1.6, Brace declared only `flyway-core`, so an app
-running on Postgres failed at startup the moment `DatabaseFactory` ran migrations:
+Flyway 10 split per-database support out of `flyway-core` (H2 stayed bundled;
+PostgreSQL did not), and through 0.1.6 Brace declared only `flyway-core` — so an app
+on Postgres failed at startup the moment `DatabaseFactory` ran migrations:
 
 ```
 org.flywaydb.core.api.FlywayException: No database found to handle jdbc:postgresql://…
 ```
 
-The standard workaround was to add the missing module — and the Postgres JDBC driver — to
-your **own** `pom.xml`. Many Brace+Postgres projects carry exactly that.
-
-**What changed in 0.1.7.** Brace now bundles `flyway-database-postgresql` itself (at
-`runtime` scope, so it reaches your app transitively). The PostgreSQL JDBC driver was
-already bundled this way. So a Brace project on Postgres needs **no Postgres dependencies of
-its own** — Brace brings everything.
-
-**The cleanup.** If your project's `pom.xml` declares either of these only to make Postgres
-work, you can remove them:
+The standard workaround was adding `flyway-database-postgresql` and the Postgres JDBC
+driver to your **own** `pom.xml`. 0.1.7 bundles both at `runtime` scope, so a Brace
+project on Postgres needs **no Postgres dependencies of its own** — the hand-added
+workaround dependencies can go:
 
 **Before:**
 
@@ -96,14 +141,15 @@ work, you can remove them:
 </dependencies>
 ```
 
-**This cleanup is optional and safe to skip.** Leaving the explicit declarations in place is
-harmless — Maven dedupes them against Brace's transitive versions. One reason to remove them:
-a hand-pinned `org.postgresql` version (e.g. `42.7.4`) *overrides* the newer driver Brace
-ships, so deleting it lets you track Brace's tested version instead.
+**This cleanup is optional and safe to skip** — Maven dedupes the explicit declarations
+against Brace's transitive versions. One reason to do it anyway: a hand-pinned
+`org.postgresql` version (e.g. `42.7.4`) *overrides* the newer driver Brace ships and
+tests against.
 
-**How to apply (mechanical):** in each project's `pom.xml`, delete any `<dependency>` on
-`org.flywaydb:flyway-database-postgresql` and any `org.postgresql:postgresql` that you only
-added for Brace. Recompile and start the app; migrations should run on Postgres unchanged.
+(Why the gap went unnoticed until now: Brace's own tests ran entirely on H2, whose
+Flyway handler *is* bundled in `flyway-core`. 0.1.7 adds a real-Postgres Testcontainers
+tier — `mvn verify` — that runs the shipped migrations against Postgres, which is what
+surfaced this. See `docs/2026-06-05-pg-testcontainers.md`.)
 
 ## New (optional): shared cache backend for multi-server consistency
 
@@ -1120,23 +1166,16 @@ from ~80 lines of third-party logging to the Brace banner plus genuine warnings.
 only needed if you *relied* on the Hibernate/Flyway INFO chatter (use the override below)
 or if your app ships its own slf4j provider (see the two-providers note).
 
-**What changed.** Through 0.1.6, Brace shipped no slf4j provider, so Jetty printed the
+**What changed.** Through 0.1.6, Brace shipped no slf4j provider: Jetty printed the
 `No SLF4J providers were found` warning (and its own logs went nowhere), while Hibernate
-(via jboss-logging) and Flyway fell back to java.util.logging, whose default console
-handler prints **two lines per record** on stderr. A real 0.1.6 boot (H2, empty app
-schema), captured verbatim — 80+ lines of this on stderr:
+and Flyway fell back to java.util.logging's two-line-per-record console handler — 80+
+lines of stderr per boot, like:
 
 ```
-Jun 11, 2026 5:02:38 PM org.flywaydb.core.FlywayExecutor execute
-INFO: Database: jdbc:h2:mem:scratch (H2 2.3)
 Jun 11, 2026 5:02:38 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
 INFO: Migrating schema "PUBLIC" to version "1 - brace scheduled jobs"
 ...30 more two-line records...
-Jun 11, 2026 5:02:38 PM org.hibernate.Version logVersion
-INFO: HHH000412: Hibernate ORM core version 7.0.10.Final
 SLF4J(W): No SLF4J providers were found.
-SLF4J(W): Defaulting to no-operation (NOP) logger implementation
-SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
 ...
 ```
 
@@ -1411,16 +1450,6 @@ app.trustedProxies("127.0.0.1", "::1");
 
 See the "Trusted Proxies" section of `docs/SECURITY.md` for a full behavioral table and
 IPv6-mapped address guidance.
-
----
-
-## Why the Postgres packaging gap went unnoticed until now
-
-Brace's test suite ran entirely on in-memory H2, whose Flyway handler *is* bundled in
-`flyway-core` — so the framework's own tests never exercised the real Postgres migration
-path and never saw the gap. 0.1.7 adds a Postgres testcontainer test tier (`mvn verify`)
-that runs the shipped migrations against real Postgres, which is what surfaced this. See
-`docs/2026-06-05-pg-testcontainers.md`.
 
 ## Security fix: CSRF token now persists when rendered through a plain Handler
 
