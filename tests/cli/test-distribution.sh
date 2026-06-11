@@ -46,6 +46,8 @@ cd "$WORK"
 [[ -f testapp/pom.xml ]] || fail "testapp/pom.xml not created"
 [[ -f testapp/src/main/java/app/App.java ]] || fail "App.java not created"
 [[ -f testapp/src/test/java/app/HomeControllerTest.java ]] || fail "test class not created"
+grep -q "public static void routes(Brace app)" testapp/src/main/java/app/App.java || fail "App.java missing reusable routes(Brace) method"
+grep -q "App::routes" testapp/src/test/java/app/HomeControllerTest.java || fail "generated test doesn't reuse App::routes"
 pass "brace new created project"
 
 step "Running brace compile"

@@ -395,6 +395,59 @@ Two behaviors worth knowing:
 The Testing section of `BRACE-AGENTS.md` documents all of it, including the CSRF-in-tests
 rule that was previously undocumented.
 
+## New (optional): scaffold extracts route wiring into `App.routes(Brace)`
+
+**Existing projects: nothing to do** — this only changes what `brace new` generates
+in 0.1.7+. Newly scaffolded `App.java` keeps route registration in
+`public static void routes(Brace app)` (called from `main()`, which keeps config and
+server startup to itself), and the scaffolded test reuses it via
+`.start(App::routes)` instead of re-registering routes by hand. The scaffolded test
+also includes a `TestData` factory-helper skeleton as the copyable pattern for
+entity setup.
+
+**To adopt in an existing project**, extract the route-registration lines from
+`main()` into a static method:
+
+```java
+// Before — routes wired inline in main(), tests must duplicate them:
+public static void main(String[] args) throws Exception {
+    var config = Config.load(...);
+    var app = Brace.app().port(...).database(db).templates("views");
+    var home = new HomeController();
+    app.get("/", home::index);
+    app.getRead("/posts", posts::index);
+    app.start();
+}
+
+// After — main() keeps config/startup; routes() owns the wiring:
+public static void main(String[] args) throws Exception {
+    var config = Config.load(...);
+    var app = Brace.app().port(...).database(db).templates("views");
+    routes(app);
+    app.start();
+}
+
+public static void routes(Brace app) {
+    var home = new HomeController();
+    var posts = new PostController();
+    app.get("/", home::index);
+    app.getRead("/posts", posts::index);
+}
+```
+
+Then point every test at the real wiring:
+
+```java
+// Before:
+testApp = Brace.test().templates("views").start(app -> {
+    var home = new HomeController();
+    app.get("/", home::index);     // duplicated, drifts from main()
+});
+
+// After:
+testApp = Brace.test().templates("views").start(App::routes);
+```
+
 ## New (optional): scoped read-only ops keys
 
 **Nothing to do** — existing keys and tokens keep working unchanged. 0.1.7 adds a

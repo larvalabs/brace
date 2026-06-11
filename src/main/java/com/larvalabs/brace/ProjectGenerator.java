@@ -117,10 +117,22 @@ public class App {
             .sessions(config.get("session.secret"))
             .ops("ops-authorized-keys");
 
-        var home = new HomeController();
-        app.get("/", home::index);
+        routes(app);
 
         app.start();
+    }
+
+    /**
+     * All route registration lives here, separate from config and server
+     * startup, so tests can wire the exact same routes:
+     *   Brace.test().templates("views").start(App::routes)
+     */
+    public static void routes(Brace app) {
+        var home = new HomeController();
+        app.get("/", home::index);
+        // DB-backed routes use the typed registration methods, e.g.:
+        //   app.getRead("/posts", posts::index);   // read-only DB handler
+        //   app.postDb("/posts", posts::create);   // transactional DB handler
     }
 }
 """);
@@ -143,7 +155,6 @@ public class HomeController {
 package app;
 
 import com.larvalabs.brace.*;
-import app.controllers.HomeController;
 import org.junit.jupiter.api.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -154,10 +165,8 @@ class HomeControllerTest {
     static void setup() throws Exception {
         testApp = Brace.test()
             .templates("views")
-            .start(app -> {
-                var home = new HomeController();
-                app.get("/", home::index);
-            });
+            // .entities(Post.class)  // register the entities your routes query
+            .start(App::routes);      // same wiring as main() — no duplication
     }
 
     @AfterAll
@@ -168,6 +177,18 @@ class HomeControllerTest {
         var response = testApp.get("/");
         assertEquals(200, response.status());
         assertTrue(response.body().contains("Welcome"));
+    }
+
+    /**
+     * Factory methods for test entities — one per entity. Insert with:
+     *   testApp.withDb(db -> db.insert(TestData.post("Hello")));
+     */
+    static class TestData {
+        // static Post post(String title) {
+        //     var p = new Post();
+        //     p.title = title;
+        //     return p;
+        // }
     }
 }
 """);

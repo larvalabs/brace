@@ -1126,6 +1126,18 @@ static TestApp app = Brace.test()
 }
 ```
 
+Don't re-register routes by hand in tests. Keep route registration in a
+`public static void routes(Brace app)` method on your `App` class (called from
+`main()`, which keeps config and server startup to itself — the `brace new`
+scaffold is laid out this way), and reuse it:
+
+```java
+static TestApp app = Brace.test()
+    .entities(Post.class, User.class)
+    .templates("views")
+    .start(App::routes);   // exact same wiring as production main()
+```
+
 Create a session for authenticated test requests: `Session.of("userId", 1)`. Every HTTP verb has a session variant — `get(path, session)`, `post(path, params, session)`, `postJson(path, body, session)`, `put(path, params, session)`, `delete(path, session)` — that sends the session as an encrypted cookie.
 
 ### CSRF in tests

@@ -187,6 +187,24 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void generatedAppExposesReusableRouteWiring(@TempDir Path tempDir) throws Exception {
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var appJava = Files.readString(projDir.resolve("src/main/java/app/App.java"));
+        assertTrue(appJava.contains("public static void routes(Brace app)"),
+            "App.java should extract route registration into routes(Brace)");
+        assertTrue(appJava.contains("routes(app);"),
+            "main() should call routes(app)");
+
+        var testJava = Files.readString(projDir.resolve("src/test/java/app/HomeControllerTest.java"));
+        assertTrue(testJava.contains("App::routes"),
+            "generated test should reuse App.routes instead of re-registering routes");
+        assertTrue(testJava.contains("class TestData"),
+            "generated test should include the TestData factory pattern");
+    }
+
+    @Test
     void projectNameAllowsAlphanumericUnderscoreHyphen() {
         String[] validNames = {
             "my-project",

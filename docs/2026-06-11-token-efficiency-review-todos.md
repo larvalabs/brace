@@ -271,7 +271,11 @@ expensive round**, exactly when the re-read corpus is largest).
     bearer header reaches handler; typed list deserialization.
   - **Model: Sonnet 4.6.**
 
-- [ ] **M7: Scaffold: route wiring isn't reusable by tests; no test idiom to copy** — `ProjectGenerator.java:97-126,142-173`
+- [x] **M7: Scaffold: route wiring isn't reusable by tests; no test idiom to copy** — `ProjectGenerator.java:97-126,142-173`
+  - *Done: scaffold `App.java` extracts `public static void routes(Brace app)` (typed
+    route methods shown in comments), scaffold test starts with `App::routes` and
+    ships a `TestData` factory skeleton (commented example — the scaffold has no
+    entities to instantiate), BRACE-AGENTS.md §Testing teaches the pattern.*
   - Generated `App.java` wires routes inline in `main()` (which reads config and
     starts the real server), so the scaffold test — and the documented idiom
     (BRACE-AGENTS.md §Testing) — re-register routes by hand: O(routes) duplicated
