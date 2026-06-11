@@ -169,7 +169,7 @@ public class CliCommands {
         long lastId = 0;
         for (var e : entries) {
             if (mode == CliOutput.Mode.JSON) {
-                System.out.println(CliOutput.jsonCompact(e));
+                System.out.println(CliOutput.json(e));
             } else {
                 renderLogLine(e);
             }

@@ -64,15 +64,12 @@ public class CliOutput {
         return s + " ".repeat(width - s.length());
     }
 
+    /**
+     * Serialize a value for JSON (agent) mode: compact, one line. JSON mode exists for
+     * programs — agents, `jq`, scripts — where pretty-printing only costs tokens. The
+     * human/`--pretty` mode renders tables and summaries, not pretty-printed JSON.
+     */
     public static String json(Object value) {
-        try {
-            return Json.mapper().writerWithDefaultPrettyPrinter().writeValueAsString(value);
-        } catch (Exception e) {
-            return String.valueOf(value);
-        }
-    }
-
-    public static String jsonCompact(Object value) {
         try {
             return Json.mapper().writeValueAsString(value);
         } catch (Exception e) {

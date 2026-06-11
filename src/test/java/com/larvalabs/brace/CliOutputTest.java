@@ -58,6 +58,14 @@ class CliOutputTest {
     }
 
     @Test
+    void jsonModeIsCompactSingleLine() throws Exception {
+        // M12: agent (JSON) mode must not pretty-print — one line, no indentation.
+        var out = CliOutput.json(Map.of("ok", true, "nested", Map.of("a", List.of(1, 2, 3))));
+        assertFalse(out.contains("\n"), "agent-mode JSON must be one line: " + out);
+        assertFalse(out.contains("  "), "agent-mode JSON must not be indented: " + out);
+    }
+
+    @Test
     void modeFromEnvForcesJson() {
         assertEquals(CliOutput.Mode.JSON, CliOutput.modeFrom(false, false, false));
         assertEquals(CliOutput.Mode.HUMAN, CliOutput.modeFrom(true, false, false));

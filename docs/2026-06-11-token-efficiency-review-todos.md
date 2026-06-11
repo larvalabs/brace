@@ -340,7 +340,10 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Model: Haiku 4.5** for the `at` field; Fable/Opus if the dev-mode body is
     pursued.
 
-- [ ] **M12: Agent-mode CLI JSON is pretty-printed everywhere** — `CliOutput.java:67-73`
+- [x] **M12: Agent-mode CLI JSON is pretty-printed everywhere** — `CliOutput.java:67-73`
+  *(Done: `CliOutput.json` is compact; the redundant `jsonCompact` removed and its one
+  call site (`logs`) folded in. No `tests/cli/` expectations existed for JSON layout —
+  the shell suite never asserts on it; compactness is covered by `CliOutputTest`.)*
   - `errors`, `status`, `check`, `init` all print `writerWithDefaultPrettyPrinter()`
     output in JSON (non-TTY) mode — ~15–30% extra tokens for zero agent value. Only
     `logs` does it right (compact per line).

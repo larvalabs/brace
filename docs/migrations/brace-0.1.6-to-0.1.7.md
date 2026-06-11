@@ -549,6 +549,42 @@ explicitly.
 
 `GET /ops/regressions` is unaffected — it never carried stack traces.
 
+## Behavior change: CLI JSON output is now compact (one line)
+
+**Who is affected:** scripts that parse the *text layout* of `brace <command> --json`
+output (or piped/non-TTY output, which implies JSON mode) — e.g. `grep`-ing for an
+indented `"key" : value` line. Anything that parses the output as JSON (`jq`, Jackson,
+`json.loads`) is unaffected: the bytes are the same JSON, just without whitespace.
+
+**What changed.** Through 0.1.6, JSON mode pretty-printed everything (`errors`, `status`,
+`check`, `init`, `cache`); only `logs` was compact. JSON mode exists for programs —
+agents, `jq`, CI — where indentation is pure token overhead (~15–30% per call). In 0.1.7
+every command emits compact, single-line JSON in JSON mode:
+
+**Before (0.1.6, `brace check --json`):**
+
+```json
+{
+  "healthy" : true,
+  "summary" : "All checks passed",
+  "checks" : [ {
+    "name" : "reachability",
+    "status" : "pass"
+  } ]
+}
+```
+
+**After (0.1.7):**
+
+```json
+{"healthy":true,"summary":"All checks passed","checks":[{"name":"reachability","status":"pass"}]}
+```
+
+**Escape hatches.** Human mode (`--pretty`, or just running in a terminal) is unchanged —
+it renders tables and summaries, not JSON. If you want readable JSON, pipe through your
+formatter: `brace check --json | jq .`. `brace logs --json` keeps emitting one compact
+object per line (NDJSON), exactly as before.
+
 ## Request/response hardening fixes
 
 These are bug fixes and small capability additions. None require code changes; all are
