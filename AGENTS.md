@@ -14,7 +14,7 @@ src/assembly/distribution.xml # Assembly descriptor for the brace CLI zip
 bin/brace                    # CLI launcher script (shipped in distribution)
 tests/cli/                   # Shell-based end-to-end tests for the CLI
 docs/                        # Design spec, decisions, implementation plans
-sample/                      # Sample app demonstrating the API
+sample/                      # Minimal smoke app (not the canonical API reference — that's BRACE-AGENTS.md)
 ```
 
 ## Architecture

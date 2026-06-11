@@ -517,7 +517,7 @@ expensive round**, exactly when the re-read corpus is largest).
     compress historical narration (40-line Flyway 10 background), add the
     "refresh BRACE-AGENTS.md" step once M10 lands. **Model: Sonnet 4.6.**
 
-- [ ] **L9: Sample app under-delivers as "the API demonstration"** — `sample/`
+- [x] **L9: Sample app under-delivers as "the API demonstration"** *(decision: relabel, don't expand — a golden-path sample app is already tracked separately in TODO.md Tier 3; AGENTS.md now calls `sample/` a minimal smoke app pointing at BRACE-AGENTS.md. In the sample itself: hardcoded `0.1.0` version strings neutralized, and the `/admin/*` guard is now a meaningful `X-Admin-Key` header check so `/admin/dashboard` is reachable instead of modeling an unconditional 401)* — `sample/`
   - 34 lines: no DB/views/forms/sessions/tests; hardcoded `0.1.0` version strings;
     the middleware demo registers a route behind an unconditional 401 (models an
     unreachable route). Decide: expand into a small CRUD exemplar (entity + view +
