@@ -357,6 +357,26 @@ db.insert(post);
 
 `Form` methods: `hasErrors()`, `value()`, `errors()`, `allErrors()`, `errors(field)`, `raw(field)`.
 
+**JSON APIs use the same pipeline** via `req.jsonForm(Class)` — never hand-roll per-field
+null checks or wrap `bodyAs` in try/catch. It binds the JSON body to the record, runs the
+annotations plus `validate(Errors)`, and turns a malformed or non-object body into a
+`"_body"` error instead of an exception (a raw `req.bodyAs` parse failure surfaces as a 500):
+
+```java
+app.postDb("/api/talks", (req, db) -> {
+    var form = req.jsonForm(TalkForm.class);
+    if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422);
+    var talk = new Talk();
+    talk.apply(form.value());
+    db.insert(talk);
+    return Result.json(talk.id, 201);
+});
+```
+
+When create and update share validation rules, put them in the record (annotations +
+`validate`) — not duplicated in the two handlers. Cross-entity checks (referenced rows
+exist, uniqueness) belong in one static helper both handlers call.
+
 ## Templates
 
 JTE compiled templates. Files are `.jte` in the configured templates directory.

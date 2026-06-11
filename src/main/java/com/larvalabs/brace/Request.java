@@ -320,6 +320,45 @@ public class Request {
         return FormBinder.bind(type, params);
     }
 
+    /**
+     * Bind a JSON request body to a record and run the same validation pipeline as
+     * {@link #form(Class)} — annotations ({@code @Required}, {@code @Min}, …) plus the
+     * record's custom {@code validate(Errors)} method. Never throws on bad input: an
+     * unparseable or non-object body returns a {@code Form} carrying a {@code "_body"}
+     * error, so the {@code hasErrors()} idiom covers malformed JSON too (unlike
+     * {@link #bodyAs(Class)}, which throws and surfaces as a 500).
+     *
+     * <p>Scalar JSON values (strings, numbers, booleans) bind to the record's components;
+     * JSON {@code null}s are treated as absent; nested objects/arrays bind to String
+     * components as raw JSON text. The reject idiom:
+     * {@code if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422);}
+     */
+    public <T> Form<T> jsonForm(Class<T> type) {
+        com.fasterxml.jackson.databind.JsonNode node = null;
+        try {
+            String b = body();
+            if (b != null && !b.isBlank()) {
+                node = Json.mapper().readTree(b);
+            }
+        } catch (Exception e) {
+            // fall through to the _body error below
+        }
+        if (node == null || !node.isObject()) {
+            // Bind against empty params so value() is a defaults-populated record (never
+            // null, matching form()); the "_body" error marks the malformed payload.
+            var form = FormBinder.bind(type, Map.of());
+            form.errors().add("_body", "must be a JSON object");
+            return form;
+        }
+        var params = new LinkedHashMap<String, String>();
+        node.fields().forEachRemaining(entry -> {
+            var value = entry.getValue();
+            if (value == null || value.isNull()) return;
+            params.put(entry.getKey(), value.isValueNode() ? value.asText() : value.toString());
+        });
+        return FormBinder.bind(type, params);
+    }
+
     private static Map<String, String> parseFormBody(String body) {
         var params = new LinkedHashMap<String, String>();
         if (body == null || body.isEmpty()) return params;

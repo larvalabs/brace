@@ -42,7 +42,7 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Model: Sonnet 4.6** — core is mechanical but the deprecation decision and doc
     sweep need consistency.
 
-- [ ] **H2: JSON request bodies get no declarative validation, and malformed JSON → 500** — `Request.java:174-180,315-321`, `FormBinder.java:10`
+- [x] **H2: JSON request bodies get no declarative validation, and malformed JSON → 500** — `Request.java:174-180,315-321`, `FormBinder.java:10`
   - `req.form()` binds form-encoded body + query params only; the `@Required`/`@Min`/…
     annotation vocabulary is unreachable from JSON. `req.bodyAs()` wraps parse
     failures in `RuntimeException` → generic 500, so a correct JSON endpoint needs a

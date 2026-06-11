@@ -127,6 +127,33 @@ both — keep the in-process default for hot read-through pages and a separate
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
 
+## New (optional): `req.jsonForm` — declarative validation for JSON bodies
+
+**Nothing to do** — purely additive. The `@Required`/`@Min`/`@Email` annotation
+vocabulary (previously reachable only through form-encoded `req.form()`) now works
+for JSON request bodies, including the record's custom `validate(Errors)` method.
+Malformed or non-object JSON becomes a `"_body"` validation error instead of an
+exception, so the `hasErrors()` idiom covers it — unlike `req.bodyAs()`, which
+throws on a parse failure and surfaces as a 500.
+
+**Before (all versions, still works):**
+
+```java
+Talk input;
+try { input = req.bodyAs(Talk.class); }
+catch (Exception e) { return Result.badRequest("invalid json"); }
+if (input.title == null || input.title.isBlank()) return Result.error(400, "title required");
+if (input.durationMinutes <= 0) return Result.error(400, "duration must be positive");
+// ... repeated per field, duplicated between POST and PUT
+```
+
+**After (0.1.7+):**
+
+```java
+var form = req.jsonForm(TalkForm.class);   // same record + annotations as req.form()
+if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422);
+```
+
 ## New (optional): typed read-only route methods (`getRead`, `getReadFull`, …)
 
 **Nothing to do** — purely additive; existing cast-style registrations keep working.
