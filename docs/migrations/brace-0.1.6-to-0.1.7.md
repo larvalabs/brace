@@ -501,6 +501,33 @@ behind a load balancer a captured v2 request remains replayable against a *diffe
 instance within the ±30s timestamp window. HTTPS on every hop to `/ops/*` remains the
 primary control; see `docs/SECURITY.md` → "Ops Endpoints".
 
+## Security fix: open-redirect helper (safe redirect for user input)
+
+**New optional API:** `Redirect.toLocal(path)` and `Redirect.permanentLocal(path)`.
+
+**What changed.** Through 0.1.7, `Redirect.to(location)` accepted any string — absolute URLs,
+protocol-relative URLs, and local paths. When used with untrusted input (e.g.,
+`Redirect.to(req.queryParam("next"))`), this enables open-redirect vulnerabilities: an
+attacker can pass `next=https://attacker.com` to craft a phishing link.
+
+0.1.7 introduces two new helpers that validate the path is local:
+
+```java
+// 0.1.7+ — safe for user input
+return Redirect.toLocal(req.queryParam("next"));      // throws if not local
+return Redirect.permanentLocal(req.queryParam("next"));
+
+// Both throw IllegalArgumentException if the path contains "://" or starts with "//"
+```
+
+**Code change required:** none. The original `Redirect.to()` and `Redirect.permanent()`
+remain unchanged and work as before. Use the new `toLocal()` variants **only when the path
+is derived from user input** (query params, form fields, etc.). For paths you control,
+continue using `Redirect.to()`.
+
+**Documentation note:** the class Javadoc now warns against using `to()` with user input and
+documents the `toLocal()` safety guarantee.
+
 ## Security fix: middleware trailing `/*` now matches the bare prefix
 
 **Who is affected:** applications using `before("/path/*", ...)` or `after("/path/*", ...)`

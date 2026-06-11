@@ -191,7 +191,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
 
 ## Low
 
-- [ ] **L1: No safe-redirect helper** — `Redirect.java:5-16`. Add `Redirect.toLocal(path)`
+- [x] **L1: No safe-redirect helper** — `Redirect.java:5-16`. Add `Redirect.toLocal(path)`
   (rejects absolute URLs and `//` protocol-relative) and document the
   `Redirect.to(req.queryParam("next"))` hazard. **Haiku 4.5**
 - [ ] **L2: `OpsDashboard.esc()` doesn't escape single quotes** — `OpsDashboard.java:621-624`,

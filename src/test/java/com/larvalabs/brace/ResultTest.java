@@ -66,6 +66,47 @@ class ResultTest {
     }
 
     @Test
+    void localRedirectResult() {
+        var result = Redirect.toLocal("/login");
+        assertEquals(302, result.status());
+        assertEquals("/login", result.header("Location"));
+    }
+
+    @Test
+    void localRedirectRejectsAbsoluteUrl() {
+        assertThrows(IllegalArgumentException.class, () -> Redirect.toLocal("https://attacker.com"));
+    }
+
+    @Test
+    void localRedirectRejectsProtocolRelativeUrl() {
+        assertThrows(IllegalArgumentException.class, () -> Redirect.toLocal("//attacker.com"));
+    }
+
+    @Test
+    void localRedirectAcceptsRelativePath() {
+        var result = Redirect.toLocal("login");
+        assertEquals(302, result.status());
+        assertEquals("login", result.header("Location"));
+    }
+
+    @Test
+    void permanentLocalRedirectResult() {
+        var result = Redirect.permanentLocal("/new-url");
+        assertEquals(301, result.status());
+        assertEquals("/new-url", result.header("Location"));
+    }
+
+    @Test
+    void permanentLocalRedirectRejectsAbsoluteUrl() {
+        assertThrows(IllegalArgumentException.class, () -> Redirect.permanentLocal("https://attacker.com"));
+    }
+
+    @Test
+    void permanentLocalRedirectRejectsProtocolRelativeUrl() {
+        assertThrows(IllegalArgumentException.class, () -> Redirect.permanentLocal("//attacker.com"));
+    }
+
+    @Test
     void viewStubResult() {
         var result = View.of("posts/show", "post", "hello");
         assertEquals(200, result.status());
