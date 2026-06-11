@@ -55,13 +55,53 @@ Commit-history cosmetics (harmless; fix only if rewriting history before merge):
 `dbd215a`'s body contains a leftover "(tick L4 checkbox…)" instruction line, and
 `0c4b753` (L8) bundles the checkbox ticks and migration-guide entries for L9/L10.
 
+## Code-review pass over the branch (2026-06-11)
+
+A multi-angle `/code-review` of the full branch diff (7 finder angles, per-candidate
+adversarial verification) found that several of the branch's own fixes introduced
+regressions or were incomplete. The five severe ones were fixed on this branch,
+one commit per finding:
+
+| ID | Finding | Commit |
+|---|---|---|
+| CR1 | H2 regression: XFF trust checks resolved hostname-shaped entries via DNS (request-stall DoS) — TrustedProxies now accepts only IP literals, never resolves | `fba62f1` |
+| CR2 | L1 incomplete: `Redirect.toLocal` denylist bypassable (`/\evil.com`, `https:/evil.com`) — replaced with shared allowlist (`/`-prefixed, no `\`, no control chars) | `9ea8f96` |
+| CR3 | M7 regression: null/blank rate-limit keys were bucketed together (site-wide lockout via the documented login example) — restored null-key exemption | `b70a872` |
+| CR4 | M1/M2 hazard: `keyCache.clear()` inside `computeIfAbsent`'s mapping function (CHM contract violation) — eviction moved outside | `0cd4082` |
+| CR5 | H2 regression: blank XFF segments returned `""` from `ip()`; bare `,` header threw AIOOBE — blanks skipped, fallback to remoteAddr | `1434ac5` |
+
+Confirmed but deferred (lower severity):
+
+- `Json.of` entity warning (M9) misses Map wrappers, arrays, and nested/DTO-field
+  entities; SECURITY.md/BRACE-AGENTS.md oversell it. Consider a Jackson
+  `BeanSerializerModifier` on the shared mapper, or document the limitation.
+- M10 redaction covers the error store only: raw `e.getMessage()` still flows to
+  `Stats.recordError` (served on `/ops/status`) and `Log.error` (stdout); access logs
+  record raw paths (the Redactor Javadoc's own `/password-reset/<token>` example leaks
+  on every successful request).
+- `SecurityHeaders.defaults()` (after-middleware) never applies to responses written
+  outside the after loop: static files (nosniff only), framework 404, CSRF 403, 500,
+  and the new 413s.
+- `Cache.percentEncode` is non-injective for non-ASCII (`'中'` and `"ӢD"` collide) and
+  its comment contradicts the code — use `URLEncoder.encode(v, UTF_8)`.
+- 0.1.7 CLI sends ops-auth v2 only; against a 0.1.6 server Jackson rejects the unknown
+  fields → CLI-first upgrades break, and the migration guide says "no action".
+- Migration guide intro claims "no breaking changes" while the M8 section documents a
+  new startup `IllegalArgumentException` for interior-wildcard patterns.
+- Ops auth accepts `ttlSeconds <= 0` (mints an already-expired token; fail-closed).
+- Dead weak-secret check: `Brace.java:210` tests a mixed-case literal against a
+  lowercased string — can never match.
+- Cleanup batch: duplicated session-cookie-write block in BraceHandler, fourth inline
+  SHA-256-hex, secret-generation in four places, per-call `Pattern.compile` /
+  `MessageDigest.getInstance` / entity-reflection on hot paths.
+
 ## Validation
 
-- `mvn test` (H2 suite) run before every commit; 765 tests green at branch tip.
-- `mvn verify` run at branch tip (2026-06-11): **BUILD SUCCESS** — 765 H2 tests plus
-  30 real-Postgres Testcontainers ITs, including `CountersPostgresIT` and
-  `RateLimiterPostgresIT`, which cover the real-Postgres paths M2/M3/M7 touched.
-- A `/code-review` pass over the whole branch diff is recommended before merge.
+- `mvn test` (H2 suite) run before every commit; 786 tests green at branch tip
+  (post-CR fixes).
+- `mvn verify` (full suite + real-Postgres Testcontainers ITs, including
+  `CountersPostgresIT` and `RateLimiterPostgresIT`): **BUILD SUCCESS** at the
+  pre-code-review tip (2026-06-11) and re-run after the CR fixes.
 
 ## User-visible changes
 
