@@ -73,15 +73,66 @@ grep -q "(project" "$WORK/version-global.out" && fail "global version should not
 pass "brace version reports launcher + project pin"
 
 step "Running brace test"
+# stdout is piped here (not a TTY), so brace test runs in concise mode:
+# no JUnit tree, just a one-line summary.
 "$BRACE_BIN" test > "$WORK/test.out" 2>&1 || {
     cat "$WORK/test.out"
     fail "brace test failed"
 }
-grep -qE "Test run finished|Successful tests|\[ +1 tests successful +\]" "$WORK/test.out" || {
+grep -qE "^[0-9]+ passed, 0 failed in" "$WORK/test.out" || {
     cat "$WORK/test.out"
-    fail "test output doesn't look right"
+    fail "concise test output missing 'N passed, 0 failed in X.Xs' summary line"
 }
-pass "brace test ran"
+grep -q "Test run finished" "$WORK/test.out" && {
+    cat "$WORK/test.out"
+    fail "concise mode should not pass through the raw ConsoleLauncher summary"
+}
+pass "brace test ran (concise summary)"
+
+step "Running brace test --verbose (full passthrough)"
+"$BRACE_BIN" test --verbose > "$WORK/test-verbose.out" 2>&1 || {
+    cat "$WORK/test-verbose.out"
+    fail "brace test --verbose failed"
+}
+grep -qE "Test run finished|\[ +[0-9]+ tests successful +\]" "$WORK/test-verbose.out" || {
+    cat "$WORK/test-verbose.out"
+    fail "--verbose output missing raw ConsoleLauncher summary"
+}
+pass "brace test --verbose passes raw output through"
+
+step "Running brace test with a failing test (concise failure line)"
+cat > src/test/java/app/AlwaysFailsTest.java <<'EOF'
+package app;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+public class AlwaysFailsTest {
+    @Test
+    public void alwaysFails() {
+        assertEquals(1, 2);
+    }
+}
+EOF
+set +e
+"$BRACE_BIN" test > "$WORK/test-fail.out" 2>&1
+TEST_RC=$?
+set -e
+rm src/test/java/app/AlwaysFailsTest.java
+[[ $TEST_RC -ne 0 ]] || { cat "$WORK/test-fail.out"; fail "brace test should exit nonzero on a failing test"; }
+grep -q "AlwaysFailsTest.alwaysFails() — AssertionFailedError" "$WORK/test-fail.out" || {
+    cat "$WORK/test-fail.out"
+    fail "missing one-line failure for AlwaysFailsTest.alwaysFails()"
+}
+grep -q "(AlwaysFailsTest.java:" "$WORK/test-fail.out" || {
+    cat "$WORK/test-fail.out"
+    fail "failure line missing project-frame location (AlwaysFailsTest.java:NN)"
+}
+grep -qE "^[0-9]+ passed, 1 failed in" "$WORK/test-fail.out" || {
+    cat "$WORK/test-fail.out"
+    fail "missing 'N passed, 1 failed in X.Xs' summary line"
+}
+pass "failing test produces one-line failure + summary, exit code preserved"
 
 step "Running brace ops keypair"
 rm -f ops-authorized-keys ops-private.key  # clear the ones brace new generated

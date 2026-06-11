@@ -279,6 +279,20 @@ final class BuildCommands {
     // --- test ------------------------------------------------------------
 
     static int test(Path cwd, String[] args) throws Exception {
+        boolean verbose = false, quiet = false;
+        List<String> rest = new ArrayList<>();
+        for (String a : args) {
+            switch (a) {
+                case "--verbose" -> verbose = true;
+                case "--quiet" -> quiet = true;
+                default -> rest.add(a);
+            }
+        }
+        // Concise mode when stdout isn't a TTY (agents, pipes, CI) or on --quiet:
+        // summary-only ConsoleLauncher output, post-processed to one line per
+        // failure. --verbose forces today's full passthrough in either mode.
+        boolean concise = !verbose && (quiet || !CliOutput.stdoutIsTty());
+
         if (compile(cwd) != 0) return 1;
         if (compileTests(cwd) != 0) return 1;
         if (findJunitJar() == null) {
@@ -295,15 +309,136 @@ final class BuildCommands {
         List<String> cmd = new ArrayList<>(List.of(
                 "java", "-cp", testClasspath(cwd),
                 "org.junit.platform.console.ConsoleLauncher", "execute"));
-        if (args.length > 0 && !args[0].startsWith("-")) {
+        if (!rest.isEmpty() && !rest.get(0).startsWith("-")) {
             cmd.add("--select-class");
-            cmd.add(args[0]);
+            cmd.add(rest.get(0));
         } else {
             cmd.add("--scan-classpath");
             cmd.add(cwd.resolve("target/test-classes").toString());
         }
         cmd.add("--disable-banner");
-        return new ProcessBuilder(cmd).directory(cwd.toFile()).inheritIO().start().waitFor();
+        if (!concise) {
+            return new ProcessBuilder(cmd).directory(cwd.toFile()).inheritIO().start().waitFor();
+        }
+
+        cmd.add("--details=summary");
+        cmd.add("--disable-ansi-colors");
+        Process p = new ProcessBuilder(cmd)
+                .directory(cwd.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(p.getInputStream().readAllBytes());
+        int rc = p.waitFor();
+        List<String> lines = summarizeTestRun(output, projectPackages(cwd), rc);
+        if (lines == null) {
+            // Parsing failed — never swallow output.
+            System.out.print(output);
+        } else {
+            for (String line : lines) System.out.println(line);
+        }
+        return rc;
+    }
+
+    /**
+     * Condenses captured ConsoleLauncher {@code --details=summary} output: one line per
+     * failed test — {@code Class.method() — ExceptionType: message (File.java:NN)}, the
+     * location being the first stack frame in one of the project's own packages — then a
+     * final {@code N passed, M failed in X.Xs} line. Returns {@code null} when the output
+     * doesn't parse (caller falls back to printing it verbatim).
+     */
+    static List<String> summarizeTestRun(String output, java.util.Set<String> projectPackages, int exitCode) {
+        var successful = matchLong(output, "\\[\\s*(\\d+) tests successful\\s*\\]");
+        var failed = matchLong(output, "\\[\\s*(\\d+) tests failed\\s*\\]");
+        var skipped = matchLong(output, "\\[\\s*(\\d+) tests skipped\\s*\\]");
+        var millis = matchLong(output, "Test run finished after (\\d+) ms");
+        if (successful == null || failed == null) return null;   // summary table missing
+
+        List<String> lines = new ArrayList<>(parseFailures(output, projectPackages));
+        // A nonzero exit with no parseable failure block (e.g. a container-level error
+        // we don't recognise) must not be condensed into a bare summary line.
+        if (exitCode != 0 && lines.isEmpty()) return null;
+
+        StringBuilder summary = new StringBuilder()
+                .append(successful).append(" passed, ").append(failed).append(" failed");
+        if (skipped != null && skipped > 0) summary.append(", ").append(skipped).append(" skipped");
+        if (millis != null) summary.append(" in ")
+                .append(String.format(java.util.Locale.ROOT, "%.1fs", millis / 1000.0));
+        lines.add(summary.toString());
+        return lines;
+    }
+
+    private static final java.util.regex.Pattern FAILURE_TEST = java.util.regex.Pattern.compile(
+            "className = '([^']+)', methodName = '([^']+)'");
+    private static final java.util.regex.Pattern FAILURE_EXCEPTION = java.util.regex.Pattern.compile(
+            "^\\s*=> ([\\w.$]+)(?:: (.*))?$");
+    private static final java.util.regex.Pattern STACK_FRAME = java.util.regex.Pattern.compile(
+            "^\\s*(?:at )?([\\w.$]+)\\.[\\w$<>]+\\(([\\w$]+\\.java):(\\d+)\\)");
+
+    /** One condensed line per entry in the ConsoleLauncher {@code Failures (N):} section. */
+    private static List<String> parseFailures(String output, java.util.Set<String> projectPackages) {
+        List<String> lines = new ArrayList<>();
+        String className = null, methodName = null, exception = null, location = null;
+        boolean inFailures = false;
+        for (String line : output.split("\n")) {
+            if (line.startsWith("Failures (")) { inFailures = true; continue; }
+            if (!inFailures) continue;
+            if (line.startsWith("Test run finished")) break;
+            var test = FAILURE_TEST.matcher(line);
+            if (test.find()) {
+                flushFailure(lines, className, methodName, exception, location);
+                className = test.group(1);
+                methodName = test.group(2);
+                exception = null;
+                location = null;
+                continue;
+            }
+            var ex = FAILURE_EXCEPTION.matcher(line);
+            if (exception == null && ex.matches()) {
+                String type = ex.group(1);
+                String message = ex.group(2);
+                exception = type.substring(type.lastIndexOf('.') + 1)
+                        + (message == null || message.isBlank() ? "" : ": " + message.strip());
+                continue;
+            }
+            var frame = STACK_FRAME.matcher(line);
+            if (exception != null && location == null && frame.find()) {
+                String frameClass = frame.group(1);
+                int dot = frameClass.lastIndexOf('.');
+                String framePackage = dot >= 0 ? frameClass.substring(0, dot) : "";
+                if (projectPackages.contains(framePackage)) {
+                    location = frame.group(2) + ":" + frame.group(3);
+                }
+            }
+        }
+        flushFailure(lines, className, methodName, exception, location);
+        return lines;
+    }
+
+    private static void flushFailure(List<String> lines, String className, String methodName,
+                                     String exception, String location) {
+        if (className == null) return;
+        String simple = className.substring(className.lastIndexOf('.') + 1);
+        lines.add(simple + "." + methodName + "()"
+                + (exception != null ? " — " + exception : "")
+                + (location != null ? " (" + location + ")" : ""));
+    }
+
+    private static Long matchLong(String text, String regex) {
+        var m = java.util.regex.Pattern.compile(regex).matcher(text);
+        return m.find() ? Long.parseLong(m.group(1)) : null;
+    }
+
+    /** Package names of the project's own sources (from the dirs under src/{main,test}/java). */
+    private static java.util.Set<String> projectPackages(Path cwd) throws IOException {
+        var packages = new java.util.HashSet<String>();
+        for (String tree : List.of("src/main/java", "src/test/java")) {
+            Path root = cwd.resolve(tree);
+            for (String file : findJavaFiles(root)) {
+                Path rel = root.relativize(Path.of(file)).getParent();
+                packages.add(rel == null ? "" : rel.toString().replace(File.separatorChar, '.'));
+            }
+        }
+        return packages;
     }
 
     // --- deps ------------------------------------------------------------

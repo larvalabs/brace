@@ -42,7 +42,7 @@ brace new myapp                                 # create a new project
 cd myapp
 brace deps                                      # populate lib/ from pom.xml (first time)
 brace compile                                   # compile
-brace test                                      # run all tests
+brace test                                      # run all tests (concise when piped: one line per failure + "N passed, M failed in X.Xs"; --verbose for full JUnit output)
 brace test app.HomeControllerTest               # run one test class
 brace dev                                       # run with auto-restart on file changes
 brace run                                       # run without watching

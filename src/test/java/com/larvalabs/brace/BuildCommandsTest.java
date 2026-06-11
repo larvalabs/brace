@@ -14,12 +14,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Unit tests for the concise {@code brace compile} diagnostics (H8) — the pure
- * formatting/dedupe method is exercised without invoking javac, plus one
+ * Unit tests for the concise {@code brace compile} diagnostics (H8) and the concise
+ * {@code brace test} output post-processing (H7) — both pure-formatting methods are
+ * exercised without invoking javac or spawning a JUnit ConsoleLauncher, plus one
  * real-javac test through {@link BuildCommands#compile}.
  */
 public class BuildCommandsTest {
@@ -132,5 +134,115 @@ public class BuildCommandsTest {
         assertFalse(stderr.contains("^"), "no caret expected:\n" + stderr);
         assertFalse(stderr.contains("missing();"), "no source snippet expected:\n" + stderr);
         assertTrue(stderr.contains("✗ Compilation failed: 1 error, 0 warnings"), stderr);
+    }
+
+    // --- H7: summarizeTestRun ---------------------------------------------
+
+    private static final String FAILURE_OUTPUT = """
+
+            Failures (2):
+              JUnit Jupiter:HomeControllerTest:homePage()
+                MethodSource [className = 'app.HomeControllerTest', methodName = 'homePage', methodParameterTypes = '']
+                => org.opentest4j.AssertionFailedError: expected: <200> but was: <404>
+                   org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)
+                   org.junit.jupiter.api.AssertionUtils.failNotEqual(AssertionUtils.java:62)
+                   org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:182)
+                   app.HomeControllerTest.homePage(HomeControllerTest.java:18)
+                   java.base/java.lang.reflect.Method.invoke(Method.java:565)
+                   [...]
+              JUnit Jupiter:UserTest:rejectsBlankName()
+                MethodSource [className = 'app.UserTest', methodName = 'rejectsBlankName', methodParameterTypes = '']
+                => java.lang.IllegalStateException: no database
+                   com.larvalabs.brace.Database.query(Database.java:88)
+                   app.User.validate(User.java:31)
+                   app.UserTest.rejectsBlankName(UserTest.java:44)
+                   [...]
+
+            Test run finished after 742 ms
+            [         3 containers found      ]
+            [         0 containers skipped    ]
+            [         3 containers started    ]
+            [         0 containers aborted    ]
+            [         3 containers successful ]
+            [         0 containers failed     ]
+            [        12 tests found           ]
+            [         0 tests skipped         ]
+            [        12 tests started         ]
+            [         0 tests aborted         ]
+            [        10 tests successful      ]
+            [         2 tests failed          ]
+
+            """;
+
+    @Test
+    public void summarizesFailuresToOneLineWithFirstProjectFrame() {
+        List<String> lines = BuildCommands.summarizeTestRun(FAILURE_OUTPUT, Set.of("app"), 1);
+        assertEquals(List.of(
+                "HomeControllerTest.homePage() — AssertionFailedError: expected: <200> but was: <404> (HomeControllerTest.java:18)",
+                "UserTest.rejectsBlankName() — IllegalStateException: no database (User.java:31)",
+                "10 passed, 2 failed in 0.7s"), lines);
+    }
+
+    @Test
+    public void successPrintsJustTheSummaryLine() {
+        String output = """
+                Test run finished after 503 ms
+                [         3 containers found      ]
+                [        12 tests found           ]
+                [         0 tests skipped         ]
+                [        12 tests successful      ]
+                [         0 tests failed          ]
+                """;
+        assertEquals(List.of("12 passed, 0 failed in 0.5s"),
+                BuildCommands.summarizeTestRun(output, Set.of("app"), 0));
+    }
+
+    @Test
+    public void skippedCountShownOnlyWhenNonzero() {
+        String output = """
+                Test run finished after 1200 ms
+                [         9 tests successful      ]
+                [         2 tests skipped         ]
+                [         0 tests failed          ]
+                """;
+        assertEquals(List.of("9 passed, 0 failed, 2 skipped in 1.2s"),
+                BuildCommands.summarizeTestRun(output, Set.of("app"), 0));
+    }
+
+    @Test
+    public void unparseableOutputReturnsNullSoCallerFallsBackToVerbatim() {
+        assertNull(BuildCommands.summarizeTestRun("Error: Could not find or load main class", Set.of("app"), 1));
+    }
+
+    @Test
+    public void nonzeroExitWithNoParsedFailuresFallsBackToVerbatim() {
+        // Summary table parses, but the failure block doesn't (e.g. a container-level
+        // error) — must not be condensed into a bare summary line on a failing run.
+        String output = """
+                Test run finished after 100 ms
+                [         5 tests successful      ]
+                [         0 tests failed          ]
+                """;
+        assertNull(BuildCommands.summarizeTestRun(output, Set.of("app"), 1));
+    }
+
+    @Test
+    public void failureWithoutProjectFrameOmitsLocation() {
+        String output = """
+                Failures (1):
+                  JUnit Jupiter:DeepTest:boom()
+                    MethodSource [className = 'app.DeepTest', methodName = 'boom', methodParameterTypes = '']
+                    => java.lang.OutOfMemoryError
+                       java.base/java.util.Arrays.copyOf(Arrays.java:3541)
+                       [...]
+
+                Test run finished after 90 ms
+                [         1 tests successful      ]
+                [         1 tests failed          ]
+                """;
+        assertEquals(List.of(
+                "DeepTest.boom() — OutOfMemoryError",
+                "1 passed, 1 failed in 0.1s"),
+                BuildCommands.summarizeTestRun(output, Set.of("app"), 1));
     }
 }

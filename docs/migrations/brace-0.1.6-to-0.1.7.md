@@ -27,8 +27,10 @@ Also note: the session-expiry change alters how long a stolen cookie stays valid
 is now deprecated — see "ops auth protocol v2" below.
 
 If anything **parses brace CLI output**: `brace compile` failure diagnostics are now
-condensed and deduplicated — see "`brace compile` prints condensed, deduplicated
-diagnostics" below. Exit codes are unchanged.
+condensed and deduplicated, and `brace test` prints a condensed summary when stdout is
+not a TTY — see "`brace compile` prints condensed, deduplicated diagnostics" and
+"`brace test` prints condensed output when stdout is not a TTY" below. Exit codes are
+unchanged, and `brace test --verbose` restores the old output.
 
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
@@ -785,6 +787,99 @@ compiler invocation itself is unchanged (same `-d`/`-cp`, same in-process javac)
 diagnostic *formatting* differs. If a script greps for the old `✗ Compilation failed` line,
 note it now carries the counts suffix (`grep "✗ Compilation failed"` still matches; an exact
 full-line match does not).
+
+## Changed: `brace test` prints condensed output when stdout is not a TTY
+
+**Affects agents, pipes, and CI — anywhere stdout is not a terminal.** In an
+interactive terminal `brace test` behaves exactly as before (full JUnit ConsoleLauncher
+passthrough: per-test tree, failure stack traces, summary table). But when stdout is **not**
+a TTY — which is every agent and shell-script invocation — output is now condensed: one line
+per failed test plus a one-line summary. Exit codes are unchanged in both modes (0 when all
+tests pass, nonzero on failure), so `brace test && deploy` style scripts keep working.
+
+(Detection: the `bin/brace` launcher checks `[ -t 1 ]` and passes the answer down via
+`-Dbrace.stdout.tty`, because `System.console()` alone is not trustworthy on JLine-backed
+JDKs — it can be non-null with redirected output. When `Cli` runs without the shim it falls
+back to `Console.isTerminal()` where available, else a non-null `System.console()`. The
+property is optional, so launcher and toolchain versions mix freely across this boundary.)
+
+Two flags control the mode explicitly:
+
+- `brace test --verbose` — full raw ConsoleLauncher passthrough, even when piped. This is
+  the escape hatch if you need the old output (full stack traces, the per-test tree, the
+  `Test run finished` summary table).
+- `brace test --quiet` — condensed output, even in an interactive terminal.
+
+**Before (0.1.6, piped) — every run, pass or fail:**
+
+```
+▸ Running tests...
+╷
+├─ JUnit Jupiter ✔
+│  ├─ HomeControllerTest ✔
+│  │  ├─ homePage() ✘ expected: <200> but was: <404>
+│  │  └─ aboutPage() ✔
+│  └─ UserTest ✔
+│     └─ rejectsBlankName() ✔
+...
+Failures (1):
+  JUnit Jupiter:HomeControllerTest:homePage()
+    MethodSource [className = 'app.HomeControllerTest', methodName = 'homePage', methodParameterTypes = '']
+    => org.opentest4j.AssertionFailedError: expected: <200> but was: <404>
+       org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)
+       org.junit.jupiter.api.AssertionUtils.failNotEqual(AssertionUtils.java:62)
+       org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:182)
+       app.HomeControllerTest.homePage(HomeControllerTest.java:18)
+       java.base/java.lang.reflect.Method.invoke(Method.java:565)
+       [... 30+ more framework frames ...]
+
+Test run finished after 742 ms
+[         3 containers found      ]
+[         0 containers skipped    ]
+[         3 containers started    ]
+[         0 containers aborted    ]
+[         3 containers successful ]
+[         0 containers failed     ]
+[        12 tests found           ]
+[         0 tests skipped         ]
+[        12 tests started         ]
+[         0 tests aborted         ]
+[        11 tests successful      ]
+[         1 tests failed          ]
+```
+
+(plus ANSI color escapes — ConsoleLauncher does not TTY-detect, so they land in the pipe.)
+
+**After (0.1.7, piped) — failing run:**
+
+```
+▸ Running tests...
+HomeControllerTest.homePage() — AssertionFailedError: expected: <200> but was: <404> (HomeControllerTest.java:18)
+11 passed, 1 failed in 0.7s
+```
+
+**After (0.1.7, piped) — passing run:**
+
+```
+▸ Running tests...
+12 passed, 0 failed in 0.7s
+```
+
+Each failure line is `Class.method() — ExceptionType: message (File.java:NN)`, where the
+location is the **first stack frame inside your project's own packages** (derived from the
+directory structure under `src/main/java` and `src/test/java`) — i.e. the line of *your*
+code to look at, not 30 framework frames. A nonzero skipped count appears as
+`, K skipped` before the duration. ANSI colors are disabled in concise mode.
+
+**Robustness:** if the captured ConsoleLauncher output ever fails to parse (unexpected
+format, container-level error), `brace test` prints it **verbatim** rather than swallowing
+it — you may see raw output in edge cases, never less.
+
+**Action:** none for humans. Scripts that grepped raw ConsoleLauncher output (e.g. for
+`Test run finished` or `[ 1 tests successful ]`) should either match the new summary line
+(`^[0-9]+ passed, [0-9]+ failed in`) — as `tests/cli/test-distribution.sh` now does — or
+pass `--verbose` to keep the old format. Prefer checking the **exit code** over parsing
+output.
 
 ## Request/response hardening fixes
 

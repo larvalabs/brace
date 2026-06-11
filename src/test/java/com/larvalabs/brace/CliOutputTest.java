@@ -7,6 +7,20 @@ import static org.junit.jupiter.api.Assertions.*;
 class CliOutputTest {
 
     @Test
+    void stdoutIsTtyHonorsLauncherProperty() {
+        String prev = System.getProperty("brace.stdout.tty");
+        try {
+            System.setProperty("brace.stdout.tty", "true");
+            assertTrue(CliOutput.stdoutIsTty());
+            System.setProperty("brace.stdout.tty", "false");
+            assertFalse(CliOutput.stdoutIsTty());
+        } finally {
+            if (prev == null) System.clearProperty("brace.stdout.tty");
+            else System.setProperty("brace.stdout.tty", prev);
+        }
+    }
+
+    @Test
     void tableRendersHeadersAndRows() {
         var out = CliOutput.table(
             List.of("ID", "MESSAGE"),

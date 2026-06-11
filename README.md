@@ -71,7 +71,7 @@ brace new myapp        # scaffold a new project (pins the framework version)
 cd myapp
 brace deps             # populate ./lib/ from pom.xml (one time, requires Maven)
 brace dev              # compile + run + watch for changes
-brace test             # run all tests
+brace test             # run all tests (concise summary when piped; --verbose for full JUnit output)
 brace ops keypair      # generate ops auth keys
 brace ops dashboard    # authenticate and open /ops/dashboard
 ```

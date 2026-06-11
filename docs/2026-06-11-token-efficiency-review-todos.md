@@ -134,7 +134,13 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Model: Fable 5 / Opus 4.8** — API-shape change rippling across dashboard,
     `brace check`, and the migration guide.
 
-- [ ] **H7: `brace test` pipes raw JUnit ConsoleLauncher output: per-test tree, ANSI codes, full framework stack traces** — `BuildCommands.java:177-203`
+- [x] **H7: `brace test` pipes raw JUnit ConsoleLauncher output: per-test tree, ANSI codes, full framework stack traces** — `BuildCommands.java:177-203`
+  *Done; `tests/cli/test-distribution.sh` extended and run green (concise pass/fail
+  lines, `--verbose` passthrough, exit codes). Deviations: (1) `System.console() == null`
+  is not a usable TTY test — JLine-backed JDKs return a console with redirected output —
+  so the launcher passes `[ -t 1 ]` down as `-Dbrace.stdout.tty` (optional property, no
+  SHIM_VERSION bump) with `Console.isTerminal()`/`console() != null` fallbacks
+  (`CliOutput.stdoutIsTty`); (2) the summary line appends `, K skipped` when nonzero.*
   - Spawns ConsoleLauncher with only `--disable-banner`, `inheritIO()`. Default tree
     prints a line per test (~120+ lines green for 100 tests); piped output keeps
     ANSI escapes (ConsoleLauncher doesn't TTY-detect); failures carry 30–60 frames
