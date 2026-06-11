@@ -345,6 +345,14 @@ h1 { margin-bottom: 1rem; }
                 }
             }
 
+            // BRACE-OPS.md — ops reference (auth keys, CLI/HTTP endpoints, runbooks);
+            // packaged in the jar as /brace/agent-ops-guide.md
+            try (var in = ProjectGenerator.class.getResourceAsStream("/brace/agent-ops-guide.md")) {
+                if (in != null) {
+                    Files.writeString(root.resolve("BRACE-OPS.md"), new String(in.readAllBytes()));
+                }
+            }
+
             // .gitignore
             Files.writeString(root.resolve(".gitignore"), """
 target/

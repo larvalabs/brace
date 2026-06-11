@@ -82,7 +82,7 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 
 ## Ops — Debugging & Monitoring
 
-Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brace check`; when debugging a running app, use the `brace` CLI (or the `/ops/*` endpoints it wraps) instead of tailing logs. All read commands auto-detect TTY vs JSON output — pipe to `jq` or use `--json` explicitly. See `docs/agent-ops-guide.md` in the brace repo for workflows and exit-code contracts.
+Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brace check`; when debugging a running app, use the `brace` CLI (or the `/ops/*` endpoints it wraps) instead of tailing logs. All read commands auto-detect TTY vs JSON output — pipe to `jq` or use `--json` explicitly. See `BRACE-OPS.md` (project root; refresh with `brace agents-md`) for the full ops reference — auth setup, runbooks, and exit-code contracts.
 
 | Command | Purpose |
 |---|---|

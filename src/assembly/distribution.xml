@@ -40,6 +40,16 @@
         </fileSet>
     </fileSets>
 
+    <files>
+        <!-- Ops reference companion — packaged inside the brace jar at
+             /brace/agent-ops-guide.md and written into projects as BRACE-OPS.md;
+             shipped in the zip under the project-facing name. -->
+        <file>
+            <source>${project.basedir}/docs/agent-ops-guide.md</source>
+            <destName>BRACE-OPS.md</destName>
+        </file>
+    </files>
+
     <dependencySets>
         <!-- All runtime + compile scope deps (excludes test scope like h2) -->
         <dependencySet>

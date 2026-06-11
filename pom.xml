@@ -221,6 +221,15 @@
                 </includes>
                 <targetPath>brace</targetPath>
             </resource>
+            <!-- Ops reference companion: packaged at /brace/agent-ops-guide.md; written
+                 into projects as BRACE-OPS.md by `brace new` and `brace agents-md`. -->
+            <resource>
+                <directory>${project.basedir}/docs</directory>
+                <includes>
+                    <include>agent-ops-guide.md</include>
+                </includes>
+                <targetPath>brace</targetPath>
+            </resource>
         </resources>
         <plugins>
             <plugin>

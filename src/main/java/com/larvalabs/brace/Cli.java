@@ -171,7 +171,7 @@ public class Cli {
         System.out.println("  brace dev                   Compile, run, and watch for changes");
         System.out.println("  brace test [class]          Run tests (concise output when piped; --verbose for full, --quiet to force concise)");
         System.out.println("  brace deps                  Copy dependencies from pom.xml into ./lib/");
-        System.out.println("  brace agents-md             Refresh BRACE-AGENTS.md from the pinned framework version (--stdout to print)");
+        System.out.println("  brace agents-md             Refresh BRACE-AGENTS.md + BRACE-OPS.md from the pinned framework version (--stdout to print)");
         System.out.println();
         System.out.println("Project commands (run inside a project):");
         System.out.println("  brace init                  Scaffold .brace + .brace.local and run readiness checks");

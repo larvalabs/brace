@@ -671,7 +671,8 @@ cannot obtain a control token even if it asks for one. Tokens carry a `kid` (key
 fingerprint), and every authenticated ops request is logged as a structured
 `ops.access` event (`kid`, scope, path, `granted`) for after-the-fact audit. The
 intended use is handing an autonomous agent a key that can observe production but
-cannot act on it. Details in `BRACE-AGENTS.md` → "Token scopes (read-only keys)".
+cannot act on it. Details in `BRACE-OPS.md` (`docs/agent-ops-guide.md` in the brace
+repo) → "Token scopes (read-only keys)".
 
 ## New (optional): refreshed `CLAUDE.md` capability index
 
@@ -723,6 +724,26 @@ The command resolves the project's pinned toolchain (same mechanism as
 framework jar, and overwrites the project copy. `brace agents-md --stdout` prints the
 doc instead of writing it. Requires a 0.1.7+ pin: pre-0.1.7 framework jars don't carry
 the command (or the packaged doc), and you'll get a friendly error saying so.
+
+## New (optional): `BRACE-OPS.md` — ops reference split out of `BRACE-AGENTS.md`
+
+**Nothing breaks** — this is a documentation reorganization. `BRACE-AGENTS.md` used to
+carry a ~300-line "Ops — Production Health Runbook" block (auth key workflows, CLI and
+HTTP endpoint tables, runbooks, the `/ops/status` JSON shape, scaling, storage/retention)
+that every coding session paid for but only production-ops sessions used. From 0.1.7 that
+content lives in a dedicated ops reference:
+
+- **`BRACE-OPS.md`** — written to the project root by `brace new`, next to
+  `BRACE-AGENTS.md`. Packaged in the framework jar at `/brace/agent-ops-guide.md`
+  (source: `docs/agent-ops-guide.md` in the brace repo) and shipped in the dist zip.
+- **`BRACE-AGENTS.md`** keeps the dev reference (routing → testing → config) plus a short
+  "Ops" pointer section: start production-health work with `brace check`, then read
+  `BRACE-OPS.md`.
+- **`brace agents-md` now refreshes both files** in one run. Existing 0.1.6 projects
+  won't have `BRACE-OPS.md` until they bump to 0.1.7 and run `brace agents-md` — which
+  the upgrade flow above already calls for.
+- The generated `CLAUDE.md` ops section now points at `BRACE-OPS.md` instead of
+  "`docs/agent-ops-guide.md` in the brace repo".
 
 ## Breaking for scripted consumers: `/ops/errors` now returns summaries
 

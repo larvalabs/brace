@@ -89,7 +89,7 @@ class ClaudeMdGeneratorTest {
             assertTrue(content.contains("brace status"), content);
             assertTrue(content.contains("brace errors"), content);
             assertTrue(content.contains("brace logs"), content);
-            assertTrue(content.contains("agent-ops-guide.md"), content);
+            assertTrue(content.contains("BRACE-OPS.md"), content);
         } finally {
             Files.walk(tmp).sorted(java.util.Comparator.reverseOrder())
                 .forEach(p -> { try { Files.delete(p); } catch (Exception ignored) {} });

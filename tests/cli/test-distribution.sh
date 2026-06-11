@@ -64,15 +64,19 @@ pass "brace compile succeeded"
 
 step "Running brace agents-md"
 [[ -f BRACE-AGENTS.md ]] || fail "brace new did not write BRACE-AGENTS.md"
+[[ -f BRACE-OPS.md ]] || fail "brace new did not write BRACE-OPS.md"
 echo "stale copy" > BRACE-AGENTS.md
+echo "stale ops copy" > BRACE-OPS.md
 "$BRACE_BIN" agents-md > "$WORK/agentsmd.out" 2>&1 || {
     cat "$WORK/agentsmd.out"
     fail "brace agents-md failed"
 }
 grep -q "Brace Framework Reference" BRACE-AGENTS.md || fail "agents-md did not rewrite BRACE-AGENTS.md from the jar"
 grep -q "stale copy" BRACE-AGENTS.md && fail "agents-md left the stale copy in place"
+grep -q "Brace Agent Ops Guide" BRACE-OPS.md || fail "agents-md did not rewrite BRACE-OPS.md from the jar"
+grep -q "stale ops copy" BRACE-OPS.md && fail "agents-md left the stale ops copy in place"
 "$BRACE_BIN" agents-md --stdout 2>/dev/null | grep -q "Brace Framework Reference" || fail "agents-md --stdout missing doc content"
-pass "brace agents-md refreshed BRACE-AGENTS.md"
+pass "brace agents-md refreshed BRACE-AGENTS.md and BRACE-OPS.md"
 
 step "Running brace version (project-aware)"
 # Inside a project, version reports both the launcher and the project's pin.

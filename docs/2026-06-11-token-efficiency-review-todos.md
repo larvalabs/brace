@@ -63,7 +63,29 @@ expensive round**, exactly when the re-read corpus is largest).
     strings.
   - **Model: Sonnet 4.6** — well-specified; the JSON→String coercion rules need care.
 
-- [ ] **H3: Split BRACE-AGENTS.md into a dev core + ops reference; dedup with agent-ops-guide.md** — `BRACE-AGENTS.md` (1,119 lines ≈ 7.8k tokens), `docs/agent-ops-guide.md` (247 lines)
+- [x] **H3: Split BRACE-AGENTS.md into a dev core + ops reference; dedup with agent-ops-guide.md** — `BRACE-AGENTS.md` (1,119 lines ≈ 7.8k tokens), `docs/agent-ops-guide.md` (247 lines)
+  *(Done. BRACE-AGENTS.md 1,324 → 853 lines (it had grown +205 during this review; the
+  ≤750 target predates that growth — remaining content is dense API reference);
+  agent-ops-guide.md 253 → 596. Heading accounting: every pre-split heading of both
+  files survives in exactly one place. Moved BRACE-AGENTS → guide: Scaling horizontally,
+  "What `clear` does" (→ "Cache clear semantics across a fleet"; 4-line summary kept in
+  the dev core), and the whole ops runbook block (key files, token scopes, ops session
+  secret, CLI commands, HTTP endpoints + regression notifications, multi-instance
+  observability, storage and retention, agent health check, 5 runbooks, /ops/status
+  shape) — replaced by a 9-line "## Ops" pointer. Deliberate deletions (true duplicates,
+  newer copy survives): the guide's old "Commands" table (lacked `brace check`/`errors
+  <id>`), its "Data retention" section (merged into Storage and retention), its
+  "Checking on production after a deploy"/"Investigating a user-reported error"
+  workflows (merged into the post-deploy/error-investigation runbooks), the
+  BRACE-AGENTS→guide retention cross-pointer, and BRACE-AGENTS' "Route configuration
+  methods" bullet (the `.csrf(false)` fact appears twice elsewhere in the file). H4
+  wording kept for keypair behavior; fixed two stale guide claims against source:
+  `brace init --env prod` (init takes no `--env`) and `brace dashboard` (it's `brace ops
+  dashboard`); scheduled-health-check workflow updated to lead with `brace check`.
+  Shipping: jar packages `/brace/agent-ops-guide.md`; `brace new` writes it as
+  `BRACE-OPS.md`; `brace agents-md` refreshes both files; dist zip ships `BRACE-OPS.md`;
+  ClaudeMdGenerator pointer now names `BRACE-OPS.md`. mvn test 933 green +
+  tests/cli/test-distribution.sh green.)*
   - ~300 lines (~27%) is strictly operational (ops runbook block `:739-1010`, scaling
     `:680-689`, cache fleet semantics `:498-508`) — paid every session by agents
     *writing* code. `docs/agent-ops-guide.md` already exists as the destination and

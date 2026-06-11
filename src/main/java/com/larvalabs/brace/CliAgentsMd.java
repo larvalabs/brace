@@ -6,28 +6,37 @@ import java.nio.file.*;
 import java.util.jar.JarFile;
 
 /**
- * {@code brace agents-md} — refresh the project's {@code BRACE-AGENTS.md} from the
- * framework version the project is pinned to.
+ * {@code brace agents-md} — refresh the project's {@code BRACE-AGENTS.md} (dev API
+ * reference) and {@code BRACE-OPS.md} (ops reference) from the framework version the
+ * project is pinned to.
  *
- * <p>{@code BRACE-AGENTS.md} is written once at {@code brace new} time and then goes
- * silently stale when {@code <brace.version>} is bumped. The launcher shim already
- * resolves the pinned toolchain for this command (everything except
- * {@code new|version|help|self-update} runs against the project's pin), so the
- * brace jar in {@link BuildCommands#frameworkLibDir()} is the pinned version's jar;
- * we extract its packaged {@code /brace/BRACE-AGENTS.md} and overwrite the project
- * copy. {@code --stdout} prints the doc instead of writing it.
+ * <p>Both docs are written once at {@code brace new} time and then go silently stale
+ * when {@code <brace.version>} is bumped. The launcher shim already resolves the pinned
+ * toolchain for this command (everything except {@code new|version|help|self-update}
+ * runs against the project's pin), so the brace jar in
+ * {@link BuildCommands#frameworkLibDir()} is the pinned version's jar; we extract its
+ * packaged {@code /brace/BRACE-AGENTS.md} and {@code /brace/agent-ops-guide.md} and
+ * overwrite the project copies. {@code --stdout} prints BRACE-AGENTS.md instead of
+ * writing either file.
  */
 final class CliAgentsMd {
 
     /** Resource path BRACE-AGENTS.md is packaged under inside the framework jar. */
     static final String JAR_ENTRY = "brace/BRACE-AGENTS.md";
 
+    /** Resource path the ops guide is packaged under inside the framework jar
+     *  (source: docs/agent-ops-guide.md in the brace repo). */
+    static final String OPS_JAR_ENTRY = "brace/agent-ops-guide.md";
+
+    /** Project-root filename the ops guide is written to. */
+    static final String OPS_FILE = "BRACE-OPS.md";
+
     private CliAgentsMd() {}
 
     static int run(Path cwd, String[] args) throws Exception {
         boolean toStdout = CliCommands.hasFlag(args, "--stdout");
 
-        String content = loadBundledAgentsMd();
+        String content = loadBundled(JAR_ENTRY);
         if (content == null) {
             CliOutput.printError("This framework version's jar does not contain BRACE-AGENTS.md "
                     + "(pre-0.1.7 toolchain). Bump <brace.version> in pom.xml to 0.1.7 or later "
@@ -47,21 +56,27 @@ final class CliAgentsMd {
         }
 
         Files.writeString(cwd.resolve("BRACE-AGENTS.md"), content);
-        CliOutput.printSuccess("BRACE-AGENTS.md refreshed from Brace " + BraceVersion.get());
+        String written = "BRACE-AGENTS.md";
+        String ops = loadBundled(OPS_JAR_ENTRY);
+        if (ops != null) {
+            Files.writeString(cwd.resolve(OPS_FILE), ops);
+            written += " and " + OPS_FILE;
+        }
+        CliOutput.printSuccess(written + " refreshed from Brace " + BraceVersion.get());
         return 0;
     }
 
     /**
-     * The packaged BRACE-AGENTS.md of the framework version this Cli runs from:
-     * extracted from the brace jar in the toolchain lib dir when running installed,
-     * or read off the classpath when running from {@code target/classes} during
-     * framework development. {@code null} when neither carries the resource.
+     * A packaged doc of the framework version this Cli runs from: extracted from the
+     * brace jar in the toolchain lib dir when running installed, or read off the
+     * classpath when running from {@code target/classes} during framework development.
+     * {@code null} when neither carries the resource.
      */
-    static String loadBundledAgentsMd() throws IOException {
+    static String loadBundled(String entry) throws IOException {
         Path lib = BuildCommands.frameworkLibDir();
         Path jar = lib != null ? findBraceJar(lib) : null;
-        if (jar != null) return extractAgentsMd(jar);
-        try (var in = CliAgentsMd.class.getResourceAsStream("/" + JAR_ENTRY)) {
+        if (jar != null) return extract(jar, entry);
+        try (var in = CliAgentsMd.class.getResourceAsStream("/" + entry)) {
             return in == null ? null : new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
@@ -79,10 +94,10 @@ final class CliAgentsMd {
         }
     }
 
-    /** The {@value #JAR_ENTRY} entry of a framework jar, or null when absent (pre-0.1.7). */
-    static String extractAgentsMd(Path jar) throws IOException {
+    /** The given entry of a framework jar, or null when absent (older framework). */
+    static String extract(Path jar, String entryName) throws IOException {
         try (var jf = new JarFile(jar.toFile())) {
-            var entry = jf.getEntry(JAR_ENTRY);
+            var entry = jf.getEntry(entryName);
             if (entry == null) return null;
             try (var in = jf.getInputStream(entry)) {
                 return new String(in.readAllBytes(), StandardCharsets.UTF_8);
