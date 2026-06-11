@@ -276,7 +276,20 @@ public class Cache {
 
     private static final Pattern TTL_PATTERN = Pattern.compile("(\\d+)([smhd])");
 
+    // TTL strings are code-site literals ("10m", "1h") with tiny cardinality, but parseTtl
+    // runs on every cache call (and on every cached-page request) — memoize the regex parse.
+    // Failures propagate out of computeIfAbsent and are never cached, preserving the
+    // throw-per-call behavior for invalid strings.
+    private static final java.util.concurrent.ConcurrentHashMap<String, Duration> TTL_CACHE =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
     static Duration parseTtl(String ttl) {
+        Duration cached = TTL_CACHE.get(ttl);
+        if (cached != null) return cached;
+        return TTL_CACHE.computeIfAbsent(ttl, Cache::parseTtlUncached);
+    }
+
+    private static Duration parseTtlUncached(String ttl) {
         var matcher = TTL_PATTERN.matcher(ttl);
         if (!matcher.matches()) throw new IllegalArgumentException("Invalid TTL format: " + ttl);
         long amount = Long.parseLong(matcher.group(1));
