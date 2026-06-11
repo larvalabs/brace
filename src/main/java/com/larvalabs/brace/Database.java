@@ -342,10 +342,30 @@ public class Database {
 
     /**
      * Rewrite {@code ?} placeholders to Hibernate-style {@code ?1, ?2, …}, but leave alone any
-     * {@code ?} that isn't actually a placeholder: ones inside single-quoted string literals,
-     * line comments, and block comments. A literal {@code ?} elsewhere (e.g. a Postgres JSONB
-     * {@code ?}/{@code ?|}/{@code ?&} operator) can be escaped as {@code ??}, which emits a single
-     * {@code ?}. For fully hand-written SQL, {@link #jdbc(JdbcConsumer)} is the escape hatch.
+     * {@code ?} that isn't actually a placeholder. The scanner recognises and skips the following
+     * constructs so that a {@code ?} inside them is never renumbered:
+     *
+     * <ul>
+     *   <li><strong>Single-quoted string literals</strong> {@code 'abc'} — {@code ''} is the
+     *       only standard escape; standard_conforming_strings is assumed on (Postgres default).</li>
+     *   <li><strong>E-strings</strong> {@code E'abc\'def'} / {@code e'...'} — a leading
+     *       {@code E}/{@code e} before the opening quote activates backslash-escape mode, so
+     *       {@code \'} does not close the string.</li>
+     *   <li><strong>Double-quoted identifiers</strong> {@code "od?d"} — {@code ""} escapes an
+     *       embedded double-quote; the body is never a placeholder.</li>
+     *   <li><strong>Dollar-quoted strings</strong> {@code $$...$$} and {@code $tag$...$tag$}
+     *       where the tag is empty or a plain identifier ({@code [A-Za-z0-9_]*}). Only a
+     *       {@code $} that opens a syntactically complete dollar-quote token triggers this state;
+     *       bare {@code $} in identifiers (e.g. {@code a$b}) or Postgres {@code $1} positional
+     *       params in raw SQL are not dollar-quote openers and fall through to the default
+     *       character-copy path.</li>
+     *   <li><strong>Line comments</strong> {@code -- ...}</li>
+     *   <li><strong>Block comments</strong> {@code /* ... *}{@code /}</li>
+     * </ul>
+     *
+     * A literal {@code ?} elsewhere (e.g. a Postgres JSONB {@code ?}/{@code ?|}/{@code ?&}
+     * operator) can be escaped as {@code ??}, which emits a single {@code ?}. For fully
+     * hand-written SQL, {@link #jdbc(JdbcConsumer)} is the raw escape hatch.
      */
     String convertPositionalParams(String hql) {   // package-private for direct unit testing
         var sb = new StringBuilder(hql.length() + 8);
@@ -354,7 +374,32 @@ public class Database {
         int i = 0;
         while (i < n) {
             char c = hql.charAt(i);
-            if (c == '\'') {                                              // single-quoted literal
+
+            // ── E-string: E'...' or e'...' — backslash escapes active ──────────────────────
+            if ((c == 'E' || c == 'e') && i + 1 < n && hql.charAt(i + 1) == '\'') {
+                sb.append(c);               // emit the E/e prefix
+                i++;
+                sb.append('\'');            // emit the opening quote
+                i++;
+                while (i < n) {
+                    char d = hql.charAt(i);
+                    sb.append(d);
+                    i++;
+                    if (d == '\\' && i < n) {   // backslash-escaped char: skip next char verbatim
+                        sb.append(hql.charAt(i));
+                        i++;
+                    } else if (d == '\'') {
+                        if (i < n && hql.charAt(i) == '\'') {  // '' escape inside E-string
+                            sb.append('\'');
+                            i++;
+                        } else {
+                            break;                               // end of E-string
+                        }
+                    }
+                }
+
+            // ── Ordinary single-quoted literal — standard SQL ('' escape only) ─────────────
+            } else if (c == '\'') {
                 sb.append(c);
                 i++;
                 while (i < n) {
@@ -362,7 +407,7 @@ public class Database {
                     sb.append(d);
                     i++;
                     if (d == '\'') {
-                        if (i < n && hql.charAt(i) == '\'') {            // '' escapes a quote
+                        if (i < n && hql.charAt(i) == '\'') {  // '' escapes a quote
                             sb.append('\'');
                             i++;
                         } else {
@@ -370,12 +415,70 @@ public class Database {
                         }
                     }
                 }
-            } else if (c == '-' && i + 1 < n && hql.charAt(i + 1) == '-') {   // -- line comment
+
+            // ── Double-quoted identifier: "..." — "" escapes an embedded double-quote ───────
+            } else if (c == '"') {
+                sb.append(c);
+                i++;
+                while (i < n) {
+                    char d = hql.charAt(i);
+                    sb.append(d);
+                    i++;
+                    if (d == '"') {
+                        if (i < n && hql.charAt(i) == '"') {   // "" escape
+                            sb.append('"');
+                            i++;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+            // ── Dollar-quoted string: $tag$...$tag$ (tag is empty or [A-Za-z0-9_]+) ────────
+            } else if (c == '$') {
+                // Try to read a dollar-quote opener: $[tag]$
+                // Scan forward to find the matching closing $, collecting the tag.
+                int j = i + 1;
+                while (j < n && (hql.charAt(j) == '_'
+                        || (hql.charAt(j) >= 'A' && hql.charAt(j) <= 'Z')
+                        || (hql.charAt(j) >= 'a' && hql.charAt(j) <= 'z')
+                        || (hql.charAt(j) >= '0' && hql.charAt(j) <= '9'))) {
+                    j++;
+                }
+                if (j < n && hql.charAt(j) == '$') {
+                    // We have a valid $tag$ opener (tag may be empty).
+                    String closeTag = hql.substring(i, j + 1);   // e.g. "$$" or "$body$"
+                    sb.append(closeTag);
+                    i = j + 1;
+                    // Scan for the matching closer.
+                    while (i < n) {
+                        int closeIdx = hql.indexOf(closeTag, i);
+                        if (closeIdx < 0) {
+                            // Unterminated dollar-quote — copy remainder verbatim.
+                            sb.append(hql, i, n);
+                            i = n;
+                        } else {
+                            sb.append(hql, i, closeIdx + closeTag.length());
+                            i = closeIdx + closeTag.length();
+                        }
+                        break;
+                    }
+                } else {
+                    // Not a dollar-quote opener (e.g. $1 positional param in raw SQL, a$b, etc.)
+                    // — copy the $ verbatim and continue.
+                    sb.append(c);
+                    i++;
+                }
+
+            // ── Line comment: -- ... ─────────────────────────────────────────────────────────
+            } else if (c == '-' && i + 1 < n && hql.charAt(i + 1) == '-') {
                 while (i < n && hql.charAt(i) != '\n') {
                     sb.append(hql.charAt(i));
                     i++;
                 }
-            } else if (c == '/' && i + 1 < n && hql.charAt(i + 1) == '*') {   // /* block comment */
+
+            // ── Block comment: /* ... */ ──────────────────────────────────────────────────────
+            } else if (c == '/' && i + 1 < n && hql.charAt(i + 1) == '*') {
                 sb.append("/*");
                 i += 2;
                 while (i < n) {
@@ -387,14 +490,18 @@ public class Database {
                     sb.append(hql.charAt(i));
                     i++;
                 }
+
+            // ── Placeholder or escaped-? ──────────────────────────────────────────────────────
             } else if (c == '?') {
-                if (i + 1 < n && hql.charAt(i + 1) == '?') {             // ?? -> literal ?
+                if (i + 1 < n && hql.charAt(i + 1) == '?') {   // ?? -> literal ?
                     sb.append('?');
                     i += 2;
                 } else {
                     sb.append('?').append(paramIndex++);
                     i++;
                 }
+
+            // ── Default: copy character verbatim ─────────────────────────────────────────────
             } else {
                 sb.append(c);
                 i++;

@@ -364,6 +364,87 @@ class DatabaseTest {
         assertEquals("data ?| ?1", db.convertPositionalParams("data ??| ?"));
     }
 
+    // --- L3: dollar-quoted strings, double-quoted identifiers, E-strings ---
+
+    @Test
+    void convertSkipsDollarQuoteBody() {
+        // A ? inside $$ ... $$ must not be renumbered; the param after it must still be ?1.
+        var db = new Database(null);
+        assertEquals("$$ hello ? world $$ AND x = ?1",
+                db.convertPositionalParams("$$ hello ? world $$ AND x = ?"));
+    }
+
+    @Test
+    void convertSkipsTaggedDollarQuoteBody() {
+        // $body$...$body$ — tag is a non-empty identifier.
+        var db = new Database(null);
+        assertEquals("$body$ a?b $body$ AND x = ?1",
+                db.convertPositionalParams("$body$ a?b $body$ AND x = ?"));
+    }
+
+    @Test
+    void convertDollarQuoteParamAfterIsNumberedCorrectly() {
+        // Two params outside dollar-quote must number sequentially.
+        var db = new Database(null);
+        assertEquals("x = ?1 AND $$ ? $$ AND y = ?2",
+                db.convertPositionalParams("x = ? AND $$ ? $$ AND y = ?"));
+    }
+
+    @Test
+    void convertSkipsDoubleQuotedIdentifier() {
+        // A ? inside a double-quoted identifier must not be renumbered.
+        var db = new Database(null);
+        assertEquals("\"od?d\" = ?1", db.convertPositionalParams("\"od?d\" = ?"));
+    }
+
+    @Test
+    void convertDoubleQuotedIdentifierWithEscapedQuote() {
+        // "" inside a double-quoted identifier is an escaped " — the identifier doesn't close.
+        var db = new Database(null);
+        assertEquals("\"a\"\"?\"\"b\" = ?1", db.convertPositionalParams("\"a\"\"?\"\"b\" = ?"));
+    }
+
+    @Test
+    void convertEStringBackslashEscapeHandled() {
+        // E'a\'?b' — the \' does not close the string, so ? is inside the literal.
+        var db = new Database(null);
+        assertEquals("E'a\\'?b' AND x = ?1",
+                db.convertPositionalParams("E'a\\'?b' AND x = ?"));
+    }
+
+    @Test
+    void convertEStringLowercasePrefix() {
+        // e'...' (lowercase) must also be recognised as an E-string.
+        var db = new Database(null);
+        assertEquals("e'a\\'?b' AND x = ?1",
+                db.convertPositionalParams("e'a\\'?b' AND x = ?"));
+    }
+
+    @Test
+    void convertBareENotConfusedWithEString() {
+        // An identifier starting with E that is NOT followed by ' is just a regular identifier.
+        var db = new Database(null);
+        assertEquals("EMAIL = ?1", db.convertPositionalParams("EMAIL = ?"));
+    }
+
+    @Test
+    void convertDollarInIdentifierNotMisparsed() {
+        // a$b — the $ is inside a word token, not a dollar-quote opener.
+        var db = new Database(null);
+        assertEquals("a$b = ?1", db.convertPositionalParams("a$b = ?"));
+    }
+
+    @Test
+    void convertDollarOnePositionalNotMisparsed() {
+        // $1 as used in raw Postgres SQL is NOT a dollar-quote opener (closing $ is absent
+        // right after the digit). Falls through to verbatim copy.
+        var db = new Database(null);
+        // The $1 at position 0 — tag scan finds '1' (digit is valid in tag) then hits end-of-string,
+        // so no closing $ is found within the tag scan → falls through as verbatim $.
+        // After the $, '1' is consumed normally.  Result: "$1" is preserved as-is.
+        assertEquals("$1 AND x = ?1", db.convertPositionalParams("$1 AND x = ?"));
+    }
+
     // --- L4: field identifier validation ---
 
     @Test

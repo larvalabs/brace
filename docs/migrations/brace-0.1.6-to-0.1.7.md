@@ -190,6 +190,20 @@ For SQL that needs full control, `db.jdbc(...)` remains the raw escape hatch.
 **Action:** none, unless you wrote a literal `??` expecting two placeholders (it now means one
 literal `?`) — use two separate `?` instead.
 
+The converter has also been extended (correctness fix only — no API change) to recognise three
+additional PostgreSQL string/identifier syntaxes so a `?` inside them is never misidentified as
+a placeholder:
+
+- **Dollar-quoted strings** — `$$...$$` and `$tag$....$tag$` (used in PL/pgSQL function bodies
+  and multi-line literals). The scanner treats the entire body verbatim.
+- **Double-quoted identifiers** — `"column?name"` — a `?` inside a quoted identifier is part of
+  the name, not a parameter.
+- **E-strings** — `E'...'` / `e'...'` — a backslash-escaped quote `\'` inside an E-string does
+  not terminate the literal, so a `?` after the `\'` is still inside the string.
+
+**Action:** none. If you previously had to use `db.jdbc(...)` only because your SQL contained
+one of these constructs with a `?` inside, you can switch back to the regular helpers.
+
 ## Security fix: non-multipart request bodies are now capped at `maxUploadSize`
 
 **Who is affected:** any application that accepts POST/PUT requests with plain (non-multipart)

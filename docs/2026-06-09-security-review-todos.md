@@ -196,7 +196,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   `Redirect.to(req.queryParam("next"))` hazard. **Haiku 4.5**
 - [ ] **L2: `OpsDashboard.esc()` doesn't escape single quotes** — `OpsDashboard.java:621-624`,
   used inside single-quoted `hx-headers` attributes. Add `'` → `&#39;`. **Haiku 4.5**
-- [ ] **L3: HQL `?`-converter miscounts in dollar-quoted strings / quoted identifiers /
+- [x] **L3: HQL `?`-converter miscounts in dollar-quoted strings / quoted identifiers /
   E-strings** — `Database.java:265-319`. Developer-authored SQL only (correctness, not
   injection). Either teach the scanner `$tag$...$tag$` and `"..."`, or document as
   unsupported → use `db.jdbc(...)`. **Sonnet 4.6**
