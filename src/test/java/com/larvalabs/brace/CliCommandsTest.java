@@ -111,6 +111,27 @@ class CliCommandsTest {
         assertTrue(bout.toString().contains("recent-message"), bout.toString());
     }
 
+    @Test
+    void logsLimitFlagIsPassedThroughToServer() throws Exception {
+        LogTap.clear();
+        for (int i = 0; i < 5; i++) Log.info("limit-msg-" + i);
+
+        var bout = new ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new PrintStream(bout));
+        try {
+            int code = CliCommands.logs(projectDir, new String[]{"--json", "--limit", "2"});
+            assertEquals(0, code);
+        } finally {
+            System.setOut(prev);
+        }
+        // JSON mode prints one compact line per entry; the server caps at ?limit=2.
+        // The capture also picks up the app's own stdout log lines (Log writes JSON to
+        // stdout), so count only the CLI-rendered tap entries — those carry an "id".
+        long rendered = bout.toString().lines().filter(l -> l.startsWith("{\"id\":")).count();
+        assertEquals(2, rendered, bout.toString());
+    }
+
     // --- Task 14: status ---
     // The two status tests are ordered: the healthy check must run before /boom puts an
     // error into the (no-database) app's in-memory recent-error list.

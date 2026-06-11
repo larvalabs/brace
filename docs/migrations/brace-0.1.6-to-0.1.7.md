@@ -873,6 +873,20 @@ it renders tables and summaries, not JSON. If you want readable JSON, pipe throu
 formatter: `brace check --json | jq .`. `brace logs --json` keeps emitting one compact
 object per line (NDJSON), exactly as before.
 
+## Behavior change: unknown CLI commands now exit 1
+
+`brace <typo>` used to print the full usage text and exit **0**, so a misspelled
+command looked like success to scripts and agents. From 0.1.7 it prints
+`Unknown command: <typo> — run 'brace help'` to stderr and exits **1**. Any script
+that (against all odds) relied on exit 0 for an unrecognized command was already
+broken and needs the command name fixed. Bare `brace`, `brace help`, `--help`, and
+`-h` still print usage and exit 0.
+
+Two small additions in the same cleanup: `brace logs` accepts `--limit <n>`
+(passthrough to the server's `?limit=` parameter; server default 200), and the
+`brace new` next-steps text now suggests `brace dev` instead of the old
+`mvn compile exec:java ...` incantation.
+
 ## Changed: `brace compile` prints condensed, deduplicated diagnostics
 
 **No action needed unless something parses compiler output.** `brace compile` (and the

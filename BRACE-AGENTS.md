@@ -880,7 +880,7 @@ Common workflows:
 | `brace check [--env prod]` | Run all health checks, return structured verdict | 0 all pass / 1 issues / 2 unreachable |
 | `brace errors [--since 1h] [--full] [--env prod]` | List unresolved error summaries (`--full` for the per-row detail shape) | 0 none / 1 some / 2 unreachable |
 | `brace errors <id> [--env prod]` | Full detail for one error (stack trace, request context, headers, queries) | 0 / 1 not found / 2 unreachable |
-| `brace logs [-f] [--since 10m] [--level warn] [--env prod]` | Tail structured log entries | 0 |
+| `brace logs [-f] [--since 10m] [--level warn] [--limit 50] [--env prod]` | Tail structured log entries (`--limit` caps entries; server default 200) | 0 |
 | `brace cache [--env prod]` | Cache size, hit rate, evictions | 0 / 2 unreachable |
 | `brace cache clear [--env prod]` | Empty the cache | 0 / 2 unreachable |
 | `brace resolve <id> [--env prod]` | Mark an error as resolved | 0 / 1 not found / 2 unreachable |

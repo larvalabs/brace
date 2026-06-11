@@ -14,6 +14,8 @@ public class Cli {
     private static final int BOOTSTRAP_CONTRACT = 2;
 
     public static void main(String[] args) throws Exception {
+        // Bare `brace` is an implicit help request (the launcher shim maps no-args
+        // to `help` too), so it prints usage and exits 0 — unlike a typo'd command.
         if (args.length == 0) { printUsage(); return; }
         warnIfStaleLauncher();
         Path cwd = Path.of(".").toAbsolutePath().normalize();
@@ -43,8 +45,13 @@ public class Cli {
         }
     }
 
-    private static int dispatch(Path cwd, String cmd, String[] args) throws Exception {
+    // Package-visible for tests (unknown-command exit code, help).
+    static int dispatch(Path cwd, String cmd, String[] args) throws Exception {
         return switch (cmd) {
+            case "help", "--help", "-h" -> {
+                printUsage();
+                yield 0;
+            }
             case "new" -> {
                 if (args.length < 1) {
                     CliOutput.printError("Usage: brace new <project-name>");
@@ -83,7 +90,11 @@ public class Cli {
             case "check"   -> requireProject(cwd, () -> CliCheck.run(cwd, args));
             case "cache"   -> cacheCommand(cwd, args);
             case "resolve" -> requireProject(cwd, () -> CliCommands.resolve(cwd, args));
-            default -> { printUsage(); yield 0; }
+            default -> {
+                // A typo must not look like success (it used to print usage and exit 0).
+                CliOutput.printError("Unknown command: " + cmd + " — run 'brace help'");
+                yield 1;
+            }
         };
     }
 
@@ -168,7 +179,7 @@ public class Cli {
         System.out.println("  brace ops dashboard         Open the ops dashboard in a browser");
         System.out.println("  brace errors [--since 1h]   List unresolved errors (summaries; --full for detail)");
         System.out.println("  brace errors <id>           Show full detail for one error");
-        System.out.println("  brace logs [-f] [--since]   Tail recent log lines");
+        System.out.println("  brace logs [-f] [--since]   Tail recent log lines (--limit <n> caps entries, server default 200)");
         System.out.println("  brace status                Show app health snapshot");
         System.out.println("  brace check                 Run all health checks");
         System.out.println("  brace cache                 Show cache stats");

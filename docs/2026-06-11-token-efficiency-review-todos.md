@@ -453,7 +453,13 @@ expensive round**, exactly when the re-read corpus is largest).
     (`Not Found: GET /user/42 — registered: GET /users/{id}, …`, cap 5). Production
     unchanged (route disclosure). **Model: Sonnet 4.6.**
 
-- [ ] **L4: CLI nits** — `Cli.java:84`, `CliCommands.logs`, `ProjectGenerator.java:287`
+- [x] **L4: CLI nits** — `Cli.java:84`, `CliCommands.logs`, `ProjectGenerator.java:287`
+  *(Done: unknown command → stderr `Unknown command: <x> — run 'brace help'` + exit 1;
+  explicit `help`/`--help`/`-h` case added so the shim's help dispatch keeps exiting 0,
+  and bare `brace` still prints usage with exit 0 (it's an implicit help request).
+  `brace logs --limit <n>` passthrough on first fetch and follow polls. Scaffold next
+  steps now say `brace dev` — no `brace deps` needed first, the scaffold's only runtime
+  dep is brace itself.)*
   - Unknown command prints full usage and **exits 0** → typos look like success; fix
     to `Unknown command: <x>` + exit 1. `brace logs` lacks `--limit` passthrough
     (server supports `?limit=`, default 200). `brace new` next-steps text says

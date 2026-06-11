@@ -54,6 +54,22 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void nextStepsSuggestBraceDevNotRawMaven(@TempDir Path tempDir) throws Exception {
+        var bout = new java.io.ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new java.io.PrintStream(bout));
+        try {
+            ProjectGenerator.generate(tempDir.resolve("myproject").toString());
+        } finally {
+            System.setOut(prev);
+        }
+        String out = bout.toString();
+        assertTrue(out.contains("brace dev"), "next steps should suggest brace dev, got: " + out);
+        assertFalse(out.contains("mvn compile exec:java"),
+            "next steps should not suggest the raw Maven incantation");
+    }
+
+    @Test
     void gitignoreContainsApplicationConf(@TempDir Path tempDir) throws Exception {
         var projDir = tempDir.resolve("myproject");
         ProjectGenerator.generate(projDir.toString());

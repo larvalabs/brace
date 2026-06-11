@@ -360,7 +360,9 @@ application.conf
 
             System.out.println("Created new Brace project: " + name);
             System.out.println("  cd " + name);
-            System.out.println("  mvn compile exec:java -Dexec.mainClass=app.App -Dbrace.mode=dev");
+            // No `brace deps` needed first: the scaffold's only runtime dependency is
+            // brace itself, which the toolchain lib dir already provides.
+            System.out.println("  brace dev");
         } catch (IOException e) {
             System.err.println("Failed to create project: " + e.getMessage());
             System.exit(1);

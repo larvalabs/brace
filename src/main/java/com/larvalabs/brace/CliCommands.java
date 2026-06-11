@@ -128,6 +128,7 @@ public class CliCommands {
 
         String level = parseFlag(args, "--level");
         String since = parseFlag(args, "--since");
+        String limit = parseFlag(args, "--limit");   // passthrough to ?limit= (server default 200)
         boolean follow = hasFlag(args, "-f") || hasFlag(args, "--follow");
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
 
@@ -141,6 +142,10 @@ public class CliCommands {
             if (query.length() > 0) query.append("&");
             query.append("level=").append(level);
         }
+        if (limit != null) {
+            if (query.length() > 0) query.append("&");
+            query.append("limit=").append(limit);
+        }
         String firstUrl = query.length() == 0 ? baseUrl : baseUrl + "?" + query;
 
         long lastId = renderLogsOnce(cfg, projectDir, firstUrl, mode);
@@ -150,6 +155,7 @@ public class CliCommands {
             Thread.sleep(1000);
             StringBuilder q = new StringBuilder("since=").append(lastId);
             if (level != null) q.append("&level=").append(level);
+            if (limit != null) q.append("&limit=").append(limit);
             long newLast = renderLogsOnce(cfg, projectDir, baseUrl + "?" + q, mode);
             if (newLast > 0) lastId = newLast;
         }
