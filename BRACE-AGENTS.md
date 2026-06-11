@@ -72,7 +72,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
 
 ## Routing
 
@@ -685,6 +685,7 @@ Brace runs correctly as **N instances behind a load balancer sharing one Postgre
 - **Automatic on Postgres** (no code change): sessions, CSRF, durable jobs, recurring scheduler (once-per-interval cluster-wide), WebSocket broadcast (`LISTEN`/`NOTIFY`), rate limiter (shared counter), ops console login (shared secret), regression detection (shared table), instance-tagged metrics feed.
 - **Opt-in:** the shared cache backend (`CacheBackend.postgres(dbFactory)`) — per-process by default even on Postgres, since it trades latency for consistency.
 - **Per-instance by design:** `/ops/dashboard`, `/ops/status`, `/ops/logs`, JFR/heap reflect the serving box (`/ops/status` carries `app.instanceId`). Use an external aggregator over the instance-tagged `ops_timeseries` feed + stdout JSON logs for the fleet view.
+- **JFR profiler runs whenever ops is enabled** (~0.5–2% CPU for continuous CPU/GC/method/allocation sampling — on by default, deliberately). `app.opsProfiler(false)` disables it on CPU-constrained instances; the dashboard then falls back to basic runtime heap numbers and `jvm.*` metrics stop flowing.
 - **Watch:** rate-limiter DB load on busy servers (Redis recommended for very high volume / hot keys — see [`docs/2026-06-07-rate-limiter-load.md`](docs/2026-06-07-rate-limiter-load.md)); ephemeral counters reset on crash/failover (by design).
 
 ## Security

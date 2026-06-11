@@ -870,3 +870,30 @@ which also stops token-bearing routes from growing the per-route stats map per r
 paths log exactly as before. Only segments that look like secrets (≥16 chars,
 base64url/hex alphabet, mixed letters and digits) are replaced with `[redacted]`. If
 your log tooling matched on such paths, match on the `[redacted]` placeholder instead.
+
+## New: `opsProfiler(boolean)` — opt out of the always-on JFR profiler
+
+**Who is affected:** no one is required to change anything — this is a new optional
+builder method. Default behavior is unchanged.
+
+When ops is enabled (`app.ops(...)`), Brace starts a continuous JFR recording stream
+that backs the JVM panels of `/ops/dashboard` (CPU load, GC pauses, hot methods,
+allocation sampling). That sampling costs roughly 0.5–2% CPU plus one thread, around
+the clock — usually a worthwhile trade for production diagnostics, and it stays on by
+default. 0.1.7 adds an explicit opt-out for CPU-constrained instances:
+
+```java
+// Before (and still the default): JFR profiler on whenever ops is enabled
+Brace.app().ops("ops-authorized-keys")
+
+// After: ops without the profiler
+Brace.app().ops("ops-authorized-keys").opsProfiler(false)
+```
+
+With the profiler disabled, the dashboard falls back to basic runtime heap numbers and
+the `jvm.*` rows in `ops_timeseries` (and the 5-minute profiling snapshots) are not
+collected.
+
+Related fix in the same change: on ops-enabled apps **without a database**, the JFR
+method/allocation sample maps were never reset and grew for the life of the JVM; they
+now reset every 5 minutes, matching the cadence of the DB-backed metrics flush.

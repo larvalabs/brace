@@ -39,6 +39,7 @@ public class Brace {
     private String opsKeysPath;
     private Stats stats = new Stats();
     private JfrProfiler profiler;
+    private boolean opsProfilerEnabled = true;
     private String instanceId;
     private OpsHandler opsHandler;
     private Cache cache;
@@ -227,6 +228,19 @@ public class Brace {
 
     public Brace ops(String keysPath) {
         this.opsKeysPath = keysPath;
+        return this;
+    }
+
+    /**
+     * Enables or disables the always-on JFR profiler that backs the JVM panels of
+     * {@code /ops/dashboard} (CPU, GC pauses, method/allocation sampling). Default
+     * {@code true}: continuous sampling costs roughly 0.5–2% CPU plus one thread, which
+     * is usually worth it for production diagnostics. Disable on CPU-constrained
+     * instances; the dashboard then falls back to basic runtime heap numbers and the
+     * {@code jvm.*} ops metrics are not collected.
+     */
+    public Brace opsProfiler(boolean enabled) {
+        this.opsProfilerEnabled = enabled;
         return this;
     }
 
@@ -498,8 +512,9 @@ public class Brace {
             errorStore = new ErrorStore(databaseFactory, maxErrors);
         }
 
-        // Create JFR profiler when ops is enabled
-        if (opsKeysPath != null) {
+        // Create JFR profiler when ops is enabled, unless explicitly disabled (M19):
+        // continuous sampling is ~0.5–2% CPU, on by default as a deliberate trade.
+        if (opsKeysPath != null && opsProfilerEnabled) {
             profiler = new JfrProfiler();
         }
 
@@ -641,6 +656,14 @@ public class Brace {
             snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
                 @Override public void run() { stats.snapshot(); }
             }, 60_000, 60_000);
+            // M19: without a database there is no ops-flush-jvm-profiling job to reset the
+            // JFR sample maps, so methodSamples/allocationByClass would grow for the life of
+            // the JVM. Reset on the same 5-minute cadence the DB-backed flush job uses.
+            if (profiler != null) {
+                snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
+                    @Override public void run() { profiler.resetProfiling(); }
+                }, 300_000, 300_000);
+            }
         }
 
         // Flush stats to ops_timeseries
