@@ -76,24 +76,31 @@ Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`
 
 ## Routing
 
-Four handler types with typed route methods (no casts needed):
+Always register routes through the typed route methods — only `app.get(path, req -> ...)`
+(single-arg `Handler`) uses the bare verb. Multi-arg lambdas on the bare verbs do not
+compile (the raw overloads are ambiguous); the typed names are the canonical form:
 
 ```java
 app.get("/hello", req -> Result.text("Hi"));                 // Handler: Request only
-app.getDb("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler: Request + Database
+app.getRead("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // ReadDbHandler: query-only, no transaction
+app.postDb("/posts", (req, db) -> ...);                      // DbHandler: Request + Database (transaction)
 app.getSession("/me", (req, session) -> ...);                // SessionHandler: Request + Session
 app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Request + Database + Session
 
 // Typed route methods available for all HTTP methods:
-// getDb, postDb, putDb, deleteDb
-// getSession, postSession, putSession, deleteSession
-// getFull, postFull, putFull, deleteFull
+// getRead, postRead, putRead, deleteRead             (ReadDbHandler — DB queries, no transaction)
+// getDb, postDb, putDb, deleteDb                     (DbHandler — DB writes, per-request transaction)
+// getSession, postSession, putSession, deleteSession (SessionHandler)
+// getFull, postFull, putFull, deleteFull             (FullHandler — DB writes + session)
+// getReadFull, postReadFull, putReadFull, deleteReadFull (ReadFullHandler — read-only DB + session)
 
 // CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);
 ```
 
-Read-only variants skip the transaction commit: `ReadDbHandler`, `ReadFullHandler`.
+Use the `Read` variants for handlers that only query: GET routes are almost always
+`getRead` (or `getReadFull` if they need the session). They skip the per-request
+transaction entirely, which is both faster and signals intent.
 
 Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`.
 
@@ -104,8 +111,8 @@ Grouping:
 
 ```java
 app.group("/admin", g -> {
-    g.get("/users", ctrl::list);       // /admin/users
-    g.post("/users", ctrl::create);    // /admin/users
+    g.getRead("/users", ctrl::list);   // /admin/users — typed methods work on groups too
+    g.postDb("/users", ctrl::create);  // /admin/users
 });
 ```
 

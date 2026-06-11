@@ -127,6 +127,28 @@ both — keep the in-process default for hot read-through pages and a separate
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
 
+## New (optional): typed read-only route methods (`getRead`, `getReadFull`, …)
+
+**Nothing to do** — purely additive; existing cast-style registrations keep working.
+0.1.6 added `getDb`/`postSession`/`putFull` etc., but read-only handlers (the most
+common kind — almost every GET) still required a cast, because the raw
+`get/post/put/delete` overloads are ambiguous for multi-arg lambdas. 0.1.7 completes
+the set: `getRead/postRead/putRead/deleteRead` (ReadDbHandler — DB queries, no
+transaction) and `getReadFull/...` (ReadFullHandler — read-only DB + session), on
+both `Brace` and route groups.
+
+**Before (all versions, still works):**
+
+```java
+app.get("/posts", (ReadDbHandler) (req, db) -> Json.of(db.findAll(Post.class)));
+```
+
+**After (0.1.7+, the canonical form):**
+
+```java
+app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class)));
+```
+
 ## New (optional): `db.findOr404` / `db.queryOneOr404` lookup helpers
 
 **Nothing to do** — purely additive. The find/null-check/404 preamble that every

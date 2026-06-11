@@ -22,7 +22,7 @@ expensive round**, exactly when the re-read corpus is largest).
 
 ## High
 
-- [ ] **H1: Route registration is ambiguous for bare lambdas; read-only handlers have no cast-free form** — `Brace.java:297-401`, `RouteGroup.java:135-183`
+- [x] **H1: Route registration is ambiguous for bare lambdas; read-only handlers have no cast-free form** — `Brace.java:297-401`, `RouteGroup.java:135-183`
   - Verified by compile test: `app.get("/a", (req, db) -> ...)` fails with "reference
     to get is ambiguous" (SessionHandler vs ReadDbHandler both match 2-arg lambdas;
     FullHandler vs ReadFullHandler both match 3-arg). The raw multi-arg overloads of

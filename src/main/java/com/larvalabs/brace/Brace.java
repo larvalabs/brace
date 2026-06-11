@@ -450,6 +450,38 @@ public class Brace {
         return delete(pattern, handler);
     }
 
+    public RouteConfig getRead(String pattern, ReadDbHandler handler) {
+        return get(pattern, handler);
+    }
+
+    public RouteConfig postRead(String pattern, ReadDbHandler handler) {
+        return post(pattern, handler);
+    }
+
+    public RouteConfig putRead(String pattern, ReadDbHandler handler) {
+        return put(pattern, handler);
+    }
+
+    public RouteConfig deleteRead(String pattern, ReadDbHandler handler) {
+        return delete(pattern, handler);
+    }
+
+    public RouteConfig getReadFull(String pattern, ReadFullHandler handler) {
+        return get(pattern, handler);
+    }
+
+    public RouteConfig postReadFull(String pattern, ReadFullHandler handler) {
+        return post(pattern, handler);
+    }
+
+    public RouteConfig putReadFull(String pattern, ReadFullHandler handler) {
+        return put(pattern, handler);
+    }
+
+    public RouteConfig deleteReadFull(String pattern, ReadFullHandler handler) {
+        return delete(pattern, handler);
+    }
+
     // Route grouping
 
     public Brace group(String prefix, Consumer<RouteGroup> config) {

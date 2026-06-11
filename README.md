@@ -223,14 +223,16 @@ public class PostController {
 
 ```java
 app.get("/hello", req -> Result.text("Hello!"));                       // Handler: Request only
-app.getDb("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler: Request + Database
+app.getRead("/posts", (req, db) -> Result.json(db.findAll(Post.class))); // ReadDbHandler: query-only, no transaction
+app.postDb("/posts", (req, db) -> ...);                                // DbHandler: Request + Database (transaction)
 app.getSession("/profile", (req, session) -> ...);                     // SessionHandler: Request + Session
 app.postFull("/posts", (req, db, session) -> ...);                     // FullHandler: Request + Database + Session
 
-// Typed route methods eliminate cast syntax
+// Typed route methods eliminate cast syntax — multi-arg lambdas on the bare verbs don't compile
+app.getRead("/posts", (req, db) -> ...);        // getRead, postRead, putRead, deleteRead (no transaction)
 app.getDb("/posts", (req, db) -> ...);          // getDb, postDb, putDb, deleteDb
 app.getSession("/profile", (req, session) -> ...); // getSession, postSession, putSession, deleteSession
-app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull
+app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull (+ getReadFull, ...)
 
 // CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API
@@ -431,7 +433,7 @@ Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.4 an
 // In your layout: <script src="/__brace/htmx.min.js"></script>
 
 // Full page by default, partial when htmx requests it
-app.get("/posts", (DbHandler) (req, db) -> {
+app.getRead("/posts", (req, db) -> {
     var posts = db.findAll(Post.class);
     if (req.isHtmx()) return Result.view("posts/_list", "posts", posts);
     return Result.view("posts/index", "posts", posts);
@@ -454,7 +456,7 @@ static TestApp app = Brace.test()
     .entities(Post.class, User.class)
     .templates("views")
     .start(app -> {
-        app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));
+        app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class)));
     });
 
 @Test void listPosts() {
