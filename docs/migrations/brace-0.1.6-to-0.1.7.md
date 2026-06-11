@@ -448,6 +448,95 @@ testApp = Brace.test().templates("views").start(app -> {
 testApp = Brace.test().templates("views").start(App::routes);
 ```
 
+## Fixed (scaffold): generated pom ran zero tests; Dockerfile couldn't run the jar
+
+**Existing projects: action recommended** — this fixes what `brace new` generates in
+0.1.7+, but projects scaffolded with earlier versions carry both problems until they
+copy the fix:
+
+1. **`mvn test` was a false green.** The generated pom had no `<build>` section, so
+   Maven's inherited Surefire 2.12.4 ignored JUnit 5 entirely — `Tests run: 0 …
+   BUILD SUCCESS` no matter what the tests did. (`brace test` was unaffected; it
+   runs the JUnit console launcher directly.)
+2. **The Dockerfile couldn't work.** It did `COPY target/*.jar app.jar` +
+   `java -jar app.jar`, but the pom built a thin jar with no `Main-Class` manifest
+   and no dependencies.
+
+New scaffolds get a `<build>` section pinning `maven-surefire-plugin` 3.5.2 and
+configuring `maven-shade-plugin` to produce an executable fat jar at
+`target/app.jar` (fixed name via `<finalName>app</finalName>`), and the Dockerfile
+copies `target/app.jar` explicitly. `mvn package && java -jar target/app.jar` now
+works, and so does the Dockerfile.
+
+**To adopt in an existing project**, paste this into your pom (after
+`</dependencies>`), and change the Dockerfile's `COPY target/*.jar app.jar` to
+`COPY target/app.jar app.jar`:
+
+```xml
+<build>
+    <!-- Fixed jar name so the Dockerfile can COPY target/app.jar deterministically. -->
+    <finalName>app</finalName>
+    <plugins>
+        <!-- Without this pin, Maven's inherited Surefire 2.x silently ignores
+             JUnit 5 tests ("Tests run: 0" + BUILD SUCCESS). Do not remove. -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <version>3.5.2</version>
+        </plugin>
+        <!-- mvn package builds an executable fat jar (target/app.jar). The
+             transformers matter: Jetty/Hibernate register implementations via
+             META-INF/services (merged by ServicesResourceTransformer), and
+             several dependencies are multi-release jars. -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-shade-plugin</artifactId>
+            <version>3.6.0</version>
+            <configuration>
+                <createDependencyReducedPom>false</createDependencyReducedPom>
+                <transformers>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                        <mainClass>app.App</mainClass>
+                        <manifestEntries>
+                            <Multi-Release>true</Multi-Release>
+                        </manifestEntries>
+                    </transformer>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                </transformers>
+                <filters>
+                    <filter>
+                        <artifact>*:*</artifact>
+                        <excludes>
+                            <exclude>META-INF/*.SF</exclude>
+                            <exclude>META-INF/*.DSA</exclude>
+                            <exclude>META-INF/*.RSA</exclude>
+                            <exclude>module-info.class</exclude>
+                            <exclude>META-INF/versions/*/module-info.class</exclude>
+                        </excludes>
+                    </filter>
+                </filters>
+            </configuration>
+            <executions>
+                <execution>
+                    <phase>package</phase>
+                    <goals><goal>shade</goal></goals>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+```
+
+(Adjust `<mainClass>` if your main class isn't `app.App`. Note the dev-mode H2
+database is a test-time convenience — H2 is not in the fat jar, so `java -jar`
+deployments use the real Postgres config.)
+
+Related one-line fix found while verifying this: the scaffold's dev database URL
+is now `jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1`. Without `DB_CLOSE_DELAY=-1` the
+in-memory database evaporates the moment Flyway's migration connection closes, so
+Hibernate then saw an empty schema. If your `application.conf` has the old URL and
+you run dev mode against H2, append `;DB_CLOSE_DELAY=-1`.
+
 ## New (optional): scoped read-only ops keys
 
 **Nothing to do** — existing keys and tokens keep working unchanged. 0.1.7 adds a

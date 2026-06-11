@@ -493,7 +493,7 @@ db.pass=${DB_PASS}
 session.secret=change-me
 
 %dev.port=9000
-%dev.db.url=jdbc:h2:mem:dev
+%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1
 %dev.db.user=
 %dev.db.pass=
 ```

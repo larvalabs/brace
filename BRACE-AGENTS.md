@@ -1198,7 +1198,7 @@ db.url=jdbc:postgresql://localhost:5432/myapp
 db.pass=${DB_PASS}
 
 %dev.port=9000
-%dev.db.url=jdbc:h2:mem:dev
+%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1
 ```
 
 Load: `Config.load(Path.of("application.conf"), "dev")`. Mode-prefixed keys override base keys.

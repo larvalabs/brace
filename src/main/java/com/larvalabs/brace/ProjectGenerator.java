@@ -80,6 +80,58 @@ public class ProjectGenerator {
             <scope>test</scope>
         </dependency>
     </dependencies>
+    <build>
+        <!-- Fixed jar name so the Dockerfile can COPY target/app.jar deterministically. -->
+        <finalName>app</finalName>
+        <plugins>
+            <!-- Without this pin, Maven's inherited Surefire 2.x silently ignores
+                 JUnit 5 tests ("Tests run: 0" + BUILD SUCCESS). Do not remove. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+            <!-- mvn package builds an executable fat jar (target/app.jar). The
+                 transformers matter: Jetty/Hibernate register implementations via
+                 META-INF/services (merged by ServicesResourceTransformer), and
+                 several dependencies are multi-release jars. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <configuration>
+                    <createDependencyReducedPom>false</createDependencyReducedPom>
+                    <transformers>
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                            <mainClass>app.App</mainClass>
+                            <manifestEntries>
+                                <Multi-Release>true</Multi-Release>
+                            </manifestEntries>
+                        </transformer>
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                    </transformers>
+                    <filters>
+                        <filter>
+                            <artifact>*:*</artifact>
+                            <excludes>
+                                <exclude>META-INF/*.SF</exclude>
+                                <exclude>META-INF/*.DSA</exclude>
+                                <exclude>META-INF/*.RSA</exclude>
+                                <exclude>module-info.class</exclude>
+                                <exclude>META-INF/versions/*/module-info.class</exclude>
+                            </excludes>
+                        </filter>
+                    </filters>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
 """);
 
@@ -203,7 +255,7 @@ class HomeControllerTest {
                 "session.secret=" + sessionSecret + "\n" +
                 "\n" +
                 "%dev.port=9000\n" +
-                "%dev.db.url=jdbc:h2:mem:dev\n" +
+                "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");
 
@@ -219,7 +271,7 @@ class HomeControllerTest {
                 "session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars\n" +
                 "\n" +
                 "%dev.port=9000\n" +
-                "%dev.db.url=jdbc:h2:mem:dev\n" +
+                "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");
 
@@ -267,11 +319,14 @@ body { font-family: system-ui, sans-serif; line-height: 1.6; max-width: 800px; m
 h1 { margin-bottom: 1rem; }
 """);
 
-            // Dockerfile
+            // Dockerfile — target/app.jar is the shaded executable jar
+            // (fixed name via <finalName>app</finalName>); build it first
+            // with `mvn package`.
             Files.writeString(root.resolve("Dockerfile"),
+                "# Build the jar first: mvn package\n" +
                 "FROM eclipse-temurin:21-jre\n" +
                 "WORKDIR /app\n" +
-                "COPY target/*.jar app.jar\n" +
+                "COPY target/app.jar app.jar\n" +
                 "COPY application.conf.example application.conf\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +

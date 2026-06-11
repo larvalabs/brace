@@ -205,6 +205,37 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void generatedPomRunsTestsAndPackagesRunnableJar(@TempDir Path tempDir) throws Exception {
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var pom = Files.readString(projDir.resolve("pom.xml"));
+        // Without the surefire pin, Maven's inherited 2.x silently runs zero
+        // JUnit 5 tests ("Tests run: 0" + BUILD SUCCESS).
+        assertTrue(pom.contains("<artifactId>maven-surefire-plugin</artifactId>"),
+            "pom must pin maven-surefire-plugin so mvn test runs JUnit 5");
+        var surefireVersion = pom.replaceAll(
+            "(?s).*maven-surefire-plugin</artifactId>\\s*<version>([^<]+)</version>.*", "$1");
+        assertTrue(surefireVersion.matches("3\\..*"),
+            "surefire pin must be 3.x (got " + surefireVersion + ")");
+
+        // The Dockerfile runs java -jar app.jar, so mvn package must produce an
+        // executable fat jar at a deterministic path.
+        assertTrue(pom.contains("<artifactId>maven-shade-plugin</artifactId>"),
+            "pom must configure maven-shade-plugin for an executable fat jar");
+        assertTrue(pom.contains("<mainClass>app.App</mainClass>"),
+            "shade config must set the scaffold's main class");
+        assertTrue(pom.contains("ServicesResourceTransformer"),
+            "shade config must merge META-INF/services (Jetty/Hibernate need it)");
+        assertTrue(pom.contains("<finalName>app</finalName>"),
+            "jar name must be fixed so the Dockerfile can COPY target/app.jar");
+
+        var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
+        assertTrue(dockerfile.contains("COPY target/app.jar app.jar"),
+            "Dockerfile must copy the shaded jar by its fixed name");
+    }
+
+    @Test
     void projectNameAllowsAlphanumericUnderscoreHyphen() {
         String[] validNames = {
             "my-project",

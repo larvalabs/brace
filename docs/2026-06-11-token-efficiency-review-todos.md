@@ -288,7 +288,19 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** scaffold e2e (`tests/cli/`) still green; generated test passes.
   - **Model: Sonnet 4.6.**
 
-- [ ] **M8: Scaffold pom: `mvn test` silently runs zero tests; Dockerfile can't work as shipped** — `ProjectGenerator.java:50-84,250-260`
+- [x] **M8: Scaffold pom: `mvn test` silently runs zero tests; Dockerfile can't work as shipped** — `ProjectGenerator.java:50-84,250-260`
+  - *Done: generated pom gains `<build>` with surefire 3.5.2 pin + shade 3.6.0
+    (Main-Class app.App, Multi-Release manifest, ServicesResourceTransformer,
+    signature/module-info filters, `<finalName>app</finalName>`); Dockerfile copies
+    `target/app.jar` explicitly. Verified end-to-end against the locally installed
+    0.1.7-SNAPSHOT (generated pom's JitPack coordinates rewritten to the local GAV,
+    since the snapshot isn't published): `mvn test` runs the generated test (1/1
+    green), `mvn package` produces target/app.jar with merged service files, the
+    jar boots and serves `/` → 200, and `docker build` + container run reach the
+    expected Postgres connection attempt. Follow-up fix found during verification:
+    scaffold dev H2 URL needed `;DB_CLOSE_DELAY=-1` (schema evaporated between
+    Flyway's connection and Hikari's). Not verified: resolution of the JitPack
+    coordinate itself (needs a published tag).*
   - Generated pom has no `<build>` section → super-POM surefire 2.12.4 → JUnit 5
     tests are ignored: "Tests run: 0 … BUILD SUCCESS" — a false green agents trust
     (they reflexively run `mvn test`). Dockerfile does `COPY target/*.jar` +
