@@ -239,6 +239,55 @@ var post = db.findOr404(Post.class, req.longPathParam("id"));
 var bySlug = db.queryOneOr404(Post.class, "slug = ?", slug);
 ```
 
+## New (optional): `db.queryPage` pagination + ORDER BY in where-fragments is now documented behavior
+
+**Nothing to do** — purely additive; existing `db.query(...)` calls keep working
+unchanged. Two related improvements to the query API's ordering/pagination story:
+
+1. **`ORDER BY` inside the where-fragment is now documented, pinned behavior.** It has
+   always worked (the fragment is concatenated into the generated HQL), but nothing
+   documented it, so apps sorted result lists in Java. As of 0.1.7 it is covered by
+   tests and listed in `BRACE-AGENTS.md` §Database — rely on it.
+2. **`db.queryPage(Class, hqlWhere, limit, offset, params...)`** — same where-fragment
+   pipeline as `db.query`, plus a result slice applied via Hibernate's
+   `setMaxResults`/`setFirstResult` (dialect-correct LIMIT/OFFSET, no string surgery).
+   Validates `limit > 0` and `offset >= 0` (`IllegalArgumentException` otherwise).
+   Put the `ORDER BY` in the where-fragment string — always order when paginating, or
+   page boundaries are unstable. Note this is a **new method**, not an overload of
+   `db.query`: an overload would have silently reinterpreted existing calls like
+   `db.query(Post.class, "a = ? AND b = ?", 1, 2)` as limit/offset.
+
+**Before (all versions, still works — but fetches every row):**
+
+```java
+// full-table fetch, then slice in Java
+var all = db.query(Post.class, "published = true");
+all.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
+var page = all.subList(Math.min(20, all.size()), Math.min(40, all.size()));
+long total = all.size();
+
+// …or hand-built LIMIT/OFFSET via native SQL
+var rows = db.sqlQuery("SELECT * FROM posts WHERE published = true ORDER BY created_at DESC LIMIT 20 OFFSET 20");
+```
+
+**After (0.1.7+):**
+
+```java
+// page 2, 20 per page — database does the ordering and slicing
+var page  = db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20);
+long total = db.count(Post.class, "published = true");  // same condition, sans ORDER BY
+
+// and for non-paged ordered lists, ORDER BY in db.query is supported semantics:
+var newest = db.query(Post.class, "published = true ORDER BY id DESC");
+```
+
+Relatedly, the documented idiom for aggregates is a single projection query — not
+fetching rows and loop-summing in Java:
+
+```java
+var row = db.hql("SELECT AVG(r.score), COUNT(r) FROM Rating r WHERE r.talkId = ?", id).get(0);
+```
+
 ## New (optional): scoped read-only ops keys
 
 **Nothing to do** — existing keys and tokens keep working unchanged. 0.1.7 adds a

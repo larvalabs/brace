@@ -205,7 +205,12 @@ expensive round**, exactly when the re-read corpus is largest).
   - **Tests:** order preserved; null values kept; odd arity throws.
   - **Model: Haiku 4.5** (helper); the doc guidance rides M5.
 
-- [ ] **M4: No ordering/pagination story in the query API or docs** — `Database.java:71`, BRACE-AGENTS.md §Database
+- [x] **M4: No ordering/pagination story in the query API or docs** — `Database.java:71`, BRACE-AGENTS.md §Database
+  - *Implemented as a distinct `db.queryPage(Class, hqlWhere, limit, offset, params...)`
+    rather than the `db.query` overload proposed below: with varargs, existing calls like
+    `db.query(Post.class, "a = ? AND b = ?", 1, 2)` would silently resolve to the new
+    overload and reinterpret the two bind params as limit/offset. ORDER-BY-in-fragment
+    pinned with tests; docs + migration-guide entry added.*
   - `"published = true ORDER BY id DESC"` already works (where-fragment is
     concatenated), but nothing documents it — zero ORDER BY mentions anywhere — so
     the benchmark app sorted in memory 5× and loop-summed aggregates (18-line stats

@@ -274,6 +274,9 @@ db.delete(post)                                   // DELETE
 // Queries
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause, returns List
+db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY goes inside the where-fragment
+db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // limit 20, offset 20 → page 2
+//   total for the pager: db.count(Post.class, "published = true")
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryOneOr404(Post.class, "slug = ?", slug)    // single result, or throws 404
 db.queryIn(Post.class, "id", List.of(1, 2, 3))   // IN clause batch lookup
@@ -289,6 +292,7 @@ db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns co
 
 // Raw queries
 db.hql("SELECT p FROM Post p WHERE ...", args)    // raw HQL, returns List<Object[]>
+db.hql("SELECT AVG(r.score), COUNT(r) FROM Rating r WHERE r.talkId = ?", id) // aggregates in one round-trip — don't fetch rows and loop-sum in Java
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL execute
 db.sqlQuery("SELECT * FROM posts WHERE ...", args) // native SQL query, returns List<Object[]>
 db.sqlQueryLong("SELECT count(*) FROM posts")      // native SQL returning Long

@@ -78,6 +78,41 @@ public class Database {
     }
 
     /**
+     * Like {@link #query(Class, String, Object...)}, but returns one page of results.
+     * {@code limit}/{@code offset} are applied via Hibernate's
+     * {@code setMaxResults}/{@code setFirstResult} — no string surgery on the HQL — so the
+     * database emits the dialect-correct LIMIT/OFFSET clause.
+     *
+     * <p>{@code ORDER BY} belongs inside the where-fragment string (it is concatenated into the
+     * generated HQL, same as {@link #query}); always order when paginating, or page boundaries
+     * are unstable. Pair with {@link #count(Class, String, Object...)} for the total:
+     *
+     * <pre>{@code
+     * // page 2, 20 per page
+     * var page = db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20);
+     * var total = db.count(Post.class, "published = true");
+     * }</pre>
+     *
+     * @param limit  maximum rows to return; must be {@code > 0}
+     * @param offset rows to skip before the first returned row; must be {@code >= 0}
+     * @throws IllegalArgumentException if {@code limit <= 0} or {@code offset < 0}
+     */
+    public <T> List<T> queryPage(Class<T> type, String hqlWhere, int limit, int offset, Object... params) {
+        if (limit <= 0) throw new IllegalArgumentException("limit must be > 0 (was " + limit + ")");
+        if (offset < 0) throw new IllegalArgumentException("offset must be >= 0 (was " + offset + ")");
+        long start = System.nanoTime();
+        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        Query<T> query = session.createQuery(hql, type);
+        bindParams(query, params);
+        query.setMaxResults(limit);
+        query.setFirstResult(offset);
+        List<T> result = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
+    }
+
+    /**
      * Batch-fetch all rows of {@code type} where {@code field} is one of the given {@code values}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
