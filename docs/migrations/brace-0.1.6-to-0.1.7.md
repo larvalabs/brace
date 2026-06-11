@@ -962,3 +962,27 @@ Two behavior refinements on apps with sessions enabled:
 CSRF **validation** of mutating requests is completely unchanged. Performance: the
 session cookie is now decrypted at most once per request (mutating requests on
 no-session routes previously decrypted it twice).
+
+## Changed: `/ops/status` route stats are keyed by route pattern
+
+**Who is affected:** tooling that parses the per-route stats keys from `/ops/status`
+(the "slowest routes" data) or the ops dashboard.
+
+Per-route stats were keyed by the concrete (redacted) request path, so `GET /users/1`
+and `GET /users/2` were separate entries — fragmenting averages across entity IDs and
+growing the stats map by one permanent entry per distinct URL ever requested (a slow
+memory leak on ID-rich or scanner-probed apps).
+
+Matched requests are now keyed by the **route pattern**:
+
+```
+// Before
+"GET /users/1": {...}, "GET /users/2": {...}, "GET /users/3": {...}
+
+// After
+"GET /users/{id}": {count: 3, ...}
+```
+
+This bounds the map by the number of registered routes and makes "slowest routes"
+aggregate per route, which is almost certainly what you wanted. Requests that never
+match a route keep the old concrete-path keying (with secret redaction).

@@ -55,7 +55,7 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
   - Fix: capture only when `smtpUrl == null` (dev mode), cap dev capture (e.g. 500, drop-oldest); track `sentCount` with a `LongAdder` like `failCount`.
   - Model: smaller model (mechanical; keep `sent()`/`last()`/`clearCaptured()` test API working).
 
-- [ ] **H7 — Per-route stats keyed by concrete URL path: unbounded cardinality, never reset**
+- [x] **H7 — Per-route stats keyed by concrete URL path: unbounded cardinality, never reset**
   - Severity: High. Files: `Stats.java:37-38,74-75`; fed raw paths from `BraceHandler.java:389,404,424`; `OpsHandler.java` route sort per /ops/status call.
   - `routeKey = method + " " + Redactor.redactPath(path)` — and `redactPath` deliberately keeps numeric IDs and UUIDs visible (Redactor doc, `Redactor.java:36-44`), so `/users/1`, `/users/2`, … each allocate a permanent map entry ("cumulative, not reset"). 404s record arbitrary attacker-chosen paths — internet scanner noise grows the map per unique probe. /ops/status sorts the whole map per call, so observability cost grows with the leak.
   - Fix: key matched requests by `match.route().pattern()` (BraceHandler already has the match in scope — pass it to `recordRequest`); collapse all 404s into a single `404` bucket; this also deletes one of the two per-request `redactPath` calls (see M8).

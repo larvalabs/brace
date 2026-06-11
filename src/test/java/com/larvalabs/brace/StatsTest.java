@@ -45,6 +45,20 @@ class StatsTest {
     }
 
     @Test
+    void patternKeyedRequestsCollapseDistinctPaths() {
+        // H7: matched requests are recorded under the route pattern, so distinct entity
+        // IDs share one key and the routes map stays bounded by the route table.
+        var stats = new Stats();
+        stats.recordRequestPattern("GET", "/users/{id}", 200, 500, 1, 100);
+        stats.recordRequestPattern("GET", "/users/{id}", 200, 300, 1, 100);
+        stats.recordRequestPattern("GET", "/users/{id}", 404, 200, 1, 100);
+
+        var routes = stats.routeStats();
+        assertEquals(1, routes.size(), "all requests to one route share one key");
+        assertEquals(3, routes.get("GET /users/{id}").count());
+    }
+
+    @Test
     void errorMessagesRedactedAtSink() {
         var stats = new Stats();
         stats.recordError("RuntimeException",
