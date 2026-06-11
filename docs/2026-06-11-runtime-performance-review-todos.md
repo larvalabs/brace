@@ -158,6 +158,22 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
 
 # Benchmarks
 
+## Cumulative scoreboard
+
+Baseline (`ea76ffa`, pre-fix) → current checkpoint. Updated after each quiet-window run;
+per-checkpoint detail and raw outputs below.
+
+**Current checkpoint: `8b495d5` (H1, H2, M5, M9, M19, L3, L5, L10, L12 applied)**
+
+| Test | Req/sec | Δ | p99 | Δ | Notes |
+|---|---|---|---|---|---|
+| Plaintext | 67,649 → 67,292 | ~flat | 27.9ms → 21.6ms | −23% | CPU shared with wrk |
+| JSON | 68,964 → 66,321 | ~flat | 45.8ms → 19.8ms | −57% | |
+| Single Query | 25,929 → 26,915 | +4% | 41.4ms → 28.9ms | −30% | |
+| Multiple Queries (20) | 1,281 → 1,761 | **+37%** | 464ms → 227ms | −51% | |
+| Fortunes | 19,920 → 27,454 | **+38%** | **1.23s → 38.9ms** | **−97%** | 51 socket timeouts → 0 |
+| Updates (20) | 1,123 → 1,445 | **+29%** | 633ms → 296ms | −53% | |
+
 ## What exists today
 
 | Asset | What it measures | Notes |
