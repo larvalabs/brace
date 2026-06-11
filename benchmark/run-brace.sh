@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export JAVA_HOME="${JAVA_HOME:-/Users/matt/Library/Java/JavaVirtualMachines/openjdk-23.0.2/Contents/Home}"
+# JDK 25+ recommended (JEP 491: no virtual-thread pinning on synchronized) — see AGENTS.md.
+export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home}"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JAR="$SCRIPT_DIR/target/brace-benchmark-0.1.0-SNAPSHOT.jar"
+JAR="$SCRIPT_DIR/target/brace-benchmark-0.2.0-SNAPSHOT.jar"
 PORT=8080
 WRK_THREADS=8
 WRK_CONNECTIONS=256
@@ -46,7 +47,7 @@ LABELS=("Plaintext" "JSON" "Single Query" "Multiple Queries (20)" "Fortunes" "Up
 
 for i in "${!TESTS[@]}"; do
   echo "--- ${LABELS[$i]} ---"
-  wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION "http://localhost:$PORT/${TESTS[$i]}"
+  wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION --latency "http://localhost:$PORT/${TESTS[$i]}"
   echo ""
 done
 

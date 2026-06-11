@@ -18,7 +18,9 @@
         <dependency>
             <groupId>com.larvalabs</groupId>
             <artifactId>brace</artifactId>
-            <version>0.2.0-SNAPSHOT</version>
+            <!-- Keep in sync with the framework pom.xml <version> (run `mvn install
+                 -DskipTests` at the repo root before building the benchmark). -->
+            <version>0.1.7-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.postgresql</groupId>

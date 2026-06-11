@@ -169,9 +169,34 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
 | `db.queryDurationUs()` | Per-request query time | Feeds Stats |
 | CI (`mvn verify`) | Correctness only | No perf gate |
 
+## Baseline (captured 2026-06-11)
+
+Framework at `ea76ffa` (M19 only — no effect on these paths: the benchmark app doesn't
+enable ops, so JFR is off either way). Environment: local macOS (Darwin 24.6.0), JDK 25.0.2
+(Homebrew), Postgres 16 in Docker (`tfb-postgres`, port 5433, TFB schema), wrk 8 threads /
+256 connections / 15s + 5s warmups, `--latency`. Raw output:
+`benchmark/baselines/2026-06-11-wrk-baseline-ea76ffa.txt` (reproduce with
+`benchmark/run-brace.sh`).
+
+| Test | Req/sec | p50 | p99 | Notes |
+|---|---|---|---|---|
+| Plaintext | 67,649 | 3.25ms | 27.9ms | |
+| JSON | 68,964 | 2.68ms | 45.8ms | |
+| Single Query | 25,929 | 9.19ms | 41.4ms | |
+| Multiple Queries (20) | 1,281 | 178ms | 464ms | |
+| Fortunes | 19,920 | 10.3ms | **1.23s** | max 1.57s, **51 socket timeouts** |
+| Updates (20) | 1,123 | 195ms | 633ms | |
+
+Observations to test against fixes: the Fortunes p99 (1.23s vs 10ms p50) and its socket
+timeouts are exactly the tail-stall signature H1 (stdout lock) and M6/M12 (render
+allocation, render-inside-transaction) predict — re-check this line after each of those
+fixes. Plaintext/JSON p99s (28/46ms vs ~3ms p50) likely carry the H1 + H2 (GC churn)
+signal too. Numbers are not comparable to `benchmark/RESULTS.md` (different JDK and
+machine conditions); within-review comparisons only.
+
 ## Gaps / what to add for this review
 
-1. **Baseline first (required):** run `benchmark/run-brace.sh` on current `main` and commit the numbers to the findings record *before* the first perf commit. Add `--latency` to the wrk invocations so we get p50/p99, not just avg/max — averages will hide H1's tail-latency effect.
+1. ~~**Baseline first (required)**~~ — captured above. `--latency` added to `run-brace.sh`; benchmark module repointed at the current framework version (was a stale unresolvable `0.2.0-SNAPSHOT`) and its `req.param` call updated to the current `req.queryParam` API; script default JDK moved to 25 per AGENTS.md recommendation.
 2. **Session/CSRF scenario (required for H5):** the existing TFB endpoints don't configure `sessionSecret`, so the session-decrypt and CSRF costs are invisible to the current suite. Add a benchmark endpoint with sessions enabled (GET page + form POST with CSRF) to measure H5/M2/M4 before/after.
 3. **JMH micro-module (recommended):** a small, separate non-shipped module (or test-scope profile) with benchmarks for the allocation-sensitive units: route matching (M1), form bind (M4), session decrypt (H5), log line (H1), `redactPath` (M8), `convertPositionalParams` (L6). Use `gc.alloc.rate.norm` to verify allocation fixes (H2, M6) — wrk alone can't see allocation.
 4. **Job-queue scenario (recommended for H3/H4):** a seeded `scheduled_jobs` table (e.g. 1M completed rows + 1k pending) with poll-latency measurement before/after the partial index; a mixed web+jobs load to demonstrate the pool-contention fix.
