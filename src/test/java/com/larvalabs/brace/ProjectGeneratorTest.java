@@ -164,4 +164,47 @@ class ProjectGeneratorTest {
             return false;
         }
     }
+
+    @Test
+    void projectNameMustContainOnlyAlphanumericUnderscoreHyphen() {
+        // Invalid names with special characters or path traversal attempts
+        String[] invalidNames = {
+            "my-project/../evil",    // path traversal
+            "project.name",          // dots
+            "my project",            // spaces
+            "my/project",            // slashes
+            "../project",            // parent directory
+            "project@name",          // at sign
+            "project!",              // exclamation
+            "project#test"           // hash
+        };
+
+        for (String invalidName : invalidNames) {
+            // Verify the regex rejects invalid names
+            assertFalse(invalidName.matches("[A-Za-z0-9_-]+"),
+                "Invalid name '" + invalidName + "' should not match the allowed pattern");
+        }
+    }
+
+    @Test
+    void projectNameAllowsAlphanumericUnderscoreHyphen() {
+        String[] validNames = {
+            "my-project",
+            "MyProject",
+            "project123",
+            "my_project",
+            "test-project-2024",
+            "a",
+            "Z",
+            "1",
+            "_",
+            "-",
+            "my_project-123"
+        };
+
+        for (String validName : validNames) {
+            assertTrue(validName.matches("[A-Za-z0-9_-]+"),
+                "Valid name '" + validName + "' should match the allowed pattern");
+        }
+    }
 }

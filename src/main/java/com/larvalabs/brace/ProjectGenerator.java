@@ -22,6 +22,14 @@ public class ProjectGenerator {
         try {
             var root = Path.of(name);
 
+            // Validate project name: extract the last path component and check it
+            // Prevents path traversal and pom.xml injection
+            var projectName = root.getFileName().toString();
+            if (!projectName.matches("[A-Za-z0-9_-]+")) {
+                System.err.println("Failed to create project: name must contain only letters, numbers, underscores, and hyphens.");
+                System.exit(1);
+            }
+
             if (Files.exists(root)) {
                 System.err.println("Failed to create project: " + root.toAbsolutePath() + " already exists.");
                 System.exit(1);

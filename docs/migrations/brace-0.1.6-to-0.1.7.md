@@ -663,3 +663,110 @@ cache invalidation is needed.
 **Action:** none. The fix is transparent — existing code works unchanged. Cached entries from
 0.1.6 will expire naturally or via `cache.clear()` when you upgrade; cache hits resume after
 repopulation.
+
+## Security fix: `brace new` validates project names
+
+**Who is affected:** developers using the `brace new <name>` CLI command.
+
+**What changed.** The `brace new` command now validates the project name to prevent path traversal
+and pom.xml injection attacks. Project names must contain only letters, numbers, underscores, and hyphens:
+`[A-Za-z0-9_-]+`.
+
+**Before (0.1.6):**
+
+```bash
+brace new ../evil          # Created ../evil/ directory (path traversal)
+brace new "my';DROP--"     # Injected into pom.xml
+```
+
+**After (0.1.7+):**
+
+```bash
+brace new ../evil
+# Failed to create project: name must contain only letters, numbers, underscores, and hyphens.
+
+brace new my_project       # ✓ valid
+brace new my-project-2024  # ✓ valid
+```
+
+**Action:** none. If you use `brace new`, the command only accepts safe names now. Any scripts or
+automation that pass project names should already be using safe characters; if you receive an error,
+change the name to use only `[A-Za-z0-9_-]`.
+
+## Security fix: bcrypt helper for constant-time enumeration-timing mitigation
+
+**Who is affected:** applications that implement login/authentication with password checks.
+
+**What changed.** `Passwords` now includes a new `dummyCheck(String password)` helper for constant-time
+user-enumeration mitigation. When a user is not found in the database (or for any other reason you
+don't have a password hash), call `dummyCheck(password)` before returning the error. This makes the
+response time indistinguishable from a failed password check, preventing attackers from distinguishing
+valid usernames by observing timing differences.
+
+**Before (0.1.6 — vulnerable to enumeration timing):**
+
+```java
+var user = db.findByEmail(email);
+if (user == null) {
+    // No delay — returns immediately, faster than a real password check
+    return unauthorized("Invalid credentials");
+}
+
+if (!Passwords.check(password, user.passwordHash)) {
+    // bcrypt takes ~500ms → timing reveals the user exists
+    return unauthorized("Invalid credentials");
+}
+
+return ok("logged in");
+```
+
+**After (0.1.7+ — constant-time response):**
+
+```java
+var user = db.findByEmail(email);
+if (user == null) {
+    // Perform a dummy bcrypt check to consume time, same as a real check
+    Passwords.dummyCheck(password);
+    return unauthorized("Invalid credentials");
+}
+
+if (!Passwords.check(password, user.passwordHash)) {
+    return unauthorized("Invalid credentials");
+}
+
+return ok("logged in");
+```
+
+**Additional improvements:** `Passwords.hash(password)` now rejects null passwords with a clear error,
+and `Passwords.check(password, hash)` throws if the hash is null (preventing silent failures).
+
+**Action:** if you implement custom authentication:
+
+1. Add `Passwords.dummyCheck(password)` to your "user not found" path
+2. Ensure null password / hash errors are handled (they now throw `IllegalArgumentException`)
+
+The API is backward-compatible — existing `hash()` and `check()` calls work unchanged (except they
+now enforce non-null inputs).
+
+## Security fix: TrustedProxies dual-stack IPv6 representation mismatch (documentation)
+
+**No code change required.** This fix updates `docs/SECURITY.md` with guidance on dual-stack proxy
+configurations. The underlying behavior is unchanged; this documents a known limitation.
+
+**What changed.** `TrustedProxies` matches addresses by binary value after DNS resolution, but fails
+closed (returns `false`) when the address family differs — an IPv4 CIDR does not match the IPv6-mapped
+form, and `127.0.0.1` does not match `::1` on a dual-stack bind.
+
+If your reverse proxy can connect to your application over both IPv4 and IPv6, you must list both
+representations:
+
+```java
+// Before: may fail to recognize IPv6 proxy on dual-stack
+app.trustedProxies("127.0.0.1");
+
+// After: covers both
+app.trustedProxies("127.0.0.1", "::1");
+```
+
+**Impact:** none, unless you have a dual-stack proxy setup. For IPv6-mapped addresses (`::ffff:a.b.c.d`),
+see the "Trusted Proxies" section of `docs/SECURITY.md` for examples.

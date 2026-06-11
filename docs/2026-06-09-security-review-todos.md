@@ -213,12 +213,12 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   parts; document that `wrap()` is for identity-independent responses only. **Haiku 4.5**
 - [x] **L7: Static responses lack `nosniff`; SVG served inline** — `BraceHandler.java:459-479`.
   Set `X-Content-Type-Options: nosniff` on the static path unconditionally. **Haiku 4.5**
-- [ ] **L8: `brace new` project name unvalidated** — `ProjectGenerator.java:8-34`. Path
+- [x] **L8: `brace new` project name unvalidated** — `ProjectGenerator.java:8-34`. Path
   traversal / pom injection (self-inflicted only). Validate `[A-Za-z0-9_-]+`. **Haiku 4.5**
-- [ ] **L9: bcrypt helper gaps** — `Passwords.java:6-12`. Null hash throws; no dummy-check
+- [x] **L9: bcrypt helper gaps** — `Passwords.java:6-12`. Null hash throws; no dummy-check
   helper for constant-time user-not-found. Add `Passwords.dummyCheck()` + doc the
   enumeration-timing guidance. **Haiku 4.5**
-- [ ] **L10: TrustedProxies IPv4/IPv6 representation mismatch fails closed silently** —
+- [x] **L10: TrustedProxies IPv4/IPv6 representation mismatch fails closed silently** —
   `TrustedProxies.java:76`. Dual-stack `::1` vs `127.0.0.1` etc. Document (fold into
   H2's SECURITY.md update). **Haiku 4.5**
 
