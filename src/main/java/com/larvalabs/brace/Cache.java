@@ -252,7 +252,7 @@ public class Cache {
         String storedName = new String(className, StandardCharsets.UTF_8);
         Class<?> stored;
         try {
-            stored = Class.forName(storedName);
+            stored = Class.forName(storedName, false, Thread.currentThread().getContextClassLoader());
         } catch (ClassNotFoundException e) {
             throw new CacheCorruptionException("cached class no longer present: " + storedName);
         }

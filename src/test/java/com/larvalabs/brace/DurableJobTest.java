@@ -41,6 +41,14 @@ class DurableJobTest {
         }
     }
 
+    /**
+     * A class that does NOT implement DurableJob — used to test that the
+     * JobPoller rejects it with a clear error before instantiation.
+     */
+    public static class NotADurableJob {
+        public NotADurableJob() {}
+    }
+
     @BeforeAll
     static void setup() {
         factory = new DatabaseFactory(
@@ -241,6 +249,40 @@ class DurableJobTest {
             assertEquals(2, stats.pending());
             assertEquals(0, stats.completed());
             assertEquals(0, stats.failed());
+            db2.commitTransaction();
+        } finally {
+            db2.close();
+        }
+    }
+
+    @Test
+    void jobWithNonDurableJobClassIsFailed() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            // Manually insert a row with a non-DurableJob class name
+            db.sql(
+                "INSERT INTO scheduled_jobs (name, job_class, job_data, run_at, max_attempts, backoff_seconds) " +
+                "VALUES (?, ?, ?, CURRENT_TIMESTAMP, 1, 60)",
+                "bad-job", NotADurableJob.class.getName(), null
+            );
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+
+        var poller = new JobPoller();
+        // This should mark the job as failed because the class does not implement DurableJob
+        poller.pollAndExecute(factory);
+
+        // Verify job is marked failed
+        var db2 = new Database(factory.openSession());
+        try {
+            db2.beginTransaction();
+            var stats = JobPoller.getDurableJobStats(db2);
+            assertEquals(1, stats.failed(), "Job with non-DurableJob class should be marked failed");
+            assertEquals(0, stats.pending());
+            assertEquals(0, stats.completed());
             db2.commitTransaction();
         } finally {
             db2.close();

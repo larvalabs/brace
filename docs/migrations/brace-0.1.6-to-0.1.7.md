@@ -604,3 +604,24 @@ and check the matched path in your handler if you need per-segment control.
 
 **No action needed** if your middleware patterns already used only trailing `/*` or exact
 paths (no `*` at all).
+
+## Security fix: `Class.forName` initializer control on durable jobs and cache entries
+
+**Who is affected:** any application using durable jobs (`Jobs.schedule(...)`) or the cache
+with serialized values on a shared backend.
+
+**What changed.** Brace now loads stored class names with `Class.forName(name, false, loader)`,
+preventing static initializers from running before type validation. Combined with an explicit
+`isAssignableFrom` check, this closes a potential vector for code execution if an attacker
+gains write access to the `scheduled_jobs` or `brace_cache` tables.
+
+**Trust boundary:** the `scheduled_jobs` table (durable job queue) and `brace_cache` table
+(shared cache) are **application-controlled** — they should be trusted. This fix hardens the
+code path in case an attacker compromises the database but not the application code. If you
+store untrusted class names in either table, that is itself a security issue; see
+**SECURITY.md** under "Database Security" for trust boundary guidance.
+
+**Action:** none. The fix is transparent — existing durable jobs and cached values work as
+before. If you have custom code that directly calls `Class.forName` on stored class names,
+apply the same pattern: disable initializers with the `false` parameter and validate the
+loaded class before instantiation.

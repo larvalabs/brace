@@ -204,7 +204,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
   `Database.java:79-153`. Latent injection if an app passes `req.param("sort")`.
   Validate `field` against the entity's attribute names at call time (reflect once,
   cache), or at minimum add loud Javadoc. **Sonnet 4.6**
-- [ ] **L5: `Class.forName` on stored class names** — `JobPoller.java:225`, `Cache.java:255`.
+- [x] **L5: `Class.forName` on stored class names** — `JobPoller.java:225`, `Cache.java:255`.
   Not request-reachable, but static initializers run before the `DurableJob` cast.
   Use `Class.forName(name, false, loader)` + `isAssignableFrom` check before
   instantiation; document the trust boundary on `scheduled_jobs`/`brace_cache`. **Haiku 4.5**

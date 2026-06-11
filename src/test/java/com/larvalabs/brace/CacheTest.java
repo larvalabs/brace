@@ -335,4 +335,27 @@ class CacheTest {
         assertEquals(0, cache.hits());
         assertEquals(0, cache.misses());
     }
+
+    @Test
+    void decomposeAndRecomposeCacheEntry() {
+        // This test ensures that Class.forName with initialize=false works correctly
+        // by caching and retrieving a value without triggering static initializers.
+        cache.set("record", new TestRecord("hello", 42));
+        TestRecord retrieved = cache.get("record", TestRecord.class);
+        assertNotNull(retrieved);
+        assertEquals("hello", retrieved.name);
+        assertEquals(42, retrieved.id);
+    }
+
+    /** A simple test record for cache serialization. */
+    public static class TestRecord {
+        public String name;
+        public int id;
+
+        public TestRecord() {} // Jackson needs a no-arg constructor
+        public TestRecord(String name, int id) {
+            this.name = name;
+            this.id = id;
+        }
+    }
 }
