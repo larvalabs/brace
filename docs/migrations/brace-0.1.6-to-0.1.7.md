@@ -1173,6 +1173,22 @@ explicitly.
 `NumberFormatException` around a defaulted call) to detect bad input, switch it to the
 non-defaulted variant and handle the exception yourself.
 
+## New (dev mode only): 404s list near-miss routes
+
+When running with `-Dbrace.mode=dev` (what `brace dev` sets), a request that matches **no
+registered route** now gets a 404 body listing up to 5 same-method registered patterns,
+preferring ones that share a path prefix with the request:
+
+```
+Not Found: GET /user/42 — registered: GET /users/{id}, GET /users
+```
+
+Production behavior is unchanged — the body stays exactly `Not Found`, so registered
+routes are never disclosed. A `NotFoundException` thrown by a handler (e.g.
+`Result.notFoundIfNull`) also still produces a plain `Not Found` in every mode. No action
+needed; dev-mode tests that assert an exact `Not Found` body on unrouted paths may need
+to relax to a status check.
+
 ## Request/response hardening fixes
 
 These are bug fixes and small capability additions. None require code changes; all are

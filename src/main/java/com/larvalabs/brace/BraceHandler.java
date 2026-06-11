@@ -37,6 +37,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final Storage storage;
     private final TrustedProxies trustedProxies;
     private final byte[] htmxJs;
+    // L3: dev mode is detected once at construction from the brace.mode system property —
+    // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
+    // the handler, and a property read here avoids widening eight telescoping constructors.
+    private final boolean devMode;
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -145,6 +149,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         } catch (Exception ignored) {}
         this.htmxJs = htmxBytes;
+        this.devMode = "dev".equals(System.getProperty("brace.mode"));
     }
 
     @Override
@@ -259,7 +264,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     writeResult(staticResult, response, callback);
                     return true;
                 }
-                writeResult(Result.notFound(), response, callback);
+                writeResult(noRouteFound(method, path), response, callback);
                 return true;
             }
 
@@ -469,6 +474,54 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             bytes = new byte[0];
         }
         response.write(true, ByteBuffer.wrap(bytes), callback);
+    }
+
+    /**
+     * 404 for the no-route-matched path. In dev mode the body lists up to 5 same-method
+     * registered route patterns to catch fat-fingered paths —
+     * {@code Not Found: GET /user/42 — registered: GET /users/{id}, GET /users} —
+     * preferring patterns that share a path prefix with the request (longest shared
+     * character prefix first, registration order on ties), falling back to any
+     * same-method patterns when none share more than the leading "/". Production
+     * behavior is unchanged (plain "Not Found"; registered routes are not disclosed).
+     * Deliberately NOT applied to the {@link NotFoundException} catch path: there a
+     * handler on an existing route chose to 404, so route suggestions are noise.
+     */
+    private Result noRouteFound(String method, String path) {
+        if (!devMode) return Result.notFound();
+        List<String> sameMethod = new ArrayList<>();
+        for (var route : router.routes()) {
+            if (route.method().equals(method) && !sameMethod.contains(route.pattern())) {
+                sameMethod.add(route.pattern());
+            }
+        }
+        if (sameMethod.isEmpty()) return Result.notFound();
+        var candidates = new ArrayList<>(sameMethod);
+        candidates.sort(java.util.Comparator.comparingInt(p -> -commonPrefixLength(path, p)));
+        List<String> picks = new ArrayList<>();
+        for (var pattern : candidates) {
+            if (commonPrefixLength(path, pattern) <= 1) break; // sorted: rest share at most "/"
+            picks.add(pattern);
+            if (picks.size() == 5) break;
+        }
+        if (picks.isEmpty()) {
+            picks = sameMethod.subList(0, Math.min(5, sameMethod.size()));
+        }
+        var body = new StringBuilder("Not Found: ").append(method).append(' ').append(path)
+            .append(" — registered: ");
+        for (int i = 0; i < picks.size(); i++) {
+            if (i > 0) body.append(", ");
+            body.append(method).append(' ').append(picks.get(i));
+        }
+        return Result.error(404, body.toString());
+    }
+
+    /** Length of the common leading character prefix of {@code a} and {@code b}. */
+    private static int commonPrefixLength(String a, String b) {
+        int max = Math.min(a.length(), b.length());
+        int i = 0;
+        while (i < max && a.charAt(i) == b.charAt(i)) i++;
+        return i;
     }
 
     private Result serveStaticFile(String requestPath) {

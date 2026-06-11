@@ -466,10 +466,16 @@ expensive round**, exactly when the re-read corpus is largest).
     the path-param accessors have no defaulted variants). Non-defaulted variants
     unchanged. Migration-guide entry + BRACE-AGENTS.md accessor notes added.*
 
-- [ ] **L3: 404s carry no route context in dev** — `Result.java:57-59`, `BraceHandler.java:232`
+- [x] **L3: 404s carry no route context in dev** — `Result.java:57-59`, `BraceHandler.java:232`
   - Dev-mode only: list same-method registered patterns sharing a prefix
     (`Not Found: GET /user/42 — registered: GET /users/{id}, …`, cap 5). Production
     unchanged (route disclosure). **Model: Sonnet 4.6.**
+    *Fixed in BraceHandler only (no `Result.notFound()` change needed — the dev body is
+    built at the no-route-matched site via `Result.error(404, …)`). Dev mode read once
+    at handler construction from the `brace.mode` system property (the signal `brace
+    dev` sets and the startup banner already reads); avoids widening the telescoping
+    constructors. Prefix preference = longest common character prefix beyond "/",
+    registration order on ties. `NotFoundException` catch path deliberately untouched.*
 
 - [x] **L4: CLI nits** — `Cli.java:84`, `CliCommands.logs`, `ProjectGenerator.java:287`
   *(Done: unknown command → stderr `Unknown command: <x> — run 'brace help'` + exit 1;
