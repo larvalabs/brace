@@ -353,7 +353,7 @@ expensive round**, exactly when the re-read corpus is largest).
     trim to truly-core + a pointer.
   - **Model: Haiku 4.5** with this list as spec.
 
-- [ ] **M15: README benchmark numbers are stale and overstate the trend** — `README.md:19,28`
+- [x] **M15: README benchmark numbers are stale and overstate the trend** *(also fixed the ai-benchmark repo link: `mattonfoot` → `larvalabs`)* — `README.md:19,28`
   - Claims $5.43 cumulative / F5 $1.36 / 41% / "the gap widens as the codebase
     grows"; reconciled ai-benchmark data: cumulative **$5.62** vs $8.16 (**31%**),
     F5 **$1.54** vs $2.29 (**33%**), and the saving is "fairly stable around a
