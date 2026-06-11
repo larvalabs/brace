@@ -23,6 +23,7 @@ public class Brace {
     /** Package-private accessor used by tests that need to inspect/mutate route metadata. */
     List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
+    private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
@@ -503,6 +504,34 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Session-aware before-middleware. Runs after all plain {@code before(...)} middleware
+     * and receives the same Session instance the handler will get — mutations made here
+     * persist via the normal session-cookie write-back. Return a Result to short-circuit
+     * (e.g. a redirect to the login page), or null to continue.
+     */
+    public Brace before(Middleware.BeforeSession handler) {
+        beforeSessionMiddleware.add(new Middleware.BoundBeforeSession(null, handler));
+        return this;
+    }
+
+    public Brace before(String pathPattern, Middleware.BeforeSession handler) {
+        beforeSessionMiddleware.add(new Middleware.BoundBeforeSession(
+                Middleware.PathPattern.compile(pathPattern), handler));
+        return this;
+    }
+
+    /**
+     * The one-line auth guard: redirect to {@code redirectTo} unless the session has
+     * {@code sessionKey}. Equivalent to
+     * {@code before(pattern, (req, session) -> session.has(key) ? null : Redirect.to(redirectTo))}.
+     * Handlers under the pattern can then assume the key is present.
+     */
+    public Brace requireSession(String pathPattern, String sessionKey, String redirectTo) {
+        return before(pathPattern, (req, session) ->
+                session.has(sessionKey) ? null : Redirect.to(redirectTo));
+    }
+
     public Brace after(Middleware.After handler) {
         afterMiddleware.add(new Middleware.BoundAfter(null, handler));
         return this;
@@ -593,6 +622,7 @@ public class Brace {
         var staticMappingsCopy = List.copyOf(staticFileMappings);
         Assets.init(staticMappingsCopy);
         var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
+        handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
 
         if (!wsRoutes.isEmpty()) {
             // Room fan-out: shared across the fleet on Postgres (LISTEN/NOTIFY), local otherwise.

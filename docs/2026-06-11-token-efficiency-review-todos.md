@@ -166,7 +166,7 @@ expensive round**, exactly when the re-read corpus is largest).
 
 ## Medium
 
-- [ ] **M1: No session-aware before-middleware — login guards can't be factored out** — `Middleware.java:7-10`, `BraceHandler.java:217-257`, `BRACE-AGENTS.md:117-118`
+- [x] **M1: No session-aware before-middleware — login guards can't be factored out** — `Middleware.java:7-10`, `BraceHandler.java:217-257`, `BRACE-AGENTS.md:117-118`
   - `Middleware.Before` is `Result handle(Request)`; the session is constructed after
     before-middleware runs, so an auth guard can only live inside each handler
     (2–3 lines × every protected route, and it forces Session/Full handler shapes on

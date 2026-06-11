@@ -121,9 +121,27 @@ app.group("/admin", g -> {
 Before middleware runs before the handler. Return `null` to continue, or a `Result` to short-circuit:
 
 ```java
-app.before(req -> req.path().startsWith("/admin") && !isAdmin(req) ? Result.unauthorized("no") : null);
-app.before("/admin/*", req -> isAdmin(req) ? null : Redirect.to("/login"));
+app.before(req -> req.header("X-Maintenance") != null ? Result.error(503, "down") : null);
+app.before("/api/*", req -> req.header("Authorization") == null ? Result.unauthorized() : null);
 ```
+
+**Auth guards use session-aware before-middleware** — never repeat a login check inside
+handlers. The one-liner covers the whole subtree:
+
+```java
+app.requireSession("/admin/*", "userId", "/login");  // redirect to /login unless session has userId
+```
+
+For custom logic, the 2-arg `before` receives the session — the SAME instance the handler
+gets, so mutations made in the guard persist via the normal cookie write-back:
+
+```java
+app.before("/admin/*", (req, session) ->
+    "admin".equals(session.get("role")) ? null : Result.forbidden());
+```
+
+Session-aware before-middleware runs after all plain `before(...)` middleware and before
+CSRF validation. Handlers behind the guard can assume the session key is present.
 
 Pattern semantics: a trailing `/*` matches the bare prefix too — `/admin/*` covers
 `/admin`, `/admin/`, and `/admin/anything` — so a guard cannot be bypassed by requesting

@@ -218,6 +218,38 @@ app.get("/posts", (ReadDbHandler) (req, db) -> Json.of(db.findAll(Post.class)));
 app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class)));
 ```
 
+## New (optional): session-aware before-middleware + `requireSession` auth guard
+
+**Nothing to do** — purely additive. Plain `before(...)` middleware never saw the
+session, so login checks had to be repeated inside every protected handler (and forced
+those handlers into Session/Full shapes). 0.1.7 adds a 2-arg `before` overload that
+receives the request's `Session`, plus a one-line guard built on it. The session
+instance the middleware sees is the **same instance** the handler receives — mutations
+made in the guard persist through the normal session-cookie write-back, including on a
+short-circuit response (e.g. a flash message set just before redirecting to login).
+Ordering: all plain `before(...)` middleware first, then session-aware middleware, then
+CSRF validation, then the handler.
+
+**Before (all versions, still works):**
+
+```java
+app.getFull("/admin/posts", (req, db, session) -> {
+    if (!session.has("userId")) return Result.redirect("/login");   // repeated per route
+    ...
+});
+```
+
+**After (0.1.7+):**
+
+```java
+app.requireSession("/admin/*", "userId", "/login");   // once, covers the subtree
+app.getRead("/admin/posts", (req, db) -> ...);        // handlers assume userId present
+
+// custom guard logic:
+app.before("/admin/*", (req, session) ->
+    "admin".equals(session.get("role")) ? null : Result.forbidden());
+```
+
 ## New (optional): `db.findOr404` / `db.queryOneOr404` lookup helpers
 
 **Nothing to do** — purely additive. The find/null-check/404 preamble that every

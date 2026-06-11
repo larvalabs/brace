@@ -23,6 +23,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     private final Router router;
     private final List<Middleware.BoundBefore> beforeMiddleware;
+    // Set post-construction by Brace.start() (avoids widening eight telescoping ctors);
+    // immutable empty by default so tests constructing BraceHandler directly are unaffected.
+    private List<Middleware.BoundBeforeSession> beforeSessionMiddleware = List.of();
     private final List<Middleware.BoundAfter> afterMiddleware;
     private final DatabaseFactory databaseFactory;
     private final String sessionSecret;
@@ -38,6 +41,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
     record StaticFileMapping(String urlPrefix, String directory) {}
+
+    void setBeforeSessionMiddleware(List<Middleware.BoundBeforeSession> middleware) {
+        this.beforeSessionMiddleware = middleware;
+    }
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
@@ -222,6 +229,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
+            // Run session-aware before middleware (after all plain before middleware).
+            // The Session built here is the SAME instance later handed to the handler —
+            // that identity is the contract: a middleware mutation (login touch, flash)
+            // persists through the normal cookie write-back, and the handler never sees
+            // a different session than its guard did.
+            Session session = null;
+            if (!beforeSessionMiddleware.isEmpty()) {
+                for (var before : beforeSessionMiddleware) {
+                    if (!before.matches(path)) continue;
+                    if (session == null) {
+                        session = buildSession(headers);
+                    }
+                    Result earlyResult = before.handler().handle(braceRequest, session);
+                    if (earlyResult != null) {
+                        // A short-circuiting guard may have mutated the session (e.g. a
+                        // flash message before redirecting to login) — persist it.
+                        attachSessionCookie(earlyResult, session);
+                        writeResult(earlyResult, response, callback);
+                        return true;
+                    }
+                }
+            }
+
             // Check static file mappings if no route matched
             if (match == null) {
                 Result staticResult = serveStaticFile(path);
@@ -242,18 +272,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 invoker = Invoker.fromFunction(handler);
             }
 
-            // Build session if needed
-            Session session = null;
-            if (invoker.needsSession()) {
-                if (sessionSecret != null) {
-                    String cookieHeader = headers.get("Cookie");
-                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    session = Session.fromCookie(sessionCookie, sessionSecret);
-                    session.consumeFlash();
-                } else {
-                    session = new Session();
-                    session.consumeFlash();
-                }
+            // Build session if needed — reusing the instance a session-aware before
+            // middleware already built (identity invariant; see above).
+            if (session == null && invoker.needsSession()) {
+                session = buildSession(headers);
             }
 
             // Expose flash data to templates
@@ -350,31 +372,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             // Write session cookie to the surviving Result after after-middleware has run.
-            if (session != null && session.isModified() && sessionSecret != null) {
-                session.maxAgeSeconds(sessionMaxAgeSeconds());
-                String cookieValue = session.toCookie(sessionSecret);
-                if (sessionOptions != null) {
-                    result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
-                } else {
-                    // Fallback for backward compatibility
-                    result.header("Set-Cookie",
-                        "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
-                }
-            }
+            attachSessionCookie(result, session);
 
             // M5c: write the CSRF-only session cookie when the handler had no Session param
             // and ensureToken minted a fresh token.  The handler-session block above and this
             // block are mutually exclusive: csrfOnlySession is null whenever session != null.
-            if (csrfOnlySession != null && sessionSecret != null) {
-                csrfOnlySession.maxAgeSeconds(sessionMaxAgeSeconds());
-                String cookieValue = csrfOnlySession.toCookie(sessionSecret);
-                if (sessionOptions != null) {
-                    result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
-                } else {
-                    result.header("Set-Cookie",
-                        "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
-                }
-            }
+            attachSessionCookie(result, csrfOnlySession);
 
             // Add Vary header for htmx requests (caching correctness)
             if ("true".equals(braceRequest.header("HX-Request"))) {
@@ -549,6 +552,34 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             return sessionOptions.maxAge().getSeconds();
         }
         return 0;
+    }
+
+    /** Build the request's Session from the cookie (or a fresh one when sessions are off). */
+    private Session buildSession(Map<String, String> headers) {
+        Session session;
+        if (sessionSecret != null) {
+            String cookieHeader = headers.get("Cookie");
+            String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
+            session = Session.fromCookie(sessionCookie, sessionSecret);
+        } else {
+            session = new Session();
+        }
+        session.consumeFlash();
+        return session;
+    }
+
+    /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
+    private void attachSessionCookie(Result result, Session session) {
+        if (session == null || !session.isModified() || sessionSecret == null) return;
+        session.maxAgeSeconds(sessionMaxAgeSeconds());
+        String cookieValue = session.toCookie(sessionSecret);
+        if (sessionOptions != null) {
+            result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
+        } else {
+            // Fallback for backward compatibility
+            result.header("Set-Cookie",
+                "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
+        }
     }
 
     private String parseCookieValue(String cookieHeader, String name) {
