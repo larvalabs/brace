@@ -26,6 +26,10 @@ Also note: the session-expiry change alters how long a stolen cookie stays valid
 "sessions now carry a server-enforced expiry" below — and the old ops auth protocol (v1)
 is now deprecated — see "ops auth protocol v2" below.
 
+If anything **parses brace CLI output**: `brace compile` failure diagnostics are now
+condensed and deduplicated — see "`brace compile` prints condensed, deduplicated
+diagnostics" below. Exit codes are unchanged.
+
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
 **Background.** Flyway 10 (which Brace uses) split per-database support out of
@@ -726,6 +730,61 @@ every command emits compact, single-line JSON in JSON mode:
 it renders tables and summaries, not JSON. If you want readable JSON, pipe through your
 formatter: `brace check --json | jq .`. `brace logs --json` keeps emitting one compact
 object per line (NDJSON), exactly as before.
+
+## Changed: `brace compile` prints condensed, deduplicated diagnostics
+
+**No action needed unless something parses compiler output.** `brace compile` (and the
+compile steps inside `brace test`, `brace run`, and the `brace dev` watch loop) no longer
+prints raw javac diagnostics. Exit codes are unchanged (0 on success, 1 on failure), and
+success output is unchanged (`✓ Compiled`). What changed is the failure output, in every
+mode (TTY and non-TTY alike):
+
+- **One line per diagnostic** — `path:line: error: message`. The source-snippet and caret
+  (`^`) lines are gone.
+- **Identical diagnostics are deduplicated across files** — the same (kind, message) is
+  printed once, with the remaining occurrences folded into a `(+N more at ...)` line
+  listing up to 5 locations.
+- **Errors print before warnings**, and output is capped at 25 diagnostics with a final
+  `... and N more` line.
+- **Failures end with a count line**: `✗ Compilation failed: N errors, M warnings`.
+
+**Before (0.1.6) — a method renamed out from under 3 call sites:**
+
+```
+▸ Compiling...
+src/main/java/app/HomeController.java:12: error: cannot find symbol
+        userService.fetchUser(id);
+                   ^
+  symbol:   method fetchUser(long)
+  location: variable userService of type UserService
+src/main/java/app/AdminController.java:31: error: cannot find symbol
+        userService.fetchUser(id);
+                   ^
+  symbol:   method fetchUser(long)
+  location: variable userService of type UserService
+src/main/java/app/ProfileController.java:9: error: cannot find symbol
+        userService.fetchUser(current);
+                   ^
+  symbol:   method fetchUser(long)
+  location: variable userService of type UserService
+3 errors
+✗ Compilation failed
+```
+
+**After (0.1.7):**
+
+```
+▸ Compiling...
+src/main/java/app/HomeController.java:12: error: cannot find symbol
+  (+2 more at AdminController.java:31, ProfileController.java:9)
+✗ Compilation failed: 3 errors, 0 warnings
+```
+
+Diagnostics still go to stderr, status lines (`▸`/`✓`/`✗`) keep their streams, and the
+compiler invocation itself is unchanged (same `-d`/`-cp`, same in-process javac) — only the
+diagnostic *formatting* differs. If a script greps for the old `✗ Compilation failed` line,
+note it now carries the counts suffix (`grep "✗ Compilation failed"` still matches; an exact
+full-line match does not).
 
 ## Request/response hardening fixes
 

@@ -153,7 +153,10 @@ expensive round**, exactly when the re-read corpus is largest).
     app frame; passing run ≤ ~5 lines; exit codes preserved.
   - **Model: Sonnet 4.6** (step 1 alone is Haiku-mechanical).
 
-- [ ] **H8: `brace compile` passes raw javac diagnostics: snippet+caret per error, no dedupe, repeated across files** — `BuildCommands.java:67-78`
+- [x] **H8: `brace compile` passes raw javac diagnostics: snippet+caret per error, no dedupe, repeated across files** — `BuildCommands.java:67-78`
+  *Done. Deviation: the 3-files-same-error dedupe case is covered by unit tests against
+  `formatDiagnostics` plus a real-javac unit test through `compile()` (BuildCommandsTest),
+  not a `tests/cli/` e2e — same coverage without a packaged-zip build in the loop.*
   - `compiler.run(null, null, null, args)` → stock javac stderr: 3–4 lines per
     diagnostic, identical messages repeated per file (a renamed method used in 8
     files = 8 near-identical blocks), up to javac's 100-error cap. 1–3k tokens per

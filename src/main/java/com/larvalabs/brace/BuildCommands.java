@@ -1,12 +1,18 @@
 package com.larvalabs.brace;
 
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
+import javax.tools.StandardJavaFileManager;
 import javax.tools.ToolProvider;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static java.nio.file.StandardWatchEventKinds.*;
@@ -46,7 +52,6 @@ final class BuildCommands {
         CliOutput.printInfo("Compiling...");
         int rc = javac(out, projectClasspath(cwd), sources);
         if (rc == 0) CliOutput.printSuccess("Compiled");
-        else CliOutput.printError("Compilation failed");
         return rc;
     }
 
@@ -59,22 +64,121 @@ final class BuildCommands {
         Files.createDirectories(out);
         CliOutput.printInfo("Compiling tests...");
         int rc = javac(out, testClasspath(cwd), sources);
-        if (rc != 0) CliOutput.printError("Test compilation failed");
-        else CliOutput.printSuccess("Tests compiled");
+        if (rc == 0) CliOutput.printSuccess("Tests compiled");
         return rc;
     }
 
-    private static int javac(Path outDir, String classpath, List<String> sources) {
+    private static int javac(Path outDir, String classpath, List<String> sources) throws IOException {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
             CliOutput.printError("No system Java compiler found — run brace with a JDK, not a JRE.");
             return 1;
         }
-        List<String> args = new ArrayList<>(List.of(
-                "-d", outDir.toString(),
-                "-cp", classpath));
-        args.addAll(sources);
-        return compiler.run(null, null, null, args.toArray(new String[0]));
+        var diagnostics = new DiagnosticCollector<JavaFileObject>();
+        try (StandardJavaFileManager fm = compiler.getStandardFileManager(diagnostics, null, null)) {
+            Iterable<? extends JavaFileObject> units = fm.getJavaFileObjectsFromStrings(sources);
+            List<String> options = List.of("-d", outDir.toString(), "-cp", classpath);
+            boolean ok = compiler.getTask(null, fm, diagnostics, options, null, units).call();
+            List<Diagnostic<? extends JavaFileObject>> diags = diagnostics.getDiagnostics();
+            for (String line : formatDiagnostics(diags)) System.err.println(line);
+            if (!ok) {
+                long errors = diags.stream().filter(d -> d.getKind() == Diagnostic.Kind.ERROR).count();
+                long warnings = diags.stream().filter(BuildCommands::isWarning).count();
+                CliOutput.printError("Compilation failed: " + errors + " error" + (errors == 1 ? "" : "s")
+                        + ", " + warnings + " warning" + (warnings == 1 ? "" : "s"));
+                return 1;
+            }
+            return 0;
+        }
+    }
+
+    private static boolean isWarning(Diagnostic<?> d) {
+        return d.getKind() == Diagnostic.Kind.WARNING || d.getKind() == Diagnostic.Kind.MANDATORY_WARNING;
+    }
+
+    /** Max deduped diagnostics printed before the trailing {@code ... and N more} line. */
+    private static final int MAX_DIAGNOSTICS = 25;
+    /** Max extra locations listed in a {@code (+N more at ...)} suffix. */
+    private static final int MAX_EXTRA_LOCATIONS = 5;
+
+    /**
+     * Condenses javac diagnostics into one line each — {@code path:line: error: message},
+     * no source snippet, no caret. Diagnostics with the same kind and first message line
+     * are deduped across files: the first occurrence is printed, the rest become a
+     * {@code (+N more at Foo.java:12, ...)} suffix. Errors sort before warnings, and the
+     * total is capped at {@link #MAX_DIAGNOSTICS} with a final {@code ... and N more} line.
+     */
+    static List<String> formatDiagnostics(List<Diagnostic<? extends JavaFileObject>> diags) {
+        // Group by (kind, first line of message), preserving first-seen order within each rank.
+        record Group(Diagnostic<? extends JavaFileObject> first, List<String> moreLocations) {}
+        Map<String, Group> groups = new LinkedHashMap<>();
+        for (Diagnostic<? extends JavaFileObject> d : diags) {
+            String key = d.getKind() + "|" + firstLine(message(d));
+            Group g = groups.get(key);
+            if (g == null) groups.put(key, new Group(d, new ArrayList<>()));
+            else g.moreLocations().add(shortLocation(d));
+        }
+        List<Group> ordered = new ArrayList<>(groups.values());
+        ordered.sort((a, b) -> Integer.compare(rank(a.first().getKind()), rank(b.first().getKind())));
+
+        List<String> lines = new ArrayList<>();
+        int printed = 0;
+        int suppressed = 0;
+        for (Group g : ordered) {
+            if (printed >= MAX_DIAGNOSTICS) {
+                suppressed += 1 + g.moreLocations().size();
+                continue;
+            }
+            Diagnostic<? extends JavaFileObject> d = g.first();
+            String location = d.getSource() != null && d.getLineNumber() != Diagnostic.NOPOS
+                    ? d.getSource().getName() + ":" + d.getLineNumber() + ": "
+                    : "";
+            lines.add(location + label(d.getKind()) + ": " + firstLine(message(d)));
+            printed++;
+            if (!g.moreLocations().isEmpty()) {
+                List<String> locs = g.moreLocations();
+                String shown = String.join(", ", locs.subList(0, Math.min(locs.size(), MAX_EXTRA_LOCATIONS)));
+                if (locs.size() > MAX_EXTRA_LOCATIONS) shown += ", ...";
+                lines.add("  (+" + locs.size() + " more at " + shown + ")");
+            }
+        }
+        if (suppressed > 0) lines.add("... and " + suppressed + " more");
+        return lines;
+    }
+
+    private static String message(Diagnostic<?> d) {
+        String m = d.getMessage(null);
+        return m == null ? "" : m;
+    }
+
+    private static String firstLine(String s) {
+        int nl = s.indexOf('\n');
+        return (nl >= 0 ? s.substring(0, nl) : s).strip();
+    }
+
+    private static String shortLocation(Diagnostic<? extends JavaFileObject> d) {
+        if (d.getSource() == null) return "<unknown>";
+        String name = d.getSource().getName();
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf(File.separatorChar));
+        if (slash >= 0) name = name.substring(slash + 1);
+        return d.getLineNumber() != Diagnostic.NOPOS ? name + ":" + d.getLineNumber() : name;
+    }
+
+    private static int rank(Diagnostic.Kind kind) {
+        return switch (kind) {
+            case ERROR -> 0;
+            case WARNING, MANDATORY_WARNING -> 1;
+            default -> 2;   // NOTE, OTHER
+        };
+    }
+
+    private static String label(Diagnostic.Kind kind) {
+        return switch (kind) {
+            case ERROR -> "error";
+            case WARNING, MANDATORY_WARNING -> "warning";
+            case NOTE -> "note";
+            default -> "info";
+        };
     }
 
     // --- run -------------------------------------------------------------
