@@ -170,6 +170,8 @@ or resume one of these reviews, read that file first.
 ### Release checklist (version references)
 `pom.xml` `<version>` is the single source of truth for the framework version. The one place a concrete version must still be hardcoded for users to copy is the install example in `README.md` (Maven/Gradle dependency + the "Replace `vX.Y.Z`" line). When cutting a release, update those `README.md` examples to the new tag. Don't reintroduce hardcoded versions into this file or `BRACE-AGENTS.md` — reference `pom.xml`.
 
+Also sweep `README.md`'s API tour sections (Controllers through Configuration, roughly lines 193–486) against `BRACE-AGENTS.md` for drift. They duplicate deliberately — the README is the GitHub landing page and the tour has adoption value — but the README copy isn't session-loaded by agents, so it rots independently and only this checklist catches it.
+
 ### Adding dynamic page updates with htmx
 1. Include `<script src="/__brace/htmx.min.js"></script>` in your layout
 2. Add `hx-get`, `hx-target`, `hx-select`, `hx-trigger` attributes to HTML elements

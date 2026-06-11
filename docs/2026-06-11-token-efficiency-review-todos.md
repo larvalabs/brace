@@ -495,7 +495,7 @@ expensive round**, exactly when the re-read corpus is largest).
     contributor doc; the reference is BRACE-AGENTS.md); two examples still use cast
     style while ":230" advertises typed methods. **Model: Haiku 4.5.**
 
-- [ ] **L6: README duplicates ~290 lines of BRACE-AGENTS.md** — `README.md:193-486`
+- [x] **L6: README duplicates ~290 lines of BRACE-AGENTS.md** *(decision: keep the duplication — README is the GitHub landing page and the API tour has adoption value, and agents never session-load it so the token cost is maintenance drift, not context; made the drift process-proof instead by adding a README-vs-BRACE-AGENTS.md sweep to the release checklist in AGENTS.md)* — `README.md:193-486`
   - The duplicated copy is where the drift in L5 lives (the canonical copy didn't
     rot). Decide: trim README to pitch + quick start + install, pointing at
     BRACE-AGENTS.md; or keep and add "README API sections" to the release
