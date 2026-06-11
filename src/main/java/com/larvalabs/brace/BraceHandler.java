@@ -470,7 +470,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     private Result serveStaticFile(String requestPath) {
         if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
-            return Result.bytes(htmxJs, "text/javascript; charset=utf-8");
+            return Result.bytes(htmxJs, "text/javascript; charset=utf-8")
+                .header("X-Content-Type-Options", "nosniff");
         }
         for (var mapping : staticFileMappings) {
             String prefix = mapping.urlPrefix();
@@ -504,7 +505,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             try {
                 byte[] fileBytes = Files.readAllBytes(filePath);
                 String contentType = contentTypeForPath(filePath.toString());
-                return Result.bytes(fileBytes, contentType);
+                return Result.bytes(fileBytes, contentType)
+                    .header("X-Content-Type-Options", "nosniff");
             } catch (Exception e) {
                 return Result.error(500, "Internal Server Error");
             }

@@ -501,6 +501,18 @@ behind a load balancer a captured v2 request remains replayable against a *diffe
 instance within the ±30s timestamp window. HTTPS on every hop to `/ops/*` remains the
 primary control; see `docs/SECURITY.md` → "Ops Endpoints".
 
+## Security fix: static files now carry `X-Content-Type-Options: nosniff`
+
+**Impact:** none. This is a pure security header addition.
+
+**What changed.** Static file responses (served via `app.staticFiles(...)` and the bundled
+`/__brace/htmx.min.js`) now include the `X-Content-Type-Options: nosniff` header. This header
+prevents browsers from MIME-sniffing the response — treating a misnamed `.svg` as executable
+JavaScript, for example — and narrows the attack surface for SVG-based XSS (which can execute
+scripts if the browser sniffs it as HTML instead of image/svg+xml).
+
+**Code change required:** none. This is a pure fix.
+
 ## Security fix: OpsDashboard HTML escaping now handles single quotes
 
 **Impact:** none unless tokens contain single quotes (extremely rare).

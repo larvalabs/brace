@@ -67,4 +67,13 @@ class HtmxTest {
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("text/javascript"));
         assertTrue(response.body().contains("htmx"));
     }
+
+    @Test
+    void htmxJsIncludesNoSniffHeader() throws Exception {
+        // Verify L7: X-Content-Type-Options: nosniff is set on htmx.min.js
+        var response = get("/__brace/htmx.min.js");
+        assertEquals(200, response.statusCode());
+        assertEquals("nosniff", response.headers().firstValue("X-Content-Type-Options").orElse(null),
+                     "htmx.min.js should have X-Content-Type-Options: nosniff to prevent MIME sniffing");
+    }
 }

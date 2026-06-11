@@ -211,7 +211,7 @@ protocol/lifecycle changes with security invariants to Opus 4.8 / Fable 5.
 - [ ] **L6: Page-cache keys collision-prone** — `Cache.java:326-344`. Param values inserted
   unescaped (`&`/`=` injection collides keys); no identity vary. Percent-encode key
   parts; document that `wrap()` is for identity-independent responses only. **Haiku 4.5**
-- [ ] **L7: Static responses lack `nosniff`; SVG served inline** — `BraceHandler.java:459-479`.
+- [x] **L7: Static responses lack `nosniff`; SVG served inline** — `BraceHandler.java:459-479`.
   Set `X-Content-Type-Options: nosniff` on the static path unconditionally. **Haiku 4.5**
 - [ ] **L8: `brace new` project name unvalidated** — `ProjectGenerator.java:8-34`. Path
   traversal / pom injection (self-inflicted only). Validate `[A-Za-z0-9_-]+`. **Haiku 4.5**

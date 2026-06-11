@@ -168,6 +168,30 @@ class StaticFilesTest {
         assertEquals(200, response.statusCode());
     }
 
+    @Test
+    void staticFilesIncludeNoSniffHeader() throws Exception {
+        // Verify L7: X-Content-Type-Options: nosniff is set on static file responses
+        var htmlResponse = get("/assets/hello.html");
+        assertEquals(200, htmlResponse.statusCode());
+        assertEquals("nosniff", htmlResponse.headers().firstValue("X-Content-Type-Options").orElse(null),
+                     "Static HTML file should have X-Content-Type-Options: nosniff");
+
+        var cssResponse = get("/assets/style.css");
+        assertEquals(200, cssResponse.statusCode());
+        assertEquals("nosniff", cssResponse.headers().firstValue("X-Content-Type-Options").orElse(null),
+                     "Static CSS file should have X-Content-Type-Options: nosniff");
+
+        var jsResponse = get("/assets/app.js");
+        assertEquals(200, jsResponse.statusCode());
+        assertEquals("nosniff", jsResponse.headers().firstValue("X-Content-Type-Options").orElse(null),
+                     "Static JS file should have X-Content-Type-Options: nosniff");
+
+        var pngResponse = getBytes("/assets/images/pixel.png");
+        assertEquals(200, pngResponse.statusCode());
+        assertEquals("nosniff", pngResponse.headers().firstValue("X-Content-Type-Options").orElse(null),
+                     "Static image file should have X-Content-Type-Options: nosniff");
+    }
+
     // Generates a minimal valid 1x1 red pixel PNG
     private static byte[] minimalPng() throws Exception {
         // PNG signature
