@@ -48,6 +48,12 @@ class TestAppHelpersTest {
                 app.delete("/protected", (SessionHandler) (req, session) ->
                     Result.text("deleted:" + session.get("user")));
 
+                // Mutates the session so the response Set-Cookie lands in the shared jar.
+                app.get("/login-as-alice", (SessionHandler) (req, session) -> {
+                    session.set("user", "alice");
+                    return Result.text("ok");
+                });
+
                 // JSON list endpoint for json() / bodyAs(TypeReference).
                 app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));
             });
@@ -121,6 +127,19 @@ class TestAppHelpersTest {
         var res = testApp.delete("/api/items", Session.of("user", "alice"));
         assertEquals(200, res.status());
         assertEquals("deleted-by:alice", res.body());
+    }
+
+    @Test
+    void legacyPostOverloadEvictsStaleJarCookie() {
+        // Mint a framework session cookie (user=alice) into the shared cookie jar...
+        testApp.get("/login-as-alice");
+        assertEquals("alice", testApp.get("/whoami").body(), "jar should replay alice's cookie");
+        // ...then the legacy post(path, params, session) overload must still send the
+        // EXPLICIT session, not the jar's. Before the fix the request carried two
+        // brace_session values and the server read the stale jar one.
+        var res = testApp.post("/api/echo", Map.of(), Session.of("user", "bob"));
+        assertEquals(200, res.status());
+        assertTrue(res.body().startsWith("bob:"), res.body());
     }
 
     // --- CSRF helpers ---

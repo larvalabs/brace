@@ -75,20 +75,18 @@ public class TestApp {
         }
     }
 
+    /**
+     * POST form params with this session's encrypted cookie. Routed through
+     * {@link TestRequest} (like every other session variant) so the explicit session
+     * evicts any framework-minted {@code brace_session} cookie from the shared jar —
+     * otherwise the request carries two session values and the server reads the
+     * stale jar one.
+     */
     public TestResponse post(String path, Map<String, String> formParams, Session session) {
-        try {
-            var body = encodeForm(formParams);
-            var cookie = "brace_session=" + session.toCookie(app.sessionSecret());
-            var request = HttpRequest.newBuilder()
-                .uri(URI.create(url(path)))
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .header("Cookie", cookie)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-            return new TestResponse(client.send(request, HttpResponse.BodyHandlers.ofString()));
-        } catch (Exception e) {
-            throw new RuntimeException("POST " + path + " with session failed", e);
-        }
+        return request("POST", path)
+            .session(session)
+            .body(encodeForm(formParams), "application/x-www-form-urlencoded")
+            .send();
     }
 
     /** GET with this session's encrypted cookie. */
