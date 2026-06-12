@@ -44,8 +44,19 @@ class CliCommandsTest {
 
     @Test
     void errorsCommandSucceedsWithEmptyList() throws Exception {
+        clearInMemoryErrors();
         int code = CliCommands.errors(projectDir, new String[]{"--json"});
         assertEquals(0, code);
+    }
+
+    /**
+     * /ops/errors serves the in-memory Stats records on no-database apps (F8 fix), so
+     * tests asserting the empty-list contract must clear whatever earlier tests provoked.
+     */
+    private static void clearInMemoryErrors() {
+        for (var rec : app.stats().recentErrors()) {
+            app.stats().resolveError(rec.id);
+        }
     }
 
     @Test
@@ -64,13 +75,15 @@ class CliCommandsTest {
 
     @Test
     void errorsFullFlagSucceedsWithEmptyList() throws Exception {
+        clearInMemoryErrors();
         int code = CliCommands.errors(projectDir, new String[]{"--full", "--json"});
         assertEquals(0, code);
     }
 
     @Test
     void errorsDetailUnknownIdReturnsNonZero() throws Exception {
-        // No error store on this app — /ops/errors/{id} 404s, the CLI reports not-found.
+        // Unknown id — /ops/errors/{id} 404s (in-memory fallback has no such record),
+        // the CLI reports not-found.
         int code = CliCommands.errors(projectDir, new String[]{"999999", "--json"});
         assertEquals(1, code);
     }

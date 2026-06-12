@@ -317,6 +317,7 @@ public class OpsHandler {
                 .limit(5)
                 .forEach(err -> {
                     var e = new LinkedHashMap<String, Object>();
+                    e.put("id", err.id);
                     e.put("errorType", err.type);
                     e.put("message", err.message);
                     e.put("route", err.route);
@@ -522,13 +523,23 @@ public class OpsHandler {
      */
     public Result errors(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
-        if (errorStore == null) return Json.of(List.of());
         String status = req.queryParam("status");
         String since = req.queryParam("since");
         Instant sinceTs = null;
         if (since != null) {
             try { sinceTs = Instant.parse(since); }
             catch (java.time.format.DateTimeParseException e) { return Result.badRequest("Invalid since timestamp"); }
+        }
+        // No database: serve the in-memory Stats records. Resolving removes them, so
+        // everything tracked is unresolved (status=resolved is by definition empty).
+        if (errorStore == null) {
+            if ("resolved".equals(status)) return Json.of(List.of());
+            boolean full = "true".equals(req.queryParam("full"));
+            var out = new ArrayList<Map<String, Object>>();
+            for (var rec : inMemoryErrors(sinceTs)) {
+                out.add(full ? inMemoryDetail(rec) : inMemorySummary(rec));
+            }
+            return Json.of(out);
         }
         var rows = errorStore.list(status, sinceTs);
         if ("true".equals(req.queryParam("full"))) return Json.of(rows);
@@ -552,12 +563,16 @@ public class OpsHandler {
     /** GET /ops/errors/{id} — full detail for one tracked error; 404 for unknown ids. */
     public Result errorDetail(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
-        if (errorStore == null) return Result.notFound();
         long id;
         try {
             id = req.longPathParam("id");
         } catch (NumberFormatException e) {
             return Result.notFound();
+        }
+        if (errorStore == null) {
+            var rec = stats.findError(id);
+            if (rec == null) return Result.notFound();
+            return Json.of(inMemoryDetail(rec));
         }
         var detail = errorStore.find(id);
         if (detail == null) return Result.notFound();
@@ -566,14 +581,65 @@ public class OpsHandler {
 
     public Result resolveError(Request req) {
         if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
-        if (errorStore == null) return Result.notFound();
         long id = req.longPathParam("id");
+        if (errorStore == null) {
+            // No database: resolving removes the in-memory record, so errors.count (and
+            // the brace status exit code) recovers instead of staying red until restart.
+            var rec = stats.resolveError(id);
+            if (wantsJson(req)) {
+                if (rec == null) return Result.notFound();
+                var resolved = inMemoryDetail(rec);
+                resolved.put("resolvedAt", Instant.now());
+                return Json.of(resolved);
+            }
+            return dashboard(req);
+        }
         var resolved = errorStore.resolve(id);
         if (wantsJson(req)) {
             if (resolved == null) return Result.notFound();
             return Json.of(resolved);
         }
         return dashboard(req);
+    }
+
+    /** In-memory error records for the no-database /ops/errors fallback, newest first. */
+    private List<Stats.ErrorRecord> inMemoryErrors(Instant since) {
+        return stats.recentErrors().stream()
+            .filter(r -> since == null || !r.lastSeen.isBefore(since))
+            .sorted((a, b) -> b.lastSeen.compareTo(a.lastSeen))
+            .toList();
+    }
+
+    /** Summary shape matching the DB-backed /ops/errors rows. */
+    private static Map<String, Object> inMemorySummary(Stats.ErrorRecord r) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("id", r.id);
+        m.put("errorType", r.type);
+        m.put("message", r.message);
+        m.put("route", r.route);
+        m.put("occurrenceCount", r.count);
+        m.put("firstSeen", r.firstSeen);
+        m.put("lastSeen", r.lastSeen);
+        String at = Log.appFrame(r.stackTrace);
+        if (at != null) m.put("at", at);
+        return m;
+    }
+
+    /** Full-detail shape matching the DB-backed /ops/errors/{id} (no requestHeaders — not captured in Stats). */
+    private static LinkedHashMap<String, Object> inMemoryDetail(Stats.ErrorRecord r) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("id", r.id);
+        m.put("errorType", r.type);
+        m.put("message", r.message);
+        m.put("stackTrace", r.stackTrace);
+        m.put("route", r.route);
+        m.put("requestDetail", r.requestDetail);
+        m.put("firstSeen", r.firstSeen);
+        m.put("lastSeen", r.lastSeen);
+        m.put("occurrenceCount", r.count);
+        m.put("resolvedAt", null);
+        m.put("queriesBefore", r.queriesBefore);
+        return m;
     }
 
     public void setRegressionTracker(RegressionTracker tracker) {

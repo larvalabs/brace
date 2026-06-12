@@ -863,6 +863,48 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void noDbErrorsListDetailAndResolve() throws Exception {
+        // This app has no database: /ops/errors must serve the in-memory Stats records
+        // (a remote path to the stack trace), and resolve must remove them so
+        // errors.count — and the brace status exit code — can recover.
+        get("/error");   // recorded synchronously into Stats
+        String token = authenticate();
+
+        var list = Json.mapper().readTree(getWithToken("/ops/errors", token).body());
+        assertTrue(list.size() > 0, list.toString());
+        var summary = list.get(0);
+        assertTrue(summary.has("id"), summary.toString());
+        assertEquals("RuntimeException", summary.path("errorType").asText());
+        assertTrue(summary.has("at"), "summary should carry the first app frame: " + summary);
+        assertFalse(summary.has("stackTrace"), "summary must not carry stackTrace: " + summary);
+
+        long id = summary.path("id").asLong();
+        var detail = Json.mapper().readTree(getWithToken("/ops/errors/" + id, token).body());
+        assertTrue(detail.path("stackTrace").asText().contains("test error"), detail.toString());
+        assertTrue(detail.has("requestDetail"), detail.toString());
+
+        var full = Json.mapper().readTree(getWithToken("/ops/errors?full=true", token).body());
+        assertTrue(full.get(0).has("stackTrace"), full.toString());
+
+        var resolveResp = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/errors/" + id + "/resolve"))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resolveResp.statusCode());
+        assertTrue(resolveResp.body().contains("resolvedAt"), resolveResp.body());
+
+        var after = Json.mapper().readTree(getWithToken("/ops/errors", token).body());
+        for (var n : after) {
+            assertNotEquals(id, n.path("id").asLong(), "resolved error must disappear: " + after);
+        }
+        assertEquals(404, getWithToken("/ops/errors/" + id, token).statusCode());
+    }
+
+    @Test
     void opsCacheReturnsStats() throws Exception {
         var response = cacheGet("/ops/cache");
 

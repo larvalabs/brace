@@ -47,6 +47,8 @@ public class Stats {
     private final List<ErrorRecord> errors = new ArrayList<>();
     private final Object errorsLock = new Object();
     private static final int MAX_ERRORS = 50;
+    // Stable ids so the no-database /ops/errors/{id} and resolve paths can address records.
+    private final java.util.concurrent.atomic.AtomicLong errorIdSeq = new java.util.concurrent.atomic.AtomicLong();
 
     public void recordRequest(String method, String path, int status, long latencyUs,
                               int queryCount, long queryUs) {
@@ -95,6 +97,7 @@ public class Stats {
                 errors.remove(0);
             }
             var rec = new ErrorRecord();
+            rec.id = errorIdSeq.incrementAndGet();
             rec.dedupeKey = dedupeKey;
             rec.type = type;
             rec.message = message;
@@ -214,6 +217,34 @@ public class Stats {
         }
     }
 
+    /** Find a tracked error by id, or null. Backs the no-database /ops/errors/{id}. */
+    public ErrorRecord findError(long id) {
+        synchronized (errorsLock) {
+            for (ErrorRecord rec : errors) {
+                if (rec.id == id) return rec;
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Remove a tracked error by id; returns the removed record or null. The no-database
+     * resolve path: without it one transient exception keeps {@code errors.count} (and
+     * {@code brace status}) red until process restart.
+     */
+    public ErrorRecord resolveError(long id) {
+        synchronized (errorsLock) {
+            for (var it = errors.iterator(); it.hasNext(); ) {
+                ErrorRecord rec = it.next();
+                if (rec.id == id) {
+                    it.remove();
+                    return rec;
+                }
+            }
+            return null;
+        }
+    }
+
     public Map<String, Long> counterTotals() {
         var result = new java.util.LinkedHashMap<String, Long>();
         for (var entry : counterTotals.entrySet()) {
@@ -308,6 +339,7 @@ public class Stats {
     }
 
     public static class ErrorRecord {
+        public long id;
         String dedupeKey;
         public String type;
         public String message;
