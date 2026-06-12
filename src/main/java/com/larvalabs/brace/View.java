@@ -2,17 +2,21 @@ package com.larvalabs.brace;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 public class View extends Result {
 
     private static TemplateEngine engine;
     private static final ThreadLocal<String> currentCsrfField = new ThreadLocal<>();
-    private static final ThreadLocal<Map<String, String>> currentFlash = new ThreadLocal<>();
+    // Flash is consumed lazily: the source (set per-request by BraceHandler) consumes the
+    // session's cookie-borne flash when — and only when — a View actually renders, so flash
+    // survives requests that render nothing (redirects, JSON, polling).
+    private static final ThreadLocal<Supplier<Map<String, String>>> currentFlash = new ThreadLocal<>();
 
     static void setCsrfField(String field) { currentCsrfField.set(field); }
     static void clearCsrfField() { currentCsrfField.remove(); }
     static String getCsrfField() { return currentCsrfField.get(); }
-    static void setFlash(Map<String, String> flash) { currentFlash.set(flash); }
+    static void setFlashSource(Supplier<Map<String, String>> source) { currentFlash.set(source); }
     static void clearFlash() { currentFlash.remove(); }
 
     private final String template;
@@ -37,9 +41,9 @@ public class View extends Result {
         if (csrfField != null) {
             params.put("csrfField", csrfField);
         }
-        Map<String, String> flash = currentFlash.get();
-        if (flash != null) {
-            params.put("flash", flash);
+        Supplier<Map<String, String>> flashSource = currentFlash.get();
+        if (flashSource != null) {
+            params.put("flash", flashSource.get());
         }
         String html;
         if (engine != null) {

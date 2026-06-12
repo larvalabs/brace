@@ -49,6 +49,13 @@ public class Session {
 
     private final Map<String, String> data = new LinkedHashMap<>();
     private final Map<String, String> flashData = new LinkedHashMap<>();
+    /**
+     * Flash keys (full {@code _flash:}-prefixed form) that arrived in the cookie, snapshotted
+     * by {@link #fromCookie}. Only these are consumable this request: an entry set in-flight
+     * (a guard's {@code flash(k, v)} during THIS request) is pending for the <em>next</em>
+     * request and must survive this one's renders and reads.
+     */
+    private final java.util.Set<String> cookieFlashKeys = new java.util.HashSet<>();
     private boolean modified = false;
 
     /**
@@ -153,15 +160,36 @@ public class Session {
         set("_flash:" + key, value);
     }
 
+    /**
+     * Read a flash message. Reading a cookie-borne entry is read-once: it is consumed
+     * (removed from the cookie on write-back) but stays readable for the rest of this
+     * request. Reading an entry set during THIS request peeks without consuming — it
+     * remains pending for the next request.
+     */
     public String flash(String key) {
-        return flashData.get(key);
+        String consumed = flashData.get(key);
+        if (consumed != null) return consumed;
+        String dataKey = "_flash:" + key;
+        String pending = data.get(dataKey);
+        if (pending != null && cookieFlashKeys.contains(dataKey)) {
+            flashData.put(key, pending);
+            data.remove(dataKey);
+            modified = true;
+        }
+        return pending;
     }
 
+    /**
+     * Consume the cookie-borne flash entries into {@link #flashData}, marking the session
+     * modified so the write-back strips them from the cookie. Called lazily at View render
+     * time (see View's flash source) — never at dispatch — so flash survives requests that
+     * render nothing. Entries set in-flight this request are deliberately left alone.
+     */
     void consumeFlash() {
         var iterator = data.entrySet().iterator();
         while (iterator.hasNext()) {
             var entry = iterator.next();
-            if (entry.getKey().startsWith("_flash:")) {
+            if (cookieFlashKeys.contains(entry.getKey())) {
                 flashData.put(entry.getKey().substring(7), entry.getValue());
                 iterator.remove();
                 modified = true;
@@ -267,6 +295,13 @@ public class Session {
                 } catch (NumberFormatException e) {
                     // Malformed _exp — treat as expired/invalid rather than indefinitely valid.
                     return new Session();
+                }
+            }
+            // Snapshot which flash entries arrived in the cookie — only these are
+            // consumable this request (see consumeFlash / flash(key) provenance rules).
+            for (String dataKey : session.data.keySet()) {
+                if (dataKey.startsWith("_flash:")) {
+                    session.cookieFlashKeys.add(dataKey);
                 }
             }
             return session;

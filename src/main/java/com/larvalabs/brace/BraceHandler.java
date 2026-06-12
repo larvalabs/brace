@@ -291,15 +291,6 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 session = buildSession(headers);
             }
 
-            // Consume flash and expose it to templates only for Session-taking handlers —
-            // they are the ones that can render it. A guard-built session on a plain
-            // Handler route (JSON, polling) must leave pending flash in the cookie for
-            // the page that will actually show it.
-            if (invoker.needsSession()) {
-                session.consumeFlash();
-                View.setFlash(session.flashData());
-            }
-
             // CSRF validation for routes that require it when sessions are enabled.
             // M5a: PATCH is mutating — added alongside POST/PUT/DELETE.
             if (sessionSecret != null && match.route().csrfRequired()) {
@@ -327,29 +318,35 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             // Ensure a CSRF token exists in session and expose it to templates.
-            // M5c: when the handler doesn't take a Session, build a local csrfSession to
-            // hold the token.  If ensureToken mints a fresh token (csrfSession.isModified()),
-            // we persist it as a cookie below just like a handler-session cookie — otherwise
-            // the rendered token is orphaned and every subsequent POST 403s.
-            // handlerSession is the session the handler itself was given (may be null); it is
-            // written separately via the handler-session cookie block below.
-            // csrfOnlySession is non-null only when the handler had no Session param AND a
-            // fresh token was minted; it must never shadow a real handler session.
+            // M5c: when the handler doesn't take a Session, build a local csrfOnlySession to
+            // hold the token. The choke point persists it whenever it ends up modified —
+            // a freshly minted token (otherwise the rendered token is orphaned and every
+            // subsequent POST 403s) or a render-time flash consumption. It must never
+            // shadow a real handler session: it is built only when session == null.
             if (sessionSecret != null) {
                 if (session == null) {
                     String cookieHeader = headers.get("Cookie");
                     String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    Session localCsrfSession = Session.fromCookie(sessionCookie, sessionSecret);
-                    Csrf.ensureToken(localCsrfSession);
-                    View.setCsrfField(Csrf.hiddenField(localCsrfSession));
-                    // Track so we can write the cookie after the handler runs (M5c).
-                    if (localCsrfSession.isModified()) {
-                        csrfOnlySession = localCsrfSession;
-                    }
+                    csrfOnlySession = Session.fromCookie(sessionCookie, sessionSecret);
+                    Csrf.ensureToken(csrfOnlySession);
+                    View.setCsrfField(Csrf.hiddenField(csrfOnlySession));
                 } else {
                     Csrf.ensureToken(session);
                     View.setCsrfField(Csrf.hiddenField(session));
                 }
+            }
+
+            // Flash is consumed lazily at View render time, whatever the handler's
+            // signature — a redirect-after-POST landing on a DbHandler or plain-Handler
+            // page renders flash too. The source consumes only cookie-borne entries
+            // (an in-flight guard flash stays pending for the next request) and marks
+            // the session modified, which the write-back choke point picks up.
+            Session flashSession = session != null ? session : csrfOnlySession;
+            if (flashSession != null) {
+                View.setFlashSource(() -> {
+                    flashSession.consumeFlash();
+                    return flashSession.flashData();
+                });
             }
 
             // Invoke with per-request database lifecycle if needed
@@ -468,8 +465,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * here, so a session mutated by a guard or handler is persisted no matter which path
      * produced the result — early short-circuits, CSRF 403s, static files, thrown 404s,
      * and 500s included. {@code session} is the handler/guard session; {@code csrfOnlySession}
-     * is the M5c local session (non-null only when the handler had no Session param and a
-     * fresh CSRF token was minted) — never both non-null.
+     * is the M5c local session (non-null only when the handler had no Session param) —
+     * never both non-null. Attachment is a no-op for unmodified sessions.
      */
     private void writeResult(Result result, Response response, Callback callback,
                              Session session, Session csrfOnlySession) {
@@ -636,7 +633,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * may belong to a request whose handler can never render flash (a plain-Handler JSON
      * or polling route) or to a short-circuiting redirect — consuming here would destroy
      * a pending flash message before the page that should show it ever renders. Flash is
-     * consumed at handler-dispatch time, only for Session-taking handlers.
+     * consumed lazily at View render time (or by an explicit {@code session.flash(key)} read).
      */
     private Session buildSession(Map<String, String> headers) {
         if (sessionSecret != null) {

@@ -91,39 +91,69 @@ class SessionTest {
     }
 
     @Test
-    void consumeFlashMovesDataToFlashMap() {
+    void consumeFlashMovesCookieBorneDataToFlashMap() {
         var session = new Session();
         session.flash("success", "Item saved!");
         session.flash("error", "Something failed");
+
+        // Same-request consume is a no-op: entries set in-flight are pending for the
+        // NEXT request, not consumable in the request that set them.
         session.consumeFlash();
+        assertTrue(session.flashData().isEmpty());
+        assertTrue(session.has("_flash:success"));
 
-        // Flash data available via flash(key) and flashData()
-        assertEquals("Item saved!", session.flash("success"));
-        assertEquals("Something failed", session.flash("error"));
-        assertEquals(2, session.flashData().size());
+        // After the cookie round trip they are cookie-borne and consumable.
+        var restored = Session.fromCookie(session.toCookie(SECRET), SECRET);
+        restored.consumeFlash();
+        assertEquals("Item saved!", restored.flash("success"));
+        assertEquals("Something failed", restored.flash("error"));
+        assertEquals(2, restored.flashData().size());
 
-        // Removed from session data
-        assertFalse(session.has("_flash:success"));
-        assertFalse(session.has("_flash:error"));
+        // Removed from session data (stripped from the cookie on write-back)
+        assertFalse(restored.has("_flash:success"));
+        assertFalse(restored.has("_flash:error"));
     }
 
     @Test
-    void flashDataGoneAfterSecondConsume() {
+    void flashDataGoneAfterConsumeRoundTrip() {
         var session = new Session();
         session.flash("success", "Item saved!");
 
-        // First consume: flash is available
-        session.consumeFlash();
-        assertEquals("Item saved!", session.flash("success"));
-
-        // Serialize and deserialize (simulating a new request)
-        var cookie = session.toCookie(SECRET);
-        var restored = Session.fromCookie(cookie, SECRET);
+        // Next request: cookie-borne flash is consumed.
+        var restored = Session.fromCookie(session.toCookie(SECRET), SECRET);
         restored.consumeFlash();
+        assertEquals("Item saved!", restored.flash("success"));
+        assertTrue(restored.isModified(), "consumption must trigger cookie write-back");
 
-        // Flash data should not be present
-        assertNull(restored.flash("success"));
-        assertTrue(restored.flashData().isEmpty());
+        // Request after that: the re-minted cookie no longer carries the flash.
+        var next = Session.fromCookie(restored.toCookie(SECRET), SECRET);
+        next.consumeFlash();
+        assertNull(next.flash("success"));
+        assertTrue(next.flashData().isEmpty());
+    }
+
+    @Test
+    void flashReadConsumesCookieBorneEntry() {
+        var session = new Session();
+        session.flash("notice", "pending");
+
+        var restored = Session.fromCookie(session.toCookie(SECRET), SECRET);
+        // Explicit read of a cookie-borne entry is read-once: consumed + written back.
+        assertEquals("pending", restored.flash("notice"));
+        assertTrue(restored.isModified());
+        assertFalse(restored.has("_flash:notice"));
+        // Still readable for the rest of this request.
+        assertEquals("pending", restored.flash("notice"));
+    }
+
+    @Test
+    void flashReadPeeksInFlightEntryWithoutConsuming() {
+        var session = new Session();
+        session.flash("notice", "just set");
+        // Reading an entry set THIS request peeks — it stays pending for the next request.
+        assertEquals("just set", session.flash("notice"));
+        assertTrue(session.has("_flash:notice"));
+        assertTrue(session.flashData().isEmpty());
     }
 
     @Test
