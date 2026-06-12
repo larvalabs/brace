@@ -1013,3 +1013,24 @@ table from the job itself — `scheduled_jobs` is a queue, not an archive.
 On Postgres this release also adds a partial index over claimable jobs
 (`idx_scheduled_jobs_claimable`, framework migration V15, applied automatically), so
 claim cost tracks live work rather than table size.
+
+## Changed: durable-job concurrency is bounded by the connection pool
+
+**Who is affected:** apps that rely on many durable jobs running simultaneously.
+
+The poller previously ran up to 50 jobs at once against the same connection pool web
+handlers use (default pool size 10) — a job burst could take every connection, queue
+requests behind `connectionTimeout`, and 500 the request path. It also waited for an
+entire batch to finish before polling again, so one slow job delayed every other queued
+job for its duration.
+
+Now at most `poolSize / 2` jobs execute concurrently (5 with the default pool), claim
+batches are sized to the free capacity, and the poller claims more work as soon as a
+slot frees instead of waiting for the whole batch. Each job also uses one database
+session for both execution and its completed/failed mark (previously two, three on the
+failure path).
+
+Net effect: requests stay healthy during job bursts, and total queue throughput for
+mixed fast/slow workloads goes up — but peak job parallelism drops from 50 to
+`poolSize / 2`. If you need more, raise the pool size via the `DatabaseFactory`
+constructor's `poolSize` argument.

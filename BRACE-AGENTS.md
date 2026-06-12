@@ -532,6 +532,10 @@ Finished (completed/failed) durable jobs are pruned daily after 7 days — `sche
 queue, not an archive. Configure with `app.jobRetention(days)`; `0` keeps rows forever. Rows
 another job still depends on are kept regardless of age.
 
+Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they share the
+connection pool with web handlers), and the poller claims more work as slots free — a slow job
+doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
+
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 
 Job lambdas receive `(Database, JobContext)`. Use `ctx.message(...)` to attach a short

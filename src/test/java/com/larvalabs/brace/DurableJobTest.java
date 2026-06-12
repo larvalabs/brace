@@ -49,6 +49,16 @@ class DurableJobTest {
         public NotADurableJob() {}
     }
 
+    /** Blocks until {@link #gate} is opened — simulates a slow job for the H4 dispatch tests. */
+    public static class GatedJob implements DurableJob {
+        static volatile java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(0);
+        public GatedJob() {}
+        @Override public String data() { return null; }
+        @Override public void run(String data, Database db) throws Exception {
+            gate.await();
+        }
+    }
+
     @BeforeAll
     static void setup() {
         factory = new DatabaseFactory(
@@ -253,6 +263,70 @@ class DurableJobTest {
         } finally {
             db2.close();
         }
+    }
+
+    @Test
+    void claimsSizedToCapacityAndSlowJobsDontStallNewBatches() throws Exception {
+        // Pool 10 → execution capacity poolSize/2 = 5. Six ready jobs with distinct run_at
+        // ordering: four slow (gated) jobs first, then two fast ones.
+        GatedJob.gate = new java.util.concurrent.CountDownLatch(1);
+        long now = System.currentTimeMillis();
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            long[] ids = new long[6];
+            for (int i = 0; i < 4; i++) {
+                ids[i] = Jobs.schedule(db, new GatedJob(), Duration.ZERO);
+            }
+            ids[4] = Jobs.schedule(db, new TestJob("fast1"), Duration.ZERO);
+            ids[5] = Jobs.schedule(db, new TestJob("fast2"), Duration.ZERO);
+            for (int i = 0; i < 6; i++) {
+                // Force a deterministic claim order regardless of schedule-time timestamp ties
+                db.sql("UPDATE scheduled_jobs SET run_at = ? WHERE id = ?",
+                    new java.sql.Timestamp(now - 60_000 + i * 1_000), ids[i]);
+            }
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+
+        var poller = new JobPoller();
+        try {
+            // First batch: capacity-limited to 5 (4 gated + fast1), not the old fixed 50.
+            var first = poller.dispatch(factory);
+            assertEquals(5, first.claimed(), "claim batch must be sized to execution capacity");
+
+            // Second dispatch blocks only until ONE slot frees (fast1 finishing), not until the
+            // whole first batch is done — the gated jobs are still holding their slots.
+            var second = poller.dispatch(factory);
+            assertEquals(1, second.claimed(), "a freed slot admits a new claim while slow jobs run");
+            for (var t : second.threads()) {
+                t.join();
+            }
+            // fast2 completed while the four gated jobs are still blocked: no head-of-line stall.
+            assertEquals(2, TestJob.runCount.get(), "both fast jobs done despite running slow jobs");
+        } finally {
+            GatedJob.gate.countDown();
+        }
+
+        // Drain: wait for the gated jobs, then verify everything completed exactly once.
+        int settled = 0;
+        while (settled < 50) {
+            var db2 = new Database(factory.openSession());
+            try {
+                db2.beginTransaction();
+                var stats = JobPoller.getDurableJobStats(db2);
+                db2.commitTransaction();
+                if (stats.completed() == 6 && stats.running() == 0) {
+                    return;
+                }
+            } finally {
+                db2.close();
+            }
+            settled++;
+            Thread.sleep(100);
+        }
+        fail("gated jobs did not complete after release");
     }
 
     @Test

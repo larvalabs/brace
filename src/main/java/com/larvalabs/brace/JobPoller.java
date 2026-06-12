@@ -4,12 +4,28 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 
 public class JobPoller {
 
     private volatile boolean running;
     private Thread pollerThread;
     private DatabaseFactory dbFactory;
+
+    // Execution-capacity limiter (perf review H4): jobs share the app's connection pool with web
+    // handlers, so at most poolSize/2 jobs run at once — a burst can no longer take every Hikari
+    // connection and 500 the request path. Claim batches are sized to the free permits, so rows
+    // are only flipped to started_at when a slot can actually run them (matters multi-instance:
+    // an over-claimed row is invisible to other pollers). Initialized from the first factory seen.
+    private Semaphore limiter;
+    private int maxConcurrent;
+
+    private synchronized void initLimiter(DatabaseFactory factory) {
+        if (limiter == null) {
+            maxConcurrent = Math.max(1, factory.poolSize() / 2);
+            limiter = new Semaphore(maxConcurrent);
+        }
+    }
 
     public record DurableJobStats(long pending, long running, long completed, long failed) {}
 
@@ -34,13 +50,16 @@ public class JobPoller {
     private void pollLoop() {
         while (running) {
             try {
-                int processed = pollAndExecute();
-                if (processed == 0) {
+                var batch = dispatch(dbFactory);
+                if (batch.claimed() == 0) {
                     Thread.sleep(10_000);
-                } else if (processed < 50) {
+                } else if (batch.claimed() < batch.slots()) {
                     Thread.sleep(1_000);
                 }
-                // if batch was full (50), immediately poll again
+                // Full batch: more work is likely queued — poll again immediately. dispatch
+                // itself blocks until an execution slot frees, so the loop re-polls as
+                // capacity opens up; it no longer joins the whole batch, which let one slow
+                // job stall every other queued job for its duration (H4).
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -65,38 +84,78 @@ public class JobPoller {
         return pollAndExecute(dbFactory);
     }
 
+    /**
+     * Claims one batch and waits for every job in it to finish before returning; returns the
+     * number of jobs claimed. This synchronous form exists for deterministic tests (and the
+     * drain loops in {@code DurableJobConcurrencyPostgresIT}) — the live poll loop calls
+     * {@link #dispatch} directly and does not wait for the batch.
+     */
     public int pollAndExecute(DatabaseFactory factory) {
-        // Two claim strategies, by dialect:
-        //   Postgres — claimBatchPostgres folds selection + claim into a single FOR UPDATE
-        //   SKIP LOCKED transaction, so concurrent instances get disjoint batches and each row is
-        //   claimed exactly once by construction (no per-row re-claim). Rows come back pre-claimed.
-        //   H2 (tests) — H2 doesn't reliably support SKIP LOCKED, so it keeps the portable path:
-        //   an unlocked candidate select, then each row defends its own claim in claimAndExecute
-        //   (the row-count-checked B7 guard) before executing.
-        boolean preClaimed = factory.isPostgres();
-        List<Object[]> jobs = preClaimed ? claimBatchPostgres(factory) : selectCandidatesH2(factory);
-
-        if (jobs.isEmpty()) {
+        try {
+            var batch = dispatch(factory);
+            for (var thread : batch.threads()) {
+                thread.join();
+            }
+            return batch.claimed();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             return 0;
         }
+    }
 
-        var threads = new java.util.ArrayList<Thread>();
-        for (var row : jobs) {
-            var thread = Thread.startVirtualThread(() -> {
-                if (preClaimed) runJobBody(factory, row);
-                else claimAndExecute(factory, row);
-            });
-            threads.add(thread);
+    /** One claimed batch: how many slots were free when it was claimed, and the threads
+     * executing the claimed jobs (one each, already started). */
+    record Batch(int slots, List<Thread> threads) {
+        int claimed() {
+            return threads.size();
         }
-        for (var thread : threads) {
-            try {
-                thread.join();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+    }
+
+    /**
+     * Claims up to one batch of pending jobs and starts a virtual thread per job, WITHOUT
+     * waiting for them. Blocks until at least one execution slot is free, then sizes the
+     * claim to the free capacity. Each job thread releases its slot when the job's terminal
+     * mark is written. Package-private for tests.
+     *
+     * <p>Two claim strategies, by dialect:
+     * Postgres — claimBatchPostgres folds selection + claim into a single FOR UPDATE
+     * SKIP LOCKED transaction, so concurrent instances get disjoint batches and each row is
+     * claimed exactly once by construction (no per-row re-claim). Rows come back pre-claimed.
+     * H2 (tests) — H2 doesn't reliably support SKIP LOCKED, so it keeps the portable path:
+     * an unlocked candidate select, then each row defends its own claim in claimAndExecute
+     * (the row-count-checked B7 guard) before executing.
+     */
+    Batch dispatch(DatabaseFactory factory) throws InterruptedException {
+        initLimiter(factory);
+        limiter.acquire();
+        int slots = 1;
+        while (slots < maxConcurrent && limiter.tryAcquire()) {
+            slots++;
+        }
+
+        boolean preClaimed = factory.isPostgres();
+        List<Object[]> jobs = List.of();
+        try {
+            jobs = preClaimed ? claimBatchPostgres(factory, slots) : selectCandidatesH2(factory, slots);
+        } finally {
+            // Give back the slots this batch won't fill (all of them if the claim threw).
+            for (int i = jobs.size(); i < slots; i++) {
+                limiter.release();
             }
         }
 
-        return jobs.size();
+        var threads = new java.util.ArrayList<Thread>(jobs.size());
+        for (var row : jobs) {
+            threads.add(Thread.startVirtualThread(() -> {
+                try {
+                    if (preClaimed) runJobBody(factory, row);
+                    else claimAndExecute(factory, row);
+                } finally {
+                    limiter.release();
+                }
+            }));
+        }
+        return new Batch(slots, threads);
     }
 
     /**
@@ -108,7 +167,7 @@ public class JobPoller {
      * the lock clause reaches Postgres intact. {@code RETURNING attempts - 1} hands back the
      * pre-increment attempts, so {@link #runJobBody}'s retry math is identical to the H2 path.
      */
-    private List<Object[]> claimBatchPostgres(DatabaseFactory factory) {
+    private List<Object[]> claimBatchPostgres(DatabaseFactory factory, int limit) {
         var db = new Database(factory.openSession());
         try {
             db.beginTransaction();
@@ -128,13 +187,15 @@ public class JobPoller {
                         "  AND (j.depends_on_id IS NULL " +
                         "       OR NOT EXISTS (SELECT 1 FROM scheduled_jobs d " +
                         "                      WHERE d.id = j.depends_on_id AND d.completed_at IS NULL)) " +
-                        "  ORDER BY j.run_at LIMIT 50 FOR UPDATE SKIP LOCKED) " +
-                        "RETURNING id, name, job_class, job_data, attempts - 1, max_attempts, backoff_seconds");
-                     var rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        out.add(new Object[]{
-                                rs.getLong(1), rs.getString(2), rs.getString(3), rs.getString(4),
-                                rs.getInt(5), rs.getInt(6), rs.getLong(7)});
+                        "  ORDER BY j.run_at LIMIT ? FOR UPDATE SKIP LOCKED) " +
+                        "RETURNING id, name, job_class, job_data, attempts - 1, max_attempts, backoff_seconds")) {
+                    ps.setInt(1, limit);
+                    try (var rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            out.add(new Object[]{
+                                    rs.getLong(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                                    rs.getInt(5), rs.getInt(6), rs.getLong(7)});
+                        }
                     }
                 }
                 return out;
@@ -151,7 +212,7 @@ public class JobPoller {
     }
 
     /** H2 path: select claimable candidates without locking; each row claims itself in {@link #claimAndExecute}. */
-    private List<Object[]> selectCandidatesH2(DatabaseFactory factory) {
+    private List<Object[]> selectCandidatesH2(DatabaseFactory factory, int limit) {
         var db = new Database(factory.openSession());
         try {
             db.beginTransaction();
@@ -168,7 +229,7 @@ public class JobPoller {
                 "     OR NOT EXISTS (SELECT 1 FROM scheduled_jobs d " +
                 "                    WHERE d.id = j.depends_on_id AND d.completed_at IS NULL)) " +
                 "ORDER BY j.run_at " +
-                "LIMIT 50");
+                "LIMIT ?", limit);
             db.commitTransaction();
             return rows;
         } finally {
@@ -225,51 +286,48 @@ public class JobPoller {
         int maxAttempts = ((Number) row[5]).intValue();
         long backoffSeconds = ((Number) row[6]).longValue();
 
-        // Execute the job
-        var execDb = new Database(factory.openSession());
+        // One session for the job AND its terminal mark, each in its own transaction (perf
+        // review H4): a separate mark session per job previously doubled — tripled on the
+        // failure path — pool demand under bursts.
+        var db = new Database(factory.openSession());
         try {
-            execDb.beginTransaction();
-            Class<?> loadedClass = Class.forName(jobClass, false, Thread.currentThread().getContextClassLoader());
-            if (!DurableJob.class.isAssignableFrom(loadedClass)) {
-                throw new ClassCastException("Class " + jobClass + " does not implement DurableJob");
+            try {
+                db.beginTransaction();
+                Class<?> loadedClass = Class.forName(jobClass, false, Thread.currentThread().getContextClassLoader());
+                if (!DurableJob.class.isAssignableFrom(loadedClass)) {
+                    throw new ClassCastException("Class " + jobClass + " does not implement DurableJob");
+                }
+                DurableJob job = (DurableJob) loadedClass.getDeclaredConstructor().newInstance();
+                job.run(jobData, db);
+                db.commitTransaction();
+            } catch (Exception e) {
+                db.rollbackTransaction();
+
+                int newAttempts = attempts + 1;
+                try {
+                    db.beginTransaction();
+                    if (newAttempts >= maxAttempts) {
+                        db.sql("UPDATE scheduled_jobs SET failed_at = CURRENT_TIMESTAMP, error = ? WHERE id = ?",
+                            e.getMessage(), id);
+                    } else {
+                        // Push run_at forward by backoff * attempts
+                        var newRunAt = Timestamp.from(Instant.now().plus(Duration.ofSeconds(backoffSeconds).multipliedBy(newAttempts)));
+                        db.sql("UPDATE scheduled_jobs SET started_at = NULL, error = ?, run_at = ? WHERE id = ?",
+                            e.getMessage(), newRunAt, id);
+                    }
+                    db.commitTransaction();
+                } catch (Exception e2) {
+                    db.rollbackTransaction();
+                }
+                return;
             }
-            DurableJob job = (DurableJob) loadedClass.getDeclaredConstructor().newInstance();
-            job.run(jobData, execDb);
-            execDb.commitTransaction();
 
             // Mark completed
-            var markDb = new Database(factory.openSession());
-            try {
-                markDb.beginTransaction();
-                markDb.sql("UPDATE scheduled_jobs SET completed_at = CURRENT_TIMESTAMP WHERE id = ?", id);
-                markDb.commitTransaction();
-            } finally {
-                markDb.close();
-            }
-        } catch (Exception e) {
-            execDb.rollbackTransaction();
-
-            int newAttempts = attempts + 1;
-            var failDb = new Database(factory.openSession());
-            try {
-                failDb.beginTransaction();
-                if (newAttempts >= maxAttempts) {
-                    failDb.sql("UPDATE scheduled_jobs SET failed_at = CURRENT_TIMESTAMP, error = ? WHERE id = ?",
-                        e.getMessage(), id);
-                } else {
-                    // Push run_at forward by backoff * attempts
-                    var newRunAt = Timestamp.from(Instant.now().plus(Duration.ofSeconds(backoffSeconds).multipliedBy(newAttempts)));
-                    failDb.sql("UPDATE scheduled_jobs SET started_at = NULL, error = ?, run_at = ? WHERE id = ?",
-                        e.getMessage(), newRunAt, id);
-                }
-                failDb.commitTransaction();
-            } catch (Exception e2) {
-                failDb.rollbackTransaction();
-            } finally {
-                failDb.close();
-            }
+            db.beginTransaction();
+            db.sql("UPDATE scheduled_jobs SET completed_at = CURRENT_TIMESTAMP WHERE id = ?", id);
+            db.commitTransaction();
         } finally {
-            execDb.close();
+            db.close();
         }
     }
 
