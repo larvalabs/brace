@@ -15,7 +15,7 @@ public class CliOutput {
     }
 
     public static Mode autoMode(boolean jsonFlag, boolean prettyFlag) {
-        return modeFrom(System.console() != null, jsonFlag, prettyFlag);
+        return modeFrom(stdoutIsTty(), jsonFlag, prettyFlag);
     }
 
     /**
