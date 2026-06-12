@@ -607,10 +607,14 @@ public class OpsHandler {
         return include;
     }
 
-    /** In-memory error records for the no-database /ops/errors fallback, newest first. */
+    /**
+     * In-memory error records for the no-database /ops/errors fallback, newest first.
+     * {@code since} filters on {@code firstSeen}, matching the DB path's
+     * {@code first_seen >= ?} — both modes answer "errors that appeared after X".
+     */
     private List<Stats.ErrorRecord> inMemoryErrors(Instant since) {
         return stats.recentErrors().stream()
-            .filter(r -> since == null || !r.lastSeen.isBefore(since))
+            .filter(r -> since == null || !r.firstSeen.isBefore(since))
             .sorted((a, b) -> b.lastSeen.compareTo(a.lastSeen))
             .toList();
     }
