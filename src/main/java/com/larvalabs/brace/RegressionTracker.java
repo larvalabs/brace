@@ -85,8 +85,8 @@ public class RegressionTracker implements ErrorStore.RegressionListener {
     }
 
     @Override
-    public void onRepeat(String type, String route) {
-        store.bump(id(type, route));
+    public void onRepeat(String type, String route, long count) {
+        store.bump(id(type, route), count);
     }
 
     private void add(String type, String route, String message, Instant firstSeen, boolean notify) {

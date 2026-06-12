@@ -857,6 +857,12 @@ Behind a load balancer, `/ops/status`, `/ops/logs`, and the JFR/heap figures are
 
 Errors are **deduplicated on `error_type + route`** for unresolved rows — repeated occurrences increment `occurrence_count` on the existing row rather than inserting a new one. This means a noisy app produces few rows, not thousands.
 
+Error recording is **buffered ~2s**: occurrences coalesce in memory per `(type, route)` and a
+single flusher persists them, so an error storm can't starve the connection pool. Errors appear
+on `/ops/errors` (and regression notifications fire) within ~2 seconds of the request. Tests
+that trigger a 500 and assert on `/ops/errors` should call `app.stop()` first (flushes the
+buffer) or wait >2s.
+
 Retention is **count-based, not time-based** for both errors and logs — nothing is dropped purely because it got old.
 
 ### Agent health check (start here)

@@ -51,12 +51,21 @@ class ErrorStorePostgresIT extends PostgresTestBase {
         errorStore = new ErrorStore(factory, 1000);
     }
 
+    @org.junit.jupiter.api.AfterEach
+    void closeStore() {
+        errorStore.close();
+    }
+
     // --- Parity: the Postgres branch must behave like the H2 one on the non-racy paths ---
 
     @Test
     void duplicateUnresolvedErrorsFoldIntoOneRowWithIncrementingCount() {
+        // Flush between the two records so the second upsert exercises the DO UPDATE branch
+        // (a single flush would coalesce them into one INSERT with count 2 — see H9).
         errorStore.record("RuntimeException", "error 1", "GET /test", "stack1", "req1");
+        errorStore.flush();
         errorStore.record("RuntimeException", "error 2", "GET /test", "stack2", "req2");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         assertEquals(1, errors.size(), "same (type, route) must fold into one row");
@@ -69,6 +78,7 @@ class ErrorStorePostgresIT extends PostgresTestBase {
     @Test
     void resolvedErrorRecurrenceGetsANewRow() {
         errorStore.record("RuntimeException", "error", "GET /test", "stack", "req");
+        errorStore.flush();
         long id = ((Number) errorStore.list(null).get(0).get("id")).longValue();
         errorStore.resolve(id);
 
@@ -76,6 +86,7 @@ class ErrorStorePostgresIT extends PostgresTestBase {
         // (WHERE resolved_at IS NULL), so the resolved row isn't a conflict target and a fresh
         // unresolved row is inserted.
         errorStore.record("RuntimeException", "error again", "GET /test", "stack2", "req2");
+        errorStore.flush();
 
         var unresolved = errorStore.list(null);
         assertEquals(1, unresolved.size());
@@ -88,6 +99,7 @@ class ErrorStorePostgresIT extends PostgresTestBase {
     void differentRoutesSameTypeStaySeparateRows() {
         errorStore.record("RuntimeException", "error", "GET /a", "stack", "req");
         errorStore.record("RuntimeException", "error", "GET /b", "stack", "req");
+        errorStore.flush();
         assertEquals(2, errorStore.list(null).size());
     }
 
@@ -95,18 +107,29 @@ class ErrorStorePostgresIT extends PostgresTestBase {
 
     @Test
     void concurrentDuplicatesFoldIntoOneRowWithExactCount() throws Exception {
+        // Post-H9, records coalesce in memory per store, so the DB-level race lives BETWEEN
+        // instances: two stores (two simulated servers) buffer the same (type, route) and flush
+        // concurrently. Without the atomic upsert + partial unique index, both flushes could pass
+        // an existence check and INSERT, leaving duplicate rows and a lost count.
         int writers = 50;
-        var threads = new ArrayList<Thread>();
-        for (int i = 0; i < writers; i++) {
-            int n = i;
-            // Every writer records the SAME (type, route) at once. Without the atomic upsert +
-            // partial unique index, several would pass the existence check and INSERT, leaving
-            // duplicate rows and a count below `writers`.
-            threads.add(Thread.startVirtualThread(() ->
-                errorStore.record("RuntimeException", "boom-" + n, "GET /hot", "stack-" + n, "req-" + n)));
-        }
-        for (var t : threads) {
-            t.join();
+        var storeB = new ErrorStore(factory, 1000);
+        try {
+            var threads = new ArrayList<Thread>();
+            for (int i = 0; i < writers; i++) {
+                int n = i;
+                var store = (n % 2 == 0) ? errorStore : storeB;
+                threads.add(Thread.startVirtualThread(() ->
+                    store.record("RuntimeException", "boom-" + n, "GET /hot", "stack-" + n, "req-" + n)));
+            }
+            for (var t : threads) {
+                t.join();
+            }
+            var flushA = Thread.startVirtualThread(errorStore::flush);
+            var flushB = Thread.startVirtualThread(storeB::flush);
+            flushA.join();
+            flushB.join();
+        } finally {
+            storeB.close();
         }
 
         var errors = errorStore.list(null);
@@ -134,6 +157,7 @@ class ErrorStorePostgresIT extends PostgresTestBase {
         for (var t : threads) {
             t.join();
         }
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         assertEquals(routes, errors.size(), "distinct keys must not collide under concurrency");

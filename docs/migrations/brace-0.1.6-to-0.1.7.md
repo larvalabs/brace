@@ -1035,6 +1035,39 @@ mixed fast/slow workloads goes up — but peak job parallelism drops from 50 to
 `poolSize / 2`. If you need more, raise the pool size via the `DatabaseFactory`
 constructor's `poolSize` argument.
 
+## Changed: error recording is coalesced (~2s flush) so error storms can't starve the pool
+
+**Who is affected:** tests that trigger a 500 and immediately assert on `/ops/errors`;
+custom `ErrorStore.RegressionListener` implementations.
+
+Previously every error occurrence spawned a virtual thread that opened 1–2 database
+transactions (the `ops_errors` upsert + the regression bump). The scenario that
+produces error floods — a degraded database — is exactly when thousands of those
+threads piled up demanding pool connections, starving the healthy requests that
+remained. Now `record()` is a non-blocking in-memory merge per `(type, route)`, and a
+single flusher writes one upsert per error kind every ~2 seconds on one connection.
+
+Nothing the error store keeps is lost — `ops_errors` was already one row per kind with
+a count and the latest stack trace. The deliberate trade-offs:
+
+- Errors appear on `/ops/errors`, and new-regression notifications fire, up to ~2s
+  after the request (in-memory `/ops/status` `errors.recent` is still immediate).
+- A hard crash loses at most the last ~2s of error data. `app.stop()` flushes.
+- During a storm, occurrences of already-buffered kinds are never dropped (they're a
+  counter bump). New *distinct* kinds beyond 1,000 pending are dropped and counted,
+  with a warning logged at the next flush.
+- If the database is down, the buffer keeps accumulating counts (bounded by kind
+  cardinality, not error rate) and retries every interval — counts survive the outage.
+
+**Test impact:** assertions against `/ops/errors` right after a triggered 500 now race
+the flush. Call `app.stop()` first, or wait >2s. (The framework's own tests flush
+directly via a package-private accessor.)
+
+**API change:** `ErrorStore.RegressionListener.onRepeat(String type, String route)`
+gained a count parameter: `onRepeat(String type, String route, long count)` — the
+occurrences coalesced into that flush. Only affects code implementing this interface
+directly (the built-in `RegressionTracker` is updated).
+
 ## Breaking: cached routes ignore query params unless declared with `.vary(...)`
 
 **Who is affected:** any app using route-level page caching (`cache.wrap(...)`) on routes

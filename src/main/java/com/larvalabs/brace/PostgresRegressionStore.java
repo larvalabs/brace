@@ -43,11 +43,12 @@ final class PostgresRegressionStore implements RegressionStore {
     }
 
     @Override
-    public void bump(String id) {
+    public void bump(String id, long count) {
         inTx(conn -> {
             try (var ps = conn.prepareStatement(
-                    "UPDATE brace_regressions SET count = count + 1 WHERE id = ?")) {
-                ps.setString(1, id);
+                    "UPDATE brace_regressions SET count = count + ? WHERE id = ?")) {
+                ps.setLong(1, count);
+                ps.setString(2, id);
                 ps.executeUpdate();
                 return null;
             }

@@ -74,9 +74,10 @@ class RegressionIntegrationTest {
     @Test
     @Order(1)
     void newErrorAppearsAndCanBeAcknowledged() throws Exception {
-        // Trigger a brand-new error kind, then wait for the async error-record + tracker hook.
+        // Trigger a brand-new error kind, then flush the H9 buffer so the tracker hook fires.
         client.send(HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/boom")).GET().build(),
             HttpResponse.BodyHandlers.discarding());
+        app.errorStore().flush();
 
         String control = token(controlKey);
         JsonNode regs = null;

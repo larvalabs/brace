@@ -39,6 +39,7 @@ public class Brace {
     private String opsKeysPath;
     private Stats stats = new Stats();
     private JfrProfiler profiler;
+    private ErrorStore errorStore;
     private boolean opsProfilerEnabled = true;
     private String instanceId;
     private OpsHandler opsHandler;
@@ -518,7 +519,6 @@ public class Brace {
 
     public void start() throws Exception {
         // Create ErrorStore if database is available
-        ErrorStore errorStore = null;
         if (databaseFactory != null) {
             int maxErrors = 1000;
             errorStore = new ErrorStore(databaseFactory, maxErrors);
@@ -859,6 +859,11 @@ public class Brace {
         if (cache != null) {
             cache.close();
         }
+        if (errorStore != null) {
+            // Stops the flusher and writes out the buffered window, so a stop() right after a
+            // 500 (tests, clean shutdown) doesn't lose the last <2s of error data.
+            errorStore.close();
+        }
         if (profiler != null) {
             profiler.close();
         }
@@ -871,6 +876,11 @@ public class Brace {
         // Drain any structured log lines still queued in the async writer (H1) so a stop()
         // immediately followed by assertions (tests) or process exit loses nothing.
         Log.flush();
+    }
+
+    /** The error store, for tests that need to flush the H9 buffer deterministically. */
+    ErrorStore errorStore() {
+        return errorStore;
     }
 
     public int actualPort() {

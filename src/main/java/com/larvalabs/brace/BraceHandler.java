@@ -470,11 +470,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 String stackTrace = stackTraceToString(e);
                 // Instant-of-failure context: how much DB work ran before the throw, and the
                 // redacted request headers. Captured synchronously (the Jetty request isn't safe
-                // to read off-thread), then persisted on a virtual thread.
+                // to read off-thread). record() is a non-blocking in-memory merge (H9) — the
+                // ErrorStore flusher persists it; no thread or pool connection per error.
                 String queriesBefore = "{\"count\":" + qc + ",\"durationMs\":" + (Math.round(qu / 100.0) / 10.0) + "}";
                 String requestHeaders = captureRedactedHeaders(jettyRequest);
-                Thread.startVirtualThread(() -> errorStore.record(
-                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders));
+                errorStore.record(
+                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders);
             }
             Result errorResult = Result.error(500, "Internal Server Error");
             writeResult(errorResult, response, callback);

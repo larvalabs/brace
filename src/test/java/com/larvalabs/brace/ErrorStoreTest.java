@@ -39,9 +39,52 @@ class ErrorStoreTest {
         errorStore = new ErrorStore(dbFactory, 1000);
     }
 
+    @AfterEach
+    void closeStore() {
+        errorStore.close();
+    }
+
+    @Test
+    void recordsCoalescePerKindWithinOneFlush() {
+        // H9: a storm of one kind is a single upsert carrying the coalesced count + latest payload.
+        for (int i = 1; i <= 50; i++) {
+            errorStore.record("RuntimeException", "msg " + i, "GET /storm", "stack " + i, "req");
+        }
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(1, errors.size());
+        assertEquals(50, errors.get(0).get("occurrenceCount"));
+        assertEquals("msg 50", errors.get(0).get("message"), "latest payload wins");
+        assertEquals("stack 50", errors.get(0).get("stackTrace"));
+    }
+
+    @Test
+    void newKindsBeyondPendingCapAreDroppedKnownKindsAreNot() {
+        // Fill the pending buffer with MAX_PENDING_KINDS distinct kinds, then push more.
+        for (int i = 0; i < ErrorStore.MAX_PENDING_KINDS; i++) {
+            errorStore.record("E" + i, "m", "GET /r" + i, "s", "req");
+        }
+        // A new kind past the cap is dropped...
+        errorStore.record("Overflow", "m", "GET /overflow", "s", "req");
+        // ...but more occurrences of a buffered kind still count.
+        errorStore.record("E0", "m2", "GET /r0", "s2", "req");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(ErrorStore.MAX_PENDING_KINDS, errors.size(), "overflow kind must not appear");
+        for (var e : errors) {
+            assertNotEquals("Overflow", e.get("errorType"));
+            if ("E0".equals(e.get("errorType"))) {
+                assertEquals(2, e.get("occurrenceCount"), "known-kind occurrences are never dropped");
+            }
+        }
+    }
+
     @Test
     void recordCreatesRow() {
         errorStore.record("RuntimeException", "test error", "GET /test", "stack...", "GET /test");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         assertEquals(1, errors.size());
@@ -56,6 +99,7 @@ class ErrorStoreTest {
         errorStore.record("RuntimeException", "boom", "GET /test", "stack",
             "GET /test", "{\"count\":3,\"durationMs\":12.4}",
             "{\"user-agent\":\"curl/8\",\"authorization\":\"[REDACTED]\"}");
+        errorStore.flush();
 
         var err = errorStore.list(null).get(0);
         assertEquals("{\"count\":3,\"durationMs\":12.4}", err.get("queriesBefore"));
@@ -68,6 +112,7 @@ class ErrorStoreTest {
     @Test
     void legacyFiveArgRecordLeavesContextNull() {
         errorStore.record("RuntimeException", "boom", "GET /test", "stack", "GET /test");
+        errorStore.flush();
         var err = errorStore.list(null).get(0);
         assertNull(err.get("queriesBefore"));
         assertNull(err.get("requestHeaders"));
@@ -76,7 +121,9 @@ class ErrorStoreTest {
     @Test
     void duplicateErrorsIncrementCount() {
         errorStore.record("RuntimeException", "error 1", "GET /test", "stack1", "req1");
+        errorStore.flush();
         errorStore.record("RuntimeException", "error 2", "GET /test", "stack2", "req2");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         assertEquals(1, errors.size());
@@ -89,6 +136,7 @@ class ErrorStoreTest {
     @Test
     void resolvedErrorsGetNewRowsOnRecurrence() {
         errorStore.record("RuntimeException", "error", "GET /test", "stack", "req");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         assertEquals(1, errors.size());
@@ -99,6 +147,7 @@ class ErrorStoreTest {
 
         // Record same error again - should create new row since previous is resolved
         errorStore.record("RuntimeException", "error again", "GET /test", "stack2", "req2");
+        errorStore.flush();
 
         var unresolved = errorStore.list(null);
         assertEquals(1, unresolved.size());
@@ -112,7 +161,9 @@ class ErrorStoreTest {
     @Test
     void listReturnsUnresolvedByDefault() {
         errorStore.record("RuntimeException", "unresolved", "GET /a", "stack", "req");
+        errorStore.flush();
         errorStore.record("NullPointerException", "to-resolve", "GET /b", "stack", "req");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         assertEquals(2, errors.size());
@@ -139,6 +190,7 @@ class ErrorStoreTest {
     @Test
     void listWithStatusResolvedReturnsResolved() {
         errorStore.record("RuntimeException", "error", "GET /test", "stack", "req");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         long id = ((Number) errors.get(0).get("id")).longValue();
@@ -152,6 +204,7 @@ class ErrorStoreTest {
     @Test
     void resolveSetsResolvedAt() {
         errorStore.record("RuntimeException", "error", "GET /test", "stack", "req");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         long id = ((Number) errors.get(0).get("id")).longValue();
@@ -168,8 +221,11 @@ class ErrorStoreTest {
 
         // Insert 3 errors
         smallStore.record("Error1", "msg1", "GET /a", "stack", "req");
+        smallStore.flush();
         smallStore.record("Error2", "msg2", "GET /b", "stack", "req");
+        smallStore.flush();
         smallStore.record("Error3", "msg3", "GET /c", "stack", "req");
+        smallStore.flush();
 
         // Resolve the first one
         var errors = smallStore.list(null);
@@ -187,6 +243,7 @@ class ErrorStoreTest {
 
         // Insert a 4th error - should prune the resolved one (Error1)
         smallStore.record("Error4", "msg4", "GET /d", "stack", "req");
+        smallStore.flush();
 
         var allUnresolved = smallStore.list(null);
         var allResolved = smallStore.list("resolved");
@@ -204,7 +261,9 @@ class ErrorStoreTest {
     @Test
     void differentRoutesSameTypeCreateSeparateRows() {
         errorStore.record("RuntimeException", "error", "GET /a", "stack", "req");
+        errorStore.flush();
         errorStore.record("RuntimeException", "error", "GET /b", "stack", "req");
+        errorStore.flush();
 
         var errors = errorStore.list(null);
         assertEquals(2, errors.size());
@@ -214,10 +273,12 @@ class ErrorStoreTest {
     void listSinceReturnsOnlyErrorsAfterTimestamp() throws Exception {
         var store = new ErrorStore(dbFactory, 100);
         store.record("OldError", "old", "/old", "stack", null);
+        store.flush();
         Thread.sleep(50);
         var cutoff = java.time.Instant.now();
         Thread.sleep(50);
         store.record("NewError", "new", "/new", "stack", null);
+        store.flush();
 
         var all = store.list(null);
         assertEquals(2, all.size());
@@ -274,8 +335,8 @@ class ErrorStoreTest {
                 HttpResponse.BodyHandlers.ofString());
             assertEquals(500, errorResp.statusCode());
 
-            // Wait for virtual thread to persist
-            Thread.sleep(200);
+            // Persist the H9-buffered error deterministically
+            app.errorStore().flush();
 
             // Check errors endpoint
             String token = authenticateOps(port, kp);
@@ -316,7 +377,7 @@ class ErrorStoreTest {
                 HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/boom")).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
-            Thread.sleep(200);
+            app.errorStore().flush();
 
             // Get errors to find the ID
             String token = authenticateOps(port, kp);
@@ -424,8 +485,8 @@ class ErrorStoreTest {
                 HttpResponse.BodyHandlers.ofString());
             assertEquals(500, errorResp.statusCode());
 
-            // Wait for the virtual thread to persist
-            Thread.sleep(200);
+            // Persist the H9-buffered error deterministically
+            app.errorStore().flush();
 
             // Fetch the stored error record via /ops/errors
             String token = authenticateOps(port, kp);

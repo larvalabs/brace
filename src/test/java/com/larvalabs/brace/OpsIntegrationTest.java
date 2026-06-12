@@ -315,7 +315,7 @@ class OpsIntegrationTest {
         client.send(
             HttpRequest.newBuilder().uri(URI.create("http://localhost:" + cachePort + "/cacheboom")).GET().build(),
             HttpResponse.BodyHandlers.ofString());
-        Thread.sleep(200);
+        cacheApp.errorStore().flush(); // persist the H9-buffered error deterministically
     }
 
     @AfterAll
