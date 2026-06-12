@@ -347,9 +347,12 @@ final class BuildCommands {
 
         cmd.add("--details=summary");
         cmd.add("--disable-ansi-colors");
+        // Capture stdout (the ConsoleLauncher report we condense) but let stderr stream
+        // through live: a hung or crashing run (OOM, fatal JVM error, test debug output
+        // on stderr) stays visible instead of being buffered until process exit.
         Process p = new ProcessBuilder(cmd)
                 .directory(cwd.toFile())
-                .redirectErrorStream(true)
+                .redirectError(ProcessBuilder.Redirect.INHERIT)
                 .start();
         String output = new String(p.getInputStream().readAllBytes());
         int rc = p.waitFor();

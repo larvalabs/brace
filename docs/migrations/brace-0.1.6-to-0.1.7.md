@@ -1264,6 +1264,20 @@ provider *and* silence the warning, exclude Brace's:
 </dependency>
 ```
 
+The binding direction also matters in reverse: if `slf4j-jdk14` happens to be the provider
+slf4j finds first, **your provider loses silently** — Hibernate/Jetty/Flyway output your
+logback/log4j config expects is routed into JUL instead and quieted to WARNING by Brace's
+defaults. If startup logs you used to see disappear after the upgrade, this is why. The fix
+is the same exclusion above (your provider stays authoritative) or `-Dlog.level.*` overrides
+(accept Brace's sink and re-enable specific loggers).
+
+One more side effect worth knowing: constructing `DatabaseFactory` (or calling
+`Brace.app()`) configures global JUL state once — the root ConsoleHandler's formatter/level
+and the four quieted logger levels — unless `-Djava.util.logging.config.file` or
+`...config.class` is set, in which case Brace leaves JUL completely alone. An app embedding
+`DatabaseFactory` standalone that does not want its process-wide logging touched should set
+one of those properties.
+
 ## Behavior change: defaulted numeric query accessors no longer throw on unparseable input
 
 **Who is affected:** handlers calling the *defaulted* variants `req.queryInt(name, default)`
