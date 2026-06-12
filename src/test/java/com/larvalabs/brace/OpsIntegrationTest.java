@@ -1048,6 +1048,8 @@ class OpsIntegrationTest {
         assertTrue(first.has("message"), first.toString());
         assertTrue(first.has("route"), first.toString());
         assertTrue(first.has("occurrenceCount"), first.toString());
+        assertTrue(first.has("firstSeen"),
+            "DB-backed rows carry firstSeen like the in-memory shape: " + first);
         assertTrue(first.has("lastSeen"), first.toString());
         assertFalse(first.has("stackTrace"), "status summaries must not carry stackTrace: " + first);
     }

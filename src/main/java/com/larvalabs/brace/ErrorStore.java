@@ -172,14 +172,16 @@ public class ErrorStore {
 
     /**
      * The most recent unresolved errors, summary fields only ({@code id, errorType, message,
-     * route, occurrenceCount, lastSeen}) — no stack traces. Backs {@code errors.recent} in
-     * {@code /ops/status}; full detail lives at {@code /ops/errors/{id}}.
+     * route, occurrenceCount, firstSeen, lastSeen, at}) — the same row shape as the no-database
+     * in-memory summaries, so {@code errors.recent} in {@code /ops/status} doesn't change shape
+     * with the deployment mode. {@code at} is the first app frame of the stored trace; full
+     * detail lives at {@code /ops/errors/{id}}.
      */
     public List<Map<String, Object>> recentUnresolved(int limit) {
         var db = new Database(databaseFactory.openSession());
         try {
             var rows = db.sqlQuery(
-                "SELECT id, error_type, message, route, occurrence_count, last_seen " +
+                "SELECT id, error_type, message, route, occurrence_count, first_seen, last_seen, stack_trace " +
                 "FROM ops_errors WHERE resolved_at IS NULL ORDER BY last_seen DESC LIMIT ?", limit);
             var result = new ArrayList<Map<String, Object>>();
             for (var row : rows) {
@@ -189,7 +191,10 @@ public class ErrorStore {
                 m.put("message", row[2]);
                 m.put("route", row[3]);
                 m.put("occurrenceCount", ((Number) row[4]).intValue());
-                m.put("lastSeen", toInstant(row[5]));
+                m.put("firstSeen", toInstant(row[5]));
+                m.put("lastSeen", toInstant(row[6]));
+                String at = Log.appFrame((String) row[7]);
+                if (at != null) m.put("at", at);
                 result.add(m);
             }
             return result;
