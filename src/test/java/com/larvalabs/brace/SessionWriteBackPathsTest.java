@@ -50,6 +50,16 @@ class SessionWriteBackPathsTest {
                 });
                 app.getSession("/login", (req, session) ->
                     Result.text("login:" + session.flash("notice")));
+
+                // Pass-through guard over routes that exercise the non-handler response
+                // paths: CSRF 403, thrown NotFoundException, and the 500 catch.
+                app.before("/guarded/*", (req, session) -> {
+                    session.set("seen", "yes");
+                    return null;
+                });
+                app.post("/guarded/submit", req -> Result.text("ok"));
+                app.get("/guarded/missing", req -> { throw new NotFoundException(); });
+                app.get("/guarded/boom", req -> { throw new RuntimeException("boom"); });
             });
     }
 
@@ -71,6 +81,31 @@ class SessionWriteBackPathsTest {
         assertFalse(miss.headers("Set-Cookie").isEmpty(),
             "guard mutation must be written back even when no route matches");
         // The jar carries the mutated session to the next request.
+        assertEquals("seen:yes", testApp.get("/whoseen").body());
+    }
+
+    @Test
+    void guardMutationPersistsOnCsrf403() {
+        // POST without a CSRF token: the guard runs (and mutates) before CSRF validation
+        // rejects — the mutation must still be written back with the 403.
+        var rejected = testApp.post("/guarded/submit");
+        assertEquals(403, rejected.status());
+        assertFalse(rejected.headers("Set-Cookie").isEmpty(),
+            "guard mutation must be written back on the CSRF-403 path");
+        assertEquals("seen:yes", testApp.get("/whoseen").body());
+    }
+
+    @Test
+    void guardMutationPersistsOnThrownNotFound() {
+        var miss = testApp.get("/guarded/missing");
+        assertEquals(404, miss.status());
+        assertEquals("seen:yes", testApp.get("/whoseen").body());
+    }
+
+    @Test
+    void guardMutationPersistsOn500() {
+        var boom = testApp.get("/guarded/boom");
+        assertEquals(500, boom.status());
         assertEquals("seen:yes", testApp.get("/whoseen").body());
     }
 
