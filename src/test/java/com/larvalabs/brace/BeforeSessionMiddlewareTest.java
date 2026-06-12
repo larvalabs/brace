@@ -106,6 +106,22 @@ class BeforeSessionMiddlewareTest {
     }
 
     @Test
+    void requireSessionWithoutSessionsWarnsAtStartup() throws Exception {
+        // Without .sessions(secret) every request gets an empty session, so the guard
+        // redirects forever — a silent loop. Startup must call it out.
+        LogTap.clear();
+        var noSessions = Brace.test().start(app ->
+            app.requireSession("/x/*", "userId", "/login"));
+        try {
+            boolean warned = LogTap.snapshot().stream().anyMatch(e ->
+                String.valueOf(e.fields().get("message")).contains("sessions are not enabled"));
+            assertTrue(warned, "expected a startup warning about session-aware middleware without sessions");
+        } finally {
+            noSessions.stop();
+        }
+    }
+
+    @Test
     void csrfInterplayUnchangedOnGuardedMutatingRoutes() {
         var session = Session.of("userId", "9");
         // Without a token: still CSRF-rejected (the guard passing must not bypass CSRF).

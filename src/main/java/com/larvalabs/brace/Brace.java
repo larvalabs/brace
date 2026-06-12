@@ -553,6 +553,15 @@ public class Brace {
     // Server lifecycle
 
     public void start() throws Exception {
+        // Session-aware middleware without .sessions(secret) is a silent trap: every
+        // request gets a fresh empty Session, so a requireSession guard redirects forever
+        // (a guard-loop with no error anywhere). Warn loudly at startup.
+        if (!beforeSessionMiddleware.isEmpty() && sessionSecret == null) {
+            Log.warn("Session-aware before-middleware (before(pattern, BeforeSession) / requireSession) "
+                + "is registered but sessions are not enabled — call .sessions(secret). Without it every "
+                + "request sees an empty session, so requireSession guards redirect unconditionally.");
+        }
+
         // Create ErrorStore if database is available
         ErrorStore errorStore = null;
         if (databaseFactory != null) {
