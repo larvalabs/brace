@@ -122,6 +122,32 @@ exposed. All confirmed findings fixed, one commit per finding where independent:
 | One URL-pair parser (`Request.parsePairs`) behind query/form/multi-value parsing | `bcfaba8` |
 | Unshipped-surface cleanups: `?full=true` → `?include=detail` (one verbosity grammar), read-only typed route names GET-only (`postRead` et al. removed as footguns), profiling block computed only when requested, one in-memory error-summary builder | `50b2079` |
 
+## Code-review fix round 2 (2026-06-12)
+
+The `/code-review` pass over fix round 1 (7 finder angles, ~30 candidates, 1 refuted)
+said F5 and F6 needed a second pass at a lower altitude, not spot patches — plus seven
+smaller findings. Findings doc: `docs/2026-06-11-token-review-fix-round-2-todos.md`.
+All fixed except R10 (a startup-throw decision left for Matt); one commit per finding,
+`mvn test` green per commit, `mvn verify` + CLI distribution tests green at the end:
+
+| Finding | Commit |
+|---|---|
+| R2 session write-back choke point — every response path (CSRF-403, thrown-404, 500 included) persists guard mutations through one `writeResult` overload | `784ad1d` |
+| R1 flash consumed at View render time with cookie-borne provenance — PRG to plain-Handler pages displays flash, guard-set flash survives its own request, guards can read pending flash | `aece711` |
+| R3 `Cache-Control: private` on session-cookie responses (heuristic-cacheability leak via force-cache proxies) + SECURITY.md note | `c2239fa` |
+| R4 in-memory `/ops/errors?since=` filters `firstSeen` like the DB path | `dbd5e84` |
+| R5 ClaudeMdGenerator emitted the removed `?full=true` | `77678cc` |
+| R6 `/ops/status` errors.recent — one row shape in both deployment modes (`firstSeen` + `at` added to the DB rows) | `79c19e4` |
+| R7 `/ops/errors` 500-row cap applies only to unfiltered lists; `since` windows are complete; cap documented | `10c7002` |
+| R8 single-pass pair parsing, cached form map on Request, `List.copyOf` at the multi-value accessors | `1b5187a` |
+| R9 `resolveError` 404s on malformed ids instead of 500ing (which re-recorded a framework error) | `b863c51` |
+| Below-cut batch: CSRF `_csrf` through the shared parser (last divergent copy), resolveError/Stats/ErrorStore dedup, ProjectGenerator shares CliAgentsMd's jar-entry constants, parseFailures shared transition | `c941ccc` |
+
+**Open: R10** — `requireSession` without `.sessions(secret)` is a provable infinite
+redirect loop; round 1 added a startup WARN (`da8025c`). Proposal on the table:
+`requireSession` should *throw* at `start()` instead (generic BeforeSession keeps the
+WARN). Matt to decide.
+
 ## User-visible changes
 
 Everything user-visible has a before/after entry in

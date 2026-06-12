@@ -436,7 +436,7 @@ session.clear();                       // remove all
 
 Configure cookie security with `app.sessions(SessionOptions.secure("secret").maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `path(String)`, `domain(String)`.
 
-Flash messages (available for one subsequent request): `session.flash("notice", "Post created")` sets, `session.flash("notice")` reads (returns null after first read), `session.flashData()` returns all flash data as a Map.
+Flash messages (display once, on the next request): `session.flash("notice", "Post created")` sets; the message is consumed when the next page renders — any handler type, e.g. a redirect-after-POST landing on a plain `Handler` view — and is available to templates as the `flash` map (`flash.get("notice")`). `session.flash("notice")` reads it programmatically: reading a pending message from a previous request consumes it (read-once); reading one set during the current request peeks without consuming, so it still displays next request. `session.flashData()` returns the consumed entries as a Map.
 
 ## CSRF
 

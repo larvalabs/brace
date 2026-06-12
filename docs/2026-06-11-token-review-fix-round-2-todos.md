@@ -11,7 +11,7 @@ not spot patches.
 
 ## Findings (ranked)
 
-- [ ] **R1 — Flash mechanism is at the wrong altitude (F6 follow-up).** Three confirmed
+- [x] **R1 — Flash mechanism is at the wrong altitude (F6 follow-up).** Three confirmed
   failure modes, one root cause: consumption is tied to the handler signature
   (`invoker.needsSession()`) instead of to rendering.
   1. PRG to a DbHandler/plain-Handler view under `requireSession`: flash never displays
@@ -27,7 +27,7 @@ not spot patches.
   marks session modified → existing write-back picks it up), make `Session.flash(key)`
   fall back to peeking `data.get("_flash:"+key)`, and only consume entries that arrived
   in the cookie. BraceHandler.java:297, Session.java:160.
-- [ ] **R2 — Session write-back needs a choke point (F5 follow-up).** Five attach sites
+- [x] **R2 — Session write-back needs a choke point (F5 follow-up).** Five attach sites
   now, and three paths still drop guard mutations: CSRF-403 (BraceHandler.java:320),
   the NotFoundException catch, and the 500 catch (both structurally can't attach —
   `session` is declared inside the try). Hoist the session local above the try, route
@@ -35,35 +35,35 @@ not spot patches.
   explicitly whether 500s persist guard mutations (they should — the DB rollback is
   orthogonal to middleware session touches). Extend SessionWriteBackPathsTest to the
   CSRF-403 and thrown-404/500 paths.
-- [ ] **R3 — Static Set-Cookie + shared caches.** serveStaticFile emits zero caching
+- [x] **R3 — Static Set-Cookie + shared caches.** serveStaticFile emits zero caching
   headers, so a static 200 carrying a session Set-Cookie (lastSeen-touch middleware) is
   heuristically cacheable; force-cache-statics proxy recipes replay user A's cookie to
   everyone. Fix: emit `Cache-Control: private` (or no-store) whenever a session cookie
   is attached to a response with no explicit Cache-Control — arguably for all such
   responses, not just static. Add a SECURITY.md note about the lastSeen pattern +
   static prefixes. BraceHandler.java:266.
-- [ ] **R4 — `?since=` divergence.** In-memory fallback filters `lastSeen`, DB path
+- [x] **R4 — `?since=` divergence.** In-memory fallback filters `lastSeen`, DB path
   filters `first_seen`. Filter `firstSeen` in `inMemoryErrors` to match.
   OpsHandler.java:613.
-- [ ] **R5 — ClaudeMdGenerator still emits `?full=true`** — the one emitter missed by
+- [x] **R5 — ClaudeMdGenerator still emits `?full=true`** — the one emitter missed by
   the `?include=detail` convergence. ClaudeMdGenerator.java:100 (check the
   generated-CLAUDE.md test).
-- [ ] **R6 — `/ops/status` errors.recent shape differs by mode.** In-memory rows carry
+- [x] **R6 — `/ops/status` errors.recent shape differs by mode.** In-memory rows carry
   `firstSeen` + `at`; DB rows (recentUnresolved) don't. Pick one shape — likely give
   recentUnresolved firstSeen + stack_trace→at so both modes serve the richer shape.
   OpsHandler.java:307, ErrorStore.java:178.
-- [ ] **R7 — LIST_LIMIT=500 silent truncation.** errors.count is uncapped (store prunes
+- [x] **R7 — LIST_LIMIT=500 silent truncation.** errors.count is uncapped (store prunes
   at 1000); list returns 500 with no signal. Minimum: document in BRACE-OPS + migration
   guide; better: only cap when no `since` filter, or echo a truncation hint.
   ErrorStore.java:206.
-- [ ] **R8 — parser convergence allocation regression.** parseQuery builds multi-map +
+- [x] **R8 — parser convergence allocation regression.** parseQuery builds multi-map +
   collapsed map per request (2 maps even with no query string); parseFormBody doubles
   the same way per formParam() call; valuesOf leaks parsePairs' mutable ArrayList
   (was List.copyOf). Single-pass last-wins mode (per-pair callback) in the shared
   parser, shared empty-map early return, List.copyOf at valuesOf. Consider caching the
   parsed form map in a Request field (body is immutable) — fixes the pre-existing
   re-parse-per-call too. Request.java:188, BraceHandler.java:705.
-- [ ] **R9 — resolveError 500 on malformed id.** Unguarded `longPathParam` (sibling
+- [x] **R9 — resolveError 500 on malformed id.** Unguarded `longPathParam` (sibling
   errorDetail catches NFE) → POST /ops/errors/abc/resolve 500s and records a framework
   error — re-reddening the count the resolve path exists to clear. Pre-existing;
   two-line fix. OpsHandler.java:575.
@@ -71,6 +71,10 @@ not spot patches.
   Provably an infinite redirect loop; the WARN scrolls past and the symptom
   (ERR_TOO_MANY_REDIRECTS) points nowhere. Proposal: `requireSession` throws at
   `start()`; generic BeforeSession (possibly read-only) keeps the WARN. Matt to decide.
+
+**Status (2026-06-12):** R1–R9 fixed (one commit each), below-the-cut batch folded in
+(`c941ccc`), `mvn verify` + `tests/cli/test-distribution.sh` green, review record and
+migration guide updated. **R10 remains open — Matt's call** (throw vs WARN at start()).
 
 ## Below the cut (confirmed, fold in where convenient)
 

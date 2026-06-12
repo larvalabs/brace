@@ -72,6 +72,8 @@ summary; this is the scan/jump table.
 | `brace test` condensed when piped | behavior change | scripts grepping raw JUnit output: match summary line or `--verbose` | [§](#changed-brace-test-prints-condensed-output-when-stdout-is-not-a-tty) |
 | Startup log noise quieted | behavior change | none; `-Dlog.level.*` restores; exclude `slf4j-jdk14` if you ship a provider | [§](#behavior-change-third-party-startup-log-noise-is-quieted-by-default) |
 | Defaulted numeric accessors no longer throw | behavior change | none unless relying on the 500 | [§](#behavior-change-defaulted-numeric-query-accessors-no-longer-throw-on-unparseable-input) |
+| Flash renders on any page, consumed at render time | behavior change | none — bug fixes; relax tests asserting the old eat-the-flash behavior | [§](#behavior-change-flash-messages-render-on-any-page-and-are-consumed-at-render-time) |
+| Session-cookie responses get `Cache-Control: private` | behavior change | none; an explicit `Cache-Control` wins | [§](#behavior-change-session-cookie-responses-default-to-cache-control-private) |
 | Dev-mode 404s list near-miss routes | new-optional | relax exact-body 404 asserts in dev-mode tests | [§](#new-dev-mode-only-404s-list-near-miss-routes) |
 | Request/response hardening (headers, cookies, body order, `?` escaping) | behavior change | none; note body-read ordering on unmatched routes | [§](#requestresponse-hardening-fixes) |
 | Non-multipart bodies capped at `maxUploadSize` (413) | behavior change | raise `maxUploadSize` if >10 MB bodies intended | [§](#security-fix-non-multipart-request-bodies-are-now-capped-at-maxuploadsize) |
@@ -841,6 +843,12 @@ always returned the full shape anyway. Conversely, a pre-0.1.7 CLI against a 0.1
 server keeps working but sees summaries; pass `?include=detail` server-side consumers need
 explicitly.
 
+**Row cap.** An *unfiltered* list (no `since`) returns at most the **500 most recent**
+rows — `errors.count` in `/ops/status` is the true unresolved total (the store itself
+prunes at 1000 by default). A `since`-filtered list returns its whole window, so pass
+`since` when you need completeness. (0.1.6 had no list cap — the worst case was the
+whole pruned store, up to 1000 full-detail rows, in one response.)
+
 `GET /ops/regressions` is unaffected — it never carried stack traces.
 
 ## Breaking for scripted consumers: `/ops/status` is now a compact snapshot
@@ -1317,6 +1325,52 @@ explicitly.
 **Action:** none for most apps. If a handler *relied* on the 500 (or caught
 `NumberFormatException` around a defaulted call) to detect bad input, switch it to the
 non-defaulted variant and handle the exception yourself.
+
+## Behavior change: flash messages render on any page and are consumed at render time
+
+**Who is affected:** apps using `session.flash(key, value)` / `session.flash(key)` /
+the `flash` template parameter. For almost everyone this is a set of bug fixes — flash
+messages that previously vanished (or popped up stale on a later page) now display
+exactly once, where intended. No call-site changes are needed.
+
+**What changed.** Through 0.1.6 (and most of the 0.1.7 cycle), pending flash was
+consumed at dispatch time, and only for handlers that take a `Session` parameter. That
+tied a rendering concern to the handler's *signature*, with three visible failure modes:
+a redirect-after-POST landing on a `DbHandler` or plain-`Handler` page never displayed
+the flash (it lingered in the cookie and appeared later on an unrelated page); a flash
+set by a pass-through guard *during* a request was consumed in that same request (so it
+died before ever displaying); and middleware could not read pending flash at all.
+
+From 0.1.7, flash mechanics follow the data, not the signature:
+
+- **Consumption happens when a page actually renders** (any `View`/`Result.view`
+  response, whatever the handler type). Redirects, JSON, and polling responses leave
+  pending flash in the cookie for the page that will display it.
+- **Only cookie-borne flash is consumable.** A flash set during the current request
+  (e.g. by a guard) survives that request's render and displays on the next page.
+- **`session.flash(key)` reads pending flash directly** — guards and non-rendering
+  handlers can read it. Reading a cookie-borne entry is read-once (it is consumed and
+  stripped from the cookie); reading an entry set this request peeks without consuming.
+- **The `flash` template parameter is available on every rendered page** when sessions
+  are enabled — previously only `Session`-taking handlers got it.
+
+**Action:** none, unless a template relied on `flash` being absent for non-`Session`
+handlers, or a test asserted the old eat-the-flash behavior on JSON/polling routes.
+
+## Behavior change: session-cookie responses default to `Cache-Control: private`
+
+Any response Brace attaches a session `Set-Cookie` to now also carries
+`Cache-Control: private` — unless the handler set an explicit `Cache-Control`, which
+always wins. A response carrying a session cookie is per-user by definition; without
+a caching header it was *heuristically cacheable*, and a misconfigured shared cache
+(e.g. a force-cache-statics proxy recipe in front of a session-touching middleware)
+could replay one user's cookie to every user. Spec-compliant proxies and browsers now
+treat these responses as per-user automatically.
+
+**Action:** none for correctness. If you intended a session-cookie response to be
+shared-cacheable (almost certainly not), set an explicit `Cache-Control`. See
+`docs/SECURITY.md` → "Session Cookies and Shared Caches" for the middleware-scoping
+advice.
 
 ## New (dev mode only): 404s list near-miss routes
 
