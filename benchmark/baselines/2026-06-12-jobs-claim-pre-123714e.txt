@@ -1,0 +1,86 @@
+CREATE DATABASE
+JobsBench jar: /tmp/jobs-pre.jar
+Jobs claim-latency benchmark
+  url=jdbc:postgresql://localhost:5433/jobs_bench seedDead=1000000 pending=1000
+Jun 12, 2026 3:15:51 PM org.flywaydb.core.FlywayExecutor execute
+INFO: Database: jdbc:postgresql://localhost:5433/jobs_bench (PostgreSQL 16.13)
+Jun 12, 2026 3:15:51 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory allAppliedMigrations
+INFO: Schema history table "public"."flyway_brace_history" does not exist yet
+Jun 12, 2026 3:15:51 PM org.flywaydb.core.internal.command.DbValidate validate
+INFO: Successfully validated 14 migrations (execution time 00:00.019s)
+Jun 12, 2026 3:15:51 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory create
+INFO: Creating Schema History table "public"."flyway_brace_history" ...
+Jun 12, 2026 3:15:51 PM org.flywaydb.core.internal.command.DbMigrate migrateGroup
+INFO: Current version of schema "public": << Empty Schema >>
+Jun 12, 2026 3:15:51 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "1 - brace scheduled jobs"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "2 - brace ops tables"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "3 - brace profiling tables"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "4 - brace error context"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "5 - brace scheduled runs"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "6 - brace ops errors dedupe index"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "7 - brace timestamptz"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "8 - brace cache"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "9 - brace counters"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "10 - brace ws messages"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "11 - brace counters unlogged"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "12 - brace regressions"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "13 - brace ops timeseries instance"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "14 - ops timeseries instance pk"
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate logSummary
+INFO: Successfully applied 14 migrations to schema "public", now at version v14 (execution time 00:00.115s)
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.FlywayExecutor execute
+INFO: Database: jdbc:postgresql://localhost:5433/jobs_bench (PostgreSQL 16.13)
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory allAppliedMigrations
+INFO: Schema history table "public"."flyway_schema_history" does not exist yet
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbValidate validate
+INFO: Successfully validated 0 migrations (execution time 00:00.002s)
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbValidate validate
+WARNING: No migrations found. Are your locations set up correctly?
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory create
+INFO: Creating Schema History table "public"."flyway_schema_history" with baseline ...
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbBaseline baseline
+INFO: Successfully baselined schema with version: 0
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate migrateGroup
+INFO: Current version of schema "public": 0
+Jun 12, 2026 3:15:52 PM org.flywaydb.core.internal.command.DbMigrate logSummary
+INFO: Schema "public" is up to date. No migration necessary.
+Jun 12, 2026 3:15:52 PM org.hibernate.Version logVersion
+INFO: HHH000412: Hibernate ORM core version [WORKING]
+Jun 12, 2026 3:15:52 PM org.hibernate.engine.jdbc.connections.internal.ConnectionProviderInitiator instantiateNamedConnectionProvider
+INFO: HHH000130: Instantiating explicit connection provider: org.hibernate.hikaricp.internal.HikariCPConnectionProvider
+SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Jun 12, 2026 3:15:52 PM org.hibernate.engine.jdbc.dialect.internal.DialectFactoryImpl constructDialect
+WARN: HHH90000025: PostgreSQLDialect does not need to be specified explicitly using 'hibernate.dialect' (remove the property setting and it will be selected by default)
+Jun 12, 2026 3:15:52 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://localhost:5433/jobs_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database version: 16.13
+	Autocommit mode: true
+	Isolation level: undefined/unknown
+	Pool: HikariCPConnectionProvider
+	Minimum pool size: 10
+	Maximum pool size: 10
+Jun 12, 2026 3:15:52 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+  seed: inserting 1000000 dead rows...
+  seed: done in 3s
+empty poll    n=30  min=62.8ms  p50=65.3ms  avg=65.6ms  max=73.9ms
+job stats     n=20  min=100.7ms  p50=216.5ms  avg=210.9ms  max=235.9ms
+drain         1000 jobs in 20 polls, 29263 ms total, 29.26 ms/job

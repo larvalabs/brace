@@ -297,6 +297,36 @@ plus possibly H7 (per-route stats key lookup no longer allocates a redacted path
 string on the success path). Given the variance caveat, confidence is moderate;
 the DB-backed tests are dominated by query time and moved within noise, as expected.
 
+### Job-queue claim latency (H3/H4) — `123714e` (pre) vs `515cdcd` (post)
+
+First run of `run-jobs-claim.sh` (gap #4, claim-latency half): `benchmark.JobsBench`
+against tfb-postgres, database `jobs_bench`, seeded with 1M dead rows (95% completed /
+5% failed, run_at spread over the prior 30 days — the oldest-prefix shape H3 describes).
+Same jar-swap discipline as the session suite (`JobPoller.class` checksums verified
+distinct). The post run reused the seeded table **plus** the 1,000 rows the pre drain
+completed, so it faced slightly more history, and paid the one-time V15 index build at
+startup. Not a quiet-window run — these are single-query latencies, not throughput, and
+the deltas are far outside machine noise. Raw outputs:
+`benchmark/baselines/2026-06-12-jobs-claim-pre-123714e.txt`, `…-post-515cdcd.txt`.
+
+| Metric | Pre (avg) | Post (avg) | Δ |
+|---|---|---|---|
+| Empty poll (every 10s/instance, forever) | 65.6ms | 0.7ms | **−99%** |
+| `getDurableJobStats` (per /ops/status) | 210.9ms | 38.4ms | **−82%** |
+| Drain 1,000 no-op jobs | 29.26 ms/job (20 polls × 50) | 0.52 ms/job (200 polls × 5) | **−98%** |
+
+Mechanism check: empty poll is the V15 partial index + NOT EXISTS rewrite doing exactly
+what H3 predicted — claim cost now tracks live work (sub-ms) instead of table history.
+Stats is the 4-scans→1-scan collapse; the remaining 38ms is the irreducible single scan
+of 1M rows (drops further as retention prunes). The drain line is indicative only
+(H4 changed batch size 50 → poolSize/2 = 5), but is the strongest combined signal:
+56× more throughput with 10× more claim round-trips, because each pre-H3 claim-with-
+pending paid ~1.4s walking dead rows and hashing 950k completed ids per poll.
+
+The mixed web+jobs half (`JobsApp` + `run-jobs-mixed.sh`, H4's pool-contention story)
+is built but not yet run — it's a wrk throughput run and needs the quiet-window
+protocol.
+
 ### Session/CSRF scenario — `8b495d5` (pre) vs `33180b8` (post)
 
 First run of the new `run-session.sh` suite (see "What exists today" / gap #2):
@@ -327,6 +357,6 @@ single form-body parse.
 1. ~~**Baseline first (required)**~~ — captured above. `--latency` added to `run-brace.sh`; benchmark module repointed at the current framework version (was a stale unresolvable `0.2.0-SNAPSHOT`) and its `req.param` call updated to the current `req.queryParam` API; script default JDK moved to 25 per AGENTS.md recommendation.
 2. ~~**Session/CSRF scenario (required for H5)**~~ — done: `benchmark.SessionApp` + `run-session.sh` (session-read GET, CSRF form POST, csrf(false) API POST; primes cookie + token, sanity-checks semantics, verifies the port listener is its own app). Results above.
 3. **JMH micro-module (recommended):** a small, separate non-shipped module (or test-scope profile) with benchmarks for the allocation-sensitive units: route matching (M1), form bind (M4), session decrypt (H5), log line (H1), `redactPath` (M8), `convertPositionalParams` (L6). Use `gc.alloc.rate.norm` to verify allocation fixes (H2, M6) — wrk alone can't see allocation.
-4. **Job-queue scenario (recommended for H3/H4):** a seeded `scheduled_jobs` table (e.g. 1M completed rows + 1k pending) with poll-latency measurement before/after the partial index; a mixed web+jobs load to demonstrate the pool-contention fix.
+4. ~~**Job-queue scenario (recommended for H3/H4)**~~ — claim-latency half done (`JobsBench` + `run-jobs-claim.sh`, results above: empty poll −99%, stats −82%, drain −98%/job). Mixed web+jobs half built (`JobsApp` + `run-jobs-mixed.sh`: wrk on `/ping-db` while a `/burst` of connection-holding SlowJobs churns) but awaiting a quiet window.
 5. **Cold-start timing (for M7/M21):** trivial harness — `time` from JVM launch to first successful HTTP response on the sample app (with a Postgres testcontainer for the DB-app case), 5 runs, before/after. Plus first-render latency per template (M7) via the access log.
 6. **Not adding:** CI perf gates (too flaky on shared runners — keep the protocol manual and documented), percentile tracking inside `Stats` (a feature, not a review fix; note as a candidate follow-up for the ops dashboard).
