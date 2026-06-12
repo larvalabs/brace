@@ -1034,3 +1034,23 @@ Net effect: requests stay healthy during job bursts, and total queue throughput 
 mixed fast/slow workloads goes up — but peak job parallelism drops from 50 to
 `poolSize / 2`. If you need more, raise the pool size via the `DatabaseFactory`
 constructor's `poolSize` argument.
+
+## Changed: Mailer no longer retains sent emails in production
+
+**Who is affected:** apps reading `mailer.sent()`/`mailer.last()` outside dev mode, or
+tooling that treated `sentCount` as "send attempts".
+
+The mailer previously appended every email — full HTML and text bodies — to an
+unbounded in-memory list even when really sending via SMTP: a slow leak of roughly
+20KB per email, ~2GB per 100k sends. Now:
+
+- **Capture is dev-only** (`new Mailer(null)`, no SMTP URL) and bounded to the last
+  500 emails, dropping the oldest. The `mailer.sent()` / `mailer.last()` /
+  `mailer.clearCaptured()` test API is unchanged within that window.
+- **With SMTP configured, nothing is captured.** `mailer.sent()` returns an empty
+  list in production — it was never a safe thing to rely on, and now it's explicit.
+- **`sentCount()` counts successful sends only** (it previously counted attempts,
+  including failures, and was reset by `clearCaptured()` in all modes). Failed sends
+  count in `failCount()` as before. The /ops dashboard "Sent" stat therefore now
+  means emails actually handed to SMTP. `sentCount()` also widens `int` → `long`;
+  recompile if you call it (source-compatible).

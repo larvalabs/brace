@@ -99,8 +99,22 @@ class MailerTest {
             // expected
         }
         assertEquals(1, mailer.failCount());
-        // sentCount still records the attempt
-        assertEquals(1, mailer.sentCount());
+        // A failed send is not a sent email: it counts in failCount only, and SMTP
+        // mode captures nothing (capture is dev-only).
+        assertEquals(0, mailer.sentCount());
+        assertTrue(mailer.sent().isEmpty());
+    }
+
+    @Test
+    void captureIsBoundedDropOldest() {
+        var mailer = new Mailer(null);
+        for (int i = 1; i <= Mailer.CAPTURE_LIMIT + 1; i++) {
+            mailer.to("user@example.com").subject("msg-" + i).text("body").send();
+        }
+        assertEquals(Mailer.CAPTURE_LIMIT + 1, mailer.sentCount(), "counter keeps counting past the cap");
+        assertEquals(Mailer.CAPTURE_LIMIT, mailer.sent().size(), "capture stays bounded");
+        assertEquals("msg-" + (Mailer.CAPTURE_LIMIT + 1), mailer.last().subject(), "newest kept");
+        assertEquals("msg-2", mailer.sent().get(0).subject(), "oldest dropped");
     }
 
     @Test

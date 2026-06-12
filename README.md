@@ -332,7 +332,7 @@ mail.to("user@example.com")
     .send();
 ```
 
-Dev mode captures emails without sending. Access via `mailer.sent()` in tests.
+Dev mode captures emails without sending (last 500). Access via `mailer.sent()` in tests.
 
 ## Storage
 

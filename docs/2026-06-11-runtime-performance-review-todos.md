@@ -51,11 +51,12 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
   - Fix: decrypt once — reuse the `:275` `csrfSession` in the ensure block; gate the ensure-token/`View.setCsrfField` work on `match.route().csrfRequired()`, or mint lazily only when a `View` render actually consumes `csrfField`. Decide deliberately what cookieless clients should get (probably: no Set-Cookie unless the route renders a form).
   - Model: frontier (CSRF invariants — M5c regression risk; the comment block at `:289-297` documents the orphaned-token failure mode to preserve).
 
-- [ ] **H6 — Mailer retains every sent email forever, in production too**
+- [x] **H6 — Mailer retains every sent email forever, in production too**
   - Severity: High. File: `Mailer.java:11,34` (capture before the `smtpUrl != null` branch), `:28` (`sentCount` = `captured.size()`).
   - `send()` unconditionally appends the full email (HTML + text bodies) to an unbounded `synchronizedList` even when really sending via SMTP. 100k emails × 20KB ≈ 2GB leaked. The /ops counter is structurally coupled to the leak.
   - Fix: capture only when `smtpUrl == null` (dev mode), cap dev capture (e.g. 500, drop-oldest); track `sentCount` with a `LongAdder` like `failCount`.
   - Model: smaller model (mechanical; keep `sent()`/`last()`/`clearCaptured()` test API working).
+  - **Resolved as:** per spec (dev-only capture, 500 drop-oldest, `LongAdder`). Deliberate semantics change beyond the spec: `sentCount()` now counts *successful* sends only — it previously counted attempts including SMTP failures, which made the ops dashboard's side-by-side Sent/Failed double-count failures. `clearCaptured()` also resets the counter (preserves the dev-mode `sentCount == sent().size()` invariant TestApp relies on). `sentCount()` widened `int` → `long`. Migration-guide entry covers all three; test API verified unchanged.
 
 - [x] **H7 — Per-route stats keyed by concrete URL path: unbounded cardinality, never reset**
   - Severity: High. Files: `Stats.java:37-38,74-75`; fed raw paths from `BraceHandler.java:389,404,424`; `OpsHandler.java` route sort per /ops/status call.

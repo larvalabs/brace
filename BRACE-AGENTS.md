@@ -575,7 +575,9 @@ mail.to("user@example.com")
     .send();
 ```
 
-Dev mode captures emails without sending. Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
+Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.
+Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
+With SMTP configured nothing is captured; `sentCount()` counts successful sends, `failCount()` failures.
 
 ## Storage
 
