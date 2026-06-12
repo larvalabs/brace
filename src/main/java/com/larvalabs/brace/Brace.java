@@ -47,6 +47,7 @@ public class Brace {
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private WsRegistry wsRegistry;
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
+    private int jobRetentionDays = 7;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -303,6 +304,17 @@ public class Brace {
 
     public Brace daily(String time, String name, Job job) {
         jobScheduler.daily(time, name, job);
+        return this;
+    }
+
+    /**
+     * How many days finished (completed or failed) durable jobs stay in {@code scheduled_jobs}
+     * before the framework's daily prune deletes them. Default 7. Set {@code 0} (or negative)
+     * to keep finished rows forever — the pre-0.1.7 behavior. Rows another job still depends
+     * on are kept regardless of age.
+     */
+    public Brace jobRetention(int days) {
+        this.jobRetentionDays = days;
         return this;
     }
 
@@ -638,6 +650,19 @@ public class Brace {
                 "type", throwable.getClass().getName(),
                 "message", String.valueOf(throwable.getMessage())));
         });
+
+        // Durable-job retention (perf review H3): finished rows otherwise accumulate forever and
+        // every poll's claim query walks the dead prefix. Daily, once cluster-wide (B1
+        // coordination via brace_scheduled_runs). Registered before jobScheduler.start —
+        // daily() has no late-registration path.
+        if (databaseFactory != null && jobRetentionDays > 0) {
+            int retentionDays = jobRetentionDays;
+            jobScheduler.daily("03:23", "brace-jobs-prune", (db, ctx) -> {
+                var cutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(retentionDays));
+                int deleted = JobPoller.purgeFinishedJobs(db, cutoff);
+                ctx.message("Deleted " + deleted + " finished jobs older than " + retentionDays + " days");
+            });
+        }
 
         jobScheduler.start(databaseFactory);
         if (databaseFactory != null) {

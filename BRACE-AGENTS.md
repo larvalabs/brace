@@ -528,6 +528,10 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
 
 `JobOptions`: `maxAttempts(n)`, `backoff(Duration)`, `after(jobId)` (run after another job completes).
 
+Finished (completed/failed) durable jobs are pruned daily after 7 days — `scheduled_jobs` is a
+queue, not an archive. Configure with `app.jobRetention(days)`; `0` keeps rows forever. Rows
+another job still depends on are kept regardless of age.
+
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 
 Job lambdas receive `(Database, JobContext)`. Use `ctx.message(...)` to attach a short

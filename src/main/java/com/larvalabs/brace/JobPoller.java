@@ -114,16 +114,21 @@ public class JobPoller {
             db.beginTransaction();
             List<Object[]> rows = db.jdbc(conn -> {
                 var out = new java.util.ArrayList<Object[]>();
+                // Dependency check is NOT EXISTS (an unfinished parent blocks the child) rather
+                // than IN (SELECT all completed ids): the IN form hashes every completed job in
+                // the table on every poll; NOT EXISTS is a single PK probe per candidate. The FK
+                // on depends_on_id guarantees the parent row exists, so the two are equivalent.
                 try (var ps = conn.prepareStatement(
                         "UPDATE scheduled_jobs SET started_at = CURRENT_TIMESTAMP, attempts = attempts + 1 " +
                         "WHERE id IN (" +
-                        "  SELECT id FROM scheduled_jobs " +
-                        "  WHERE run_at <= CURRENT_TIMESTAMP " +
-                        "  AND completed_at IS NULL AND failed_at IS NULL AND started_at IS NULL " +
-                        "  AND attempts < max_attempts " +
-                        "  AND (depends_on_id IS NULL " +
-                        "       OR depends_on_id IN (SELECT id FROM scheduled_jobs WHERE completed_at IS NOT NULL)) " +
-                        "  ORDER BY run_at LIMIT 50 FOR UPDATE SKIP LOCKED) " +
+                        "  SELECT id FROM scheduled_jobs j " +
+                        "  WHERE j.run_at <= CURRENT_TIMESTAMP " +
+                        "  AND j.completed_at IS NULL AND j.failed_at IS NULL AND j.started_at IS NULL " +
+                        "  AND j.attempts < j.max_attempts " +
+                        "  AND (j.depends_on_id IS NULL " +
+                        "       OR NOT EXISTS (SELECT 1 FROM scheduled_jobs d " +
+                        "                      WHERE d.id = j.depends_on_id AND d.completed_at IS NULL)) " +
+                        "  ORDER BY j.run_at LIMIT 50 FOR UPDATE SKIP LOCKED) " +
                         "RETURNING id, name, job_class, job_data, attempts - 1, max_attempts, backoff_seconds");
                      var rs = ps.executeQuery()) {
                     while (rs.next()) {
@@ -150,17 +155,19 @@ public class JobPoller {
         var db = new Database(factory.openSession());
         try {
             db.beginTransaction();
+            // Same NOT EXISTS dependency form as claimBatchPostgres — see the comment there.
             var rows = db.sqlQuery(
                 "SELECT id, name, job_class, job_data, attempts, max_attempts, backoff_seconds " +
-                "FROM scheduled_jobs " +
-                "WHERE run_at <= CURRENT_TIMESTAMP " +
-                "AND completed_at IS NULL " +
-                "AND failed_at IS NULL " +
-                "AND started_at IS NULL " +
-                "AND attempts < max_attempts " +
-                "AND (depends_on_id IS NULL " +
-                "     OR depends_on_id IN (SELECT id FROM scheduled_jobs WHERE completed_at IS NOT NULL)) " +
-                "ORDER BY run_at " +
+                "FROM scheduled_jobs j " +
+                "WHERE j.run_at <= CURRENT_TIMESTAMP " +
+                "AND j.completed_at IS NULL " +
+                "AND j.failed_at IS NULL " +
+                "AND j.started_at IS NULL " +
+                "AND j.attempts < j.max_attempts " +
+                "AND (j.depends_on_id IS NULL " +
+                "     OR NOT EXISTS (SELECT 1 FROM scheduled_jobs d " +
+                "                    WHERE d.id = j.depends_on_id AND d.completed_at IS NULL)) " +
+                "ORDER BY j.run_at " +
                 "LIMIT 50");
             db.commitTransaction();
             return rows;
@@ -267,15 +274,44 @@ public class JobPoller {
     }
 
     public static DurableJobStats getDurableJobStats(Database db) {
-        long pending = countWithStatus(db, "completed_at IS NULL AND failed_at IS NULL AND started_at IS NULL");
-        long running = countWithStatus(db, "started_at IS NOT NULL AND completed_at IS NULL AND failed_at IS NULL");
-        long completed = countWithStatus(db, "completed_at IS NOT NULL");
-        long failed = countWithStatus(db, "failed_at IS NOT NULL");
-        return new DurableJobStats(pending, running, completed, failed);
+        // One table scan instead of four COUNT(*) passes; SUMs are NULL on an empty table.
+        var rows = db.sqlQuery(
+            "SELECT " +
+            "SUM(CASE WHEN completed_at IS NULL AND failed_at IS NULL AND started_at IS NULL THEN 1 ELSE 0 END), " +
+            "SUM(CASE WHEN started_at IS NOT NULL AND completed_at IS NULL AND failed_at IS NULL THEN 1 ELSE 0 END), " +
+            "SUM(CASE WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END), " +
+            "SUM(CASE WHEN failed_at IS NOT NULL THEN 1 ELSE 0 END) " +
+            "FROM scheduled_jobs");
+        if (rows.isEmpty()) {
+            return new DurableJobStats(0, 0, 0, 0);
+        }
+        Object[] row = rows.get(0);
+        return new DurableJobStats(toCount(row[0]), toCount(row[1]), toCount(row[2]), toCount(row[3]));
     }
 
-    private static long countWithStatus(Database db, String condition) {
-        var result = db.sqlQueryLong("SELECT COUNT(*) FROM scheduled_jobs WHERE " + condition);
-        return result != null ? result : 0;
+    private static long toCount(Object value) {
+        return value == null ? 0 : ((Number) value).longValue();
+    }
+
+    /**
+     * Delete completed/failed jobs whose terminal timestamp is older than {@code cutoff}. Rows
+     * another job still references via {@code depends_on_id} are kept — the FK would reject the
+     * delete, and an unfinished child must still see its parent's state; a finished parent is
+     * removed by a later purge once its children are themselves purged. Returns rows deleted.
+     * Called by the framework's daily {@code brace-jobs-prune} job (see {@code Brace.start});
+     * public so apps with a custom retention schedule can run it themselves.
+     */
+    public static int purgeFinishedJobs(Database db, Instant cutoff) {
+        var ts = Timestamp.from(cutoff);
+        return db.jdbc(conn -> {
+            try (var ps = conn.prepareStatement(
+                    "DELETE FROM scheduled_jobs " +
+                    "WHERE (completed_at < ? OR failed_at < ?) " +
+                    "AND NOT EXISTS (SELECT 1 FROM scheduled_jobs c WHERE c.depends_on_id = scheduled_jobs.id)")) {
+                ps.setTimestamp(1, ts);
+                ps.setTimestamp(2, ts);
+                return ps.executeUpdate();
+            }
+        });
     }
 }

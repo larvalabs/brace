@@ -320,6 +320,9 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
     JobOptions.maxAttempts(5).backoff(Duration.ofMinutes(10)));
 ```
 
+Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
+`0` to keep forever).
+
 ## Mailer
 
 ```java

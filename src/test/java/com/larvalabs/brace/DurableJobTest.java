@@ -256,6 +256,64 @@ class DurableJobTest {
     }
 
     @Test
+    void purgeDeletesOldFinishedJobsButKeepsReferencedParents() {
+        long oldDoneId, parentId, recentId;
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            oldDoneId = Jobs.schedule(db, new TestJob("old"), Duration.ZERO);
+            parentId = Jobs.schedule(db, new TestJob("parent"), Duration.ZERO);
+            recentId = Jobs.schedule(db, new TestJob("recent"), Duration.ZERO);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+
+        new JobPoller().pollAndExecute(factory);
+        assertEquals(3, TestJob.runCount.get());
+
+        var tenDaysAgo = java.sql.Timestamp.from(
+            java.time.Instant.now().minus(Duration.ofDays(10)));
+        var db2 = new Database(factory.openSession());
+        try {
+            db2.beginTransaction();
+            // A pending child referencing parent: the purge must keep the parent despite its age.
+            Jobs.schedule(db2, new TestJob("child"), Duration.ofHours(1), JobOptions.after(parentId));
+            // Age two completed jobs past the cutoff; "recent" keeps its real completed_at.
+            db2.sql("UPDATE scheduled_jobs SET completed_at = ? WHERE id = ?", tenDaysAgo, oldDoneId);
+            db2.sql("UPDATE scheduled_jobs SET completed_at = ? WHERE id = ?", tenDaysAgo, parentId);
+            // An old permanently-failed job: purged like completed ones.
+            db2.sql(
+                "INSERT INTO scheduled_jobs (name, job_class, run_at, failed_at, max_attempts, backoff_seconds) " +
+                "VALUES (?, ?, ?, ?, 1, 60)",
+                "old-failed", FailingJob.class.getName(), tenDaysAgo, tenDaysAgo);
+            db2.commitTransaction();
+        } finally {
+            db2.close();
+        }
+
+        var db3 = new Database(factory.openSession());
+        try {
+            db3.beginTransaction();
+            int deleted = JobPoller.purgeFinishedJobs(db3, java.time.Instant.now().minus(Duration.ofDays(7)));
+            db3.commitTransaction();
+            assertEquals(2, deleted, "old completed + old failed purged; referenced parent and recent kept");
+
+            db3.beginTransaction();
+            var stats = JobPoller.getDurableJobStats(db3);
+            db3.commitTransaction();
+            assertEquals(1, stats.pending(), "child still pending");
+            assertEquals(2, stats.completed(), "parent (referenced) and recent retained");
+            assertEquals(0, stats.failed(), "old failed job purged");
+            assertNull(db3.sqlQueryLong("SELECT id FROM scheduled_jobs WHERE id = " + oldDoneId));
+            assertNotNull(db3.sqlQueryLong("SELECT id FROM scheduled_jobs WHERE id = " + parentId));
+            assertNotNull(db3.sqlQueryLong("SELECT id FROM scheduled_jobs WHERE id = " + recentId));
+        } finally {
+            db3.close();
+        }
+    }
+
+    @Test
     void jobWithNonDurableJobClassIsFailed() {
         var db = new Database(factory.openSession());
         try {

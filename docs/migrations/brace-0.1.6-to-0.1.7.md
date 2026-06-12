@@ -986,3 +986,30 @@ Matched requests are now keyed by the **route pattern**:
 This bounds the map by the number of registered routes and makes "slowest routes"
 aggregate per route, which is almost certainly what you wanted. Requests that never
 match a route keep the old concrete-path keying (with secret redaction).
+
+## Changed: finished durable jobs are pruned after 7 days (configurable)
+
+**Who is affected:** apps using durable jobs (`Jobs.schedule(...)`) that treat old
+`scheduled_jobs` rows as a permanent audit log, or that query the table directly.
+
+Completed and failed job rows previously stayed in `scheduled_jobs` forever, so the
+poller's claim query walked an ever-growing prefix of dead rows on every poll (every
+10 seconds), and `/ops/status` job counts scanned the full history. Now a daily
+framework job (`brace-jobs-prune`, runs once cluster-wide) deletes finished rows older
+than 7 days. Rows another job still references via `JobOptions.after(...)` are kept
+regardless of age.
+
+```java
+// Keep finished jobs for 30 days instead
+app.jobRetention(30);
+
+// Restore the pre-0.1.7 keep-forever behavior
+app.jobRetention(0);
+```
+
+If you need job history beyond the retention window, copy what you need into your own
+table from the job itself — `scheduled_jobs` is a queue, not an archive.
+
+On Postgres this release also adds a partial index over claimable jobs
+(`idx_scheduled_jobs_claimable`, framework migration V15, applied automatically), so
+claim cost tracks live work rather than table size.
