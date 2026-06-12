@@ -18,7 +18,7 @@ Four narrow cases **are breaking** and need action:
   must switch to the `Authorization: Bearer` header — see "`?token=` query-param auth
   removed" below.
 - Scripts that parse **`GET /ops/errors`** (or `brace errors --json`) and read
-  `stackTrace`/`requestDetail` from the rows must add `?full=true` (CLI: `--full`) —
+  `stackTrace`/`requestDetail` from the rows must add `?include=detail` (CLI: `--full`) —
   the default response is now a compact summary per error. See "`/ops/errors` now
   returns summaries" below.
 - Scripts that parse **`GET /ops/status`** (or `brace status --json`) and read
@@ -63,7 +63,7 @@ summary; this is the scan/jump table.
 | Refreshed `CLAUDE.md` generator | new-optional | optional — regenerate and diff | [§](#new-optional-refreshed-claudemd-capability-index) |
 | `brace agents-md` doc refresh | new-optional | run after bumping `<brace.version>` | [§](#new-optional-brace-agents-md--refresh-brace-agentsmd-after-an-upgrade) |
 | `BRACE-OPS.md` ops reference split | new-optional | none — `brace agents-md` writes it; ops content moved out of `BRACE-AGENTS.md` | [§](#new-optional-brace-opsmd--ops-reference-split-out-of-brace-agentsmd) |
-| `/ops/errors` returns summaries | breaking | scripts reading `stackTrace` etc.: add `?full=true` or fetch `/ops/errors/{id}` | [§](#breaking-for-scripted-consumers-opserrors-now-returns-summaries) |
+| `/ops/errors` returns summaries | breaking | scripts reading `stackTrace` etc.: add `?include=detail` or fetch `/ops/errors/{id}` | [§](#breaking-for-scripted-consumers-opserrors-now-returns-summaries) |
 | `/ops/status` compact snapshot | breaking | scripts reading `timeseries`/`profiling`: add `?include=`; exit code now real | [§](#breaking-for-scripted-consumers-opsstatus-is-now-a-compact-snapshot) |
 | Per-test H2 database | behavior change | suites relying on the shared DB: set an explicit URL | [§](#behavior-change-each-bracetest-gets-its-own-h2-database) |
 | CLI JSON output compact | behavior change | none if parsing as JSON; fix text-layout greps | [§](#behavior-change-cli-json-output-is-now-compact-one-line) |
@@ -265,9 +265,12 @@ if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422
 0.1.6 added `getDb`/`postSession`/`putFull` etc., but read-only handlers (the most
 common kind — almost every GET) still required a cast, because the raw
 `get/post/put/delete` overloads are ambiguous for multi-arg lambdas. 0.1.7 completes
-the set: `getRead/postRead/putRead/deleteRead` (ReadDbHandler — DB queries, no
-transaction) and `getReadFull/...` (ReadFullHandler — read-only DB + session), on
-both `Brace` and route groups.
+the set with `getRead` (ReadDbHandler — DB queries, no transaction) and `getReadFull`
+(ReadFullHandler — read-only DB + session), on both `Brace` and route groups. The
+read-only names exist for GET only: pairing a mutating verb with a
+transaction-skipping handler is a footgun (an insert inside would run outside any
+transaction). The rare legitimate case — e.g. POST as a complex query — still works
+via the cast form, `app.post(pattern, (ReadDbHandler) ...)`.
 
 **Before (all versions, still works):**
 
@@ -806,7 +809,7 @@ and library frames are skipped), which usually pinpoints the bug without the ful
   complete pre-0.1.7 record for one error — `stackTrace`, `requestDetail`,
   `queriesBefore`, `requestHeaders`, `resolvedAt` and all summary fields. 404 for an
   unknown id. CLI: `brace errors <id>`.
-- **Whole list (compat escape hatch):** `GET /ops/errors?full=true` returns the exact
+- **Whole list (compat escape hatch):** `GET /ops/errors?include=detail` returns the exact
   pre-0.1.7 shape, combinable with the existing `status`/`since` params. CLI:
   `brace errors --full`.
 
@@ -829,13 +832,13 @@ brace errors 7 --env prod --json | jq -r '.stackTrace'
   unchanged.
 - `brace errors <id>` — **new**; prints one error's full detail (human-readable, or the
   detail JSON object in `--json`/piped mode). Exits 0 found / 1 not found / 2 unreachable.
-- `brace errors --full` — **new**; requests `?full=true` for the pre-0.1.7 list shape.
+- `brace errors --full` — **new**; requests `?include=detail` for the pre-0.1.7 list shape.
 
 **Version skew.** A 0.1.7 CLI running `brace errors <id>` against a **pre-0.1.7 server**
 gets a 404 (the server has no `/ops/errors/{id}` route) and reports "not found"; use
-`brace errors --full` there instead — `?full=true` is ignored by old servers, which
+`brace errors --full` there instead — `?include=detail` is ignored by old servers, which
 always returned the full shape anyway. Conversely, a pre-0.1.7 CLI against a 0.1.7
-server keeps working but sees summaries; pass `?full=true` server-side consumers need
+server keeps working but sees summaries; pass `?include=detail` server-side consumers need
 explicitly.
 
 `GET /ops/regressions` is unaffected — it never carried stack traces.
@@ -933,7 +936,7 @@ curl -H "Authorization: Bearer $TOKEN" "https://app.example.com/ops/status?inclu
 
 Stack traces never come back through status — fetch the error you care about instead:
 `GET /ops/errors/{id}` / `brace errors <id>` (full pre-0.1.7 record), or
-`GET /ops/errors?full=true` for the whole list.
+`GET /ops/errors?include=detail` for the whole list.
 
 **Behavior change worth knowing — the `brace status` exit code now works.** The
 documented contract was always "exit 0 healthy / 1 errors exist / 2 unreachable", but

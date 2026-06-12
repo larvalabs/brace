@@ -883,7 +883,7 @@ class OpsIntegrationTest {
         assertTrue(detail.path("stackTrace").asText().contains("test error"), detail.toString());
         assertTrue(detail.has("requestDetail"), detail.toString());
 
-        var full = Json.mapper().readTree(getWithToken("/ops/errors?full=true", token).body());
+        var full = Json.mapper().readTree(getWithToken("/ops/errors?include=detail", token).body());
         assertTrue(full.get(0).has("stackTrace"), full.toString());
 
         var resolveResp = client.send(
@@ -1006,7 +1006,7 @@ class OpsIntegrationTest {
     @Test
     void opsErrorsFullParamReturnsLegacyDetailShape() throws Exception {
         awaitUnresolvedErrors();
-        var response = cacheGet("/ops/errors?full=true");
+        var response = cacheGet("/ops/errors?include=detail");
         assertEquals(200, response.statusCode());
         var root = Json.mapper().readTree(response.body());
         assertTrue(root.size() > 0, response.body());

@@ -452,36 +452,17 @@ public class Brace {
         return delete(pattern, handler);
     }
 
+    // Read-only typed names exist for GET only: a mutating verb (POST/PUT/DELETE) with a
+    // transaction-skipping Read handler is a footgun — a db.insert inside would run
+    // outside any transaction. The rare legitimate case (e.g. POST-as-complex-query)
+    // can still use the explicit cast form: app.post(pattern, (ReadDbHandler) ...).
+
     public RouteConfig getRead(String pattern, ReadDbHandler handler) {
         return get(pattern, handler);
     }
 
-    public RouteConfig postRead(String pattern, ReadDbHandler handler) {
-        return post(pattern, handler);
-    }
-
-    public RouteConfig putRead(String pattern, ReadDbHandler handler) {
-        return put(pattern, handler);
-    }
-
-    public RouteConfig deleteRead(String pattern, ReadDbHandler handler) {
-        return delete(pattern, handler);
-    }
-
     public RouteConfig getReadFull(String pattern, ReadFullHandler handler) {
         return get(pattern, handler);
-    }
-
-    public RouteConfig postReadFull(String pattern, ReadFullHandler handler) {
-        return post(pattern, handler);
-    }
-
-    public RouteConfig putReadFull(String pattern, ReadFullHandler handler) {
-        return put(pattern, handler);
-    }
-
-    public RouteConfig deleteReadFull(String pattern, ReadFullHandler handler) {
-        return delete(pattern, handler);
     }
 
     // Route grouping

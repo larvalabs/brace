@@ -85,12 +85,12 @@ app.postDb("/posts", (req, db) -> ...);                      // DbHandler: Reque
 app.getSession("/me", (req, session) -> ...);                // SessionHandler: Request + Session
 app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Request + Database + Session
 
-// Typed route methods available for all HTTP methods:
-// getRead, postRead, putRead, deleteRead             (ReadDbHandler — DB queries, no transaction)
+// Typed route methods:
+// getRead, getReadFull                               (read-only DB; GET only — a mutating verb with a
+//                                                     transaction-skipping handler is a footgun)
 // getDb, postDb, putDb, deleteDb                     (DbHandler — DB writes, per-request transaction)
 // getSession, postSession, putSession, deleteSession (SessionHandler)
 // getFull, postFull, putFull, deleteFull             (FullHandler — DB writes + session)
-// getReadFull, postReadFull, putReadFull, deleteReadFull (ReadFullHandler — read-only DB + session)
 
 // CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);

@@ -229,10 +229,10 @@ app.getSession("/profile", (req, session) -> ...);                     // Sessio
 app.postFull("/posts", (req, db, session) -> ...);                     // FullHandler: Request + Database + Session
 
 // Typed route methods eliminate cast syntax — multi-arg lambdas on the bare verbs don't compile
-app.getRead("/posts", (req, db) -> ...);        // getRead, postRead, putRead, deleteRead (no transaction)
+app.getRead("/posts", (req, db) -> ...);        // getRead, getReadFull (read-only, GET only — no transaction)
 app.getDb("/posts", (req, db) -> ...);          // getDb, postDb, putDb, deleteDb
 app.getSession("/profile", (req, session) -> ...); // getSession, postSession, putSession, deleteSession
-app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull (+ getReadFull, ...)
+app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull
 
 // CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API

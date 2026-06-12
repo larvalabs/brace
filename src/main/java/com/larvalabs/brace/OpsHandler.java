@@ -240,11 +240,7 @@ public class OpsHandler {
     public Result status(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
 
-        var include = new HashSet<String>();
-        String includeParam = req.queryParam("include");
-        if (includeParam != null) {
-            for (var part : includeParam.split(",")) include.add(part.trim());
-        }
+        var include = includeParams(req);
 
         var data = new LinkedHashMap<String, Object>();
 
@@ -279,9 +275,9 @@ public class OpsHandler {
         // top allocations) is opt-in via ?include=profiling; without a profiler there is no
         // cpu/gc/profiling data, so those keys are simply absent (no all-zeros stubs).
         if (profiler != null) {
-            var jvm = profiler.snapshot();
-            if (!include.contains("profiling")) jvm.remove("profiling");
-            data.put("jvm", jvm);
+            // The profiling block is built only when requested — H6 trimmed it from the
+            // default JSON; this also skips the sort/map work behind it.
+            data.put("jvm", profiler.snapshot(include.contains("profiling")));
         } else {
             var jvm = new LinkedHashMap<String, Object>();
             var heap = new LinkedHashMap<String, Object>();
@@ -312,19 +308,12 @@ public class OpsHandler {
         } else {
             var inMemory = stats.recentErrors();
             errorCount = inMemory.size();
+            // Same row shape as the no-database /ops/errors list — one builder for
+            // every in-memory summary row.
             inMemory.stream()
                 .sorted((a, b) -> b.lastSeen.compareTo(a.lastSeen))
                 .limit(5)
-                .forEach(err -> {
-                    var e = new LinkedHashMap<String, Object>();
-                    e.put("id", err.id);
-                    e.put("errorType", err.type);
-                    e.put("message", err.message);
-                    e.put("route", err.route);
-                    e.put("occurrenceCount", err.count);
-                    e.put("lastSeen", err.lastSeen.toString());
-                    recentErrors.add(e);
-                });
+                .forEach(err -> recentErrors.add(inMemorySummary(err)));
         }
         errors.put("count", errorCount);
         errors.put("recent", recentErrors);
@@ -519,7 +508,9 @@ public class OpsHandler {
      * GET /ops/errors — one summary row per error: {@code id, errorType, message, route,
      * occurrenceCount, firstSeen, lastSeen} plus {@code at}, the first app frame of the
      * stored trace. Full detail (stackTrace, requestDetail, queriesBefore, requestHeaders)
-     * via {@code ?full=true} (the pre-0.1.7 shape) or per-error via /ops/errors/{id}.
+     * via {@code ?include=detail} (the pre-0.1.7 shape) or per-error via /ops/errors/{id}.
+     * Same opt-in grammar as {@code /ops/status?include=...} — one verbosity convention
+     * across the ops endpoints.
      */
     public Result errors(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
@@ -530,11 +521,11 @@ public class OpsHandler {
             try { sinceTs = Instant.parse(since); }
             catch (java.time.format.DateTimeParseException e) { return Result.badRequest("Invalid since timestamp"); }
         }
+        boolean full = includeParams(req).contains("detail");
         // No database: serve the in-memory Stats records. Resolving removes them, so
         // everything tracked is unresolved (status=resolved is by definition empty).
         if (errorStore == null) {
             if ("resolved".equals(status)) return Json.of(List.of());
-            boolean full = "true".equals(req.queryParam("full"));
             var out = new ArrayList<Map<String, Object>>();
             for (var rec : inMemoryErrors(sinceTs)) {
                 out.add(full ? inMemoryDetail(rec) : inMemorySummary(rec));
@@ -542,7 +533,7 @@ public class OpsHandler {
             return Json.of(out);
         }
         var rows = errorStore.list(status, sinceTs);
-        if ("true".equals(req.queryParam("full"))) return Json.of(rows);
+        if (full) return Json.of(rows);
         var out = new ArrayList<Map<String, Object>>();
         for (var row : rows) {
             var m = new LinkedHashMap<String, Object>();
@@ -600,6 +591,20 @@ public class OpsHandler {
             return Json.of(resolved);
         }
         return dashboard(req);
+    }
+
+    /**
+     * The {@code ?include=a,b} opt-in sections — the one verbosity grammar across ops
+     * endpoints ({@code /ops/status?include=timeseries,profiling},
+     * {@code /ops/errors?include=detail}).
+     */
+    private static java.util.Set<String> includeParams(Request req) {
+        var include = new HashSet<String>();
+        String includeParam = req.queryParam("include");
+        if (includeParam != null) {
+            for (var part : includeParam.split(",")) include.add(part.trim());
+        }
+        return include;
     }
 
     /** In-memory error records for the no-database /ops/errors fallback, newest first. */

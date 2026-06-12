@@ -26,8 +26,9 @@ public class CliCommands {
         var params = new ArrayList<String>();
         String since = parseFlag(args, "--since");
         if (since != null) params.add("since=" + parseDuration(since));
-        // --full: the pre-0.1.7 detail shape (stackTrace etc. on every row)
-        if (hasFlag(args, "--full")) params.add("full=true");
+        // --full: the pre-0.1.7 detail shape (stackTrace etc. on every row).
+        // Same ?include= grammar as /ops/status.
+        if (hasFlag(args, "--full")) params.add("include=detail");
         if (!params.isEmpty()) url += "?" + String.join("&", params);
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,

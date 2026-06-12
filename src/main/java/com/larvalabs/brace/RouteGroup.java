@@ -182,35 +182,14 @@ public class RouteGroup {
         return delete(pattern, handler);
     }
 
+    // GET only, mirroring Brace: mutating verbs with transaction-skipping Read handlers
+    // are footguns (see the note in Brace).
+
     public GroupRouteConfig getRead(String pattern, ReadDbHandler handler) {
         return get(pattern, handler);
     }
 
-    public GroupRouteConfig postRead(String pattern, ReadDbHandler handler) {
-        return post(pattern, handler);
-    }
-
-    public GroupRouteConfig putRead(String pattern, ReadDbHandler handler) {
-        return put(pattern, handler);
-    }
-
-    public GroupRouteConfig deleteRead(String pattern, ReadDbHandler handler) {
-        return delete(pattern, handler);
-    }
-
     public GroupRouteConfig getReadFull(String pattern, ReadFullHandler handler) {
         return get(pattern, handler);
-    }
-
-    public GroupRouteConfig postReadFull(String pattern, ReadFullHandler handler) {
-        return post(pattern, handler);
-    }
-
-    public GroupRouteConfig putReadFull(String pattern, ReadFullHandler handler) {
-        return put(pattern, handler);
-    }
-
-    public GroupRouteConfig deleteReadFull(String pattern, ReadFullHandler handler) {
-        return delete(pattern, handler);
     }
 }
