@@ -97,7 +97,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | Endpoint | Returns |
 |---|---|
 | `GET /ops/status` | System snapshot — HTTP stats, JVM heap/GC/threads, error summary, jobs, cache, metrics; `?include=timeseries,profiling` for the bulky blocks |
-| `GET /ops/errors` | Tracked error summaries (id, type, message, route, counts, `at` app frame); `?full=true` for full detail |
+| `GET /ops/errors` | Tracked error summaries (id, type, message, route, counts, `at` app frame); `?include=detail` for full detail |
 | `GET /ops/errors/{id}` | Full detail for one error — stack trace, request detail, headers, queries before failure |
 | `GET /ops/logs` | Recent structured log entries (filter by level and time) |
 | `GET /ops/cache` | Cache stats (`POST /ops/cache/clear` to clear) |
