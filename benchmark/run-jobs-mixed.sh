@@ -39,10 +39,22 @@ docker exec tfb-postgres psql -U benchmarkdbuser -d hello_world -tc \
 docker exec tfb-postgres psql -U benchmarkdbuser -d jobs_bench -c \
   "DELETE FROM scheduled_jobs WHERE name = 'SlowJob'" > /dev/null 2>&1 || true
 
+# Refuse to start while another JobsApp is alive: a previous run's poller polls the same
+# scheduled_jobs table and would poach this run's burst, corrupting BOTH apps' numbers.
+# (The first post-H4 run was contaminated exactly this way — see the findings doc.)
+if pgrep -f benchmark.JobsApp > /dev/null; then
+  echo "FATAL: a benchmark.JobsApp JVM is already running; kill it first" >&2
+  exit 1
+fi
+
 echo "Starting JobsApp ($JAR)..."
 java --enable-preview -cp "$JAR" benchmark.JobsApp > /dev/null 2>&1 &
 APP_PID=$!
-trap "kill $APP_PID 2>/dev/null; wait $APP_PID 2>/dev/null" EXIT
+# On exit, wait until the app is REALLY dead (escalating to -9) — its poller must not
+# survive into a subsequent run.
+trap 'kill $APP_PID 2>/dev/null
+      for i in $(seq 1 40); do kill -0 $APP_PID 2>/dev/null || break; sleep 0.5; done
+      kill -9 $APP_PID 2>/dev/null; wait $APP_PID 2>/dev/null' EXIT
 
 for i in $(seq 1 30); do
   if curl -sf http://localhost:$PORT/ping-db > /dev/null 2>&1; then

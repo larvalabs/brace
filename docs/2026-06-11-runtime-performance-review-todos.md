@@ -323,9 +323,37 @@ of 1M rows (drops further as retention prunes). The drain line is indicative onl
 56× more throughput with 10× more claim round-trips, because each pre-H3 claim-with-
 pending paid ~1.4s walking dead rows and hashing 950k completed ids per poll.
 
-The mixed web+jobs half (`JobsApp` + `run-jobs-mixed.sh`, H4's pool-contention story)
-is built but not yet run — it's a wrk throughput run and needs the quiet-window
-protocol.
+### Mixed web+jobs (H4) — `123714e` (pre) vs `515cdcd` (post)
+
+`run-jobs-mixed.sh` (gap #4, second half): wrk drives `/ping-db` (256 connections, 15s)
+against `JobsApp` (default pool 10), first with no jobs, then while a burst of 300
+SlowJobs (3s sleep each) churns through the durable queue. Quiet window verified
+(1-min load 4.83 → 5.26 across two minutes). Each run's no-jobs baseline is its own
+control. Raw outputs: `benchmark/baselines/2026-06-12-jobs-mixed-{pre-123714e,post-515cdcd}.txt`.
+
+| | Pre `123714e` | Post `515cdcd` |
+|---|---|---|
+| Baseline /ping-db | 10,029 req/s | 10,063 req/s |
+| Contended /ping-db | 1,578 req/s (**−84%**) | 7,260 req/s (**−28%**) |
+| Contended socket timeouts | **256** (= every wrk connection) | **0** |
+| Burst claim observed | 50 at once | 5 at once (`started=5`, +5 per 3s wave) |
+
+Pre-H4, the burst collapses web traffic: 50 concurrent jobs' session/claim/mark
+connection acquisitions swamp the 10-connection pool and every one of wrk's 256
+connections hits a timeout. Post-H4 the same burst costs 28% throughput with zero
+errors and p99 76ms vs 57ms baseline — jobs degrade web traffic gracefully instead of
+500ing it.
+
+**Contamination incident (methodology, recorded like the port-8080 one):** the first
+post-H4 mixed run produced `started=177` and 256 Hikari `Connection is not available…
+waiting=199` failures on SlowJob rows — impossible under the 5-permit semaphore, and
+initially read as an H4 bug. An isolated repro (idle burst, observed +5/3s claim ramp)
+cleared the framework; the real cause was the **pre run's JVM outliving its script's
+`kill`** long enough for its unbounded 50-batch poller to poach the post run's burst
+from the shared table — starving its own pool (the 256 failures) and flattering the
+post app's wrk number (9,627 req/s, discarded). `run-jobs-mixed.sh` now refuses to
+start while another `JobsApp` is alive and escalates its exit kill to `-9` after a
+20s grace. The post numbers above are from a verified-isolated re-run.
 
 ### Session/CSRF scenario — `8b495d5` (pre) vs `33180b8` (post)
 
@@ -357,6 +385,6 @@ single form-body parse.
 1. ~~**Baseline first (required)**~~ — captured above. `--latency` added to `run-brace.sh`; benchmark module repointed at the current framework version (was a stale unresolvable `0.2.0-SNAPSHOT`) and its `req.param` call updated to the current `req.queryParam` API; script default JDK moved to 25 per AGENTS.md recommendation.
 2. ~~**Session/CSRF scenario (required for H5)**~~ — done: `benchmark.SessionApp` + `run-session.sh` (session-read GET, CSRF form POST, csrf(false) API POST; primes cookie + token, sanity-checks semantics, verifies the port listener is its own app). Results above.
 3. **JMH micro-module (recommended):** a small, separate non-shipped module (or test-scope profile) with benchmarks for the allocation-sensitive units: route matching (M1), form bind (M4), session decrypt (H5), log line (H1), `redactPath` (M8), `convertPositionalParams` (L6). Use `gc.alloc.rate.norm` to verify allocation fixes (H2, M6) — wrk alone can't see allocation.
-4. ~~**Job-queue scenario (recommended for H3/H4)**~~ — claim-latency half done (`JobsBench` + `run-jobs-claim.sh`, results above: empty poll −99%, stats −82%, drain −98%/job). Mixed web+jobs half built (`JobsApp` + `run-jobs-mixed.sh`: wrk on `/ping-db` while a `/burst` of connection-holding SlowJobs churns) but awaiting a quiet window.
+4. ~~**Job-queue scenario (recommended for H3/H4)**~~ — both halves done. Claim latency (`JobsBench` + `run-jobs-claim.sh`): empty poll −99%, stats −82%, drain −98%/job. Mixed web+jobs (`JobsApp` + `run-jobs-mixed.sh`): contended /ping-db 1,578 → 7,260 req/s, 256 → 0 socket timeouts. Results + a cross-run contamination incident recorded above.
 5. **Cold-start timing (for M7/M21):** trivial harness — `time` from JVM launch to first successful HTTP response on the sample app (with a Postgres testcontainer for the DB-app case), 5 runs, before/after. Plus first-render latency per template (M7) via the access log.
 6. **Not adding:** CI perf gates (too flaky on shared runners — keep the protocol manual and documented), percentile tracking inside `Stats` (a feature, not a review fix; note as a candidate follow-up for the ops dashboard).
