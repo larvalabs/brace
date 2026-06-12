@@ -82,6 +82,12 @@ final class JulLogging {
         for (var handler : root.getHandlers()) {
             if (handler instanceof ConsoleHandler) {
                 handler.setFormatter(new SingleLineFormatter());
+                // Let logger levels do ALL the filtering. The default ConsoleHandler level
+                // is INFO, which silently drops the records a -Dlog.level.<logger>=DEBUG/
+                // TRACE override just enabled — the logger says loggable, the handler
+                // discards. Loggers without an explicit level still inherit the root
+                // logger's INFO, so output is unchanged for everything else.
+                handler.setLevel(Level.ALL);
             }
         }
         for (var name : QUIET_LOGGERS) {

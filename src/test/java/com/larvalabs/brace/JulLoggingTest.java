@@ -106,6 +106,34 @@ class JulLoggingTest {
     }
 
     @Test
+    void overrideBelowInfoReachesTheConsoleHandler() {
+        // The recording handler is attached at Level.ALL, which masked this bug: logger
+        // levels were lowered but the real ConsoleHandler stayed at its INFO default and
+        // dropped the FINE/FINEST records the override enabled. Assert the handler chain
+        // itself passes a record the overridden logger allows.
+        System.setProperty("log.level.com.example.deepdebug", "DEBUG");
+        try {
+            JulLogging.apply();
+
+            assertTrue(Logger.getLogger("com.example.deepdebug").isLoggable(Level.FINE));
+            var record = new LogRecord(Level.FINE, "debug detail");
+            record.setLoggerName("com.example.deepdebug");
+            boolean sawConsoleHandler = false;
+            for (var handler : Logger.getLogger("").getHandlers()) {
+                if (handler instanceof java.util.logging.ConsoleHandler) {
+                    sawConsoleHandler = true;
+                    assertTrue(handler.isLoggable(record),
+                        "ConsoleHandler must not drop records an explicit override enabled");
+                }
+            }
+            assertTrue(sawConsoleHandler, "expected a ConsoleHandler on the JUL root logger");
+        } finally {
+            System.clearProperty("log.level.com.example.deepdebug");
+            JulLogging.apply();
+        }
+    }
+
+    @Test
     void warningsFromQuietedLibsStillGetThrough() {
         JulLogging.apply();
         records.clear();
