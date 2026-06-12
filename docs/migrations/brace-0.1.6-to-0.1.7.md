@@ -1125,3 +1125,19 @@ unbounded in-memory list even when really sending via SMTP: a slow leak of rough
   count in `failCount()` as before. The /ops dashboard "Sent" stat therefore now
   means emails actually handed to SMTP. `sentCount()` also widens `int` → `long`;
   recompile if you call it (source-compatible).
+
+## Changed: Storage requests now time out (60s default, configurable)
+
+**Who is affected:** apps doing very large uploads over slow links via `storage.put(...)`.
+
+`Storage`'s HTTP client previously had **no timeouts at all**: an unresponsive
+S3-compatible endpoint hung `put()`/`delete()` forever — typically inside a request
+handler, holding that request's transaction and pooled connection indefinitely. Now
+connections time out after 10 seconds and each request after 60 seconds
+(`s3.timeoutSeconds` to change; a timed-out `put()` throws like any other failed
+upload, a timed-out `delete()` logs `s3.delete.error` and returns as before).
+
+```hocon
+# application.conf — only needed if 60s is too tight, e.g. multi-GB uploads
+s3.timeoutSeconds = 300
+```

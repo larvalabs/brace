@@ -613,7 +613,7 @@ String ext = Storage.extension("photo.jpg");  // "jpg" (sanitized, alphanumeric 
 var stored = storage.put("custom/path.jpg", file);  // returns StoredFile(key, url)
 ```
 
-Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`.
+Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`, `s3.timeoutSeconds` (per-request timeout, default 60).
 
 **StoredFile** record: `key()`, `url()`.
 
