@@ -163,6 +163,14 @@ public class Request {
 
     /** Copy headers into a case-insensitive map so lookups don't depend on the sender's casing. */
     private static Map<String, String> caseInsensitive(Map<String, String> source) {
+        // M3: adopt a map that is already case-insensitive (BraceHandler builds one per
+        // request) instead of copying it into a second TreeMap — the copy was ~20
+        // comparator-driven inserts of pure waste on every request. Maps with any other
+        // comparator (or HashMaps from tests/public callers) still get the defensive copy.
+        if (source instanceof TreeMap<String, String> tm
+            && tm.comparator() == String.CASE_INSENSITIVE_ORDER) {
+            return source;
+        }
         var map = new TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER);
         if (source != null) map.putAll(source);
         return map;
