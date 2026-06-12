@@ -291,8 +291,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 session = buildSession(headers);
             }
 
-            // Expose flash data to templates
-            if (session != null) {
+            // Consume flash and expose it to templates only for Session-taking handlers —
+            // they are the ones that can render it. A guard-built session on a plain
+            // Handler route (JSON, polling) must leave pending flash in the cookie for
+            // the page that will actually show it.
+            if (invoker.needsSession()) {
+                session.consumeFlash();
                 View.setFlash(session.flashData());
             }
 
@@ -615,18 +619,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return 0;
     }
 
-    /** Build the request's Session from the cookie (or a fresh one when sessions are off). */
+    /**
+     * Build the request's Session from the cookie (or a fresh one when sessions are off).
+     * Deliberately does NOT consume flash: a session built for a before-middleware guard
+     * may belong to a request whose handler can never render flash (a plain-Handler JSON
+     * or polling route) or to a short-circuiting redirect — consuming here would destroy
+     * a pending flash message before the page that should show it ever renders. Flash is
+     * consumed at handler-dispatch time, only for Session-taking handlers.
+     */
     private Session buildSession(Map<String, String> headers) {
-        Session session;
         if (sessionSecret != null) {
             String cookieHeader = headers.get("Cookie");
             String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-            session = Session.fromCookie(sessionCookie, sessionSecret);
-        } else {
-            session = new Session();
+            return Session.fromCookie(sessionCookie, sessionSecret);
         }
-        session.consumeFlash();
-        return session;
+        return new Session();
     }
 
     /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
