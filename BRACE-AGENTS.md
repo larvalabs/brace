@@ -127,6 +127,9 @@ handlers. The one-liner covers the whole subtree:
 app.requireSession("/admin/*", "userId", "/login");  // redirect to /login unless session has userId
 ```
 
+`requireSession` requires `.sessions(secret)` — `start()` throws without it (an empty
+per-request session would make the guard redirect forever).
+
 For custom logic, the 2-arg `before` receives the session — the SAME instance the handler
 gets, so mutations made in the guard persist via the normal cookie write-back:
 

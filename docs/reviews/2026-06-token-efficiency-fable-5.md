@@ -143,10 +143,11 @@ All fixed except R10 (a startup-throw decision left for Matt); one commit per fi
 | R9 `resolveError` 404s on malformed ids instead of 500ing (which re-recorded a framework error) | `b863c51` |
 | Below-cut batch: CSRF `_csrf` through the shared parser (last divergent copy), resolveError/Stats/ErrorStore dedup, ProjectGenerator shares CliAgentsMd's jar-entry constants, parseFailures shared transition | `c941ccc` |
 
-**Open: R10** — `requireSession` without `.sessions(secret)` is a provable infinite
-redirect loop; round 1 added a startup WARN (`da8025c`). Proposal on the table:
-`requireSession` should *throw* at `start()` instead (generic BeforeSession keeps the
-WARN). Matt to decide.
+**R10 (decided 2026-06-12, post-merge on main):** `requireSession` without
+`.sessions(secret)` now **throws `IllegalStateException` at `start()`** — it is a
+provable infinite redirect loop, and the round-1 WARN (`da8025c`) scrolled past while
+the browser symptom (ERR_TOO_MANY_REDIRECTS) pointed nowhere. A generic session-aware
+`before(...)` keeps the WARN (it may be read-only or tolerant of an empty session).
 
 ## User-visible changes
 

@@ -67,14 +67,15 @@ not spot patches.
   errorDetail catches NFE) → POST /ops/errors/abc/resolve 500s and records a framework
   error — re-reddening the count the resolve path exists to clear. Pre-existing;
   two-line fix. OpsHandler.java:575.
-- [ ] **R10 (decision) — `requireSession` without `.sessions(secret)`: throw, not WARN?**
+- [x] **R10 (decision) — `requireSession` without `.sessions(secret)`: throw, not WARN?**
   Provably an infinite redirect loop; the WARN scrolls past and the symptom
   (ERR_TOO_MANY_REDIRECTS) points nowhere. Proposal: `requireSession` throws at
   `start()`; generic BeforeSession (possibly read-only) keeps the WARN. Matt to decide.
 
 **Status (2026-06-12):** R1–R9 fixed (one commit each), below-the-cut batch folded in
 (`c941ccc`), `mvn verify` + `tests/cli/test-distribution.sh` green, review record and
-migration guide updated. **R10 remains open — Matt's call** (throw vs WARN at start()).
+migration guide updated. R10 decided 2026-06-12: requireSession now throws at start();
+generic BeforeSession keeps the WARN.
 
 ## Below the cut (confirmed, fold in where convenient)
 

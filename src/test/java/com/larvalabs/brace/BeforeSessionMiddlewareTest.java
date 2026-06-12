@@ -106,12 +106,24 @@ class BeforeSessionMiddlewareTest {
     }
 
     @Test
-    void requireSessionWithoutSessionsWarnsAtStartup() throws Exception {
+    void requireSessionWithoutSessionsThrowsAtStartup() {
         // Without .sessions(secret) every request gets an empty session, so the guard
-        // redirects forever — a silent loop. Startup must call it out.
+        // redirects forever — a provable infinite loop whose runtime symptom
+        // (ERR_TOO_MANY_REDIRECTS) points nowhere. Startup must fail, not warn.
+        var ex = assertThrows(IllegalStateException.class, () ->
+            Brace.test().start(app ->
+                app.requireSession("/x/*", "userId", "/login")));
+        assertTrue(ex.getMessage().contains("/x/*"), ex.getMessage());
+        assertTrue(ex.getMessage().contains(".sessions(secret)"), ex.getMessage());
+    }
+
+    @Test
+    void genericBeforeSessionWithoutSessionsWarnsAtStartup() throws Exception {
+        // A generic BeforeSession may be read-only or tolerant of an empty session,
+        // so it keeps the loud warning instead of the requireSession throw.
         LogTap.clear();
         var noSessions = Brace.test().start(app ->
-            app.requireSession("/x/*", "userId", "/login"));
+            app.before("/x/*", (req, session) -> null));
         try {
             boolean warned = LogTap.snapshot().stream().anyMatch(e ->
                 String.valueOf(e.fields().get("message")).contains("sessions are not enabled"));

@@ -24,6 +24,8 @@ public class Brace {
     List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
+    /** First requireSession pattern, or null — backs the start()-time misconfiguration check. */
+    private String requireSessionPattern;
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
@@ -508,8 +510,15 @@ public class Brace {
      * {@code sessionKey}. Equivalent to
      * {@code before(pattern, (req, session) -> session.has(key) ? null : Redirect.to(redirectTo))}.
      * Handlers under the pattern can then assume the key is present.
+     *
+     * <p>Requires sessions: {@link #start()} throws {@link IllegalStateException} if a
+     * requireSession guard is registered without {@code .sessions(secret)} — without a
+     * session the guard is a provable infinite redirect loop.
      */
     public Brace requireSession(String pathPattern, String sessionKey, String redirectTo) {
+        if (requireSessionPattern == null) {
+            requireSessionPattern = pathPattern;
+        }
         return before(pathPattern, (req, session) ->
                 session.has(sessionKey) ? null : Redirect.to(redirectTo));
     }
@@ -535,12 +544,24 @@ public class Brace {
 
     public void start() throws Exception {
         // Session-aware middleware without .sessions(secret) is a silent trap: every
-        // request gets a fresh empty Session, so a requireSession guard redirects forever
-        // (a guard-loop with no error anywhere). Warn loudly at startup.
-        if (!beforeSessionMiddleware.isEmpty() && sessionSecret == null) {
-            Log.warn("Session-aware before-middleware (before(pattern, BeforeSession) / requireSession) "
-                + "is registered but sessions are not enabled — call .sessions(secret). Without it every "
-                + "request sees an empty session, so requireSession guards redirect unconditionally.");
+        // request gets a fresh empty Session. For requireSession that is *provably* an
+        // infinite redirect loop (the session can never carry the key), and the runtime
+        // symptom — ERR_TOO_MANY_REDIRECTS — points nowhere near the cause, so fail at
+        // start(). A generic BeforeSession may be read-only or otherwise tolerant of an
+        // empty session, so it keeps the loud warning instead.
+        if (sessionSecret == null) {
+            if (requireSessionPattern != null) {
+                throw new IllegalStateException("requireSession(\"" + requireSessionPattern
+                    + "\", ...) is registered but sessions are not enabled — call .sessions(secret) "
+                    + "before start(). Without it every request sees an empty session, so the guard "
+                    + "redirects unconditionally: an infinite redirect loop (ERR_TOO_MANY_REDIRECTS).");
+            }
+            if (!beforeSessionMiddleware.isEmpty()) {
+                Log.warn("Session-aware before-middleware (before(pattern, BeforeSession)) "
+                    + "is registered but sessions are not enabled — call .sessions(secret). Without it "
+                    + "every request sees an empty session, so session reads return null and mutations "
+                    + "are not persisted.");
+            }
         }
 
         // Create ErrorStore if database is available

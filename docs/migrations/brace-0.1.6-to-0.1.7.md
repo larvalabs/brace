@@ -318,6 +318,12 @@ app.before("/admin/*", (req, session) ->
     "admin".equals(session.get("role")) ? null : Result.forbidden());
 ```
 
+Note: `requireSession` requires `.sessions(secret)` — `start()` throws
+`IllegalStateException` without it, because an empty per-request session would make the
+guard redirect unconditionally (an infinite redirect loop whose browser symptom,
+`ERR_TOO_MANY_REDIRECTS`, points nowhere near the cause). A generic session-aware
+`before(...)` without sessions gets a startup WARN instead.
+
 ## New (optional): `db.findOr404` / `db.queryOneOr404` lookup helpers
 
 **Nothing to do** — purely additive. The find/null-check/404 preamble that every
