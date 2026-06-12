@@ -187,7 +187,7 @@ final class BuildCommands {
         if (compile(cwd) != 0) return 1;
         String mainClass = findMainClass(cwd);
         CliOutput.printInfo("Starting " + mainClass);
-        Process app = new ProcessBuilder("java", "-cp", projectClasspath(cwd), mainClass)
+        Process app = new ProcessBuilder(appCommand(cwd, mainClass, false))
                 .directory(cwd.toFile())
                 .inheritIO()
                 .start();
@@ -246,12 +246,26 @@ final class BuildCommands {
     }
 
     private static Process startApp(Path cwd, String mainClass) throws IOException {
-        Process p = new ProcessBuilder("java", "-cp", projectClasspath(cwd), mainClass)
+        Process p = new ProcessBuilder(appCommand(cwd, mainClass, true))
                 .directory(cwd.toFile())
                 .inheritIO()
                 .start();
         CliOutput.printSuccess("Started (PID " + p.pid() + ")");
         return p;
+    }
+
+    /**
+     * Command line for the app JVM. {@code brace dev} runs the app in dev mode
+     * ({@code -Dbrace.mode=dev}), which activates {@code %dev.} config overrides
+     * (the scaffold's in-memory H2 database, dev port) and dev-only behavior like
+     * 404 route suggestions. {@code brace run} deliberately sets no mode — it is
+     * the production-style launch, where config comes from the base keys and env vars.
+     */
+    static List<String> appCommand(Path cwd, String mainClass, boolean devMode) {
+        List<String> cmd = new ArrayList<>(List.of("java"));
+        if (devMode) cmd.add("-Dbrace.mode=dev");
+        cmd.addAll(List.of("-cp", projectClasspath(cwd), mainClass));
+        return cmd;
     }
 
     private static void stopApp(Process p) {

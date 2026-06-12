@@ -136,6 +136,19 @@ public class BuildCommandsTest {
         assertTrue(stderr.contains("✗ Compilation failed: 1 error, 0 warnings"), stderr);
     }
 
+    // --- app launch command ------------------------------------------------
+
+    @Test
+    public void devRunsAppInDevModeRunDoesNot(@TempDir Path dir) {
+        List<String> dev = BuildCommands.appCommand(dir, "app.App", true);
+        List<String> run = BuildCommands.appCommand(dir, "app.App", false);
+        // brace dev must activate %dev. config overrides (the scaffold's H2 db)
+        // and dev-only behavior; brace run is the production-style launch.
+        assertTrue(dev.contains("-Dbrace.mode=dev"), dev.toString());
+        assertFalse(run.contains("-Dbrace.mode=dev"), run.toString());
+        assertEquals("app.App", dev.get(dev.size() - 1));
+    }
+
     // --- H7: summarizeTestRun ---------------------------------------------
 
     private static final String FAILURE_OUTPUT = """
