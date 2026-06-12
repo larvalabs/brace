@@ -304,7 +304,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
                         csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
                     }
-                    String submittedToken = parseFormParam(body, "_csrf");
+                    // One body parser: _csrf extraction sees the same decoded, last-wins
+                    // view of the form body as FormBinder (it used to be a third divergent
+                    // pair parser — raw-key compare, first-match-wins, swallowed decode
+                    // failures). Only form bodies are parsed: for JSON and other content
+                    // types the token rides the X-CSRF-Token header, and parsing an
+                    // arbitrary body as pairs risks URL-decode failures.
+                    String submittedToken = braceRequest.isFormPost() || braceRequest.isMultipart()
+                        ? braceRequest.formParam("_csrf") : null;
                     if (submittedToken == null) {
                         submittedToken = headers.get("X-CSRF-Token");
                     }
@@ -671,24 +678,6 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String trimmed = part.strip();
             if (trimmed.startsWith(name + "=")) {
                 return trimmed.substring(name.length() + 1);
-            }
-        }
-        return null;
-    }
-
-    private String parseFormParam(String body, String paramName) {
-        if (body == null || body.isEmpty()) return null;
-        for (String pair : body.split("&")) {
-            int eq = pair.indexOf('=');
-            if (eq > 0) {
-                String key = pair.substring(0, eq);
-                if (key.equals(paramName)) {
-                    try {
-                        return java.net.URLDecoder.decode(pair.substring(eq + 1), java.nio.charset.StandardCharsets.UTF_8);
-                    } catch (Exception e) {
-                        return pair.substring(eq + 1);
-                    }
-                }
             }
         }
         return null;

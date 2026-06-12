@@ -217,12 +217,15 @@ public class ErrorStore {
         return list(status, null);
     }
 
+    /** The full-detail column list — one definition for {@link #list}, {@link #find}, {@link #resolve} (mapped by {@link #mapRow}). */
+    private static final String FULL_COLUMNS =
+        "id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers";
+
     public List<Map<String, Object>> list(String status, Instant since) {
         var db = new Database(databaseFactory.openSession());
         try {
             String where = "resolved".equals(status) ? "resolved_at IS NOT NULL" : "resolved_at IS NULL";
-            String sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers "
-                + "FROM ops_errors WHERE " + where
+            String sql = "SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE " + where
                 + (since != null ? " AND first_seen >= ?" : "")
                 + " ORDER BY last_seen DESC"
                 + (since == null ? " LIMIT ?" : "");
@@ -244,8 +247,7 @@ public class ErrorStore {
     public Map<String, Object> find(long id) {
         var db = new Database(databaseFactory.openSession());
         try {
-            var rows = db.sqlQuery(
-                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE id = ?", id);
+            var rows = db.sqlQuery("SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE id = ?", id);
             if (rows.isEmpty()) return null;
             return mapRow(rows.get(0));
         } finally {
@@ -296,15 +298,16 @@ public class ErrorStore {
         try {
             var now = Timestamp.from(Instant.now());
             db.sql("UPDATE ops_errors SET resolved_at = ? WHERE id = ?", now, id);
+            // Re-fetch on the same session — shared FULL_COLUMNS + mapRow keep the row
+            // shape from drifting (this method once hand-built the map and had drifted).
+            var rows = db.sqlQuery("SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE id = ?", id);
             db.commitTransaction();
+            return rows.isEmpty() ? null : mapRow(rows.get(0));
         } catch (Exception e) {
             db.rollbackTransaction();
             return null;
         } finally {
             db.close();
         }
-        // Re-fetch through find() — one row-mapping (this method used to hand-build a
-        // copy of mapRow's map and had already drifted, omitting two fields).
-        return find(id);
     }
 }

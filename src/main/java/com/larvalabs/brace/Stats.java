@@ -233,15 +233,11 @@ public class Stats {
      * {@code brace status}) red until process restart.
      */
     public ErrorRecord resolveError(long id) {
+        // Reuses findError under the same (reentrant) lock so find-and-remove is atomic.
         synchronized (errorsLock) {
-            for (var it = errors.iterator(); it.hasNext(); ) {
-                ErrorRecord rec = it.next();
-                if (rec.id == id) {
-                    it.remove();
-                    return rec;
-                }
-            }
-            return null;
+            ErrorRecord rec = findError(id);
+            if (rec != null) errors.remove(rec);
+            return rec;
         }
     }
 

@@ -425,20 +425,21 @@ final class BuildCommands {
             if (line.startsWith("Failures (")) { inFailures = true; continue; }
             if (!inFailures) continue;
             if (line.startsWith("Test run finished")) break;
+            // A new entry starts with a MethodSource (test failure) or ClassSource
+            // (container failure: @BeforeAll, constructor) — one shared transition.
+            String entryClass = null, entryMethod = null;
             var test = FAILURE_TEST.matcher(line);
             if (test.find()) {
-                flushFailure(lines, className, methodName, exception, location);
-                className = test.group(1);
-                methodName = test.group(2);
-                exception = null;
-                location = null;
-                continue;
+                entryClass = test.group(1);
+                entryMethod = test.group(2);
+            } else {
+                var container = FAILURE_CONTAINER.matcher(line);
+                if (container.find()) entryClass = container.group(1);
             }
-            var container = FAILURE_CONTAINER.matcher(line);
-            if (container.find()) {
+            if (entryClass != null) {
                 flushFailure(lines, className, methodName, exception, location);
-                className = container.group(1);
-                methodName = null;
+                className = entryClass;
+                methodName = entryMethod;
                 exception = null;
                 location = null;
                 continue;

@@ -338,24 +338,17 @@ h1 { margin-bottom: 1rem; }
             // CLAUDE.md — capability index with pointers to full reference
             ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));
 
-            // BRACE-AGENTS.md — full Brace framework API reference. UTF-8 explicitly:
-            // the bundled docs contain non-ASCII (arrows, em dashes) and the platform
-            // default charset would mangle them on some hosts (CliAgentsMd already
-            // reads the same resources as UTF-8).
-            try (var in = ProjectGenerator.class.getResourceAsStream("/brace/BRACE-AGENTS.md")) {
-                if (in != null) {
-                    Files.writeString(root.resolve("BRACE-AGENTS.md"),
-                        new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
-                }
+            // BRACE-AGENTS.md (full API reference) and BRACE-OPS.md (ops reference) —
+            // the same bundled resources `brace agents-md` refreshes, loaded through
+            // CliAgentsMd's constants and reader (UTF-8) so the entry paths and the
+            // generator can't drift apart and silently stop shipping a doc.
+            String agentsMd = CliAgentsMd.loadBundled(CliAgentsMd.JAR_ENTRY);
+            if (agentsMd != null) {
+                Files.writeString(root.resolve("BRACE-AGENTS.md"), agentsMd);
             }
-
-            // BRACE-OPS.md — ops reference (auth keys, CLI/HTTP endpoints, runbooks);
-            // packaged in the jar as /brace/agent-ops-guide.md
-            try (var in = ProjectGenerator.class.getResourceAsStream("/brace/agent-ops-guide.md")) {
-                if (in != null) {
-                    Files.writeString(root.resolve("BRACE-OPS.md"),
-                        new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
-                }
+            String opsMd = CliAgentsMd.loadBundled(CliAgentsMd.OPS_JAR_ENTRY);
+            if (opsMd != null) {
+                Files.writeString(root.resolve(CliAgentsMd.OPS_FILE), opsMd);
             }
 
             // .gitignore

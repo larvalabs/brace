@@ -580,22 +580,18 @@ public class OpsHandler {
             // framework error — re-reddening the count this endpoint exists to clear.
             return Result.notFound();
         }
+        Map<String, Object> resolved;
         if (errorStore == null) {
             // No database: resolving removes the in-memory record, so errors.count (and
             // the brace status exit code) recovers instead of staying red until restart.
             var rec = stats.resolveError(id);
-            if (wantsJson(req)) {
-                if (rec == null) return Result.notFound();
-                var resolved = inMemoryDetail(rec);
-                resolved.put("resolvedAt", Instant.now());
-                return Json.of(resolved);
-            }
-            return dashboard(req);
+            resolved = rec == null ? null : inMemoryDetail(rec);
+            if (resolved != null) resolved.put("resolvedAt", Instant.now());
+        } else {
+            resolved = errorStore.resolve(id);
         }
-        var resolved = errorStore.resolve(id);
         if (wantsJson(req)) {
-            if (resolved == null) return Result.notFound();
-            return Json.of(resolved);
+            return resolved == null ? Result.notFound() : Json.of(resolved);
         }
         return dashboard(req);
     }
