@@ -82,7 +82,7 @@ aren't in a project directory.
 | Endpoint | Returns |
 |---|---|
 | `GET /ops/status` | System snapshot (app, http, jvm, error summary, jobs, cache, metrics); `?include=timeseries,profiling` for the bulky blocks |
-| `GET /ops/errors[?status=open&since=<iso8601>&include=detail]` | Tracked error **summaries** (`id, errorType, message, route, occurrenceCount, firstSeen, lastSeen, at`), filterable by status and time window; `?include=detail` returns the pre-0.1.7 full-detail rows (same opt-in grammar as `/ops/status?include=...`) |
+| `GET /ops/errors[?status=open&since=<iso8601>&include=detail]` | Tracked error **summaries** (`id, errorType, message, route, occurrenceCount, firstSeen, lastSeen, at`), filterable by status and time window; `?include=detail` returns the pre-0.1.7 full-detail rows (same opt-in grammar as `/ops/status?include=...`). An unfiltered list is capped at the 500 most recent rows (`errors.count` in `/ops/status` is the true total); a `since`-filtered list returns its whole window — pass `since` when you need completeness |
 | `GET /ops/errors/{id}` | Full detail for one error: `stackTrace`, `requestDetail`, `queriesBefore`, `requestHeaders` plus the summary fields; 404 for unknown ids |
 | `GET /ops/logs[?since=<id>&since_ts=<iso8601>&level=<info\|warn\|error>&limit=200]` | Recent log entries from in-memory ring buffer |
 | `GET /ops/cache` | Cache stats: shared, size, hits, misses, hitRate, evictions |

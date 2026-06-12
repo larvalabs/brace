@@ -204,9 +204,12 @@ public class ErrorStore {
     }
 
     /**
-     * Cap on rows returned by {@link #list}. The store itself is pruned to {@code maxErrors}
-     * (default 1000), but a list response carrying every heavy column unbounded is still a
-     * needlessly large payload — recent-first plus {@code since} covers the real use.
+     * Cap on rows returned by an <em>unfiltered</em> {@link #list}. The store itself is pruned
+     * to {@code maxErrors} (default 1000), but a list response carrying every heavy column
+     * unbounded is still a needlessly large payload — recent-first covers the browse use.
+     * A {@code since}-filtered list is NOT capped: the caller asked for a bounded window and
+     * gets it completely (the prune bounds the worst case), so the window never silently
+     * loses rows while {@code errors.count} says otherwise.
      */
     static final int LIST_LIMIT = 500;
 
@@ -221,9 +224,10 @@ public class ErrorStore {
             String sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers "
                 + "FROM ops_errors WHERE " + where
                 + (since != null ? " AND first_seen >= ?" : "")
-                + " ORDER BY last_seen DESC LIMIT ?";
+                + " ORDER BY last_seen DESC"
+                + (since == null ? " LIMIT ?" : "");
             List<Object[]> rows = since != null
-                ? db.sqlQuery(sql, Timestamp.from(since), LIST_LIMIT)
+                ? db.sqlQuery(sql, Timestamp.from(since))
                 : db.sqlQuery(sql, LIST_LIMIT);
 
             var result = new ArrayList<Map<String, Object>>();
