@@ -656,6 +656,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             result.header("Set-Cookie",
                 "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
         }
+        // A response carrying a session cookie is per-user by definition. Without this,
+        // a response with no caching headers (e.g. a static file under a lastSeen-touch
+        // middleware) is heuristically cacheable, and a force-cache proxy would replay
+        // user A's Set-Cookie to everyone. An explicit Cache-Control wins.
+        if (result.header("Cache-Control") == null) {
+            result.header("Cache-Control", "private");
+        }
     }
 
     private String parseCookieValue(String cookieHeader, String name) {

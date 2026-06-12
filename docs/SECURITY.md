@@ -320,6 +320,21 @@ app.sessions(SessionOptions.secure("secret")
 
 This sets: `HttpOnly=true`, `Secure=true`, `SameSite=Lax`, `Max-Age=1209600` (14 days)
 
+### Session Cookies and Shared Caches
+
+Any response Brace attaches a session `Set-Cookie` to also gets `Cache-Control: private`
+(unless the handler set an explicit `Cache-Control`, which always wins). A response
+carrying a session cookie is per-user by definition — without this header it is
+*heuristically cacheable*, and a misconfigured shared cache (e.g. an nginx recipe that
+force-caches everything under `/static/`) would replay user A's cookie to every user.
+
+The riskiest shape is a session-mutating middleware whose path pattern covers static
+prefixes — for example a `lastSeen`-touch guard on `/*`. Every static file response then
+carries a fresh session cookie. The `private` default makes that safe for spec-compliant
+caches, but prefer scoping such middleware to application routes (`/app/*`) rather than
+`/*`, and never configure a proxy to ignore response headers for paths a session
+middleware can touch.
+
 ---
 
 ## File Uploads

@@ -60,6 +60,12 @@ class SessionWriteBackPathsTest {
                 app.post("/guarded/submit", req -> Result.text("ok"));
                 app.get("/guarded/missing", req -> { throw new NotFoundException(); });
                 app.get("/guarded/boom", req -> { throw new RuntimeException("boom"); });
+
+                // Session mutation + explicit caching directive from the handler.
+                app.getSession("/cached", (req, session) -> {
+                    session.set("seen", "yes");
+                    return Result.text("cached").header("Cache-Control", "no-store");
+                });
             });
     }
 
@@ -82,6 +88,23 @@ class SessionWriteBackPathsTest {
             "guard mutation must be written back even when no route matches");
         // The jar carries the mutated session to the next request.
         assertEquals("seen:yes", testApp.get("/whoseen").body());
+    }
+
+    @Test
+    void sessionCookieResponseIsCacheControlPrivate() {
+        // A response carrying a session Set-Cookie with no explicit Cache-Control must
+        // not be heuristically cacheable — a force-cache proxy would replay user A's
+        // cookie to everyone (e.g. statics under a lastSeen-touch middleware).
+        var miss = testApp.get("/tracked/anything");
+        assertFalse(miss.headers("Set-Cookie").isEmpty());
+        assertEquals("private", miss.header("Cache-Control"));
+    }
+
+    @Test
+    void explicitCacheControlWinsOverPrivateDefault() {
+        var cached = testApp.get("/cached");
+        assertFalse(cached.headers("Set-Cookie").isEmpty());
+        assertEquals("no-store", cached.header("Cache-Control"));
     }
 
     @Test
