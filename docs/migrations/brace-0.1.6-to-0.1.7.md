@@ -1035,6 +1035,44 @@ mixed fast/slow workloads goes up — but peak job parallelism drops from 50 to
 `poolSize / 2`. If you need more, raise the pool size via the `DatabaseFactory`
 constructor's `poolSize` argument.
 
+## Breaking: cached routes ignore query params unless declared with `.vary(...)`
+
+**Who is affected:** any app using route-level page caching (`cache.wrap(...)`) on routes
+whose content depends on query params — pagination, sorting, filtering.
+
+Page-cache keys previously included the **entire query string**, so every distinct
+param combination stored a full copy of the rendered page. The request side controls
+that keyspace: `GET /cached-page?x=<random>` minted one page-sized cache entry per
+request (memory exhaustion on the in-memory backend, a row insert per request on the
+Postgres backend), and even benign crawler/tracking params (`?utm_source=`,
+`?fbclid=`) fragmented the cache.
+
+Now **query params are ignored by default** — a cached route serves one entry per
+path. Declare the params that legitimately change the page:
+
+```java
+// Before (0.1.6): every distinct query string = its own cache entry
+app.get("/posts", cache.wrap("10m", ctrl::list));
+
+// After (0.1.7): declare what varies; everything else is ignored
+app.get("/posts", cache.wrap("10m", ctrl::list).vary("page", "sort"));
+//   /posts?page=2                 → its own entry
+//   /posts?page=2&utm_source=tw   → same entry as ?page=2
+//   /posts?x=<random-flood>       → same entry as /posts
+```
+
+**Action required:** audit every `cache.wrap(...)` route. If the handler reads a query
+param, add it to `.vary(...)` — otherwise the cache will serve the same entry for all
+values of that param (e.g. `?page=2` returning page 1). Routes that ignore the query
+string entirely need no change and get a better hit rate.
+
+`HX-Request` varying is unchanged (htmx partials and full pages stay separate).
+
+Relatedly, the in-memory cache backend is now **capped at 10,000 entries** (previously
+unbounded): past the cap, inserting a new key drops expired entries first, then
+arbitrary ones. Size it with `app.cache(CacheBackend.inMemory(maxEntries))`. Counters
+and tags are not capped.
+
 ## Changed: Mailer no longer retains sent emails in production
 
 **Who is affected:** apps reading `mailer.sent()`/`mailer.last()` outside dev mode, or

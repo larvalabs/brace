@@ -390,6 +390,7 @@ cache.clearTag("simulation");                        // remove by tag
 // Route-level page caching
 app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
 app.get("/team/{id}", cache.wrap("30m", ctrl::team).tags("simulation"));
+app.get("/posts", cache.wrap("10m", ctrl::list).vary("page"));  // ?page= keys the cache; other params ignored
 cache.clearTag("simulation");  // invalidate all cached pages at once
 ```
 

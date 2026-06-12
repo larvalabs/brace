@@ -5,6 +5,7 @@ import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.LongAdder;
@@ -309,6 +310,7 @@ public class Cache {
         private final String ttl;
         private final Handler handler;
         private String[] tags = new String[0];
+        private String[] vary = new String[0];
 
         CachedHandler(Cache cache, String ttl, Handler handler) {
             this.cache = cache;
@@ -318,6 +320,20 @@ public class Cache {
 
         public CachedHandler tags(String... tags) {
             this.tags = tags;
+            return this;
+        }
+
+        /**
+         * Declares which query params key the cache. Only declared params contribute to the cache
+         * key; everything else is ignored, so clients can't mint entries with junk params
+         * ({@code ?utm_source=...}, {@code ?fbclid=...}, or deliberate {@code ?x=<random>} floods).
+         * By default NOTHING varies — a cached route serves one entry per path regardless of query
+         * string. If the page's content depends on a param ({@code ?page=}, {@code ?sort=}),
+         * declare it here or stale-wrong responses will be served for it.
+         */
+        public CachedHandler vary(String... params) {
+            this.vary = params.clone();
+            Arrays.sort(this.vary); // canonical key order regardless of declaration order
             return this;
         }
 
@@ -344,16 +360,21 @@ public class Cache {
             return prefix + request.method() + ":" + request.path() + queryKey(request);
         }
 
+        /**
+         * The query component of the cache key: declared {@link #vary} params only, in sorted
+         * order, present-or-absent distinguished. Undeclared params never reach the key — the
+         * request side must not control cache cardinality (H8: one full rendered page is stored
+         * per distinct key, so attacker-minted keys are a memory-exhaustion vector).
+         */
         private String queryKey(Request request) {
-            var params = request.queryParams();
-            if (params.isEmpty()) return "";
-            var sb = new StringBuilder("?");
-            params.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .forEach(e -> {
-                    if (sb.length() > 1) sb.append("&");
-                    sb.append(percentEncode(e.getKey())).append("=").append(percentEncode(e.getValue()));
-                });
+            if (vary.length == 0) return "";
+            var sb = new StringBuilder();
+            for (var param : vary) { // pre-sorted by vary()
+                var value = request.queryParam(param);
+                if (value == null) continue; // absent param: contributes nothing (≠ empty value)
+                sb.append(sb.isEmpty() ? '?' : '&');
+                sb.append(percentEncode(param)).append('=').append(percentEncode(value));
+            }
             return sb.toString();
         }
 

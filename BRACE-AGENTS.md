@@ -464,11 +464,17 @@ Route-level page caching:
 
 ```java
 app.get("/", cache.wrap("5m", ctrl::index));
-app.get("/posts", cache.wrap("30m", ctrl::list).tags("posts"));
+app.get("/posts", cache.wrap("30m", ctrl::list).tags("posts").vary("page", "sort"));
 cache.clearTag("posts");  // invalidate all cached pages with this tag
 ```
 
-Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path/query are cached separately (they don't clobber each other).
+**Query params are ignored by default** — a cached route serves one entry per path. If the
+page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
+or the cache will serve the same entry for every value. Undeclared params never key the cache
+(so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
+entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
+
+Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path are cached separately (they don't clobber each other).
 
 ### Backends: in-process (default) vs shared
 

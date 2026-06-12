@@ -24,9 +24,40 @@ class InMemoryBackend implements CacheBackend {
     /** Result of {@link #getOrCompute}: the value plus whether it was already cached. */
     record Computed(Object value, boolean hit) {}
 
+    static final int DEFAULT_MAX_ENTRIES = 10_000;
+
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> tagIndex = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> counters = new ConcurrentHashMap<>();
+    private final int maxEntries;
+    private final AtomicLong capacityEvictions = new AtomicLong();
+
+    InMemoryBackend() {
+        this(DEFAULT_MAX_ENTRIES);
+    }
+
+    InMemoryBackend(int maxEntries) {
+        this.maxEntries = maxEntries;
+    }
+
+    /**
+     * Entry-count safety net (perf review H8), not an LRU: before inserting a NEW key into a full
+     * store, drop expired entries, then — still full — arbitrary ones ({@code ConcurrentHashMap}
+     * iteration order), until there's room. Sized so a runaway keyspace degrades the hit rate
+     * instead of exhausting the heap. The bound is approximate under concurrent inserts (racing
+     * writers may briefly overshoot by a few entries); counters and the tag index are not capped.
+     */
+    private void ensureCapacity(String newKey) {
+        if (store.size() < maxEntries || store.containsKey(newKey)) {
+            return;
+        }
+        sweepExpired();
+        var it = store.keySet().iterator();
+        while (store.size() >= maxEntries && it.hasNext()) {
+            remove(it.next());
+            capacityEvictions.incrementAndGet();
+        }
+    }
 
     @Override
     public boolean requiresSerialization() {
@@ -46,6 +77,7 @@ class InMemoryBackend implements CacheBackend {
 
     @Override
     public void setObject(String key, Object value, Duration ttl, String[] tags) {
+        ensureCapacity(key);
         var expiry = ttl == null ? null : Instant.now().plus(ttl);
         store.put(key, new Entry(value, expiry, tags));
         for (var tag : tags) {
@@ -63,6 +95,7 @@ class InMemoryBackend implements CacheBackend {
         if (current != null && !current.expired()) {
             return new Computed(current.value(), true);
         }
+        ensureCapacity(key);
         boolean[] computed = {false};
         var entry = store.compute(key, (k, existing) -> {
             if (existing != null && !existing.expired()) return existing;
@@ -117,6 +150,11 @@ class InMemoryBackend implements CacheBackend {
 
     @Override
     public long evictExpired() {
+        // Fold in capacity evictions since the last sweep so the facade's eviction stat sees them.
+        return sweepExpired() + capacityEvictions.getAndSet(0);
+    }
+
+    private long sweepExpired() {
         var now = Instant.now();
         long removed = 0;
         for (var entry : store.entrySet()) {
