@@ -100,16 +100,29 @@ public class Request {
 
     // Form parameter accessors
 
+    // Parsed at most once per request (M2): each accessor used to split and URL-decode the
+    // whole body again, so a handler reading 5 fields paid 5 full parses (plus the
+    // framework's CSRF extraction). Requests are handled on a single thread; the benign
+    // re-parse race is acceptable if one ever escapes.
+    private Map<String, String> formParams;
+
+    private Map<String, String> formParams() {
+        if (formParams == null) {
+            formParams = parseFormBody(body);
+        }
+        return formParams;
+    }
+
     public String formParam(String name) {
-        return parseFormBody(body).get(name);
+        return formParams().get(name);
     }
 
     public int formInt(String name) {
-        return Integer.parseInt(parseFormBody(body).get(name));
+        return Integer.parseInt(formParams().get(name));
     }
 
     public boolean hasFormParam(String name) {
-        return parseFormBody(body).containsKey(name);
+        return formParams().containsKey(name);
     }
 
     // JSON request helpers
@@ -313,7 +326,9 @@ public class Request {
     }
 
     public <T> Form<T> form(Class<T> type) {
-        var params = parseFormBody(body());
+        // Copy: the cached map must stay pristine for formParam() readers while query
+        // params are merged in here.
+        var params = new LinkedHashMap<>(formParams());
         for (var entry : queryParams.entrySet()) {
             params.putIfAbsent(entry.getKey(), entry.getValue());
         }
