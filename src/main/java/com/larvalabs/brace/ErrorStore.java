@@ -159,35 +159,43 @@ public class ErrorStore {
         return true;
     }
 
-    public List<Map<String, Object>> list(String status) {
+    /** Count of unresolved errors — the number {@code /ops/status} reports as {@code errors.count}. */
+    public long countUnresolved() {
         var db = new Database(databaseFactory.openSession());
         try {
-            String sql;
-            List<Object[]> rows;
-            if ("resolved".equals(status)) {
-                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE resolved_at IS NOT NULL ORDER BY last_seen DESC";
-                rows = db.sqlQuery(sql);
-            } else {
-                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE resolved_at IS NULL ORDER BY last_seen DESC";
-                rows = db.sqlQuery(sql);
-            }
+            Long n = db.sqlQueryLong("SELECT COUNT(*) FROM ops_errors WHERE resolved_at IS NULL");
+            return n != null ? n : 0;
+        } finally {
+            db.close();
+        }
+    }
 
+    /**
+     * The most recent unresolved errors, summary fields only ({@code id, errorType, message,
+     * route, occurrenceCount, firstSeen, lastSeen, at}) — the same row shape as the no-database
+     * in-memory summaries, so {@code errors.recent} in {@code /ops/status} doesn't change shape
+     * with the deployment mode. {@code at} is the first app frame of the stored trace; full
+     * detail lives at {@code /ops/errors/{id}}.
+     */
+    public List<Map<String, Object>> recentUnresolved(int limit) {
+        var db = new Database(databaseFactory.openSession());
+        try {
+            var rows = db.sqlQuery(
+                "SELECT id, error_type, message, route, occurrence_count, first_seen, last_seen, stack_trace " +
+                "FROM ops_errors WHERE resolved_at IS NULL ORDER BY last_seen DESC LIMIT ?", limit);
             var result = new ArrayList<Map<String, Object>>();
             for (var row : rows) {
-                var map = new LinkedHashMap<String, Object>();
-                map.put("id", ((Number) row[0]).longValue());
-                map.put("errorType", row[1]);
-                map.put("message", row[2]);
-                map.put("stackTrace", row[3]);
-                map.put("route", row[4]);
-                map.put("requestDetail", row[5]);
-                map.put("firstSeen", toInstant(row[6]));
-                map.put("lastSeen", toInstant(row[7]));
-                map.put("occurrenceCount", ((Number) row[8]).intValue());
-                map.put("resolvedAt", toInstant(row[9]));
-                map.put("queriesBefore", row[10]);
-                map.put("requestHeaders", row[11]);
-                result.add(map);
+                var m = new LinkedHashMap<String, Object>();
+                m.put("id", ((Number) row[0]).longValue());
+                m.put("errorType", row[1]);
+                m.put("message", row[2]);
+                m.put("route", row[3]);
+                m.put("occurrenceCount", ((Number) row[4]).intValue());
+                m.put("firstSeen", toInstant(row[5]));
+                m.put("lastSeen", toInstant(row[6]));
+                String at = Log.appFrame((String) row[7]);
+                if (at != null) m.put("at", at);
+                result.add(m);
             }
             return result;
         } finally {
@@ -195,17 +203,74 @@ public class ErrorStore {
         }
     }
 
-    public List<Map<String, Object>> list(String status, java.time.Instant since) {
-        var all = list(status);
-        if (since == null) return all;
-        var out = new ArrayList<Map<String, Object>>();
-        for (var row : all) {
-            // firstSeen is a typed Instant now (timestamptz column), so the cutoff is a direct
-            // compare — no string parsing. Rows with a null first_seen are dropped, as before.
-            var firstSeen = (Instant) row.get("firstSeen");
-            if (firstSeen != null && !firstSeen.isBefore(since)) out.add(row);
+    /**
+     * Cap on rows returned by an <em>unfiltered</em> {@link #list}. The store itself is pruned
+     * to {@code maxErrors} (default 1000), but a list response carrying every heavy column
+     * unbounded is still a needlessly large payload — recent-first covers the browse use.
+     * A {@code since}-filtered list is NOT capped: the caller asked for a bounded window and
+     * gets it completely (the prune bounds the worst case), so the window never silently
+     * loses rows while {@code errors.count} says otherwise.
+     */
+    static final int LIST_LIMIT = 500;
+
+    public List<Map<String, Object>> list(String status) {
+        return list(status, null);
+    }
+
+    /** The full-detail column list — one definition for {@link #list}, {@link #find}, {@link #resolve} (mapped by {@link #mapRow}). */
+    private static final String FULL_COLUMNS =
+        "id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers";
+
+    public List<Map<String, Object>> list(String status, Instant since) {
+        var db = new Database(databaseFactory.openSession());
+        try {
+            String where = "resolved".equals(status) ? "resolved_at IS NOT NULL" : "resolved_at IS NULL";
+            String sql = "SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE " + where
+                + (since != null ? " AND first_seen >= ?" : "")
+                + " ORDER BY last_seen DESC"
+                + (since == null ? " LIMIT ?" : "");
+            List<Object[]> rows = since != null
+                ? db.sqlQuery(sql, Timestamp.from(since))
+                : db.sqlQuery(sql, LIST_LIMIT);
+
+            var result = new ArrayList<Map<String, Object>>();
+            for (var row : rows) {
+                result.add(mapRow(row));
+            }
+            return result;
+        } finally {
+            db.close();
         }
-        return out;
+    }
+
+    /** Fetch one error by id with full detail (any status), or null if the id is unknown. */
+    public Map<String, Object> find(long id) {
+        var db = new Database(databaseFactory.openSession());
+        try {
+            var rows = db.sqlQuery("SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE id = ?", id);
+            if (rows.isEmpty()) return null;
+            return mapRow(rows.get(0));
+        } finally {
+            db.close();
+        }
+    }
+
+    /** Map a full SELECT row (the column order used by {@link #list} and {@link #find}). */
+    private static Map<String, Object> mapRow(Object[] row) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("id", ((Number) row[0]).longValue());
+        map.put("errorType", row[1]);
+        map.put("message", row[2]);
+        map.put("stackTrace", row[3]);
+        map.put("route", row[4]);
+        map.put("requestDetail", row[5]);
+        map.put("firstSeen", toInstant(row[6]));
+        map.put("lastSeen", toInstant(row[7]));
+        map.put("occurrenceCount", ((Number) row[8]).intValue());
+        map.put("resolvedAt", toInstant(row[9]));
+        map.put("queriesBefore", row[10]);
+        map.put("requestHeaders", row[11]);
+        return map;
     }
 
     /**
@@ -233,26 +298,11 @@ public class ErrorStore {
         try {
             var now = Timestamp.from(Instant.now());
             db.sql("UPDATE ops_errors SET resolved_at = ? WHERE id = ?", now, id);
+            // Re-fetch on the same session — shared FULL_COLUMNS + mapRow keep the row
+            // shape from drifting (this method once hand-built the map and had drifted).
+            var rows = db.sqlQuery("SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE id = ?", id);
             db.commitTransaction();
-
-            // Re-fetch the updated record
-            var rows = db.sqlQuery(
-                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE id = ?", id);
-
-            if (rows.isEmpty()) return null;
-            var row = rows.get(0);
-            var map = new LinkedHashMap<String, Object>();
-            map.put("id", ((Number) row[0]).longValue());
-            map.put("errorType", row[1]);
-            map.put("message", row[2]);
-            map.put("stackTrace", row[3]);
-            map.put("route", row[4]);
-            map.put("requestDetail", row[5]);
-            map.put("firstSeen", toInstant(row[6]));
-            map.put("lastSeen", toInstant(row[7]));
-            map.put("occurrenceCount", ((Number) row[8]).intValue());
-            map.put("resolvedAt", toInstant(row[9]));
-            return map;
+            return rows.isEmpty() ? null : mapRow(rows.get(0));
         } catch (Exception e) {
             db.rollbackTransaction();
             return null;

@@ -15,17 +15,22 @@ public class App {
         app.get("/json", req ->
             Result.json(Map.of(
                 "framework", "Brace",
-                "version", "0.1.0",
+                "version", "dev",
                 "status", "running"
             )));
 
         app.get("/redirect", req -> Result.redirect("/"));
 
-        app.before("/admin/*", req -> Result.unauthorized("Login required"));
+        // Before middleware: guard /admin/* behind a header check (demo only — not real auth).
+        // Returning null continues the chain; a Result short-circuits the request.
+        app.before("/admin/*", req ->
+            "letmein".equals(req.header("X-Admin-Key"))
+                ? null
+                : Result.unauthorized("Send header X-Admin-Key: letmein"));
         app.get("/admin/dashboard", req -> Result.text("Admin Dashboard"));
 
         app.after((req, result) -> {
-            result.header("X-Powered-By", "Brace/0.1.0");
+            result.header("X-Powered-By", "Brace");
             return result;
         });
 

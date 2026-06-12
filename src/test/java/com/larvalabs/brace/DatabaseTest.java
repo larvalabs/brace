@@ -59,6 +59,62 @@ class DatabaseTest {
     }
 
     @Test
+    void findOr404ReturnsRowWhenPresent() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "Found";
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var found = db.findOr404(Post.class, post.id);
+            assertEquals("Found", found.title);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void findOr404ThrowsNotFoundForMissing() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            assertThrows(NotFoundException.class, () -> db.findOr404(Post.class, 99999L));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryOneOr404ReturnsRowAndThrowsForMissing() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "QueryOne404";
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var found = db.queryOneOr404(Post.class, "title = ?", "QueryOne404");
+            assertEquals(post.id, found.id);
+            assertThrows(NotFoundException.class,
+                () -> db.queryOneOr404(Post.class, "title = ?", "no-such-title"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void queryWithCondition() {
         var db = new Database(factory.openSession());
         try {
@@ -74,6 +130,146 @@ class DatabaseTest {
             var results = db.query(Post.class, "title = ?", post.title);
             assertFalse(results.isEmpty());
             assertEquals(post.title, results.get(0).title);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    // --- M4: ORDER BY in the where-fragment is supported semantics, and queryPage ---
+
+    /** Insert {@code n} posts titled {@code prefix_0 … prefix_(n-1)} and return the prefix. */
+    private String seedPosts(Database db, int n) {
+        String prefix = "OrderTest_" + System.nanoTime();
+        db.beginTransaction();
+        for (int i = 0; i < n; i++) {
+            var post = new Post();
+            post.title = prefix + "_" + i;
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+        }
+        db.commitTransaction();
+        return prefix;
+    }
+
+    @Test
+    void queryHonorsOrderByInWhereFragment() {
+        // ORDER BY inside the where-fragment is documented, pinned behavior — not an accident
+        // of concatenation. Descending by id must return newest-inserted first.
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 3);
+
+            db.beginTransaction();
+            var desc = db.query(Post.class, "title LIKE ? ORDER BY id DESC", prefix + "%");
+            assertEquals(3, desc.size());
+            assertTrue(desc.get(0).id > desc.get(1).id);
+            assertTrue(desc.get(1).id > desc.get(2).id);
+            assertEquals(prefix + "_2", desc.get(0).title);
+
+            var asc = db.query(Post.class, "title LIKE ? ORDER BY id ASC", prefix + "%");
+            assertEquals(prefix + "_0", asc.get(0).title);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryPageReturnsCorrectSlice() {
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 5);
+
+            db.beginTransaction();
+            // Page 2 of size 2, ordered ascending: rows 2 and 3 (0-based).
+            var page = db.queryPage(Post.class, "title LIKE ? ORDER BY id ASC", 2, 2, prefix + "%");
+            assertEquals(2, page.size());
+            assertEquals(prefix + "_2", page.get(0).title);
+            assertEquals(prefix + "_3", page.get(1).title);
+
+            // Last page is short.
+            var last = db.queryPage(Post.class, "title LIKE ? ORDER BY id ASC", 2, 4, prefix + "%");
+            assertEquals(1, last.size());
+            assertEquals(prefix + "_4", last.get(0).title);
+
+            // Offset past the end is empty, not an error.
+            var past = db.queryPage(Post.class, "title LIKE ? ORDER BY id ASC", 2, 10, prefix + "%");
+            assertTrue(past.isEmpty());
+
+            // The page-total idiom: db.count with the same where-condition (sans ORDER BY).
+            assertEquals(5, db.count(Post.class, "title LIKE ?", prefix + "%"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryPageWithOrderByDescSlices() {
+        // ORDER BY DESC combined with the slice: page 1 of size 2 = the two newest rows.
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 4);
+
+            db.beginTransaction();
+            var page = db.queryPage(Post.class, "title LIKE ? ORDER BY id DESC", 2, 0, prefix + "%");
+            assertEquals(2, page.size());
+            assertEquals(prefix + "_3", page.get(0).title);
+            assertEquals(prefix + "_2", page.get(1).title);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryPageValidatesLimitAndOffset() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            assertThrows(IllegalArgumentException.class,
+                    () -> db.queryPage(Post.class, "title = ?", 0, 0, "x"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> db.queryPage(Post.class, "title = ?", -1, 0, "x"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> db.queryPage(Post.class, "title = ?", 10, -1, "x"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void queryPageInstrumentsQueryCount() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            int before = db.queryCount();
+            db.queryPage(Post.class, "title = ? ORDER BY id ASC", 5, 0, "no-such-title");
+            assertEquals(before + 1, db.queryCount());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void hqlAggregateProjection() {
+        // The documented aggregate idiom: one SELECT AVG/COUNT round-trip instead of
+        // fetching rows and loop-summing in Java.
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 3);
+
+            db.beginTransaction();
+            var rows = db.hql(
+                "SELECT AVG(p.id), COUNT(p) FROM Post p WHERE p.title LIKE ?", prefix + "%");
+            assertEquals(1, rows.size());
+            Object[] row = rows.get(0);
+            assertTrue(((Number) row[0]).doubleValue() > 0);
+            assertEquals(3L, ((Number) row[1]).longValue());
             db.commitTransaction();
         } finally {
             db.close();
@@ -112,6 +308,48 @@ class DatabaseTest {
             db.beginTransaction();
             long count = db.count(Post.class);
             assertTrue(count >= 0);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void existsTrueAndFalse() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "Exists Check";
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            assertTrue(db.exists(Post.class, "title = ?", "Exists Check"));
+            assertFalse(db.exists(Post.class, "title = ?", "no-such-title"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void existsWithMultipleParams() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "Multi Exists";
+            post.body = "Multi Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            assertTrue(db.exists(Post.class, "title = ? AND body = ?", "Multi Exists", "Multi Body"));
+            assertFalse(db.exists(Post.class, "title = ? AND body = ?", "Multi Exists", "Wrong Body"));
             db.commitTransaction();
         } finally {
             db.close();

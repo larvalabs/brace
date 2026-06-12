@@ -23,6 +23,7 @@ public class Brace {
     /** Package-private accessor used by tests that need to inspect/mutate route metadata. */
     List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
+    private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
@@ -54,6 +55,7 @@ public class Brace {
     private final List<Notifier> regressionNotifiers = new ArrayList<>();
 
     public static Brace app() {
+        JulLogging.init();
         return new Brace();
     }
 
@@ -450,6 +452,19 @@ public class Brace {
         return delete(pattern, handler);
     }
 
+    // Read-only typed names exist for GET only: a mutating verb (POST/PUT/DELETE) with a
+    // transaction-skipping Read handler is a footgun — a db.insert inside would run
+    // outside any transaction. The rare legitimate case (e.g. POST-as-complex-query)
+    // can still use the explicit cast form: app.post(pattern, (ReadDbHandler) ...).
+
+    public RouteConfig getRead(String pattern, ReadDbHandler handler) {
+        return get(pattern, handler);
+    }
+
+    public RouteConfig getReadFull(String pattern, ReadFullHandler handler) {
+        return get(pattern, handler);
+    }
+
     // Route grouping
 
     public Brace group(String prefix, Consumer<RouteGroup> config) {
@@ -469,6 +484,34 @@ public class Brace {
         beforeMiddleware.add(new Middleware.BoundBefore(
                 Middleware.PathPattern.compile(pathPattern), handler));
         return this;
+    }
+
+    /**
+     * Session-aware before-middleware. Runs after all plain {@code before(...)} middleware
+     * and receives the same Session instance the handler will get — mutations made here
+     * persist via the normal session-cookie write-back. Return a Result to short-circuit
+     * (e.g. a redirect to the login page), or null to continue.
+     */
+    public Brace before(Middleware.BeforeSession handler) {
+        beforeSessionMiddleware.add(new Middleware.BoundBeforeSession(null, handler));
+        return this;
+    }
+
+    public Brace before(String pathPattern, Middleware.BeforeSession handler) {
+        beforeSessionMiddleware.add(new Middleware.BoundBeforeSession(
+                Middleware.PathPattern.compile(pathPattern), handler));
+        return this;
+    }
+
+    /**
+     * The one-line auth guard: redirect to {@code redirectTo} unless the session has
+     * {@code sessionKey}. Equivalent to
+     * {@code before(pattern, (req, session) -> session.has(key) ? null : Redirect.to(redirectTo))}.
+     * Handlers under the pattern can then assume the key is present.
+     */
+    public Brace requireSession(String pathPattern, String sessionKey, String redirectTo) {
+        return before(pathPattern, (req, session) ->
+                session.has(sessionKey) ? null : Redirect.to(redirectTo));
     }
 
     public Brace after(Middleware.After handler) {
@@ -491,6 +534,15 @@ public class Brace {
     // Server lifecycle
 
     public void start() throws Exception {
+        // Session-aware middleware without .sessions(secret) is a silent trap: every
+        // request gets a fresh empty Session, so a requireSession guard redirects forever
+        // (a guard-loop with no error anywhere). Warn loudly at startup.
+        if (!beforeSessionMiddleware.isEmpty() && sessionSecret == null) {
+            Log.warn("Session-aware before-middleware (before(pattern, BeforeSession) / requireSession) "
+                + "is registered but sessions are not enabled — call .sessions(secret). Without it every "
+                + "request sees an empty session, so requireSession guards redirect unconditionally.");
+        }
+
         // Create ErrorStore if database is available
         ErrorStore errorStore = null;
         if (databaseFactory != null) {
@@ -533,6 +585,7 @@ public class Brace {
             router.add("GET", "/ops/logs", (Handler) opsHandler::logs);
             router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
             router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
+            router.add("GET", "/ops/errors/{id}", (Handler) opsHandler::errorDetail);
             router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError).setCsrfRequired(false);
             router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache).setCsrfRequired(false);
             router.add("GET", "/ops/cache", (Handler) opsHandler::cacheStats);
@@ -561,6 +614,7 @@ public class Brace {
         var staticMappingsCopy = List.copyOf(staticFileMappings);
         Assets.init(staticMappingsCopy);
         var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
+        handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
 
         if (!wsRoutes.isEmpty()) {
             // Room fan-out: shared across the fleet on Postgres (LISTEN/NOTIFY), local otherwise.
@@ -854,7 +908,18 @@ public class Brace {
     }
 
     public static class TestAppBuilder {
-        private String dbUrl = "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1";
+        /**
+         * Gives each builder its own in-memory H2 database by default. A fixed shared name
+         * (the old {@code jdbc:h2:mem:test}) meant every test class in one JVM (Surefire
+         * reuses forks) wrote into the same database, leaking data across classes unless
+         * each remembered to reset. A monotonic counter (not random/time-based) keeps URLs
+         * deterministic per JVM run. Call {@link #database(String)} to opt back into a
+         * shared database explicitly.
+         */
+        private static final java.util.concurrent.atomic.AtomicInteger DB_COUNTER =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+        private String dbUrl = "jdbc:h2:mem:test-" + DB_COUNTER.incrementAndGet() + ";DB_CLOSE_DELAY=-1";
         private String templatesPath;
         private String secret;
         private final List<Class<?>> entityClasses = new ArrayList<>();

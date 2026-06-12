@@ -1,5 +1,8 @@
 package com.larvalabs.brace;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.net.http.HttpResponse;
 import java.util.List;
 
@@ -41,6 +44,31 @@ public class TestResponse {
             return Json.mapper().readValue(body(), type);
         } catch (Exception e) {
             throw new RuntimeException("Failed to deserialize response body as " + type.getSimpleName(), e);
+        }
+    }
+
+    /**
+     * Deserialize the body via a Jackson {@link TypeReference} — for generic types that
+     * {@link #bodyAs(Class)} can't express, e.g.
+     * {@code res.bodyAs(new TypeReference<List<Post>>() {})}.
+     */
+    public <T> T bodyAs(TypeReference<T> type) {
+        try {
+            return Json.mapper().readValue(body(), type);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to deserialize response body as " + type.getType(), e);
+        }
+    }
+
+    /**
+     * Parse the body as a Jackson {@link JsonNode} tree for structural assertions without a
+     * DTO: {@code res.json().get(0).get("title").asText()}.
+     */
+    public JsonNode json() {
+        try {
+            return Json.mapper().readTree(body());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to parse response body as JSON: " + body(), e);
         }
     }
 }

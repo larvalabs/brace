@@ -80,6 +80,58 @@ public class ProjectGenerator {
             <scope>test</scope>
         </dependency>
     </dependencies>
+    <build>
+        <!-- Fixed jar name so the Dockerfile can COPY target/app.jar deterministically. -->
+        <finalName>app</finalName>
+        <plugins>
+            <!-- Without this pin, Maven's inherited Surefire 2.x silently ignores
+                 JUnit 5 tests ("Tests run: 0" + BUILD SUCCESS). Do not remove. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+            <!-- mvn package builds an executable fat jar (target/app.jar). The
+                 transformers matter: Jetty/Hibernate register implementations via
+                 META-INF/services (merged by ServicesResourceTransformer), and
+                 several dependencies are multi-release jars. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <configuration>
+                    <createDependencyReducedPom>false</createDependencyReducedPom>
+                    <transformers>
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                            <mainClass>app.App</mainClass>
+                            <manifestEntries>
+                                <Multi-Release>true</Multi-Release>
+                            </manifestEntries>
+                        </transformer>
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                    </transformers>
+                    <filters>
+                        <filter>
+                            <artifact>*:*</artifact>
+                            <excludes>
+                                <exclude>META-INF/*.SF</exclude>
+                                <exclude>META-INF/*.DSA</exclude>
+                                <exclude>META-INF/*.RSA</exclude>
+                                <exclude>module-info.class</exclude>
+                                <exclude>META-INF/versions/*/module-info.class</exclude>
+                            </excludes>
+                        </filter>
+                    </filters>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
 """);
 
@@ -117,10 +169,22 @@ public class App {
             .sessions(config.get("session.secret"))
             .ops("ops-authorized-keys");
 
-        var home = new HomeController();
-        app.get("/", home::index);
+        routes(app);
 
         app.start();
+    }
+
+    /**
+     * All route registration lives here, separate from config and server
+     * startup, so tests can wire the exact same routes:
+     *   Brace.test().templates("views").start(App::routes)
+     */
+    public static void routes(Brace app) {
+        var home = new HomeController();
+        app.get("/", home::index);
+        // DB-backed routes use the typed registration methods, e.g.:
+        //   app.getRead("/posts", posts::index);   // read-only DB handler
+        //   app.postDb("/posts", posts::create);   // transactional DB handler
     }
 }
 """);
@@ -143,7 +207,6 @@ public class HomeController {
 package app;
 
 import com.larvalabs.brace.*;
-import app.controllers.HomeController;
 import org.junit.jupiter.api.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -154,10 +217,8 @@ class HomeControllerTest {
     static void setup() throws Exception {
         testApp = Brace.test()
             .templates("views")
-            .start(app -> {
-                var home = new HomeController();
-                app.get("/", home::index);
-            });
+            // .entities(Post.class)  // register the entities your routes query
+            .start(App::routes);      // same wiring as main() — no duplication
     }
 
     @AfterAll
@@ -168,6 +229,18 @@ class HomeControllerTest {
         var response = testApp.get("/");
         assertEquals(200, response.status());
         assertTrue(response.body().contains("Welcome"));
+    }
+
+    /**
+     * Factory methods for test entities — one per entity. Insert with:
+     *   testApp.withDb(db -> db.insert(TestData.post("Hello")));
+     */
+    static class TestData {
+        // static Post post(String title) {
+        //     var p = new Post();
+        //     p.title = title;
+        //     return p;
+        // }
     }
 }
 """);
@@ -182,7 +255,7 @@ class HomeControllerTest {
                 "session.secret=" + sessionSecret + "\n" +
                 "\n" +
                 "%dev.port=9000\n" +
-                "%dev.db.url=jdbc:h2:mem:dev\n" +
+                "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");
 
@@ -198,7 +271,7 @@ class HomeControllerTest {
                 "session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars\n" +
                 "\n" +
                 "%dev.port=9000\n" +
-                "%dev.db.url=jdbc:h2:mem:dev\n" +
+                "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");
 
@@ -246,11 +319,14 @@ body { font-family: system-ui, sans-serif; line-height: 1.6; max-width: 800px; m
 h1 { margin-bottom: 1rem; }
 """);
 
-            // Dockerfile
+            // Dockerfile — target/app.jar is the shaded executable jar
+            // (fixed name via <finalName>app</finalName>); build it first
+            // with `mvn package`.
             Files.writeString(root.resolve("Dockerfile"),
+                "# Build the jar first: mvn package\n" +
                 "FROM eclipse-temurin:21-jre\n" +
                 "WORKDIR /app\n" +
-                "COPY target/*.jar app.jar\n" +
+                "COPY target/app.jar app.jar\n" +
                 "COPY application.conf.example application.conf\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +
@@ -262,11 +338,17 @@ h1 { margin-bottom: 1rem; }
             // CLAUDE.md — capability index with pointers to full reference
             ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));
 
-            // BRACE-AGENTS.md — full Brace framework API reference
-            try (var in = ProjectGenerator.class.getResourceAsStream("/brace/BRACE-AGENTS.md")) {
-                if (in != null) {
-                    Files.writeString(root.resolve("BRACE-AGENTS.md"), new String(in.readAllBytes()));
-                }
+            // BRACE-AGENTS.md (full API reference) and BRACE-OPS.md (ops reference) —
+            // the same bundled resources `brace agents-md` refreshes, loaded through
+            // CliAgentsMd's constants and reader (UTF-8) so the entry paths and the
+            // generator can't drift apart and silently stop shipping a doc.
+            String agentsMd = CliAgentsMd.loadBundled(CliAgentsMd.JAR_ENTRY);
+            if (agentsMd != null) {
+                Files.writeString(root.resolve("BRACE-AGENTS.md"), agentsMd);
+            }
+            String opsMd = CliAgentsMd.loadBundled(CliAgentsMd.OPS_JAR_ENTRY);
+            if (opsMd != null) {
+                Files.writeString(root.resolve(CliAgentsMd.OPS_FILE), opsMd);
             }
 
             // .gitignore
@@ -284,7 +366,9 @@ application.conf
 
             System.out.println("Created new Brace project: " + name);
             System.out.println("  cd " + name);
-            System.out.println("  mvn compile exec:java -Dexec.mainClass=app.App -Dbrace.mode=dev");
+            // No `brace deps` needed first: the scaffold's only runtime dependency is
+            // brace itself, which the toolchain lib dir already provides.
+            System.out.println("  brace dev");
         } catch (IOException e) {
             System.err.println("Failed to create project: " + e.getMessage());
             System.exit(1);

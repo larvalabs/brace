@@ -1,12 +1,18 @@
 package com.larvalabs.brace;
 
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
+import javax.tools.StandardJavaFileManager;
 import javax.tools.ToolProvider;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static java.nio.file.StandardWatchEventKinds.*;
@@ -46,7 +52,6 @@ final class BuildCommands {
         CliOutput.printInfo("Compiling...");
         int rc = javac(out, projectClasspath(cwd), sources);
         if (rc == 0) CliOutput.printSuccess("Compiled");
-        else CliOutput.printError("Compilation failed");
         return rc;
     }
 
@@ -59,22 +64,131 @@ final class BuildCommands {
         Files.createDirectories(out);
         CliOutput.printInfo("Compiling tests...");
         int rc = javac(out, testClasspath(cwd), sources);
-        if (rc != 0) CliOutput.printError("Test compilation failed");
-        else CliOutput.printSuccess("Tests compiled");
+        if (rc == 0) CliOutput.printSuccess("Tests compiled");
         return rc;
     }
 
-    private static int javac(Path outDir, String classpath, List<String> sources) {
+    private static int javac(Path outDir, String classpath, List<String> sources) throws IOException {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
             CliOutput.printError("No system Java compiler found — run brace with a JDK, not a JRE.");
             return 1;
         }
-        List<String> args = new ArrayList<>(List.of(
-                "-d", outDir.toString(),
-                "-cp", classpath));
-        args.addAll(sources);
-        return compiler.run(null, null, null, args.toArray(new String[0]));
+        var diagnostics = new DiagnosticCollector<JavaFileObject>();
+        try (StandardJavaFileManager fm = compiler.getStandardFileManager(diagnostics, null, null)) {
+            Iterable<? extends JavaFileObject> units = fm.getJavaFileObjectsFromStrings(sources);
+            List<String> options = List.of("-d", outDir.toString(), "-cp", classpath);
+            boolean ok = compiler.getTask(null, fm, diagnostics, options, null, units).call();
+            List<Diagnostic<? extends JavaFileObject>> diags = diagnostics.getDiagnostics();
+            for (String line : formatDiagnostics(diags)) System.err.println(line);
+            if (!ok) {
+                long errors = diags.stream().filter(d -> d.getKind() == Diagnostic.Kind.ERROR).count();
+                long warnings = diags.stream().filter(BuildCommands::isWarning).count();
+                CliOutput.printError("Compilation failed: " + errors + " error" + (errors == 1 ? "" : "s")
+                        + ", " + warnings + " warning" + (warnings == 1 ? "" : "s"));
+                return 1;
+            }
+            return 0;
+        }
+    }
+
+    private static boolean isWarning(Diagnostic<?> d) {
+        return d.getKind() == Diagnostic.Kind.WARNING || d.getKind() == Diagnostic.Kind.MANDATORY_WARNING;
+    }
+
+    /** Max deduped diagnostics printed before the trailing {@code ... and N more} line. */
+    private static final int MAX_DIAGNOSTICS = 25;
+    /** Max extra locations listed in a {@code (+N more at ...)} suffix. */
+    private static final int MAX_EXTRA_LOCATIONS = 5;
+
+    /**
+     * Condenses javac diagnostics into one line each — {@code path:line: error: message},
+     * no source snippet, no caret. Multi-line messages keep their detail lines (joined
+     * with {@code ;}): for {@code cannot find symbol} the symbol name lives on line 2,
+     * and dropping it would make N different missing symbols indistinguishable.
+     * Diagnostics with the same kind and condensed message are deduped across files: the
+     * first occurrence is printed, the rest become a {@code (+N more at Foo.java:12, ...)}
+     * suffix. Errors sort before warnings, and the total is capped at
+     * {@link #MAX_DIAGNOSTICS} with a final {@code ... and N more} line.
+     */
+    static List<String> formatDiagnostics(List<Diagnostic<? extends JavaFileObject>> diags) {
+        // Group by (kind, condensed message), preserving first-seen order within each rank.
+        record Group(Diagnostic<? extends JavaFileObject> first, List<String> moreLocations) {}
+        Map<String, Group> groups = new LinkedHashMap<>();
+        for (Diagnostic<? extends JavaFileObject> d : diags) {
+            String key = d.getKind() + "|" + condense(message(d));
+            Group g = groups.get(key);
+            if (g == null) groups.put(key, new Group(d, new ArrayList<>()));
+            else g.moreLocations().add(shortLocation(d));
+        }
+        List<Group> ordered = new ArrayList<>(groups.values());
+        ordered.sort((a, b) -> Integer.compare(rank(a.first().getKind()), rank(b.first().getKind())));
+
+        List<String> lines = new ArrayList<>();
+        int printed = 0;
+        int suppressed = 0;
+        for (Group g : ordered) {
+            if (printed >= MAX_DIAGNOSTICS) {
+                suppressed += 1 + g.moreLocations().size();
+                continue;
+            }
+            Diagnostic<? extends JavaFileObject> d = g.first();
+            String location = d.getSource() != null && d.getLineNumber() != Diagnostic.NOPOS
+                    ? d.getSource().getName() + ":" + d.getLineNumber() + ": "
+                    : "";
+            lines.add(location + label(d.getKind()) + ": " + condense(message(d)));
+            printed++;
+            if (!g.moreLocations().isEmpty()) {
+                List<String> locs = g.moreLocations();
+                String shown = String.join(", ", locs.subList(0, Math.min(locs.size(), MAX_EXTRA_LOCATIONS)));
+                if (locs.size() > MAX_EXTRA_LOCATIONS) shown += ", ...";
+                lines.add("  (+" + locs.size() + " more at " + shown + ")");
+            }
+        }
+        if (suppressed > 0) lines.add("... and " + suppressed + " more");
+        return lines;
+    }
+
+    private static String message(Diagnostic<?> d) {
+        String m = d.getMessage(null);
+        return m == null ? "" : m;
+    }
+
+    /**
+     * Flattens a (possibly multi-line) javac message to one line: each line is
+     * whitespace-normalized and non-blank lines are joined with {@code "; "} —
+     * e.g. {@code cannot find symbol; symbol: method foo(); location: class Bar}.
+     */
+    private static String condense(String message) {
+        return message.lines()
+                .map(line -> line.strip().replaceAll("\\s+", " "))
+                .filter(line -> !line.isEmpty())
+                .collect(java.util.stream.Collectors.joining("; "));
+    }
+
+    private static String shortLocation(Diagnostic<? extends JavaFileObject> d) {
+        if (d.getSource() == null) return "<unknown>";
+        String name = d.getSource().getName();
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf(File.separatorChar));
+        if (slash >= 0) name = name.substring(slash + 1);
+        return d.getLineNumber() != Diagnostic.NOPOS ? name + ":" + d.getLineNumber() : name;
+    }
+
+    private static int rank(Diagnostic.Kind kind) {
+        return switch (kind) {
+            case ERROR -> 0;
+            case WARNING, MANDATORY_WARNING -> 1;
+            default -> 2;   // NOTE, OTHER
+        };
+    }
+
+    private static String label(Diagnostic.Kind kind) {
+        return switch (kind) {
+            case ERROR -> "error";
+            case WARNING, MANDATORY_WARNING -> "warning";
+            case NOTE -> "note";
+            default -> "info";
+        };
     }
 
     // --- run -------------------------------------------------------------
@@ -83,7 +197,7 @@ final class BuildCommands {
         if (compile(cwd) != 0) return 1;
         String mainClass = findMainClass(cwd);
         CliOutput.printInfo("Starting " + mainClass);
-        Process app = new ProcessBuilder("java", "-cp", projectClasspath(cwd), mainClass)
+        Process app = new ProcessBuilder(appCommand(cwd, mainClass, false))
                 .directory(cwd.toFile())
                 .inheritIO()
                 .start();
@@ -142,12 +256,26 @@ final class BuildCommands {
     }
 
     private static Process startApp(Path cwd, String mainClass) throws IOException {
-        Process p = new ProcessBuilder("java", "-cp", projectClasspath(cwd), mainClass)
+        Process p = new ProcessBuilder(appCommand(cwd, mainClass, true))
                 .directory(cwd.toFile())
                 .inheritIO()
                 .start();
         CliOutput.printSuccess("Started (PID " + p.pid() + ")");
         return p;
+    }
+
+    /**
+     * Command line for the app JVM. {@code brace dev} runs the app in dev mode
+     * ({@code -Dbrace.mode=dev}), which activates {@code %dev.} config overrides
+     * (the scaffold's in-memory H2 database, dev port) and dev-only behavior like
+     * 404 route suggestions. {@code brace run} deliberately sets no mode — it is
+     * the production-style launch, where config comes from the base keys and env vars.
+     */
+    static List<String> appCommand(Path cwd, String mainClass, boolean devMode) {
+        List<String> cmd = new ArrayList<>(List.of("java"));
+        if (devMode) cmd.add("-Dbrace.mode=dev");
+        cmd.addAll(List.of("-cp", projectClasspath(cwd), mainClass));
+        return cmd;
     }
 
     private static void stopApp(Process p) {
@@ -175,6 +303,20 @@ final class BuildCommands {
     // --- test ------------------------------------------------------------
 
     static int test(Path cwd, String[] args) throws Exception {
+        boolean verbose = false, quiet = false;
+        List<String> rest = new ArrayList<>();
+        for (String a : args) {
+            switch (a) {
+                case "--verbose" -> verbose = true;
+                case "--quiet" -> quiet = true;
+                default -> rest.add(a);
+            }
+        }
+        // Concise mode when stdout isn't a TTY (agents, pipes, CI) or on --quiet:
+        // summary-only ConsoleLauncher output, post-processed to one line per
+        // failure. --verbose forces today's full passthrough in either mode.
+        boolean concise = !verbose && (quiet || !CliOutput.stdoutIsTty());
+
         if (compile(cwd) != 0) return 1;
         if (compileTests(cwd) != 0) return 1;
         if (findJunitJar() == null) {
@@ -191,15 +333,166 @@ final class BuildCommands {
         List<String> cmd = new ArrayList<>(List.of(
                 "java", "-cp", testClasspath(cwd),
                 "org.junit.platform.console.ConsoleLauncher", "execute"));
-        if (args.length > 0 && !args[0].startsWith("-")) {
+        if (!rest.isEmpty() && !rest.get(0).startsWith("-")) {
             cmd.add("--select-class");
-            cmd.add(args[0]);
+            cmd.add(rest.get(0));
         } else {
             cmd.add("--scan-classpath");
             cmd.add(cwd.resolve("target/test-classes").toString());
         }
         cmd.add("--disable-banner");
-        return new ProcessBuilder(cmd).directory(cwd.toFile()).inheritIO().start().waitFor();
+        if (!concise) {
+            return new ProcessBuilder(cmd).directory(cwd.toFile()).inheritIO().start().waitFor();
+        }
+
+        cmd.add("--details=summary");
+        cmd.add("--disable-ansi-colors");
+        // Capture stdout (the ConsoleLauncher report we condense) but let stderr stream
+        // through live: a hung or crashing run (OOM, fatal JVM error, test debug output
+        // on stderr) stays visible instead of being buffered until process exit.
+        Process p = new ProcessBuilder(cmd)
+                .directory(cwd.toFile())
+                .redirectError(ProcessBuilder.Redirect.INHERIT)
+                .start();
+        String output = new String(p.getInputStream().readAllBytes());
+        int rc = p.waitFor();
+        List<String> lines = summarizeTestRun(output, projectPackages(cwd), rc);
+        if (lines == null) {
+            // Parsing failed — never swallow output.
+            System.out.print(output);
+        } else {
+            for (String line : lines) System.out.println(line);
+        }
+        return rc;
+    }
+
+    /**
+     * Condenses captured ConsoleLauncher {@code --details=summary} output: one line per
+     * failed test — {@code Class.method() — ExceptionType: message (File.java:NN)}, the
+     * location being the first stack frame in one of the project's own packages — then a
+     * final {@code N passed, M failed in X.Xs} line. Returns {@code null} when the output
+     * doesn't parse (caller falls back to printing it verbatim).
+     */
+    static List<String> summarizeTestRun(String output, java.util.Set<String> projectPackages, int exitCode) {
+        var successful = matchLong(output, "\\[\\s*(\\d+) tests successful\\s*\\]");
+        var failed = matchLong(output, "\\[\\s*(\\d+) tests failed\\s*\\]");
+        var skipped = matchLong(output, "\\[\\s*(\\d+) tests skipped\\s*\\]");
+        var containersFailed = matchLong(output, "\\[\\s*(\\d+) containers failed\\s*\\]");
+        var millis = matchLong(output, "Test run finished after (\\d+) ms");
+        if (successful == null || failed == null) return null;   // summary table missing
+
+        List<String> lines = new ArrayList<>(parseFailures(output, projectPackages));
+        // A nonzero exit with no parseable failure block (e.g. an engine-level error
+        // we don't recognise) must not be condensed into a bare summary line.
+        if (exitCode != 0 && lines.isEmpty()) return null;
+        // Cross-check against the section header: if we parsed fewer entries than the
+        // launcher reported (an entry shape we don't recognise), don't silently drop
+        // failures — fall back to verbatim output.
+        var declared = matchLong(output, "Failures \\((\\d+)\\):");
+        if (declared != null && lines.size() != declared) return null;
+
+        StringBuilder summary = new StringBuilder()
+                .append(successful).append(" passed, ").append(failed).append(" failed");
+        if (skipped != null && skipped > 0) summary.append(", ").append(skipped).append(" skipped");
+        // Container failures (@BeforeAll, constructor, @AfterAll) are counted separately
+        // by the launcher and silently skip the container's tests — never hide them.
+        if (containersFailed != null && containersFailed > 0) {
+            summary.append(", ").append(containersFailed)
+                    .append(containersFailed == 1 ? " container" : " containers").append(" failed");
+        }
+        if (millis != null) summary.append(" in ")
+                .append(String.format(java.util.Locale.ROOT, "%.1fs", millis / 1000.0));
+        lines.add(summary.toString());
+        return lines;
+    }
+
+    private static final java.util.regex.Pattern FAILURE_TEST = java.util.regex.Pattern.compile(
+            "className = '([^']+)', methodName = '([^']+)'");
+    // Container-level failures (@BeforeAll, constructor) carry a ClassSource, no methodName.
+    private static final java.util.regex.Pattern FAILURE_CONTAINER = java.util.regex.Pattern.compile(
+            "ClassSource \\[className = '([^']+)'");
+    private static final java.util.regex.Pattern FAILURE_EXCEPTION = java.util.regex.Pattern.compile(
+            "^\\s*=> ([\\w.$]+)(?:: (.*))?$");
+    private static final java.util.regex.Pattern STACK_FRAME = java.util.regex.Pattern.compile(
+            "^\\s*(?:at )?([\\w.$]+)\\.[\\w$<>]+\\(([\\w$]+\\.java):(\\d+)\\)");
+
+    /** One condensed line per entry in the ConsoleLauncher {@code Failures (N):} section. */
+    private static List<String> parseFailures(String output, java.util.Set<String> projectPackages) {
+        List<String> lines = new ArrayList<>();
+        String className = null, methodName = null, exception = null, location = null;
+        boolean inFailures = false;
+        for (String line : output.split("\n")) {
+            if (line.startsWith("Failures (")) { inFailures = true; continue; }
+            if (!inFailures) continue;
+            if (line.startsWith("Test run finished")) break;
+            // A new entry starts with a MethodSource (test failure) or ClassSource
+            // (container failure: @BeforeAll, constructor) — one shared transition.
+            String entryClass = null, entryMethod = null;
+            var test = FAILURE_TEST.matcher(line);
+            if (test.find()) {
+                entryClass = test.group(1);
+                entryMethod = test.group(2);
+            } else {
+                var container = FAILURE_CONTAINER.matcher(line);
+                if (container.find()) entryClass = container.group(1);
+            }
+            if (entryClass != null) {
+                flushFailure(lines, className, methodName, exception, location);
+                className = entryClass;
+                methodName = entryMethod;
+                exception = null;
+                location = null;
+                continue;
+            }
+            var ex = FAILURE_EXCEPTION.matcher(line);
+            if (exception == null && ex.matches()) {
+                String type = ex.group(1);
+                String message = ex.group(2);
+                exception = type.substring(type.lastIndexOf('.') + 1)
+                        + (message == null || message.isBlank() ? "" : ": " + message.strip());
+                continue;
+            }
+            var frame = STACK_FRAME.matcher(line);
+            if (exception != null && location == null && frame.find()) {
+                String frameClass = frame.group(1);
+                int dot = frameClass.lastIndexOf('.');
+                String framePackage = dot >= 0 ? frameClass.substring(0, dot) : "";
+                if (projectPackages.contains(framePackage)) {
+                    location = frame.group(2) + ":" + frame.group(3);
+                }
+            }
+        }
+        flushFailure(lines, className, methodName, exception, location);
+        return lines;
+    }
+
+    private static void flushFailure(List<String> lines, String className, String methodName,
+                                     String exception, String location) {
+        if (className == null) return;
+        String simple = className.substring(className.lastIndexOf('.') + 1);
+        // methodName == null is a container-level failure (@BeforeAll, constructor):
+        // the whole class failed to initialize and its tests never ran.
+        lines.add(simple + (methodName != null ? "." + methodName + "()" : " (class init)")
+                + (exception != null ? " — " + exception : "")
+                + (location != null ? " (" + location + ")" : ""));
+    }
+
+    private static Long matchLong(String text, String regex) {
+        var m = java.util.regex.Pattern.compile(regex).matcher(text);
+        return m.find() ? Long.parseLong(m.group(1)) : null;
+    }
+
+    /** Package names of the project's own sources (from the dirs under src/{main,test}/java). */
+    private static java.util.Set<String> projectPackages(Path cwd) throws IOException {
+        var packages = new java.util.HashSet<String>();
+        for (String tree : List.of("src/main/java", "src/test/java")) {
+            Path root = cwd.resolve(tree);
+            for (String file : findJavaFiles(root)) {
+                Path rel = root.relativize(Path.of(file)).getParent();
+                packages.add(rel == null ? "" : rel.toString().replace(File.separatorChar, '.'));
+            }
+        }
+        return packages;
     }
 
     // --- deps ------------------------------------------------------------
@@ -250,8 +543,10 @@ final class BuildCommands {
      * The directory holding the framework jars. Set by the launcher via
      * {@code -Dbrace.home}; falls back to the directory of the running jar so
      * that {@code java -cp brace.jar Cli run} works without the launcher.
+     * Package-visible: {@link CliAgentsMd} extracts the packaged BRACE-AGENTS.md
+     * from the brace jar found here.
      */
-    private static Path frameworkLibDir() {
+    static Path frameworkLibDir() {
         String home = System.getProperty("brace.home");
         if (home != null && !home.isBlank()) return Path.of(home, "lib");
         try {

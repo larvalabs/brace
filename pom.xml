@@ -57,6 +57,7 @@
         <flyway.version>10.22.0</flyway.version>
         <jte.version>3.2.1</jte.version>
         <jbcrypt.version>0.4</jbcrypt.version>
+        <slf4j.version>2.0.17</slf4j.version>
         <testcontainers.version>1.21.3</testcontainers.version>
     </properties>
 
@@ -188,6 +189,17 @@
             <artifactId>jakarta.mail</artifactId>
             <version>2.0.5</version>
         </dependency>
+
+        <!-- slf4j → java.util.logging bridge. Without a provider, Jetty prints the
+             "No SLF4J providers were found" warning and slf4j-routed logs vanish; with it,
+             everything (Jetty, Hibernate via jboss-logging, Flyway, HikariCP) funnels into
+             the single JUL sink that JulLogging configures (single-line format, WARNING
+             default for the noisy libs). Version matches the slf4j-api Jetty pulls in. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-jdk14</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
     </dependencies>
 
     <build>
@@ -206,6 +218,15 @@
                 <directory>${project.basedir}</directory>
                 <includes>
                     <include>BRACE-AGENTS.md</include>
+                </includes>
+                <targetPath>brace</targetPath>
+            </resource>
+            <!-- Ops reference companion: packaged at /brace/agent-ops-guide.md; written
+                 into projects as BRACE-OPS.md by `brace new` and `brace agents-md`. -->
+            <resource>
+                <directory>${project.basedir}/docs</directory>
+                <includes>
+                    <include>agent-ops-guide.md</include>
                 </includes>
                 <targetPath>brace</targetPath>
             </resource>

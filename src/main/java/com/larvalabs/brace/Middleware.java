@@ -9,6 +9,18 @@ public class Middleware {
         Result handle(Request req);
     }
 
+    /**
+     * Before-middleware that receives the request's {@link Session} — the place to put
+     * auth guards, instead of repeating the login check inside every protected handler.
+     * Runs after all plain {@link Before} middleware. The Session instance it receives is
+     * the SAME instance later passed to the handler, so mutations made here (and the
+     * resulting cookie write-back) behave exactly as if made in the handler.
+     */
+    @FunctionalInterface
+    public interface BeforeSession {
+        Result handle(Request req, Session session);
+    }
+
     @FunctionalInterface
     public interface After {
         Result handle(Request req, Result result);
@@ -20,6 +32,12 @@ public class Middleware {
                 return handler.handle(req);
             }
             return null;
+        }
+    }
+
+    public record BoundBeforeSession(PathPattern pattern, BeforeSession handler) {
+        public boolean matches(String path) {
+            return pattern == null || pattern.matches(path);
         }
     }
 

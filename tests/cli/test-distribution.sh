@@ -46,6 +46,11 @@ cd "$WORK"
 [[ -f testapp/pom.xml ]] || fail "testapp/pom.xml not created"
 [[ -f testapp/src/main/java/app/App.java ]] || fail "App.java not created"
 [[ -f testapp/src/test/java/app/HomeControllerTest.java ]] || fail "test class not created"
+grep -q "public static void routes(Brace app)" testapp/src/main/java/app/App.java || fail "App.java missing reusable routes(Brace) method"
+grep -q "App::routes" testapp/src/test/java/app/HomeControllerTest.java || fail "generated test doesn't reuse App::routes"
+grep -q "maven-surefire-plugin" testapp/pom.xml || fail "pom.xml missing surefire pin (mvn test would run zero tests)"
+grep -q "maven-shade-plugin" testapp/pom.xml || fail "pom.xml missing shade plugin (Dockerfile jar would not run)"
+grep -q "COPY target/app.jar app.jar" testapp/Dockerfile || fail "Dockerfile doesn't copy the shaded target/app.jar"
 pass "brace new created project"
 
 step "Running brace compile"
@@ -56,6 +61,22 @@ cd "$WORK/testapp"
 }
 [[ -f target/classes/app/App.class ]] || fail "App.class not produced"
 pass "brace compile succeeded"
+
+step "Running brace agents-md"
+[[ -f BRACE-AGENTS.md ]] || fail "brace new did not write BRACE-AGENTS.md"
+[[ -f BRACE-OPS.md ]] || fail "brace new did not write BRACE-OPS.md"
+echo "stale copy" > BRACE-AGENTS.md
+echo "stale ops copy" > BRACE-OPS.md
+"$BRACE_BIN" agents-md > "$WORK/agentsmd.out" 2>&1 || {
+    cat "$WORK/agentsmd.out"
+    fail "brace agents-md failed"
+}
+grep -q "Brace Framework Reference" BRACE-AGENTS.md || fail "agents-md did not rewrite BRACE-AGENTS.md from the jar"
+grep -q "stale copy" BRACE-AGENTS.md && fail "agents-md left the stale copy in place"
+grep -q "Brace Agent Ops Guide" BRACE-OPS.md || fail "agents-md did not rewrite BRACE-OPS.md from the jar"
+grep -q "stale ops copy" BRACE-OPS.md && fail "agents-md left the stale ops copy in place"
+"$BRACE_BIN" agents-md --stdout 2>/dev/null | grep -q "Brace Framework Reference" || fail "agents-md --stdout missing doc content"
+pass "brace agents-md refreshed BRACE-AGENTS.md and BRACE-OPS.md"
 
 step "Running brace version (project-aware)"
 # Inside a project, version reports both the launcher and the project's pin.
@@ -68,15 +89,66 @@ grep -q "(project" "$WORK/version-global.out" && fail "global version should not
 pass "brace version reports launcher + project pin"
 
 step "Running brace test"
+# stdout is piped here (not a TTY), so brace test runs in concise mode:
+# no JUnit tree, just a one-line summary.
 "$BRACE_BIN" test > "$WORK/test.out" 2>&1 || {
     cat "$WORK/test.out"
     fail "brace test failed"
 }
-grep -qE "Test run finished|Successful tests|\[ +1 tests successful +\]" "$WORK/test.out" || {
+grep -qE "^[0-9]+ passed, 0 failed in" "$WORK/test.out" || {
     cat "$WORK/test.out"
-    fail "test output doesn't look right"
+    fail "concise test output missing 'N passed, 0 failed in X.Xs' summary line"
 }
-pass "brace test ran"
+grep -q "Test run finished" "$WORK/test.out" && {
+    cat "$WORK/test.out"
+    fail "concise mode should not pass through the raw ConsoleLauncher summary"
+}
+pass "brace test ran (concise summary)"
+
+step "Running brace test --verbose (full passthrough)"
+"$BRACE_BIN" test --verbose > "$WORK/test-verbose.out" 2>&1 || {
+    cat "$WORK/test-verbose.out"
+    fail "brace test --verbose failed"
+}
+grep -qE "Test run finished|\[ +[0-9]+ tests successful +\]" "$WORK/test-verbose.out" || {
+    cat "$WORK/test-verbose.out"
+    fail "--verbose output missing raw ConsoleLauncher summary"
+}
+pass "brace test --verbose passes raw output through"
+
+step "Running brace test with a failing test (concise failure line)"
+cat > src/test/java/app/AlwaysFailsTest.java <<'EOF'
+package app;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+public class AlwaysFailsTest {
+    @Test
+    public void alwaysFails() {
+        assertEquals(1, 2);
+    }
+}
+EOF
+set +e
+"$BRACE_BIN" test > "$WORK/test-fail.out" 2>&1
+TEST_RC=$?
+set -e
+rm src/test/java/app/AlwaysFailsTest.java
+[[ $TEST_RC -ne 0 ]] || { cat "$WORK/test-fail.out"; fail "brace test should exit nonzero on a failing test"; }
+grep -q "AlwaysFailsTest.alwaysFails() — AssertionFailedError" "$WORK/test-fail.out" || {
+    cat "$WORK/test-fail.out"
+    fail "missing one-line failure for AlwaysFailsTest.alwaysFails()"
+}
+grep -q "(AlwaysFailsTest.java:" "$WORK/test-fail.out" || {
+    cat "$WORK/test-fail.out"
+    fail "failure line missing project-frame location (AlwaysFailsTest.java:NN)"
+}
+grep -qE "^[0-9]+ passed, 1 failed in" "$WORK/test-fail.out" || {
+    cat "$WORK/test-fail.out"
+    fail "missing 'N passed, 1 failed in X.Xs' summary line"
+}
+pass "failing test produces one-line failure + summary, exit code preserved"
 
 step "Running brace ops keypair"
 rm -f ops-authorized-keys ops-private.key  # clear the ones brace new generated

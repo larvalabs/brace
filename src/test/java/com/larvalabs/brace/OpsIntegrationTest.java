@@ -155,23 +155,65 @@ class OpsIntegrationTest {
 
     @Test
     void errorTracking() throws Exception {
-        // Trigger an error
+        // Trigger an error — this app has no database, so the count falls back to the
+        // in-memory Stats list. Summary entries carry no stack trace (H6).
         get("/error");
-        var response = getWithToken("/ops/status");
-        assertTrue(response.body().contains("\"errors\""));
+        var root = Json.mapper().readTree(getWithToken("/ops/status").body());
+        var errors = root.path("errors");
+        assertTrue(errors.path("count").asLong(0) >= 1, errors.toString());
+        var first = errors.path("recent").get(0);
+        assertNotNull(first, errors.toString());
+        assertTrue(first.has("errorType"), first.toString());
+        assertTrue(first.has("message"), first.toString());
+        assertTrue(first.has("route"), first.toString());
+        assertTrue(first.has("occurrenceCount"), first.toString());
+        assertTrue(first.has("lastSeen"), first.toString());
+        assertFalse(first.has("stackTrace"), "status summaries must not carry stackTrace: " + first);
     }
 
     @Test
     void opsStatusJvmSectionHasExpectedFields() throws Exception {
-        var response = getWithToken("/ops/status");
-        var body = response.body();
-        assertTrue(body.contains("\"heap\""));
-        assertTrue(body.contains("\"cpu\""));
-        assertTrue(body.contains("\"threads\""));
-        assertTrue(body.contains("\"gc\""));
-        assertTrue(body.contains("\"profiling\""));
-        assertTrue(body.contains("\"usedMB\""));
-        assertTrue(body.contains("\"maxMB\""));
+        // Profiler is attached (ops enabled), so heap/cpu/threads/gc are real data — but
+        // profiling (hot methods + allocations) is opt-in via ?include=profiling (H6).
+        var jvm = Json.mapper().readTree(getWithToken("/ops/status").body()).path("jvm");
+        assertTrue(jvm.has("heap"), jvm.toString());
+        assertTrue(jvm.has("cpu"), jvm.toString());
+        assertTrue(jvm.has("threads"), jvm.toString());
+        assertTrue(jvm.has("gc"), jvm.toString());
+        assertFalse(jvm.has("profiling"), "profiling must be opt-in: " + jvm);
+        assertTrue(jvm.path("heap").has("usedMB"), jvm.toString());
+        assertTrue(jvm.path("heap").has("maxMB"), jvm.toString());
+    }
+
+    @Test
+    void opsStatusTimeseriesIsOptIn() throws Exception {
+        var defaultBody = Json.mapper().readTree(getWithToken("/ops/status").body());
+        assertFalse(defaultBody.has("timeseries"), "timeseries must be opt-in");
+
+        var withInclude = Json.mapper().readTree(getWithToken("/ops/status?include=timeseries").body());
+        assertTrue(withInclude.has("timeseries"), withInclude.toString());
+        assertTrue(withInclude.path("timeseries").has("minutes"), withInclude.toString());
+    }
+
+    @Test
+    void opsStatusWithoutProfilerOmitsCpuGcProfilingStubs() throws Exception {
+        // Direct handler construction is the only no-profiler path — Brace always attaches a
+        // JfrProfiler when ops is enabled. Pre-H6 this branch emitted all-zeros cpu/gc/profiling
+        // stubs; now the keys are simply absent and `brace check` tolerates that (.path defaults).
+        String secret = OpsToken.generateSecret();
+        var handler = new OpsHandler(new Stats(), null, null, new Router(), java.util.Map.of(), secret);
+        String token = OpsToken.create(secret, 60, OpsScope.READ, "test");
+        var req = new Request("GET", "/ops/status", java.util.Map.of(), java.util.Map.of(),
+            java.util.Map.of("Authorization", "Bearer " + token), null);
+        var result = handler.status(req);
+        var root = Json.mapper().readTree(result.body());
+        var jvm = root.path("jvm");
+        assertTrue(jvm.has("heap"), jvm.toString());
+        assertTrue(jvm.has("threads"), jvm.toString());
+        assertFalse(jvm.has("cpu"), "no profiler -> no cpu stub: " + jvm);
+        assertFalse(jvm.has("gc"), "no profiler -> no gc stub: " + jvm);
+        assertFalse(jvm.has("profiling"), "no profiler -> no profiling stub: " + jvm);
+        assertEquals(0, root.path("errors").path("count").asLong(-1), root.path("errors").toString());
     }
 
     // --- Auth endpoint tests ---
@@ -537,9 +579,10 @@ class OpsIntegrationTest {
                 HttpResponse.BodyHandlers.ofString());
         }
         String token = authenticate(jfrPort, jfrKeypair);
+        // Profiling (hot methods + allocations) is opt-in via ?include=profiling (H6).
         var response = client.send(
             HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + jfrPort + "/ops/status"))
+                .uri(URI.create("http://localhost:" + jfrPort + "/ops/status?include=profiling"))
                 .header("Authorization", "Bearer " + token).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
@@ -552,6 +595,14 @@ class OpsIntegrationTest {
         assertTrue(body.contains("\"profiling\""));
         assertTrue(body.contains("\"hotMethods\""));
         assertTrue(body.contains("\"topAllocations\""));
+
+        var withoutInclude = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + jfrPort + "/ops/status"))
+                .header("Authorization", "Bearer " + token).GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        var jvm = Json.mapper().readTree(withoutInclude.body()).path("jvm");
+        assertFalse(jvm.has("profiling"), "profiling must be opt-in: " + jvm);
     }
 
     @Test
@@ -812,6 +863,64 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void noDbErrorsListDetailAndResolve() throws Exception {
+        // This app has no database: /ops/errors must serve the in-memory Stats records
+        // (a remote path to the stack trace), and resolve must remove them so
+        // errors.count — and the brace status exit code — can recover.
+        get("/error");   // recorded synchronously into Stats
+        String token = authenticate();
+
+        var list = Json.mapper().readTree(getWithToken("/ops/errors", token).body());
+        assertTrue(list.size() > 0, list.toString());
+        var summary = list.get(0);
+        assertTrue(summary.has("id"), summary.toString());
+        assertEquals("RuntimeException", summary.path("errorType").asText());
+        assertTrue(summary.has("at"), "summary should carry the first app frame: " + summary);
+        assertFalse(summary.has("stackTrace"), "summary must not carry stackTrace: " + summary);
+
+        long id = summary.path("id").asLong();
+        var detail = Json.mapper().readTree(getWithToken("/ops/errors/" + id, token).body());
+        assertTrue(detail.path("stackTrace").asText().contains("test error"), detail.toString());
+        assertTrue(detail.has("requestDetail"), detail.toString());
+
+        var full = Json.mapper().readTree(getWithToken("/ops/errors?include=detail", token).body());
+        assertTrue(full.get(0).has("stackTrace"), full.toString());
+
+        var resolveResp = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/errors/" + id + "/resolve"))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resolveResp.statusCode());
+        assertTrue(resolveResp.body().contains("resolvedAt"), resolveResp.body());
+
+        var after = Json.mapper().readTree(getWithToken("/ops/errors", token).body());
+        for (var n : after) {
+            assertNotEquals(id, n.path("id").asLong(), "resolved error must disappear: " + after);
+        }
+        assertEquals(404, getWithToken("/ops/errors/" + id, token).statusCode());
+    }
+
+    @Test
+    void resolveWithMalformedIdIs404Not500() throws Exception {
+        // A 500 here would record a fresh framework error — re-reddening the count the
+        // resolve endpoint exists to clear.
+        String token = authenticate();
+        var resp = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/errors/abc/resolve"))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, resp.statusCode());
+    }
+
+    @Test
     void opsCacheReturnsStats() throws Exception {
         var response = cacheGet("/ops/cache");
 
@@ -869,6 +978,112 @@ class OpsIntegrationTest {
         assertEquals(200, response.statusCode());
         assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("application/json"));
         assertTrue(response.body().contains("resolvedAt"), response.body());
+    }
+
+    // --- /ops/errors summary + detail (H5) ---
+
+    /**
+     * Trigger /cacheboom and wait for the (async) error record to land, then return the
+     * unresolved errors list. Resilient to test order: other tests may have resolved the
+     * seeded error, so this always provokes a fresh occurrence.
+     */
+    private com.fasterxml.jackson.databind.JsonNode awaitUnresolvedErrors() throws Exception {
+        client.send(
+            HttpRequest.newBuilder().uri(URI.create("http://localhost:" + cachePort + "/cacheboom")).GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        for (int i = 0; i < 50; i++) {
+            var response = cacheGet("/ops/errors");
+            assertEquals(200, response.statusCode());
+            var root = Json.mapper().readTree(response.body());
+            if (root.size() > 0) return root;
+            Thread.sleep(100);
+        }
+        throw new AssertionError("error never appeared on /ops/errors");
+    }
+
+    @Test
+    void opsErrorsReturnsSummaryShapeWithoutStackTrace() throws Exception {
+        var root = awaitUnresolvedErrors();
+        var e = root.get(0);
+        assertTrue(e.has("id"), e.toString());
+        assertTrue(e.has("errorType"), e.toString());
+        assertTrue(e.has("message"), e.toString());
+        assertTrue(e.has("route"), e.toString());
+        assertTrue(e.has("occurrenceCount"), e.toString());
+        assertTrue(e.has("firstSeen"), e.toString());
+        assertTrue(e.has("lastSeen"), e.toString());
+        assertTrue(e.has("at"), "summary should carry the first app frame: " + e);
+        assertFalse(e.has("stackTrace"), "summary must not carry stackTrace: " + e);
+        assertFalse(e.has("requestDetail"), e.toString());
+        assertFalse(e.has("queriesBefore"), e.toString());
+        assertFalse(e.has("requestHeaders"), e.toString());
+    }
+
+    @Test
+    void opsErrorsFullParamReturnsLegacyDetailShape() throws Exception {
+        awaitUnresolvedErrors();
+        var response = cacheGet("/ops/errors?include=detail");
+        assertEquals(200, response.statusCode());
+        var root = Json.mapper().readTree(response.body());
+        assertTrue(root.size() > 0, response.body());
+        var e = root.get(0);
+        assertTrue(e.has("stackTrace"), e.toString());
+        assertTrue(e.has("requestDetail"), e.toString());
+        assertTrue(e.has("queriesBefore"), e.toString());
+        assertTrue(e.has("requestHeaders"), e.toString());
+    }
+
+    @Test
+    void opsErrorDetailByIdReturnsFullRecord() throws Exception {
+        var root = awaitUnresolvedErrors();
+        long id = root.get(0).path("id").asLong();
+
+        var response = cacheGet("/ops/errors/" + id);
+        assertEquals(200, response.statusCode());
+        var e = Json.mapper().readTree(response.body());
+        assertEquals(id, e.path("id").asLong());
+        assertTrue(e.has("stackTrace"), e.toString());
+        assertTrue(e.has("requestDetail"), e.toString());
+        assertTrue(e.has("queriesBefore"), e.toString());
+        assertTrue(e.has("requestHeaders"), e.toString());
+        assertTrue(e.path("stackTrace").asText().contains("cache test error"), e.toString());
+    }
+
+    @Test
+    void opsStatusErrorsCountIsDbBackedAndSummaryShaped() throws Exception {
+        // This app has a database, so errors.count comes from the ErrorStore's unresolved
+        // count and errors.recent from its top-5 summary query (H6).
+        awaitUnresolvedErrors();
+        var root = Json.mapper().readTree(cacheGet("/ops/status").body());
+        var errors = root.path("errors");
+        assertTrue(errors.path("count").asLong(0) >= 1, errors.toString());
+        var first = errors.path("recent").get(0);
+        assertNotNull(first, errors.toString());
+        assertTrue(first.has("id"), "DB-backed rows carry the id for /ops/errors/{id}: " + first);
+        assertTrue(first.has("errorType"), first.toString());
+        assertTrue(first.has("message"), first.toString());
+        assertTrue(first.has("route"), first.toString());
+        assertTrue(first.has("occurrenceCount"), first.toString());
+        assertTrue(first.has("firstSeen"),
+            "DB-backed rows carry firstSeen like the in-memory shape: " + first);
+        assertTrue(first.has("lastSeen"), first.toString());
+        assertFalse(first.has("stackTrace"), "status summaries must not carry stackTrace: " + first);
+    }
+
+    @Test
+    void opsErrorDetailUnknownIdIs404() throws Exception {
+        var response = cacheGet("/ops/errors/999999999");
+        assertEquals(404, response.statusCode());
+    }
+
+    @Test
+    void opsErrorDetailRequiresAuth() throws Exception {
+        var response = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + cachePort + "/ops/errors/1"))
+                .GET().build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, response.statusCode());
     }
 
     @Test

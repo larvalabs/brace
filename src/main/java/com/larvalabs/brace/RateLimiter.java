@@ -84,7 +84,7 @@ public class RateLimiter {
      * only POST submissions with a concrete email value are counted.
      *
      * <pre>{@code
-     * app.before("/login", RateLimiter.perKey(req -> req.param("email"), 5, "15m"));
+     * app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
      * }</pre>
      */
     public static Middleware.Before perKey(Function<Request, String> keyExtractor, int maxRequests, String duration) {

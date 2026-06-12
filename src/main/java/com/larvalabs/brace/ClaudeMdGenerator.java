@@ -14,7 +14,7 @@ public class ClaudeMdGenerator {
         return """
 # %s
 
-Built with [Brace](https://github.com/matth/brace) — a plain Java 21+ web framework. No DI, no classpath scanning. All routes, services, and dependencies are wired explicitly in `main()`.
+Built with [Brace](https://github.com/larvalabs/brace) — a plain Java 21+ web framework. No DI, no classpath scanning. All routes, services, and dependencies are wired explicitly in `main()`.
 
 ## Build & Run
 
@@ -40,16 +40,19 @@ brace test Name   # run specific test class
 
 Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check the reference when you need method signatures or usage details.
 
-- **Routing** — `app.get("/path", handler)` with four handler types: `Handler` (request only), `DbHandler` (+database), `SessionHandler` (+session), `FullHandler` (+both). Read-only variants: `ReadDbHandler`, `ReadFullHandler`. Path params: `/posts/{id}`. Route groups: `app.group("/prefix", g -> ...)`.
-- **Request** — `req.queryParam(name)`, `req.pathParam(name)`, `req.formParam(name)`, `req.header(name)`, `req.body()`, `req.bodyAs(Class)`, `req.form(Class)`, `req.file(name)`, `req.ip()`, `req.isHtmx()`.
-- **Responses** — `Result.text()`, `.html()`, `.json()`, `.bytes()`, `.view()`, `.redirect()`, `.error()`, `.notFound()`, `.unauthorized()`, `.forbidden()`, `.badRequest()`, `.created()`, `.noContent()`, `.download()`.
+- **Routing** — `app.get("/path", handler)` with four handler types: `Handler` (request only), `DbHandler` (+database), `SessionHandler` (+session), `FullHandler` (+both). Read-only routes (query-only, no transaction): `app.getRead("/path", (req, db) -> ...)`, `app.getReadFull(...)` (+session). Path params: `/posts/{id}`. Route groups: `app.group("/prefix", g -> ...)`.
+- **Request** — `req.queryParam(name)`, `req.pathParam(name)`, `req.formParam(name)`, `req.header(name)`, `req.body()`, `req.bodyAs(Class)`, `req.form(Class)`, `req.jsonForm(Class)`, `req.file(name)`, `req.ip()`, `req.isHtmx()`.
+- **Responses** — `Result.text()`, `.html()`, `.json()`, `.bytes()`, `.view()`, `.redirect()`, `.error()`, `.notFound()`, `.unauthorized()`, `.forbidden()`, `.badRequest()`, `.created()`, `.noContent()`, `.download()`. `Json.obj("k", v, ...)` for one-line ad-hoc JSON shapes. `Redirect.toLocal(path)` for user-derived redirect targets (rejects off-site URLs).
+- **HTTP client** — `Http.get(url).fetchJson(Class)`, `Http.post(url).bodyJson(obj).fetch()`, `.bearer(token)`, `.header()`, `.timeout()`, `.bodyForm()`, `.multipart()`. Use this, not raw `java.net.http`.
+- **URLs** — `Url.to("/users/{id}", 42)` builds a path from a route pattern.
+- **Assets** — `Assets.url("/css/app.css")` returns a content-hashed URL for cache-busted static assets.
 - **Config** — Properties file with `%%mode.` prefixes and `${ENV_VAR}` substitution. `config.get(key)`, `.getInt()`, `.getBool()`.
-- **Database** — Hibernate StatelessSession wrapper. `db.find()`, `.insert()`, `.update()`, `.delete()`, `.query()`, `.queryOne()`, `.findBy()`, `.count()`, `.sql()`. Per-request transactions. HQL with `?` positional params.
+- **Database** — Hibernate StatelessSession wrapper. `db.find()`, `.findOr404()`, `.insert()`, `.update()`, `.delete()`, `.query()`, `.queryOne()`, `.queryOneOr404()`, `.findBy()`, `.count()`, `.sql()`. Per-request transactions. HQL with `?` positional params.
 - **Entities** — JPA `@Entity` with public fields. Flyway migrations in `migrations/`. Register in `DatabaseFactory` constructor.
 - **Forms** — Java records with `@Required`, `@MinLength`, `@MaxLength`, `@Email`, etc. `req.form(MyForm.class)` returns `Form<T>` with `.hasErrors()`, `.value()`.
 - **Templates** — JTE `.jte` files. `Result.view("path", "key", value)`. Partials use `_` prefix.
 - **Sessions** — AES-256-GCM encrypted cookies. `session.set()`, `.get()`, `.getInt()`, `.remove()`, `.flash()`. Configure via `SessionOptions`.
-- **CSRF** — Required by default on POST/PUT/DELETE. Opt out: `.csrf(false)` for bearer-token APIs.
+- **CSRF** — Required by default on POST/PUT/DELETE/PATCH. Opt out: `.csrf(false)` for bearer-token APIs.
 - **Cache** — TTL with tags; in-process by default, or shared across servers via `app.cache(CacheBackend.postgres(dbFactory))`. `cache.set()`, `.get()`, `.getOrSet()`, `.clearTag()`. Route caching: `cache.wrap("5m", handler)`.
 - **Jobs** — Recurring: `app.every("5m", name, job)`, `app.daily("02:00", name, job)`. Durable: `Jobs.schedule(db, job, delay)`.
 - **Mailer** — `mail.to().subject().html().send()`. Dev mode captures without sending.
@@ -60,7 +63,7 @@ Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check t
 - **Metrics** — `Stats.counter(name)`, `.gauge(name, fn)`, `.timer(name, ms)`. Appear in ops dashboard.
 - **Middleware** — `app.before(req -> ...)` returns null to continue or Result to short-circuit. `app.after((req, result) -> ...)`.
 - **htmx** — Bundled 2.0.4 at `/__brace/htmx.min.js`. `req.isHtmx()` for partial responses. `Vary: HX-Request` set automatically.
-- **Logging** — `Log.event("name", Map.of(...))` structured JSON to stdout.
+- **Logging** — `Log.debug/info/error(msg)` (each takes optional `Map.of(...)` data), `Log.event("name", Map.of(...))`. Structured JSON to stdout.
 - **Passwords** — `Passwords.hash(pw)`, `Passwords.check(pw, hash)` (bcrypt).
 - **Testing** — `Brace.test().start(app -> ...)` returns `TestApp`. `.get()`, `.post()`, `.postJson()`, `.withDb()`. H2 in-memory.
 
@@ -79,39 +82,35 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 
 ## Ops — Debugging & Monitoring
 
-When debugging a running Brace app, use `/ops/status` instead of tailing logs. Setup: `app.ops("ops-authorized-keys")`.
-
-| Endpoint | Returns |
-|---|---|
-| `GET /ops/status` | Full system snapshot — HTTP stats, JVM heap/GC/threads, errors, jobs, cache, metrics, timeseries |
-| `GET /ops/errors` | Tracked errors with stack traces, request details, and DB queries that ran before failure |
-| `GET /ops/routes` | All registered routes |
-| `GET /ops/dashboard` | HTML dashboard |
-
-**Debugging workflow:**
-1. **Errors?** → `errors.recent` has stack trace, route, request details, and queries before failure
-2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU
-3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations`
-4. **Job failing?** → `jobs.scheduled` shows `lastStatus`, `lastError`, `failCount`
-5. **Cache miss rate?** → `cache.hits` vs `cache.misses`
-
-## Production ops (for agents)
-
-This project ships with `brace` CLI commands for inspecting the running app.
-Use these to check production health, investigate errors, and read recent
-logs without leaving the terminal.
+Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brace check`; when debugging a running app, use the `brace` CLI (or the `/ops/*` endpoints it wraps) instead of tailing logs. All read commands auto-detect TTY vs JSON output — pipe to `jq` or use `--json` explicitly. See `BRACE-OPS.md` (project root; refresh with `brace agents-md`) for the full ops reference — auth setup, runbooks, and exit-code contracts.
 
 | Command | Purpose |
 |---|---|
+| `brace check` | Run all health checks — the first move for production health |
 | `brace status [--env prod]` | App health snapshot — exits non-zero on degradation |
-| `brace errors [--since 1h]` | List unresolved errors — exits non-zero if any exist |
+| `brace errors [--since 1h]` | List unresolved error summaries — exits non-zero if any exist |
+| `brace errors <id>` | Full detail (stack trace, request context) for one error |
 | `brace logs [-f] [--since 10m]` | Tail recent structured log entries |
 | `brace cache` / `brace cache clear` | Cache stats; clear cache |
 | `brace resolve <id>` | Mark an error as resolved |
 
-All read commands auto-detect TTY vs JSON output. Pipe to `jq` or use
-`--json` explicitly. See `docs/agent-ops-guide.md` in the brace repo for
-workflows and exit-code contracts.
+| Endpoint | Returns |
+|---|---|
+| `GET /ops/status` | System snapshot — HTTP stats, JVM heap/GC/threads, error summary, jobs, cache, metrics; `?include=timeseries,profiling` for the bulky blocks |
+| `GET /ops/errors` | Tracked error summaries (id, type, message, route, counts, `at` app frame); `?include=detail` for full detail |
+| `GET /ops/errors/{id}` | Full detail for one error — stack trace, request detail, headers, queries before failure |
+| `GET /ops/logs` | Recent structured log entries (filter by level and time) |
+| `GET /ops/cache` | Cache stats (`POST /ops/cache/clear` to clear) |
+| `GET /ops/regressions` | New error kinds since startup |
+| `GET /ops/routes` | All registered routes |
+| `GET /ops/dashboard` | HTML dashboard |
+
+**Debugging workflow:**
+1. **Errors?** → `errors.count` + `errors.recent` summaries in status; full detail (stack trace, request, queries before failure) via `brace errors <id>` / `GET /ops/errors/{id}`
+2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU (`?include=profiling`)
+3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations` (`?include=profiling`)
+4. **Job failing?** → `jobs.scheduled` shows `lastStatus`, `lastError`, `failCount`
+5. **Cache miss rate?** → `cache.hits` vs `cache.misses`
 """.formatted(projectName);
     }
 

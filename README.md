@@ -10,13 +10,13 @@ Current web frameworks were designed for human developers. They avoid boilerplat
 
 Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
 
-Brace is both simple and complete. ~20 core types, ~4,000 lines of framework code, 410 tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+Brace is both simple and complete. A compact set of core types, ~15k lines of framework code (CLI included), 800+ tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
 
 ### AI Token Efficiency
 
 Everything flows through parameters. A controller method's signature tells you exactly what it has access to — no guessing about what's injected, what's ThreadLocal, what's magic. Templates fail the build if parameters are wrong. Wrong types are caught at compile time, not when a user hits the page.
 
-In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests), Brace costs 33% less than Spring Boot on feature additions ($5.43 vs $8.16) — and the gap widens as the codebase grows:
+In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests), Brace costs 31% less than Spring Boot on feature additions ($5.62 vs $8.16) — and the saving holds fairly steady at about a third per feature round:
 
 | Phase | Brace | Spring | Saving |
 |---|---|---|---|
@@ -25,15 +25,15 @@ In benchmarks measuring AI token cost to build and extend a Conference Manager A
 | + Waitlist with Auto-Promotion | $1.02 | $1.14 | 11% |
 | + Ratings & Speaker Stats | $0.75 | $1.18 | 36% |
 | + Multi-Day Events & Tracks | $1.29 | $1.96 | 34% |
-| + Notifications & Activity Feed | $1.36 | $2.29 | 41% |
+| + Notifications & Activity Feed | $1.54 | $2.29 | 33% |
 
-The greenfield build is roughly tied — both frameworks are cheap when the codebase is empty. The advantage emerges as features accumulate and the AI has to read and modify existing code. Brace's context scales linearly (read the controller and its dependencies) while Spring's scales super-linearly (trace the DI graph, understand conditional beans, check profiles). Hono (TypeScript) performed comparably to Brace on token cost ($5.79 for feature additions) but trades runtime performance for simplicity. Full benchmark data and methodology: [ai-benchmark](https://github.com/mattonfoot/ai-benchmark).
+The greenfield build is roughly tied — both frameworks are cheap when the codebase is empty. The advantage emerges as features accumulate and the AI has to read and modify existing code. Brace's context scales linearly (read the controller and its dependencies) while Spring's scales super-linearly (trace the DI graph, understand conditional beans, check profiles). Hono (TypeScript) performed comparably to Brace on token cost ($5.79 for feature additions) but trades runtime performance for simplicity. Full benchmark data and methodology: [ai-benchmark](https://github.com/larvalabs/ai-benchmark).
 
 ### Agent Observability
 
 No existing framework exposes a structured diagnostics API designed for AI agents. Brace does.
 
-`GET /ops/status` returns everything an agent needs to diagnose any problem: request stats, slow routes, recent errors with full context (stack trace, request details, queries that ran before the error), custom metrics, JFR profiling (heap, CPU, GC pauses, hot methods, allocations), job statuses, cache hit rates, and per-minute timeseries. The built-in dashboard shows the same data visually.
+`GET /ops/status` returns everything an agent needs to triage any problem in one compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. Drill-downs stay one call away — `GET /ops/errors/{id}` for a full error (stack trace, request details, queries that ran before the error), `?include=timeseries,profiling` for per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data visually.
 
 Ops endpoints use Ed25519 keypair authentication with short-lived tokens — agents authenticate securely without shared secrets. An AI agent can deploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
 
@@ -43,7 +43,7 @@ The same design choices that help AI also eliminate runtime overhead. No DI cont
 
 For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33μs vs ~125μs), no ORM lifecycle tax, compiled templates (~180μs vs ~480μs for Thymeleaf).
 
-AI agents: read [AGENTS.md](AGENTS.md) for the complete framework reference.
+AI agents: read [BRACE-AGENTS.md](BRACE-AGENTS.md) for the complete framework reference, and [docs/agent-ops-guide.md](docs/agent-ops-guide.md) (written into projects as `BRACE-OPS.md`) for operating a running app.
 
 ## Install
 
@@ -71,7 +71,7 @@ brace new myapp        # scaffold a new project (pins the framework version)
 cd myapp
 brace deps             # populate ./lib/ from pom.xml (one time, requires Maven)
 brace dev              # compile + run + watch for changes
-brace test             # run all tests
+brace test             # run all tests (concise summary when piped; --verbose for full JUnit output)
 brace ops keypair      # generate ops auth keys
 brace ops dashboard    # authenticate and open /ops/dashboard
 ```
@@ -175,7 +175,7 @@ public class App {
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
-- **CSRF** — Required by default on POST/PUT/DELETE, explicit opt-out with `.csrf(false)` for bearer-token APIs
+- **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs
 - **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
@@ -223,16 +223,18 @@ public class PostController {
 
 ```java
 app.get("/hello", req -> Result.text("Hello!"));                       // Handler: Request only
-app.getDb("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // DbHandler: Request + Database
+app.getRead("/posts", (req, db) -> Result.json(db.findAll(Post.class))); // ReadDbHandler: query-only, no transaction
+app.postDb("/posts", (req, db) -> ...);                                // DbHandler: Request + Database (transaction)
 app.getSession("/profile", (req, session) -> ...);                     // SessionHandler: Request + Session
 app.postFull("/posts", (req, db, session) -> ...);                     // FullHandler: Request + Database + Session
 
-// Typed route methods eliminate cast syntax
+// Typed route methods eliminate cast syntax — multi-arg lambdas on the bare verbs don't compile
+app.getRead("/posts", (req, db) -> ...);        // getRead, getReadFull (read-only, GET only — no transaction)
 app.getDb("/posts", (req, db) -> ...);          // getDb, postDb, putDb, deleteDb
 app.getSession("/profile", (req, session) -> ...); // getSession, postSession, putSession, deleteSession
 app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull
 
-// CSRF is required by default on POST/PUT/DELETE - explicitly opt out for bearer-token APIs
+// CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API
 ```
 
@@ -245,6 +247,8 @@ db.update(post)                                   // update
 db.delete(post)                                   // delete
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause
+db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY inside the where-fragment
+db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // limit, offset (page 2)
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryIn(Post.class, "id", List.of(1, 2, 3))   // batch lookup with IN clause
 db.count(Post.class, "published = ?", true)       // count with condition
@@ -311,8 +315,8 @@ app.sessions(SessionOptions.secure("secret")
 
 ```java
 // Recurring (in-memory)
-app.every("5m", "cleanup", db -> db.sql("DELETE FROM sessions WHERE expired < NOW()"));
-app.daily("02:00", "digest", db -> sendDigestEmails(db));
+app.every("5m", "cleanup", (db, ctx) -> db.sql("DELETE FROM sessions WHERE expired < NOW()"));
+app.daily("02:00", "digest", (db, ctx) -> sendDigestEmails(db));
 
 // Durable (database-backed, survives restarts)
 Jobs.schedule(db, new SendReceipt(orderId), Duration.ofMinutes(5));
@@ -431,7 +435,7 @@ Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.4 an
 // In your layout: <script src="/__brace/htmx.min.js"></script>
 
 // Full page by default, partial when htmx requests it
-app.get("/posts", (DbHandler) (req, db) -> {
+app.getRead("/posts", (req, db) -> {
     var posts = db.findAll(Post.class);
     if (req.isHtmx()) return Result.view("posts/_list", "posts", posts);
     return Result.view("posts/index", "posts", posts);
@@ -454,20 +458,29 @@ static TestApp app = Brace.test()
     .entities(Post.class, User.class)
     .templates("views")
     .start(app -> {
-        app.get("/posts", (DbHandler) (req, db) -> Json.of(db.findAll(Post.class)));
+        app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class)));
     });
 
 @Test void listPosts() {
     app.withDb(db -> { db.insert(newPost("Hello")); });
     var response = app.get("/posts");
     assertEquals(200, response.status());
-    assertTrue(response.body().contains("Hello"));
+    assertEquals("Hello", response.json().get(0).get("title").asText());
 }
 
 @Test void showPost() {
     var response = app.get("/posts/42");
     assertEquals(200, response.status());
 }
+```
+
+Custom headers (e.g. bearer-token APIs) via the request builder; CSRF-protected routes via `postWithCsrf`:
+
+```java
+var res = app.request("GET", "/api/items").header("Authorization", "Bearer " + token).send();
+
+var session = Session.of("userId", "1");
+var created = app.postWithCsrf("/posts", Map.of("title", "Hi"), session);  // mints + sends the CSRF token
 ```
 
 ## Configuration
@@ -480,7 +493,7 @@ db.pass=${DB_PASS}
 session.secret=change-me
 
 %dev.port=9000
-%dev.db.url=jdbc:h2:mem:dev
+%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1
 %dev.db.user=
 %dev.db.pass=
 ```
@@ -499,7 +512,7 @@ session.secret=change-me
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~4,000 lines of framework code. 409 tests.**
+**~15k lines of framework code (CLI included). 800+ tests.**
 
 ## Security
 

@@ -7,6 +7,38 @@ import static org.junit.jupiter.api.Assertions.*;
 class CliOutputTest {
 
     @Test
+    void stdoutIsTtyHonorsLauncherProperty() {
+        String prev = System.getProperty("brace.stdout.tty");
+        try {
+            System.setProperty("brace.stdout.tty", "true");
+            assertTrue(CliOutput.stdoutIsTty());
+            System.setProperty("brace.stdout.tty", "false");
+            assertFalse(CliOutput.stdoutIsTty());
+        } finally {
+            if (prev == null) System.clearProperty("brace.stdout.tty");
+            else System.setProperty("brace.stdout.tty", prev);
+        }
+    }
+
+    @Test
+    void autoModeKeysOnStdoutIsTtyNotSystemConsole() {
+        // autoMode must agree with stdoutIsTty() (the shim's -Dbrace.stdout.tty answer),
+        // not System.console() — on JLine-backed JDKs console() is non-null even under
+        // redirection, which made `brace errors | jq` pick HUMAN while `brace test | cat`
+        // in the same pipeline went concise.
+        String prev = System.getProperty("brace.stdout.tty");
+        try {
+            System.setProperty("brace.stdout.tty", "false");
+            assertEquals(CliOutput.Mode.JSON, CliOutput.autoMode(false, false));
+            System.setProperty("brace.stdout.tty", "true");
+            assertEquals(CliOutput.Mode.HUMAN, CliOutput.autoMode(false, false));
+        } finally {
+            if (prev == null) System.clearProperty("brace.stdout.tty");
+            else System.setProperty("brace.stdout.tty", prev);
+        }
+    }
+
+    @Test
     void tableRendersHeadersAndRows() {
         var out = CliOutput.table(
             List.of("ID", "MESSAGE"),
@@ -55,6 +87,14 @@ class CliOutputTest {
         var out = CliOutput.json(Map.of("ok", true, "count", 5));
         assertTrue(out.contains("\"ok\""));
         assertTrue(out.contains("\"count\""));
+    }
+
+    @Test
+    void jsonModeIsCompactSingleLine() throws Exception {
+        // M12: agent (JSON) mode must not pretty-print — one line, no indentation.
+        var out = CliOutput.json(Map.of("ok", true, "nested", Map.of("a", List.of(1, 2, 3))));
+        assertFalse(out.contains("\n"), "agent-mode JSON must be one line: " + out);
+        assertFalse(out.contains("  "), "agent-mode JSON must not be indented: " + out);
     }
 
     @Test

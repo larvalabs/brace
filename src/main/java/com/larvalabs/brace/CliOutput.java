@@ -15,7 +15,27 @@ public class CliOutput {
     }
 
     public static Mode autoMode(boolean jsonFlag, boolean prettyFlag) {
-        return modeFrom(System.console() != null, jsonFlag, prettyFlag);
+        return modeFrom(stdoutIsTty(), jsonFlag, prettyFlag);
+    }
+
+    /**
+     * Whether stdout is attached to a terminal. The launcher shim passes the
+     * authoritative answer via {@code -Dbrace.stdout.tty} (shell {@code [ -t 1 ]}),
+     * because {@code System.console()} on JLine-backed JDKs can be non-null even
+     * when output is redirected. Fallbacks, for running {@code Cli} without the
+     * shim: {@code Console.isTerminal()} where available (JDK 22+), else a
+     * non-null {@code System.console()}.
+     */
+    public static boolean stdoutIsTty() {
+        String prop = System.getProperty("brace.stdout.tty");
+        if (prop != null) return Boolean.parseBoolean(prop);
+        java.io.Console console = System.console();
+        if (console == null) return false;
+        try {
+            return (boolean) java.io.Console.class.getMethod("isTerminal").invoke(console);
+        } catch (ReflectiveOperationException e) {
+            return true;   // pre-22 JDK: a non-null console is the best signal available
+        }
     }
 
     public static String table(List<String> headers, List<List<String>> rows) {
@@ -64,15 +84,12 @@ public class CliOutput {
         return s + " ".repeat(width - s.length());
     }
 
+    /**
+     * Serialize a value for JSON (agent) mode: compact, one line. JSON mode exists for
+     * programs — agents, `jq`, scripts — where pretty-printing only costs tokens. The
+     * human/`--pretty` mode renders tables and summaries, not pretty-printed JSON.
+     */
     public static String json(Object value) {
-        try {
-            return Json.mapper().writerWithDefaultPrettyPrinter().writeValueAsString(value);
-        } catch (Exception e) {
-            return String.valueOf(value);
-        }
-    }
-
-    public static String jsonCompact(Object value) {
         try {
             return Json.mapper().writeValueAsString(value);
         } catch (Exception e) {

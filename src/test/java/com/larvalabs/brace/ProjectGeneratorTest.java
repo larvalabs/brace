@@ -54,6 +54,22 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void nextStepsSuggestBraceDevNotRawMaven(@TempDir Path tempDir) throws Exception {
+        var bout = new java.io.ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new java.io.PrintStream(bout));
+        try {
+            ProjectGenerator.generate(tempDir.resolve("myproject").toString());
+        } finally {
+            System.setOut(prev);
+        }
+        String out = bout.toString();
+        assertTrue(out.contains("brace dev"), "next steps should suggest brace dev, got: " + out);
+        assertFalse(out.contains("mvn compile exec:java"),
+            "next steps should not suggest the raw Maven incantation");
+    }
+
+    @Test
     void gitignoreContainsApplicationConf(@TempDir Path tempDir) throws Exception {
         var projDir = tempDir.resolve("myproject");
         ProjectGenerator.generate(projDir.toString());
@@ -184,6 +200,55 @@ class ProjectGeneratorTest {
             assertFalse(invalidName.matches("[A-Za-z0-9_-]+"),
                 "Invalid name '" + invalidName + "' should not match the allowed pattern");
         }
+    }
+
+    @Test
+    void generatedAppExposesReusableRouteWiring(@TempDir Path tempDir) throws Exception {
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var appJava = Files.readString(projDir.resolve("src/main/java/app/App.java"));
+        assertTrue(appJava.contains("public static void routes(Brace app)"),
+            "App.java should extract route registration into routes(Brace)");
+        assertTrue(appJava.contains("routes(app);"),
+            "main() should call routes(app)");
+
+        var testJava = Files.readString(projDir.resolve("src/test/java/app/HomeControllerTest.java"));
+        assertTrue(testJava.contains("App::routes"),
+            "generated test should reuse App.routes instead of re-registering routes");
+        assertTrue(testJava.contains("class TestData"),
+            "generated test should include the TestData factory pattern");
+    }
+
+    @Test
+    void generatedPomRunsTestsAndPackagesRunnableJar(@TempDir Path tempDir) throws Exception {
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var pom = Files.readString(projDir.resolve("pom.xml"));
+        // Without the surefire pin, Maven's inherited 2.x silently runs zero
+        // JUnit 5 tests ("Tests run: 0" + BUILD SUCCESS).
+        assertTrue(pom.contains("<artifactId>maven-surefire-plugin</artifactId>"),
+            "pom must pin maven-surefire-plugin so mvn test runs JUnit 5");
+        var surefireVersion = pom.replaceAll(
+            "(?s).*maven-surefire-plugin</artifactId>\\s*<version>([^<]+)</version>.*", "$1");
+        assertTrue(surefireVersion.matches("3\\..*"),
+            "surefire pin must be 3.x (got " + surefireVersion + ")");
+
+        // The Dockerfile runs java -jar app.jar, so mvn package must produce an
+        // executable fat jar at a deterministic path.
+        assertTrue(pom.contains("<artifactId>maven-shade-plugin</artifactId>"),
+            "pom must configure maven-shade-plugin for an executable fat jar");
+        assertTrue(pom.contains("<mainClass>app.App</mainClass>"),
+            "shade config must set the scaffold's main class");
+        assertTrue(pom.contains("ServicesResourceTransformer"),
+            "shade config must merge META-INF/services (Jetty/Hibernate need it)");
+        assertTrue(pom.contains("<finalName>app</finalName>"),
+            "jar name must be fixed so the Dockerfile can COPY target/app.jar");
+
+        var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
+        assertTrue(dockerfile.contains("COPY target/app.jar app.jar"),
+            "Dockerfile must copy the shaded jar by its fixed name");
     }
 
     @Test

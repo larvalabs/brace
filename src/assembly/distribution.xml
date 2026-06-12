@@ -27,7 +27,28 @@
                 <include>brace-*.md</include>
             </includes>
         </fileSet>
+
+        <!-- Agent-facing framework reference — also packaged inside the brace jar at
+             /brace/BRACE-AGENTS.md (which `brace agents-md` extracts); shipped here too
+             so the doc is browsable without opening the jar. -->
+        <fileSet>
+            <directory>${project.basedir}</directory>
+            <outputDirectory></outputDirectory>
+            <includes>
+                <include>BRACE-AGENTS.md</include>
+            </includes>
+        </fileSet>
     </fileSets>
+
+    <files>
+        <!-- Ops reference companion — packaged inside the brace jar at
+             /brace/agent-ops-guide.md and written into projects as BRACE-OPS.md;
+             shipped in the zip under the project-facing name. -->
+        <file>
+            <source>${project.basedir}/docs/agent-ops-guide.md</source>
+            <destName>BRACE-OPS.md</destName>
+        </file>
+    </files>
 
     <dependencySets>
         <!-- All runtime + compile scope deps (excludes test scope like h2) -->

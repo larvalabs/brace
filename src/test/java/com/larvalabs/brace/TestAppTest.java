@@ -1,9 +1,11 @@
 package com.larvalabs.brace;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.larvalabs.brace.testmodels.Post;
 import org.junit.jupiter.api.*;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -55,8 +57,9 @@ class TestAppTest {
         var response = testApp.post("/posts", Map.of("title", "Test", "body", "Content"));
         assertEquals(201, response.status());
 
+        // Structural assertion via json() — no fragile body().contains(...) substring match.
         var list = testApp.get("/posts");
-        assertTrue(list.body().contains("Test"));
+        assertEquals("Test", list.json().get(0).get("title").asText());
     }
 
     @Test
@@ -85,8 +88,10 @@ class TestAppTest {
             db.insert(post);
         });
 
-        var response = testApp.get("/posts");
-        assertTrue(response.body().contains("Via Helper"));
+        // Typed deserialization via bodyAs(TypeReference) for generic types.
+        var posts = testApp.get("/posts").bodyAs(new TypeReference<List<Post>>() {});
+        assertEquals(1, posts.size());
+        assertEquals("Via Helper", posts.get(0).title);
     }
 
     @Test

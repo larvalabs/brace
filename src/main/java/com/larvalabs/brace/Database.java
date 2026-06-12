@@ -78,10 +78,45 @@ public class Database {
     }
 
     /**
+     * Like {@link #query(Class, String, Object...)}, but returns one page of results.
+     * {@code limit}/{@code offset} are applied via Hibernate's
+     * {@code setMaxResults}/{@code setFirstResult} — no string surgery on the HQL — so the
+     * database emits the dialect-correct LIMIT/OFFSET clause.
+     *
+     * <p>{@code ORDER BY} belongs inside the where-fragment string (it is concatenated into the
+     * generated HQL, same as {@link #query}); always order when paginating, or page boundaries
+     * are unstable. Pair with {@link #count(Class, String, Object...)} for the total:
+     *
+     * <pre>{@code
+     * // page 2, 20 per page
+     * var page = db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20);
+     * var total = db.count(Post.class, "published = true");
+     * }</pre>
+     *
+     * @param limit  maximum rows to return; must be {@code > 0}
+     * @param offset rows to skip before the first returned row; must be {@code >= 0}
+     * @throws IllegalArgumentException if {@code limit <= 0} or {@code offset < 0}
+     */
+    public <T> List<T> queryPage(Class<T> type, String hqlWhere, int limit, int offset, Object... params) {
+        if (limit <= 0) throw new IllegalArgumentException("limit must be > 0 (was " + limit + ")");
+        if (offset < 0) throw new IllegalArgumentException("offset must be >= 0 (was " + offset + ")");
+        long start = System.nanoTime();
+        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        Query<T> query = session.createQuery(hql, type);
+        bindParams(query, params);
+        query.setMaxResults(limit);
+        query.setFirstResult(offset);
+        List<T> result = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
+    }
+
+    /**
      * Batch-fetch all rows of {@code type} where {@code field} is one of the given {@code values}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -114,6 +149,27 @@ public class Database {
         return results.isEmpty() ? null : results.get(0);
     }
 
+    /**
+     * Like {@link #find(Class, Object)}, but throws {@link NotFoundException} (rendered as a
+     * 404 response) when no row exists. The canonical handler lookup:
+     * {@code var post = db.findOr404(Post.class, req.longPathParam("id"));}
+     */
+    public <T> T findOr404(Class<T> type, Object id) {
+        T result = find(type, id);
+        if (result == null) throw new NotFoundException();
+        return result;
+    }
+
+    /**
+     * Like {@link #queryOne(Class, String, Object...)}, but throws {@link NotFoundException}
+     * (rendered as a 404 response) when no row matches.
+     */
+    public <T> T queryOneOr404(Class<T> type, String hqlWhere, Object... params) {
+        T result = queryOne(type, hqlWhere, params);
+        if (result == null) throw new NotFoundException();
+        return result;
+    }
+
     public <T> long count(Class<T> type) {
         long start = System.nanoTime();
         String hql = "SELECT count(*) FROM " + type.getSimpleName();
@@ -134,13 +190,29 @@ public class Database {
         return result;
     }
 
+    /**
+     * Return {@code true} if any row of {@code type} matches the HQL where-fragment — the
+     * multi-field counterpart of {@link #existsBy(Class, String, Object)}. Equivalent to
+     * {@code count(type, hqlWhere, params) > 0} in one call:
+     * {@code db.exists(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId)}.
+     *
+     * <p><strong>Security:</strong> {@code hqlWhere} is concatenated into the generated HQL,
+     * same as {@link #query(Class, String, Object...)} — it must be a trusted, hard-coded
+     * fragment. User-controlled values belong in {@code ?} bind params, never in the
+     * fragment itself.
+     */
+    public <T> boolean exists(Class<T> type, String hqlWhere, Object... params) {
+        // count() already instruments
+        return count(type, hqlWhere, params) > 0;
+    }
+
     // --- Constrained helpers (single-field queries) ---
 
     /**
      * Find the first row of {@code type} where {@code field} equals {@code value}, or {@code null}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -154,7 +226,7 @@ public class Database {
      * Find all rows of {@code type} where {@code field} equals {@code value}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -168,7 +240,7 @@ public class Database {
      * Count rows of {@code type} where {@code field} equals {@code value}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -182,7 +254,7 @@ public class Database {
      * Return {@code true} if any row of {@code type} has {@code field} equal to {@code value}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.
@@ -197,7 +269,7 @@ public class Database {
      * Returns the number of rows deleted.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
-     * name — never pass user-controlled input (e.g. {@code req.param("sort")}) as the field
+     * name — never pass user-controlled input (e.g. {@code req.queryParam("sort")}) as the field
      * argument. Doing so is an HQL injection risk. The value is validated against the safe
      * identifier pattern {@code [A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*}
      * and rejected with {@link IllegalArgumentException} if it does not match.

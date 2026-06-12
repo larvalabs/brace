@@ -7,14 +7,14 @@ Brace is a full-stack Java web framework. Requires JDK 21+; JDK 25 LTS recommend
 ## Project Structure
 
 ```
-src/main/java/com/larvalabs/brace/     # Framework source (~4,000 lines)
+src/main/java/com/larvalabs/brace/     # Framework source (~15k lines including the CLI)
 src/test/java/com/larvalabs/brace/     # Tests (run with `mvn test`)
 src/test/resources/          # Test templates, migrations
 src/assembly/distribution.xml # Assembly descriptor for the brace CLI zip
 bin/brace                    # CLI launcher script (shipped in distribution)
 tests/cli/                   # Shell-based end-to-end tests for the CLI
 docs/                        # Design spec, decisions, implementation plans
-sample/                      # Sample app demonstrating the API
+sample/                      # Minimal smoke app (not the canonical API reference — that's BRACE-AGENTS.md)
 ```
 
 ## Architecture
@@ -55,6 +55,20 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Config` | File + env var config with mode prefixes |
 | `Passwords` | bcrypt hash/check |
 | `Csrf` | CSRF token generation and validation |
+| `Cache` | Cache facade (stats, TTL, serialization, page cache) over a `CacheBackend` |
+| `CacheBackend` | Storage SPI behind `Cache` — in-process default or shared Postgres |
+| `Storage` | S3-compatible object storage client (AWS Sig V4, no SDK) |
+| `Http` | Fluent outbound HTTP client over `java.net.http` |
+| `RateLimiter` | Per-IP / per-key rate-limiting middleware |
+| `Assets` | Asset URL fingerprinting for cache busting |
+| `Url` | URL generation from route patterns (`Url.to("/users/{id}", 42)`) |
+| `WsContext` | WebSocket session wrapper (send, rooms, broadcast) |
+| `UploadedFile` | Multipart upload (filename, content type, bytes) |
+| `Notifier` | Regression notification hook — `LogNotifier`, `WebhookNotifier`, `MailerNotifier` |
+| `RegressionTracker` | Tracks new error kinds per deploy, backs `/ops/regressions` |
+| `ErrorStore` | Persists exception data to the `ops_errors` table |
+| `OpsAudit` | Logs authenticated ops-endpoint access as `ops.access` events |
+| `OpsKeys` | Ed25519 keygen, signing, verification, authorized-keys parsing |
 | `TestApp` | In-process test harness |
 
 ### Handler Interfaces
@@ -151,9 +165,12 @@ or resume one of these reviews, read that file first.
 - **While developing toward the next release:** keep the guide for the in-progress step (the one ending at the current `-SNAPSHOT` version in `pom.xml`) up to date as you go. Any user-visible change — a breaking change *or* a notable new/optional capability — gets an entry there, with before/after examples. Create the file the first time a release needs one; don't wait for tag time.
 - **A guide is required even when there are no breaking changes.** State that explicitly ("This release has no breaking changes") so a skipped guide is never ambiguous with a missing one — agents are told to read every guide between two versions in order, so a gap reads as "lost," not "nothing changed."
 - **Don't rename or backfill silently.** If you find a missing guide for an already-released step, surface it rather than reconstructing history as part of an unrelated change.
+- **The upgrade flow ends with a docs refresh:** after bumping `<brace.version>`, projects run `brace agents-md` to rewrite their `BRACE-AGENTS.md` from the new version's jar — guides can assume this step and don't need to repeat it.
 
 ### Release checklist (version references)
 `pom.xml` `<version>` is the single source of truth for the framework version. The one place a concrete version must still be hardcoded for users to copy is the install example in `README.md` (Maven/Gradle dependency + the "Replace `vX.Y.Z`" line). When cutting a release, update those `README.md` examples to the new tag. Don't reintroduce hardcoded versions into this file or `BRACE-AGENTS.md` — reference `pom.xml`.
+
+Also sweep `README.md`'s API tour sections (Controllers through Configuration, roughly lines 193–486) against `BRACE-AGENTS.md` for drift. They duplicate deliberately — the README is the GitHub landing page and the tour has adoption value — but the README copy isn't session-loaded by agents, so it rots independently and only this checklist catches it.
 
 ### Adding dynamic page updates with htmx
 1. Include `<script src="/__brace/htmx.min.js"></script>` in your layout

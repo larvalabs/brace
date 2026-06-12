@@ -9,7 +9,7 @@ body-read ordering, smarter `?` parameter conversion) plus several **security fi
 new **server-enforced session expiry**, and a **replay-resistant ops auth protocol, v2**)
 covered at the end of this guide.
 
-Two narrow cases **are breaking** and need action:
+Four narrow cases **are breaking** and need action:
 
 - Middleware patterns with an **interior wildcard** (e.g. `/api/*/admin`) are now
   rejected at startup with an `IllegalArgumentException` — see "middleware trailing
@@ -17,32 +17,96 @@ Two narrow cases **are breaking** and need action:
 - Scripts that authenticated to `/ops/*` endpoints with a **`?token=` query parameter**
   must switch to the `Authorization: Bearer` header — see "`?token=` query-param auth
   removed" below.
+- Scripts that parse **`GET /ops/errors`** (or `brace errors --json`) and read
+  `stackTrace`/`requestDetail` from the rows must add `?include=detail` (CLI: `--full`) —
+  the default response is now a compact summary per error. See "`/ops/errors` now
+  returns summaries" below.
+- Scripts that parse **`GET /ops/status`** (or `brace status --json`) and read
+  `timeseries`, `jvm.profiling`, or fields of `errors.recent` beyond the summary set
+  must add `?include=timeseries,profiling` (for the first two) or fetch
+  `/ops/errors/{id}` (for stack traces). Also note `brace status` now actually exits
+  non-zero when unresolved errors exist — a bug fix, but a behavior change for scripts.
+  See "`/ops/status` is now a compact snapshot" below.
 
 Also note: the session-expiry change alters how long a stolen cookie stays valid — see
 "sessions now carry a server-enforced expiry" below — and the old ops auth protocol (v1)
 is now deprecated — see "ops auth protocol v2" below.
 
+If anything **parses brace CLI output**: `brace compile` failure diagnostics are now
+condensed and deduplicated, `brace test` prints a condensed summary when stdout is not
+a TTY, and every command's `--json` output is now compact single-line (identical bytes
+to a JSON parser; only text-layout greps notice) — see the corresponding sections below.
+Exit codes are unchanged, and `brace test --verbose` restores the old output.
+
+## Index
+
+One row per section of this guide, in document order. The bullets above are the prose
+summary; this is the scan/jump table.
+
+| Change | Type | Action required | Anchor |
+|---|---|---|---|
+| Drop manual `flyway-database-postgresql` dep | cleanup | optional — delete hand-added Postgres deps | [§](#recommended-cleanup-drop-the-manual-flyway-database-postgresql-dependency) |
+| Shared cache backend | new-optional | none — additive | [§](#new-optional-shared-cache-backend-for-multi-server-consistency) |
+| Form binding: enums, `LocalDate`, `Instant`, `BigDecimal` | new-optional | none — additive | [§](#new-optional-form-binding-for-enums-localdate-instant-bigdecimal) |
+| `Json.obj` ad-hoc JSON shapes | new-optional | none — additive | [§](#new-optional-jsonobj--one-line-ad-hoc-json-shapes) |
+| `req.jsonForm` JSON-body validation | new-optional | none — additive | [§](#new-optional-reqjsonform--declarative-validation-for-json-bodies) |
+| Typed read-only route methods (`getRead`, …) | new-optional | none — additive | [§](#new-optional-typed-read-only-route-methods-getread-getreadfull-) |
+| Session-aware `before` + `requireSession` | new-optional | none — additive | [§](#new-optional-session-aware-before-middleware--requiresession-auth-guard) |
+| `db.findOr404` / `db.queryOneOr404` | new-optional | none — additive | [§](#new-optional-dbfindor404--dbqueryoneor404-lookup-helpers) |
+| `db.queryPage` + ORDER BY in where-fragments | new-optional | none — additive | [§](#new-optional-dbquerypage-pagination--order-by-in-where-fragments-is-now-documented-behavior) |
+| `db.exists` multi-field check | new-optional | none — additive | [§](#new-optional-dbexists--multi-field-existence-check) |
+| Multi-value `req.queryParams` / `req.formParams` | new-optional | none — additive | [§](#new-optional-multi-value-queryform-params--reqqueryparamsname--reqformparamsname) |
+| TestApp builder, CSRF helpers, JSON assertions | new-optional | none — additive | [§](#new-optional-testapp-request-builder-csrf-helpers-session-variants-json-assertions) |
+| Scaffold extracts `App.routes(Brace)` | new-optional | none — new scaffolds only; adopt if useful | [§](#new-optional-scaffold-extracts-route-wiring-into-approutesbrace) |
+| Scaffold fix: surefire pin + fat jar | cleanup | older scaffolds: paste `<build>` section, fix Dockerfile COPY | [§](#fixed-scaffold-generated-pom-ran-zero-tests-dockerfile-couldnt-run-the-jar) |
+| Scoped read-only ops keys | new-optional | none — keys without marker stay `control` | [§](#new-optional-scoped-read-only-ops-keys) |
+| Refreshed `CLAUDE.md` generator | new-optional | optional — regenerate and diff | [§](#new-optional-refreshed-claudemd-capability-index) |
+| `brace agents-md` doc refresh | new-optional | run after bumping `<brace.version>` | [§](#new-optional-brace-agents-md--refresh-brace-agentsmd-after-an-upgrade) |
+| `BRACE-OPS.md` ops reference split | new-optional | none — `brace agents-md` writes it; ops content moved out of `BRACE-AGENTS.md` | [§](#new-optional-brace-opsmd--ops-reference-split-out-of-brace-agentsmd) |
+| `/ops/errors` returns summaries | breaking | scripts reading `stackTrace` etc.: add `?include=detail` or fetch `/ops/errors/{id}` | [§](#breaking-for-scripted-consumers-opserrors-now-returns-summaries) |
+| `/ops/status` compact snapshot | breaking | scripts reading `timeseries`/`profiling`: add `?include=`; exit code now real | [§](#breaking-for-scripted-consumers-opsstatus-is-now-a-compact-snapshot) |
+| Per-test H2 database | behavior change | suites relying on the shared DB: set an explicit URL | [§](#behavior-change-each-bracetest-gets-its-own-h2-database) |
+| CLI JSON output compact | behavior change | none if parsing as JSON; fix text-layout greps | [§](#behavior-change-cli-json-output-is-now-compact-one-line) |
+| Unknown CLI commands exit 1 | behavior change | none — fix typos | [§](#behavior-change-unknown-cli-commands-now-exit-1) |
+| `brace compile` condensed diagnostics | behavior change | update parsers of javac failure output | [§](#changed-brace-compile-prints-condensed-deduplicated-diagnostics) |
+| `brace test` condensed when piped | behavior change | scripts grepping raw JUnit output: match summary line or `--verbose` | [§](#changed-brace-test-prints-condensed-output-when-stdout-is-not-a-tty) |
+| Startup log noise quieted | behavior change | none; `-Dlog.level.*` restores; exclude `slf4j-jdk14` if you ship a provider | [§](#behavior-change-third-party-startup-log-noise-is-quieted-by-default) |
+| Defaulted numeric accessors no longer throw | behavior change | none unless relying on the 500 | [§](#behavior-change-defaulted-numeric-query-accessors-no-longer-throw-on-unparseable-input) |
+| Flash renders on any page, consumed at render time | behavior change | none — bug fixes; relax tests asserting the old eat-the-flash behavior | [§](#behavior-change-flash-messages-render-on-any-page-and-are-consumed-at-render-time) |
+| Session-cookie responses get `Cache-Control: private` | behavior change | none; an explicit `Cache-Control` wins | [§](#behavior-change-session-cookie-responses-default-to-cache-control-private) |
+| Dev-mode 404s list near-miss routes | new-optional | relax exact-body 404 asserts in dev-mode tests | [§](#new-dev-mode-only-404s-list-near-miss-routes) |
+| Request/response hardening (headers, cookies, body order, `?` escaping) | behavior change | none; note body-read ordering on unmatched routes | [§](#requestresponse-hardening-fixes) |
+| Non-multipart bodies capped at `maxUploadSize` (413) | behavior change | raise `maxUploadSize` if >10 MB bodies intended | [§](#security-fix-non-multipart-request-bodies-are-now-capped-at-maxuploadsize) |
+| `req.ip()` rightmost-untrusted | behavior change | update tests asserting leftmost XFF | [§](#security-fix-reqip-now-returns-the-rightmost-untrusted-address) |
+| CSRF token persists on plain `Handler` | behavior change | none; workaround `Session` params removable | [§](#security-fix-csrf-token-now-persists-when-rendered-through-a-plain-handler) |
+| Server-enforced session expiry `_exp` | behavior change | none; note 14-day default from last write | [§](#security-fix-sessions-now-carry-a-server-enforced-expiry-_exp) |
+| `?token=` ops auth removed | breaking | switch scripts to `Authorization: Bearer` | [§](#security-fix-token-query-param-auth-removed-from-general-ops-endpoints) |
+| Ops auth protocol v2; v1 deprecated | behavior change | none for CLI; update hand-rolled `/ops/auth` clients | [§](#security-fix-ops-auth-protocol-v2-key-bound-nonced-signature-v1-deprecated) |
+| Static files send `nosniff` | behavior change | none | [§](#security-fix-static-files-now-carry-x-content-type-options-nosniff) |
+| OpsDashboard escapes single quotes | cleanup | none | [§](#security-fix-opsdashboard-html-escaping-now-handles-single-quotes) |
+| `Redirect.toLocal` open-redirect helper | new-optional | use for user-derived redirect targets | [§](#security-fix-open-redirect-helper-safe-redirect-for-user-input) |
+| Middleware `/*` matches bare prefix; interior wildcards rejected | breaking | fix interior-wildcard patterns; review bare-prefix guards | [§](#security-fix-middleware-trailing--now-matches-the-bare-prefix) |
+| `Class.forName` initializer control | cleanup | none | [§](#security-fix-classforname-initializer-control-on-durable-jobs-and-cache-entries) |
+| Page-cache keys percent-encoded | behavior change | none — one-time cache misses after upgrade | [§](#security-fix-page-cache-keys-now-percent-encode-query-parameters) |
+| `brace new` validates project names | behavior change | use `[A-Za-z0-9_-]` names | [§](#security-fix-brace-new-validates-project-names) |
+| `Passwords.dummyCheck` timing helper | new-optional | add to user-not-found login path | [§](#security-fix-bcrypt-helper-for-constant-time-enumeration-timing-mitigation) |
+| TrustedProxies dual-stack guidance (docs) | cleanup | list both `127.0.0.1` and `::1` on dual-stack | [§](#security-fix-trustedproxies-dual-stack-ipv6-representation-mismatch-documentation) |
+| High-entropy path segments redacted in logs/stats | behavior change | log tooling matching token paths: match `[redacted]` | [§](#security-fix-high-entropy-path-segments-redacted-in-access-logs-and-ops-stats) |
+
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
-**Background.** Flyway 10 (which Brace uses) split per-database support out of
-`flyway-core` into separate modules. `flyway-core` bundles only a few handlers — H2 among
-them — but **not** PostgreSQL. Through 0.1.6, Brace declared only `flyway-core`, so an app
-running on Postgres failed at startup the moment `DatabaseFactory` ran migrations:
+Flyway 10 split per-database support out of `flyway-core` (H2 stayed bundled;
+PostgreSQL did not), and through 0.1.6 Brace declared only `flyway-core` — so an app
+on Postgres failed at startup the moment `DatabaseFactory` ran migrations:
 
 ```
 org.flywaydb.core.api.FlywayException: No database found to handle jdbc:postgresql://…
 ```
 
-The standard workaround was to add the missing module — and the Postgres JDBC driver — to
-your **own** `pom.xml`. Many Brace+Postgres projects carry exactly that.
-
-**What changed in 0.1.7.** Brace now bundles `flyway-database-postgresql` itself (at
-`runtime` scope, so it reaches your app transitively). The PostgreSQL JDBC driver was
-already bundled this way. So a Brace project on Postgres needs **no Postgres dependencies of
-its own** — Brace brings everything.
-
-**The cleanup.** If your project's `pom.xml` declares either of these only to make Postgres
-work, you can remove them:
+The standard workaround was adding `flyway-database-postgresql` and the Postgres JDBC
+driver to your **own** `pom.xml`. 0.1.7 bundles both at `runtime` scope, so a Brace
+project on Postgres needs **no Postgres dependencies of its own** — the hand-added
+workaround dependencies can go:
 
 **Before:**
 
@@ -80,14 +144,15 @@ work, you can remove them:
 </dependencies>
 ```
 
-**This cleanup is optional and safe to skip.** Leaving the explicit declarations in place is
-harmless — Maven dedupes them against Brace's transitive versions. One reason to remove them:
-a hand-pinned `org.postgresql` version (e.g. `42.7.4`) *overrides* the newer driver Brace
-ships, so deleting it lets you track Brace's tested version instead.
+**This cleanup is optional and safe to skip** — Maven dedupes the explicit declarations
+against Brace's transitive versions. One reason to do it anyway: a hand-pinned
+`org.postgresql` version (e.g. `42.7.4`) *overrides* the newer driver Brace ships and
+tests against.
 
-**How to apply (mechanical):** in each project's `pom.xml`, delete any `<dependency>` on
-`org.flywaydb:flyway-database-postgresql` and any `org.postgresql:postgresql` that you only
-added for Brace. Recompile and start the app; migrations should run on Postgres unchanged.
+(Why the gap went unnoticed until now: Brace's own tests ran entirely on H2, whose
+Flyway handler *is* bundled in `flyway-core`. 0.1.7 adds a real-Postgres Testcontainers
+tier — `mvn verify` — that runs the shipped migrations against Postgres, which is what
+surfaced this. See `docs/2026-06-05-pg-testcontainers.md`.)
 
 ## New (optional): shared cache backend for multi-server consistency
 
@@ -127,6 +192,464 @@ both — keep the in-process default for hot read-through pages and a separate
 (L1/L2) tier, is in `docs/2026-06-04-brace-shared-cache.md` and the Cache section of
 `BRACE-AGENTS.md`.
 
+## New (optional): form binding for enums, `LocalDate`, `Instant`, `BigDecimal`
+
+**Nothing to do** — purely additive. Form (and `jsonForm`) records can now declare
+enum, `LocalDate`, `Instant`, and `BigDecimal` components directly; previously these
+types fell through the binder and crashed record construction with a 500. Unparseable
+input becomes a field error (`"must be a date (yyyy-MM-dd)"`, `"must be one of: DRAFT,
+PUBLISHED"`, …) — same `hasErrors()` handling as every other validation failure.
+
+**Before (all versions, still works):**
+
+```java
+public record EventForm(@Required String name, String startDate) {}
+// ...then hand-parse: LocalDate.parse(form.value().startDate()) wrapped in try/catch
+```
+
+**After (0.1.7+):**
+
+```java
+public record EventForm(@Required String name, LocalDate startDate) {}
+```
+
+## New (optional): `Json.obj` — one-line ad-hoc JSON shapes
+
+**Nothing to do** — purely additive. For one-off response shapes, `Json.obj` replaces
+the LinkedHashMap-and-put block. It preserves key order and allows `null` values
+(the two reasons `Map.of` doesn't work for JSON responses).
+
+**Before (all versions, still works):**
+
+```java
+var response = new LinkedHashMap<String, Object>();
+response.put("talkId", id);
+response.put("averageRating", avg);   // may be null — Map.of would throw
+return Json.of(response);
+```
+
+**After (0.1.7+):**
+
+```java
+return Json.of(Json.obj("talkId", id, "averageRating", avg));
+```
+
+## New (optional): `req.jsonForm` — declarative validation for JSON bodies
+
+**Nothing to do** — purely additive. The `@Required`/`@Min`/`@Email` annotation
+vocabulary (previously reachable only through form-encoded `req.form()`) now works
+for JSON request bodies, including the record's custom `validate(Errors)` method.
+Malformed or non-object JSON becomes a `"_body"` validation error instead of an
+exception, so the `hasErrors()` idiom covers it — unlike `req.bodyAs()`, which
+throws on a parse failure and surfaces as a 500.
+
+**Before (all versions, still works):**
+
+```java
+Talk input;
+try { input = req.bodyAs(Talk.class); }
+catch (Exception e) { return Result.badRequest("invalid json"); }
+if (input.title == null || input.title.isBlank()) return Result.error(400, "title required");
+if (input.durationMinutes <= 0) return Result.error(400, "duration must be positive");
+// ... repeated per field, duplicated between POST and PUT
+```
+
+**After (0.1.7+):**
+
+```java
+var form = req.jsonForm(TalkForm.class);   // same record + annotations as req.form()
+if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422);
+```
+
+## New (optional): typed read-only route methods (`getRead`, `getReadFull`, …)
+
+**Nothing to do** — purely additive; existing cast-style registrations keep working.
+0.1.6 added `getDb`/`postSession`/`putFull` etc., but read-only handlers (the most
+common kind — almost every GET) still required a cast, because the raw
+`get/post/put/delete` overloads are ambiguous for multi-arg lambdas. 0.1.7 completes
+the set with `getRead` (ReadDbHandler — DB queries, no transaction) and `getReadFull`
+(ReadFullHandler — read-only DB + session), on both `Brace` and route groups. The
+read-only names exist for GET only: pairing a mutating verb with a
+transaction-skipping handler is a footgun (an insert inside would run outside any
+transaction). The rare legitimate case — e.g. POST as a complex query — still works
+via the cast form, `app.post(pattern, (ReadDbHandler) ...)`.
+
+**Before (all versions, still works):**
+
+```java
+app.get("/posts", (ReadDbHandler) (req, db) -> Json.of(db.findAll(Post.class)));
+```
+
+**After (0.1.7+, the canonical form):**
+
+```java
+app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class)));
+```
+
+## New (optional): session-aware before-middleware + `requireSession` auth guard
+
+**Nothing to do** — purely additive. Plain `before(...)` middleware never saw the
+session, so login checks had to be repeated inside every protected handler (and forced
+those handlers into Session/Full shapes). 0.1.7 adds a 2-arg `before` overload that
+receives the request's `Session`, plus a one-line guard built on it. The session
+instance the middleware sees is the **same instance** the handler receives — mutations
+made in the guard persist through the normal session-cookie write-back, including on a
+short-circuit response (e.g. a flash message set just before redirecting to login).
+Ordering: all plain `before(...)` middleware first, then session-aware middleware, then
+CSRF validation, then the handler.
+
+**Before (all versions, still works):**
+
+```java
+app.getFull("/admin/posts", (req, db, session) -> {
+    if (!session.has("userId")) return Result.redirect("/login");   // repeated per route
+    ...
+});
+```
+
+**After (0.1.7+):**
+
+```java
+app.requireSession("/admin/*", "userId", "/login");   // once, covers the subtree
+app.getRead("/admin/posts", (req, db) -> ...);        // handlers assume userId present
+
+// custom guard logic:
+app.before("/admin/*", (req, session) ->
+    "admin".equals(session.get("role")) ? null : Result.forbidden());
+```
+
+## New (optional): `db.findOr404` / `db.queryOneOr404` lookup helpers
+
+**Nothing to do** — purely additive. The find/null-check/404 preamble that every
+show/update/delete handler starts with collapses to one line; the helpers throw
+`NotFoundException`, which Brace already renders as a 404 response.
+
+**Before (all versions, still works):**
+
+```java
+var post = db.find(Post.class, req.longPathParam("id"));
+if (post == null) return Result.notFound();
+```
+
+**After (0.1.7+, the canonical lookup):**
+
+```java
+var post = db.findOr404(Post.class, req.longPathParam("id"));
+// and for non-ID lookups:
+var bySlug = db.queryOneOr404(Post.class, "slug = ?", slug);
+```
+
+## New (optional): `db.queryPage` pagination + ORDER BY in where-fragments is now documented behavior
+
+**Nothing to do** — purely additive; existing `db.query(...)` calls keep working
+unchanged. Two related improvements to the query API's ordering/pagination story:
+
+1. **`ORDER BY` inside the where-fragment is now documented, pinned behavior.** It has
+   always worked (the fragment is concatenated into the generated HQL), but nothing
+   documented it, so apps sorted result lists in Java. As of 0.1.7 it is covered by
+   tests and listed in `BRACE-AGENTS.md` §Database — rely on it.
+2. **`db.queryPage(Class, hqlWhere, limit, offset, params...)`** — same where-fragment
+   pipeline as `db.query`, plus a result slice applied via Hibernate's
+   `setMaxResults`/`setFirstResult` (dialect-correct LIMIT/OFFSET, no string surgery).
+   Validates `limit > 0` and `offset >= 0` (`IllegalArgumentException` otherwise).
+   Put the `ORDER BY` in the where-fragment string — always order when paginating, or
+   page boundaries are unstable. Note this is a **new method**, not an overload of
+   `db.query`: an overload would have silently reinterpreted existing calls like
+   `db.query(Post.class, "a = ? AND b = ?", 1, 2)` as limit/offset.
+
+**Before (all versions, still works — but fetches every row):**
+
+```java
+// full-table fetch, then slice in Java
+var all = db.query(Post.class, "published = true");
+all.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
+var page = all.subList(Math.min(20, all.size()), Math.min(40, all.size()));
+long total = all.size();
+
+// …or hand-built LIMIT/OFFSET via native SQL
+var rows = db.sqlQuery("SELECT * FROM posts WHERE published = true ORDER BY created_at DESC LIMIT 20 OFFSET 20");
+```
+
+**After (0.1.7+):**
+
+```java
+// page 2, 20 per page — database does the ordering and slicing
+var page  = db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20);
+long total = db.count(Post.class, "published = true");  // same condition, sans ORDER BY
+
+// and for non-paged ordered lists, ORDER BY in db.query is supported semantics:
+var newest = db.query(Post.class, "published = true ORDER BY id DESC");
+```
+
+Relatedly, the documented idiom for aggregates is a single projection query — not
+fetching rows and loop-summing in Java:
+
+```java
+var row = db.hql("SELECT AVG(r.score), COUNT(r) FROM Rating r WHERE r.talkId = ?", id).get(0);
+```
+
+## New (optional): `db.exists` — multi-field existence check
+
+**Nothing to do** — purely additive. `db.existsBy(Class, field, value)` covers
+single-field checks; `db.exists(Class, hqlWhere, params...)` is its multi-field
+counterpart (internally `count(type, hqlWhere, params) > 0`). Same security rule as
+the rest of the `query` family: the where-fragment must be a trusted, hard-coded
+string — user input goes in `?` bind params.
+
+**Before (all versions, still works — but fetches rows just to test emptiness):**
+
+```java
+boolean rated = !db.query(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId).isEmpty();
+```
+
+**After (0.1.7+):**
+
+```java
+boolean rated = db.exists(Rating.class, "talkId = ? AND attendeeId = ?", talkId, attendeeId);
+```
+
+## New (optional): multi-value query/form params — `req.queryParams(name)` / `req.formParams(name)`
+
+The single-value maps behind `req.queryParam(name)` / `req.formParam(name)` are
+last-value-wins, so `<select multiple>` and checkbox-group submissions
+(`?tag=a&tag=b`, or the same shape in a form body) were unrepresentable without
+hand-parsing `req.body()`. Two additive accessors return ALL values of a repeated
+parameter as a `List<String>` (URL-decoded, order preserved, empty list when absent):
+
+```html
+<select name="tag" multiple>
+    <option>java</option>
+    <option>web</option>
+</select>
+```
+
+```java
+// Before: only the last selected value survived
+String last = req.formParam("tag");           // "web"
+
+// After: every selected value
+List<String> tags = req.formParams("tag");    // ["java", "web"]
+List<String> fromQuery = req.queryParams("tag"); // same for ?tag=java&tag=web
+```
+
+All existing single-value methods (and the no-arg `req.queryParams()` map) are
+unchanged — repeated keys still resolve last-value-wins there. `FormBinder` does not
+bind `List<String>` record components yet; read repeated fields through these
+accessors for now.
+
+## New (optional): TestApp request builder, CSRF helpers, session variants, JSON assertions
+
+**Nothing to do** — purely additive; every existing `TestApp`/`TestResponse` method keeps
+its exact behavior. 0.1.6's harness had four gaps that forced boilerplate: no way to set
+request headers (bearer-token APIs were untestable through `TestApp`, so tests hand-rolled
+an `HttpClient`), no session variants for `get`/`postJson`/`put`/`delete`, no CSRF helper
+(the first mutating-route test under `.sessions(...)` 403s, and tests scraped the token out
+of rendered HTML), and JSON assertions limited to `bodyAs(Class)` (so tests fell back to
+fragile `body().contains(...)`).
+
+**Before (all versions, still works) — hand-rolled client + token scrape:**
+
+```java
+// Bearer-token API: TestApp couldn't set headers, so every API test class carried this:
+var client = HttpClient.newBuilder().cookieHandler(new CookieManager()).build();
+var resp = client.send(
+    HttpRequest.newBuilder()
+        .uri(URI.create("http://localhost:" + app.port() + "/api/items"))
+        .header("Authorization", "Bearer " + token)
+        .GET().build(),
+    HttpResponse.BodyHandlers.ofString());
+
+// CSRF-protected POST: GET a page, regex-scrape the token out of the HTML, replay it:
+var page = client.send(/* GET /posts/new ... */, HttpResponse.BodyHandlers.ofString());
+String csrf = scrapeHiddenField(page.body());   // ~10 lines of string surgery
+client.send(HttpRequest.newBuilder()
+    .uri(URI.create("http://localhost:" + app.port() + "/posts"))
+    .POST(HttpRequest.BodyPublishers.ofString("_csrf=" + csrf + "&title=Hi"))
+    .header("Content-Type", "application/x-www-form-urlencoded")
+    .build(), HttpResponse.BodyHandlers.ofString());
+```
+
+**After (0.1.7+) — one-liners on the harness:**
+
+```java
+// Bearer-token API via the request builder (.header is repeatable; .body/.session too):
+var res = app.request("GET", "/api/items").header("Authorization", "Bearer " + token).send();
+
+// CSRF-protected mutating routes — token minted via Csrf.ensureToken and sent automatically:
+var session = Session.of("userId", "1");
+app.postWithCsrf("/posts", Map.of("title", "Hi"), session);     // _csrf form param
+app.putWithCsrf("/posts/1", Map.of("title", "New"), session);   // _csrf form param
+app.deleteWithCsrf("/posts/1", session);                        // X-CSRF-Token header (no form body)
+
+// Session variants now exist for every verb:
+app.get("/me", session);
+app.postJson("/api/notes", Map.of("text", "hi"), session);
+app.put("/posts/1", Map.of("title", "New"), session);           // csrf(false) routes
+app.delete("/posts/1", session);
+
+// JSON assertions instead of body().contains(...):
+assertEquals("Hi", res.json().get(0).get("title").asText());            // Jackson JsonNode
+List<Post> posts = res.bodyAs(new TypeReference<List<Post>>() {});      // typed generics
+```
+
+Two behaviors worth knowing:
+
+- **`post(...)` still never auto-injects a CSRF token.** With `.sessions(...)` enabled,
+  every mutating route requires CSRF by default, so a plain `post`/`put`/`delete` to such a
+  route 403s — that's deliberate (missing-token regressions stay testable). Reach for the
+  `*WithCsrf` helpers in app tests.
+- **Explicit sessions evict the shared cookie jar's `brace_session`.** `TestApp`'s
+  HttpClient keeps a cookie jar, and with sessions enabled the framework Set-Cookies a
+  minted CSRF session on the first request. When you pass a `Session` to the new builder or
+  helpers, any jar-held `brace_session` is evicted at send time so the server sees exactly
+  the session you passed (previously two cookies raced nondeterministically). The
+  pre-existing `post(path, params, session)` is untouched and keeps its old behavior.
+
+The Testing section of `BRACE-AGENTS.md` documents all of it, including the CSRF-in-tests
+rule that was previously undocumented.
+
+## New (optional): scaffold extracts route wiring into `App.routes(Brace)`
+
+**Existing projects: nothing to do** — this only changes what `brace new` generates
+in 0.1.7+. Newly scaffolded `App.java` keeps route registration in
+`public static void routes(Brace app)` (called from `main()`, which keeps config and
+server startup to itself), and the scaffolded test reuses it via
+`.start(App::routes)` instead of re-registering routes by hand. The scaffolded test
+also includes a `TestData` factory-helper skeleton as the copyable pattern for
+entity setup.
+
+**To adopt in an existing project**, extract the route-registration lines from
+`main()` into a static method:
+
+```java
+// Before — routes wired inline in main(), tests must duplicate them:
+public static void main(String[] args) throws Exception {
+    var config = Config.load(...);
+    var app = Brace.app().port(...).database(db).templates("views");
+    var home = new HomeController();
+    app.get("/", home::index);
+    app.getRead("/posts", posts::index);
+    app.start();
+}
+
+// After — main() keeps config/startup; routes() owns the wiring:
+public static void main(String[] args) throws Exception {
+    var config = Config.load(...);
+    var app = Brace.app().port(...).database(db).templates("views");
+    routes(app);
+    app.start();
+}
+
+public static void routes(Brace app) {
+    var home = new HomeController();
+    var posts = new PostController();
+    app.get("/", home::index);
+    app.getRead("/posts", posts::index);
+}
+```
+
+Then point every test at the real wiring:
+
+```java
+// Before:
+testApp = Brace.test().templates("views").start(app -> {
+    var home = new HomeController();
+    app.get("/", home::index);     // duplicated, drifts from main()
+});
+
+// After:
+testApp = Brace.test().templates("views").start(App::routes);
+```
+
+## Fixed (scaffold): generated pom ran zero tests; Dockerfile couldn't run the jar
+
+**Existing projects: action recommended** — this fixes what `brace new` generates in
+0.1.7+, but projects scaffolded with earlier versions carry both problems until they
+copy the fix:
+
+1. **`mvn test` was a false green.** The generated pom had no `<build>` section, so
+   Maven's inherited Surefire 2.12.4 ignored JUnit 5 entirely — `Tests run: 0 …
+   BUILD SUCCESS` no matter what the tests did. (`brace test` was unaffected; it
+   runs the JUnit console launcher directly.)
+2. **The Dockerfile couldn't work.** It did `COPY target/*.jar app.jar` +
+   `java -jar app.jar`, but the pom built a thin jar with no `Main-Class` manifest
+   and no dependencies.
+
+New scaffolds get a `<build>` section pinning `maven-surefire-plugin` 3.5.2 and
+configuring `maven-shade-plugin` to produce an executable fat jar at
+`target/app.jar` (fixed name via `<finalName>app</finalName>`), and the Dockerfile
+copies `target/app.jar` explicitly. `mvn package && java -jar target/app.jar` now
+works, and so does the Dockerfile.
+
+**To adopt in an existing project**, paste this into your pom (after
+`</dependencies>`), and change the Dockerfile's `COPY target/*.jar app.jar` to
+`COPY target/app.jar app.jar`:
+
+```xml
+<build>
+    <!-- Fixed jar name so the Dockerfile can COPY target/app.jar deterministically. -->
+    <finalName>app</finalName>
+    <plugins>
+        <!-- Without this pin, Maven's inherited Surefire 2.x silently ignores
+             JUnit 5 tests ("Tests run: 0" + BUILD SUCCESS). Do not remove. -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <version>3.5.2</version>
+        </plugin>
+        <!-- mvn package builds an executable fat jar (target/app.jar). The
+             transformers matter: Jetty/Hibernate register implementations via
+             META-INF/services (merged by ServicesResourceTransformer), and
+             several dependencies are multi-release jars. -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-shade-plugin</artifactId>
+            <version>3.6.0</version>
+            <configuration>
+                <createDependencyReducedPom>false</createDependencyReducedPom>
+                <transformers>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                        <mainClass>app.App</mainClass>
+                        <manifestEntries>
+                            <Multi-Release>true</Multi-Release>
+                        </manifestEntries>
+                    </transformer>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                </transformers>
+                <filters>
+                    <filter>
+                        <artifact>*:*</artifact>
+                        <excludes>
+                            <exclude>META-INF/*.SF</exclude>
+                            <exclude>META-INF/*.DSA</exclude>
+                            <exclude>META-INF/*.RSA</exclude>
+                            <exclude>module-info.class</exclude>
+                            <exclude>META-INF/versions/*/module-info.class</exclude>
+                        </excludes>
+                    </filter>
+                </filters>
+            </configuration>
+            <executions>
+                <execution>
+                    <phase>package</phase>
+                    <goals><goal>shade</goal></goals>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+```
+
+(Adjust `<mainClass>` if your main class isn't `app.App`. Note the dev-mode H2
+database is a test-time convenience — H2 is not in the fat jar, so `java -jar`
+deployments use the real Postgres config.)
+
+Related one-line fix found while verifying this: the scaffold's dev database URL
+is now `jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1`. Without `DB_CLOSE_DELAY=-1` the
+in-memory database evaporates the moment Flyway's migration connection closes, so
+Hibernate then saw an empty schema. If your `application.conf` has the old URL and
+you run dev mode against H2, append `;DB_CLOSE_DELAY=-1`.
+
 ## New (optional): scoped read-only ops keys
 
 **Nothing to do** — existing keys and tokens keep working unchanged. 0.1.7 adds a
@@ -154,7 +677,716 @@ cannot obtain a control token even if it asks for one. Tokens carry a `kid` (key
 fingerprint), and every authenticated ops request is logged as a structured
 `ops.access` event (`kid`, scope, path, `granted`) for after-the-fact audit. The
 intended use is handing an autonomous agent a key that can observe production but
-cannot act on it. Details in `BRACE-AGENTS.md` → "Token scopes (read-only keys)".
+cannot act on it. Details in `BRACE-OPS.md` (`docs/agent-ops-guide.md` in the brace
+repo) → "Token scopes (read-only keys)".
+
+## New (optional): refreshed `CLAUDE.md` capability index
+
+**Nothing breaks if you skip this** — but your project's `CLAUDE.md` is a snapshot
+written at `brace new` time and does not update on upgrade, so it goes stale silently.
+0.1.7's generator fixes errors and fills the largest gaps in the emitted file:
+
+- **New capability entries:** the `Http` client (`Http.get(url).fetchJson(Class)`,
+  `.bearer(token)`, `.bodyJson(obj)` — previously absent entirely, which sent agents
+  to raw `java.net.http`), `Assets.url("/path")` content-hash fingerprinting,
+  `Url.to("/users/{id}", 42)`, `Log.debug/info/error` levels (previously only
+  `Log.event` was shown), `Redirect.toLocal(path)` for user-derived redirect targets.
+- **This release's API additions reflected:** `db.findOr404`/`db.queryOneOr404`,
+  `req.jsonForm(Class)`, `Json.obj(...)`, and the typed read-only route methods
+  (`app.getRead(...)`/`getReadFull`) as the canonical routing style.
+- **Stale facts fixed:** the repo link now points at `github.com/larvalabs/brace`
+  (was a dead `matth` URL); the CSRF line now lists PATCH alongside POST/PUT/DELETE.
+- **Ops sections merged:** the two overlapping ops sections are now one, with a
+  `brace check` row (the documented first move for production health) and the
+  previously missing `/ops/logs`, `/ops/cache`, and `/ops/regressions` endpoint rows.
+
+To refresh, re-run the generator and review the diff (it overwrites the file, so
+re-apply any project-specific edits — e.g. your filled-in **Deploy** section):
+
+```java
+// anywhere you have the app builder, e.g. a one-off main or jshell:
+app.generateClaudeMd("myapp", java.nio.file.Path.of("CLAUDE.md"));
+```
+
+Tip: `git diff CLAUDE.md` afterwards makes it easy to restore hand-written sections
+while keeping the refreshed capability index.
+
+## New (optional): `brace agents-md` — refresh `BRACE-AGENTS.md` after an upgrade
+
+**Nothing breaks if you skip this** — but `BRACE-AGENTS.md` is written once at
+`brace new` time and never updates itself, so after bumping `<brace.version>` your
+project's API reference silently describes the *old* version. From 0.1.7 the upgrade
+flow has a final step:
+
+```bash
+# 1. bump <brace.version> in pom.xml
+# 2. read the migration guide(s) for the version step — like this one
+# 3. refresh the project's framework docs to match the new pin:
+brace agents-md
+```
+
+The command resolves the project's pinned toolchain (same mechanism as
+`brace compile`/`run`), extracts the `BRACE-AGENTS.md` packaged inside that version's
+framework jar, and overwrites the project copy. `brace agents-md --stdout` prints the
+doc instead of writing it. Requires a 0.1.7+ pin: pre-0.1.7 framework jars don't carry
+the command (or the packaged doc), and you'll get a friendly error saying so.
+
+## New (optional): `BRACE-OPS.md` — ops reference split out of `BRACE-AGENTS.md`
+
+**Nothing breaks** — this is a documentation reorganization. `BRACE-AGENTS.md` used to
+carry a ~300-line "Ops — Production Health Runbook" block (auth key workflows, CLI and
+HTTP endpoint tables, runbooks, the `/ops/status` JSON shape, scaling, storage/retention)
+that every coding session paid for but only production-ops sessions used. From 0.1.7 that
+content lives in a dedicated ops reference:
+
+- **`BRACE-OPS.md`** — written to the project root by `brace new`, next to
+  `BRACE-AGENTS.md`. Packaged in the framework jar at `/brace/agent-ops-guide.md`
+  (source: `docs/agent-ops-guide.md` in the brace repo) and shipped in the dist zip.
+- **`BRACE-AGENTS.md`** keeps the dev reference (routing → testing → config) plus a short
+  "Ops" pointer section: start production-health work with `brace check`, then read
+  `BRACE-OPS.md`.
+- **`brace agents-md` now refreshes both files** in one run. Existing 0.1.6 projects
+  won't have `BRACE-OPS.md` until they bump to 0.1.7 and run `brace agents-md` — which
+  the upgrade flow above already calls for.
+- The generated `CLAUDE.md` ops section now points at `BRACE-OPS.md` instead of
+  "`docs/agent-ops-guide.md` in the brace repo".
+
+## Breaking for scripted consumers: `/ops/errors` now returns summaries
+
+**Who is affected:** anything that parses the JSON from `GET /ops/errors` or
+`brace errors --json` and reads `stackTrace`, `requestDetail`, `queriesBefore`, or
+`requestHeaders` off the rows. The dashboard, `brace check`, and the human `brace errors`
+table are unaffected. The fields a script most likely keys on (`id`, `errorType`,
+`message`, `route`, `occurrenceCount`, `firstSeen`, `lastSeen`) are all still present.
+
+**Why.** Each full error row carries a complete stack trace plus request context —
+roughly 500 tokens per error, re-read on every iteration of an agent's fix loop. The
+common consumer (triage) needs the list; only the error being worked on needs the trace.
+
+**What changed.** `GET /ops/errors` returns one **summary** per error, with a new `at`
+field — the first stack frame of the stored trace that is in *app* code (framework, JDK,
+and library frames are skipped), which usually pinpoints the bug without the full trace:
+
+**Before (0.1.6):**
+
+```json
+[
+  {
+    "id": 7,
+    "errorType": "NullPointerException",
+    "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+    "stackTrace": "java.lang.NullPointerException: ...\n\tat app.controllers.UserController.show(UserController.java:42)\n\tat ... (dozens of frames)",
+    "route": "GET /users/{id}",
+    "requestDetail": "GET /users/123",
+    "firstSeen": "2026-06-10T09:14:02Z",
+    "lastSeen": "2026-06-11T08:01:55Z",
+    "occurrenceCount": 14,
+    "resolvedAt": null,
+    "queriesBefore": "{\"count\":2,\"durationMs\":3.1}",
+    "requestHeaders": "{...}"
+  }
+]
+```
+
+**After (0.1.7 default):**
+
+```json
+[
+  {
+    "id": 7,
+    "errorType": "NullPointerException",
+    "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+    "route": "GET /users/{id}",
+    "occurrenceCount": 14,
+    "firstSeen": "2026-06-10T09:14:02Z",
+    "lastSeen": "2026-06-11T08:01:55Z",
+    "at": "app.controllers.UserController.show(UserController.java:42)"
+  }
+]
+```
+
+**Getting the full detail.** Two ways:
+
+- **Per error (preferred):** new endpoint `GET /ops/errors/{id}` (read scope) returns the
+  complete pre-0.1.7 record for one error — `stackTrace`, `requestDetail`,
+  `queriesBefore`, `requestHeaders`, `resolvedAt` and all summary fields. 404 for an
+  unknown id. CLI: `brace errors <id>`.
+- **Whole list (compat escape hatch):** `GET /ops/errors?include=detail` returns the exact
+  pre-0.1.7 shape, combinable with the existing `status`/`since` params. CLI:
+  `brace errors --full`.
+
+**Mechanical fix for an existing script:**
+
+```bash
+# before (0.1.6)
+brace errors --env prod --json | jq -r '.[0].stackTrace'
+
+# after (0.1.7) — either keep the old shape:
+brace errors --env prod --full --json | jq -r '.[0].stackTrace'
+# or, better, fetch only the error you need:
+brace errors 7 --env prod --json | jq -r '.stackTrace'
+```
+
+**CLI changes** (`brace errors`):
+
+- `brace errors` — unchanged invocation; JSON mode now emits the summary shape. The human
+  table and the exit-code contract (0 no errors / 1 errors exist / 2 unreachable) are
+  unchanged.
+- `brace errors <id>` — **new**; prints one error's full detail (human-readable, or the
+  detail JSON object in `--json`/piped mode). Exits 0 found / 1 not found / 2 unreachable.
+- `brace errors --full` — **new**; requests `?include=detail` for the pre-0.1.7 list shape.
+
+**Version skew.** A 0.1.7 CLI running `brace errors <id>` against a **pre-0.1.7 server**
+gets a 404 (the server has no `/ops/errors/{id}` route) and reports "not found"; use
+`brace errors --full` there instead — `?include=detail` is ignored by old servers, which
+always returned the full shape anyway. Conversely, a pre-0.1.7 CLI against a 0.1.7
+server keeps working but sees summaries; pass `?include=detail` server-side consumers need
+explicitly.
+
+**Row cap.** An *unfiltered* list (no `since`) returns at most the **500 most recent**
+rows — `errors.count` in `/ops/status` is the true unresolved total (the store itself
+prunes at 1000 by default). A `since`-filtered list returns its whole window, so pass
+`since` when you need completeness. (0.1.6 had no list cap — the worst case was the
+whole pruned store, up to 1000 full-detail rows, in one response.)
+
+`GET /ops/regressions` is unaffected — it never carried stack traces.
+
+## Breaking for scripted consumers: `/ops/status` is now a compact snapshot
+
+**Who is affected:** anything that parses the JSON from `GET /ops/status` (or
+`brace status --json`) and reads `timeseries`, `jvm.profiling` (hot methods / top
+allocations), or per-error detail fields (`stackTrace`, `firstSeen`, or the old
+`type`/`count` key names) off `errors.recent`. The dashboard, `brace check`, and the
+human `brace status` table are unaffected. The scalar blocks most pollers key on
+(`app`, `http`, `jvm.heap`/`threads`, `jobs`, `cache`, `metrics`) are unchanged.
+
+**Why.** Status is the highest-frequency poll in the fix loop, and most of its bytes
+went to blocks nobody read: up to 50 recent errors **with full stack traces** (the
+status copy of what `/ops/errors` already serves in summary form), 60 per-minute
+timeseries snapshots, and 20+20 JFR hot-method/allocation entries — tens of KB per
+call. Worse, the payload never carried the one number the CLI's documented exit-code
+contract depends on: `brace status` read `errors.count`, the server never emitted it,
+so the command **always printed "Errors 0" and exited 0**, even with unresolved errors.
+
+**What changed.**
+
+1. **`errors` is now `{count, recent}`.** `count` is the unresolved error count
+   (database-backed via the error store when one is configured; the in-memory recent
+   list otherwise) and `recent` holds the **top 5** most recent summaries — using the
+   same field names as `/ops/errors` (`errorType`, `occurrenceCount`), with **no
+   `stackTrace`**. Every entry carries `id` for the `/ops/errors/{id}` drill-down —
+   database-backed or not: apps without a database serve `/ops/errors`,
+   `/ops/errors/{id}` and resolve from the in-memory records, so the stack trace stays
+   reachable remotely and resolving recovers the count (and the `brace status` exit
+   code).
+2. **`timeseries` and `jvm.profiling` are opt-in** via `?include=timeseries,profiling`
+   (comma-separated; either alone works). Their shapes are unchanged when requested.
+3. **No more all-zeros stubs.** A profiler-less app previously emitted hardcoded
+   `jvm.cpu`/`jvm.gc`/`jvm.profiling` blocks full of zeros; those keys are now simply
+   absent. (In practice the JFR profiler is always attached when ops is enabled, so
+   `cpu`/`gc` remain present with real data; only `profiling` moves behind `?include=`.)
+
+**Before (0.1.6):**
+
+```json
+{
+  "app": { "...": "..." },
+  "http": { "...": "..." },
+  "jvm": {
+    "heap": { "...": "..." }, "cpu": { "...": "..." }, "threads": { "...": "..." },
+    "gc": { "...": "..." },
+    "profiling": { "windowSeconds": 300, "hotMethods": ["... 20 entries ..."], "topAllocations": ["... 20 entries ..."] }
+  },
+  "errors": {
+    "recent": [{
+      "type": "NullPointerException",
+      "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+      "route": "GET /users/{id}",
+      "count": 14,
+      "firstSeen": "2026-06-10T09:14:02Z",
+      "lastSeen": "2026-06-11T08:01:55Z",
+      "stackTrace": "java.lang.NullPointerException: ...\n\tat ... (dozens of frames)"
+    }, "... up to 50 of these ..."]
+  },
+  "jobs": { "...": "..." }, "cache": { "...": "..." },
+  "timeseries": { "minutes": ["... 60 snapshots ..."] }
+}
+```
+
+**After (0.1.7 default):**
+
+```json
+{
+  "app": { "...": "..." },
+  "http": { "...": "..." },
+  "jvm": {
+    "heap": { "...": "..." }, "cpu": { "...": "..." }, "threads": { "...": "..." },
+    "gc": { "...": "..." }
+  },
+  "errors": {
+    "count": 3,
+    "recent": [{
+      "id": 7,
+      "errorType": "NullPointerException",
+      "message": "Cannot invoke \"User.getName()\" because \"user\" is null",
+      "route": "GET /users/{id}",
+      "occurrenceCount": 14,
+      "lastSeen": "2026-06-11T08:01:55Z"
+    }, "... at most 5 ..."]
+  },
+  "jobs": { "...": "..." }, "cache": { "...": "..." }
+}
+```
+
+**Getting the trimmed blocks back (escape hatch):**
+
+```bash
+# timeseries and/or profiling, unchanged shapes, on demand:
+curl -H "Authorization: Bearer $TOKEN" "https://app.example.com/ops/status?include=timeseries,profiling"
+```
+
+Stack traces never come back through status — fetch the error you care about instead:
+`GET /ops/errors/{id}` / `brace errors <id>` (full pre-0.1.7 record), or
+`GET /ops/errors?include=detail` for the whole list.
+
+**Behavior change worth knowing — the `brace status` exit code now works.** The
+documented contract was always "exit 0 healthy / 1 errors exist / 2 unreachable", but
+due to the missing `errors.count` the command **never** exited 1: cron jobs and CI
+gates like `brace status --env prod || alert` have silently never fired on unresolved
+errors. From 0.1.7 they will. If a script relied on `brace status` always succeeding,
+use the exit code's documented meaning (or `--json` and inspect the fields you mean).
+The human table is unchanged except the `Errors` row now shows the real count.
+
+**Version skew.** A 0.1.7 CLI against a **pre-0.1.7 server** falls back to counting the
+server's `errors.recent` list, so the exit code and `Errors` row are correct there too
+(bounded by that list's 50-entry cap). `?include=` is ignored by old servers, which
+always sent `timeseries`/`profiling` anyway. A pre-0.1.7 CLI against a 0.1.7 server
+keeps printing "Errors 0" and exiting 0 — its bug, fixed by upgrading the CLI.
+
+**The dashboard is unaffected** — it renders server-side from `Stats`/the profiler
+directly and polls `/ops/dashboard`, not the status JSON. `brace check` is unaffected —
+it reads the scalar blocks via `.path()` with defaults and gets error counts from
+`/ops/errors`, not status.
+## Behavior change: each `Brace.test()` gets its own H2 database
+
+**Who is affected:** test suites where one test class (accidentally or deliberately)
+reads data that another test class wrote. Suites whose classes are self-contained — each
+seeds its own data, or resets via `resetDatabase()` — see no difference.
+
+**What changed.** Through 0.1.6, every `Brace.test()` builder defaulted to the same URL
+(`jdbc:h2:mem:test;DB_CLOSE_DELAY=-1`), so all test classes in one JVM shared one
+database and leaked rows across classes unless each remembered to reset. In 0.1.7 the
+default URL is unique per builder (`jdbc:h2:mem:test-1`, `test-2`, … via a per-JVM
+counter), so test classes are isolated by default.
+
+**Before (0.1.6):** a row inserted by `FirstTest` was still visible to `SecondTest`
+running later in the same JVM.
+
+**After (0.1.7):** each test class's TestApp sees only its own data. If your suite
+relied on the shared database, opt back in explicitly:
+
+```java
+static TestApp app = Brace.test()
+    .database("jdbc:h2:mem:shared;DB_CLOSE_DELAY=-1")   // restore 0.1.6 sharing
+    .entities(Post.class)
+    .start(...);
+```
+
+Related: `TestApp.resetDatabase()` is now documented as H2-only and throws
+`UnsupportedOperationException` with a clear message when the JDBC URL isn't H2
+(previously it failed with a cryptic SQL error on Postgres). Use explicit fixtures on
+the Postgres/Testcontainers tier.
+
+## Behavior change: CLI JSON output is now compact (one line)
+
+**Who is affected:** scripts that parse the *text layout* of `brace <command> --json`
+output (or piped/non-TTY output, which implies JSON mode) — e.g. `grep`-ing for an
+indented `"key" : value` line. Anything that parses the output as JSON (`jq`, Jackson,
+`json.loads`) is unaffected: the bytes are the same JSON, just without whitespace.
+
+**What changed.** Through 0.1.6, JSON mode pretty-printed everything (`errors`, `status`,
+`check`, `init`, `cache`); only `logs` was compact. JSON mode exists for programs —
+agents, `jq`, CI — where indentation is pure token overhead (~15–30% per call). In 0.1.7
+every command emits compact, single-line JSON in JSON mode:
+
+**Before (0.1.6, `brace check --json`):**
+
+```json
+{
+  "healthy" : true,
+  "summary" : "All checks passed",
+  "checks" : [ {
+    "name" : "reachability",
+    "status" : "pass"
+  } ]
+}
+```
+
+**After (0.1.7):**
+
+```json
+{"healthy":true,"summary":"All checks passed","checks":[{"name":"reachability","status":"pass"}]}
+```
+
+**Escape hatches.** Human mode (`--pretty`, or just running in a terminal) is unchanged —
+it renders tables and summaries, not JSON. If you want readable JSON, pipe through your
+formatter: `brace check --json | jq .`. `brace logs --json` keeps emitting one compact
+object per line (NDJSON), exactly as before.
+
+## Behavior change: unknown CLI commands now exit 1
+
+`brace <typo>` used to print the full usage text and exit **0**, so a misspelled
+command looked like success to scripts and agents. From 0.1.7 it prints
+`Unknown command: <typo> — run 'brace help'` to stderr and exits **1**. Any script
+that (against all odds) relied on exit 0 for an unrecognized command was already
+broken and needs the command name fixed. Bare `brace`, `brace help`, `--help`, and
+`-h` still print usage and exit 0.
+
+Two small additions in the same cleanup: `brace logs` accepts `--limit <n>`
+(passthrough to the server's `?limit=` parameter; server default 200), and the
+`brace new` next-steps text now suggests `brace dev` instead of the old
+`mvn compile exec:java ...` incantation.
+
+Relatedly, `brace dev` launches the app JVM with `-Dbrace.mode=dev` (the old printed
+incantation set this by hand), so the `%dev.` config overrides — the scaffold's
+in-memory H2 database, the dev port — and dev-only behavior like 404 route suggestions
+apply under the command named for them. `brace run` deliberately sets no mode: it is
+the production-style launch.
+
+## Changed: `brace compile` prints condensed, deduplicated diagnostics
+
+**No action needed unless something parses compiler output.** `brace compile` (and the
+compile steps inside `brace test`, `brace run`, and the `brace dev` watch loop) no longer
+prints raw javac diagnostics. Exit codes are unchanged (0 on success, 1 on failure), and
+success output is unchanged (`✓ Compiled`). What changed is the failure output, in every
+mode (TTY and non-TTY alike):
+
+- **One line per diagnostic** — `path:line: error: message`. The source-snippet and caret
+  (`^`) lines are gone.
+- **Identical diagnostics are deduplicated across files** — the same (kind, message) is
+  printed once, with the remaining occurrences folded into a `(+N more at ...)` line
+  listing up to 5 locations.
+- **Errors print before warnings**, and output is capped at 25 diagnostics with a final
+  `... and N more` line.
+- **Failures end with a count line**: `✗ Compilation failed: N errors, M warnings`.
+
+**Before (0.1.6) — a method renamed out from under 3 call sites:**
+
+```
+▸ Compiling...
+src/main/java/app/HomeController.java:12: error: cannot find symbol
+        userService.fetchUser(id);
+                   ^
+  symbol:   method fetchUser(long)
+  location: variable userService of type UserService
+src/main/java/app/AdminController.java:31: error: cannot find symbol
+        userService.fetchUser(id);
+                   ^
+  symbol:   method fetchUser(long)
+  location: variable userService of type UserService
+src/main/java/app/ProfileController.java:9: error: cannot find symbol
+        userService.fetchUser(current);
+                   ^
+  symbol:   method fetchUser(long)
+  location: variable userService of type UserService
+3 errors
+✗ Compilation failed
+```
+
+**After (0.1.7):**
+
+```
+▸ Compiling...
+src/main/java/app/HomeController.java:12: error: cannot find symbol
+  (+2 more at AdminController.java:31, ProfileController.java:9)
+✗ Compilation failed: 3 errors, 0 warnings
+```
+
+Diagnostics still go to stderr, status lines (`▸`/`✓`/`✗`) keep their streams, and the
+compiler invocation itself is unchanged (same `-d`/`-cp`, same in-process javac) — only the
+diagnostic *formatting* differs. If a script greps for the old `✗ Compilation failed` line,
+note it now carries the counts suffix (`grep "✗ Compilation failed"` still matches; an exact
+full-line match does not).
+
+## Changed: `brace test` prints condensed output when stdout is not a TTY
+
+**Affects agents, pipes, and CI — anywhere stdout is not a terminal.** In an
+interactive terminal `brace test` behaves exactly as before (full JUnit ConsoleLauncher
+passthrough: per-test tree, failure stack traces, summary table). But when stdout is **not**
+a TTY — which is every agent and shell-script invocation — output is now condensed: one line
+per failed test plus a one-line summary. Exit codes are unchanged in both modes (0 when all
+tests pass, nonzero on failure), so `brace test && deploy` style scripts keep working.
+
+(Detection: the `bin/brace` launcher checks `[ -t 1 ]` and passes the answer down via
+`-Dbrace.stdout.tty`, because `System.console()` alone is not trustworthy on JLine-backed
+JDKs — it can be non-null with redirected output. When `Cli` runs without the shim it falls
+back to `Console.isTerminal()` where available, else a non-null `System.console()`. The
+property is optional, so launcher and toolchain versions mix freely across this boundary.)
+
+Two flags control the mode explicitly:
+
+- `brace test --verbose` — full raw ConsoleLauncher passthrough, even when piped. This is
+  the escape hatch if you need the old output (full stack traces, the per-test tree, the
+  `Test run finished` summary table).
+- `brace test --quiet` — condensed output, even in an interactive terminal.
+
+**Before (0.1.6, piped) — every run, pass or fail:**
+
+```
+▸ Running tests...
+╷
+├─ JUnit Jupiter ✔
+│  ├─ HomeControllerTest ✔
+│  │  ├─ homePage() ✘ expected: <200> but was: <404>
+│  │  └─ aboutPage() ✔
+│  └─ UserTest ✔
+│     └─ rejectsBlankName() ✔
+...
+Failures (1):
+  JUnit Jupiter:HomeControllerTest:homePage()
+    MethodSource [className = 'app.HomeControllerTest', methodName = 'homePage', methodParameterTypes = '']
+    => org.opentest4j.AssertionFailedError: expected: <200> but was: <404>
+       org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)
+       org.junit.jupiter.api.AssertionUtils.failNotEqual(AssertionUtils.java:62)
+       org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:182)
+       app.HomeControllerTest.homePage(HomeControllerTest.java:18)
+       java.base/java.lang.reflect.Method.invoke(Method.java:565)
+       [... 30+ more framework frames ...]
+
+Test run finished after 742 ms
+[         3 containers found      ]
+[         0 containers skipped    ]
+[         3 containers started    ]
+[         0 containers aborted    ]
+[         3 containers successful ]
+[         0 containers failed     ]
+[        12 tests found           ]
+[         0 tests skipped         ]
+[        12 tests started         ]
+[         0 tests aborted         ]
+[        11 tests successful      ]
+[         1 tests failed          ]
+```
+
+(plus ANSI color escapes — ConsoleLauncher does not TTY-detect, so they land in the pipe.)
+
+**After (0.1.7, piped) — failing run:**
+
+```
+▸ Running tests...
+HomeControllerTest.homePage() — AssertionFailedError: expected: <200> but was: <404> (HomeControllerTest.java:18)
+11 passed, 1 failed in 0.7s
+```
+
+**After (0.1.7, piped) — passing run:**
+
+```
+▸ Running tests...
+12 passed, 0 failed in 0.7s
+```
+
+Each failure line is `Class.method() — ExceptionType: message (File.java:NN)`, where the
+location is the **first stack frame inside your project's own packages** (derived from the
+directory structure under `src/main/java` and `src/test/java`) — i.e. the line of *your*
+code to look at, not 30 framework frames. A nonzero skipped count appears as
+`, K skipped` before the duration. ANSI colors are disabled in concise mode.
+
+**Robustness:** if the captured ConsoleLauncher output ever fails to parse (unexpected
+format, container-level error), `brace test` prints it **verbatim** rather than swallowing
+it — you may see raw output in edge cases, never less.
+
+**Action:** none for humans. Scripts that grepped raw ConsoleLauncher output (e.g. for
+`Test run finished` or `[ 1 tests successful ]`) should either match the new summary line
+(`^[0-9]+ passed, [0-9]+ failed in`) — as `tests/cli/test-distribution.sh` now does — or
+pass `--verbose` to keep the old format. Prefer checking the **exit code** over parsing
+output.
+
+## Behavior change: third-party startup log noise is quieted by default
+
+**Who is affected:** everyone, positively — startup (and every `brace dev` restart) drops
+from ~80 lines of third-party logging to the Brace banner plus genuine warnings. Action is
+only needed if you *relied* on the Hibernate/Flyway INFO chatter (use the override below)
+or if your app ships its own slf4j provider (see the two-providers note).
+
+**What changed.** Through 0.1.6, Brace shipped no slf4j provider: Jetty printed the
+`No SLF4J providers were found` warning (and its own logs went nowhere), while Hibernate
+and Flyway fell back to java.util.logging's two-line-per-record console handler — 80+
+lines of stderr per boot, like:
+
+```
+Jun 11, 2026 5:02:38 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "PUBLIC" to version "1 - brace scheduled jobs"
+...30 more two-line records...
+SLF4J(W): No SLF4J providers were found.
+...
+```
+
+In 0.1.7, Brace ships `org.slf4j:slf4j-jdk14` (so every library funnels into the one JUL
+sink — the no-provider warning is gone) and configures JUL once, at `Brace.app()` or the
+first `new DatabaseFactory(...)`, whichever runs first: single-line format, and level
+`WARNING` for `org.hibernate`, `org.flywaydb`, `com.zaxxer.hikari`, and
+`org.eclipse.jetty`. The same boot now prints, in full:
+
+```
+17:06:15 WARN org.flywaydb.core.internal.command.DbValidate No migrations found. Are your locations set up correctly?
+17:06:15 WARN org.hibernate.orm.deprecation HHH90000025: H2Dialect does not need to be specified explicitly using 'hibernate.dialect' (remove the property setting and it will be selected by default)
+```
+
+plus the unchanged Brace banner and route list on stdout. WARN/ERROR from those libraries
+still print (as above); only INFO-and-below is filtered. The framework's own `mvn test`
+output benefits the same way. (`org.eclipse.jetty` is quieted too because the new provider
+would otherwise *surface* Jetty INFO lines that the NOP logger used to swallow.)
+
+**Restoring the verbose output.** The override is a **system property** (not an
+`application.conf` key — your config file is loaded by *your* `main`, after the noisy
+libraries have already booted): `-Dlog.level.<logger>=<level>`, where level is an slf4j
+name (`ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`) or a JUL name (`SEVERE`, `WARNING`,
+`FINE`, …), plus `OFF`/`ALL`. It works for any logger, not just the four defaults:
+
+```bash
+# before/0.1.6-style verbosity for migrations and the ORM:
+java -Dlog.level.org.flywaydb=INFO -Dlog.level.org.hibernate=INFO -jar app.jar
+
+# or debug a single subsystem:
+java -Dlog.level.com.zaxxer.hikari=DEBUG -jar app.jar
+```
+
+Apps that configure JUL themselves (`-Djava.util.logging.config.file` or
+`-Djava.util.logging.config.class`) are detected and left completely alone.
+
+**If your app already ships an slf4j provider** (logback, slf4j-simple, log4j-slf4j2-impl,
+…), the classpath now contains two. This is harmless but noisy and was verified directly:
+slf4j 2.x prints
+
+```
+SLF4J(W): Class path contains multiple SLF4J providers.
+SLF4J(W): Found provider [org.slf4j.simple.SimpleServiceProvider@...]
+SLF4J(W): Found provider [org.slf4j.jul.JULServiceProvider@...]
+SLF4J(I): Actual provider is of type [org.slf4j.simple.SimpleServiceProvider@...]
+```
+
+and binds **whichever provider it finds first on the classpath** — if that's yours, your
+logging config wins and Brace's JUL quieting simply doesn't apply to slf4j-routed logs
+(you'll get your provider's verbosity back, e.g. Flyway INFO via logback). To keep your
+provider *and* silence the warning, exclude Brace's:
+
+```xml
+<dependency>
+    <groupId>com.larvalabs</groupId>
+    <artifactId>brace</artifactId>
+    <version>0.1.7</version>
+    <exclusions>
+        <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-jdk14</artifactId>
+        </exclusion>
+    </exclusions>
+</dependency>
+```
+
+The binding direction also matters in reverse: if `slf4j-jdk14` happens to be the provider
+slf4j finds first, **your provider loses silently** — Hibernate/Jetty/Flyway output your
+logback/log4j config expects is routed into JUL instead and quieted to WARNING by Brace's
+defaults. If startup logs you used to see disappear after the upgrade, this is why. The fix
+is the same exclusion above (your provider stays authoritative) or `-Dlog.level.*` overrides
+(accept Brace's sink and re-enable specific loggers).
+
+One more side effect worth knowing: constructing `DatabaseFactory` (or calling
+`Brace.app()`) configures global JUL state once — the root ConsoleHandler's formatter/level
+and the four quieted logger levels — unless `-Djava.util.logging.config.file` or
+`...config.class` is set, in which case Brace leaves JUL completely alone. An app embedding
+`DatabaseFactory` standalone that does not want its process-wide logging touched should set
+one of those properties.
+
+## Behavior change: defaulted numeric query accessors no longer throw on unparseable input
+
+**Who is affected:** handlers calling the *defaulted* variants `req.queryInt(name, default)`
+or `req.queryLong(name, default)` with input that doesn't parse as a number.
+
+**What changed.** Through 0.1.6, the default only covered a *missing* parameter — a present
+but unparseable value threw `NumberFormatException`, which surfaced as a 500:
+
+```java
+// before (0.1.6): GET /posts?page=abc
+req.queryInt("page", 1)   // → NumberFormatException → 500 Internal Server Error
+
+// after (0.1.7): GET /posts?page=abc
+req.queryInt("page", 1)   // → 1 (the default)
+```
+
+A caller that supplies a default has already said what a bad value means, so garbage input
+from a client should not be able to trigger a server error on those call sites.
+
+**Unchanged:** the non-defaulted variants — `req.queryInt(name)`, `req.queryLong(name)`,
+`req.intPathParam(name)`, `req.longPathParam(name)`, `req.formInt(name)` — still throw on
+unparseable input. That's a real client error the handler may want to surface or handle
+explicitly.
+
+**Action:** none for most apps. If a handler *relied* on the 500 (or caught
+`NumberFormatException` around a defaulted call) to detect bad input, switch it to the
+non-defaulted variant and handle the exception yourself.
+
+## Behavior change: flash messages render on any page and are consumed at render time
+
+**Who is affected:** apps using `session.flash(key, value)` / `session.flash(key)` /
+the `flash` template parameter. For almost everyone this is a set of bug fixes — flash
+messages that previously vanished (or popped up stale on a later page) now display
+exactly once, where intended. No call-site changes are needed.
+
+**What changed.** Through 0.1.6 (and most of the 0.1.7 cycle), pending flash was
+consumed at dispatch time, and only for handlers that take a `Session` parameter. That
+tied a rendering concern to the handler's *signature*, with three visible failure modes:
+a redirect-after-POST landing on a `DbHandler` or plain-`Handler` page never displayed
+the flash (it lingered in the cookie and appeared later on an unrelated page); a flash
+set by a pass-through guard *during* a request was consumed in that same request (so it
+died before ever displaying); and middleware could not read pending flash at all.
+
+From 0.1.7, flash mechanics follow the data, not the signature:
+
+- **Consumption happens when a page actually renders** (any `View`/`Result.view`
+  response, whatever the handler type). Redirects, JSON, and polling responses leave
+  pending flash in the cookie for the page that will display it.
+- **Only cookie-borne flash is consumable.** A flash set during the current request
+  (e.g. by a guard) survives that request's render and displays on the next page.
+- **`session.flash(key)` reads pending flash directly** — guards and non-rendering
+  handlers can read it. Reading a cookie-borne entry is read-once (it is consumed and
+  stripped from the cookie); reading an entry set this request peeks without consuming.
+- **The `flash` template parameter is available on every rendered page** when sessions
+  are enabled — previously only `Session`-taking handlers got it.
+
+**Action:** none, unless a template relied on `flash` being absent for non-`Session`
+handlers, or a test asserted the old eat-the-flash behavior on JSON/polling routes.
+
+## Behavior change: session-cookie responses default to `Cache-Control: private`
+
+Any response Brace attaches a session `Set-Cookie` to now also carries
+`Cache-Control: private` — unless the handler set an explicit `Cache-Control`, which
+always wins. A response carrying a session cookie is per-user by definition; without
+a caching header it was *heuristically cacheable*, and a misconfigured shared cache
+(e.g. a force-cache-statics proxy recipe in front of a session-touching middleware)
+could replay one user's cookie to every user. Spec-compliant proxies and browsers now
+treat these responses as per-user automatically.
+
+**Action:** none for correctness. If you intended a session-cookie response to be
+shared-cacheable (almost certainly not), set an explicit `Cache-Control`. See
+`docs/SECURITY.md` → "Session Cookies and Shared Caches" for the middleware-scoping
+advice.
+
+## New (dev mode only): 404s list near-miss routes
+
+When running with `-Dbrace.mode=dev` (what `brace dev` sets), a request that matches **no
+registered route** now gets a 404 body listing up to 5 same-method registered patterns,
+preferring ones that share a path prefix with the request:
+
+```
+Not Found: GET /user/42 — registered: GET /users/{id}, GET /users
+```
+
+Production behavior is unchanged — the body stays exactly `Not Found`, so registered
+routes are never disclosed. A `NotFoundException` thrown by a handler (e.g.
+`Result.notFoundIfNull`) also still produces a plain `Not Found` in every mode. No action
+needed; dev-mode tests that assert an exact `Not Found` body on unrouted paths may need
+to relax to a status check.
 
 ## Request/response hardening fixes
 
@@ -320,16 +1552,6 @@ app.trustedProxies("127.0.0.1", "::1");
 
 See the "Trusted Proxies" section of `docs/SECURITY.md` for a full behavioral table and
 IPv6-mapped address guidance.
-
----
-
-## Why the Postgres packaging gap went unnoticed until now
-
-Brace's test suite ran entirely on in-memory H2, whose Flyway handler *is* bundled in
-`flyway-core` — so the framework's own tests never exercised the real Postgres migration
-path and never saw the gap. 0.1.7 adds a Postgres testcontainer test tier (`mvn verify`)
-that runs the shipped migrations against real Postgres, which is what surfaced this. See
-`docs/2026-06-05-pg-testcontainers.md`.
 
 ## Security fix: CSRF token now persists when rendered through a plain Handler
 

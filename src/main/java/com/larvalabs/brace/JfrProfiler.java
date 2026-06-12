@@ -94,6 +94,15 @@ public class JfrProfiler implements AutoCloseable {
     }
 
     public Map<String, Object> snapshot() {
+        return snapshot(true);
+    }
+
+    /**
+     * JVM metrics snapshot. The profiling block (hot methods + top allocations) sorts and
+     * maps two sample tables, so it is built only when the caller will actually emit it —
+     * {@code /ops/status} includes it solely under {@code ?include=profiling}.
+     */
+    public Map<String, Object> snapshot(boolean includeProfiling) {
         var data = new LinkedHashMap<String, Object>();
 
         // Heap — supplement JFR data with MXBean for between-GC accuracy
@@ -144,11 +153,13 @@ public class JfrProfiler implements AutoCloseable {
         data.put("gc", gc);
 
         // Profiling
-        var profiling = new LinkedHashMap<String, Object>();
-        profiling.put("windowSeconds", 300);
-        profiling.put("hotMethods", topEntries(methodSamples.get(), 20));
-        profiling.put("topAllocations", topAllocEntries(allocationByClass.get(), 20));
-        data.put("profiling", profiling);
+        if (includeProfiling) {
+            var profiling = new LinkedHashMap<String, Object>();
+            profiling.put("windowSeconds", 300);
+            profiling.put("hotMethods", topEntries(methodSamples.get(), 20));
+            profiling.put("topAllocations", topAllocEntries(allocationByClass.get(), 20));
+            data.put("profiling", profiling);
+        }
 
         return data;
     }

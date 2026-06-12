@@ -8,7 +8,6 @@ import org.eclipse.jetty.server.Response;
 import org.eclipse.jetty.util.Callback;
 
 import java.io.File;
-import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -23,6 +22,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     private final Router router;
     private final List<Middleware.BoundBefore> beforeMiddleware;
+    // Set post-construction by Brace.start() (avoids widening eight telescoping ctors);
+    // immutable empty by default so tests constructing BraceHandler directly are unaffected.
+    private List<Middleware.BoundBeforeSession> beforeSessionMiddleware = List.of();
     private final List<Middleware.BoundAfter> afterMiddleware;
     private final DatabaseFactory databaseFactory;
     private final String sessionSecret;
@@ -34,10 +36,18 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final Storage storage;
     private final TrustedProxies trustedProxies;
     private final byte[] htmxJs;
+    // L3: dev mode is detected once at construction from the brace.mode system property —
+    // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
+    // the handler, and a property read here avoids widening eight telescoping constructors.
+    private final boolean devMode;
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
     record StaticFileMapping(String urlPrefix, String directory) {}
+
+    void setBeforeSessionMiddleware(List<Middleware.BoundBeforeSession> middleware) {
+        this.beforeSessionMiddleware = middleware;
+    }
 
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
@@ -138,6 +148,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         } catch (Exception ignored) {}
         this.htmxJs = htmxBytes;
+        this.devMode = "dev".equals(System.getProperty("brace.mode"));
     }
 
     @Override
@@ -146,12 +157,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                           Callback callback) throws Exception {
         var startNanos = System.nanoTime();
         Database db = null;
+        // Hoisted above the try so the catch paths (thrown 404, 500) can persist session
+        // mutations too — see the write-back choke point on writeResult below.
+        Session session = null;
+        Session csrfOnlySession = null;
         try {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
 
-            // Parse query parameters
-            Map<String, String> queryParams = parseQuery(jettyRequest.getHttpURI().getQuery());
+            // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
+            String rawQuery = jettyRequest.getHttpURI().getQuery();
+            Map<String, String> queryParams = parseQuery(rawQuery);
 
             // Extract headers into a case-insensitive map. HTTP header names are
             // case-insensitive (and arrive lowercased over HTTP/2), so lookups like
@@ -183,7 +199,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         try {
                             long declaredLength = Long.parseLong(contentLengthHeader.strip());
                             if (declaredLength > maxUploadSize) {
-                                writeResult(Result.error(413, "Payload Too Large"), response, callback);
+                                writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession);
                                 return true;
                             }
                         } catch (NumberFormatException ignored) {
@@ -196,7 +212,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     // is too large and we return 413.
                     byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
                     if (bodyBytes == null) {
-                        writeResult(Result.error(413, "Payload Too Large"), response, callback);
+                        writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession);
                         return true;
                     }
                     body = new String(bodyBytes, StandardCharsets.UTF_8);
@@ -209,6 +225,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
             Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles, remoteAddr, trustedProxies);
+            braceRequest.setRawQuery(rawQuery);
             if (storage != null) {
                 braceRequest.setStorage(storage);
             }
@@ -217,19 +234,45 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             for (var before : beforeMiddleware) {
                 Result earlyResult = before.apply(braceRequest);
                 if (earlyResult != null) {
-                    writeResult(earlyResult, response, callback);
+                    writeResult(earlyResult, response, callback, session, csrfOnlySession);
                     return true;
                 }
             }
 
-            // Check static file mappings if no route matched
+            // Run session-aware before middleware (after all plain before middleware).
+            // The Session built here is the SAME instance later handed to the handler —
+            // that identity is the contract: a middleware mutation (login touch, flash)
+            // persists through the normal cookie write-back, and the handler never sees
+            // a different session than its guard did.
+            if (!beforeSessionMiddleware.isEmpty()) {
+                for (var before : beforeSessionMiddleware) {
+                    if (!before.matches(path)) continue;
+                    if (session == null) {
+                        session = buildSession(headers);
+                    }
+                    Result earlyResult = before.handler().handle(braceRequest, session);
+                    if (earlyResult != null) {
+                        // A short-circuiting guard may have mutated the session (e.g. a
+                        // flash message before redirecting to login) — persisted by the
+                        // write-back choke point.
+                        writeResult(earlyResult, response, callback, session, csrfOnlySession);
+                        return true;
+                    }
+                }
+            }
+
+            // Check static file mappings if no route matched. A pass-through
+            // session-aware middleware may have mutated the session above (login touch,
+            // counters) — the write-back contract holds on these paths too via the
+            // choke point, instead of silently dropping the mutation.
             if (match == null) {
                 Result staticResult = serveStaticFile(path);
                 if (staticResult != null) {
-                    writeResult(staticResult, response, callback);
+                    writeResult(staticResult, response, callback, session, csrfOnlySession);
                     return true;
                 }
-                writeResult(Result.notFound(), response, callback);
+                Result notFoundResult = noRouteFound(method, path);
+                writeResult(notFoundResult, response, callback, session, csrfOnlySession);
                 return true;
             }
 
@@ -242,23 +285,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 invoker = Invoker.fromFunction(handler);
             }
 
-            // Build session if needed
-            Session session = null;
-            if (invoker.needsSession()) {
-                if (sessionSecret != null) {
-                    String cookieHeader = headers.get("Cookie");
-                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    session = Session.fromCookie(sessionCookie, sessionSecret);
-                    session.consumeFlash();
-                } else {
-                    session = new Session();
-                    session.consumeFlash();
-                }
-            }
-
-            // Expose flash data to templates
-            if (session != null) {
-                View.setFlash(session.flashData());
+            // Build session if needed — reusing the instance a session-aware before
+            // middleware already built (identity invariant; see above).
+            if (session == null && invoker.needsSession()) {
+                session = buildSession(headers);
             }
 
             // CSRF validation for routes that require it when sessions are enabled.
@@ -274,43 +304,56 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
                         csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
                     }
-                    String submittedToken = parseFormParam(body, "_csrf");
+                    // One body parser: _csrf extraction sees the same decoded, last-wins
+                    // view of the form body as FormBinder (it used to be a third divergent
+                    // pair parser — raw-key compare, first-match-wins, swallowed decode
+                    // failures). Only form bodies are parsed: for JSON and other content
+                    // types the token rides the X-CSRF-Token header, and parsing an
+                    // arbitrary body as pairs risks URL-decode failures.
+                    String submittedToken = braceRequest.isFormPost() || braceRequest.isMultipart()
+                        ? braceRequest.formParam("_csrf") : null;
                     if (submittedToken == null) {
                         submittedToken = headers.get("X-CSRF-Token");
                     }
                     if (!Csrf.validateToken(csrfSession, submittedToken)) {
+                        // Choke point persists guard mutations on the 403 too.
                         writeResult(Result.json(java.util.Map.of("error", "csrf_required"), 403),
-                            response, callback);
+                            response, callback, session, csrfOnlySession);
                         return true;
                     }
                 }
             }
 
             // Ensure a CSRF token exists in session and expose it to templates.
-            // M5c: when the handler doesn't take a Session, build a local csrfSession to
-            // hold the token.  If ensureToken mints a fresh token (csrfSession.isModified()),
-            // we persist it as a cookie below just like a handler-session cookie — otherwise
-            // the rendered token is orphaned and every subsequent POST 403s.
-            // handlerSession is the session the handler itself was given (may be null); it is
-            // written separately via the handler-session cookie block below.
-            // csrfOnlySession is non-null only when the handler had no Session param AND a
-            // fresh token was minted; it must never shadow a real handler session.
-            Session csrfOnlySession = null;
+            // M5c: when the handler doesn't take a Session, build a local csrfOnlySession to
+            // hold the token. The choke point persists it whenever it ends up modified —
+            // a freshly minted token (otherwise the rendered token is orphaned and every
+            // subsequent POST 403s) or a render-time flash consumption. It must never
+            // shadow a real handler session: it is built only when session == null.
             if (sessionSecret != null) {
                 if (session == null) {
                     String cookieHeader = headers.get("Cookie");
                     String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    Session localCsrfSession = Session.fromCookie(sessionCookie, sessionSecret);
-                    Csrf.ensureToken(localCsrfSession);
-                    View.setCsrfField(Csrf.hiddenField(localCsrfSession));
-                    // Track so we can write the cookie after the handler runs (M5c).
-                    if (localCsrfSession.isModified()) {
-                        csrfOnlySession = localCsrfSession;
-                    }
+                    csrfOnlySession = Session.fromCookie(sessionCookie, sessionSecret);
+                    Csrf.ensureToken(csrfOnlySession);
+                    View.setCsrfField(Csrf.hiddenField(csrfOnlySession));
                 } else {
                     Csrf.ensureToken(session);
                     View.setCsrfField(Csrf.hiddenField(session));
                 }
+            }
+
+            // Flash is consumed lazily at View render time, whatever the handler's
+            // signature — a redirect-after-POST landing on a DbHandler or plain-Handler
+            // page renders flash too. The source consumes only cookie-borne entries
+            // (an in-flight guard flash stays pending for the next request) and marks
+            // the session modified, which the write-back choke point picks up.
+            Session flashSession = session != null ? session : csrfOnlySession;
+            if (flashSession != null) {
+                View.setFlashSource(() -> {
+                    flashSession.consumeFlash();
+                    return flashSession.flashData();
+                });
             }
 
             // Invoke with per-request database lifecycle if needed
@@ -349,39 +392,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 result = after.apply(braceRequest, result);
             }
 
-            // Write session cookie to the surviving Result after after-middleware has run.
-            if (session != null && session.isModified() && sessionSecret != null) {
-                session.maxAgeSeconds(sessionMaxAgeSeconds());
-                String cookieValue = session.toCookie(sessionSecret);
-                if (sessionOptions != null) {
-                    result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
-                } else {
-                    // Fallback for backward compatibility
-                    result.header("Set-Cookie",
-                        "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
-                }
-            }
-
-            // M5c: write the CSRF-only session cookie when the handler had no Session param
-            // and ensureToken minted a fresh token.  The handler-session block above and this
-            // block are mutually exclusive: csrfOnlySession is null whenever session != null.
-            if (csrfOnlySession != null && sessionSecret != null) {
-                csrfOnlySession.maxAgeSeconds(sessionMaxAgeSeconds());
-                String cookieValue = csrfOnlySession.toCookie(sessionSecret);
-                if (sessionOptions != null) {
-                    result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
-                } else {
-                    result.header("Set-Cookie",
-                        "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
-                }
-            }
-
             // Add Vary header for htmx requests (caching correctness)
             if ("true".equals(braceRequest.header("HX-Request"))) {
                 result.header("Vary", "HX-Request");
             }
 
-            writeResult(result, response, callback);
+            // Session cookies (handler session + M5c CSRF-only session) are attached to the
+            // surviving Result by the write-back choke point.
+            writeResult(result, response, callback, session, csrfOnlySession);
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             if (stats != null) {
                 int qc = db != null ? db.queryCount() : 0;
@@ -394,7 +412,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         } catch (NotFoundException e) {
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             Result notFoundResult = Result.notFound();
-            writeResult(notFoundResult, response, callback);
+            writeResult(notFoundResult, response, callback, session, csrfOnlySession);
             if (stats != null) {
                 String errorMethod = jettyRequest.getMethod();
                 String errorPath = jettyRequest.getHttpURI().getPath();
@@ -441,10 +459,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 Thread.startVirtualThread(() -> errorStore.record(
                     errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders));
             }
+            // Guard/middleware session mutations persist on the 500 too — the DB rollback
+            // is orthogonal to middleware session touches.
             Result errorResult = Result.error(500, "Internal Server Error");
-            writeResult(errorResult, response, callback);
+            writeResult(errorResult, response, callback, session, csrfOnlySession);
             return true;
         }
+    }
+
+    /**
+     * Write-back choke point: every response leaving {@link #handle} is routed through
+     * here, so a session mutated by a guard or handler is persisted no matter which path
+     * produced the result — early short-circuits, CSRF 403s, static files, thrown 404s,
+     * and 500s included. {@code session} is the handler/guard session; {@code csrfOnlySession}
+     * is the M5c local session (non-null only when the handler had no Session param) —
+     * never both non-null. Attachment is a no-op for unmodified sessions.
+     */
+    private void writeResult(Result result, Response response, Callback callback,
+                             Session session, Session csrfOnlySession) {
+        attachSessionCookie(result, session);
+        attachSessionCookie(result, csrfOnlySession);
+        writeResult(result, response, callback);
     }
 
     private void writeResult(Result result, Response response, Callback callback) {
@@ -466,6 +501,54 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             bytes = new byte[0];
         }
         response.write(true, ByteBuffer.wrap(bytes), callback);
+    }
+
+    /**
+     * 404 for the no-route-matched path. In dev mode the body lists up to 5 same-method
+     * registered route patterns to catch fat-fingered paths —
+     * {@code Not Found: GET /user/42 — registered: GET /users/{id}, GET /users} —
+     * preferring patterns that share a path prefix with the request (longest shared
+     * character prefix first, registration order on ties), falling back to any
+     * same-method patterns when none share more than the leading "/". Production
+     * behavior is unchanged (plain "Not Found"; registered routes are not disclosed).
+     * Deliberately NOT applied to the {@link NotFoundException} catch path: there a
+     * handler on an existing route chose to 404, so route suggestions are noise.
+     */
+    private Result noRouteFound(String method, String path) {
+        if (!devMode) return Result.notFound();
+        List<String> sameMethod = new ArrayList<>();
+        for (var route : router.routes()) {
+            if (route.method().equals(method) && !sameMethod.contains(route.pattern())) {
+                sameMethod.add(route.pattern());
+            }
+        }
+        if (sameMethod.isEmpty()) return Result.notFound();
+        var candidates = new ArrayList<>(sameMethod);
+        candidates.sort(java.util.Comparator.comparingInt(p -> -commonPrefixLength(path, p)));
+        List<String> picks = new ArrayList<>();
+        for (var pattern : candidates) {
+            if (commonPrefixLength(path, pattern) <= 1) break; // sorted: rest share at most "/"
+            picks.add(pattern);
+            if (picks.size() == 5) break;
+        }
+        if (picks.isEmpty()) {
+            picks = sameMethod.subList(0, Math.min(5, sameMethod.size()));
+        }
+        var body = new StringBuilder("Not Found: ").append(method).append(' ').append(path)
+            .append(" — registered: ");
+        for (int i = 0; i < picks.size(); i++) {
+            if (i > 0) body.append(", ");
+            body.append(method).append(' ').append(picks.get(i));
+        }
+        return Result.error(404, body.toString());
+    }
+
+    /** Length of the common leading character prefix of {@code a} and {@code b}. */
+    private static int commonPrefixLength(String a, String b) {
+        int max = Math.min(a.length(), b.length());
+        int i = 0;
+        while (i < max && a.charAt(i) == b.charAt(i)) i++;
+        return i;
     }
 
     private Result serveStaticFile(String requestPath) {
@@ -551,30 +634,50 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return 0;
     }
 
+    /**
+     * Build the request's Session from the cookie (or a fresh one when sessions are off).
+     * Deliberately does NOT consume flash: a session built for a before-middleware guard
+     * may belong to a request whose handler can never render flash (a plain-Handler JSON
+     * or polling route) or to a short-circuiting redirect — consuming here would destroy
+     * a pending flash message before the page that should show it ever renders. Flash is
+     * consumed lazily at View render time (or by an explicit {@code session.flash(key)} read).
+     */
+    private Session buildSession(Map<String, String> headers) {
+        if (sessionSecret != null) {
+            String cookieHeader = headers.get("Cookie");
+            String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
+            return Session.fromCookie(sessionCookie, sessionSecret);
+        }
+        return new Session();
+    }
+
+    /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
+    private void attachSessionCookie(Result result, Session session) {
+        if (session == null || !session.isModified() || sessionSecret == null) return;
+        session.maxAgeSeconds(sessionMaxAgeSeconds());
+        String cookieValue = session.toCookie(sessionSecret);
+        if (sessionOptions != null) {
+            result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
+        } else {
+            // Fallback for backward compatibility
+            result.header("Set-Cookie",
+                "brace_session=" + cookieValue + "; Path=/; HttpOnly; SameSite=Lax");
+        }
+        // A response carrying a session cookie is per-user by definition. Without this,
+        // a response with no caching headers (e.g. a static file under a lastSeen-touch
+        // middleware) is heuristically cacheable, and a force-cache proxy would replay
+        // user A's Set-Cookie to everyone. An explicit Cache-Control wins.
+        if (result.header("Cache-Control") == null) {
+            result.header("Cache-Control", "private");
+        }
+    }
+
     private String parseCookieValue(String cookieHeader, String name) {
         if (cookieHeader == null || cookieHeader.isEmpty()) return null;
         for (String part : cookieHeader.split(";")) {
             String trimmed = part.strip();
             if (trimmed.startsWith(name + "=")) {
                 return trimmed.substring(name.length() + 1);
-            }
-        }
-        return null;
-    }
-
-    private String parseFormParam(String body, String paramName) {
-        if (body == null || body.isEmpty()) return null;
-        for (String pair : body.split("&")) {
-            int eq = pair.indexOf('=');
-            if (eq > 0) {
-                String key = pair.substring(0, eq);
-                if (key.equals(paramName)) {
-                    try {
-                        return java.net.URLDecoder.decode(pair.substring(eq + 1), java.nio.charset.StandardCharsets.UTF_8);
-                    } catch (Exception e) {
-                        return pair.substring(eq + 1);
-                    }
-                }
             }
         }
         return null;
@@ -605,19 +708,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     private Map<String, String> parseQuery(String query) {
-        Map<String, String> params = new LinkedHashMap<>();
-        if (query == null || query.isEmpty()) return params;
-        for (String pair : query.split("&")) {
-            int eq = pair.indexOf('=');
-            if (eq > 0) {
-                params.put(
-                    URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8),
-                    URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8));
-            } else {
-                params.put(URLDecoder.decode(pair, StandardCharsets.UTF_8), "");
-            }
-        }
-        return params;
+        // Single pair parser for query strings and form bodies — see Request.scanPairs.
+        return Request.parseSingleValues(query, true);
     }
 
     /**

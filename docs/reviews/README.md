@@ -39,10 +39,10 @@ branch with one commit per finding, and a permanent record in this directory.
 | Date | Category | Model | Record | Findings doc |
 |---|---|---|---|---|
 | 2026-06 | Security | Fable 5 | [2026-06-security-fable-5.md](2026-06-security-fable-5.md) | [security-review-todos](../2026-06-09-security-review-todos.md) |
-| 2026-06 | Token Efficiency | Fable 5 (via ai-benchmark) | _informal — findings live in [TODO.md](../../TODO.md) "token-efficiency" items_ | — |
+| 2026-06 | Token Efficiency | Fable 5 | [2026-06-token-efficiency-fable-5.md](2026-06-token-efficiency-fable-5.md) | [token-efficiency-review-todos](../2026-06-11-token-efficiency-review-todos.md) |
 | — | Runtime Performance | _none yet_ | — | — |
 
-The 2026-06 token-efficiency pass predates this process: it came out of the ai-benchmark
-project's review of agent-generated Brace apps (commit `a8c96eb`) rather than a structured
-review, and its findings were filed straight into `TODO.md`. The next token-efficiency
-review should follow the full process above.
+The 2026-06-11 token-efficiency review formalizes and supersedes an informal 2026-06-10
+pass that came out of the ai-benchmark project's review of agent-generated Brace apps
+(commit `a8c96eb`) and was filed straight into `TODO.md`; those seed findings were
+verified, re-quantified, and folded into the findings doc.

@@ -15,13 +15,21 @@ public class CliCommands {
 
     public static int errors(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
+        var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
+
+        // brace errors <id> — fetch full detail for one error from /ops/errors/{id}
+        if (args.length > 0 && !args[0].startsWith("--")) {
+            return errorDetail(cfg, projectDir, args[0], mode);
+        }
 
         String url = cfg.url() + "/ops/errors";
+        var params = new ArrayList<String>();
         String since = parseFlag(args, "--since");
-        if (since != null) {
-            Instant cutoff = parseDuration(since);
-            url += "?since=" + cutoff.toString();
-        }
+        if (since != null) params.add("since=" + parseDuration(since));
+        // --full: the pre-0.1.7 detail shape (stackTrace etc. on every row).
+        // Same ?include= grammar as /ops/status.
+        if (hasFlag(args, "--full")) params.add("include=detail");
+        if (!params.isEmpty()) url += "?" + String.join("&", params);
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
@@ -35,7 +43,6 @@ public class CliCommands {
         }
 
         JsonNode root = Json.mapper().readTree(response.body());
-        var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
 
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(root));
@@ -43,6 +50,57 @@ public class CliCommands {
             renderErrorsTable(root);
         }
         return root.size() == 0 ? 0 : 1;
+    }
+
+    private static int errorDetail(CliConfig cfg, Path projectDir, String id, CliOutput.Mode mode) throws Exception {
+        var response = CliAuth.sendAuthenticated(cfg, projectDir,
+            HttpRequest.newBuilder()
+                .uri(URI.create(cfg.url() + "/ops/errors/" + id))
+                .header("Accept", "application/json")
+                .GET());
+
+        if (response.statusCode() == 404) {
+            CliOutput.printError("error " + id + " not found"
+                + " (unknown id, or the server predates the 0.1.7 /ops/errors/{id} endpoint)");
+            return 1;
+        }
+        if (response.statusCode() != 200) {
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            return 2;
+        }
+
+        JsonNode detail = Json.mapper().readTree(response.body());
+        if (mode == CliOutput.Mode.JSON) {
+            System.out.println(CliOutput.json(detail));
+        } else {
+            renderErrorDetail(detail);
+        }
+        return 0;
+    }
+
+    private static void renderErrorDetail(JsonNode e) {
+        System.out.println(e.path("errorType").asText("?") + ": " + e.path("message").asText(""));
+        System.out.println("  id          " + e.path("id").asText("?"));
+        System.out.println("  route       " + e.path("route").asText(""));
+        System.out.println("  count       " + e.path("occurrenceCount").asInt(0));
+        System.out.println("  first seen  " + e.path("firstSeen").asText(""));
+        System.out.println("  last seen   " + e.path("lastSeen").asText(""));
+        if (!e.path("resolvedAt").isNull() && !e.path("resolvedAt").isMissingNode()) {
+            System.out.println("  resolved    " + e.path("resolvedAt").asText(""));
+        }
+        printTextSection("Request", e.path("requestDetail"));
+        printTextSection("Request headers", e.path("requestHeaders"));
+        printTextSection("Queries before failure", e.path("queriesBefore"));
+        printTextSection("Stack trace", e.path("stackTrace"));
+    }
+
+    private static void printTextSection(String title, JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) return;
+        String text = value.asText("");
+        if (text.isBlank()) return;
+        System.out.println();
+        System.out.println(title + ":");
+        for (var line : text.split("\n")) System.out.println("  " + line);
     }
 
     private static void renderErrorsTable(JsonNode errors) {
@@ -71,6 +129,7 @@ public class CliCommands {
 
         String level = parseFlag(args, "--level");
         String since = parseFlag(args, "--since");
+        String limit = parseFlag(args, "--limit");   // passthrough to ?limit= (server default 200)
         boolean follow = hasFlag(args, "-f") || hasFlag(args, "--follow");
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
 
@@ -84,6 +143,10 @@ public class CliCommands {
             if (query.length() > 0) query.append("&");
             query.append("level=").append(level);
         }
+        if (limit != null) {
+            if (query.length() > 0) query.append("&");
+            query.append("limit=").append(limit);
+        }
         String firstUrl = query.length() == 0 ? baseUrl : baseUrl + "?" + query;
 
         long lastId = renderLogsOnce(cfg, projectDir, firstUrl, mode);
@@ -93,6 +156,7 @@ public class CliCommands {
             Thread.sleep(1000);
             StringBuilder q = new StringBuilder("since=").append(lastId);
             if (level != null) q.append("&level=").append(level);
+            if (limit != null) q.append("&limit=").append(limit);
             long newLast = renderLogsOnce(cfg, projectDir, baseUrl + "?" + q, mode);
             if (newLast > 0) lastId = newLast;
         }
@@ -112,7 +176,7 @@ public class CliCommands {
         long lastId = 0;
         for (var e : entries) {
             if (mode == CliOutput.Mode.JSON) {
-                System.out.println(CliOutput.jsonCompact(e));
+                System.out.println(CliOutput.json(e));
             } else {
                 renderLogLine(e);
             }
@@ -169,8 +233,20 @@ public class CliCommands {
             renderStatus(root);
         }
 
-        int errorCount = root.path("errors").path("count").asInt(0);
-        return errorCount > 0 ? 1 : 0;
+        return errorCount(root) > 0 ? 1 : 0;
+    }
+
+    /**
+     * Unresolved error count from a /ops/status payload. 0.1.7+ servers emit
+     * {@code errors.count}; pre-0.1.7 servers never did (so `brace status` always reported
+     * 0 errors and exited 0 — the bug this fixes), but they do emit {@code errors.recent},
+     * whose length is the correct fallback there.
+     */
+    private static long errorCount(JsonNode root) {
+        var errors = root.path("errors");
+        var count = errors.path("count");
+        if (count.isNumber()) return count.asLong();
+        return errors.path("recent").size();
     }
 
     private static void renderStatus(JsonNode root) {
@@ -192,8 +268,7 @@ public class CliCommands {
             }
         }
         System.out.println();
-        var errors = root.path("errors");
-        System.out.println("Errors    " + errors.path("count").asInt(0));
+        System.out.println("Errors    " + errorCount(root));
         System.out.println();
         var jvm = root.path("jvm");
         if (!jvm.isMissingNode()) {

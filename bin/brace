@@ -137,6 +137,13 @@ case "$COMMAND" in
     version|--version|-v) PINNED="$(pinned_version || true)" ;;
 esac
 
+# Whether stdout is a terminal, passed down because the JVM can't reliably tell
+# on its own: System.console() on JLine-backed JDKs can be non-null even with
+# redirected output. Cli uses this to pick concise vs full output (e.g. `test`).
+# Optional property — older toolchains ignore it, newer ones fall back to
+# System.console() heuristics when run without the shim — so no SHIM_VERSION bump.
+if [ -t 1 ]; then STDOUT_TTY="true"; else STDOUT_TTY="false"; fi
+
 # exec (not a child) so Ctrl-C / SIGTERM reach Cli directly and its shutdown
 # hooks (which stop the app JVM in `run`/`dev`) actually fire.
 if [ -n "$PINNED" ]; then
@@ -144,12 +151,14 @@ if [ -n "$PINNED" ]; then
         -Dbrace.home="$HOME_DIR" \
         -Dbrace.launcher="$SHIM_VERSION" \
         -Dbrace.pinned="$PINNED" \
+        -Dbrace.stdout.tty="$STDOUT_TTY" \
         -cp "$HOME_DIR/lib/*" \
         com.larvalabs.brace.Cli "$COMMAND" "$@"
 else
     exec java \
         -Dbrace.home="$HOME_DIR" \
         -Dbrace.launcher="$SHIM_VERSION" \
+        -Dbrace.stdout.tty="$STDOUT_TTY" \
         -cp "$HOME_DIR/lib/*" \
         com.larvalabs.brace.Cli "$COMMAND" "$@"
 fi

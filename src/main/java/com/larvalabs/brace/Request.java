@@ -19,6 +19,9 @@ public class Request {
     private final String remoteAddr;
     private final TrustedProxies trustedProxies;
     private Storage storage;
+    private String rawQuery;
+    /** Lazily parsed form body (see {@link #parsedFormBody()}); body is immutable so this is safe to cache. */
+    private Map<String, String> formBodyParams;
 
     public Request(String method, String path, Map<String, String> pathParams,
                    Map<String, String> queryParams, Map<String, String> headers,
@@ -80,36 +83,139 @@ public class Request {
         return Integer.parseInt(queryParams.get(name));
     }
 
+    /**
+     * Returns the query param parsed as an int, or {@code defaultValue} when the param is
+     * missing OR present but unparseable ({@code ?page=abc}). The defaulted variants never
+     * throw — a caller that supplies a default has already said what a bad value means.
+     * Use {@link #queryInt(String)} when an unparseable value should surface as an error.
+     */
     public int queryInt(String name, int defaultValue) {
         var value = queryParams.get(name);
-        return value != null ? Integer.parseInt(value) : defaultValue;
+        if (value == null) return defaultValue;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public long queryLong(String name) {
         return Long.parseLong(queryParams.get(name));
     }
 
+    /**
+     * Returns the query param parsed as a long, or {@code defaultValue} when the param is
+     * missing OR present but unparseable. See {@link #queryInt(String, int)}.
+     */
     public long queryLong(String name, long defaultValue) {
         var value = queryParams.get(name);
-        return value != null ? Long.parseLong(value) : defaultValue;
+        if (value == null) return defaultValue;
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public boolean hasQueryParam(String name) {
         return queryParams.containsKey(name);
     }
 
+    /**
+     * All values of a query parameter, URL-decoded, in order of appearance — for
+     * {@code <select multiple>} / checkbox-group submissions like {@code ?tag=a&tag=b}.
+     * Returns an empty list when the parameter is absent. The single-value
+     * {@link #queryParam(String)} (last value wins) is unchanged.
+     */
+    public List<String> queryParams(String name) {
+        if (rawQuery == null) {
+            // No raw query string available (e.g. a hand-constructed Request in a unit
+            // test): fall back to the single-value map.
+            var single = queryParams.get(name);
+            return single != null ? List.of(single) : List.of();
+        }
+        // Mirror BraceHandler.parseQuery's split rules: a pair without '=' (or starting
+        // with '=') is a bare key with an empty value.
+        return valuesOf(rawQuery, name, true);
+    }
+
     // Form parameter accessors
 
     public String formParam(String name) {
-        return parseFormBody(body).get(name);
+        return parsedFormBody().get(name);
     }
 
     public int formInt(String name) {
-        return Integer.parseInt(parseFormBody(body).get(name));
+        return Integer.parseInt(parsedFormBody().get(name));
     }
 
     public boolean hasFormParam(String name) {
-        return parseFormBody(body).containsKey(name);
+        return parsedFormBody().containsKey(name);
+    }
+
+    /**
+     * All values of a form parameter, URL-decoded, in order of appearance in the
+     * {@code application/x-www-form-urlencoded} body — for {@code <select multiple>} /
+     * checkbox-group submissions like {@code tag=a&tag=b}. Returns an empty list when
+     * the parameter is absent. The single-value {@link #formParam(String)} (last value
+     * wins) is unchanged.
+     */
+    public List<String> formParams(String name) {
+        // Mirror parseFormBody's split rules: a pair without '=' is a bare key with an
+        // empty value; a leading '=' means an empty-string key.
+        return valuesOf(body, name, false);
+    }
+
+    /**
+     * THE pair scanner — every {@code &}-separated, URL-encoded pair string (query string,
+     * form body) goes through here, multi-value and single-value alike, so the split rules
+     * can't drift between copies. Pairs are fed to {@code sink} in order of appearance.
+     * {@code bareKeyOnLeadingEq} selects the edge-case rule for a pair starting with '=':
+     * {@code true} is query parsing (the whole pair is the key), {@code false} is form
+     * parsing (empty key, rest is value).
+     */
+    private static void scanPairs(String raw, boolean bareKeyOnLeadingEq,
+                                  java.util.function.BiConsumer<String, String> sink) {
+        for (var pair : raw.split("&")) {
+            var eq = pair.indexOf('=');
+            String key;
+            String value;
+            if (eq < 0 || (eq == 0 && bareKeyOnLeadingEq)) {
+                key = URLDecoder.decode(pair, StandardCharsets.UTF_8);
+                value = "";
+            } else {
+                key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
+                value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+            }
+            sink.accept(key, value);
+        }
+    }
+
+    /** Multi-value view of {@link #scanPairs}: keys map to their values in order of appearance. */
+    static Map<String, List<String>> parsePairs(String raw, boolean bareKeyOnLeadingEq) {
+        if (raw == null || raw.isEmpty()) return Map.of();
+        var params = new LinkedHashMap<String, List<String>>();
+        scanPairs(raw, bareKeyOnLeadingEq,
+            (k, v) -> params.computeIfAbsent(k, x -> new java.util.ArrayList<>()).add(v));
+        return params;
+    }
+
+    /**
+     * Single-pass single-value view of {@link #scanPairs}: first-appearance key order
+     * (LinkedHashMap keeps the original position on re-put), last value wins. Returns the
+     * shared empty map for a null/empty input — no per-request allocation when there is
+     * nothing to parse.
+     */
+    static Map<String, String> parseSingleValues(String raw, boolean bareKeyOnLeadingEq) {
+        if (raw == null || raw.isEmpty()) return Map.of();
+        var params = new LinkedHashMap<String, String>();
+        scanPairs(raw, bareKeyOnLeadingEq, params::put);
+        return params;
+    }
+
+    private static List<String> valuesOf(String raw, String name, boolean bareKeyOnLeadingEq) {
+        // copyOf: don't leak parsePairs' mutable value lists to callers.
+        return List.copyOf(parsePairs(raw, bareKeyOnLeadingEq).getOrDefault(name, List.of()));
     }
 
     // JSON request helpers
@@ -313,31 +419,73 @@ public class Request {
     }
 
     public <T> Form<T> form(Class<T> type) {
-        var params = parseFormBody(body());
+        // Copy: the cached form map must not absorb query params, and may be immutable-empty.
+        var params = new LinkedHashMap<>(parsedFormBody());
         for (var entry : queryParams.entrySet()) {
             params.putIfAbsent(entry.getKey(), entry.getValue());
         }
         return FormBinder.bind(type, params);
     }
 
-    private static Map<String, String> parseFormBody(String body) {
-        var params = new LinkedHashMap<String, String>();
-        if (body == null || body.isEmpty()) return params;
-        for (var pair : body.split("&")) {
-            var eq = pair.indexOf('=');
-            if (eq < 0) {
-                params.put(URLDecoder.decode(pair, StandardCharsets.UTF_8), "");
-            } else {
-                var key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
-                var value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
-                params.put(key, value);
+    /**
+     * Bind a JSON request body to a record and run the same validation pipeline as
+     * {@link #form(Class)} — annotations ({@code @Required}, {@code @Min}, …) plus the
+     * record's custom {@code validate(Errors)} method. Never throws on bad input: an
+     * unparseable or non-object body returns a {@code Form} carrying a {@code "_body"}
+     * error, so the {@code hasErrors()} idiom covers malformed JSON too (unlike
+     * {@link #bodyAs(Class)}, which throws and surfaces as a 500).
+     *
+     * <p>Scalar JSON values (strings, numbers, booleans) bind to the record's components;
+     * JSON {@code null}s are treated as absent; nested objects/arrays bind to String
+     * components as raw JSON text. The reject idiom:
+     * {@code if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422);}
+     */
+    public <T> Form<T> jsonForm(Class<T> type) {
+        com.fasterxml.jackson.databind.JsonNode node = null;
+        try {
+            String b = body();
+            if (b != null && !b.isBlank()) {
+                node = Json.mapper().readTree(b);
             }
+        } catch (Exception e) {
+            // fall through to the _body error below
         }
-        return params;
+        if (node == null || !node.isObject()) {
+            // Bind against empty params so value() is a defaults-populated record (never
+            // null, matching form()); the "_body" error marks the malformed payload.
+            var form = FormBinder.bind(type, Map.of());
+            form.errors().add("_body", "must be a JSON object");
+            return form;
+        }
+        var params = new LinkedHashMap<String, String>();
+        node.fields().forEachRemaining(entry -> {
+            var value = entry.getValue();
+            if (value == null || value.isNull()) return;
+            params.put(entry.getKey(), value.isValueNode() ? value.asText() : value.toString());
+        });
+        return FormBinder.bind(type, params);
+    }
+
+    /**
+     * The body parsed as a form, cached — the body is immutable, so the first accessor
+     * ({@code formParam}, {@code form}, CSRF's {@code _csrf} extraction) pays the parse
+     * and the rest reuse it. May be the shared immutable empty map; callers copy if they
+     * need to mutate.
+     */
+    Map<String, String> parsedFormBody() {
+        if (formBodyParams == null) {
+            formBodyParams = parseSingleValues(body, false);
+        }
+        return formBodyParams;
     }
 
     void setStorage(Storage storage) {
         this.storage = storage;
+    }
+
+    /** Raw (still URL-encoded) query string, set by {@link BraceHandler}; backs {@link #queryParams(String)}. */
+    void setRawQuery(String rawQuery) {
+        this.rawQuery = rawQuery;
     }
 
     public Storage storage() {
