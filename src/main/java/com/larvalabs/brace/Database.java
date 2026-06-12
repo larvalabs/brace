@@ -196,8 +196,18 @@ public class Database {
      * and rejected with {@link IllegalArgumentException} if it does not match.
      */
     public <T> boolean existsBy(Class<T> type, String field, Object value) {
-        // requireValidFieldIdentifier delegated to countBy
-        return countBy(type, field, value) > 0;
+        requireValidFieldIdentifier(field);
+        // SELECT 1 with a row cap: an index probe that stops at the first hit,
+        // instead of COUNT(*) walking every matching row.
+        long start = System.nanoTime();
+        String hql = "SELECT 1 FROM " + type.getSimpleName() + " WHERE " + field + " = ?1";
+        Query<Integer> query = session.createQuery(hql, Integer.class);
+        query.setParameter(1, value);
+        query.setMaxResults(1);
+        boolean result = !query.getResultList().isEmpty();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     /**

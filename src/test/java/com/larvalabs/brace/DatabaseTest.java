@@ -106,6 +106,29 @@ class DatabaseTest {
     }
 
     @Test
+    void existsBy() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var post = new Post();
+            post.title = "ExistsByTest_" + System.nanoTime();
+            post.body = "Body";
+            post.createdAt = Instant.now();
+            db.insert(post);
+            db.commitTransaction();
+
+            db.beginTransaction();
+            assertTrue(db.existsBy(Post.class, "title", post.title));
+            assertFalse(db.existsBy(Post.class, "title", "Nonexistent_" + System.nanoTime()));
+            assertThrows(IllegalArgumentException.class,
+                () -> db.existsBy(Post.class, "title = 'x' OR 1=1", "y"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void count() {
         var db = new Database(factory.openSession());
         try {
