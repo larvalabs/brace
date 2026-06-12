@@ -103,17 +103,20 @@ final class BuildCommands {
 
     /**
      * Condenses javac diagnostics into one line each — {@code path:line: error: message},
-     * no source snippet, no caret. Diagnostics with the same kind and first message line
-     * are deduped across files: the first occurrence is printed, the rest become a
-     * {@code (+N more at Foo.java:12, ...)} suffix. Errors sort before warnings, and the
-     * total is capped at {@link #MAX_DIAGNOSTICS} with a final {@code ... and N more} line.
+     * no source snippet, no caret. Multi-line messages keep their detail lines (joined
+     * with {@code ;}): for {@code cannot find symbol} the symbol name lives on line 2,
+     * and dropping it would make N different missing symbols indistinguishable.
+     * Diagnostics with the same kind and condensed message are deduped across files: the
+     * first occurrence is printed, the rest become a {@code (+N more at Foo.java:12, ...)}
+     * suffix. Errors sort before warnings, and the total is capped at
+     * {@link #MAX_DIAGNOSTICS} with a final {@code ... and N more} line.
      */
     static List<String> formatDiagnostics(List<Diagnostic<? extends JavaFileObject>> diags) {
-        // Group by (kind, first line of message), preserving first-seen order within each rank.
+        // Group by (kind, condensed message), preserving first-seen order within each rank.
         record Group(Diagnostic<? extends JavaFileObject> first, List<String> moreLocations) {}
         Map<String, Group> groups = new LinkedHashMap<>();
         for (Diagnostic<? extends JavaFileObject> d : diags) {
-            String key = d.getKind() + "|" + firstLine(message(d));
+            String key = d.getKind() + "|" + condense(message(d));
             Group g = groups.get(key);
             if (g == null) groups.put(key, new Group(d, new ArrayList<>()));
             else g.moreLocations().add(shortLocation(d));
@@ -133,7 +136,7 @@ final class BuildCommands {
             String location = d.getSource() != null && d.getLineNumber() != Diagnostic.NOPOS
                     ? d.getSource().getName() + ":" + d.getLineNumber() + ": "
                     : "";
-            lines.add(location + label(d.getKind()) + ": " + firstLine(message(d)));
+            lines.add(location + label(d.getKind()) + ": " + condense(message(d)));
             printed++;
             if (!g.moreLocations().isEmpty()) {
                 List<String> locs = g.moreLocations();
@@ -151,9 +154,16 @@ final class BuildCommands {
         return m == null ? "" : m;
     }
 
-    private static String firstLine(String s) {
-        int nl = s.indexOf('\n');
-        return (nl >= 0 ? s.substring(0, nl) : s).strip();
+    /**
+     * Flattens a (possibly multi-line) javac message to one line: each line is
+     * whitespace-normalized and non-blank lines are joined with {@code "; "} —
+     * e.g. {@code cannot find symbol; symbol: method foo(); location: class Bar}.
+     */
+    private static String condense(String message) {
+        return message.lines()
+                .map(line -> line.strip().replaceAll("\\s+", " "))
+                .filter(line -> !line.isEmpty())
+                .collect(java.util.stream.Collectors.joining("; "));
     }
 
     private static String shortLocation(Diagnostic<? extends JavaFileObject> d) {

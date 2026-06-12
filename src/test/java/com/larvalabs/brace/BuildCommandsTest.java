@@ -47,12 +47,30 @@ public class BuildCommandsTest {
     }
 
     @Test
-    public void oneLinePerDiagnosticNoSnippetNoCaret() {
+    public void oneLinePerDiagnosticKeepsDetailLinesNoSnippetNoCaret() {
         List<Diagnostic<? extends JavaFileObject>> diags = new ArrayList<>();
         diags.add(diag(Diagnostic.Kind.ERROR, "src/main/java/app/Foo.java", 12,
                 "cannot find symbol\n  symbol:   method renamed()\n  location: class Foo"));
         List<String> lines = BuildCommands.formatDiagnostics(diags);
-        assertEquals(List.of("src/main/java/app/Foo.java:12: error: cannot find symbol"), lines);
+        // The symbol name lives on line 2 of the javac message — it must survive
+        // condensing, or a fix loop can't learn which symbol is unresolved.
+        assertEquals(List.of(
+                "src/main/java/app/Foo.java:12: error: cannot find symbol; symbol: method renamed(); location: class Foo"),
+                lines);
+    }
+
+    @Test
+    public void differentSymbolsDoNotDedupeIntoOneLine() {
+        List<Diagnostic<? extends JavaFileObject>> diags = new ArrayList<>();
+        diags.add(diag(Diagnostic.Kind.ERROR, "A.java", 3,
+                "cannot find symbol\n  symbol:   method foo()\n  location: class A"));
+        diags.add(diag(Diagnostic.Kind.ERROR, "B.java", 5,
+                "cannot find symbol\n  symbol:   method bar()\n  location: class B"));
+        List<String> lines = BuildCommands.formatDiagnostics(diags);
+        assertEquals(List.of(
+                "A.java:3: error: cannot find symbol; symbol: method foo(); location: class A",
+                "B.java:5: error: cannot find symbol; symbol: method bar(); location: class B"),
+                lines);
     }
 
     @Test
@@ -131,8 +149,11 @@ public class BuildCommandsTest {
         assertEquals(1, rc);
         String stderr = err.toString();
         assertTrue(stderr.contains("Broken.java:3: error: cannot find symbol"), stderr);
+        assertTrue(stderr.contains("symbol: method missing()"), "symbol detail expected:\n" + stderr);
         assertFalse(stderr.contains("^"), "no caret expected:\n" + stderr);
-        assertFalse(stderr.contains("missing();"), "no source snippet expected:\n" + stderr);
+        // The condensed message legitimately contains "missing()" (the symbol detail);
+        // the SOURCE snippet would be the full code line.
+        assertFalse(stderr.contains("void f()"), "no source snippet expected:\n" + stderr);
         assertTrue(stderr.contains("✗ Compilation failed: 1 error, 0 warnings"), stderr);
     }
 
