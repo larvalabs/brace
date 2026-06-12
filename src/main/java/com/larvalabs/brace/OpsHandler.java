@@ -572,7 +572,14 @@ public class OpsHandler {
 
     public Result resolveError(Request req) {
         if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
-        long id = req.longPathParam("id");
+        long id;
+        try {
+            id = req.longPathParam("id");
+        } catch (NumberFormatException e) {
+            // Like errorDetail: a malformed id is a 404, not a 500 that records a fresh
+            // framework error — re-reddening the count this endpoint exists to clear.
+            return Result.notFound();
+        }
         if (errorStore == null) {
             // No database: resolving removes the in-memory record, so errors.count (and
             // the brace status exit code) recovers instead of staying red until restart.

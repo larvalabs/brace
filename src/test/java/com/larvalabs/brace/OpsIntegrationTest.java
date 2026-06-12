@@ -905,6 +905,22 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void resolveWithMalformedIdIs404Not500() throws Exception {
+        // A 500 here would record a fresh framework error — re-reddening the count the
+        // resolve endpoint exists to clear.
+        String token = authenticate();
+        var resp = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/errors/abc/resolve"))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, resp.statusCode());
+    }
+
+    @Test
     void opsCacheReturnsStats() throws Exception {
         var response = cacheGet("/ops/cache");
 
