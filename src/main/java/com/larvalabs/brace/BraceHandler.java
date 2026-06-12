@@ -259,14 +259,20 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
-            // Check static file mappings if no route matched
+            // Check static file mappings if no route matched. A pass-through
+            // session-aware middleware may have mutated the session above (login touch,
+            // counters) — the write-back contract holds on these paths too, so attach
+            // the cookie instead of silently dropping the mutation.
             if (match == null) {
                 Result staticResult = serveStaticFile(path);
                 if (staticResult != null) {
+                    attachSessionCookie(staticResult, session);
                     writeResult(staticResult, response, callback);
                     return true;
                 }
-                writeResult(noRouteFound(method, path), response, callback);
+                Result notFoundResult = noRouteFound(method, path);
+                attachSessionCookie(notFoundResult, session);
+                writeResult(notFoundResult, response, callback);
                 return true;
             }
 
