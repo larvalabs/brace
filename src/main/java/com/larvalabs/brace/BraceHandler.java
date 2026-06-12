@@ -719,8 +719,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     private Map<String, String> parseQuery(String query) {
-        // Single pair parser for query strings and form bodies — see Request.parsePairs.
-        return Request.lastValues(Request.parsePairs(query, true));
+        // Single pair parser for query strings and form bodies — see Request.scanPairs.
+        return Request.parseSingleValues(query, true);
     }
 
     /**

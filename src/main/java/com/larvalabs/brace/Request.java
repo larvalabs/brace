@@ -20,6 +20,8 @@ public class Request {
     private final TrustedProxies trustedProxies;
     private Storage storage;
     private String rawQuery;
+    /** Lazily parsed form body (see {@link #parsedFormBody()}); body is immutable so this is safe to cache. */
+    private Map<String, String> formBodyParams;
 
     public Request(String method, String path, Map<String, String> pathParams,
                    Map<String, String> queryParams, Map<String, String> headers,
@@ -140,15 +142,15 @@ public class Request {
     // Form parameter accessors
 
     public String formParam(String name) {
-        return parseFormBody(body).get(name);
+        return parsedFormBody().get(name);
     }
 
     public int formInt(String name) {
-        return Integer.parseInt(parseFormBody(body).get(name));
+        return Integer.parseInt(parsedFormBody().get(name));
     }
 
     public boolean hasFormParam(String name) {
-        return parseFormBody(body).containsKey(name);
+        return parsedFormBody().containsKey(name);
     }
 
     /**
@@ -165,16 +167,15 @@ public class Request {
     }
 
     /**
-     * THE pair parser — every {@code &}-separated, URL-encoded pair string (query string,
+     * THE pair scanner — every {@code &}-separated, URL-encoded pair string (query string,
      * form body) goes through here, multi-value and single-value alike, so the split rules
-     * can't drift between copies. Keys map to their values in order of appearance.
+     * can't drift between copies. Pairs are fed to {@code sink} in order of appearance.
      * {@code bareKeyOnLeadingEq} selects the edge-case rule for a pair starting with '=':
      * {@code true} is query parsing (the whole pair is the key), {@code false} is form
      * parsing (empty key, rest is value).
      */
-    static Map<String, List<String>> parsePairs(String raw, boolean bareKeyOnLeadingEq) {
-        var params = new LinkedHashMap<String, List<String>>();
-        if (raw == null || raw.isEmpty()) return params;
+    private static void scanPairs(String raw, boolean bareKeyOnLeadingEq,
+                                  java.util.function.BiConsumer<String, String> sink) {
         for (var pair : raw.split("&")) {
             var eq = pair.indexOf('=');
             String key;
@@ -186,20 +187,35 @@ public class Request {
                 key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
                 value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
             }
-            params.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(value);
+            sink.accept(key, value);
         }
+    }
+
+    /** Multi-value view of {@link #scanPairs}: keys map to their values in order of appearance. */
+    static Map<String, List<String>> parsePairs(String raw, boolean bareKeyOnLeadingEq) {
+        if (raw == null || raw.isEmpty()) return Map.of();
+        var params = new LinkedHashMap<String, List<String>>();
+        scanPairs(raw, bareKeyOnLeadingEq,
+            (k, v) -> params.computeIfAbsent(k, x -> new java.util.ArrayList<>()).add(v));
         return params;
     }
 
-    /** Single-value view of {@link #parsePairs}: first-appearance key order, last value wins. */
-    static Map<String, String> lastValues(Map<String, List<String>> pairs) {
-        var out = new LinkedHashMap<String, String>();
-        pairs.forEach((k, v) -> out.put(k, v.get(v.size() - 1)));
-        return out;
+    /**
+     * Single-pass single-value view of {@link #scanPairs}: first-appearance key order
+     * (LinkedHashMap keeps the original position on re-put), last value wins. Returns the
+     * shared empty map for a null/empty input — no per-request allocation when there is
+     * nothing to parse.
+     */
+    static Map<String, String> parseSingleValues(String raw, boolean bareKeyOnLeadingEq) {
+        if (raw == null || raw.isEmpty()) return Map.of();
+        var params = new LinkedHashMap<String, String>();
+        scanPairs(raw, bareKeyOnLeadingEq, params::put);
+        return params;
     }
 
     private static List<String> valuesOf(String raw, String name, boolean bareKeyOnLeadingEq) {
-        return parsePairs(raw, bareKeyOnLeadingEq).getOrDefault(name, List.of());
+        // copyOf: don't leak parsePairs' mutable value lists to callers.
+        return List.copyOf(parsePairs(raw, bareKeyOnLeadingEq).getOrDefault(name, List.of()));
     }
 
     // JSON request helpers
@@ -403,7 +419,8 @@ public class Request {
     }
 
     public <T> Form<T> form(Class<T> type) {
-        var params = parseFormBody(body());
+        // Copy: the cached form map must not absorb query params, and may be immutable-empty.
+        var params = new LinkedHashMap<>(parsedFormBody());
         for (var entry : queryParams.entrySet()) {
             params.putIfAbsent(entry.getKey(), entry.getValue());
         }
@@ -449,8 +466,17 @@ public class Request {
         return FormBinder.bind(type, params);
     }
 
-    private static Map<String, String> parseFormBody(String body) {
-        return lastValues(parsePairs(body, false));
+    /**
+     * The body parsed as a form, cached — the body is immutable, so the first accessor
+     * ({@code formParam}, {@code form}, CSRF's {@code _csrf} extraction) pays the parse
+     * and the rest reuse it. May be the shared immutable empty map; callers copy if they
+     * need to mutate.
+     */
+    Map<String, String> parsedFormBody() {
+        if (formBodyParams == null) {
+            formBodyParams = parseSingleValues(body, false);
+        }
+        return formBodyParams;
     }
 
     void setStorage(Storage storage) {
