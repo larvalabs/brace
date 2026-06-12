@@ -240,6 +240,53 @@ public class BuildCommandsTest {
     }
 
     @Test
+    public void containerFailureShownAlongsideMethodFailure() {
+        // A @BeforeAll/constructor failure carries a ClassSource (no methodName); it must
+        // not vanish just because a method-level failure parsed successfully.
+        String output = """
+                Failures (2):
+                  JUnit Jupiter:BrokenSetupTest
+                    ClassSource [className = 'app.BrokenSetupTest', filePosition = null]
+                    => java.lang.IllegalStateException: DB not reachable
+                       app.BrokenSetupTest.beforeAll(BrokenSetupTest.java:12)
+                  JUnit Jupiter:UserTest:rejectsBlankName()
+                    MethodSource [className = 'app.UserTest', methodName = 'rejectsBlankName', methodParameterTypes = '']
+                    => org.opentest4j.AssertionFailedError: expected: <true> but was: <false>
+                       app.UserTest.rejectsBlankName(UserTest.java:44)
+
+                Test run finished after 320 ms
+                [         1 containers failed     ]
+                [         8 tests successful      ]
+                [         1 tests failed          ]
+                """;
+        assertEquals(List.of(
+                "BrokenSetupTest (class init) — IllegalStateException: DB not reachable (BrokenSetupTest.java:12)",
+                "UserTest.rejectsBlankName() — AssertionFailedError: expected: <true> but was: <false> (UserTest.java:44)",
+                "8 passed, 1 failed, 1 container failed in 0.3s"),
+                BuildCommands.summarizeTestRun(output, Set.of("app"), 1));
+    }
+
+    @Test
+    public void unrecognizedFailureEntryFallsBackToVerbatim() {
+        // The Failures header declares 2 entries but only 1 parses — condensing would
+        // silently drop a failure, so the caller must get null and print verbatim.
+        String output = """
+                Failures (2):
+                  JUnit Jupiter:UserTest:rejectsBlankName()
+                    MethodSource [className = 'app.UserTest', methodName = 'rejectsBlankName', methodParameterTypes = '']
+                    => java.lang.AssertionError
+                  JUnit Vintage:WeirdSuite
+                    CompositeSource [something we do not parse]
+                    => java.lang.Exception: legacy suite exploded
+
+                Test run finished after 100 ms
+                [         3 tests successful      ]
+                [         1 tests failed          ]
+                """;
+        assertNull(BuildCommands.summarizeTestRun(output, Set.of("app"), 1));
+    }
+
+    @Test
     public void failureWithoutProjectFrameOmitsLocation() {
         String output = """
                 Failures (1):

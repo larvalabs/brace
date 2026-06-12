@@ -364,17 +364,29 @@ final class BuildCommands {
         var successful = matchLong(output, "\\[\\s*(\\d+) tests successful\\s*\\]");
         var failed = matchLong(output, "\\[\\s*(\\d+) tests failed\\s*\\]");
         var skipped = matchLong(output, "\\[\\s*(\\d+) tests skipped\\s*\\]");
+        var containersFailed = matchLong(output, "\\[\\s*(\\d+) containers failed\\s*\\]");
         var millis = matchLong(output, "Test run finished after (\\d+) ms");
         if (successful == null || failed == null) return null;   // summary table missing
 
         List<String> lines = new ArrayList<>(parseFailures(output, projectPackages));
-        // A nonzero exit with no parseable failure block (e.g. a container-level error
+        // A nonzero exit with no parseable failure block (e.g. an engine-level error
         // we don't recognise) must not be condensed into a bare summary line.
         if (exitCode != 0 && lines.isEmpty()) return null;
+        // Cross-check against the section header: if we parsed fewer entries than the
+        // launcher reported (an entry shape we don't recognise), don't silently drop
+        // failures — fall back to verbatim output.
+        var declared = matchLong(output, "Failures \\((\\d+)\\):");
+        if (declared != null && lines.size() != declared) return null;
 
         StringBuilder summary = new StringBuilder()
                 .append(successful).append(" passed, ").append(failed).append(" failed");
         if (skipped != null && skipped > 0) summary.append(", ").append(skipped).append(" skipped");
+        // Container failures (@BeforeAll, constructor, @AfterAll) are counted separately
+        // by the launcher and silently skip the container's tests — never hide them.
+        if (containersFailed != null && containersFailed > 0) {
+            summary.append(", ").append(containersFailed)
+                    .append(containersFailed == 1 ? " container" : " containers").append(" failed");
+        }
         if (millis != null) summary.append(" in ")
                 .append(String.format(java.util.Locale.ROOT, "%.1fs", millis / 1000.0));
         lines.add(summary.toString());
@@ -383,6 +395,9 @@ final class BuildCommands {
 
     private static final java.util.regex.Pattern FAILURE_TEST = java.util.regex.Pattern.compile(
             "className = '([^']+)', methodName = '([^']+)'");
+    // Container-level failures (@BeforeAll, constructor) carry a ClassSource, no methodName.
+    private static final java.util.regex.Pattern FAILURE_CONTAINER = java.util.regex.Pattern.compile(
+            "ClassSource \\[className = '([^']+)'");
     private static final java.util.regex.Pattern FAILURE_EXCEPTION = java.util.regex.Pattern.compile(
             "^\\s*=> ([\\w.$]+)(?:: (.*))?$");
     private static final java.util.regex.Pattern STACK_FRAME = java.util.regex.Pattern.compile(
@@ -402,6 +417,15 @@ final class BuildCommands {
                 flushFailure(lines, className, methodName, exception, location);
                 className = test.group(1);
                 methodName = test.group(2);
+                exception = null;
+                location = null;
+                continue;
+            }
+            var container = FAILURE_CONTAINER.matcher(line);
+            if (container.find()) {
+                flushFailure(lines, className, methodName, exception, location);
+                className = container.group(1);
+                methodName = null;
                 exception = null;
                 location = null;
                 continue;
@@ -432,7 +456,9 @@ final class BuildCommands {
                                      String exception, String location) {
         if (className == null) return;
         String simple = className.substring(className.lastIndexOf('.') + 1);
-        lines.add(simple + "." + methodName + "()"
+        // methodName == null is a container-level failure (@BeforeAll, constructor):
+        // the whole class failed to initialize and its tests never ran.
+        lines.add(simple + (methodName != null ? "." + methodName + "()" : " (class init)")
                 + (exception != null ? " — " + exception : "")
                 + (location != null ? " (" + location + ")" : ""));
     }
