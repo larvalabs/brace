@@ -198,18 +198,28 @@ public class ErrorStore {
         }
     }
 
+    /**
+     * Cap on rows returned by {@link #list}. The store itself is pruned to {@code maxErrors}
+     * (default 1000), but a list response carrying every heavy column unbounded is still a
+     * needlessly large payload — recent-first plus {@code since} covers the real use.
+     */
+    static final int LIST_LIMIT = 500;
+
     public List<Map<String, Object>> list(String status) {
+        return list(status, null);
+    }
+
+    public List<Map<String, Object>> list(String status, Instant since) {
         var db = new Database(databaseFactory.openSession());
         try {
-            String sql;
-            List<Object[]> rows;
-            if ("resolved".equals(status)) {
-                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE resolved_at IS NOT NULL ORDER BY last_seen DESC";
-                rows = db.sqlQuery(sql);
-            } else {
-                sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE resolved_at IS NULL ORDER BY last_seen DESC";
-                rows = db.sqlQuery(sql);
-            }
+            String where = "resolved".equals(status) ? "resolved_at IS NOT NULL" : "resolved_at IS NULL";
+            String sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers "
+                + "FROM ops_errors WHERE " + where
+                + (since != null ? " AND first_seen >= ?" : "")
+                + " ORDER BY last_seen DESC LIMIT ?";
+            List<Object[]> rows = since != null
+                ? db.sqlQuery(sql, Timestamp.from(since), LIST_LIMIT)
+                : db.sqlQuery(sql, LIST_LIMIT);
 
             var result = new ArrayList<Map<String, Object>>();
             for (var row : rows) {
@@ -252,19 +262,6 @@ public class ErrorStore {
         return map;
     }
 
-    public List<Map<String, Object>> list(String status, java.time.Instant since) {
-        var all = list(status);
-        if (since == null) return all;
-        var out = new ArrayList<Map<String, Object>>();
-        for (var row : all) {
-            // firstSeen is a typed Instant now (timestamptz column), so the cutoff is a direct
-            // compare — no string parsing. Rows with a null first_seen are dropped, as before.
-            var firstSeen = (Instant) row.get("firstSeen");
-            if (firstSeen != null && !firstSeen.isBefore(since)) out.add(row);
-        }
-        return out;
-    }
-
     /**
      * Normalize whatever temporal type the JDBC driver surfaces for a {@code TIMESTAMP WITH TIME
      * ZONE} column into an absolute {@link Instant}. Hibernate native queries hand back an
@@ -291,30 +288,14 @@ public class ErrorStore {
             var now = Timestamp.from(Instant.now());
             db.sql("UPDATE ops_errors SET resolved_at = ? WHERE id = ?", now, id);
             db.commitTransaction();
-
-            // Re-fetch the updated record
-            var rows = db.sqlQuery(
-                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE id = ?", id);
-
-            if (rows.isEmpty()) return null;
-            var row = rows.get(0);
-            var map = new LinkedHashMap<String, Object>();
-            map.put("id", ((Number) row[0]).longValue());
-            map.put("errorType", row[1]);
-            map.put("message", row[2]);
-            map.put("stackTrace", row[3]);
-            map.put("route", row[4]);
-            map.put("requestDetail", row[5]);
-            map.put("firstSeen", toInstant(row[6]));
-            map.put("lastSeen", toInstant(row[7]));
-            map.put("occurrenceCount", ((Number) row[8]).intValue());
-            map.put("resolvedAt", toInstant(row[9]));
-            return map;
         } catch (Exception e) {
             db.rollbackTransaction();
             return null;
         } finally {
             db.close();
         }
+        // Re-fetch through find() — one row-mapping (this method used to hand-build a
+        // copy of mapRow's map and had already drifted, omitting two fields).
+        return find(id);
     }
 }
