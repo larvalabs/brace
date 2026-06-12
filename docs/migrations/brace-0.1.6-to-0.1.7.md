@@ -866,8 +866,11 @@ so the command **always printed "Errors 0" and exited 0**, even with unresolved 
    (database-backed via the error store when one is configured; the in-memory recent
    list otherwise) and `recent` holds the **top 5** most recent summaries — using the
    same field names as `/ops/errors` (`errorType`, `occurrenceCount`), with **no
-   `stackTrace`**. When a database backs the store, each entry carries `id` for the
-   `/ops/errors/{id}` drill-down.
+   `stackTrace`**. Every entry carries `id` for the `/ops/errors/{id}` drill-down —
+   database-backed or not: apps without a database serve `/ops/errors`,
+   `/ops/errors/{id}` and resolve from the in-memory records, so the stack trace stays
+   reachable remotely and resolving recovers the count (and the `brace status` exit
+   code).
 2. **`timeseries` and `jvm.profiling` are opt-in** via `?include=timeseries,profiling`
    (comma-separated; either alone works). Their shapes are unchanged when requested.
 3. **No more all-zeros stubs.** A profiler-less app previously emitted hardcoded
@@ -1035,6 +1038,12 @@ Two small additions in the same cleanup: `brace logs` accepts `--limit <n>`
 (passthrough to the server's `?limit=` parameter; server default 200), and the
 `brace new` next-steps text now suggests `brace dev` instead of the old
 `mvn compile exec:java ...` incantation.
+
+Relatedly, `brace dev` launches the app JVM with `-Dbrace.mode=dev` (the old printed
+incantation set this by hand), so the `%dev.` config overrides — the scaffold's
+in-memory H2 database, the dev port — and dev-only behavior like 404 route suggestions
+apply under the command named for them. `brace run` deliberately sets no mode: it is
+the production-style launch.
 
 ## Changed: `brace compile` prints condensed, deduplicated diagnostics
 

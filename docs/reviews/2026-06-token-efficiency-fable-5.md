@@ -96,8 +96,31 @@ informal 2026-06-10 pass that was filed straight into `TODO.md`.
 - `tests/cli/test-distribution.sh` (shell e2e against the packaged zip) run by the
   H7/H8, M10/L4, and H3 agents in their worktrees — all green, including new
   assertions for condensed test output, `brace agents-md`, and the BRACE-OPS scaffold.
-- A code-review pass over the full branch diff is the remaining merge gate (per
-  process step 5).
+- Code-review pass over the full branch diff (process step 5): **done** — see the
+  fix round below; `mvn verify` green again after it.
+
+## Code-review fix round (2026-06-11, post-35/35)
+
+The merge-gate review (multi-agent, adversarially verified: 29 candidates, 1 refuted)
+found regressions the per-finding fixes introduced plus pre-existing issues the branch
+exposed. All confirmed findings fixed, one commit per finding where independent:
+
+| Finding | Commit |
+|---|---|
+| F1 `brace dev` never set `-Dbrace.mode=dev` — fresh scaffold's printed next step crashed on first run; dev-404 dead under its own command | `9c3da2c` |
+| F2 legacy `post(path, params, session)` ignored the explicit session whenever the jar held a minted cookie | `a4d2811` |
+| F3 concise `brace test` dropped container-level failures (`@BeforeAll`, constructor) when a method failure parsed | `dc6590d` |
+| F4 condensed javac diagnostics lost the symbol detail (line 2) and deduped distinct missing symbols into one line | `3c90422` |
+| F5 BeforeSession mutations silently dropped on static-file and 404 paths | `a28612b` |
+| F6 `buildSession` consumed flash for any guarded route — racing polls and the `requireSession` redirect destroyed pending flash | `a745609` |
+| F7+F8 no-database apps: `errors.count` never shrank (status red until restart) and stack traces were remotely unreachable — `/ops/errors{,/{id},/{id}/resolve}` now serve the in-memory Stats records with stable ids | `89f3e1f` |
+| F9 `autoMode` keyed on `System.console()` instead of `stdoutIsTty()` | `10366a8` |
+| F10 `-Dlog.level.<logger>=DEBUG/TRACE` was a silent no-op (ConsoleHandler stayed at INFO) | `62f6614` |
+| `requireSession` without `.sessions(secret)` now warns at startup (silent guard-loop) | `da8025c` |
+| Live stderr in concise `brace test`; UTF-8 scaffold doc writes; reverse-slf4j-binding + JUL-mutation migration notes | `946e1df` |
+| `ErrorStore.resolve()` reuses `find()` (had drifted); `list()` pushes `since` into SQL + LIMIT 500 | `f9d9b51` |
+| One URL-pair parser (`Request.parsePairs`) behind query/form/multi-value parsing | `bcfaba8` |
+| Unshipped-surface cleanups: `?full=true` → `?include=detail` (one verbosity grammar), read-only typed route names GET-only (`postRead` et al. removed as footguns), profiling block computed only when requested, one in-memory error-summary builder | `50b2079` |
 
 ## User-visible changes
 
