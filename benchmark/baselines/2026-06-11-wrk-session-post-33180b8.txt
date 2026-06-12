@@ -1,0 +1,51 @@
+22:34  up 18 days, 10:30, 7 users, load averages: 28.00 15.29 15.60
+Starting Brace session benchmark app (/Users/matt/code/brace/.claude/worktrees/perf-review/benchmark/target/brace-benchmark-0.2.0-SNAPSHOT.jar)...
+
+=== Brace Session/CSRF Benchmark (wrk -t8 -c256 -d15s) ===
+
+--- Session Read ---
+Running 15s test @ http://localhost:8081/sess/read
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.69ms    3.88ms 128.50ms   95.19%
+    Req/Sec     9.50k     1.73k   29.39k    81.00%
+  Latency Distribution
+     50%    3.15ms
+     75%    3.53ms
+     90%    4.96ms
+     99%   20.56ms
+  1135748 requests in 15.08s, 151.64MB read
+Requests/sec:  75331.82
+Transfer/sec:     10.06MB
+
+--- CSRF Form POST ---
+Running 15s test @ http://localhost:8081/sess/form
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     4.62ms    8.37ms 286.54ms   95.23%
+    Req/Sec     9.41k     2.19k   29.54k    78.78%
+  Latency Distribution
+     50%    3.10ms
+     75%    3.71ms
+     90%    6.95ms
+     99%   44.51ms
+  1123498 requests in 15.10s, 142.50MB read
+Requests/sec:  74381.46
+Transfer/sec:      9.43MB
+
+--- API POST csrf(false) ---
+Running 15s test @ http://localhost:8081/sess/api
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.71ms    4.30ms 127.05ms   95.47%
+    Req/Sec     9.51k     1.81k   22.92k    83.04%
+  Latency Distribution
+     50%    3.13ms
+     75%    3.52ms
+     90%    5.05ms
+     99%   20.06ms
+  1139086 requests in 15.10s, 155.34MB read
+Requests/sec:  75421.24
+Transfer/sec:     10.29MB
+
+Done. Stopping Brace.

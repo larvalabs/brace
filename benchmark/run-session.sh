@@ -17,7 +17,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JAR="${BENCH_JAR:-$SCRIPT_DIR/target/brace-benchmark-0.2.0-SNAPSHOT.jar}"
-PORT=8081
+export PORT=${PORT:-8081}
 WRK_THREADS=${WRK_THREADS:-8}
 WRK_CONNECTIONS=${WRK_CONNECTIONS:-256}
 WRK_DURATION=${WRK_DURATION:-15s}
@@ -41,6 +41,14 @@ for i in $(seq 1 30); do
   fi
   sleep 0.5
 done
+
+# Guard against a stale/foreign process answering on the port (a failed bind
+# would otherwise let wrk measure the wrong server)
+LISTENER=$(lsof -t -iTCP:$PORT -sTCP:LISTEN | head -1)
+if [ "$LISTENER" != "$APP_PID" ]; then
+  echo "FATAL: port $PORT is served by PID ${LISTENER:-none}, not the benchmark app ($APP_PID)" >&2
+  exit 1
+fi
 
 # Prime a session: capture the brace_session cookie and the CSRF token (body)
 HDRS=$(mktemp)

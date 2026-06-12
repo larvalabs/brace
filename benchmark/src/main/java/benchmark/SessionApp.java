@@ -15,7 +15,7 @@ import java.util.Map;
 public class SessionApp {
     public static void main(String[] args) throws Exception {
         var app = Brace.app()
-            .port(8081)
+            .port(Integer.parseInt(System.getenv().getOrDefault("PORT", "8081")))
             .sessions("brace-benchmark-session-secret-0123456789abcdef");
 
         // Prime: establish a session with a value and a CSRF token; body = the token.

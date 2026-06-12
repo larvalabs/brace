@@ -163,16 +163,25 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
 Baseline (`ea76ffa`, pre-fix) → current checkpoint. Updated after each quiet-window run;
 per-checkpoint detail and raw outputs below.
 
-**Current checkpoint: `8b495d5` (H1, H2, M5, M9, M19, L3, L5, L10, L12 applied)**
+**Current checkpoint: `33180b8` (adds H5, H7, M2, M3, M8 to the above)**
 
 | Test | Req/sec | Δ | p99 | Δ | Notes |
 |---|---|---|---|---|---|
-| Plaintext | 67,649 → 67,292 | ~flat | 27.9ms → 21.6ms | −23% | CPU shared with wrk |
-| JSON | 68,964 → 66,321 | ~flat | 45.8ms → 19.8ms | −57% | |
-| Single Query | 25,929 → 26,915 | +4% | 41.4ms → 28.9ms | −30% | |
-| Multiple Queries (20) | 1,281 → 1,761 | **+37%** | 464ms → 227ms | −51% | |
-| Fortunes | 19,920 → 27,454 | **+38%** | **1.23s → 38.9ms** | **−97%** | 51 socket timeouts → 0 |
-| Updates (20) | 1,123 → 1,445 | **+29%** | 633ms → 296ms | −53% | |
+| Plaintext | 67,649 → 76,901 | +14% | 27.9ms → 26.8ms | −4% | CPU shared with wrk |
+| JSON | 68,964 → 78,200 | +13% | 45.8ms → 10.8ms | **−76%** | |
+| Single Query | 25,929 → 27,288 | +5% | 41.4ms → 25.3ms | −39% | |
+| Multiple Queries (20) | 1,281 → 1,696 | **+32%** | 464ms → 296ms | −36% | |
+| Fortunes | 19,920 → 24,305 | **+22%** | **1.23s → 56.7ms** | **−95%** | 51 socket timeouts → 0; see variance caveat |
+| Updates (20) | 1,123 → 1,423 | **+27%** | 633ms → 301ms | −52% | |
+
+Session/CSRF scenario (separate suite, baseline is the `8b495d5` checkpoint — see
+"Session/CSRF scenario" below):
+
+| Test | Req/sec | Δ | p99 | Δ |
+|---|---|---|---|---|
+| Session Read | 74,553 → 75,332 | +1% | 44.0ms → 20.6ms | **−53%** |
+| CSRF Form POST | 73,132 → 74,381 | +2% | 60.4ms → 44.5ms | −26% |
+| API POST csrf(false) | 70,635 → 75,421 | +7% | 85.2ms → 20.1ms | **−76%** |
 
 ## What exists today
 
@@ -256,10 +265,65 @@ pauses landing in the tail. Fortunes (largest responses, most allocation-sensiti
 gained the most throughput. Cumulative vs the pre-fix baseline: Fortunes 19,920 → 27,454
 req/s (+38%) with p99 1.23s → 39ms; Queries(20) +37%; Updates(20) +29%.
 
+### After H5 cluster (H5, H7, M2, M3, M8) — framework `33180b8`
+
+Quiet-window run (1-min load 7.3 at fire, verified <7 for the two prior minutes). Raw
+output: `benchmark/baselines/2026-06-11-wrk-post-H5cluster-33180b8.txt`. Run on port
+8090 — Matt's larva2 dev server (brace 0.1.6) held 8080 and was running, mostly idle,
+throughout; a first attempt on 8080 silently measured that server's 404s, which is why
+`run-brace.sh`/`run-session.sh` now hard-fail unless the port's listener PID is the app
+they just started.
+
+**Variance caveat:** two isolated back-to-back Fortunes re-runs under identical
+conditions returned 21,872 and 26,308 req/s (~±10%), noisier than earlier checkpoints —
+treat all single-digit deltas below, and the apparent Fortunes drop vs the previous
+checkpoint, as noise.
+
+| Test | Req/sec | vs post-H2 | p99 | vs post-H2 |
+|---|---|---|---|---|
+| Plaintext | 76,901 | +14% | 26.8ms | +24% |
+| JSON | 78,200 | +18% | 10.8ms | −45% |
+| Single Query | 27,288 | +1% (noise) | 25.3ms | −12% |
+| Multiple Queries (20) | 1,696 | −4% (noise) | 296ms | +30% (noise) |
+| Fortunes | 24,305 | −11% (noise) | 56.7ms | +46% (noise) |
+| Updates (20) | 1,423 | −2% (noise) | 301ms | flat |
+
+The standard suite never touches sessions, so H5/M2 are invisible here by design;
+the candidates for the real Plaintext/JSON throughput gain are M3 (drops a per-request
+TreeMap copy of all headers — the only hot-path change that fires on every request)
+plus possibly H7 (per-route stats key lookup no longer allocates a redacted path
+string on the success path). Given the variance caveat, confidence is moderate;
+the DB-backed tests are dominated by query time and moved within noise, as expected.
+
+### Session/CSRF scenario — `8b495d5` (pre) vs `33180b8` (post)
+
+First run of the new `run-session.sh` suite (see "What exists today" / gap #2):
+`benchmark.SessionApp`, no database, sessions enabled. wrk sends a primed session
+cookie on every request; the form POST carries a valid `_csrf` token. Before/after
+jars differ **only** in the embedded framework (verified by `BraceHandler.class`
+checksum — note `mvn package` without `clean` silently reuses stale shade output).
+Raw outputs: `benchmark/baselines/2026-06-11-wrk-session-pre-8b495d5.txt`,
+`…-session-post-33180b8.txt`. Pre ran in the quiet window (load 4.0); post ran
+immediately after and shared its window with larva2's JVM startup, biasing
+*against* the improvement — the direction is trustworthy.
+
+| Test | Req/sec (pre → post) | Δ | p99 (pre → post) | Δ |
+|---|---|---|---|---|
+| Session Read | 74,553 → 75,332 | +1% | 44.0ms → 20.6ms | **−53%** |
+| CSRF Form POST | 73,132 → 74,381 | +2% | 60.4ms → 44.5ms | −26% |
+| API POST csrf(false) | 70,635 → 75,421 | +7% | 85.2ms → 20.1ms | **−76%** |
+
+Matches H5's mechanism: throughput is CPU-saturated alongside wrk (like
+plaintext), so the saved crypto shows up in tail latency rather than req/s.
+csrf(false) improves most — post-H5 it performs **zero** session crypto where it
+previously decrypted the cookie per request just in case. Session Read halves its
+p99 (one decrypt instead of two), and the form POST combines one-decrypt with M2's
+single form-body parse.
+
 ## Gaps / what to add for this review
 
 1. ~~**Baseline first (required)**~~ — captured above. `--latency` added to `run-brace.sh`; benchmark module repointed at the current framework version (was a stale unresolvable `0.2.0-SNAPSHOT`) and its `req.param` call updated to the current `req.queryParam` API; script default JDK moved to 25 per AGENTS.md recommendation.
-2. **Session/CSRF scenario (required for H5):** the existing TFB endpoints don't configure `sessionSecret`, so the session-decrypt and CSRF costs are invisible to the current suite. Add a benchmark endpoint with sessions enabled (GET page + form POST with CSRF) to measure H5/M2/M4 before/after.
+2. ~~**Session/CSRF scenario (required for H5)**~~ — done: `benchmark.SessionApp` + `run-session.sh` (session-read GET, CSRF form POST, csrf(false) API POST; primes cookie + token, sanity-checks semantics, verifies the port listener is its own app). Results above.
 3. **JMH micro-module (recommended):** a small, separate non-shipped module (or test-scope profile) with benchmarks for the allocation-sensitive units: route matching (M1), form bind (M4), session decrypt (H5), log line (H1), `redactPath` (M8), `convertPositionalParams` (L6). Use `gc.alloc.rate.norm` to verify allocation fixes (H2, M6) — wrk alone can't see allocation.
 4. **Job-queue scenario (recommended for H3/H4):** a seeded `scheduled_jobs` table (e.g. 1M completed rows + 1k pending) with poll-latency measurement before/after the partial index; a mixed web+jobs load to demonstrate the pool-contention fix.
 5. **Cold-start timing (for M7/M21):** trivial harness — `time` from JVM launch to first successful HTTP response on the sample app (with a Postgres testcontainer for the DB-app case), 5 runs, before/after. Plus first-render latency per template (M7) via the access log.

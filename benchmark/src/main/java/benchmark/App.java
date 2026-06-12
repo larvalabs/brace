@@ -15,7 +15,7 @@ public class App {
             256);
 
         var app = Brace.app()
-            .port(8080)
+            .port(Integer.parseInt(System.getenv().getOrDefault("PORT", "8080")))
             .database(db)
             .templates("benchmark/src/main/resources/views");
 
