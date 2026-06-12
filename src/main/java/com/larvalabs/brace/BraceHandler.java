@@ -8,7 +8,6 @@ import org.eclipse.jetty.server.Response;
 import org.eclipse.jetty.util.Callback;
 
 import java.io.File;
-import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -704,19 +703,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     private Map<String, String> parseQuery(String query) {
-        Map<String, String> params = new LinkedHashMap<>();
-        if (query == null || query.isEmpty()) return params;
-        for (String pair : query.split("&")) {
-            int eq = pair.indexOf('=');
-            if (eq > 0) {
-                params.put(
-                    URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8),
-                    URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8));
-            } else {
-                params.put(URLDecoder.decode(pair, StandardCharsets.UTF_8), "");
-            }
-        }
-        return params;
+        // Single pair parser for query strings and form bodies — see Request.parsePairs.
+        return Request.lastValues(Request.parsePairs(query, true));
     }
 
     /**

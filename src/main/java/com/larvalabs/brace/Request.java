@@ -165,14 +165,16 @@ public class Request {
     }
 
     /**
-     * Collect every value of {@code name} from an {@code &}-separated, URL-encoded pair
-     * string. {@code bareKeyOnLeadingEq} selects the edge-case rule for a pair starting
-     * with '=': {@code true} matches {@link BraceHandler}'s query parsing (whole pair is
-     * the key), {@code false} matches {@link #parseFormBody} (empty key, rest is value).
+     * THE pair parser — every {@code &}-separated, URL-encoded pair string (query string,
+     * form body) goes through here, multi-value and single-value alike, so the split rules
+     * can't drift between copies. Keys map to their values in order of appearance.
+     * {@code bareKeyOnLeadingEq} selects the edge-case rule for a pair starting with '=':
+     * {@code true} is query parsing (the whole pair is the key), {@code false} is form
+     * parsing (empty key, rest is value).
      */
-    private static List<String> valuesOf(String raw, String name, boolean bareKeyOnLeadingEq) {
-        if (raw == null || raw.isEmpty()) return List.of();
-        var values = new java.util.ArrayList<String>();
+    static Map<String, List<String>> parsePairs(String raw, boolean bareKeyOnLeadingEq) {
+        var params = new LinkedHashMap<String, List<String>>();
+        if (raw == null || raw.isEmpty()) return params;
         for (var pair : raw.split("&")) {
             var eq = pair.indexOf('=');
             String key;
@@ -184,9 +186,20 @@ public class Request {
                 key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
                 value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
             }
-            if (key.equals(name)) values.add(value);
+            params.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(value);
         }
-        return values.isEmpty() ? List.of() : List.copyOf(values);
+        return params;
+    }
+
+    /** Single-value view of {@link #parsePairs}: first-appearance key order, last value wins. */
+    static Map<String, String> lastValues(Map<String, List<String>> pairs) {
+        var out = new LinkedHashMap<String, String>();
+        pairs.forEach((k, v) -> out.put(k, v.get(v.size() - 1)));
+        return out;
+    }
+
+    private static List<String> valuesOf(String raw, String name, boolean bareKeyOnLeadingEq) {
+        return parsePairs(raw, bareKeyOnLeadingEq).getOrDefault(name, List.of());
     }
 
     // JSON request helpers
@@ -437,19 +450,7 @@ public class Request {
     }
 
     private static Map<String, String> parseFormBody(String body) {
-        var params = new LinkedHashMap<String, String>();
-        if (body == null || body.isEmpty()) return params;
-        for (var pair : body.split("&")) {
-            var eq = pair.indexOf('=');
-            if (eq < 0) {
-                params.put(URLDecoder.decode(pair, StandardCharsets.UTF_8), "");
-            } else {
-                var key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
-                var value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
-                params.put(key, value);
-            }
-        }
-        return params;
+        return lastValues(parsePairs(body, false));
     }
 
     void setStorage(Storage storage) {
