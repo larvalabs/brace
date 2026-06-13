@@ -50,3 +50,22 @@ wrk -t8 -c256 -d15s http://localhost:8080/updates?queries=20
 
 Use the Spring Boot TFB implementation from the TechEmpower repo:
 https://github.com/TechEmpower/FrameworkBenchmarks/tree/master/frameworks/Java/spring
+
+## Allocation micro-benchmarks (JMH)
+
+wrk measures throughput and latency but cannot see per-operation allocation. The JMH harness in
+`src/main/java/benchmark/jmh/` fills that gap (the `gc.alloc.rate.norm` profiler reports bytes
+allocated per op), for the allocation-sensitive units the runtime-performance review targets.
+
+```bash
+# From the repo root (the template path is repo-root-relative). Installs the framework, rebuilds
+# the benchmark jar, and runs every benchmark.jmh.* benchmark with the GC profiler attached.
+./benchmark/run-jmh.sh
+
+# Or a subset, by include-regex:
+./benchmark/run-jmh.sh RenderAllocBench
+```
+
+`RenderAllocBench` quantifies M6 (render straight to UTF-8 bytes vs the old String→getBytes path)
+for both template and JSON rendering. Add new `@Benchmark` classes under `benchmark.jmh` and the
+runner discovers them by package.

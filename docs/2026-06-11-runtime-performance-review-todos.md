@@ -383,11 +383,49 @@ previously decrypted the cookie per request just in case. Session Read halves it
 p99 (one decrypt instead of two), and the form POST combines one-decrypt with M2's
 single form-body parse.
 
+### JMH allocation micro-benchmarks (M6 / gap #3) — framework `a62f737`
+
+First run of the JMH harness (`benchmark/src/main/java/benchmark/jmh/`, run via `run-jmh.sh` →
+`benchmark.jmh.JmhRunner`, GC profiler always attached). `RenderAllocBench` renders the Fortunes
+page two ways — the exact before/after of M6 isolated to the render unit: a jte engine *without*
+`binaryStaticContent` (StringOutput → `toString()` → `getBytes`, the three-pass materialization)
+vs *with* it (Utf8ByteOutput → `toByteArray`). JSON pair mirrors `Json.of`: `writeValueAsString()
+.getBytes()` vs `writeValueAsBytes()`. `gc.alloc.rate.norm` is deterministic (±0.001 B/op across
+iterations); the µs/op figures were not captured on a guaranteed-quiet machine but variance was
+±3%. JDK 25.
+
+| Path | rows | Alloc pre → post (B/op) | Δ alloc | Time pre → post (µs/op) | Δ time |
+|---|---|---|---|---|---|
+| View render | 12 | 34,008 → 14,184 | **−58%** | 5.22 → 4.52 | −13% |
+| View render | 100 | 127,187 → 107,432 | −16% | 45.19 → 28.56 | **−37%** |
+| JSON serialize | 12 | 8,560 → 1,656 | **−81%** | 2.34 → 1.42 | −39% |
+| JSON serialize | 100 | 67,904 → 18,448 | **−73%** | 20.59 → 11.65 | **−43%** |
+
+Mechanism confirmations:
+- **The View static-content saving is a near-constant ~19.8 KB/render** (34,008−14,184 = 19,824;
+  127,187−107,432 = 19,755) regardless of row count — exactly what `binaryStaticContent` predicts:
+  it eliminates the StringBuilder `char[]` (2 bytes/char) + the intermediate `String` for the
+  *static* template chunks, a fixed cost. So the *percentage* win shrinks as dynamic content (the
+  per-row messages, encoded either way) grows to dominate — biggest on small/static-heavy pages.
+- **JSON is the larger allocation win (−73% to −81%):** `writeValueAsString` builds a full `String`
+  (plus Jackson's intermediate char buffers) and `getBytes` re-encodes; `writeValueAsBytes` writes
+  UTF-8 straight to a byte buffer. The per-render byte body the page cache stores also shrinks.
+- **Time dropped more than the review predicted.** The finding (and the M6 discussion) framed M6 as
+  "mostly GC pressure, a little CPU." The micro-bench shows a substantial *CPU* cut too — render
+  −37% and JSON −43% at 100 rows — from skipping the 2-byte-per-char StringBuilder and the second
+  encode pass. At the app level this is diluted by the rest of request handling (routing, DB, socket),
+  so it won't move whole-request throughput by 37%, but it's more than the "secondary" CPU effect
+  originally claimed. wrk's Fortunes line is where any throughput component of this would show.
+
+The harness covers M6 today; the other gap-#3 units (route match M1, form bind M4, session decrypt
+H5, log line H1, `redactPath` M8, `convertPositionalParams` L6) can be added as sibling `@Benchmark`
+classes — the runner discovers them by package.
+
 ## Gaps / what to add for this review
 
 1. ~~**Baseline first (required)**~~ — captured above. `--latency` added to `run-brace.sh`; benchmark module repointed at the current framework version (was a stale unresolvable `0.2.0-SNAPSHOT`) and its `req.param` call updated to the current `req.queryParam` API; script default JDK moved to 25 per AGENTS.md recommendation.
 2. ~~**Session/CSRF scenario (required for H5)**~~ — done: `benchmark.SessionApp` + `run-session.sh` (session-read GET, CSRF form POST, csrf(false) API POST; primes cookie + token, sanity-checks semantics, verifies the port listener is its own app). Results above.
-3. **JMH micro-module (recommended):** a small, separate non-shipped module (or test-scope profile) with benchmarks for the allocation-sensitive units: route matching (M1), form bind (M4), session decrypt (H5), log line (H1), `redactPath` (M8), `convertPositionalParams` (L6). Use `gc.alloc.rate.norm` to verify allocation fixes (H2, M6) — wrk alone can't see allocation.
+3. **JMH micro-module (recommended):** ~~harness built~~ — `benchmark/src/main/java/benchmark/jmh/` (`JmhRunner` + GC profiler, `run-jmh.sh`; JMH wired into the existing `brace-benchmark` module via explicit `annotationProcessorPaths`, required on JDK 23+). `RenderAllocBench` verifies **M6** (View −58%/−16% alloc by page size, JSON −73%/−81%; results above). Still to add as sibling `@Benchmark` classes for the other allocation-sensitive units: route matching (M1), form bind (M4), session decrypt (H5), log line (H1), `redactPath` (M8), `convertPositionalParams` (L6), and **H2** (request body buffer — needs a mock-request path, more involved than the pure-unit benches). Use `gc.alloc.rate.norm` — wrk alone can't see allocation.
 4. ~~**Job-queue scenario (recommended for H3/H4)**~~ — both halves done. Claim latency (`JobsBench` + `run-jobs-claim.sh`): empty poll −99%, stats −82%, drain −98%/job. Mixed web+jobs (`JobsApp` + `run-jobs-mixed.sh`): contended /ping-db 1,578 → 7,260 req/s, 256 → 0 socket timeouts. Results + a cross-run contamination incident recorded above.
 5. **Cold-start timing (for M7/M21):** trivial harness — `time` from JVM launch to first successful HTTP response on the sample app (with a Postgres testcontainer for the DB-app case), 5 runs, before/after. Plus first-render latency per template (M7) via the access log.
 6. **Not adding:** CI perf gates (too flaky on shared runners — keep the protocol manual and documented), percentile tracking inside `Stats` (a feature, not a review fix; note as a candidate follow-up for the ops dashboard).
