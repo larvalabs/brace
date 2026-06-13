@@ -80,6 +80,48 @@ public class ProjectGenerator {
             <scope>test</scope>
         </dependency>
     </dependencies>
+    <build>
+        <finalName>""" + name + """
+</finalName>
+        <plugins>
+            <!-- Shade bundles all dependencies into one runnable jar, so the
+                 Dockerfile's `java -jar` works without a lib/ directory. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer
+                                    implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>app.App</mainClass>
+                                </transformer>
+                                <!-- Hibernate / Jakarta service-loader files must be
+                                     merged across jars or they clobber. -->
+                                <transformer
+                                    implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
 """);
 
@@ -252,7 +294,9 @@ h1 { margin-bottom: 1rem; }
                 "# so the JDK's compiler never runs in production.\n" +
                 "FROM eclipse-temurin:25-jre\n" +
                 "WORKDIR /app\n" +
-                "COPY target/*.jar app.jar\n" +
+                "# `mvn package` builds this shaded (all-dependencies) jar; the exact name\n" +
+                "# matters because shade also leaves an original-*.jar in target/.\n" +
+                "COPY target/" + name + ".jar app.jar\n" +
                 "COPY application.conf.example application.conf\n" +
                 "# Run `brace compile` before `docker build` — it writes target/jte-classes,\n" +
                 "# which prod mode loads instead of compiling templates at runtime.\n" +
