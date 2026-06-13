@@ -14,7 +14,11 @@ public class Router {
     private final Map<String, List<Route>> dynamicRoutes = new HashMap<>();
 
     public Route add(String method, String pattern, Handler handler) {
-        return register(new Route(method, pattern, handler));
+        // L1: build the plain-Handler invoker once at registration — every other handler type
+        // already does (Brace.get(DbHandler) etc.), but this overload (used by Brace.get(Handler),
+        // RouteGroup, and the /ops/* routes) previously left it null, forcing BraceHandler to
+        // allocate a fresh Invoker.fromFunction on every request.
+        return register(new Route(method, pattern, handler, Invoker.fromFunction(handler)));
     }
 
     public Route add(String method, String pattern, Object handler, Invoker invoker) {
