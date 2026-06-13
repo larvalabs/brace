@@ -29,6 +29,15 @@ class TemplatePrecompilerTest {
             assertTrue(engine.render("hello", Map.of()).contains("Hello from JTE!"));
             assertTrue(engine.render("params", Map.of("name", "Alice", "count", 42))
                     .contains("Hello Alice"));
+
+            // M6: the View render path goes through renderToBytes (Utf8ByteOutput). Exercise it against
+            // the precompiled classes, which TemplatePrecompiler generated with binaryStaticContent — so
+            // static chunks arrive as byte[] writeBinaryContent calls. Verify correct UTF-8 bytes,
+            // including a multibyte param, straight off the precompiled class.
+            byte[] bytes = engine.renderToBytes("unicode", Map.of("name", "Renée"));
+            String decoded = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(decoded.contains("日本語 — 🚀 — Hello Renée"), decoded);
+            assertEquals(decoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length, bytes.length);
         } finally {
             System.clearProperty("brace.mode");
             System.clearProperty("brace.templates.precompiled");

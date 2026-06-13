@@ -16,7 +16,8 @@ public class Json extends Result {
     private static final ConcurrentHashMap.KeySetView<Class<?>, Boolean> warnedClasses =
         ConcurrentHashMap.newKeySet();
 
-    private Json(int status, String body) {
+    // M6: body held as UTF-8 bytes from writeValueAsBytes — Jackson encodes once, straight to the wire.
+    private Json(int status, byte[] body) {
         super(status, "application/json", body);
     }
 
@@ -27,7 +28,7 @@ public class Json extends Result {
     public static Json of(Object value, int status) {
         warnIfEntity(value);
         try {
-            return new Json(status, MAPPER.writeValueAsString(value));
+            return new Json(status, MAPPER.writeValueAsBytes(value));
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize JSON", e);
         }

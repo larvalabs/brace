@@ -1,5 +1,6 @@
 package com.larvalabs.brace;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,7 +24,8 @@ public class Result {
         this.body = body;
     }
 
-    private Result(int status, String contentType, byte[] rawBytes) {
+    // Package-private (not private): Json extends Result and serializes straight to UTF-8 bytes (M6).
+    Result(int status, String contentType, byte[] rawBytes) {
         this.status = status;
         this.contentType = contentType;
         this.rawBytes = rawBytes;
@@ -122,21 +124,39 @@ public class Result {
 
     public int status() { return status; }
     public String contentType() { return contentType; }
-    public String body() { materialize(); return body; }
-    public byte[] rawBytes() { return rawBytes; }
+
+    /**
+     * The response body as a String. When the body is held as raw UTF-8 bytes (a {@link View} render or
+     * a {@link Json} serialization — M6, which writes bytes directly to avoid a String round-trip on the
+     * hot path), it is decoded on demand and memoized. The wire path ({@code writeResult}) and the page
+     * cache read {@link #rawBytes()} first, so this decode runs only for a caller that actually wants the
+     * String form (e.g. a body-rewriting after-middleware).
+     */
+    public String body() {
+        materialize();
+        if (body == null && rawBytes != null) {
+            body = new String(rawBytes, StandardCharsets.UTF_8);
+        }
+        return body;
+    }
+
+    public byte[] rawBytes() { materialize(); return rawBytes; }
 
     /**
      * Renders any deferred body (M12). A plain {@code Result} is already materialized, so this is a
      * no-op; {@link View} overrides it to run the template engine. The framework calls this once after
      * the request transaction commits and its DB connection is released, so template rendering — which
      * touches no transactional state under StatelessSession — no longer holds a pooled connection.
-     * Also invoked lazily by {@link #body()} so any earlier reader (a body-rewriting after-middleware,
-     * the page cache snapshot) still sees a fully rendered response. Idempotent.
+     * Also invoked lazily by {@link #body()} / {@link #rawBytes()} so any earlier reader (a body-rewriting
+     * after-middleware, the page cache snapshot) still sees a fully rendered response. Idempotent.
      */
     void materialize() {}
 
-    /** Sets the body produced by a deferred {@link #materialize()} render. */
+    /** Sets a deferred {@link #materialize()} body as a String (stub renders, no template engine). */
     void setRenderedBody(String rendered) { this.body = rendered; }
+
+    /** Sets a deferred {@link #materialize()} body as raw UTF-8 bytes (M6: the rendered-to-bytes path). */
+    void setRenderedBytes(byte[] rendered) { this.rawBytes = rendered; }
     public Map<String, String> headers() { return headers; }
 
     /** All {@code Set-Cookie} values for this response, in the order they were added. */

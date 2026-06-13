@@ -33,7 +33,7 @@ public class View extends Result {
     private boolean rendered;
 
     private View(String template, Map<String, Object> params) {
-        super(200, "text/html", null);
+        super(200, "text/html", (String) null);
         this.template = template;
         this.params = params;
     }
@@ -78,13 +78,13 @@ public class View extends Result {
             return;
         }
         rendered = true;
-        String html;
         if (engine != null) {
-            html = engine.render(template, params);
+            // M6: render straight to UTF-8 bytes — the wire path reads rawBytes() with no String
+            // round-trip or second encode. body() decodes lazily if a caller wants the String form.
+            setRenderedBytes(engine.renderToBytes(template, params));
         } else {
-            html = "[Template: " + template + " | Params: " + params.keySet() + "]";
+            setRenderedBody("[Template: " + template + " | Params: " + params.keySet() + "]");
         }
-        setRenderedBody(html);
     }
 
     public static String render(String template, Object... keyValues) {

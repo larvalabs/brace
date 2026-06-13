@@ -43,6 +43,9 @@ public final class TemplatePrecompiler {
         var engine = gg.jte.TemplateEngine.create(
                 new DirectoryCodeResolver(templates), output, ContentType.Html,
                 null, Constants.PACKAGE_NAME_PRECOMPILED);
+        // M6: generate byte[] static content so the prod createPrecompiled runtime renders to a
+        // Utf8ByteOutput with no per-render charset encoding. Must be set before precompileAll().
+        engine.setBinaryStaticContent(true);
         engine.precompileAll();
         // Written last: a marker only exists for a complete, successful run. The path is
         // recorded as given (normalized, NOT absolutized): builds and deploys run from
