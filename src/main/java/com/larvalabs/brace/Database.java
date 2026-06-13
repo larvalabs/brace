@@ -5,6 +5,7 @@ import org.hibernate.query.MutationQuery;
 import org.hibernate.query.Query;
 
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 /**
@@ -385,7 +386,25 @@ public class Database {
      * operator) can be escaped as {@code ??}, which emits a single {@code ?}. For fully
      * hand-written SQL, {@link #jdbc(JdbcConsumer)} is the raw escape hatch.
      */
+    // L6: the rewrite is a pure function of the input string and the inputs are almost always
+    // code literals (a naturally small, bounded set), so memoize it instead of re-scanning on
+    // every execution. Bounded — once the cache is full we stop adding entries and fall back to a
+    // fresh scan, so a caller that builds dynamic query strings (e.g. queryIn's per-IN-size HQL,
+    // L7) can't grow it without limit.
+    private static final int PARAM_CACHE_MAX = 1000;
+    private static final ConcurrentHashMap<String, String> PARAM_CACHE = new ConcurrentHashMap<>();
+
     String convertPositionalParams(String hql) {   // package-private for direct unit testing
+        String cached = PARAM_CACHE.get(hql);
+        if (cached != null) return cached;
+        String converted = scanPositionalParams(hql);
+        if (PARAM_CACHE.size() < PARAM_CACHE_MAX) {
+            PARAM_CACHE.putIfAbsent(hql, converted);
+        }
+        return converted;
+    }
+
+    private static String scanPositionalParams(String hql) {
         var sb = new StringBuilder(hql.length() + 8);
         int paramIndex = 1;
         int n = hql.length();
