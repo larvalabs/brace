@@ -299,12 +299,23 @@ public class Request {
         if (colonCount == 1) {
             int colon = addr.lastIndexOf(':');
             var portPart = addr.substring(colon + 1);
-            // Only strip if the suffix looks like a decimal port number
-            if (portPart.matches("\\d+")) {
+            // Only strip if the suffix looks like a decimal port number. Hand-rolled digit check
+            // avoids compiling a fresh regex Pattern on every ip() resolution (L4).
+            if (isAllDigits(portPart)) {
                 return addr.substring(0, colon);
             }
         }
         return addr;
+    }
+
+    /** True for a non-empty string of ASCII digits only — a regex-free {@code matches("\\d+")}. */
+    private static boolean isAllDigits(String s) {
+        if (s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
     }
 
     private String extractForwardedFor(String forwarded) {
