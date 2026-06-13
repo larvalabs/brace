@@ -42,12 +42,14 @@ public class TemplateEngine {
         if (System.getProperty("brace.templates.precompiled") != null) {
             return Files.isDirectory(dir);
         }
-        // Default location: only use it if the brace CLI generated it from this same
-        // template directory (see TemplatePrecompiler.SOURCE_MARKER) — otherwise fall
-        // back to compiling from source rather than serving mismatched templates.
+        // Default location: only use it if it was generated from this same template
+        // directory (see TemplatePrecompiler.SOURCE_MARKER) — otherwise fall back to
+        // compiling from source rather than serving mismatched templates. Compared as
+        // given (not absolutized) so classes precompiled on a build host load in a
+        // container with a different working directory.
         try {
             String source = Files.readString(dir.resolve(TemplatePrecompiler.SOURCE_MARKER)).trim();
-            return Path.of(source).equals(Path.of(templatePath).toAbsolutePath().normalize());
+            return Path.of(source).equals(Path.of(templatePath).normalize());
         } catch (IOException e) {
             return false;
         }

@@ -44,9 +44,11 @@ public final class TemplatePrecompiler {
                 new DirectoryCodeResolver(templates), output, ContentType.Html,
                 null, Constants.PACKAGE_NAME_PRECOMPILED);
         engine.precompileAll();
-        // Written last: a marker only exists for a complete, successful run.
-        Files.writeString(output.resolve(SOURCE_MARKER),
-                templates.toAbsolutePath().normalize().toString());
+        // Written last: a marker only exists for a complete, successful run. The path is
+        // recorded as given (normalized, NOT absolutized): builds and deploys run from
+        // different roots (host project dir vs container WORKDIR, Docker build stage vs
+        // runtime stage), but both resolve the same project-relative "views".
+        Files.writeString(output.resolve(SOURCE_MARKER), templates.normalize().toString());
     }
 
     private static void deleteRecursively(Path dir) throws IOException {

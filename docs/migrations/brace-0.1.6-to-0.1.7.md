@@ -1219,3 +1219,28 @@ production for nothing. Now:
 other than `views/` or `templates/`, prod startup eager-compiles them (correct, just
 slower to boot) — move them to a conventional directory or point
 `brace.templates.precompiled` at your own precompiled output to get the full win.
+
+### Deploying with Docker (or any non-CLI launch)
+
+Until now, a containerized Brace app that renders templates needed a **full JDK
+runtime image**: dev-mode JTE compiles each template on first render via
+`javax.tools.JavaCompiler`, which JRE images don't ship (`eclipse-temurin:*-jre`
+has no `jdk.compiler` module — first render fails). Precompiling removes that
+requirement. To convert a deployment:
+
+1. **Precompile during your image build** (or on the host before `docker build`):
+   - CLI projects: `brace compile` writes `target/jte-classes`.
+   - Maven/shaded-jar projects: the precompiler is on your classpath —
+     `java -cp target/myapp.jar com.larvalabs.brace.TemplatePrecompiler views target/jte-classes`.
+2. **Copy it into the runtime image:** `COPY target/jte-classes/ target/jte-classes/`.
+3. **Run in prod mode:** `CMD ["java", "-Dbrace.mode=prod", "-jar", "app.jar"]`.
+4. **Drop to a JRE base image** (e.g. `eclipse-temurin:25-jre`) — smaller, and
+   nothing in prod needs the compiler anymore.
+
+The `.source-templates` marker records the template path *relative to the project
+root*, so classes precompiled on a build host (or in a Docker build stage) load in
+a container with a different absolute working directory. If you keep a JDK runtime
+image and skip steps 1–2, prod mode still works — it eager-compiles all templates
+at startup (slower boot, same steady-state behavior).
+
+Newly scaffolded projects (`brace new`) get a Dockerfile with all of this in place.

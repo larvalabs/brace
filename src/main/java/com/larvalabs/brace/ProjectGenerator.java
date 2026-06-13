@@ -248,16 +248,21 @@ h1 { margin-bottom: 1rem; }
 
             // Dockerfile
             Files.writeString(root.resolve("Dockerfile"),
-                "FROM eclipse-temurin:21-jre\n" +
+                "# A JRE image is enough: templates are precompiled at build time (below),\n" +
+                "# so the JDK's compiler never runs in production.\n" +
+                "FROM eclipse-temurin:25-jre\n" +
                 "WORKDIR /app\n" +
                 "COPY target/*.jar app.jar\n" +
                 "COPY application.conf.example application.conf\n" +
+                "# Run `brace compile` before `docker build` — it writes target/jte-classes,\n" +
+                "# which prod mode loads instead of compiling templates at runtime.\n" +
+                "COPY target/jte-classes/ target/jte-classes/\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +
                 "COPY migrations/ migrations/\n" +
                 "EXPOSE 8080\n" +
                 "# Pass secrets via env vars: docker run -e SESSION_SECRET=... -e DB_PASS=...\n" +
-                "CMD [\"java\", \"-jar\", \"app.jar\"]\n");
+                "CMD [\"java\", \"-Dbrace.mode=prod\", \"-jar\", \"app.jar\"]\n");
 
             // CLAUDE.md — capability index with pointers to full reference
             ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));

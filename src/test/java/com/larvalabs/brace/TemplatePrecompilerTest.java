@@ -50,19 +50,25 @@ class TemplatePrecompilerTest {
     void markerMustMatchTemplateDirAtDefaultLocation(@TempDir Path dir) throws Exception {
         assertNull(System.getProperty("brace.templates.precompiled"), "test assumes default location");
         Path target = Files.createDirectory(dir.resolve("jte-classes"));
+        Path marker = target.resolve(TemplatePrecompiler.SOURCE_MARKER);
 
         // No marker at all → not usable.
-        assertFalse(TemplateEngine.hasPrecompiledClasses(target, VIEWS));
+        assertFalse(TemplateEngine.hasPrecompiledClasses(target, "views"));
 
         // Marker from a different template dir → not usable.
-        Files.writeString(target.resolve(TemplatePrecompiler.SOURCE_MARKER),
-                dir.resolve("other-views").toAbsolutePath().normalize().toString());
-        assertFalse(TemplateEngine.hasPrecompiledClasses(target, VIEWS));
+        Files.writeString(marker, "other-views");
+        assertFalse(TemplateEngine.hasPrecompiledClasses(target, "views"));
 
-        // Marker matching this template dir → usable.
-        Files.writeString(target.resolve(TemplatePrecompiler.SOURCE_MARKER),
-                Path.of(VIEWS).toAbsolutePath().normalize().toString());
-        assertTrue(TemplateEngine.hasPrecompiledClasses(target, VIEWS));
+        // Marker matching this template dir → usable. The comparison is over the
+        // relative path as given, so classes precompiled on a build host match in a
+        // container with a different working directory; "./views" normalizes too.
+        Files.writeString(marker, "views");
+        assertTrue(TemplateEngine.hasPrecompiledClasses(target, "views"));
+        assertTrue(TemplateEngine.hasPrecompiledClasses(target, "./views"));
+
+        // An absolute template path never matches a relative marker (safe fallback).
+        assertFalse(TemplateEngine.hasPrecompiledClasses(target,
+                dir.resolve("views").toAbsolutePath().toString()));
     }
 
     @Test
