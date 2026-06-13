@@ -2,7 +2,6 @@ package com.larvalabs.brace;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArraySet;
 
 /**
  * Per-instance WebSocket room registry and broadcast fan-out. Holds the set of room members
@@ -36,7 +35,12 @@ final class WsRegistry {
     }
 
     void join(String room, WsContext ctx) {
-        rooms.computeIfAbsent(room, k -> new CopyOnWriteArraySet<>()).add(ctx);
+        // L15: ConcurrentHashMap.newKeySet() gives O(1) add/remove on join/leave, vs the O(n)
+        // array copy CopyOnWriteArraySet paid on every membership change (quadratic for a
+        // high-churn room). Its iterator is weakly consistent, which is still safe for the
+        // lock-free broadcast fan-out in deliverLocal — a just-joined/just-left member may or may
+        // not be seen for an in-flight broadcast, the same tolerance the snapshot iterator had.
+        rooms.computeIfAbsent(room, k -> ConcurrentHashMap.newKeySet()).add(ctx);
     }
 
     void leave(String room, WsContext ctx) {
