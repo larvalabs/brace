@@ -172,7 +172,18 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
 Baseline (`ea76ffa`, pre-fix) → current checkpoint. Updated after each quiet-window run;
 per-checkpoint detail and raw outputs below.
 
-**Current checkpoint: `a62f737` (adds M1, M10, M13, M16, M20, M7, M12, M6 since `33180b8`)**
+**FINAL checkpoint: `d89cf90` (merge-gate run; adds the Low batch — L21/L4/L6/L1/L2/L18/L15/L17 — since `a62f737`)**
+
+| Test | Req/sec | Δ | p99 | Δ | Notes |
+|---|---|---|---|---|---|
+| Plaintext | 67,649 → 76,417 | +13% | 27.9ms → 4.71ms | −83% | CPU-saturated w/ wrk; p99 flattered by clean machine (see caveats) |
+| JSON | 68,964 → 76,630 | +11% | 45.8ms → 4.82ms | −89% | M6 byte path |
+| Single Query | 25,929 → 31,356 | +21% | 41.4ms → 17.0ms | −59% | |
+| Multiple Queries (20) | 1,281 → 1,867 | **+46%** | 464ms → 214ms | −54% | |
+| Fortunes | 19,920 → 30,438 | **+53%** | **1.23s → 32.9ms** | **−97%** | template render path (M6/M7) |
+| Updates (20) | 1,123 → 1,515 | **+35%** | 633ms → 286ms | −55% | |
+
+vs the prior `a62f737` checkpoint the Low batch is flat-to-slightly-up (Plaintext/JSON +0.5–0.8% = noise; Single Query +6.6%, Multiple Queries +6.1%, Fortunes +8.1%, Updates +3.6% — within the recorded ±10% single-run variance). Expected: the Low batch (static-file caching, IP parse, HQL memo, invoker alloc, Assets, WS set, ErrorStore SQL) barely touches the TFB hot paths, so the headline is that the cumulative gains **hold with no regression**. Previous checkpoint `a62f737` table:
 
 | Test | Req/sec | Δ | p99 | Δ | Notes |
 |---|---|---|---|---|---|
@@ -428,6 +439,38 @@ runs without `brace.mode=prod`, so it's dev-mode on-demand compile *with* M6's b
   plus M7/M1, though this run can't separate them. Cumulatively Fortunes is +41% req/s and 1.23s → 35ms
   p99 (−97%) vs the pre-review baseline.
 - Not comparable to `benchmark/RESULTS.md` (different machine/JDK); within-review only.
+
+### FINAL merge-gate macro checkpoint (Low batch) — framework `d89cf90`
+
+Full `run-brace.sh` suite on port 8080 (tfb-postgres on 5433, JDK 25). Closes out the review: folds
+in the Low batch since `a62f737` — L21 (static-file Cache-Control/ETag + conditional GET), L4 (IP
+parse), L6 (HQL-rewrite memo), L1 (plain-Handler invoker built once), L2, L18 (Assets base-path
+hoist), L15 (WS room set), L17 (ErrorStore since-pushdown). Build discipline followed: `mvn install
+-DskipTests` at root → `mvn clean package` in benchmark; embedded `BraceHandler.class` checksum
+verified identical to the freshly-installed framework jar (L21's `isNotModified` present). Single run.
+Quiet-window gate passed (1-min load 6.07 → 4.64 across two consecutive minutes; fired at 4.64).
+Port 8080 was free this run — no foreign server to contaminate it. Raw output:
+`benchmark/baselines/2026-06-13-wrk-final-d89cf90.txt`.
+
+| Test | Req/sec (vs `a62f737`) | p99 | vs baseline `ea76ffa` |
+|---|---|---|---|
+| Plaintext | 76,417 (+0.5%, noise) | 4.71ms | +13% req/s, p99 27.9ms → 4.71ms (−83%) |
+| JSON | 76,630 (+0.8%, noise) | 4.82ms | +11% req/s, p99 45.8ms → 4.82ms (−89%) |
+| Single Query | 31,356 (+6.6%) | 17.0ms (1 socket timeout) | +21% req/s, p99 41.4ms → 17.0ms (−59%) |
+| Multiple Queries (20) | 1,867 (+6.1%) | 214ms | **+46%** req/s, p99 464ms → 214ms (−54%) |
+| Fortunes | 30,438 (+8.1%) | 32.9ms | **+53%** req/s, p99 **1.23s → 32.9ms (−97%)** |
+| Updates (20) | 1,515 (+3.6%) | 286ms | **+35%** req/s, p99 633ms → 286ms (−55%) |
+
+**Reading the deltas:** vs the prior checkpoint everything is flat-to-modestly-up and inside the
+recorded ±10% single-run variance — expected, because the Low batch targets paths the TFB suite barely
+exercises (static-file caching, IP/CIDR parsing, the HQL-rewrite memo, per-request invoker allocation,
+Asset URL fingerprinting, the WS room set, the ErrorStore admin query). None of those sit on the
+plaintext/json/db/fortunes/updates hot path except marginally (L1/L6). So the result to take away is
+**the cumulative review gains hold with no regression** from the Low batch: vs the pre-review baseline,
++11–53% req/s across the board and the Fortunes tail down from 1.23s to 33ms (−97%). The single Single
+Query socket timeout is the same negligible tail blip prior DB-endpoint runs showed; no other socket
+errors. Same machine/JDK caveats as the `a62f737` checkpoint apply (single sample; plaintext/JSON are
+CPU-bound shared with wrk; not comparable to `benchmark/RESULTS.md`).
 
 ### JMH allocation micro-benchmarks (M6 / gap #3) — framework `a62f737`
 
