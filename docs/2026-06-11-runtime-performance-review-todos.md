@@ -168,7 +168,18 @@ group of related fixes; JMH micro-benchmarks for allocation-sensitive fixes.
 Baseline (`ea76ffa`, pre-fix) → current checkpoint. Updated after each quiet-window run;
 per-checkpoint detail and raw outputs below.
 
-**Current checkpoint: `33180b8` (adds H5, H7, M2, M3, M8 to the above)**
+**Current checkpoint: `a62f737` (adds M1, M10, M13, M16, M20, M7, M12, M6 since `33180b8`)**
+
+| Test | Req/sec | Δ | p99 | Δ | Notes |
+|---|---|---|---|---|---|
+| Plaintext | 67,649 → 76,054 | +12% | 27.9ms → 4.46ms | −84% | CPU-saturated w/ wrk; p99 flattered by clean machine (see caveats) |
+| JSON | 68,964 → 76,044 | +10% | 45.8ms → 5.02ms | −89% | M6 byte path |
+| Single Query | 25,929 → 29,418 | +13% | 41.4ms → 20.7ms | −50% | |
+| Multiple Queries (20) | 1,281 → 1,759 | **+37%** | 464ms → 229ms | −51% | |
+| Fortunes | 19,920 → 28,153 | **+41%** | **1.23s → 35.4ms** | **−97%** | template render path (M6/M7); +16% req/s, −38% p99 vs `33180b8` |
+| Updates (20) | 1,123 → 1,462 | **+30%** | 633ms → 291ms | −54% | |
+
+Previous checkpoint `33180b8` (adds H5, H7, M2, M3, M8), for reference:
 
 | Test | Req/sec | Δ | p99 | Δ | Notes |
 |---|---|---|---|---|---|
@@ -382,6 +393,37 @@ csrf(false) improves most — post-H5 it performs **zero** session crypto where 
 previously decrypted the cookie per request just in case. Session Read halves its
 p99 (one decrypt instead of two), and the form POST combines one-decrypt with M2's
 single form-body parse.
+
+### Cumulative macro checkpoint (M-batch + M7 + M12 + M6) — framework `a62f737`
+
+Full `run-brace.sh` suite on port 8090 (tfb-postgres on 5433). This is a **cumulative** run, not an
+M6 isolation — it folds in everything since the `33180b8` checkpoint: M1 (static route index, fires
+on every request), M10, M13, M16, M20, **M7** (templates eager/precompiled — though the benchmark app
+runs without `brace.mode=prod`, so it's dev-mode on-demand compile *with* M6's binaryStaticContent),
+**M12** (render after commit), **M6** (render to bytes). Single run.
+
+| Test | Req/sec (vs `33180b8`) | p99 (vs `33180b8`) |
+|---|---|---|
+| Plaintext | 76,054 (−1%, noise) | 4.46ms (was 26.8ms) |
+| JSON | 76,044 (−3%, noise) | 5.02ms (was 10.8ms) |
+| Single Query | 29,418 (+8%) | 20.7ms (was 25.3ms) |
+| Multiple Queries (20) | 1,759 (+4%, noise) | 229ms (was 296ms) |
+| Fortunes | 28,153 (**+16%**) | 35.4ms (**−38%**, was 56.7ms) |
+| Updates (20) | 1,462 (+3%, noise) | 291ms (was 301ms) |
+
+**Caveats (read before trusting the deltas):**
+- **Single sample, not the multi-run protocol.** Treat single-digit % as noise.
+- **Machine at the edge of the quiet gate.** 1-min load 5.65 at fire, but 5/15-min ~7 settling from the
+  JMH/build work just before. Throughput, especially CPU-saturated plaintext/JSON, is machine-sensitive.
+- **The plaintext/JSON p99 collapse (≈27/11ms → 4.5/5ms) is largely a cleaner-machine artifact, not a
+  framework win.** Prior checkpoints sometimes shared the box with Matt's larva2 dev server on 8080;
+  this run had 8090 to itself. Don't attribute that tail drop to M1/M6 — the *throughput* on those two
+  is flat (CPU-bound, shared with wrk), as every prior checkpoint noted.
+- **The trustworthy signal is Fortunes:** +16% req/s and −38% p99 vs the last checkpoint, on the one
+  endpoint that renders a template — consistent with M6 (render to bytes, JMH-measured −37% render time)
+  plus M7/M1, though this run can't separate them. Cumulatively Fortunes is +41% req/s and 1.23s → 35ms
+  p99 (−97%) vs the pre-review baseline.
+- Not comparable to `benchmark/RESULTS.md` (different machine/JDK); within-review only.
 
 ### JMH allocation micro-benchmarks (M6 / gap #3) — framework `a62f737`
 
