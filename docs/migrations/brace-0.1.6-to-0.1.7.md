@@ -1165,3 +1165,27 @@ to … failed`) and counted in `failCount()` (watch it on /ops/status). Keep `se
 where you need the failure synchronously (jobs, scripts, "email or roll back" flows).
 Dev-mode capture works identically for both, but note the async capture races your
 assertion — poll `sentCount()` in tests rather than asserting immediately.
+
+## Changed: `brace dev`/`brace run` now set `brace.mode` (dev/prod) and pass `BRACE_JAVA_OPTS`
+
+**Who is affected:** projects with `%dev.` or `%prod.` keys in `application.conf`,
+and anyone who needs JVM flags on the app process.
+
+Previously the CLI launched the app JVM with no flags at all: `brace.mode` was never
+set, so `Config.load(..., System.getProperty("brace.mode"))` — the scaffolded
+pattern — loaded **base keys only** in every launch, mode prefixes were dead, and
+the startup banner showed mode `—`. Now:
+
+- `brace dev` launches with `-Dbrace.mode=dev` → `%dev.` keys apply.
+- `brace run` launches with `-Dbrace.mode=prod` → `%prod.` keys apply, and the
+  framework selects prod behavior (notably precompiled templates, below).
+- `BRACE_JAVA_OPTS` is passed through to the app JVM, after the mode flag — so
+  `BRACE_JAVA_OPTS="-Xmx512m -Dbrace.mode=dev" brace run` works, and the last
+  `-D` wins for overrides.
+
+**Action required:** check your `application.conf` for `%dev.` keys that have never
+actually applied — they will start applying under `brace dev`. A scaffolded
+`%dev.port=9000` means `brace dev` now serves on 9000 where it previously used the
+base `port`. The same goes for `%prod.` keys under `brace run`. Apps launched some
+other way (Maven exec, systemd, Dokploy custom command) are unaffected unless you
+pass `-Dbrace.mode` yourself.

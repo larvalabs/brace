@@ -70,7 +70,8 @@ No Maven or per-project scripts needed for the dev loop. Maven is only invoked b
 brace new myapp        # scaffold a new project (pins the framework version)
 cd myapp
 brace deps             # populate ./lib/ from pom.xml (one time, requires Maven)
-brace dev              # compile + run + watch for changes
+brace dev              # compile + run + watch for changes (brace.mode=dev)
+brace run              # run in prod mode (brace.mode=prod, %prod. config keys)
 brace test             # run all tests
 brace ops keypair      # generate ops auth keys
 brace ops dashboard    # authenticate and open /ops/dashboard

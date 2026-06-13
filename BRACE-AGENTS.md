@@ -44,9 +44,15 @@ brace deps                                      # populate lib/ from pom.xml (fi
 brace compile                                   # compile
 brace test                                      # run all tests
 brace test app.HomeControllerTest               # run one test class
-brace dev                                       # run with auto-restart on file changes
-brace run                                       # run without watching
+brace dev                                       # run with auto-restart on file changes (brace.mode=dev)
+brace run                                       # run without watching (brace.mode=prod)
 ```
+
+`brace dev` launches the app JVM with `-Dbrace.mode=dev`, `brace run` with
+`-Dbrace.mode=prod` — so `%dev.`/`%prod.` config prefixes select per-mode values and
+the framework picks prod behavior (e.g. precompiled templates) under `brace run`.
+Extra JVM flags for the app go in `BRACE_JAVA_OPTS` (e.g. `BRACE_JAVA_OPTS="-Xmx512m"
+brace run`); flags there override the defaults, including the mode.
 
 ## App Setup
 
@@ -1089,7 +1095,9 @@ db.pass=${DB_PASS}
 %dev.db.url=jdbc:h2:mem:dev
 ```
 
-Load: `Config.load(Path.of("application.conf"), "dev")`. Mode-prefixed keys override base keys.
+Load: `Config.load(Path.of("application.conf"), System.getProperty("brace.mode"))`.
+Mode-prefixed keys override base keys. `brace dev` sets the mode to `dev` and
+`brace run` to `prod`; outside the CLI, pass `-Dbrace.mode=...` yourself.
 
 Methods: `get(key)`, `get(key, default)`, `getInt(key, default)`, `getBool(key, default)`.
 

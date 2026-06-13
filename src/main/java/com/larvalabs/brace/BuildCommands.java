@@ -83,7 +83,7 @@ final class BuildCommands {
         if (compile(cwd) != 0) return 1;
         String mainClass = findMainClass(cwd);
         CliOutput.printInfo("Starting " + mainClass);
-        Process app = new ProcessBuilder("java", "-cp", projectClasspath(cwd), mainClass)
+        Process app = new ProcessBuilder(javaCommand("prod", projectClasspath(cwd), mainClass))
                 .directory(cwd.toFile())
                 .inheritIO()
                 .start();
@@ -142,12 +142,37 @@ final class BuildCommands {
     }
 
     private static Process startApp(Path cwd, String mainClass) throws IOException {
-        Process p = new ProcessBuilder("java", "-cp", projectClasspath(cwd), mainClass)
+        Process p = new ProcessBuilder(javaCommand("dev", projectClasspath(cwd), mainClass))
                 .directory(cwd.toFile())
                 .inheritIO()
                 .start();
         CliOutput.printSuccess("Started (PID " + p.pid() + ")");
         return p;
+    }
+
+    /**
+     * Build the app-JVM launch command. {@code run} starts the app in prod mode and
+     * {@code dev} in dev mode, so {@code System.getProperty("brace.mode")} and the
+     * {@code %dev.}/{@code %prod.} config prefixes work out of the box. Our
+     * {@code -Dbrace.mode} comes before {@code BRACE_JAVA_OPTS} on purpose: for
+     * duplicated -D flags the last one wins, so users can override the mode (or
+     * anything else) per launch via the environment.
+     */
+    static List<String> javaCommand(String mode, String classpath, String mainClass) {
+        return javaCommand(mode, System.getenv("BRACE_JAVA_OPTS"), classpath, mainClass);
+    }
+
+    static List<String> javaCommand(String mode, String opts, String classpath, String mainClass) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("java");
+        cmd.add("-Dbrace.mode=" + mode);
+        if (opts != null && !opts.isBlank()) {
+            cmd.addAll(List.of(opts.trim().split("\\s+")));
+        }
+        cmd.add("-cp");
+        cmd.add(classpath);
+        cmd.add(mainClass);
+        return cmd;
     }
 
     private static void stopApp(Process p) {
