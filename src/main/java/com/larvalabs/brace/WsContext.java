@@ -5,6 +5,8 @@ import org.eclipse.jetty.websocket.api.StatusCode;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * WebSocket context wrapping a Jetty WebSocket session.
@@ -19,6 +21,12 @@ public class WsContext {
     private final Session session; // may be null
     private final WsRegistry registry;
     private final Set<String> joinedRooms = ConcurrentHashMap.newKeySet();
+    // M18 backpressure: bytes handed to Jetty's sendText but not yet flushed to the socket. A slow
+    // client that stops reading makes its frames pile up in Jetty's outgoing queue unboundedly; this
+    // counter bounds that per connection. closed guards both threshold/error closes and close() so we
+    // only close once and stop sending afterward.
+    private final AtomicLong queuedBytes = new AtomicLong();
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     WsContext(org.eclipse.jetty.websocket.api.Session jettySession, Session session, WsRegistry registry) {
         this.jettySession = jettySession;
@@ -27,10 +35,34 @@ public class WsContext {
     }
 
     /**
-     * Send a text message to this connection.
+     * Send a text message to this connection. Applies per-connection backpressure (M18): each send's
+     * size is tracked until Jetty reports the frame flushed (via the callback), and if a connection's
+     * unflushed backlog exceeds the configured cap — i.e. the client is too slow to drain — it is
+     * force-closed with {@code TRY_AGAIN_LATER} rather than buffering without bound. A failed send
+     * (broken connection) likewise stops further sends; Jetty's close/error callback cleans up rooms.
+     * Backpressure is per connection, so a slow client never blocks healthy members of the same room.
      */
     public void send(String message) {
-        jettySession.sendText(message, Callback.NOOP);
+        if (closed.get()) return;
+        // Approximate the queued payload by char count — a cheap proxy for UTF-8 bytes (exact for
+        // ASCII, under-counts multibyte by up to ~3x). This is a safety threshold, not exact accounting,
+        // so the approximation only loosens the effective cap; it never lets the backlog grow unbounded.
+        long size = message.length();
+        if (queuedBytes.get() + size > registry.maxQueuedBytes()) {
+            if (closed.compareAndSet(false, true)) {
+                Log.warn("ws-slow-consumer-closed queuedBytes=" + queuedBytes.get()
+                    + " capBytes=" + registry.maxQueuedBytes());
+                jettySession.close(StatusCode.TRY_AGAIN_LATER, "slow consumer", Callback.NOOP);
+            }
+            return;
+        }
+        queuedBytes.addAndGet(size);
+        jettySession.sendText(message, Callback.from(
+            () -> queuedBytes.addAndGet(-size),
+            failure -> {
+                queuedBytes.addAndGet(-size);
+                closed.set(true); // broken connection — stop sending; Jetty fires onClose/onError → cleanup
+            }));
     }
 
     /**
@@ -66,10 +98,13 @@ public class WsContext {
     }
 
     /**
-     * Close this WebSocket connection.
+     * Close this WebSocket connection. Idempotent — also marks the context closed so any in-flight
+     * broadcast sends stop targeting it.
      */
     public void close() {
-        jettySession.close(StatusCode.NORMAL, "closed", Callback.NOOP);
+        if (closed.compareAndSet(false, true)) {
+            jettySession.close(StatusCode.NORMAL, "closed", Callback.NOOP);
+        }
     }
 
     /**

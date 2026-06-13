@@ -1287,3 +1287,30 @@ recommended regardless of this change: use POST-redirect-GET, or an idempotency 
 specifically relied on render-failure rolling back a write, move the work that must be
 atomic with the response out of the template — validate/serialize it in the handler, before
 returning the `View`.
+
+## New: WebSocket slow-consumer backpressure (force-close past a queue cap)
+
+**Who is affected:** apps using WebSockets, *if* they have clients that can stop reading
+while the server keeps sending (broadcasts to many clients, or any high-rate `send`).
+
+`WsContext.send` / `broadcast` are non-blocking — Jetty queues the frame and returns. A
+client that stops reading (stalled, network-congested, or malicious) previously made its
+frames pile up in that queue without bound: broadcast-rate × message-size of heap per stuck
+client, a memory-exhaustion vector. Brace now tracks each connection's queued-but-unflushed
+bytes and **force-closes a connection whose backlog exceeds a cap** (close code
+`TRY_AGAIN_LATER`, 1013). The bound is per connection, so a slow client only disconnects
+itself — healthy members of the same room keep receiving.
+
+The cap defaults to **4 MB per connection** and is configurable:
+
+```java
+var app = Brace.app()
+    .ws("/feed", FeedSocket::new)
+    .wsMaxQueuedBytes(16 * 1024 * 1024); // raise for large-message or bursty feeds
+```
+
+**Action required:** none for typical apps. If you broadcast large messages or expect
+legitimately bursty-but-slow clients, raise `wsMaxQueuedBytes` so normal traffic doesn't
+trip the cap. Each force-close logs a `ws-slow-consumer-closed` warning, so disconnects are
+visible. (The cap is bytes queued in the server, approximated by message length — a safety
+threshold, not exact accounting.)

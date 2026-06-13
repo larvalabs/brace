@@ -1,5 +1,6 @@
 package com.larvalabs.brace;
 
+import org.eclipse.jetty.websocket.api.StatusCode;
 import org.junit.jupiter.api.*;
 
 import java.net.URI;
@@ -46,6 +47,20 @@ class WebSocketTest {
         }
     }
 
+    public static class BlastSocket {
+        private final WsContext ws;
+        public BlastSocket(WsContext ws) { this.ws = ws; }
+        public void onConnect() {
+            // Fire a large volume of frames at the just-connected client. Against a socket that isn't
+            // reading, these back up past the test app's small wsMaxQueuedBytes cap and the connection
+            // self-closes; each send short-circuits once that has happened, so this loop stops early.
+            var big = "x".repeat(16 * 1024);
+            for (int i = 0; i < 8192; i++) {
+                ws.send(big);
+            }
+        }
+    }
+
     public static class SessionSocket {
         private final WsContext ws;
         public SessionSocket(WsContext ws) { this.ws = ws; }
@@ -88,8 +103,12 @@ class WebSocketTest {
     static void startApp() throws Exception {
         app = Brace.app().port(0)
             .sessions("test-secret-key-at-least-32-characters-long")
+            // Small cap so the slow-consumer test trips backpressure quickly. Other tests send tiny
+            // messages that clients read promptly, so their queued backlog never approaches this.
+            .wsMaxQueuedBytes(64 * 1024)
             .ws("/echo", EchoSocket::new)
             .ws("/room", RoomSocket::new)
+            .ws("/blast", BlastSocket::new)
             .ws("/session", SessionSocket::new);
 
         // Also add a regular HTTP route to verify coexistence
@@ -201,6 +220,65 @@ class WebSocketTest {
 
         ws.sendClose(WebSocket.NORMAL_CLOSURE, "done");
         listener.closed.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void slowConsumerIsForceClosedByBackpressure() throws Exception {
+        // M18: a client that stops reading must not make the server buffer outgoing frames without
+        // bound — once its backlog passes wsMaxQueuedBytes the server force-closes it. Driven with a raw
+        // socket that completes the WebSocket upgrade then never reads (the JDK HttpClient WebSocket
+        // auto-drains the socket internally, so it can't simulate a stalled TCP consumer). The close
+        // handshake can't complete against a wedged socket, so we assert on the synchronous backpressure
+        // log event rather than the (timeout-delayed) onClose callback.
+        long mark = LogTap.snapshot().stream().mapToLong(LogTap.LogEntry::id).max().orElse(0);
+
+        try (var socket = new java.net.Socket("localhost", port)) {
+            var req = "GET /blast HTTP/1.1\r\n"
+                + "Host: localhost:" + port + "\r\n"
+                + "Upgrade: websocket\r\n"
+                + "Connection: Upgrade\r\n"
+                + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                + "Sec-WebSocket-Version: 13\r\n\r\n";
+            socket.getOutputStream().write(req.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            socket.getOutputStream().flush();
+
+            // Read only the HTTP 101 handshake (up to the blank line), then never read again — the
+            // server's blast frames pile up unread behind this point.
+            String statusLine = readHttpHeaders(socket.getInputStream());
+            assertTrue(statusLine.contains("101"), "expected WebSocket upgrade, got: " + statusLine);
+
+            long deadline = System.currentTimeMillis() + 10_000;
+            boolean closedForSlowness = false;
+            while (System.currentTimeMillis() < deadline) {
+                boolean seen = LogTap.since(mark).stream().anyMatch(e ->
+                    String.valueOf(e.fields().get("message")).startsWith("ws-slow-consumer-closed"));
+                if (seen) { closedForSlowness = true; break; }
+                Thread.sleep(50);
+            }
+            assertTrue(closedForSlowness,
+                "a non-reading client should trip per-connection backpressure and be force-closed");
+        }
+    }
+
+    /** Consumes bytes up to and including the blank line that ends an HTTP response's headers; returns
+     *  the status line. */
+    private static String readHttpHeaders(java.io.InputStream in) throws Exception {
+        var sb = new StringBuilder();
+        int matched = 0; // position within the "\r\n\r\n" terminator
+        int b;
+        while ((b = in.read()) != -1) {
+            sb.append((char) b);
+            char expected = "\r\n\r\n".charAt(matched);
+            if (b == expected) {
+                if (++matched == 4) {
+                    int eol = sb.indexOf("\r\n");
+                    return eol > 0 ? sb.substring(0, eol) : sb.toString();
+                }
+            } else {
+                matched = (b == '\r') ? 1 : 0;
+            }
+        }
+        throw new java.io.EOFException("connection closed before WebSocket handshake completed");
     }
 
     @Test

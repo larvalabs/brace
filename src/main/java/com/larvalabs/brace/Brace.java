@@ -47,6 +47,7 @@ public class Brace {
     private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private WsRegistry wsRegistry;
+    private long wsMaxQueuedBytes = 4L * 1024 * 1024; // M18: per-connection outgoing backlog cap (4 MB)
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
     private int jobRetentionDays = 7;
     private String httpStatsInterval = "60s";
@@ -293,6 +294,17 @@ public class Brace {
 
     public Brace ws(String path, Function<WsContext, Object> handlerFactory) {
         wsRoutes.put(path, handlerFactory);
+        return this;
+    }
+
+    /**
+     * Cap on the bytes a single WebSocket connection may have queued-but-not-yet-flushed before it is
+     * force-closed as a slow consumer (M18). A client that stops reading would otherwise make its
+     * broadcast frames pile up in Jetty's outgoing queue without bound — a per-connection memory leak.
+     * Default 4 MB; the bound is per connection, so a slow client never blocks healthy room members.
+     */
+    public Brace wsMaxQueuedBytes(long bytes) {
+        this.wsMaxQueuedBytes = bytes;
         return this;
     }
 
@@ -594,7 +606,7 @@ public class Brace {
             MessageBus messageBus = (databaseFactory != null && databaseFactory.isPostgres())
                 ? new PostgresMessageBus(databaseFactory)
                 : new InProcessMessageBus();
-            wsRegistry = new WsRegistry(messageBus);
+            wsRegistry = new WsRegistry(messageBus, wsMaxQueuedBytes);
             final WsRegistry wsRegistryRef = wsRegistry;
             // Wrap with WebSocketUpgradeHandler for WebSocket support
             var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {

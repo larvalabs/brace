@@ -22,10 +22,17 @@ final class WsRegistry {
 
     private final ConcurrentHashMap<String, Set<WsContext>> rooms = new ConcurrentHashMap<>();
     private final MessageBus bus;
+    private final long maxQueuedBytes;
 
-    WsRegistry(MessageBus bus) {
+    WsRegistry(MessageBus bus, long maxQueuedBytes) {
         this.bus = bus;
+        this.maxQueuedBytes = maxQueuedBytes;
         bus.subscribe(this::deliverLocal);
+    }
+
+    /** Per-connection cap on bytes queued-but-not-yet-flushed before a slow consumer is force-closed (M18). */
+    long maxQueuedBytes() {
+        return maxQueuedBytes;
     }
 
     void join(String room, WsContext ctx) {
