@@ -40,7 +40,7 @@ branch with one commit per finding, and a permanent record in this directory.
 |---|---|---|---|---|
 | 2026-06 | Security | Fable 5 | [2026-06-security-fable-5.md](2026-06-security-fable-5.md) | [security-review-todos](../2026-06-09-security-review-todos.md) |
 | 2026-06 | Token Efficiency | Fable 5 (via ai-benchmark) | _informal — findings live in [TODO.md](../../TODO.md) "token-efficiency" items_ | — |
-| 2026-06 | Runtime Performance | Fable 5 | _in progress — branch `runtime-performance-review-2026-06`_ | [runtime-performance-review-todos](../2026-06-11-runtime-performance-review-todos.md) |
+| 2026-06 | Runtime Performance | Fable 5 | [2026-06-runtime-performance-fable-5.md](2026-06-runtime-performance-fable-5.md) | [runtime-performance-review-todos](../2026-06-11-runtime-performance-review-todos.md) |
 
 The 2026-06 token-efficiency pass predates this process: it came out of the ai-benchmark
 project's review of agent-generated Brace apps (commit `a8c96eb`) rather than a structured
