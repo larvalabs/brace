@@ -77,10 +77,56 @@ final class BuildCommands {
         return compiler.run(null, null, null, args.toArray(new String[0]));
     }
 
+    /** The {@code brace compile} command: sources, then ahead-of-time templates. */
+    static int compileCommand(Path cwd) throws Exception {
+        int rc = compile(cwd);
+        if (rc != 0) return rc;
+        return precompileTemplates(cwd);
+    }
+
+    // --- template precompilation ------------------------------------------
+
+    /**
+     * Ahead-of-time compile the project's templates into {@code target/jte-classes}
+     * so a prod-mode app ({@code brace run}) loads finished classes (see
+     * {@link TemplateEngine}). Runs in a child JVM on the project classpath because
+     * templates reference app classes. No conventional template directory is fine —
+     * the app may not use templates, or uses a custom directory and falls back to
+     * eager compilation at startup.
+     */
+    static int precompileTemplates(Path cwd) throws Exception {
+        String templates = findTemplateDir(cwd);
+        if (templates == null) return 0;
+        CliOutput.printInfo("Precompiling templates (" + templates + "/)...");
+        int rc = new ProcessBuilder(
+                "java", "-cp", projectClasspath(cwd),
+                TemplatePrecompiler.class.getName(), templates, "target/jte-classes")
+                .directory(cwd.toFile())
+                .inheritIO()
+                .start()
+                .waitFor();
+        if (rc == 0) CliOutput.printSuccess("Templates precompiled");
+        else CliOutput.printError("Template precompilation failed");
+        return rc;
+    }
+
+    /** Conventional template directories, in lookup order (brace new scaffolds "views"). */
+    private static String findTemplateDir(Path cwd) throws IOException {
+        for (String name : List.of("views", "templates")) {
+            Path dir = cwd.resolve(name);
+            if (!Files.isDirectory(dir)) continue;
+            try (var s = Files.walk(dir)) {
+                if (s.anyMatch(p -> p.toString().endsWith(".jte"))) return name;
+            }
+        }
+        return null;
+    }
+
     // --- run -------------------------------------------------------------
 
     static int run(Path cwd) throws Exception {
         if (compile(cwd) != 0) return 1;
+        if (precompileTemplates(cwd) != 0) return 1;
         String mainClass = findMainClass(cwd);
         CliOutput.printInfo("Starting " + mainClass);
         Process app = new ProcessBuilder(javaCommand("prod", projectClasspath(cwd), mainClass))

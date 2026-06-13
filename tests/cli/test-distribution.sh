@@ -55,7 +55,14 @@ cd "$WORK/testapp"
     fail "brace compile failed"
 }
 [[ -f target/classes/app/App.class ]] || fail "App.class not produced"
-pass "brace compile succeeded"
+# compile also precompiles views/ for prod (brace run): classes + source marker
+[[ -f target/jte-classes/.source-templates ]] || {
+    cat "$WORK/compile.out"
+    fail "templates not precompiled into target/jte-classes"
+}
+find target/jte-classes/gg/jte/generated/precompiled -name '*.class' | grep -q . || \
+    fail "no precompiled template classes found"
+pass "brace compile succeeded (sources + templates)"
 
 step "Running brace version (project-aware)"
 # Inside a project, version reports both the launcher and the project's pin.

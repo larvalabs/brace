@@ -374,6 +374,15 @@ Render from handler: `Result.view("posts/index", "title", "Posts", "posts", post
 
 Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
 
+**Dev vs prod compilation.** In dev mode templates compile on first render and
+hot-reload on change. In prod mode (`brace.mode=prod`, set by `brace run`) the
+framework loads ahead-of-time compiled template classes from `target/jte-classes`
+(written by `brace compile`/`brace run`; override the location with
+`-Dbrace.templates.precompiled=<dir>`, e.g. for jte-maven-plugin output) — no
+compiler in production, no first-render latency. If no precompiled classes match
+the configured template directory, prod falls back to compiling all templates once
+at startup; a broken template then fails the boot instead of 500ing on first hit.
+
 ## Sessions
 
 AES-256-GCM encrypted cookies. Stateless — no server-side storage. Safe to store emails, roles, and permissions.

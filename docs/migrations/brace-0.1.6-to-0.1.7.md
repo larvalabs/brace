@@ -1189,3 +1189,33 @@ actually applied — they will start applying under `brace dev`. A scaffolded
 base `port`. The same goes for `%prod.` keys under `brace run`. Apps launched some
 other way (Maven exec, systemd, Dokploy custom command) are unaffected unless you
 pass `-Dbrace.mode` yourself.
+
+## Changed: templates are precompiled for prod (`brace.mode=prod`)
+
+**Who is affected:** template-rendering apps run via `brace run`, or launched with
+`-Dbrace.mode=prod`.
+
+JTE previously ran in dev mode everywhere: every template paid a javac compile on
+its first render after every deploy (tens to hundreds of ms of first-request
+latency), every subsequent render paid hot-reload timestamp checks, and the Java
+compiler plus jte's compiler infrastructure (~20–50MB of metaspace/heap) shipped to
+production for nothing. Now:
+
+- **`brace compile` / `brace run` precompile templates** from the conventional
+  `views/` (or `templates/`) directory into `target/jte-classes`.
+- **In prod mode the framework loads those finished classes** — no compiler loaded,
+  no first-render compile, no per-render checks. The directory is only used when it
+  was generated from the app's configured template directory (a `.source-templates`
+  marker guards against stale or mismatched output); override the location with
+  `-Dbrace.templates.precompiled=<dir>` if you precompile some other way (e.g.
+  jte-maven-plugin).
+- **Prod without precompiled classes** (custom template dir, non-CLI launch) falls
+  back to compiling **all** templates eagerly at startup. Note the failure-mode
+  shift: a template that doesn't compile now fails the boot — loudly, at deploy
+  time — where it previously 500'd on that template's first render.
+- **Dev mode is unchanged:** compile on first render, hot reload on change.
+
+**Action required:** none for scaffolded projects. If your templates live somewhere
+other than `views/` or `templates/`, prod startup eager-compiles them (correct, just
+slower to boot) — move them to a conventional directory or point
+`brace.templates.precompiled` at your own precompiled output to get the full win.

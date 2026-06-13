@@ -173,7 +173,7 @@ public class App {
 
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access. PostgreSQL JDBC driver bundled — no extra dependency to add
-- **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
+- **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE, explicit opt-out with `.csrf(false)` for bearer-token APIs
