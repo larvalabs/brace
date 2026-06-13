@@ -22,6 +22,7 @@ class TemplateTest {
             View.of("params", "name", req.pathParam("name"), "count", 42));
         app.get("/layout", req ->
             View.of("withLayout", "message", "It works!"));
+        app.get("/unicode", req -> View.of("unicode", "name", "Renée"));
 
         app.start();
         port = app.actualPort();
@@ -68,6 +69,28 @@ class TemplateTest {
     void viewRenderReturnsString() {
         var html = View.render("hello");
         assertTrue(html.contains("Hello from JTE!"));
+    }
+
+    @Test
+    void multibyteContentIsByteAccurateOnTheWire() throws Exception {
+        // M6 renders straight to UTF-8 bytes via Utf8ByteOutput + binaryStaticContent. This guards the
+        // char-vs-byte boundary: both static template text and the dynamic param contain multibyte
+        // characters, so a length or encoding bug would surface as a mismatched Content-Length or
+        // mojibake. We fetch raw bytes (not a decoded String) and check both.
+        var response = client.send(
+            HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/unicode")).GET().build(),
+            HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, response.statusCode());
+
+        byte[] body = response.body();
+        String decoded = new String(body, java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(decoded.contains("Café — déjà vu — 日本語 — 🚀 — Hello Renée"), decoded);
+
+        // The wire byte count must equal the UTF-8 encoding length (> the char count here), proving the
+        // body was sized and written as bytes, not chars.
+        assertEquals(decoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length, body.length);
+        response.headers().firstValue("Content-Length")
+            .ifPresent(cl -> assertEquals(body.length, Integer.parseInt(cl)));
     }
 
     @Test

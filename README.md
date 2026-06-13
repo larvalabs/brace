@@ -172,7 +172,7 @@ public class App {
 
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access. PostgreSQL JDBC driver bundled — no extra dependency to add
-- **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev
+- **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs
@@ -324,16 +324,20 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
     JobOptions.maxAttempts(5).backoff(Duration.ofMinutes(10)));
 ```
 
+Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
+`0` to keep forever).
+
 ## Mailer
 
 ```java
 mail.to("user@example.com")
     .subject("Welcome!")
     .html(View.render("emails/welcome", "user", user))
-    .send();
+    .sendAsync();   // background virtual thread; send() blocks until delivered
 ```
 
-Dev mode captures emails without sending. Access via `mailer.sent()` in tests.
+Use `sendAsync()` from request handlers — `send()` does synchronous SMTP on the calling
+thread. Dev mode captures emails without sending (last 500). Access via `mailer.sent()` in tests.
 
 ## Storage
 
@@ -391,6 +395,7 @@ cache.clearTag("simulation");                        // remove by tag
 // Route-level page caching
 app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
 app.get("/team/{id}", cache.wrap("30m", ctrl::team).tags("simulation"));
+app.get("/posts", cache.wrap("10m", ctrl::list).vary("page"));  // ?page= keys the cache; other params ignored
 cache.clearTag("simulation");  // invalidate all cached pages at once
 ```
 

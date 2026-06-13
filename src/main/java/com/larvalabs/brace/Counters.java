@@ -3,6 +3,9 @@ package com.larvalabs.brace;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Shared, cluster-wide atomic counters backed by the {@code brace_counters} table — the
@@ -62,6 +65,97 @@ class Counters {
         } finally {
             db.close();
         }
+    }
+
+    /** One counter mutation in a {@link #incrementBatch} call: add {@code delta} to {@code key}. */
+    record CounterUpdate(String key, long delta, Instant expiresAt) {}
+
+    /**
+     * Atomically apply a batch of increments in a single transaction and return each key's new
+     * value. This is the rate limiter's flush path (M17): instead of one DB round trip per request,
+     * an instance buffers increments locally and flushes up to N of them here in one shot, so DB
+     * write traffic is bounded by {@code requests / N} rather than scaling 1:1 with requests.
+     *
+     * <p>On Postgres this is a single multi-row {@code INSERT … ON CONFLICT … RETURNING} — one round
+     * trip regardless of batch size. Keys are unique within a batch (the caller keys its buffer by
+     * counter key), so the "cannot affect row a second time" hazard of duplicate ON CONFLICT targets
+     * cannot arise. On H2/portable the same per-key {@code SELECT … FOR UPDATE}+upsert as
+     * {@link #incrementAndGet} runs in a loop inside one transaction (correct; round-trip count is
+     * irrelevant on the in-process test database).
+     *
+     * <p>Expiry/reset semantics are identical to {@link #incrementAndGet}: an already-expired row
+     * starts over at {@code delta} rather than continuing a stale count.
+     *
+     * @param updates one entry per counter key (deltas typically &gt; 1, the buffered count)
+     * @return new value per key after applying its delta; empty if {@code updates} is empty
+     */
+    Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+        if (updates.isEmpty()) {
+            return Map.of();
+        }
+        var db = new Database(dbFactory.openSession());
+        try {
+            db.beginTransaction();
+            Instant now = Instant.now();
+            Map<String, Long> result = db.jdbc(conn ->
+                dbFactory.isPostgres()
+                    ? incrementBatchPostgres(conn, updates, Timestamp.from(now))
+                    : incrementBatchPortable(conn, updates, now));
+            db.commitTransaction();
+            return result;
+        } catch (RuntimeException e) {
+            db.rollbackTransaction();
+            throw e;
+        } catch (Exception e) {
+            db.rollbackTransaction();
+            throw new RuntimeException(e);
+        } finally {
+            db.close();
+        }
+    }
+
+    /** Postgres batch upsert: one multi-row statement, one round trip, RETURNING every new count. */
+    private static Map<String, Long> incrementBatchPostgres(java.sql.Connection conn,
+                                                            List<CounterUpdate> updates, Timestamp now)
+            throws java.sql.SQLException {
+        var sql = new StringBuilder(
+            "INSERT INTO brace_counters AS c (counter_key, n, expires_at) VALUES ");
+        for (int i = 0; i < updates.size(); i++) {
+            sql.append(i == 0 ? "(?, ?, ?)" : ", (?, ?, ?)");
+        }
+        sql.append(" ON CONFLICT (counter_key) DO UPDATE SET ")
+           .append("n = CASE WHEN c.expires_at IS NOT NULL AND c.expires_at <= ? ")
+           .append("THEN EXCLUDED.n ELSE c.n + EXCLUDED.n END, ")
+           .append("expires_at = EXCLUDED.expires_at ")
+           .append("RETURNING counter_key, n");
+        var result = new HashMap<String, Long>();
+        try (var ps = conn.prepareStatement(sql.toString())) {
+            int p = 1;
+            for (var u : updates) {
+                ps.setString(p++, u.key());
+                ps.setLong(p++, u.delta());
+                setNullableTimestamp(ps, p++, u.expiresAt() == null ? null : Timestamp.from(u.expiresAt()));
+            }
+            ps.setTimestamp(p, now); // expiry comparison basis, shared by every row's CASE
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.put(rs.getString(1), rs.getLong(2));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** Portable batch (H2 and any non-Postgres): the single-key upsert run per key in one tx. */
+    private static Map<String, Long> incrementBatchPortable(java.sql.Connection conn,
+                                                            List<CounterUpdate> updates, Instant now)
+            throws java.sql.SQLException {
+        var result = new HashMap<String, Long>();
+        for (var u : updates) {
+            Timestamp exp = u.expiresAt() == null ? null : Timestamp.from(u.expiresAt());
+            result.put(u.key(), incrementPortable(conn, u.key(), u.delta(), exp, now));
+        }
+        return result;
     }
 
     /**

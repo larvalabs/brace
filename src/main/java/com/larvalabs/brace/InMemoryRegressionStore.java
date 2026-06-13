@@ -38,9 +38,9 @@ final class InMemoryRegressionStore implements RegressionStore {
     }
 
     @Override
-    public void bump(String id) {
+    public void bump(String id, long count) {
         Entry e = entries.get(id);
-        if (e != null) e.count.incrementAndGet();
+        if (e != null) e.count.addAndGet((int) Math.min(count, Integer.MAX_VALUE));
     }
 
     @Override

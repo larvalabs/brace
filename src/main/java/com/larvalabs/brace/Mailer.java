@@ -5,10 +5,14 @@ import java.util.concurrent.atomic.LongAdder;
 
 public class Mailer {
 
+    /** Dev-mode capture bound: drop-oldest beyond this, so a long-running dev server can't leak. */
+    static final int CAPTURE_LIMIT = 500;
+
     private final String smtpUrl;
     private String defaultFrom;
     private String defaultReplyTo;
     private final List<CapturedEmail> captured = Collections.synchronizedList(new ArrayList<>());
+    private final LongAdder sentCount = new LongAdder();
     private final LongAdder failCount = new LongAdder();
 
     public Mailer(String smtpUrl) {
@@ -23,23 +27,52 @@ public class Mailer {
     }
 
     public List<CapturedEmail> sent() { return List.copyOf(captured); }
-    public CapturedEmail last() { return captured.isEmpty() ? null : captured.get(captured.size() - 1); }
-    public void clearCaptured() { captured.clear(); }
-    public int sentCount() { return captured.size(); }
+    public CapturedEmail last() {
+        synchronized (captured) {
+            return captured.isEmpty() ? null : captured.get(captured.size() - 1);
+        }
+    }
+    public void clearCaptured() {
+        captured.clear();
+        sentCount.reset();
+    }
+    public long sentCount() { return sentCount.sum(); }
     public long failCount() { return failCount.sum(); }
     public long drainFailCount() { return failCount.sumThenReset(); }
 
+    void sendAsync(EmailBuilder email) {
+        Thread.startVirtualThread(() -> {
+            try {
+                send(email);
+            } catch (Exception e) {
+                // send() already counted the failure in failCount
+                Log.warn("async email to " + email.to + " failed: " + e.getMessage());
+            }
+        });
+    }
+
     void send(EmailBuilder email) {
         var from = email.from != null ? email.from : defaultFrom;
-        captured.add(new CapturedEmail(email.to, email.cc, email.subject, email.textBody, email.htmlBody, from));
 
-        if (smtpUrl != null) {
-            try {
-                sendSmtp(email, from);
-            } catch (RuntimeException e) {
-                failCount.increment();
-                throw e;
+        if (smtpUrl == null) {
+            // Dev mode: capture instead of sending, bounded drop-oldest. Capture is dev-only —
+            // with SMTP configured, retaining every sent body would leak without bound.
+            synchronized (captured) {
+                captured.add(new CapturedEmail(email.to, email.cc, email.subject, email.textBody, email.htmlBody, from));
+                if (captured.size() > CAPTURE_LIMIT) {
+                    captured.remove(0);
+                }
             }
+            sentCount.increment();
+            return;
+        }
+
+        try {
+            sendSmtp(email, from);
+            sentCount.increment();
+        } catch (RuntimeException e) {
+            failCount.increment();
+            throw e;
         }
     }
 
@@ -127,5 +160,14 @@ public class Mailer {
         public EmailBuilder html(String html) { this.htmlBody = html; return this; }
 
         public void send() { mailer.send(this); }
+
+        /**
+         * Send on a background virtual thread and return immediately. Failures are logged
+         * and counted in {@code failCount()} instead of thrown. Prefer this from request
+         * handlers: {@link #send()} does synchronous SMTP (connect + STARTTLS + auth,
+         * commonly 100ms–2s) on the calling thread, holding the request's transaction
+         * and pooled connection open the whole time.
+         */
+        public void sendAsync() { mailer.sendAsync(this); }
     }
 }

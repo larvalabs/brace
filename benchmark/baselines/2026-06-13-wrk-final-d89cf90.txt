@@ -1,0 +1,97 @@
+Starting Brace benchmark app...
+Warming up...
+
+=== Brace TFB Benchmark (wrk -t8 -c256 -d15s) ===
+
+--- Plaintext ---
+Running 15s test @ http://localhost:8080/plaintext
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.33ms    1.16ms  82.04ms   96.74%
+    Req/Sec     9.65k     1.48k   58.48k    98.33%
+  Latency Distribution
+     50%    3.31ms
+     75%    3.40ms
+     90%    3.49ms
+     99%    4.71ms
+  1154114 requests in 15.10s, 143.08MB read
+Requests/sec:  76417.41
+Transfer/sec:      9.47MB
+
+--- JSON ---
+Running 15s test @ http://localhost:8080/json
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.30ms  657.72us  35.17ms   95.14%
+    Req/Sec     9.63k   354.73    14.52k    91.50%
+  Latency Distribution
+     50%    3.30ms
+     75%    3.39ms
+     90%    3.48ms
+     99%    4.82ms
+  1150642 requests in 15.02s, 164.60MB read
+Requests/sec:  76630.20
+Transfer/sec:     10.96MB
+
+--- Single Query ---
+Running 15s test @ http://localhost:8080/db
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     8.54ms   17.32ms   1.05s    99.89%
+    Req/Sec     3.94k   461.11     4.95k    60.33%
+  Latency Distribution
+     50%    7.90ms
+     75%    9.45ms
+     90%   11.18ms
+     99%   17.01ms
+  470864 requests in 15.02s, 69.05MB read
+  Socket errors: connect 0, read 0, write 0, timeout 1
+Requests/sec:  31356.30
+Transfer/sec:      4.60MB
+
+--- Multiple Queries (20) ---
+Running 15s test @ http://localhost:8080/queries?queries=20
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   135.97ms   22.90ms 351.46ms   87.01%
+    Req/Sec   234.37     32.42   310.00     68.75%
+  Latency Distribution
+     50%  133.84ms
+     75%  142.58ms
+     90%  157.27ms
+     99%  214.02ms
+  28066 requests in 15.03s, 20.36MB read
+Requests/sec:   1866.71
+Transfer/sec:      1.35MB
+
+--- Fortunes ---
+Running 15s test @ http://localhost:8080/fortunes
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     9.06ms    6.45ms 109.91ms   82.27%
+    Req/Sec     3.83k   531.12     5.00k    74.17%
+  Latency Distribution
+     50%    8.15ms
+     75%   10.33ms
+     90%   15.27ms
+     99%   32.85ms
+  456901 requests in 15.01s, 594.34MB read
+Requests/sec:  30438.46
+Transfer/sec:     39.59MB
+
+--- Updates (20) ---
+Running 15s test @ http://localhost:8080/updates?queries=20
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   167.22ms   34.97ms 497.54ms   88.87%
+    Req/Sec   190.30     33.40   310.00     71.50%
+  Latency Distribution
+     50%  166.77ms
+     75%  177.53ms
+     90%  189.76ms
+     99%  285.73ms
+  22791 requests in 15.04s, 16.53MB read
+Requests/sec:   1515.03
+Transfer/sec:      1.10MB
+
+Done. Stopping Brace.

@@ -11,8 +11,11 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -207,10 +210,10 @@ class RateLimiterTest {
      */
     @Test
     void sharedBackendFailureFallsBackToLocal() {
-        // Install a Counters stub that always throws to simulate a DB outage.
+        // Install a Counters stub whose batch flush always throws, simulating a DB outage.
         var broken = new Counters(null) {
             @Override
-            long incrementAndGet(String key, long delta, Instant expiresAt) {
+            java.util.Map<String, Long> incrementBatch(java.util.List<CounterUpdate> updates) {
                 throw new RuntimeException("simulated DB outage");
             }
         };
@@ -236,7 +239,7 @@ class RateLimiterTest {
     void sharedBackendFailureLocalFallbackIsolatesKeys() {
         var broken = new Counters(null) {
             @Override
-            long incrementAndGet(String key, long delta, Instant expiresAt) {
+            java.util.Map<String, Long> incrementBatch(java.util.List<CounterUpdate> updates) {
                 throw new RuntimeException("simulated DB outage");
             }
         };
@@ -251,6 +254,98 @@ class RateLimiterTest {
         assertNull(limiter.handle(reqB));
         assertNotNull(limiter.handle(reqA), "alice's local bucket exhausted");
         assertNotNull(limiter.handle(reqB), "bob's local bucket exhausted");
+    }
+
+    // ---- Batched shared backend (M17) ----
+
+    /**
+     * In-memory stand-in for the DB-backed {@link Counters}: applies batches atomically and counts
+     * how many flush round trips and key writes happened, so a test can assert the rate limiter's
+     * DB traffic without a database. Ignores expiry (single-window tests).
+     */
+    static class CountingCounters extends Counters {
+        final AtomicInteger flushCalls = new AtomicInteger();
+        final AtomicInteger keysWritten = new AtomicInteger();
+        final Map<String, Long> store = new ConcurrentHashMap<>();
+
+        CountingCounters() { super(null); }
+
+        @Override
+        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+            flushCalls.incrementAndGet();
+            var result = new HashMap<String, Long>();
+            for (var u : updates) {
+                keysWritten.incrementAndGet();
+                long v = store.merge(u.key(), u.delta(), Long::sum);
+                result.put(u.key(), v);
+            }
+            return result;
+        }
+    }
+
+    /**
+     * The batched shared path still enforces the limit: with a divisor that makes the limiter flush
+     * every request (small limit), enforcement is exact — N allowed, the next blocked.
+     */
+    @Test
+    void sharedBackendEnforcesLimit() {
+        RateLimiter.useSharedBackend(new CountingCounters());
+        var limiter = RateLimiter.perIp(5, "1m"); // 5/10 → flushThreshold 1 → flush every request
+        var req = fakeRequest("7.7.7.7");
+        for (int i = 0; i < 5; i++) {
+            assertNull(limiter.handle(req), "request " + (i + 1) + " should be allowed");
+        }
+        var blocked = limiter.handle(req);
+        assertNotNull(blocked, "6th request is over the shared limit");
+        assertEquals(429, blocked.status());
+    }
+
+    /**
+     * Once a key is over the limit, the negative cache serves it locally — no further DB writes for
+     * that key until the window rolls. This is the abusive-client load the design sheds.
+     */
+    @Test
+    void negativeCacheStopsDbWritesAfterBlock() {
+        var counters = new CountingCounters();
+        RateLimiter.useSharedBackend(counters);
+        var limiter = RateLimiter.perIp(3, "1m");
+        var req = fakeRequest("6.6.6.6");
+
+        // Drive it past the limit, then keep hammering.
+        Result firstBlock = null;
+        int blockedAtFlushCount = -1;
+        for (int i = 0; i < 50; i++) {
+            var r = limiter.handle(req);
+            if (r != null && firstBlock == null) {
+                firstBlock = r;
+                blockedAtFlushCount = counters.flushCalls.get();
+            }
+        }
+        assertNotNull(firstBlock, "the client must eventually be blocked");
+        assertEquals(429, firstBlock.status());
+        // No flush (DB write) happened after the block was armed: the negative cache short-circuits.
+        assertEquals(blockedAtFlushCount, counters.flushCalls.get(),
+            "negative cache must do zero DB writes once the key is blocked");
+    }
+
+    /**
+     * DB writes are bounded by requests / flushThreshold regardless of key cardinality — even when
+     * every request is a distinct key (the adversarial case for per-key batching). With limit 100
+     * (divisor 10 → flushThreshold 10), 100 distinct-key requests cost ~10 batched flushes, not 100.
+     */
+    @Test
+    void batchingBoundsDbWritesAcrossDistinctKeys() {
+        var counters = new CountingCounters();
+        RateLimiter.useSharedBackend(counters);
+        var limiter = RateLimiter.perKey(req -> req.header("X-Key"), 100, "1m");
+
+        for (int i = 0; i < 100; i++) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-Key", "key-" + i)),
+                "each distinct key is well under the limit");
+        }
+        // 100 requests, flushThreshold 10 → ~10 flush round trips, every key still counted once.
+        assertEquals(10, counters.flushCalls.get(), "DB writes bounded by requests/flushThreshold");
+        assertEquals(100, counters.keysWritten.get(), "every key is counted exactly once");
     }
 
     // Integration test with a real Brace app

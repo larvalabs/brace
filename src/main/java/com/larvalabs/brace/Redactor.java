@@ -239,9 +239,12 @@ public class Redactor {
      */
     static boolean isSecretShaped(String value) {
         if (value == null || value.isEmpty()) return false;
+        // Length first (M8): the common case — short segments like "users", "42", "edit" —
+        // must not touch the regex engine. Safe before the UUID check: UUIDs are 36 chars,
+        // always >= MIN_SECRET_LENGTH, so no UUID is ever rejected by the length test.
+        if (value.length() < MIN_SECRET_LENGTH) return false;
         // UUIDs are identifiers, not secrets — leave them for debugging.
         if (UUID_SHAPE.matcher(value).matches()) return false;
-        if (value.length() < MIN_SECRET_LENGTH) return false;
         // JWT: header.payload.signature — always a secret regardless of char diversity.
         if (JWT_SHAPE.matcher(value).matches()) return true;
         // Must consist entirely of base64url/hex characters.

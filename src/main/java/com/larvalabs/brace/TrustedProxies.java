@@ -1,6 +1,5 @@
 package com.larvalabs.brace;
 
-import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
@@ -91,14 +90,22 @@ public class TrustedProxies {
     }
 
     private static class CidrRange {
-        private final InetAddress network;
-        private final int prefixLength;
-        private final BigInteger mask;
+        // L4: precompute the masked network bytes and a per-byte mask at construction so
+        // contains() is an allocation-free byte compare on the hot path (no per-check BigIntegers
+        // and no repeated network.getAddress() clones). The incoming addr's getAddress() clone is
+        // the only unavoidable allocation (InetAddress always copies its backing array).
+        private final byte[] networkBytes; // already masked
+        private final byte[] maskBytes;
+        private final int addressLength;   // 4 (IPv4) or 16 (IPv6)
 
         private CidrRange(InetAddress network, int prefixLength) {
-            this.network = network;
-            this.prefixLength = prefixLength;
-            this.mask = createMask(prefixLength, network.getAddress().length * 8);
+            byte[] net = network.getAddress();
+            this.addressLength = net.length;
+            this.maskBytes = createMask(prefixLength, net.length);
+            this.networkBytes = new byte[net.length];
+            for (int i = 0; i < net.length; i++) {
+                this.networkBytes[i] = (byte) (net[i] & maskBytes[i]);
+            }
         }
 
         static CidrRange parse(String cidr) {
@@ -119,22 +126,29 @@ public class TrustedProxies {
         }
 
         boolean contains(InetAddress addr) {
-            if (addr.getAddress().length != network.getAddress().length) {
+            byte[] a = addr.getAddress();
+            if (a.length != addressLength) {
                 return false; // IPv4 vs IPv6 mismatch
             }
-
-            var addrBits = new BigInteger(1, addr.getAddress());
-            var netBits = new BigInteger(1, network.getAddress());
-
-            return addrBits.and(mask).equals(netBits.and(mask));
+            for (int i = 0; i < a.length; i++) {
+                if ((byte) (a[i] & maskBytes[i]) != networkBytes[i]) {
+                    return false;
+                }
+            }
+            return true;
         }
 
-        private static BigInteger createMask(int prefixLength, int totalBits) {
-            return BigInteger.ONE
-                .shiftLeft(totalBits - prefixLength)
-                .subtract(BigInteger.ONE)
-                .not()
-                .and(BigInteger.ONE.shiftLeft(totalBits).subtract(BigInteger.ONE));
+        private static byte[] createMask(int prefixLength, int addressLength) {
+            byte[] mask = new byte[addressLength];
+            int fullBytes = prefixLength / 8;
+            int remainderBits = prefixLength % 8;
+            for (int i = 0; i < fullBytes && i < addressLength; i++) {
+                mask[i] = (byte) 0xFF;
+            }
+            if (remainderBits > 0 && fullBytes < addressLength) {
+                mask[fullBytes] = (byte) (0xFF << (8 - remainderBits));
+            }
+            return mask;
         }
     }
 }

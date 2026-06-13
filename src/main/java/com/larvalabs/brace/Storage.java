@@ -22,6 +22,10 @@ import java.util.UUID;
  */
 public class Storage {
 
+    /** Default per-request timeout; without one, a blackholed endpoint hangs the caller forever. */
+    static final java.time.Duration DEFAULT_REQUEST_TIMEOUT = java.time.Duration.ofSeconds(60);
+    private static final java.time.Duration CONNECT_TIMEOUT = java.time.Duration.ofSeconds(10);
+
     private final String accessKeyId;
     private final String secretKey;
     private final String bucket;
@@ -30,15 +34,22 @@ public class Storage {
     private final String publicUrl;
     private final String host;
     private final HttpClient httpClient;
+    private final java.time.Duration requestTimeout;
 
     public Storage(String accessKeyId, String secretKey, String bucket, String region,
                    String endpoint, String publicUrl) {
+        this(accessKeyId, secretKey, bucket, region, endpoint, publicUrl, DEFAULT_REQUEST_TIMEOUT);
+    }
+
+    public Storage(String accessKeyId, String secretKey, String bucket, String region,
+                   String endpoint, String publicUrl, java.time.Duration requestTimeout) {
         this.accessKeyId = accessKeyId;
         this.secretKey = secretKey;
         this.bucket = bucket;
         this.region = region;
         this.endpoint = endpoint;
         this.publicUrl = publicUrl;
+        this.requestTimeout = requestTimeout;
 
         if (endpoint != null) {
             this.host = endpoint.replaceFirst("https?://", "");
@@ -46,13 +57,15 @@ public class Storage {
             this.host = bucket + ".s3." + region + ".amazonaws.com";
         }
 
-        this.httpClient = HttpClient.newHttpClient();
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(CONNECT_TIMEOUT)
+                .build();
     }
 
     /**
      * Create a Storage instance from Brace Config.
      * Required keys: s3.accessKeyId, s3.secretKey, s3.bucket, s3.region
-     * Optional keys: s3.endpoint, s3.publicUrl
+     * Optional keys: s3.endpoint, s3.publicUrl, s3.timeoutSeconds (per-request, default 60)
      */
     public static Storage s3(Config config) {
         var accessKeyId = config.get("s3.accessKeyId");
@@ -64,7 +77,9 @@ public class Storage {
         }
         var endpoint = config.get("s3.endpoint");
         var publicUrl = config.get("s3.publicUrl");
-        return new Storage(accessKeyId, secretKey, bucket, region, endpoint, publicUrl);
+        var timeout = java.time.Duration.ofSeconds(
+                config.getInt("s3.timeoutSeconds", (int) DEFAULT_REQUEST_TIMEOUT.toSeconds()));
+        return new Storage(accessKeyId, secretKey, bucket, region, endpoint, publicUrl, timeout);
     }
 
     /**
@@ -109,10 +124,8 @@ public class Storage {
     public String put(String key, byte[] data, String contentType) {
         try {
             var now = Instant.now();
-            var amzDate = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
-                    .withZone(ZoneOffset.UTC).format(now);
-            var dateStamp = DateTimeFormatter.ofPattern("yyyyMMdd")
-                    .withZone(ZoneOffset.UTC).format(now);
+            var amzDate = AMZ_DATE_FORMAT.format(now);
+            var dateStamp = DATE_STAMP_FORMAT.format(now);
 
             var payloadHash = sha256Hex(data);
             var auth = buildAuthHeader("PUT", key, contentType, payloadHash, amzDate, dateStamp);
@@ -120,6 +133,7 @@ public class Storage {
             var uploadUrl = buildUploadUrl(key);
             var request = HttpRequest.newBuilder()
                     .uri(URI.create(uploadUrl))
+                    .timeout(requestTimeout)
                     .method("PUT", HttpRequest.BodyPublishers.ofByteArray(data))
                     .header("Content-Type", contentType)
                     .header("Host", host)
@@ -195,10 +209,8 @@ public class Storage {
     public void delete(String key) {
         try {
             var now = Instant.now();
-            var amzDate = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
-                    .withZone(ZoneOffset.UTC).format(now);
-            var dateStamp = DateTimeFormatter.ofPattern("yyyyMMdd")
-                    .withZone(ZoneOffset.UTC).format(now);
+            var amzDate = AMZ_DATE_FORMAT.format(now);
+            var dateStamp = DATE_STAMP_FORMAT.format(now);
 
             var payloadHash = sha256Hex(new byte[0]);
             var auth = buildAuthHeader("DELETE", key, null, payloadHash, amzDate, dateStamp);
@@ -206,6 +218,7 @@ public class Storage {
             var deleteUrl = buildUploadUrl(key);
             var request = HttpRequest.newBuilder()
                     .uri(URI.create(deleteUrl))
+                    .timeout(requestTimeout)
                     .method("DELETE", HttpRequest.BodyPublishers.noBody())
                     .header("Host", host)
                     .header("x-amz-content-sha256", payloadHash)
@@ -255,8 +268,7 @@ public class Storage {
             var stringToSign = algorithm + "\n" + amzDate + "\n" + credentialScope + "\n"
                     + sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
 
-            var signingKey = getSignatureKey(secretKey, dateStamp, region, "s3");
-            var signature = bytesToHex(hmacSha256(signingKey, stringToSign));
+            var signature = bytesToHex(hmacSha256(signingKey(dateStamp), stringToSign));
 
             return algorithm + " Credential=" + accessKeyId + "/" + credentialScope
                     + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature;
@@ -266,6 +278,31 @@ public class Storage {
     }
 
     // --- Internal helpers ---
+
+    // DateTimeFormatter is immutable and thread-safe; building one per put/delete was waste.
+    private static final DateTimeFormatter AMZ_DATE_FORMAT =
+        DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter DATE_STAMP_FORMAT =
+        DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
+
+    private static final java.util.HexFormat HEX = java.util.HexFormat.of();
+
+    // SigV4 signing keys depend only on (secret, dateStamp, region, service), all fixed per
+    // instance except dateStamp, which changes once per UTC day — cache the derived key per
+    // day instead of re-running the 4-step HMAC chain on every request. Benign race: two
+    // threads may derive the same key concurrently and one wins the volatile swap.
+    private record DayKey(String dateStamp, byte[] key) {}
+    private volatile DayKey signingKeyCache;
+
+    private byte[] signingKey(String dateStamp) {
+        DayKey cached = signingKeyCache;
+        if (cached != null && cached.dateStamp().equals(dateStamp)) {
+            return cached.key();
+        }
+        byte[] key = getSignatureKey(secretKey, dateStamp, region, "s3");
+        signingKeyCache = new DayKey(dateStamp, key);
+        return key;
+    }
 
     private String buildUploadUrl(String key) {
         var encoded = uriEncodePath(key);
@@ -320,11 +357,7 @@ public class Storage {
     }
 
     static String bytesToHex(byte[] bytes) {
-        var sb = new StringBuilder(bytes.length * 2);
-        for (var b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
+        return HEX.formatHex(bytes);
     }
 
     /**

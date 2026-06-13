@@ -3,6 +3,7 @@ package com.larvalabs.brace;
 import org.junit.jupiter.api.*;
 
 import java.util.Map;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -64,6 +65,86 @@ class CacheTest {
         var result = cache.getOrSet("key", "5m", () -> { counter.incrementAndGet(); return "second"; });
         assertEquals("first", result);
         assertEquals(1, counter.get());
+    }
+
+    @Test
+    void getOrSetIsSingleFlightUnderContention() throws Exception {
+        // M15: many threads hit the same cold key at once; the supplier (a slow "DB query") must run
+        // exactly once and every caller gets that one value. The supplier now runs outside any
+        // ConcurrentHashMap bin lock, but the per-server single-flight guarantee must survive.
+        int threads = 16;
+        var supplierRuns = new AtomicInteger();
+        var startGate = new CountDownLatch(1);
+        var done = new CountDownLatch(threads);
+        var results = new ConcurrentLinkedQueue<String>();
+        var pool = Executors.newFixedThreadPool(threads);
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();
+                    results.add(cache.getOrSet("cold", "5m", () -> {
+                        supplierRuns.incrementAndGet();
+                        try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                        return "value";
+                    }));
+                } catch (Exception ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        startGate.countDown(); // release all at once
+        assertTrue(done.await(10, TimeUnit.SECONDS), "all callers should finish");
+        pool.shutdownNow();
+        assertEquals(1, supplierRuns.get(), "supplier must run exactly once across concurrent cold-key callers");
+        assertEquals(threads, results.size());
+        assertTrue(results.stream().allMatch("value"::equals), "all callers see the single computed value");
+    }
+
+    @Test
+    void getOrSetSupplierExceptionDoesNotCacheAndRetries() {
+        // A throwing supplier propagates (original type, not wrapped), caches nothing, and the key
+        // recovers on the next call.
+        var runs = new AtomicInteger();
+        assertThrows(IllegalStateException.class, () ->
+            cache.getOrSet("k", "5m", () -> { runs.incrementAndGet(); throw new IllegalStateException("boom"); }));
+        var v = cache.getOrSet("k", "5m", () -> { runs.incrementAndGet(); return "ok"; });
+        assertEquals("ok", v);
+        assertEquals(2, runs.get(), "first call ran and threw, second re-ran — nothing was cached in between");
+        assertEquals("ok", cache.get("k", String.class));
+    }
+
+    @Test
+    void getOrSetConcurrentCallersSeeUnwrappedSupplierException() throws Exception {
+        // M15: callers awaiting a failed in-flight computation must observe the supplier's actual
+        // exception type, not a CompletionException wrapper — and nothing is cached.
+        int threads = 8;
+        var startGate = new CountDownLatch(1);
+        var done = new CountDownLatch(threads);
+        var thrown = new ConcurrentLinkedQueue<Class<?>>();
+        var pool = Executors.newFixedThreadPool(threads);
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();
+                    cache.getOrSet("boom-key", "5m", () -> {
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                        throw new IllegalStateException("boom");
+                    });
+                } catch (Throwable t) {
+                    thrown.add(t.getClass());
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        startGate.countDown();
+        assertTrue(done.await(10, TimeUnit.SECONDS), "all callers should finish");
+        pool.shutdownNow();
+        assertEquals(threads, thrown.size());
+        assertTrue(thrown.stream().allMatch(c -> c == IllegalStateException.class),
+            "every caller should see the original exception type, got " + thrown);
+        assertNull(cache.get("boom-key", String.class), "a failed computation caches nothing");
     }
 
     @Test
@@ -180,14 +261,14 @@ class CacheTest {
     }
 
     @Test
-    void wrapDifferentiatesByQueryString() {
+    void wrapDifferentiatesByDeclaredVaryParams() {
         var counter = new AtomicInteger();
         Handler handler = req -> {
             counter.incrementAndGet();
             return Result.text("page" + counter.get());
         };
 
-        var cached = cache.wrap("5m", handler);
+        var cached = cache.wrap("5m", handler).vary("page");
 
         var req1 = new Request("GET", "/items", Map.of(), Map.of("page", "1"), Map.of(), null);
         var req2 = new Request("GET", "/items", Map.of(), Map.of("page", "2"), Map.of(), null);
@@ -195,6 +276,69 @@ class CacheTest {
         assertEquals("page1", bodyOf(cached.apply(req1)));
         assertEquals("page2", bodyOf(cached.apply(req2)));
         assertEquals(2, counter.get());
+    }
+
+    @Test
+    void wrapIgnoresQueryParamsByDefault() {
+        // H8: undeclared params must not key the cache — ?x=<random> would otherwise mint one
+        // full page copy per request.
+        var counter = new AtomicInteger();
+        Handler handler = req -> Result.text("v" + counter.incrementAndGet());
+        var cached = cache.wrap("5m", handler);
+
+        var plain = new Request("GET", "/items", Map.of(), Map.of(), Map.of(), null);
+        var junk1 = new Request("GET", "/items", Map.of(), Map.of("utm_source", "tw"), Map.of(), null);
+        var junk2 = new Request("GET", "/items", Map.of(), Map.of("x", "random123"), Map.of(), null);
+
+        assertEquals("v1", bodyOf(cached.apply(plain)));
+        assertEquals("v1", bodyOf(cached.apply(junk1)));
+        assertEquals("v1", bodyOf(cached.apply(junk2)));
+        assertEquals(1, counter.get(), "query params must not create cache entries unless declared");
+    }
+
+    @Test
+    void wrapVaryIgnoresUndeclaredParamsAlongsideDeclaredOnes() {
+        var counter = new AtomicInteger();
+        Handler handler = req -> Result.text("v" + counter.incrementAndGet());
+        var cached = cache.wrap("5m", handler).vary("page");
+
+        var page2 = new Request("GET", "/items", Map.of(), Map.of("page", "2"), Map.of(), null);
+        var page2Junk = new Request("GET", "/items", Map.of(),
+            Map.of("page", "2", "utm_source", "newsletter"), Map.of(), null);
+        var page2Empty = new Request("GET", "/items", Map.of(), Map.of("page", ""), Map.of(), null);
+
+        assertEquals("v1", bodyOf(cached.apply(page2)));
+        assertEquals("v1", bodyOf(cached.apply(page2Junk)), "undeclared param must not split the entry");
+        assertEquals("v2", bodyOf(cached.apply(page2Empty)), "empty value is distinct from page=2");
+        assertEquals(2, counter.get());
+    }
+
+    @Test
+    void inMemoryBackendCapsEntriesDropOldestArbitrary() {
+        var small = new Cache(CacheBackend.inMemory(5));
+        try {
+            for (int i = 1; i <= 8; i++) {
+                small.set("k" + i, "v" + i);
+            }
+            assertTrue(small.size() <= 5, "store must stay bounded, was " + small.size());
+            assertEquals("v8", small.get("k8", String.class), "newest insert must be present");
+        } finally {
+            small.close();
+        }
+    }
+
+    @Test
+    void getOrSetRespectsEntryCap() {
+        var small = new Cache(CacheBackend.inMemory(3));
+        try {
+            for (int i = 1; i <= 6; i++) {
+                final int n = i;
+                small.getOrSet("g" + n, "5m", () -> "v" + n);
+            }
+            assertTrue(small.size() <= 3, "getOrSet inserts must respect the cap, was " + small.size());
+        } finally {
+            small.close();
+        }
     }
 
     @Test
@@ -356,7 +500,7 @@ class CacheTest {
             counter.incrementAndGet();
             return Result.text("response" + counter.get());
         };
-        var cached = cache.wrap("5m", handler);
+        var cached = cache.wrap("5m", handler).vary("a", "c", "d");
 
         // First request: a=b, c=d
         var req1 = new Request("GET", "/test", Map.of(), Map.of("a", "b", "c", "d"), Map.of(), null);
@@ -382,7 +526,7 @@ class CacheTest {
             counter.incrementAndGet();
             return Result.text("v" + counter.get());
         };
-        var cached = cache.wrap("5m", handler);
+        var cached = cache.wrap("5m", handler).vary("q", "b");
 
         // Request with key=value containing = sign
         var req1 = new Request("GET", "/search", Map.of(), Map.of("q", "a=b"), Map.of(), null);
@@ -402,7 +546,7 @@ class CacheTest {
             counter.incrementAndGet();
             return Result.text("v" + counter.get());
         };
-        var cached = cache.wrap("5m", handler);
+        var cached = cache.wrap("5m", handler).vary("filter");
 
         var req1 = new Request("GET", "/items", Map.of(), Map.of("filter", "50%"), Map.of(), null);
         assertEquals("v1", bodyOf(cached.apply(req1))); // miss
@@ -423,7 +567,7 @@ class CacheTest {
             counter.incrementAndGet();
             return Result.text("v" + counter.get());
         };
-        var cached = cache.wrap("5m", handler);
+        var cached = cache.wrap("5m", handler).vary("q");
 
         var req1 = new Request("GET", "/search", Map.of(), Map.of("q", "中"), Map.of(), null);
         assertEquals("v1", bodyOf(cached.apply(req1))); // miss

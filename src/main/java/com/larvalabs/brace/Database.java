@@ -5,6 +5,7 @@ import org.hibernate.query.MutationQuery;
 import org.hibernate.query.Query;
 
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 /**
@@ -144,9 +145,17 @@ public class Database {
     }
 
     public <T> T queryOne(Class<T> type, String hqlWhere, Object... params) {
-        // Delegates to query() which already instruments
-        List<T> results = query(type, hqlWhere, params);
-        return results.isEmpty() ? null : results.get(0);
+        // Mirrors query() but caps the result set at one row: without setMaxResults(1),
+        // a non-unique predicate fetched and hydrated every matching row to return the first.
+        long start = System.nanoTime();
+        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        Query<T> query = session.createQuery(hql, type);
+        bindParams(query, params);
+        query.setMaxResults(1);
+        List<T> result = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result.isEmpty() ? null : result.get(0);
     }
 
     /**
@@ -260,8 +269,18 @@ public class Database {
      * and rejected with {@link IllegalArgumentException} if it does not match.
      */
     public <T> boolean existsBy(Class<T> type, String field, Object value) {
-        // requireValidFieldIdentifier delegated to countBy
-        return countBy(type, field, value) > 0;
+        requireValidFieldIdentifier(field);
+        // SELECT 1 with a row cap: an index probe that stops at the first hit,
+        // instead of COUNT(*) walking every matching row.
+        long start = System.nanoTime();
+        String hql = "SELECT 1 FROM " + type.getSimpleName() + " WHERE " + field + " = ?1";
+        Query<Integer> query = session.createQuery(hql, Integer.class);
+        query.setParameter(1, value);
+        query.setMaxResults(1);
+        boolean result = !query.getResultList().isEmpty();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        return result;
     }
 
     /**
@@ -439,7 +458,25 @@ public class Database {
      * operator) can be escaped as {@code ??}, which emits a single {@code ?}. For fully
      * hand-written SQL, {@link #jdbc(JdbcConsumer)} is the raw escape hatch.
      */
+    // L6: the rewrite is a pure function of the input string and the inputs are almost always
+    // code literals (a naturally small, bounded set), so memoize it instead of re-scanning on
+    // every execution. Bounded — once the cache is full we stop adding entries and fall back to a
+    // fresh scan, so a caller that builds dynamic query strings (e.g. queryIn's per-IN-size HQL,
+    // L7) can't grow it without limit.
+    private static final int PARAM_CACHE_MAX = 1000;
+    private static final ConcurrentHashMap<String, String> PARAM_CACHE = new ConcurrentHashMap<>();
+
     String convertPositionalParams(String hql) {   // package-private for direct unit testing
+        String cached = PARAM_CACHE.get(hql);
+        if (cached != null) return cached;
+        String converted = scanPositionalParams(hql);
+        if (PARAM_CACHE.size() < PARAM_CACHE_MAX) {
+            PARAM_CACHE.putIfAbsent(hql, converted);
+        }
+        return converted;
+    }
+
+    private static String scanPositionalParams(String hql) {
         var sb = new StringBuilder(hql.length() + 8);
         int paramIndex = 1;
         int n = hql.length();

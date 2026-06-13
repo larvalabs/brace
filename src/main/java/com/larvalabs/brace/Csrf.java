@@ -8,9 +8,12 @@ public class Csrf {
 
     static final String TOKEN_KEY = "_csrf";
 
+    // Shared: thread-safe, and per-token construction paid a JCA provider lookup per mint.
+    private static final SecureRandom RANDOM = new SecureRandom();
+
     public static String generateToken() {
         var bytes = new byte[32];
-        new SecureRandom().nextBytes(bytes);
+        RANDOM.nextBytes(bytes);
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 

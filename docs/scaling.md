@@ -117,6 +117,28 @@ fleet dashboard (instance picker + liveness) is a planned follow-up.
 - **TLS/HTTP-2 at the edge.** Brace serves HTTP/1.1 only; terminate TLS and HTTP/2 at your reverse
   proxy / load balancer (see [`SECURITY.md`](SECURITY.md)). Configure `TrustedProxies` so forwarded
   client IPs are honored only from your proxy.
+- **Postgres connection budget (pool sizing).** Each instance's HikariCP pool is **fixed-size** —
+  `minimumIdle == maximumPoolSize` (default **10**), Hikari's recommended posture (a fixed pool avoids
+  connection-storm thundering on load spikes). Budget per instance ≈ `poolSize` **+ 1** dedicated raw
+  connection for the Postgres message-bus `LISTEN` listener (only when you register WebSocket routes).
+  Fleet total ≈ `N × poolSize + (N if WebSockets)`. Each idle Postgres connection costs ~1–10 MB
+  server-side, so on a small PaaS Postgres (e.g. `max_connections = 100`) a few instances at the
+  default 10 can approach the ceiling — size `N × poolSize` to leave headroom for migrations, admin
+  tools, and `psql`. Tune the pool via the `DatabaseFactory(url, user, password, entities, poolSize)`
+  constructor before `app.database(dbFactory)`; `minimumIdle` is not separately configurable by design.
+- **Object storage buffers whole objects in heap.** `Storage.put(...)` holds the entire object as a
+  `byte[]` (and an uploaded file arrives already buffered via `UploadedFile.bytes()`), so a single
+  upload transiently costs ≥2× the object size in heap. Fine for typical avatars/attachments; for
+  large media, cap upload size (`app.maxUploadSize(...)`) and size the heap accordingly. A streaming
+  variant (temp-file + `BodyPublishers.ofFile`) is a documented future option, not yet implemented.
+- **WebSocket broadcast cost on Postgres.** Cross-instance fan-out (`ws.broadcast`) issues a session +
+  transaction + `pg_notify` round-trip per broadcast. This is correct and fine at human chat rates;
+  if you build a high-fan-in firehose (many messages per tick), coalescing/batching `pg_notify` would
+  be the next step — not currently done.
+- **Jetty platform thread pool.** Request handlers run on **virtual** threads, so Jetty's
+  `QueuedThreadPool` (left at its defaults, max 200) only serves acceptors/selectors and needs very
+  few threads in practice — it does not bound request concurrency. The default max is a ceiling, not a
+  reservation, so the footprint is small; it is intentionally left unconfigured.
 
 ## Quick checklist
 

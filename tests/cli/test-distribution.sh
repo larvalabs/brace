@@ -60,7 +60,14 @@ cd "$WORK/testapp"
     fail "brace compile failed"
 }
 [[ -f target/classes/app/App.class ]] || fail "App.class not produced"
-pass "brace compile succeeded"
+# compile also precompiles views/ for prod (brace run): classes + source marker
+[[ -f target/jte-classes/.source-templates ]] || {
+    cat "$WORK/compile.out"
+    fail "templates not precompiled into target/jte-classes"
+}
+find target/jte-classes/gg/jte/generated/precompiled -name '*.class' | grep -q . || \
+    fail "no precompiled template classes found"
+pass "brace compile succeeded (sources + templates)"
 
 step "Running brace agents-md"
 [[ -f BRACE-AGENTS.md ]] || fail "brace new did not write BRACE-AGENTS.md"

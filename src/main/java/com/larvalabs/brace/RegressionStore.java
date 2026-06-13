@@ -19,8 +19,8 @@ interface RegressionStore {
      */
     boolean create(String id, String type, String route, String message, Instant firstSeen);
 
-    /** Increment the occurrence count for an existing regression (no-op if absent). */
-    void bump(String id);
+    /** Add {@code count} occurrences to an existing regression (no-op if absent). */
+    void bump(String id, long count);
 
     /** Current regressions, newest first. */
     List<RegressionTracker.Regression> list();

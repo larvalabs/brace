@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * execute exactly once.
  *
  * <p>On Postgres the poller claims a batch in one transaction with
- * {@code … ORDER BY run_at LIMIT 50 FOR UPDATE SKIP LOCKED}, flipping {@code started_at} in the
+ * {@code … ORDER BY run_at LIMIT <free capacity> FOR UPDATE SKIP LOCKED}, flipping {@code started_at} in the
  * same statement (postgres-native doc Tier 1a). SKIP LOCKED hands concurrent pollers disjoint
  * batches, so each job is claimed — and run — exactly once by construction. This IT guards that
  * property on real Postgres with real concurrent transactions: the {@code HashSet} size check

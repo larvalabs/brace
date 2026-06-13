@@ -14,11 +14,8 @@ public class Route {
     private final Invoker invoker;
     private final Pattern compiledPattern;
     private final List<String> paramNames;
+    private final String staticPath;
     private boolean csrfRequired;
-
-    public Route(String method, String pattern, Object handler) {
-        this(method, pattern, handler, null, true);
-    }
 
     public Route(String method, String pattern, Object handler, Invoker invoker) {
         this(method, pattern, handler, invoker, true);
@@ -33,10 +30,12 @@ public class Route {
         this.paramNames = new ArrayList<>();
 
         var regex = new StringBuilder("^");
+        var literal = new StringBuilder();
         var parts = pattern.split("/");
         for (var part : parts) {
             if (part.isEmpty()) continue;
             regex.append("/");
+            literal.append('/').append(part);
             if (part.startsWith("{") && part.endsWith("}")) {
                 paramNames.add(part.substring(1, part.length() - 1));
                 regex.append("([^/]+)");
@@ -44,9 +43,15 @@ public class Route {
                 regex.append(Pattern.quote(part));
             }
         }
-        if (regex.length() == 1) regex.append("/");
+        if (regex.length() == 1) {
+            regex.append("/");
+            literal.append('/');
+        }
         regex.append("$");
         this.compiledPattern = Pattern.compile(regex.toString());
+        // Same normalization the regex applies (empty segments collapsed, trailing slash
+        // dropped) so the Router's exact-match index agrees with compiledPattern.
+        this.staticPath = paramNames.isEmpty() ? literal.toString() : null;
     }
 
     public String method() { return method; }
@@ -54,6 +59,8 @@ public class Route {
     public Object handler() { return handler; }
     public Invoker invoker() { return invoker; }
     public boolean isStatic() { return paramNames.isEmpty(); }
+    /** Normalized literal path for static routes, {@code null} for parameterized ones. */
+    String staticPath() { return staticPath; }
     public boolean csrfRequired() { return csrfRequired; }
 
     void setCsrfRequired(boolean required) {

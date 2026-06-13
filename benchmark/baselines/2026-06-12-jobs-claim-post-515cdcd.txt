@@ -1,0 +1,46 @@
+JobsBench jar: /tmp/jobs-post.jar
+Jobs claim-latency benchmark
+  url=jdbc:postgresql://localhost:5433/jobs_bench seedDead=1000000 pending=1000
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.FlywayExecutor execute
+INFO: Database: jdbc:postgresql://localhost:5433/jobs_bench (PostgreSQL 16.13)
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.internal.command.DbValidate validate
+INFO: Successfully validated 15 migrations (execution time 00:00.030s)
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.internal.command.DbMigrate migrateGroup
+INFO: Current version of schema "public": 14
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.internal.command.DbMigrate doMigrateGroup
+INFO: Migrating schema "public" to version "15 - brace scheduled jobs claim index"
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.internal.command.DbMigrate logSummary
+INFO: Successfully applied 1 migration to schema "public", now at version v15 (execution time 00:00.058s)
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.FlywayExecutor execute
+INFO: Database: jdbc:postgresql://localhost:5433/jobs_bench (PostgreSQL 16.13)
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.internal.command.DbValidate validate
+INFO: Successfully validated 1 migration (execution time 00:00.004s)
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.internal.command.DbMigrate migrateGroup
+INFO: Current version of schema "public": 0
+Jun 12, 2026 3:17:25 PM org.flywaydb.core.internal.command.DbMigrate logSummary
+INFO: Schema "public" is up to date. No migration necessary.
+Jun 12, 2026 3:17:25 PM org.hibernate.Version logVersion
+INFO: HHH000412: Hibernate ORM core version [WORKING]
+Jun 12, 2026 3:17:25 PM org.hibernate.engine.jdbc.connections.internal.ConnectionProviderInitiator instantiateNamedConnectionProvider
+INFO: HHH000130: Instantiating explicit connection provider: org.hibernate.hikaricp.internal.HikariCPConnectionProvider
+SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Jun 12, 2026 3:17:25 PM org.hibernate.engine.jdbc.dialect.internal.DialectFactoryImpl constructDialect
+WARN: HHH90000025: PostgreSQLDialect does not need to be specified explicitly using 'hibernate.dialect' (remove the property setting and it will be selected by default)
+Jun 12, 2026 3:17:26 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://localhost:5433/jobs_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database version: 16.13
+	Autocommit mode: true
+	Isolation level: undefined/unknown
+	Pool: HikariCPConnectionProvider
+	Minimum pool size: 10
+	Maximum pool size: 10
+Jun 12, 2026 3:17:26 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+  seed: 1001000 rows already present, skipping
+empty poll    n=30  min=0.5ms  p50=0.7ms  avg=0.7ms  max=1.0ms
+job stats     n=20  min=35.9ms  p50=38.6ms  avg=38.4ms  max=42.2ms
+drain         1000 jobs in 200 polls, 523 ms total, 0.52 ms/job

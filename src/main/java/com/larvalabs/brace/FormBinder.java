@@ -2,44 +2,93 @@ package com.larvalabs.brace;
 
 import com.larvalabs.brace.annotation.*;
 
+import java.lang.annotation.Annotation;
 import java.lang.reflect.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class FormBinder {
+
+    /**
+     * Per-record reflection, resolved once and cached (M4). Without this every bind re-ran
+     * {@code getRecordComponents()} (a fresh cloned array), {@code getAnnotations()} per component,
+     * a {@code getDeclaredConstructor} scan + {@code setAccessible}, and — for every form lacking a
+     * custom validator — a {@code getDeclaredMethod("validate", …)} that *constructed and threw* a
+     * {@code NoSuchMethodException} (stack-trace fill) as control flow. The cache key cardinality is
+     * the app's form record types (code-defined, small, not request-controlled), so it never needs
+     * eviction.
+     */
+    private record FieldMeta(String name, Class<?> type, Annotation[] annotations) {}
+
+    /** {@code validate} is null when the record declares no {@code validate(Errors)} — an absence
+     *  marker so the lookup (and its exception) never runs again for that class. */
+    private record FormMeta(FieldMeta[] fields, Constructor<?> constructor, Method validate) {}
+
+    private static final Map<Class<?>, FormMeta> META_CACHE = new ConcurrentHashMap<>();
 
     public static <T> Form<T> bind(Class<T> recordClass, Map<String, String> params) {
         if (!recordClass.isRecord()) {
             throw new IllegalArgumentException(recordClass.getName() + " is not a record");
         }
 
-        var components = recordClass.getRecordComponents();
+        FormMeta meta = META_CACHE.computeIfAbsent(recordClass, FormBinder::buildMeta);
+        var fields = meta.fields();
+
         var errors = new Errors();
         var rawValues = new LinkedHashMap<String, String>();
-        var values = new Object[components.length];
-        var types = new Class<?>[components.length];
+        var values = new Object[fields.length];
 
-        for (int i = 0; i < components.length; i++) {
-            var comp = components[i];
-            var name = comp.getName();
-            var type = comp.getType();
-            types[i] = type;
-            var raw = params.get(name);
-            rawValues.put(name, raw);
+        for (int i = 0; i < fields.length; i++) {
+            var field = fields[i];
+            var raw = params.get(field.name());
+            rawValues.put(field.name(), raw);
 
             // Convert to target type
-            values[i] = convert(raw, type, name, errors);
+            values[i] = convert(raw, field.type(), field.name(), errors);
 
             // Run annotation validations
-            validate(comp, raw, values[i], errors);
+            validate(field, raw, values[i], errors);
         }
 
         // Construct the record
-        T instance = construct(recordClass, types, values);
+        T instance = construct(recordClass, meta.constructor(), values);
 
         // Call custom validate(Errors) if present
-        callCustomValidate(instance, errors);
+        callCustomValidate(instance, meta.validate(), errors);
 
         return new Form<>(instance, errors, rawValues);
+    }
+
+    private static FormMeta buildMeta(Class<?> recordClass) {
+        var components = recordClass.getRecordComponents();
+        var fields = new FieldMeta[components.length];
+        var paramTypes = new Class<?>[components.length];
+        for (int i = 0; i < components.length; i++) {
+            var comp = components[i];
+            fields[i] = new FieldMeta(comp.getName(), comp.getType(), comp.getAnnotations());
+            paramTypes[i] = comp.getType();
+        }
+
+        Constructor<?> constructor;
+        try {
+            constructor = recordClass.getDeclaredConstructor(paramTypes);
+            constructor.setAccessible(true);
+        } catch (NoSuchMethodException e) {
+            // A record always has a canonical constructor matching its component types, so this is
+            // effectively unreachable — surface it loudly rather than swallowing if it ever isn't.
+            throw new RuntimeException(
+                "Record " + recordClass.getSimpleName() + " has no canonical constructor", e);
+        }
+
+        Method validate;
+        try {
+            validate = recordClass.getDeclaredMethod("validate", Errors.class);
+            validate.setAccessible(true);
+        } catch (NoSuchMethodException e) {
+            validate = null; // no custom validation — resolved once, not re-thrown per bind
+        }
+
+        return new FormMeta(fields, constructor, validate);
     }
 
     private static Object convert(String raw, Class<?> type, String name, Errors errors) {
@@ -105,11 +154,10 @@ public class FormBinder {
         }
     }
 
-    private static void validate(RecordComponent comp, String raw, Object value, Errors errors) {
-        var name = comp.getName();
-        var annotations = comp.getAnnotations();
+    private static void validate(FieldMeta field, String raw, Object value, Errors errors) {
+        var name = field.name();
 
-        for (var ann : annotations) {
+        for (var ann : field.annotations()) {
             if (ann instanceof Required) {
                 if (raw == null || raw.trim().isEmpty()) {
                     errors.add(name, "is required");
@@ -148,24 +196,18 @@ public class FormBinder {
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> T construct(Class<T> recordClass, Class<?>[] types, Object[] values) {
+    private static <T> T construct(Class<T> recordClass, Constructor<?> constructor, Object[] values) {
         try {
-            var constructor = recordClass.getDeclaredConstructor(types);
-            constructor.setAccessible(true);
-            return constructor.newInstance(values);
+            return (T) constructor.newInstance(values);
         } catch (Exception e) {
             throw new RuntimeException("Failed to construct record " + recordClass.getSimpleName(), e);
         }
     }
 
-    private static <T> void callCustomValidate(T instance, Errors errors) {
-        if (instance == null) return;
+    private static void callCustomValidate(Object instance, Method validate, Errors errors) {
+        if (instance == null || validate == null) return;
         try {
-            var method = instance.getClass().getDeclaredMethod("validate", Errors.class);
-            method.setAccessible(true);
-            method.invoke(instance, errors);
-        } catch (NoSuchMethodException e) {
-            // No custom validation — that's fine
+            validate.invoke(instance, errors);
         } catch (Exception e) {
             throw new RuntimeException("Failed to call validate() on " + instance.getClass().getSimpleName(), e);
         }

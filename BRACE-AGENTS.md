@@ -46,6 +46,12 @@ brace run                                       # run without watching
 brace agents-md                                 # refresh this file + BRACE-OPS.md from the pinned framework version (--stdout to print instead)
 ```
 
+`brace dev` launches the app JVM with `-Dbrace.mode=dev`, `brace run` with
+`-Dbrace.mode=prod` — so `%dev.`/`%prod.` config prefixes select per-mode values and
+the framework picks prod behavior (e.g. precompiled templates) under `brace run`.
+Extra JVM flags for the app go in `BRACE_JAVA_OPTS` (e.g. `BRACE_JAVA_OPTS="-Xmx512m"
+brace run`); flags there override the defaults, including the mode.
+
 ## App Setup
 
 Everything configured via `Brace.app()` builder in `main()`:
@@ -70,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
 
 ## Routing
 
@@ -416,6 +422,15 @@ Render from handler: `Result.view("posts/index", "title", "Posts", "posts", post
 
 Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
 
+**Dev vs prod compilation.** In dev mode templates compile on first render and
+hot-reload on change. In prod mode (`brace.mode=prod`, set by `brace run`) the
+framework loads ahead-of-time compiled template classes from `target/jte-classes`
+(written by `brace compile`/`brace run`; override the location with
+`-Dbrace.templates.precompiled=<dir>`, e.g. for jte-maven-plugin output) — no
+compiler in production, no first-render latency. If no precompiled classes match
+the configured template directory, prod falls back to compiling all templates once
+at startup; a broken template then fails the boot instead of 500ing on first hit.
+
 ## Sessions
 
 AES-256-GCM encrypted cookies. Stateless — no server-side storage. Safe to store emails, roles, and permissions.
@@ -475,11 +490,17 @@ Route-level page caching:
 
 ```java
 app.get("/", cache.wrap("5m", ctrl::index));
-app.get("/posts", cache.wrap("30m", ctrl::list).tags("posts"));
+app.get("/posts", cache.wrap("30m", ctrl::list).tags("posts").vary("page", "sort"));
 cache.clearTag("posts");  // invalidate all cached pages with this tag
 ```
 
-Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path/query are cached separately (they don't clobber each other).
+**Query params are ignored by default** — a cached route serves one entry per path. If the
+page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
+or the cache will serve the same entry for every value. Undeclared params never key the cache
+(so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
+entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
+
+Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path are cached separately (they don't clobber each other).
 
 ### Backends: in-process (default) vs shared
 
@@ -529,6 +550,14 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
 
 `JobOptions`: `maxAttempts(n)`, `backoff(Duration)`, `after(jobId)` (run after another job completes).
 
+Finished (completed/failed) durable jobs are pruned daily after 7 days — `scheduled_jobs` is a
+queue, not an archive. Configure with `app.jobRetention(days)`; `0` keeps rows forever. Rows
+another job still depends on are kept regardless of age.
+
+Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they share the
+connection pool with web handlers), and the poller claims more work as slots free — a slow job
+doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
+
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 
 Job lambdas receive `(Database, JobContext)`. Use `ctx.message("Retrieved " + n + " new listings")`
@@ -549,14 +578,27 @@ Inspect via `Jobs.asyncSubmitted()` / `Jobs.asyncFailed()` (counters).
 ```java
 var mail = new Mailer(config.get("smtp.url")).from("noreply@app.com");
 
+// From request handlers, prefer sendAsync(): returns immediately, sends on a background
+// virtual thread. send() does synchronous SMTP (commonly 100ms-2s) on the calling thread,
+// holding the request's transaction open the whole time.
 mail.to("user@example.com")
     .cc("admin@example.com")                              // optional
     .subject("Welcome!")
-    .html(View.render("emails/welcome", "user", user))    // or .text("plain body")
+    .html(View.render("emails/welcome", "user", user))
+    .sendAsync();
+
+// send() blocks until delivered and throws on failure — for jobs/scripts that need the result.
+mail.to("user@example.com")
+    .cc("admin@example.com")
+    .subject("Report")
+    .text("Plain text body")
     .send();
 ```
 
-Dev mode captures emails without sending. Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
+`sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
+Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.
+Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
+With SMTP configured nothing is captured; `sentCount()` counts successful sends, `failCount()` failures.
 
 ## Storage
 
@@ -577,7 +619,9 @@ String key = Storage.safeKey("uploads", "user photo.jpg");   // sanitizes and ad
 String ext = Storage.extension("photo.jpg");                 // "jpg" (alphanumeric only)
 ```
 
-Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`. **StoredFile** record: `key()`, `url()`.
+Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`, `s3.timeoutSeconds` (per-request timeout, default 60).
+
+**StoredFile** record: `key()`, `url()`.
 
 ## Asset Fingerprinting
 
@@ -626,6 +670,8 @@ app.ws("/chat", ctx -> new ChatHandler(ctx));
 
 Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 
+**Slow-consumer backpressure.** `send`/`broadcast` are non-blocking. A connection that stops reading would otherwise make its outgoing frames pile up in Jetty's queue without bound (a per-connection memory leak). Brace bounds each connection's queued-but-unflushed bytes and force-closes a connection that exceeds the cap (`TRY_AGAIN_LATER`); the bound is per connection, so one slow client never blocks healthy members of the same room. Tune with `app.wsMaxQueuedBytes(bytes)` (default 4 MB).
+
 ## Rate Limiting
 
 ```java
@@ -633,7 +679,12 @@ app.before("/api/*", RateLimiter.perIp(100, "1m"));
 app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
 ```
 
-**Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see `BRACE-OPS.md` → "Scaling horizontally".
+**Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see `BRACE-OPS.md` → "Scaling horizontally" and [`docs/scaling.md`](docs/scaling.md).
+
+**DB load is bounded, not per-request (M17).** Shared counting is *batched and best-effort*: each instance buffers increments and flushes them to the DB every `maxRequests / divisor` requests (default divisor 10), so writes scale with request rate / divisor, not 1:1 — and a client already over the limit is rejected from a local negative cache with **no DB call at all** (the abusive traffic you most want to shed costs nothing). The trade-off is fleet accuracy: across `K` instances a burst can overshoot the limit by up to about `maxRequests / divisor × K` before enforcement engages (assume **no** sticky routing). Abuse from one client is always caught immediately regardless — an instance sees its own count with no lag. Two knobs:
+
+- `app.rateLimitBatchDivisor(int)` (default 10) — higher = tighter fleet accuracy + more DB writes; lower = fewer writes + looser. A small limit like `5/15m` already flushes ~every request at the default (near-exact, and cheap because the traffic is low); a large limit like `1000/min` batches ~10×.
+- `app.sharedRateLimiting(false)` — eliminate **all** rate-limiter DB traffic; every limiter then counts purely per-instance, so the effective limit becomes roughly `K × maxRequests` across the fleet. Off Postgres, limiters are already per-instance and both knobs are no-ops.
 
 ## Security
 
@@ -777,7 +828,9 @@ db.pass=${DB_PASS}
 %dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1
 ```
 
-Load: `Config.load(Path.of("application.conf"), "dev")`. Mode-prefixed keys override base keys.
+Load: `Config.load(Path.of("application.conf"), System.getProperty("brace.mode"))`.
+Mode-prefixed keys override base keys. `brace dev` sets the mode to `dev` and
+`brace run` to `prod`; outside the CLI, pass `-Dbrace.mode=...` yourself.
 
 Methods: `get(key)`, `get(key, default)`, `getInt(key, default)`, `getBool(key, default)`.
 
@@ -795,6 +848,16 @@ Log.debug("cache warm start");                   // debug/info/warn/error each t
 Log.info("import finished", Map.of("rows", n));  // (message) or (message, Map data);
 Log.error("payment failed", exception);          // error also takes (message, Throwable)
 ```
+
+Stdout writes are asynchronous: entries go through a bounded queue drained by a single
+writer thread (batched writes, no per-request lock contention). Lines may trail the
+request by a few ms under load; `/ops/logs` sees entries immediately. If the queue
+overflows (sustained > ~8k lines buffered), oldest lines are dropped and a
+`log.dropped` WARN reports the count. `Brace.stop()` and JVM exit flush the queue.
+
+Minimum level (default `DEBUG` = everything): set `BRACE_LOG_LEVEL=INFO`,
+`-Dbrace.log.level=INFO`, or `Log.level("INFO")`. Entries below the level are skipped
+entirely — they reach neither stdout nor `/ops/logs`.
 
 ## htmx
 

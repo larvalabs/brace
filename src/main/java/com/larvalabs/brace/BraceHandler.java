@@ -1,5 +1,7 @@
 package com.larvalabs.brace;
 
+import org.eclipse.jetty.http.DateGenerator;
+import org.eclipse.jetty.http.DateParser;
 import org.eclipse.jetty.http.HttpField;
 import org.eclipse.jetty.http.MultiPart;
 import org.eclipse.jetty.http.MultiPartFormData;
@@ -7,11 +9,11 @@ import org.eclipse.jetty.io.Content;
 import org.eclipse.jetty.server.Response;
 import org.eclipse.jetty.util.Callback;
 
-import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,6 +38,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final Storage storage;
     private final TrustedProxies trustedProxies;
     private final byte[] htmxJs;
+    private final String htmxEtag; // content-derived validator for the bundled htmx asset (L21)
     // L3: dev mode is detected once at construction from the brace.mode system property —
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
@@ -148,6 +151,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         } catch (Exception ignored) {}
         this.htmxJs = htmxBytes;
+        // Content-derived ETag computed once: changes if the bundled bytes change across a brace
+        // upgrade (length + array hash), so revalidation can't return a false 304 after an upgrade.
+        this.htmxEtag = htmxBytes == null ? null
+            : "\"htmx-" + Long.toHexString(htmxBytes.length) + "-"
+                + Integer.toHexString(java.util.Arrays.hashCode(htmxBytes)) + "\"";
         this.devMode = "dev".equals(System.getProperty("brace.mode"));
     }
 
@@ -266,7 +274,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // counters) — the write-back contract holds on these paths too via the
             // choke point, instead of silently dropping the mutation.
             if (match == null) {
-                Result staticResult = serveStaticFile(path);
+                Result staticResult = serveStaticFile(braceRequest);
                 if (staticResult != null) {
                     writeResult(staticResult, response, callback, session, csrfOnlySession);
                     return true;
@@ -335,12 +343,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     String cookieHeader = headers.get("Cookie");
                     String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
                     csrfOnlySession = Session.fromCookie(sessionCookie, sessionSecret);
-                    Csrf.ensureToken(csrfOnlySession);
-                    View.setCsrfField(Csrf.hiddenField(csrfOnlySession));
-                } else {
-                    Csrf.ensureToken(session);
-                    View.setCsrfField(Csrf.hiddenField(session));
                 }
+                // Lazy token mint (H5): ensureToken used to run eagerly here on every matched
+                // request, minting a token — and forcing a Set-Cookie below — even for responses
+                // that never render a form (JSON, redirects). The supplier mints and builds the
+                // hidden field only when something consumes it: View.of() putting csrfField into a
+                // template, or a handler calling View.getCsrfField(). ensureToken is idempotent, and
+                // the consumption marks the session modified so the write-back choke point persists
+                // it (the M5c invariant — otherwise the rendered token is orphaned and POSTs 403).
+                final Session tokenSession = session != null ? session : csrfOnlySession;
+                View.setCsrfField(() -> {
+                    Csrf.ensureToken(tokenSession);
+                    return Csrf.hiddenField(tokenSession);
+                });
             }
 
             // Flash is consumed lazily at View render time, whatever the handler's
@@ -551,10 +566,22 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return i;
     }
 
-    private Result serveStaticFile(String requestPath) {
+    private Result serveStaticFile(Request request) {
+        String requestPath = request.path();
         if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
+            // Bundled, version-pinned asset served from memory. NOT immutable — a brace upgrade can
+            // change the bytes at this fixed URL — so use an ETag + revalidate-always, letting
+            // browsers skip the ~50KB re-download on each page via a conditional GET (L21).
+            String cacheControl = "public, max-age=0, must-revalidate";
+            if (isNotModified(request, htmxEtag, 0)) {
+                return Result.notModified()
+                    .header("ETag", htmxEtag)
+                    .header("Cache-Control", cacheControl);
+            }
             return Result.bytes(htmxJs, "text/javascript; charset=utf-8")
-                .header("X-Content-Type-Options", "nosniff");
+                .header("X-Content-Type-Options", "nosniff")
+                .header("ETag", htmxEtag)
+                .header("Cache-Control", cacheControl);
         }
         for (var mapping : staticFileMappings) {
             String prefix = mapping.urlPrefix();
@@ -580,21 +607,79 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return Result.notFound();
             }
 
-            File file = filePath.toFile();
-            if (!file.exists() || !file.isFile()) {
+            BasicFileAttributes attrs;
+            try {
+                // One stat for existence + regular-file + size + mtime, vs four separate File
+                // syscalls (exists/isFile/length/lastModified) on this hot path.
+                attrs = Files.readAttributes(filePath, BasicFileAttributes.class);
+            } catch (java.io.IOException e) {
+                return Result.notFound(); // missing file (NoSuchFileException) or unreadable
+            }
+            if (!attrs.isRegularFile()) {
                 return Result.notFound();
+            }
+
+            // L21: emit validators + Cache-Control so browsers/CDNs can cache and revalidate.
+            // Only a "?v=" whose value matches the file's CURRENT content fingerprint (the one
+            // Assets.url would mint) earns the immutable year — a stale or hand-rolled "?v=" falls
+            // back to revalidate-always, so wrong/old bytes are never pinned content-addressed.
+            // Otherwise the client holding a current copy revalidates via a cheap conditional GET.
+            long mtime = attrs.lastModifiedTime().toMillis();
+            long length = attrs.size();
+            String etag = "\"" + Long.toHexString(length) + "-" + Long.toHexString(mtime) + "\"";
+            String version = request.queryParam("v");
+            boolean immutable = version != null && version.equals(Assets.currentVersion(requestPath));
+            String cacheControl = immutable
+                ? "public, max-age=31536000, immutable"
+                : "public, max-age=0, must-revalidate";
+
+            if (isNotModified(request, etag, mtime)) {
+                return Result.notModified()
+                    .header("ETag", etag)
+                    .header("Cache-Control", cacheControl);
             }
 
             try {
                 byte[] fileBytes = Files.readAllBytes(filePath);
                 String contentType = contentTypeForPath(filePath.toString());
-                return Result.bytes(fileBytes, contentType)
-                    .header("X-Content-Type-Options", "nosniff");
+                Result result = Result.bytes(fileBytes, contentType)
+                    .header("X-Content-Type-Options", "nosniff")
+                    .header("ETag", etag)
+                    .header("Cache-Control", cacheControl);
+                if (mtime > 0) {
+                    result.header("Last-Modified", DateGenerator.formatDate(mtime));
+                }
+                return result;
             } catch (Exception e) {
                 return Result.error(500, "Internal Server Error");
             }
         }
         return null;
+    }
+
+    /** True when the client's conditional-GET headers show it already holds the current resource. */
+    private static boolean isNotModified(Request request, String etag, long mtime) {
+        String ifNoneMatch = request.header("If-None-Match");
+        if (ifNoneMatch != null) {
+            // ETag wins over If-Modified-Since per RFC 9110 when both are present.
+            if (ifNoneMatch.trim().equals("*")) return true;
+            String want = stripWeakPrefix(etag);
+            for (String candidate : ifNoneMatch.split(",")) {
+                if (stripWeakPrefix(candidate.trim()).equals(want)) return true;
+            }
+            return false;
+        }
+        String ifModifiedSince = request.header("If-Modified-Since");
+        if (ifModifiedSince != null && mtime > 0) {
+            long since = DateParser.parseDate(ifModifiedSince);
+            // HTTP dates carry second resolution — compare truncated to seconds.
+            return since >= 0 && mtime / 1000 <= since / 1000;
+        }
+        return false;
+    }
+
+    private static String stripWeakPrefix(String etag) {
+        return etag.startsWith("W/") ? etag.substring(2) : etag;
     }
 
     private String contentTypeForPath(String path) {

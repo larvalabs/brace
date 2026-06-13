@@ -1,7 +1,5 @@
 package com.larvalabs.brace;
 
-import java.util.regex.Pattern;
-
 public class Middleware {
 
     @FunctionalInterface
@@ -51,10 +49,15 @@ public class Middleware {
     }
 
     public static class PathPattern {
-        private final Pattern regex;
+        // The only supported shapes are exact and trailing-/* prefix, so matching is plain
+        // string comparison — running a regex (and allocating a Matcher) per request per
+        // middleware was pure overhead. Semantics match the previous ^prefix(/.*)?$ regex.
+        private final String exact;            // the exact path, or the prefix without "/*"
+        private final String prefixWithSlash;  // precomputed "prefix/" for prefix patterns; null for exact
 
-        private PathPattern(Pattern regex) {
-            this.regex = regex;
+        private PathPattern(String exact, String prefixWithSlash) {
+            this.exact = exact;
+            this.prefixWithSlash = prefixWithSlash;
         }
 
         public static PathPattern compile(String pattern) {
@@ -68,19 +71,19 @@ public class Middleware {
                 }
             }
 
-            String regex;
             if (pattern.endsWith("/*")) {
                 var prefix = pattern.substring(0, pattern.length() - 2);
-                // Match bare prefix, prefix/, and prefix/anything
-                regex = "^" + Pattern.quote(prefix) + "(/.*)?$";
-            } else {
-                regex = "^" + Pattern.quote(pattern) + "$";
+                // Matches bare prefix, prefix/, and prefix/anything
+                return new PathPattern(prefix, prefix + "/");
             }
-            return new PathPattern(Pattern.compile(regex));
+            return new PathPattern(pattern, null);
         }
 
         public boolean matches(String path) {
-            return regex.matcher(path).matches();
+            if (prefixWithSlash == null) {
+                return path.equals(exact);
+            }
+            return path.equals(exact) || path.startsWith(prefixWithSlash);
         }
     }
 }

@@ -59,6 +59,37 @@ class RouterTest {
     }
 
     @Test
+    void staticRouteWinsRegardlessOfRegistrationOrder() {
+        router.add("GET", "/posts/{id}", this::dummyHandler);
+        router.add("GET", "/posts/new", this::dummyHandler);
+        var match = router.match("GET", "/posts/new");
+        assertNotNull(match);
+        assertTrue(match.pathParams().isEmpty());
+    }
+
+    @Test
+    void duplicateStaticRouteFirstRegistrationWins() {
+        var first = router.add("GET", "/dup", this::dummyHandler);
+        router.add("GET", "/dup", this::dummyHandler);
+        assertSame(first, router.match("GET", "/dup").route());
+    }
+
+    @Test
+    void matchesRootRoute() {
+        router.add("GET", "/", this::dummyHandler);
+        assertNotNull(router.match("GET", "/"));
+    }
+
+    @Test
+    void trailingSlashPatternNormalized() {
+        // "/about/" compiles to the same matcher as "/about": the bare path matches,
+        // a trailing-slash request does not.
+        router.add("GET", "/about/", this::dummyHandler);
+        assertNotNull(router.match("GET", "/about"));
+        assertNull(router.match("GET", "/about/"));
+    }
+
+    @Test
     void routeTableListing() {
         router.add("GET", "/", this::dummyHandler);
         router.add("GET", "/posts/{id}", this::dummyHandler);

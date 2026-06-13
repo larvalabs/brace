@@ -49,7 +49,7 @@ class OpsScopeIntegrationTest {
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/boom")).GET().build(),
             HttpResponse.BodyHandlers.discarding());
-        Thread.sleep(200);
+        app.errorStore().flush(); // persist the H9-buffered error deterministically
     }
 
     @AfterAll

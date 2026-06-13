@@ -1,0 +1,36 @@
+Starting JobsApp (/tmp/jobs-post.jar)...
+--- Baseline: /ping-db, no jobs running ---
+Running 15s test @ http://localhost:8091/ping-db
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    25.55ms   10.76ms 132.54ms   83.05%
+    Req/Sec     1.26k   119.45     1.69k    68.83%
+  Latency Distribution
+     50%   25.24ms
+     75%   27.39ms
+     90%   31.94ms
+     99%   57.04ms
+  151131 requests in 15.02s, 20.18MB read
+Requests/sec:  10063.09
+Transfer/sec:      1.34MB
+
+Enqueueing burst: 300 jobs x 3000ms...
+Burst executing (started=5). Running wrk under contention...
+
+--- Contended: /ping-db while slow jobs hold pool connections ---
+Running 15s test @ http://localhost:8091/ping-db
+  8 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    35.18ms   12.59ms 198.46ms   87.51%
+    Req/Sec     0.91k    91.24     1.27k    73.67%
+  Latency Distribution
+     50%   35.14ms
+     75%   37.90ms
+     90%   41.02ms
+     99%   75.82ms
+  109067 requests in 15.02s, 14.56MB read
+Requests/sec:   7260.36
+Transfer/sec:      0.97MB
+
+{"completed":25,"started":30}
+Done. Stopping JobsApp (remaining burst jobs are abandoned with the app).

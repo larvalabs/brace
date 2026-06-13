@@ -192,6 +192,89 @@ class StaticFilesTest {
                      "Static image file should have X-Content-Type-Options: nosniff");
     }
 
+    @Test
+    void staticFilesEmitValidatorsAndRevalidateCacheControl() throws Exception {
+        // L21: unfingerprinted URLs get an ETag + Last-Modified and a revalidate-always policy.
+        var response = get("/assets/style.css");
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("ETag").isPresent(), "expected an ETag");
+        assertTrue(response.headers().firstValue("Last-Modified").isPresent(), "expected Last-Modified");
+        assertEquals("public, max-age=0, must-revalidate",
+            response.headers().firstValue("Cache-Control").orElse(null));
+    }
+
+    @Test
+    void fingerprintedUrlGetsImmutableCacheControl() throws Exception {
+        // L21: a GENUINE current "?v=" fingerprint (the value Assets.url mints) is content-addressed
+        // → cache for a year. Must use the real hash, since immutability is now verified against it.
+        String fingerprinted = Assets.url("/assets/style.css"); // /assets/style.css?v=<realhash>
+        assertTrue(fingerprinted.contains("?v="), "expected a fingerprinted URL, got: " + fingerprinted);
+        var response = get(fingerprinted);
+        assertEquals(200, response.statusCode());
+        assertEquals("public, max-age=31536000, immutable",
+            response.headers().firstValue("Cache-Control").orElse(null));
+    }
+
+    @Test
+    void staleOrBogusVersionParamDoesNotGetImmutable() throws Exception {
+        // A "?v=" that is NOT the file's current fingerprint (a stale hash, a hand-rolled value,
+        // or one appended by a CDN/client) must fall back to revalidate-always — never pinned as
+        // immutable content-addressed, or wrong/old bytes could be cached for a year.
+        var response = get("/assets/style.css?v=deadbeef");
+        assertEquals(200, response.statusCode());
+        assertEquals("public, max-age=0, must-revalidate",
+            response.headers().firstValue("Cache-Control").orElse(null));
+    }
+
+    @Test
+    void htmxBundleIsCacheableAndRevalidates() throws Exception {
+        var first = get("/__brace/htmx.min.js");
+        assertEquals(200, first.statusCode());
+        String etag = first.headers().firstValue("ETag").orElse(null);
+        assertNotNull(etag, "bundled htmx should carry an ETag");
+        // Version-pinned, not immutable: revalidate so a brace upgrade isn't masked by a year-long cache.
+        assertEquals("public, max-age=0, must-revalidate",
+            first.headers().firstValue("Cache-Control").orElse(null));
+
+        var conditional = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/__brace/htmx.min.js"))
+            .header("If-None-Match", etag)
+            .GET()
+            .build();
+        var revalidated = client.send(conditional, HttpResponse.BodyHandlers.ofString());
+        assertEquals(304, revalidated.statusCode(), "matching ETag should revalidate to 304");
+    }
+
+    @Test
+    void conditionalGetWithIfNoneMatchReturns304() throws Exception {
+        var first = get("/assets/style.css");
+        String etag = first.headers().firstValue("ETag").orElseThrow();
+
+        var conditional = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/assets/style.css"))
+            .header("If-None-Match", etag)
+            .GET()
+            .build();
+        var response = client.send(conditional, HttpResponse.BodyHandlers.ofString());
+        assertEquals(304, response.statusCode());
+        assertEquals("", response.body(), "304 must not carry a body");
+        assertEquals(etag, response.headers().firstValue("ETag").orElse(null));
+    }
+
+    @Test
+    void conditionalGetWithIfModifiedSinceReturns304() throws Exception {
+        var first = get("/assets/style.css");
+        String lastModified = first.headers().firstValue("Last-Modified").orElseThrow();
+
+        var conditional = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/assets/style.css"))
+            .header("If-Modified-Since", lastModified)
+            .GET()
+            .build();
+        var response = client.send(conditional, HttpResponse.BodyHandlers.ofString());
+        assertEquals(304, response.statusCode());
+    }
+
     // Generates a minimal valid 1x1 red pixel PNG
     private static byte[] minimalPng() throws Exception {
         // PNG signature

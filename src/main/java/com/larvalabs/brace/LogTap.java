@@ -46,13 +46,21 @@ public class LogTap {
     public static int capacity() { return capacity; }
 
     public static void append(Map<String, Object> fields) {
-        long id = nextId.getAndIncrement();
         // Defensive copy: callers must not be coupled to internal state, and
         // snapshot()/since() readers see immutable maps.
         // LinkedHashMap used instead of Map.copyOf because Log.error() paths can
         // put null values (e.g. throwable.getMessage()) which Map.copyOf rejects.
-        var copy = new LinkedHashMap<>(fields);
-        entries.add(new LogEntry(id, copy));
+        appendTrusted(new LinkedHashMap<>(fields));
+    }
+
+    /**
+     * Adopts {@code fields} without the defensive copy. Only for callers that hand over a
+     * freshly built map nothing else will mutate — i.e. {@link Log#println}, whose redacted
+     * map is already a private instance (copying it again was pure per-request waste).
+     */
+    static void appendTrusted(Map<String, Object> fields) {
+        long id = nextId.getAndIncrement();
+        entries.add(new LogEntry(id, fields));
         if (currentSize.incrementAndGet() > capacity) {
             if (entries.pollFirst() != null) {
                 currentSize.decrementAndGet();

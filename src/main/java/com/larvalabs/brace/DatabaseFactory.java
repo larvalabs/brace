@@ -21,6 +21,7 @@ public class DatabaseFactory {
     private final SessionFactory sessionFactory;
     private final List<Class<?>> entityClasses;
     private final boolean postgres;
+    private final int poolSize;
     private final String jdbcUrl;
     private final String jdbcUser;
     private final String jdbcPass;
@@ -35,6 +36,7 @@ public class DatabaseFactory {
         JulLogging.init();
         var cfg = parseDbConfig(url, user, password);
         this.postgres = cfg.url() != null && cfg.url().startsWith("jdbc:postgresql:");
+        this.poolSize = poolSize;
         this.jdbcUrl = cfg.url();
         this.jdbcUser = cfg.user();
         this.jdbcPass = cfg.pass();
@@ -61,6 +63,12 @@ public class DatabaseFactory {
     /** Resolved JDBC URL this factory connects with. Package-private; used by {@link TestApp}. */
     String jdbcUrl() {
         return jdbcUrl;
+    }
+
+    /** Hikari {@code maximumPoolSize} this factory was built with. {@link JobPoller} sizes its
+     * execution concurrency from it so job bursts can't starve web handlers of connections. */
+    int poolSize() {
+        return poolSize;
     }
 
     /**

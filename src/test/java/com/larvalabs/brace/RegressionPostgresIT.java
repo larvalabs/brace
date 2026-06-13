@@ -85,8 +85,8 @@ class RegressionPostgresIT extends PostgresTestBase {
         var b = tracker(new CapturingNotifier(), "deploy-1");
 
         a.onNew("E", "GET /z", "m", Instant.now()); // count 1, claimed by A
-        b.onRepeat("E", "GET /z");                  // +1 from B
-        a.onRepeat("E", "GET /z");                  // +1 from A
+        b.onRepeat("E", "GET /z", 1);               // +1 from B
+        a.onRepeat("E", "GET /z", 1);               // +1 from A
         assertEquals(3, a.list().get(0).count(), "count accumulates across instances");
     }
 

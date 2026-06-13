@@ -50,8 +50,30 @@ public class Stats {
     // Stable ids so the no-database /ops/errors/{id} and resolve paths can address records.
     private final java.util.concurrent.atomic.AtomicLong errorIdSeq = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * Records a request against a raw URL path. The path is redacted (secrets must never
+     * reach /ops/status) but remains concrete — {@code /users/1} and {@code /users/2} are
+     * distinct keys — so this is only for requests with no matched route. Matched requests
+     * go through {@link #recordRequestPattern} which is bounded by the route table (H7).
+     */
     public void recordRequest(String method, String path, int status, long latencyUs,
                               int queryCount, long queryUs) {
+        record(method + " " + Redactor.redactPath(path), status, latencyUs, queryCount, queryUs);
+    }
+
+    /**
+     * Records a request against its matched route pattern (e.g. {@code GET /users/{id}}).
+     * Patterns are code-site literals: no redaction needed, and the routes map stays
+     * bounded by the number of registered routes instead of growing per distinct URL —
+     * previously ID-bearing paths leaked one map entry per entity ever requested (H7).
+     */
+    void recordRequestPattern(String method, String routePattern, int status, long latencyUs,
+                              int queryCount, long queryUs) {
+        record(method + " " + routePattern, status, latencyUs, queryCount, queryUs);
+    }
+
+    private void record(String routeKey, int status, long latencyUs,
+                        int queryCount, long queryUs) {
         requestCount.increment();
         totalLatencyUs.add(latencyUs);
         totalQueryCount.add(queryCount);
@@ -70,10 +92,6 @@ public class Stats {
             current = maxLatencyUs.get();
         }
 
-        // Per-route stats. Redact high-entropy path segments so secrets never reach
-        // /ops/status and token-bearing paths collapse into one route key instead of
-        // growing the map per request.
-        String routeKey = method + " " + Redactor.redactPath(path);
         routes.computeIfAbsent(routeKey, k -> new RouteStats()).record(latencyUs);
     }
 

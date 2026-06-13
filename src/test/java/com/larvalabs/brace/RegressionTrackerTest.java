@@ -27,7 +27,7 @@ class RegressionTrackerTest {
 
         t.onNew("RuntimeException", "GET /a", "boom", Instant.now());
         t.onNew("RuntimeException", "GET /a", "boom again", Instant.now()); // same kind — dedup
-        t.onRepeat("RuntimeException", "GET /a");
+        t.onRepeat("RuntimeException", "GET /a", 1);
 
         assertEquals(1, n.received.size(), "a new kind notifies exactly once; recurrences don't");
         var list = t.list();

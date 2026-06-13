@@ -7,23 +7,36 @@ import java.util.function.Supplier;
 public class View extends Result {
 
     private static TemplateEngine engine;
-    private static final ThreadLocal<String> currentCsrfField = new ThreadLocal<>();
-    // Flash is consumed lazily: the source (set per-request by BraceHandler) consumes the
-    // session's cookie-borne flash when — and only when — a View actually renders, so flash
-    // survives requests that render nothing (redirects, JSON, polling).
+    // Supplier, not a materialized string (H5): the CSRF token is minted — and the
+    // session cookie consequently written — only when a render (or a handler via
+    // getCsrfField()) actually consumes the field, not on every matched request.
+    private static final ThreadLocal<Supplier<String>> currentCsrfField = new ThreadLocal<>();
+    // Flash is consumed lazily via a supplier (R1): the source (set per-request by BraceHandler)
+    // consumes the session's cookie-borne flash when — and only when — a View actually renders, so
+    // flash survives requests that render nothing (redirects, JSON, polling).
     private static final ThreadLocal<Supplier<Map<String, String>>> currentFlash = new ThreadLocal<>();
 
-    static void setCsrfField(String field) { currentCsrfField.set(field); }
+    static void setCsrfField(Supplier<String> fieldSupplier) { currentCsrfField.set(fieldSupplier); }
     static void clearCsrfField() { currentCsrfField.remove(); }
-    static String getCsrfField() { return currentCsrfField.get(); }
+
+    /**
+     * Resolves the CSRF hidden field for the current request, minting the token on first
+     * use. Null when CSRF is not active for the route ({@code .csrf(false)}, or sessions
+     * not configured).
+     */
+    static String getCsrfField() {
+        Supplier<String> supplier = currentCsrfField.get();
+        return supplier != null ? supplier.get() : null;
+    }
     static void setFlashSource(Supplier<Map<String, String>> source) { currentFlash.set(source); }
     static void clearFlash() { currentFlash.remove(); }
 
     private final String template;
     private final Map<String, Object> params;
+    private boolean rendered;
 
-    private View(String template, Map<String, Object> params, String renderedHtml) {
-        super(200, "text/html", renderedHtml);
+    private View(String template, Map<String, Object> params) {
+        super(200, "text/html", (String) null);
         this.template = template;
         this.params = params;
     }
@@ -37,21 +50,46 @@ public class View extends Result {
         for (int i = 0; i < keyValues.length - 1; i += 2) {
             params.put((String) keyValues[i], keyValues[i + 1]);
         }
-        String csrfField = currentCsrfField.get();
+        // Resolve the request-scoped CSRF field and flash NOW, while their ThreadLocals are still set
+        // (the handler is mid-flight). getCsrfField() mints the token, so the session is marked modified
+        // here — before the cookie-write decision — exactly as it was when rendering happened eagerly.
+        // The template render itself is deferred to materialize() (M12); the resolved values ride along
+        // in params, so it no longer depends on the ThreadLocals, which are cleared before it runs.
+        String csrfField = getCsrfField();
         if (csrfField != null) {
             params.put("csrfField", csrfField);
         }
+        // R1: consuming the flash source here (View.of == a render is happening) clears the
+        // session's flash exactly when a View renders, not on redirects/JSON/polling.
         Supplier<Map<String, String>> flashSource = currentFlash.get();
         if (flashSource != null) {
             params.put("flash", flashSource.get());
         }
-        String html;
-        if (engine != null) {
-            html = engine.render(template, params);
-        } else {
-            html = "[Template: " + template + " | Params: " + params.keySet() + "]";
+        return new View(template, params);
+    }
+
+    /**
+     * Renders the template (M12). Deferred from {@link #of} so it runs after the request transaction
+     * commits and its DB connection is released — a slow render no longer caps pool throughput. A render
+     * failure here surfaces as a 500 with the transaction already committed: under StatelessSession the
+     * render reads no transactional state, and every other post-handler step (after-middleware, cookie
+     * write, socket write) is already post-commit, so rendering is treated as response delivery, not part
+     * of the unit of work. Idempotent — guarded so a lazy {@link #body()} read and the framework's
+     * explicit call don't render twice.
+     */
+    @Override
+    void materialize() {
+        if (rendered) {
+            return;
         }
-        return new View(template, params, html);
+        rendered = true;
+        if (engine != null) {
+            // M6: render straight to UTF-8 bytes — the wire path reads rawBytes() with no String
+            // round-trip or second encode. body() decodes lazily if a caller wants the String form.
+            setRenderedBytes(engine.renderToBytes(template, params));
+        } else {
+            setRenderedBody("[Template: " + template + " | Params: " + params.keySet() + "]");
+        }
     }
 
     public static String render(String template, Object... keyValues) {

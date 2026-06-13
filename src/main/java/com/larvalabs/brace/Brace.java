@@ -42,13 +42,19 @@ public class Brace {
     private String opsKeysPath;
     private Stats stats = new Stats();
     private JfrProfiler profiler;
+    private ErrorStore errorStore;
+    private boolean opsProfilerEnabled = true;
     private String instanceId;
     private OpsHandler opsHandler;
     private Cache cache;
     private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private WsRegistry wsRegistry;
+    private long wsMaxQueuedBytes = 4L * 1024 * 1024; // M18: per-connection outgoing backlog cap (4 MB)
+    private boolean sharedRateLimiting = true; // M17: count rate limits fleet-wide via the DB on Postgres
+    private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
+    private int jobRetentionDays = 7;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -235,6 +241,59 @@ public class Brace {
     }
 
     /**
+     * Enables or disables the always-on JFR profiler that backs the JVM panels of
+     * {@code /ops/dashboard} (CPU, GC pauses, method/allocation sampling). Default
+     * {@code true}: continuous sampling costs roughly 0.5–2% CPU plus one thread, which
+     * is usually worth it for production diagnostics. Disable on CPU-constrained
+     * instances; the dashboard then falls back to basic runtime heap numbers and the
+     * {@code jvm.*} ops metrics are not collected.
+     */
+    public Brace opsProfiler(boolean enabled) {
+        this.opsProfilerEnabled = enabled;
+        return this;
+    }
+
+    /**
+     * Enables or disables DB-backed (fleet-wide) rate limiting. Default {@code true}: on Postgres,
+     * rate limiters count cluster-wide through a shared counter so a limit of {@code N} is enforced
+     * across the whole fleet, not {@code N} times per instance. Counting is batched and best-effort
+     * (M17) — abusive clients are short-circuited locally and writes are bounded by request rate, so
+     * the DB load is small — but it is not zero.
+     *
+     * <p>Set {@code false} to eliminate <em>all</em> rate-limiter database traffic: every limiter
+     * then counts purely per-instance in memory. The trade-off is that a limit becomes per-instance,
+     * so across a fleet of {@code K} instances the effective limit is roughly {@code K × N}. Off
+     * Postgres (single process, H2, no database) limiters are already per-instance and this flag has
+     * no effect. See {@code docs/2026-06-07-rate-limiter-load.md}.
+     */
+    public Brace sharedRateLimiting(boolean enabled) {
+        this.sharedRateLimiting = enabled;
+        return this;
+    }
+
+    /**
+     * Tunes the batching of DB-backed (shared) rate limiting — the trade-off between rate-limiter
+     * database load and how tightly a limit is enforced across a multi-instance fleet (M17). Each
+     * instance flushes its buffered counts to the shared counter every {@code maxRequests / divisor}
+     * requests. Default {@value RateLimiter#DEFAULT_BATCH_DIVISOR}.
+     *
+     * <p>Higher divisor → smaller batches → tighter fleet accuracy but more DB writes. Lower → bigger
+     * batches → fewer writes but a looser fleet view: on a burst spread evenly across {@code K}
+     * instances (assume no sticky routing) the limit can overshoot by up to about
+     * {@code maxRequests / divisor × K} before enforcement engages. A divisor of 1 batches maximally
+     * (one flush per {@code maxRequests}); set it high to approach exact per-request counting.
+     *
+     * <p>This only affects fleet-wide accuracy. Abuse from a single client hitting a single instance
+     * is always caught immediately (an instance sees its own count with no lag), and an already-over
+     * key is served from a local negative cache with no DB call at all. Has no effect when shared
+     * rate limiting is off or unavailable (see {@link #sharedRateLimiting(boolean)}).
+     */
+    public Brace rateLimitBatchDivisor(int divisor) {
+        this.rateLimitBatchDivisor = Math.max(1, divisor);
+        return this;
+    }
+
+    /**
      * Seconds after startup during which a brand-new error kind is <em>not</em> flagged as a
      * regression — suppresses cold-boot noise (e.g. a transient DB-connect failure). Default 30.
      */
@@ -284,6 +343,17 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Cap on the bytes a single WebSocket connection may have queued-but-not-yet-flushed before it is
+     * force-closed as a slow consumer (M18). A client that stops reading would otherwise make its
+     * broadcast frames pile up in Jetty's outgoing queue without bound — a per-connection memory leak.
+     * Default 4 MB; the bound is per connection, so a slow client never blocks healthy room members.
+     */
+    public Brace wsMaxQueuedBytes(long bytes) {
+        this.wsMaxQueuedBytes = bytes;
+        return this;
+    }
+
     // Job scheduling
 
     public Brace every(String interval, String name, Job job) {
@@ -293,6 +363,17 @@ public class Brace {
 
     public Brace daily(String time, String name, Job job) {
         jobScheduler.daily(time, name, job);
+        return this;
+    }
+
+    /**
+     * How many days finished (completed or failed) durable jobs stay in {@code scheduled_jobs}
+     * before the framework's daily prune deletes them. Default 7. Set {@code 0} (or negative)
+     * to keep finished rows forever — the pre-0.1.7 behavior. Rows another job still depends
+     * on are kept regardless of age.
+     */
+    public Brace jobRetention(int days) {
+        this.jobRetentionDays = days;
         return this;
     }
 
@@ -565,14 +646,14 @@ public class Brace {
         }
 
         // Create ErrorStore if database is available
-        ErrorStore errorStore = null;
         if (databaseFactory != null) {
             int maxErrors = 1000;
             errorStore = new ErrorStore(databaseFactory, maxErrors);
         }
 
-        // Create JFR profiler when ops is enabled
-        if (opsKeysPath != null) {
+        // Create JFR profiler when ops is enabled, unless explicitly disabled (M19):
+        // continuous sampling is ~0.5–2% CPU, on by default as a deliberate trade.
+        if (opsKeysPath != null && opsProfilerEnabled) {
             profiler = new JfrProfiler();
         }
 
@@ -642,7 +723,7 @@ public class Brace {
             MessageBus messageBus = (databaseFactory != null && databaseFactory.isPostgres())
                 ? new PostgresMessageBus(databaseFactory)
                 : new InProcessMessageBus();
-            wsRegistry = new WsRegistry(messageBus);
+            wsRegistry = new WsRegistry(messageBus, wsMaxQueuedBytes);
             final WsRegistry wsRegistryRef = wsRegistry;
             // Wrap with WebSocketUpgradeHandler for WebSocket support
             var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {
@@ -699,6 +780,19 @@ public class Brace {
                 "message", String.valueOf(throwable.getMessage())));
         });
 
+        // Durable-job retention (perf review H3): finished rows otherwise accumulate forever and
+        // every poll's claim query walks the dead prefix. Daily, once cluster-wide (B1
+        // coordination via brace_scheduled_runs). Registered before jobScheduler.start —
+        // daily() has no late-registration path.
+        if (databaseFactory != null && jobRetentionDays > 0) {
+            int retentionDays = jobRetentionDays;
+            jobScheduler.daily("03:23", "brace-jobs-prune", (db, ctx) -> {
+                var cutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(retentionDays));
+                int deleted = JobPoller.purgeFinishedJobs(db, cutoff);
+                ctx.message("Deleted " + deleted + " finished jobs older than " + retentionDays + " days");
+            });
+        }
+
         jobScheduler.start(databaseFactory);
         if (databaseFactory != null) {
             jobPoller.start(databaseFactory);
@@ -706,7 +800,10 @@ public class Brace {
 
         // On Postgres, rate limiters count cluster-wide via a shared DB counter (B4) so a limit is
         // enforced across the fleet, not N times too loosely. Off Postgres they stay per-process.
-        if (databaseFactory != null && databaseFactory.isPostgres()) {
+        // sharedRateLimiting(false) opts out of all rate-limiter DB traffic (M17) — limiters then
+        // count purely per-instance (effective limit ≈ instances × N).
+        if (sharedRateLimiting && databaseFactory != null && databaseFactory.isPostgres()) {
+            RateLimiter.setBatchDivisor(rateLimitBatchDivisor);
             RateLimiter.useSharedBackend(new Counters(databaseFactory));
         }
 
@@ -716,6 +813,14 @@ public class Brace {
             snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
                 @Override public void run() { stats.snapshot(); }
             }, 60_000, 60_000);
+            // M19: without a database there is no ops-flush-jvm-profiling job to reset the
+            // JFR sample maps, so methodSamples/allocationByClass would grow for the life of
+            // the JVM. Reset on the same 5-minute cadence the DB-backed flush job uses.
+            if (profiler != null) {
+                snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
+                    @Override public void run() { profiler.resetProfiling(); }
+                }, 300_000, 300_000);
+            }
         }
 
         // Flush stats to ops_timeseries
@@ -886,6 +991,11 @@ public class Brace {
         if (cache != null) {
             cache.close();
         }
+        if (errorStore != null) {
+            // Stops the flusher and writes out the buffered window, so a stop() right after a
+            // 500 (tests, clean shutdown) doesn't lose the last <2s of error data.
+            errorStore.close();
+        }
         if (profiler != null) {
             profiler.close();
         }
@@ -895,6 +1005,14 @@ public class Brace {
         if (wsRegistry != null) {
             wsRegistry.close();
         }
+        // Drain any structured log lines still queued in the async writer (H1) so a stop()
+        // immediately followed by assertions (tests) or process exit loses nothing.
+        Log.flush();
+    }
+
+    /** The error store, for tests that need to flush the H9 buffer deterministically. */
+    ErrorStore errorStore() {
+        return errorStore;
     }
 
     public int actualPort() {

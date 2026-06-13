@@ -15,7 +15,7 @@ public class App {
             256);
 
         var app = Brace.app()
-            .port(8080)
+            .port(Integer.parseInt(System.getenv().getOrDefault("PORT", "8080")))
             .database(db)
             .templates("benchmark/src/main/resources/views");
 
@@ -40,7 +40,7 @@ public class App {
 
         // 4. Multiple Queries (read-only, no transaction)
         app.get("/queries", (ReadDbHandler) (req, dbSession) -> {
-            int queries = parseQueries(req.param("queries"));
+            int queries = parseQueries(req.queryParam("queries"));
             var worlds = new ArrayList<World>(queries);
             for (int i = 0; i < queries; i++) {
                 int id = ThreadLocalRandom.current().nextInt(1, 10001);
@@ -62,7 +62,7 @@ public class App {
 
         // 6. Updates (read worlds, then batch update via raw JDBC)
         app.get("/updates", (DbHandler) (req, dbSession) -> {
-            int queries = parseQueries(req.param("queries"));
+            int queries = parseQueries(req.queryParam("queries"));
             var worlds = new ArrayList<World>(queries);
             for (int i = 0; i < queries; i++) {
                 int id = ThreadLocalRandom.current().nextInt(1, 10001);

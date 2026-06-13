@@ -2098,3 +2098,491 @@ which also stops token-bearing routes from growing the per-route stats map per r
 paths log exactly as before. Only segments that look like secrets (≥16 chars,
 base64url/hex alphabet, mixed letters and digits) are replaced with `[redacted]`. If
 your log tooling matched on such paths, match on the `[redacted]` placeholder instead.
+
+## New: `opsProfiler(boolean)` — opt out of the always-on JFR profiler
+
+**Who is affected:** no one is required to change anything — this is a new optional
+builder method. Default behavior is unchanged.
+
+When ops is enabled (`app.ops(...)`), Brace starts a continuous JFR recording stream
+that backs the JVM panels of `/ops/dashboard` (CPU load, GC pauses, hot methods,
+allocation sampling). That sampling costs roughly 0.5–2% CPU plus one thread, around
+the clock — usually a worthwhile trade for production diagnostics, and it stays on by
+default. 0.1.7 adds an explicit opt-out for CPU-constrained instances:
+
+```java
+// Before (and still the default): JFR profiler on whenever ops is enabled
+Brace.app().ops("ops-authorized-keys")
+
+// After: ops without the profiler
+Brace.app().ops("ops-authorized-keys").opsProfiler(false)
+```
+
+With the profiler disabled, the dashboard falls back to basic runtime heap numbers and
+the `jvm.*` rows in `ops_timeseries` (and the 5-minute profiling snapshots) are not
+collected.
+
+Related fix in the same change: on ops-enabled apps **without a database**, the JFR
+method/allocation sample maps were never reset and grew for the life of the JVM; they
+now reset every 5 minutes, matching the cadence of the DB-backed metrics flush.
+
+## Changed: stdout logging is now asynchronous (single writer thread)
+
+**Who is affected:** apps that consume Brace's structured stdout logs, and tests that
+assert on captured stdout immediately after a request.
+
+Through earlier 0.1.7 snapshots, every `Log.*` call serialized JSON and wrote it to
+`System.out` inline on the calling thread — one global `PrintStream` lock and one write
+syscall per line, on every request. Under load this was the framework's main contention
+point (and a virtual-thread carrier-pinning hazard on JDK 21–24).
+
+Log entries are now placed on a bounded in-memory queue (8,192 entries) and written in
+batches by a dedicated `brace-log-writer` daemon thread.
+
+What this means in practice:
+
+- **Ordering and content are unchanged** — same JSON shape, same redaction, still stdout.
+- **Lines can trail the event by a few milliseconds.** Log processors are unaffected;
+  tests that assert on captured stdout right after a request should call `Brace.stop()`
+  first (which flushes) or assert via `/ops/logs` — the in-memory ring buffer is still
+  written synchronously and is the more precise tool.
+- **Overflow drops oldest lines, counted.** If more than ~8k lines back up (sustained
+  faster than stdout can drain), the oldest are dropped and a
+  `{"event":"log.dropped","count":N}` WARN is emitted with the next batch.
+- **JVM exit and `Brace.stop()` flush the queue**, so shutdown logs are not lost.
+
+## New: minimum log level
+
+`Log` now supports a minimum level — `DEBUG` (default, logs everything: the previous
+behavior), `INFO`, `WARN`, `ERROR`. Entries below the level are skipped before any
+formatting work and reach neither stdout nor `/ops/logs`.
+
+```java
+Log.level("INFO");               // in code
+// or: BRACE_LOG_LEVEL=INFO      (env var)
+// or: -Dbrace.log.level=INFO    (system property)
+```
+
+## Changed: CSRF token minting is lazy; `.csrf(false)` routes skip session crypto entirely
+
+**Who is affected:** log/traffic tooling that expected a `brace_session` Set-Cookie on
+every response, and (rare) templates that render `${csrfField}` from a route marked
+`.csrf(false)`.
+
+Two behavior refinements on apps with sessions enabled:
+
+1. **`.csrf(false)` routes do no CSRF work at all.** Previously even opted-out routes
+   (bearer-token APIs) decrypted the session cookie and minted a token on every request,
+   and cookieless clients received a fresh `Set-Cookie` on every response. Such routes
+   now skip the decrypt, the mint, and the cookie — `${csrfField}` is no longer populated
+   for them (they never validated it anyway). If an opted-out route really needs the
+   hidden field, take a `Session` parameter and call `Csrf.ensureToken(session)` +
+   `Csrf.hiddenField(session)` directly.
+
+2. **On CSRF-required routes the token is minted when first consumed, not per request.**
+   Rendering a view (or calling `View.getCsrfField()`) mints the token and writes the
+   session cookie exactly as before — form flows are unchanged. But JSON/redirect/text
+   responses that never render the field no longer mint tokens, so cookieless clients
+   (health checks, bots, API consumers hitting HTML routes) no longer trigger an
+   encrypt + `Set-Cookie` per request. Handlers that need the token programmatically
+   without rendering can call `Csrf.ensureToken(session)` themselves.
+
+CSRF **validation** of mutating requests is completely unchanged. Performance: the
+session cookie is now decrypted at most once per request (mutating requests on
+no-session routes previously decrypted it twice).
+
+## Changed: `/ops/status` route stats are keyed by route pattern
+
+**Who is affected:** tooling that parses the per-route stats keys from `/ops/status`
+(the "slowest routes" data) or the ops dashboard.
+
+Per-route stats were keyed by the concrete (redacted) request path, so `GET /users/1`
+and `GET /users/2` were separate entries — fragmenting averages across entity IDs and
+growing the stats map by one permanent entry per distinct URL ever requested (a slow
+memory leak on ID-rich or scanner-probed apps).
+
+Matched requests are now keyed by the **route pattern**:
+
+```
+// Before
+"GET /users/1": {...}, "GET /users/2": {...}, "GET /users/3": {...}
+
+// After
+"GET /users/{id}": {count: 3, ...}
+```
+
+This bounds the map by the number of registered routes and makes "slowest routes"
+aggregate per route, which is almost certainly what you wanted. Requests that never
+match a route keep the old concrete-path keying (with secret redaction).
+
+## Changed: finished durable jobs are pruned after 7 days (configurable)
+
+**Who is affected:** apps using durable jobs (`Jobs.schedule(...)`) that treat old
+`scheduled_jobs` rows as a permanent audit log, or that query the table directly.
+
+Completed and failed job rows previously stayed in `scheduled_jobs` forever, so the
+poller's claim query walked an ever-growing prefix of dead rows on every poll (every
+10 seconds), and `/ops/status` job counts scanned the full history. Now a daily
+framework job (`brace-jobs-prune`, runs once cluster-wide) deletes finished rows older
+than 7 days. Rows another job still references via `JobOptions.after(...)` are kept
+regardless of age.
+
+```java
+// Keep finished jobs for 30 days instead
+app.jobRetention(30);
+
+// Restore the pre-0.1.7 keep-forever behavior
+app.jobRetention(0);
+```
+
+If you need job history beyond the retention window, copy what you need into your own
+table from the job itself — `scheduled_jobs` is a queue, not an archive.
+
+On Postgres this release also adds a partial index over claimable jobs
+(`idx_scheduled_jobs_claimable`, framework migration V15, applied automatically), so
+claim cost tracks live work rather than table size.
+
+## Changed: durable-job concurrency is bounded by the connection pool
+
+**Who is affected:** apps that rely on many durable jobs running simultaneously.
+
+The poller previously ran up to 50 jobs at once against the same connection pool web
+handlers use (default pool size 10) — a job burst could take every connection, queue
+requests behind `connectionTimeout`, and 500 the request path. It also waited for an
+entire batch to finish before polling again, so one slow job delayed every other queued
+job for its duration.
+
+Now at most `poolSize / 2` jobs execute concurrently (5 with the default pool), claim
+batches are sized to the free capacity, and the poller claims more work as soon as a
+slot frees instead of waiting for the whole batch. Each job also uses one database
+session for both execution and its completed/failed mark (previously two, three on the
+failure path).
+
+Net effect: requests stay healthy during job bursts, and total queue throughput for
+mixed fast/slow workloads goes up — but peak job parallelism drops from 50 to
+`poolSize / 2`. If you need more, raise the pool size via the `DatabaseFactory`
+constructor's `poolSize` argument.
+
+## Changed: error recording is coalesced (~2s flush) so error storms can't starve the pool
+
+**Who is affected:** tests that trigger a 500 and immediately assert on `/ops/errors`;
+custom `ErrorStore.RegressionListener` implementations.
+
+Previously every error occurrence spawned a virtual thread that opened 1–2 database
+transactions (the `ops_errors` upsert + the regression bump). The scenario that
+produces error floods — a degraded database — is exactly when thousands of those
+threads piled up demanding pool connections, starving the healthy requests that
+remained. Now `record()` is a non-blocking in-memory merge per `(type, route)`, and a
+single flusher writes one upsert per error kind every ~2 seconds on one connection.
+
+Nothing the error store keeps is lost — `ops_errors` was already one row per kind with
+a count and the latest stack trace. The deliberate trade-offs:
+
+- Errors appear on `/ops/errors`, and new-regression notifications fire, up to ~2s
+  after the request (in-memory `/ops/status` `errors.recent` is still immediate).
+- A hard crash loses at most the last ~2s of error data. `app.stop()` flushes.
+- During a storm, occurrences of already-buffered kinds are never dropped (they're a
+  counter bump). New *distinct* kinds beyond 1,000 pending are dropped and counted,
+  with a warning logged at the next flush.
+- If the database is down, the buffer keeps accumulating counts (bounded by kind
+  cardinality, not error rate) and retries every interval — counts survive the outage.
+
+**Test impact:** assertions against `/ops/errors` right after a triggered 500 now race
+the flush. Call `app.stop()` first, or wait >2s. (The framework's own tests flush
+directly via a package-private accessor.)
+
+**API change:** `ErrorStore.RegressionListener.onRepeat(String type, String route)`
+gained a count parameter: `onRepeat(String type, String route, long count)` — the
+occurrences coalesced into that flush. Only affects code implementing this interface
+directly (the built-in `RegressionTracker` is updated).
+
+## Breaking: cached routes ignore query params unless declared with `.vary(...)`
+
+**Who is affected:** any app using route-level page caching (`cache.wrap(...)`) on routes
+whose content depends on query params — pagination, sorting, filtering.
+
+Page-cache keys previously included the **entire query string**, so every distinct
+param combination stored a full copy of the rendered page. The request side controls
+that keyspace: `GET /cached-page?x=<random>` minted one page-sized cache entry per
+request (memory exhaustion on the in-memory backend, a row insert per request on the
+Postgres backend), and even benign crawler/tracking params (`?utm_source=`,
+`?fbclid=`) fragmented the cache.
+
+Now **query params are ignored by default** — a cached route serves one entry per
+path. Declare the params that legitimately change the page:
+
+```java
+// Before (0.1.6): every distinct query string = its own cache entry
+app.get("/posts", cache.wrap("10m", ctrl::list));
+
+// After (0.1.7): declare what varies; everything else is ignored
+app.get("/posts", cache.wrap("10m", ctrl::list).vary("page", "sort"));
+//   /posts?page=2                 → its own entry
+//   /posts?page=2&utm_source=tw   → same entry as ?page=2
+//   /posts?x=<random-flood>       → same entry as /posts
+```
+
+**Action required:** audit every `cache.wrap(...)` route. If the handler reads a query
+param, add it to `.vary(...)` — otherwise the cache will serve the same entry for all
+values of that param (e.g. `?page=2` returning page 1). Routes that ignore the query
+string entirely need no change and get a better hit rate.
+
+`HX-Request` varying is unchanged (htmx partials and full pages stay separate).
+
+Relatedly, the in-memory cache backend is now **capped at 10,000 entries** (previously
+unbounded): past the cap, inserting a new key drops expired entries first, then
+arbitrary ones. Size it with `app.cache(CacheBackend.inMemory(maxEntries))`. Counters
+and tags are not capped.
+
+## Changed: Mailer no longer retains sent emails in production
+
+**Who is affected:** apps reading `mailer.sent()`/`mailer.last()` outside dev mode, or
+tooling that treated `sentCount` as "send attempts".
+
+The mailer previously appended every email — full HTML and text bodies — to an
+unbounded in-memory list even when really sending via SMTP: a slow leak of roughly
+20KB per email, ~2GB per 100k sends. Now:
+
+- **Capture is dev-only** (`new Mailer(null)`, no SMTP URL) and bounded to the last
+  500 emails, dropping the oldest. The `mailer.sent()` / `mailer.last()` /
+  `mailer.clearCaptured()` test API is unchanged within that window.
+- **With SMTP configured, nothing is captured.** `mailer.sent()` returns an empty
+  list in production — it was never a safe thing to rely on, and now it's explicit.
+- **`sentCount()` counts successful sends only** (it previously counted attempts,
+  including failures, and was reset by `clearCaptured()` in all modes). Failed sends
+  count in `failCount()` as before. The /ops dashboard "Sent" stat therefore now
+  means emails actually handed to SMTP. `sentCount()` also widens `int` → `long`;
+  recompile if you call it (source-compatible).
+
+## Changed: Storage requests now time out (60s default, configurable)
+
+**Who is affected:** apps doing very large uploads over slow links via `storage.put(...)`.
+
+`Storage`'s HTTP client previously had **no timeouts at all**: an unresponsive
+S3-compatible endpoint hung `put()`/`delete()` forever — typically inside a request
+handler, holding that request's transaction and pooled connection indefinitely. Now
+connections time out after 10 seconds and each request after 60 seconds
+(`s3.timeoutSeconds` to change; a timed-out `put()` throws like any other failed
+upload, a timed-out `delete()` logs `s3.delete.error` and returns as before).
+
+```hocon
+# application.conf — only needed if 60s is too tight, e.g. multi-GB uploads
+s3.timeoutSeconds = 300
+```
+
+## New (optional): `sendAsync()` — email off the request thread
+
+**Who is affected:** nobody is forced to change; recommended for any `send()` call
+inside a request handler.
+
+`send()` performs synchronous SMTP — TCP connect, STARTTLS, auth, delivery, commonly
+100ms–2s — on the calling thread, and inside a handler that means the request's
+transaction and pooled connection stay open the whole time. `sendAsync()` returns
+immediately and delivers on a background virtual thread:
+
+```java
+// Before: request waits for SMTP; DB connection held throughout
+mail.to(user.email).subject("Welcome!").html(body).send();
+
+// After: returns immediately; failure is logged and counted in failCount()
+mail.to(user.email).subject("Welcome!").html(body).sendAsync();
+```
+
+Semantics: `sendAsync()` never throws — a failed delivery is logged (`async email
+to … failed`) and counted in `failCount()` (watch it on /ops/status). Keep `send()`
+where you need the failure synchronously (jobs, scripts, "email or roll back" flows).
+Dev-mode capture works identically for both, but note the async capture races your
+assertion — poll `sentCount()` in tests rather than asserting immediately.
+
+## Changed: `brace dev`/`brace run` now set `brace.mode` (dev/prod) and pass `BRACE_JAVA_OPTS`
+
+**Who is affected:** projects with `%dev.` or `%prod.` keys in `application.conf`,
+and anyone who needs JVM flags on the app process.
+
+Previously the CLI launched the app JVM with no flags at all: `brace.mode` was never
+set, so `Config.load(..., System.getProperty("brace.mode"))` — the scaffolded
+pattern — loaded **base keys only** in every launch, mode prefixes were dead, and
+the startup banner showed mode `—`. Now:
+
+- `brace dev` launches with `-Dbrace.mode=dev` → `%dev.` keys apply.
+- `brace run` launches with `-Dbrace.mode=prod` → `%prod.` keys apply, and the
+  framework selects prod behavior (notably precompiled templates, below).
+- `BRACE_JAVA_OPTS` is passed through to the app JVM, after the mode flag — so
+  `BRACE_JAVA_OPTS="-Xmx512m -Dbrace.mode=dev" brace run` works, and the last
+  `-D` wins for overrides.
+
+**Action required:** check your `application.conf` for `%dev.` keys that have never
+actually applied — they will start applying under `brace dev`. A scaffolded
+`%dev.port=9000` means `brace dev` now serves on 9000 where it previously used the
+base `port`. The same goes for `%prod.` keys under `brace run`. Apps launched some
+other way (Maven exec, systemd, Dokploy custom command) are unaffected unless you
+pass `-Dbrace.mode` yourself.
+
+## Changed: templates are precompiled for prod (`brace.mode=prod`)
+
+**Who is affected:** template-rendering apps run via `brace run`, or launched with
+`-Dbrace.mode=prod`.
+
+JTE previously ran in dev mode everywhere: every template paid a javac compile on
+its first render after every deploy (tens to hundreds of ms of first-request
+latency), every subsequent render paid hot-reload timestamp checks, and the Java
+compiler plus jte's compiler infrastructure (~20–50MB of metaspace/heap) shipped to
+production for nothing. Now:
+
+- **`brace compile` / `brace run` precompile templates** from the conventional
+  `views/` (or `templates/`) directory into `target/jte-classes`.
+- **In prod mode the framework loads those finished classes** — no compiler loaded,
+  no first-render compile, no per-render checks. The directory is only used when it
+  was generated from the app's configured template directory (a `.source-templates`
+  marker guards against stale or mismatched output); override the location with
+  `-Dbrace.templates.precompiled=<dir>` if you precompile some other way (e.g.
+  jte-maven-plugin).
+- **Prod without precompiled classes** (custom template dir, non-CLI launch) falls
+  back to compiling **all** templates eagerly at startup. Note the failure-mode
+  shift: a template that doesn't compile now fails the boot — loudly, at deploy
+  time — where it previously 500'd on that template's first render.
+- **Dev mode is unchanged:** compile on first render, hot reload on change.
+
+**Action required:** none for scaffolded projects. If your templates live somewhere
+other than `views/` or `templates/`, prod startup eager-compiles them (correct, just
+slower to boot) — move them to a conventional directory or point
+`brace.templates.precompiled` at your own precompiled output to get the full win.
+
+### Deploying with Docker (or any non-CLI launch)
+
+Until now, a containerized Brace app that renders templates needed a **full JDK
+runtime image**: dev-mode JTE compiles each template on first render via
+`javax.tools.JavaCompiler`, which JRE images don't ship (`eclipse-temurin:*-jre`
+has no `jdk.compiler` module — first render fails). Precompiling removes that
+requirement. To convert a deployment:
+
+1. **Precompile during your image build** (or on the host before `docker build`):
+   - CLI projects: `brace compile` writes `target/jte-classes`.
+   - Maven/shaded-jar projects: the precompiler is on your classpath —
+     `java -cp target/myapp.jar com.larvalabs.brace.TemplatePrecompiler views target/jte-classes`.
+2. **Copy it into the runtime image:** `COPY target/jte-classes/ target/jte-classes/`.
+3. **Run in prod mode:** `CMD ["java", "-Dbrace.mode=prod", "-jar", "app.jar"]`.
+4. **Drop to a JRE base image** (e.g. `eclipse-temurin:25-jre`) — smaller, and
+   nothing in prod needs the compiler anymore.
+
+The `.source-templates` marker records the template path *relative to the project
+root*, so classes precompiled on a build host (or in a Docker build stage) load in
+a container with a different absolute working directory. If you keep a JDK runtime
+image and skip steps 1–2, prod mode still works — it eager-compiles all templates
+at startup (slower boot, same steady-state behavior).
+
+Newly scaffolded projects (`brace new`) get a Dockerfile with all of this in place.
+
+## Changed: template rendering now happens after the transaction commits
+
+**Who is affected:** apps with a handler that **mutates the database and then returns a
+`View` whose template throws at render time** — and only when that render actually fails.
+Successful renders are unaffected. Apps that follow POST-redirect-GET (mutate, then 302 to
+a GET that renders) are not affected at all, because the mutating request returns a
+`Redirect`, not a `View`.
+
+Previously a `View` rendered its template *inside* the handler, before the per-request
+transaction committed. A render failure therefore threw before the commit and rolled the
+transaction back. Now rendering is deferred until **after** the transaction commits and its
+pooled DB connection is released — so a slow template render no longer holds a connection
+(under StatelessSession the render faults in nothing, so it needs none), which lifts a
+throughput ceiling on render-heavy DB routes.
+
+The deliberate consequence: **if a deferred render throws, the response is still a 500, but
+the transaction has already committed** — the write persists. This matches how every other
+post-handler step already behaved (after-middleware, the session-cookie write, and the
+socket write all run post-commit), and it matches HTTP semantics, where a 500 means
+"indeterminate," not "nothing happened" (a clean "nothing happened" is a `4xx`, and those
+paths reject before mutating). It also fails toward availability: a cosmetic template bug
+no longer makes a committed action impossible to complete — it surfaces as "the action
+worked but the confirmation page errored" rather than "the action keeps failing."
+
+```java
+// If this render throws (e.g. a template bug), the post is now COMMITTED and the client
+// gets a 500. Previously the insert was rolled back.
+app.post("/posts", (FullHandler) (req, db, session) -> {
+    var post = new Post();
+    post.apply(req.form(PostForm.class).value());
+    db.insert(post);
+    return View.of("posts/show", "post", post);   // deferred render, runs post-commit
+});
+```
+
+**Action required:** none for most apps. If you have a **non-idempotent** mutation that
+renders its result inline (rather than redirecting), be aware that a retry after a
+render-failure 500 can now repeat the mutation. The standard remedies apply and are
+recommended regardless of this change: use POST-redirect-GET, or an idempotency key. If you
+specifically relied on render-failure rolling back a write, move the work that must be
+atomic with the response out of the template — validate/serialize it in the handler, before
+returning the `View`.
+
+## New: WebSocket slow-consumer backpressure (force-close past a queue cap)
+
+**Who is affected:** apps using WebSockets, *if* they have clients that can stop reading
+while the server keeps sending (broadcasts to many clients, or any high-rate `send`).
+
+`WsContext.send` / `broadcast` are non-blocking — Jetty queues the frame and returns. A
+client that stops reading (stalled, network-congested, or malicious) previously made its
+frames pile up in that queue without bound: broadcast-rate × message-size of heap per stuck
+client, a memory-exhaustion vector. Brace now tracks each connection's queued-but-unflushed
+bytes and **force-closes a connection whose backlog exceeds a cap** (close code
+`TRY_AGAIN_LATER`, 1013). The bound is per connection, so a slow client only disconnects
+itself — healthy members of the same room keep receiving.
+
+The cap defaults to **4 MB per connection** and is configurable:
+
+```java
+var app = Brace.app()
+    .ws("/feed", FeedSocket::new)
+    .wsMaxQueuedBytes(16 * 1024 * 1024); // raise for large-message or bursty feeds
+```
+
+**Action required:** none for typical apps. If you broadcast large messages or expect
+legitimately bursty-but-slow clients, raise `wsMaxQueuedBytes` so normal traffic doesn't
+trip the cap. Each force-close logs a `ws-slow-consumer-closed` warning, so disconnects are
+visible. (The cap is bytes queued in the server, approximated by message length — a safety
+threshold, not exact accounting.)
+
+## Changed: DB-backed rate limiting is now batched and best-effort (was exact-per-request)
+
+**Who is affected:** multi-instance apps on Postgres that rely on rate limiting being enforced
+*exactly* at the configured limit across the fleet. Single-process apps and off-Postgres apps are
+unaffected (they were already per-instance). Most apps need no action.
+
+In 0.1.6 the multi-server rate limiter (B4) counted through the shared DB counter on **every**
+request — one upsert per rate-limited request, and the cluster-wide limit was enforced exactly. That
+makes the rate limiter add database load in direct proportion to incoming traffic, i.e. it generates
+the most load exactly when an endpoint is under attack — the opposite of what a load-shedding control
+should do.
+
+0.1.7 makes shared counting **batched and best-effort** (M17):
+
+- Each instance buffers increments locally and flushes them to the DB in one batched statement every
+  `maxRequests / divisor` requests (default `divisor` = 10). DB writes now scale with request rate /
+  divisor, not 1:1 with requests.
+- A client already over its limit is rejected from a local negative cache with **no DB call** until
+  the window rolls — so abusive traffic costs nothing.
+
+**The behavioral change:** the cluster-wide limit is now *approximate*. With no sticky routing, a
+burst spread across `K` instances can overshoot the limit by up to about `maxRequests / divisor × K`
+before enforcement engages (then it blocks for the rest of the window). Abuse from a single client is
+still caught immediately. At the default divisor a **small limit flushes ~every request, so it stays
+near-exact** — e.g. a `RateLimiter.perKey(..., 5, "15m")` login limit behaves essentially as before;
+the looseness only grows for large limits, where the DB savings are the point.
+
+Two new knobs:
+
+```java
+var app = Brace.app()
+    // Higher = tighter fleet accuracy + more DB writes; lower = fewer writes + looser. Default 10.
+    .rateLimitBatchDivisor(50)
+    // Or eliminate ALL rate-limiter DB traffic: every limiter counts purely per-instance, so the
+    // effective limit becomes ~ instances × maxRequests across the fleet.
+    .sharedRateLimiting(false);
+```
+
+**Action required:** none for typical apps. If you depend on a *tight* cluster-wide limit for a
+large limit (say `1000/min`) on a multi-box fleet, raise `rateLimitBatchDivisor` (toward exact) or
+accept the documented overshoot. If you want zero rate-limiter DB load and per-instance limits are
+acceptable, set `sharedRateLimiting(false)`. Background and load analysis:
+[`docs/2026-06-07-rate-limiter-load.md`](../2026-06-07-rate-limiter-load.md).

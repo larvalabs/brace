@@ -55,6 +55,37 @@ class CountersPostgresIT extends PostgresTestBase {
     }
 
     @Test
+    void incrementBatchUpsertsManyRowsInOneStatement() {
+        // The multi-row INSERT ... ON CONFLICT ... RETURNING path (incrementBatchPostgres).
+        var first = counters.incrementBatch(List.of(
+            new Counters.CounterUpdate("a", 2, null),
+            new Counters.CounterUpdate("b", 5, null),
+            new Counters.CounterUpdate("c", 1, null)));
+        assertEquals(2L, first.get("a"));
+        assertEquals(5L, first.get("b"));
+        assertEquals(1L, first.get("c"));
+
+        // A second batch accumulates onto existing rows and seeds new ones in the same statement.
+        var second = counters.incrementBatch(List.of(
+            new Counters.CounterUpdate("a", 3, null),
+            new Counters.CounterUpdate("d", 9, null)));
+        assertEquals(5L, second.get("a"));
+        assertEquals(9L, second.get("d"));
+        assertEquals(5, counters.get("b"));
+    }
+
+    @Test
+    void incrementBatchExpiredRowResets() {
+        Instant past = Instant.now().minus(1, ChronoUnit.MINUTES);
+        Instant future = Instant.now().plus(1, ChronoUnit.MINUTES);
+        counters.incrementBatch(List.of(new Counters.CounterUpdate("k", 5, past)));
+        // The CASE must reset an already-expired row to delta, not continue from 5.
+        var reset = counters.incrementBatch(List.of(new Counters.CounterUpdate("k", 2, future)));
+        assertEquals(2L, reset.get("k"));
+        assertEquals(2, counters.get("k"));
+    }
+
+    @Test
     void expiredRowResetsOnIncrement() {
         Instant past = Instant.now().minus(1, ChronoUnit.MINUTES);
         assertEquals(5, counters.incrementAndGet("win", 5, past)); // created already expired

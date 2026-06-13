@@ -102,6 +102,15 @@ public interface CacheBackend {
         return new InMemoryBackend();
     }
 
+    /**
+     * In-memory backend with a custom entry cap (default 10,000). The cap is a heap-safety net:
+     * past it, inserting a new key first drops expired entries, then arbitrary ones. Counters and
+     * tags are not capped.
+     */
+    static CacheBackend inMemory(int maxEntries) {
+        return new InMemoryBackend(maxEntries);
+    }
+
     static CacheBackend postgres(DatabaseFactory factory) {
         return new PostgresBackend(factory);
     }

@@ -90,6 +90,10 @@ public class Session {
     private static final ConcurrentHashMap<String, SecretKeySpec> keyCache = new ConcurrentHashMap<>();
     static final int MAX_KEY_CACHE_SIZE = 16;
 
+    // Shared: SecureRandom is thread-safe and instantiation does a JCA provider lookup —
+    // per-cookie-write construction was measurable garbage on every session response.
+    private static final SecureRandom RANDOM = new SecureRandom();
+
     // -------------------------------------------------------------------------
     // Accessors
     // -------------------------------------------------------------------------
@@ -225,7 +229,7 @@ public class Session {
 
             // Generate random 12-byte nonce for GCM
             byte[] nonce = new byte[12];
-            new SecureRandom().nextBytes(nonce);
+            RANDOM.nextBytes(nonce);
 
             // Encrypt with AES-256-GCM (includes authentication tag)
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");

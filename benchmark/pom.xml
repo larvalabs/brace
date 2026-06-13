@@ -12,13 +12,16 @@
     <properties>
         <maven.compiler.release>${java.specification.version}</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <jmh.version>1.37</jmh.version>
     </properties>
 
     <dependencies>
         <dependency>
             <groupId>com.larvalabs</groupId>
             <artifactId>brace</artifactId>
-            <version>0.2.0-SNAPSHOT</version>
+            <!-- Keep in sync with the framework pom.xml <version> (run `mvn install
+                 -DskipTests` at the repo root before building the benchmark). -->
+            <version>0.1.7-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.postgresql</groupId>
@@ -29,6 +32,13 @@
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-database-postgresql</artifactId>
             <version>10.22.0</version>
+        </dependency>
+        <!-- JMH micro-benchmarks (gap #3): allocation-sensitive units measured with
+             gc.alloc.rate.norm, which wrk can't see. Run via benchmark.jmh.JmhRunner. -->
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-core</artifactId>
+            <version>${jmh.version}</version>
         </dependency>
     </dependencies>
 
@@ -43,6 +53,15 @@
                     <compilerArgs>
                         <arg>--enable-preview</arg>
                     </compilerArgs>
+                    <!-- JDK 23+ disables implicit annotation processing, so JMH's
+                         @Benchmark code generator must be declared explicitly here. -->
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.openjdk.jmh</groupId>
+                            <artifactId>jmh-generator-annprocess</artifactId>
+                            <version>${jmh.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
                 </configuration>
             </plugin>
             <plugin>
