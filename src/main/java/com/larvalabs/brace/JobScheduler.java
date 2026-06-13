@@ -62,9 +62,21 @@ public class JobScheduler {
         LocalTime targetTime = LocalTime.parse(time);
         long initialDelayMs = computeDelayUntil(targetTime);
         long periodMs = Duration.ofHours(24).toMillis();
-        registeredJobs.add(new RegisteredJob(name, "daily at " + time, periodMs, initialDelayMs, job, false));
+        var rj = new RegisteredJob(name, "daily at " + time, periodMs, initialDelayMs, job, false);
+        registeredJobs.add(rj);
         Instant nextRun = Instant.now().plusMillis(initialDelayMs);
         statuses.add(new JobStatus(name, "daily at " + time, null, 0, "pending", null, 0, nextRun, null));
+
+        // If the scheduler is already running, schedule immediately — same late-registration branch
+        // register() has. Without this a daily job added after start() was tracked in statuses but
+        // never handed to the executor, so it silently never ran. daily is always cluster-deduped.
+        if (scheduler != null) {
+            final int index = registeredJobs.size() - 1;
+            seedRunRow(name);
+            scheduler.scheduleAtFixedRate(() -> {
+                Thread.startVirtualThread(() -> executeJob(index, rj));
+            }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
+        }
     }
 
     public void start(DatabaseFactory dbFactory) {
@@ -186,12 +198,59 @@ public class JobScheduler {
      * advisory lock.
      */
     private boolean claimRun(RegisteredJob rj) {
+        long currentSlot = Instant.now().toEpochMilli() / rj.periodMs();
+
+        // Fast path (M14): a NON-locking read. On a multi-instance cluster the slot is almost always
+        // already claimed — by another instance, or by this one on an earlier tick within the same slot
+        // — and that case must not take a row lock. Previously every tick on every instance ran
+        // SELECT … FOR UPDATE, so an every("1s") job on N instances was N write-lock acquisitions per
+        // second serialized on one row. Now it's N cheap snapshot reads, and the lock is taken only by
+        // the (rare) instances that find the slot genuinely unclaimed. A stale read can only under-report
+        // the claim (READ COMMITTED never shows an uncommitted newer slot), so the worst case is falling
+        // through to the locked path and re-checking there — never a missed skip, never a duplicate run.
+        try {
+            var db = new Database(dbFactory.openSession());
+            try {
+                db.beginTransaction();
+                Long lastSlot = db.jdbc(conn -> {
+                    try (var ps = conn.prepareStatement(
+                            "SELECT last_run_slot FROM brace_scheduled_runs WHERE job_name = ?")) {
+                        ps.setString(1, rj.name());
+                        try (var rs = ps.executeQuery()) {
+                            if (!rs.next()) return null; // row missing → let the locked path decide
+                            long v = rs.getLong(1);
+                            return rs.wasNull() ? null : v; // null slot (freshly seeded) → not yet claimed
+                        }
+                    }
+                });
+                db.commitTransaction();
+                if (lastSlot != null && lastSlot >= currentSlot) {
+                    return false; // already claimed this slot — no lock needed
+                }
+            } finally {
+                db.close();
+            }
+        } catch (Exception e) {
+            // A transient read error shouldn't drop a run — fall through and decide under the lock.
+            Log.warn("scheduler-claim-read-failed job=" + rj.name() + " error=" + e.getMessage());
+        }
+
+        // Slow path: the slot looks unclaimed (or the row is missing). Take the row lock and re-check
+        // under it — another instance may have claimed between our unlocked read and acquiring the lock.
+        return claimUnderLock(rj, currentSlot);
+    }
+
+    /**
+     * The authoritative claim: SELECT … FOR UPDATE on the job's coordination row, re-check the slot under
+     * the lock, and advance it iff still unclaimed. Reached only when {@link #claimRun}'s unlocked read
+     * found the slot open, so this — and its row lock — runs at most once per slot per instance that races
+     * for it, not on every tick. The exactly-once guarantee lives here, unchanged from the original.
+     */
+    private boolean claimUnderLock(RegisteredJob rj, long currentSlot) {
         var db = new Database(dbFactory.openSession());
         try {
             db.beginTransaction();
-            var now = Instant.now();
-            long currentSlot = now.toEpochMilli() / rj.periodMs();
-            var nowTs = Timestamp.from(now);
+            var nowTs = Timestamp.from(Instant.now());
             boolean claimed = db.jdbc(conn -> {
                 try (var ps = conn.prepareStatement(
                         "SELECT last_run_slot FROM brace_scheduled_runs WHERE job_name = ? FOR UPDATE")) {
@@ -204,7 +263,7 @@ public class JobScheduler {
                         }
                         long lastSlot = rs.getLong(1);
                         if (!rs.wasNull() && lastSlot >= currentSlot) {
-                            return false; // this slot was already claimed by another instance
+                            return false; // claimed by another instance since our unlocked read
                         }
                     }
                 }

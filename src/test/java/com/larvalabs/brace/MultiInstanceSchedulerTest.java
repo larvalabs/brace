@@ -61,6 +61,29 @@ class MultiInstanceSchedulerTest {
     }
 
     @Test
+    void dailyJobRegisteredAfterStartIsScheduled() throws Exception {
+        // Regression: daily() lacked register()'s "scheduler already running" branch, so a daily job
+        // added AFTER start() was tracked in statuses but never handed to the executor — it silently
+        // never ran. Register one targeting ~1-2s out and confirm it actually fires.
+        var runs = new AtomicInteger(0);
+        var a = new JobScheduler();
+        a.start(dbFactory); // start with no jobs registered yet
+
+        // plusSeconds(2) then truncate to whole seconds → target is ~1-2s in the future (daily() parses
+        // HH:mm:ss). computeDelayUntil rolls to tomorrow only if the target is already past, which this
+        // isn't except in a ~1s window at midnight — acceptable for a timing test.
+        var target = java.time.LocalTime.now().plusSeconds(2).withNano(0);
+        a.daily(target.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")),
+            "late-daily", (db, ctx) -> runs.incrementAndGet());
+
+        Thread.sleep(4000);
+        a.stop();
+
+        assertTrue(runs.get() >= 1,
+            "a daily job registered after start() should be scheduled and run; got " + runs.get());
+    }
+
+    @Test
     void singleInstanceStillRunsEveryInterval() throws Exception {
         var runs = new AtomicInteger(0);
         var a = new JobScheduler();
