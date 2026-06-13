@@ -106,6 +106,31 @@ class MailerTest {
     }
 
     @Test
+    void sendAsyncCapturesInDevMode() throws Exception {
+        var mailer = new Mailer(null);
+        mailer.to("user@example.com").subject("Async").text("Hi").sendAsync();
+        awaitCount(() -> mailer.sentCount() == 1);
+        assertEquals("Async", mailer.last().subject());
+        assertEquals(0, mailer.failCount());
+    }
+
+    @Test
+    void sendAsyncDoesNotThrowOnSmtpError() throws Exception {
+        var mailer = new Mailer("smtp://invalid:25");
+        mailer.to("user@example.com").subject("Async").text("Hi").sendAsync(); // must not throw
+        awaitCount(() -> mailer.failCount() == 1);
+        assertEquals(0, mailer.sentCount());
+    }
+
+    private static void awaitCount(java.util.function.BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() > deadline) fail("condition not met within 10s");
+            Thread.sleep(10);
+        }
+    }
+
+    @Test
     void captureIsBoundedDropOldest() {
         var mailer = new Mailer(null);
         for (int i = 1; i <= Mailer.CAPTURE_LIMIT + 1; i++) {

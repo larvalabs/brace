@@ -1141,3 +1141,27 @@ upload, a timed-out `delete()` logs `s3.delete.error` and returns as before).
 # application.conf — only needed if 60s is too tight, e.g. multi-GB uploads
 s3.timeoutSeconds = 300
 ```
+
+## New (optional): `sendAsync()` — email off the request thread
+
+**Who is affected:** nobody is forced to change; recommended for any `send()` call
+inside a request handler.
+
+`send()` performs synchronous SMTP — TCP connect, STARTTLS, auth, delivery, commonly
+100ms–2s — on the calling thread, and inside a handler that means the request's
+transaction and pooled connection stay open the whole time. `sendAsync()` returns
+immediately and delivers on a background virtual thread:
+
+```java
+// Before: request waits for SMTP; DB connection held throughout
+mail.to(user.email).subject("Welcome!").html(body).send();
+
+// After: returns immediately; failure is logged and counted in failCount()
+mail.to(user.email).subject("Welcome!").html(body).sendAsync();
+```
+
+Semantics: `sendAsync()` never throws — a failed delivery is logged (`async email
+to … failed`) and counted in `failCount()` (watch it on /ops/status). Keep `send()`
+where you need the failure synchronously (jobs, scripts, "email or roll back" flows).
+Dev-mode capture works identically for both, but note the async capture races your
+assertion — poll `sentCount()` in tests rather than asserting immediately.

@@ -569,11 +569,15 @@ Inspect via `Jobs.asyncSubmitted()` / `Jobs.asyncFailed()` (counters).
 ```java
 var mail = new Mailer(config.get("smtp.url")).from("noreply@app.com");
 
+// From request handlers, prefer sendAsync(): returns immediately, sends on a background
+// virtual thread. send() does synchronous SMTP (commonly 100ms-2s) on the calling thread,
+// holding the request's transaction open the whole time.
 mail.to("user@example.com")
     .subject("Welcome!")
     .html(View.render("emails/welcome", "user", user))
-    .send();
+    .sendAsync();
 
+// send() blocks until delivered and throws on failure — for jobs/scripts that need the result.
 mail.to("user@example.com")
     .cc("admin@example.com")
     .subject("Report")
@@ -581,6 +585,7 @@ mail.to("user@example.com")
     .send();
 ```
 
+`sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
 Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.
 Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
 With SMTP configured nothing is captured; `sentCount()` counts successful sends, `failCount()` failures.

@@ -329,10 +329,11 @@ Finished durable jobs are pruned daily after 7 days (configure with `app.jobRete
 mail.to("user@example.com")
     .subject("Welcome!")
     .html(View.render("emails/welcome", "user", user))
-    .send();
+    .sendAsync();   // background virtual thread; send() blocks until delivered
 ```
 
-Dev mode captures emails without sending (last 500). Access via `mailer.sent()` in tests.
+Use `sendAsync()` from request handlers — `send()` does synchronous SMTP on the calling
+thread. Dev mode captures emails without sending (last 500). Access via `mailer.sent()` in tests.
 
 ## Storage
 
