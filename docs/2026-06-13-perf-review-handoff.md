@@ -6,12 +6,15 @@ Process/conventions: `docs/reviews/README.md`.
 
 ## Where things are
 
-- **Worktree:** `.claude/worktrees/perf-review` — **always `cd` here and confirm `pwd` + branch
-  before running `mvn`.** (A `cd /tmp` earlier in a session silently reset the shell cwd to the
-  *main* repo on `main`; builds there falsely "passed" against code without the changes.)
-- **Branch:** `runtime-performance-review-2026-06`. **HEAD: `605a8d1`.** Working tree clean.
+- **Location:** the main checkout `/Users/matt/code/brace` is now **directly on the review branch**
+  (the `.claude/worktrees/perf-review` worktree was removed on 2026-06-13 — the perf review is the only
+  active work stream, so the separate worktree that isolated it from the concurrent token-efficiency
+  review is no longer needed). Work here; no `cd` dance, and the LSP is on-classpath again.
+- **Branch:** `runtime-performance-review-2026-06` (checked out in the main repo). **HEAD: `85d0b04`**
+  (this handoff). Working tree clean except an untracked `docs/2026-06-12-release-notes-0.1.7-draft.md`
+  (pre-existing, unrelated).
 - **Built on** local `main` (includes the unpushed security-review + token-efficiency merges). Nothing
-  on this branch is pushed.
+  on this branch is pushed. To return to `main`: `git checkout main`.
 - **Suite:** `mvn test` → **834/834** green (H2). `mvn verify` adds the real-Postgres `*IT` tier
   (needs Docker; `tfb-postgres` container on port 5433).
 
