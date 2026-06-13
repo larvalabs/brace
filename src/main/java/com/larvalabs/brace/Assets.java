@@ -24,13 +24,25 @@ public class Assets {
 
     private static volatile Assets instance;
 
-    private final List<BraceHandler.StaticFileMapping> mappings;
+    private final List<ResolvedMapping> mappings;
     private final ConcurrentHashMap<String, CachedHash> cache = new ConcurrentHashMap<>();
 
     private record CachedHash(long mtime, String hash) {}
 
+    /** A static-file mapping with its base directory normalized once (L18), not per url() call. */
+    private record ResolvedMapping(String prefix, Path base) {}
+
     Assets(List<BraceHandler.StaticFileMapping> mappings) {
-        this.mappings = mappings;
+        // L18: resolve each mapping's base directory to an absolute, normalized Path at
+        // construction. resolve() previously redid Path.of(dir).toAbsolutePath().normalize() for
+        // every mapping on every Assets.url() call — and url() is called for each asset reference
+        // in each rendered page, so this is on the template-render hot path.
+        var resolved = new java.util.ArrayList<ResolvedMapping>(mappings.size());
+        for (var m : mappings) {
+            resolved.add(new ResolvedMapping(m.urlPrefix(),
+                Path.of(m.directory()).toAbsolutePath().normalize()));
+        }
+        this.mappings = List.copyOf(resolved);
     }
 
     static void init(List<BraceHandler.StaticFileMapping> mappings) {
@@ -73,12 +85,12 @@ public class Assets {
 
     private Path resolve(String urlPath) {
         for (var mapping : mappings) {
-            var prefix = mapping.urlPrefix();
+            var prefix = mapping.prefix();
             if (!urlPath.startsWith(prefix)) continue;
             var relative = urlPath.substring(prefix.length());
             if (relative.startsWith("/")) relative = relative.substring(1);
             if (relative.isEmpty() || relative.contains("..")) return null;
-            var base = Path.of(mapping.directory()).toAbsolutePath().normalize();
+            var base = mapping.base();
             var file = base.resolve(relative).normalize();
             if (!file.startsWith(base)) return null;
             if (!Files.isRegularFile(file)) return null;
