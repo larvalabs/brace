@@ -31,6 +31,15 @@ public class Invoker {
         this.needsSession = paramTypes.contains(ParamType.SESSION);
     }
 
+    /**
+     * Builds a reflection-backed invoker for a controller method, mapping its parameters to
+     * {@link Request}/{@link Database}/{@link Session}. This is the only invoker whose
+     * {@link #invoke} runs a reflective {@link Method#invoke} — it exists for a future
+     * controller-method-scanning entry point and is <strong>not</strong> on the request hot path:
+     * every {@code app.get(...)} overload wraps lambdas in the direct-call {@code fromXxx} invokers
+     * below, so no reflection runs per request (L2). {@code setAccessible(true)} is set here once so
+     * the path also works for methods on non-public controller classes.
+     */
     public static Invoker build(Object target, Method method) {
         var paramTypes = new ArrayList<ParamType>();
         for (Parameter param : method.getParameters()) {
@@ -48,6 +57,7 @@ public class Invoker {
                     ". Supported types: Request, Database, Session");
             }
         }
+        method.setAccessible(true);
         return new Invoker(target, method, paramTypes);
     }
 
