@@ -1314,3 +1314,47 @@ legitimately bursty-but-slow clients, raise `wsMaxQueuedBytes` so normal traffic
 trip the cap. Each force-close logs a `ws-slow-consumer-closed` warning, so disconnects are
 visible. (The cap is bytes queued in the server, approximated by message length — a safety
 threshold, not exact accounting.)
+
+## Changed: DB-backed rate limiting is now batched and best-effort (was exact-per-request)
+
+**Who is affected:** multi-instance apps on Postgres that rely on rate limiting being enforced
+*exactly* at the configured limit across the fleet. Single-process apps and off-Postgres apps are
+unaffected (they were already per-instance). Most apps need no action.
+
+In 0.1.6 the multi-server rate limiter (B4) counted through the shared DB counter on **every**
+request — one upsert per rate-limited request, and the cluster-wide limit was enforced exactly. That
+makes the rate limiter add database load in direct proportion to incoming traffic, i.e. it generates
+the most load exactly when an endpoint is under attack — the opposite of what a load-shedding control
+should do.
+
+0.1.7 makes shared counting **batched and best-effort** (M17):
+
+- Each instance buffers increments locally and flushes them to the DB in one batched statement every
+  `maxRequests / divisor` requests (default `divisor` = 10). DB writes now scale with request rate /
+  divisor, not 1:1 with requests.
+- A client already over its limit is rejected from a local negative cache with **no DB call** until
+  the window rolls — so abusive traffic costs nothing.
+
+**The behavioral change:** the cluster-wide limit is now *approximate*. With no sticky routing, a
+burst spread across `K` instances can overshoot the limit by up to about `maxRequests / divisor × K`
+before enforcement engages (then it blocks for the rest of the window). Abuse from a single client is
+still caught immediately. At the default divisor a **small limit flushes ~every request, so it stays
+near-exact** — e.g. a `RateLimiter.perKey(..., 5, "15m")` login limit behaves essentially as before;
+the looseness only grows for large limits, where the DB savings are the point.
+
+Two new knobs:
+
+```java
+var app = Brace.app()
+    // Higher = tighter fleet accuracy + more DB writes; lower = fewer writes + looser. Default 10.
+    .rateLimitBatchDivisor(50)
+    // Or eliminate ALL rate-limiter DB traffic: every limiter counts purely per-instance, so the
+    // effective limit becomes ~ instances × maxRequests across the fleet.
+    .sharedRateLimiting(false);
+```
+
+**Action required:** none for typical apps. If you depend on a *tight* cluster-wide limit for a
+large limit (say `1000/min`) on a multi-box fleet, raise `rateLimitBatchDivisor` (toward exact) or
+accept the documented overshoot. If you want zero rate-limiter DB load and per-instance limits are
+acceptable, set `sharedRateLimiting(false)`. Background and load analysis:
+[`docs/2026-06-07-rate-limiter-load.md`](../2026-06-07-rate-limiter-load.md).

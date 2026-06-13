@@ -70,6 +70,37 @@ class CountersTest {
     }
 
     @Test
+    void incrementBatchAccumulatesAndReturnsNewValues() {
+        var first = counters.incrementBatch(List.of(
+            new Counters.CounterUpdate("a", 2, null),
+            new Counters.CounterUpdate("b", 5, null)));
+        assertEquals(2L, first.get("a"));
+        assertEquals(5L, first.get("b"));
+
+        // A second batch accumulates onto the existing rows.
+        var second = counters.incrementBatch(List.of(new Counters.CounterUpdate("a", 3, null)));
+        assertEquals(5L, second.get("a"));
+        assertEquals(5, counters.get("a"));
+        assertEquals(5, counters.get("b"));
+    }
+
+    @Test
+    void incrementBatchEmptyIsNoOp() {
+        assertTrue(counters.incrementBatch(List.of()).isEmpty());
+    }
+
+    @Test
+    void incrementBatchExpiredRowResets() {
+        Instant past = Instant.now().minus(1, ChronoUnit.MINUTES);
+        Instant future = Instant.now().plus(1, ChronoUnit.MINUTES);
+        counters.incrementBatch(List.of(new Counters.CounterUpdate("k", 5, past)));
+        // Already expired → the next batch starts fresh rather than continuing from 5.
+        var reset = counters.incrementBatch(List.of(new Counters.CounterUpdate("k", 2, future)));
+        assertEquals(2L, reset.get("k"));
+        assertEquals(2, counters.get("k"));
+    }
+
+    @Test
     void sweepRemovesOnlyExpired() {
         Instant past = Instant.now().minus(1, ChronoUnit.MINUTES);
         Instant future = Instant.now().plus(1, ChronoUnit.MINUTES);

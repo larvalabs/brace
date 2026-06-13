@@ -34,6 +34,40 @@ becomes the bottleneck it was meant to prevent.
 + `UPDATE`/`INSERT`, two round trips. Single-process apps don't use the shared backend at all and
 keep an in-process counter.)
 
+## Update (0.1.7, M17): the cost above is no longer paid per request
+
+The "one upsert per request" model above was the original B4 design. As of M17 the shared backend is
+**batched and best-effort**, so the DB load is bounded by request *rate*, not by request *count*:
+
+- **Batched flush.** Each instance counts locally and flushes its buffered increments to
+  `brace_counters` in **one multi-row `INSERT … ON CONFLICT … RETURNING`** (the
+  `incrementBatch` path) every `maxRequests / divisor` requests — `divisor` defaults to 10, tunable
+  via `Brace.rateLimitBatchDivisor(int)`. So a route taking R req/s generates roughly
+  `R / (maxRequests/divisor)` upserts/sec, and a single batch upsert can carry many distinct keys at
+  once. Unique-key floods (the adversarial case for per-key schemes) collapse to `R/N` writes too,
+  because the batch threshold counts *total* buffered requests, not keys.
+- **Negative cache.** Once a key is over its limit for the current window, that instance rejects it
+  from a local map with **zero DB calls** until the window rolls. Fixed-window counts are monotonic
+  within a window, so the cached 429 is the same decision the counter would return — which means the
+  abusive client generating the most traffic generates *no* counter load. This directly defuses the
+  hot-key regime below for the case that matters most (a client being actively limited).
+- **Failure fallback.** If a flush fails (DB blip), the buffered counts are retained and the limiter
+  keeps enforcing per-instance until a short retry cooldown elapses — never a 500, never lost
+  enforcement, just looser-by-the-fleet for the outage.
+
+**The trade-off is fleet accuracy, by design.** A machine only learns the fleet count when it flushes
+(every `maxRequests/divisor` requests), so on a burst spread across `K` instances with **no sticky
+routing** the limit can overshoot by up to about `maxRequests/divisor × K` before enforcement
+engages. Worst case (`divisor = 1`) this equals the per-instance looseness (`K × maxRequests`), but
+batched counting *recovers* — it blocks for the rest of the window — whereas pure per-instance
+counting stays loose every window. Single-instance / single-key abuse is always caught immediately
+(an instance sees its own count with no lag). Set `divisor` higher to approach exact per-request
+counting, or `Brace.sharedRateLimiting(false)` to opt out of DB-backed counting entirely (effective
+limit ≈ `K × maxRequests`, zero DB).
+
+The regime analysis below still describes the *underlying* per-upsert cost; with M17 you pay it once
+per flush rather than once per request, and not at all for already-blocked keys.
+
 ## Making Postgres behave more like Redis for this workload
 
 This data is **ephemeral, best-effort, and windowed**: none of WAL durability, crash safety, or

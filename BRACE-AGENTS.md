@@ -713,7 +713,12 @@ app.before("/api/*", RateLimiter.perIp(100, "1m"));
 app.before("/login", RateLimiter.perKey(req -> req.param("email"), 5, "15m"));
 ```
 
-**Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see Scaling below.
+**Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (a shared counter), not per instance — see Scaling below.
+
+**DB load is bounded, not per-request (M17).** Shared counting is *batched and best-effort*: each instance buffers increments and flushes them to the DB every `maxRequests / divisor` requests (default divisor 10), so writes scale with request rate / divisor, not 1:1 — and a client already over the limit is rejected from a local negative cache with **no DB call at all** (the abusive traffic you most want to shed costs nothing). The trade-off is fleet accuracy: across `K` instances a burst can overshoot the limit by up to about `maxRequests / divisor × K` before enforcement engages (assume **no** sticky routing). Abuse from one client is always caught immediately regardless — an instance sees its own count with no lag. Two knobs:
+
+- `app.rateLimitBatchDivisor(int)` (default 10) — higher = tighter fleet accuracy + more DB writes; lower = fewer writes + looser. A small limit like `5/15m` already flushes ~every request at the default (near-exact, and cheap because the traffic is low); a large limit like `1000/min` batches ~10×.
+- `app.sharedRateLimiting(false)` — eliminate **all** rate-limiter DB traffic; every limiter then counts purely per-instance, so the effective limit becomes roughly `K × maxRequests` across the fleet. Off Postgres, limiters are already per-instance and both knobs are no-ops.
 
 ## Scaling horizontally
 
@@ -724,7 +729,7 @@ Brace runs correctly as **N instances behind a load balancer sharing one Postgre
 - **Opt-in:** the shared cache backend (`CacheBackend.postgres(dbFactory)`) — per-process by default even on Postgres, since it trades latency for consistency.
 - **Per-instance by design:** `/ops/dashboard`, `/ops/status`, `/ops/logs`, JFR/heap reflect the serving box (`/ops/status` carries `app.instanceId`). Use an external aggregator over the instance-tagged `ops_timeseries` feed + stdout JSON logs for the fleet view.
 - **JFR profiler runs whenever ops is enabled** (~0.5–2% CPU for continuous CPU/GC/method/allocation sampling — on by default, deliberately). `app.opsProfiler(false)` disables it on CPU-constrained instances; the dashboard then falls back to basic runtime heap numbers and `jvm.*` metrics stop flowing.
-- **Watch:** rate-limiter DB load on busy servers (Redis recommended for very high volume / hot keys — see [`docs/2026-06-07-rate-limiter-load.md`](docs/2026-06-07-rate-limiter-load.md)); ephemeral counters reset on crash/failover (by design).
+- **Rate-limiter DB load is bounded (M17):** counting is batched (flush every `maxRequests / rateLimitBatchDivisor` requests) and over-limit clients are served from a local negative cache with no DB call — so DB load scales with request rate, not 1:1, and abusive traffic costs nothing. Tune via `app.rateLimitBatchDivisor(int)`, or `app.sharedRateLimiting(false)` to go fully per-instance (effective limit ≈ `K × maxRequests`). Background: [`docs/2026-06-07-rate-limiter-load.md`](docs/2026-06-07-rate-limiter-load.md). Ephemeral counters reset on crash/failover (by design).
 
 ## Security
 

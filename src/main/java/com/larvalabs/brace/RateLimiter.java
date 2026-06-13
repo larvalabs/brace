@@ -11,6 +11,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 
@@ -44,6 +46,39 @@ public class RateLimiter {
      */
     static final int MAX_KEY_LENGTH = 64;
 
+    /**
+     * Upper bound on the per-instance flush batch (M17). Keeps the local buffer bounded for a
+     * pathologically large limit by making flushes more frequent — it never lets a breach go
+     * undetected (single-instance breaches are caught by the per-request estimate regardless).
+     */
+    static final int MAX_FLUSH_BATCH = 10_000;
+
+    /**
+     * Default divisor relating the flush batch size to the limit: {@code flushThreshold =
+     * maxRequests / batchDivisor} (floored at 1). See {@link #batchDivisor}.
+     */
+    static final int DEFAULT_BATCH_DIVISOR = 10;
+
+    /**
+     * M17 accuracy/DB-load knob (set via {@code Brace.rateLimitBatchDivisor}). An instance flushes
+     * its buffered counts to the shared counter every {@code maxRequests / batchDivisor} requests.
+     * Higher divisor → smaller batches → tighter fleet accuracy but more DB writes; lower → bigger
+     * batches → fewer writes but a looser fleet view (worst-case burst ≈ {@code maxRequests/divisor ×
+     * instances} over the limit). At the default 10, a small limit (e.g. login {@code 5/15m}) flushes
+     * essentially every request — near-exact, and cheap because the traffic is low — while a large
+     * limit (e.g. {@code 1000/min}) batches ~10×. Single-instance abuse is always caught immediately
+     * via the per-request estimate + negative cache, independent of this knob.
+     */
+    private static volatile int batchDivisor = DEFAULT_BATCH_DIVISOR;
+
+    /** After a failed flush, back off DB retries this long while counting per-instance. */
+    private static final long FLUSH_RETRY_COOLDOWN_MILLIS = 1_000;
+
+    /** Set the global flush-batch divisor (Brace builder). Clamped to ≥ 1. */
+    static void setBatchDivisor(int divisor) {
+        batchDivisor = Math.max(1, divisor);
+    }
+
     private final ConcurrentHashMap<String, Window> windows = new ConcurrentHashMap<>();
     private final int maxRequests;
     private final Duration windowDuration;
@@ -51,6 +86,23 @@ public class RateLimiter {
     private final String label;
     private final LongAdder allowed = new LongAdder();
     private final LongAdder blocked = new LongAdder();
+
+    // --- M17: batched, best-effort shared counting state (used only on the shared-backend path) ---
+    // Instead of a DB round trip per request, each instance buffers increments locally and flushes
+    // up to flushThreshold() of them in one Counters.incrementBatch call, so DB writes are bounded by
+    // requests/flushThreshold regardless of key cardinality. A request's allow/block decision uses
+    // (lastKnownGlobal at last flush) + (local pending) — best-effort: the fleet view lags by up to
+    // one flush, so the effective limit can overshoot by ~flushThreshold × instances. Documented.
+    private final ConcurrentHashMap<String, AtomicLong> pending = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> windowEndByKey = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> lastKnownGlobal = new ConcurrentHashMap<>();
+    private final LongAdder totalPending = new LongAdder();
+    private final AtomicBoolean flushing = new AtomicBoolean(false);
+    private volatile long flushCooldownUntilMillis = 0L;
+    // Negative cache: a counter key known over the limit for the current window short-circuits to a
+    // 429 with no DB call and no buffering (the abusive-client traffic we most want to shed). Value
+    // = the window-end millis it stays blocked until; cleared once the window rolls.
+    private final ConcurrentHashMap<String, Long> blockedUntil = new ConcurrentHashMap<>();
 
     private RateLimiter(int maxRequests, Duration windowDuration, Function<Request, String> keyExtractor, String label) {
         this.maxRequests = maxRequests;
@@ -191,10 +243,16 @@ public class RateLimiter {
     }
 
     /**
-     * Cluster-wide fixed-window count backed by a shared atomic counter (B4). Every instance
-     * derives the same window slot from wall-clock — slot = floor(now / window) — so the counter
-     * key is identical across the fleet and the limit is enforced once, globally. Like B1's
+     * Cluster-wide fixed-window count backed by a shared atomic counter (B4), counted in
+     * best-effort batches (M17). Every instance derives the same window slot from wall-clock —
+     * slot = floor(now / window) — so the counter key is identical across the fleet. Like B1's
      * scheduler, this needs clocks synced only within one window (NTP-trivial for any real limit).
+     *
+     * <p>Rather than one DB round trip per request, an instance buffers increments and flushes them
+     * in batches of up to {@code flushThreshold} (= {@code maxRequests}); the per-request decision
+     * uses {@code lastKnownGlobal + localPending}. This is deliberately approximate — see the field
+     * comments and {@code docs/2026-06-07-rate-limiter-load.md}. An already-blocked key is served
+     * from the local negative cache with no DB at all.
      */
     private Result checkShared(String key, Counters counters) {
         long windowMillis = Math.max(1, windowDuration.toMillis());
@@ -206,16 +264,141 @@ public class RateLimiter {
         // identical type/limit/window on different paths would share a budget — name them apart if
         // that matters; uncommon, and the failure mode is conservative.)
         String counterKey = "rl:" + label + ":" + key + ":" + slot;
-        long count = counters.incrementAndGet(counterKey, 1, Instant.ofEpochMilli(windowEndMillis));
 
-        if (count > maxRequests) {
+        // Negative cache: a key already over the limit for this window is rejected locally — no DB
+        // call, no buffering. Fixed-window counts are monotonic within a slot, so once a key is over
+        // it stays over until the slot rolls; the cached block is the same decision the counter
+        // would return, at zero DB cost — which is exactly the abusive-client load we want to shed.
+        Long blockUntil = blockedUntil.get(counterKey);
+        if (blockUntil != null) {
+            if (nowMillis < blockUntil) {
+                blocked.increment();
+                return tooMany(retryAfterSeconds(blockUntil, nowMillis));
+            }
+            blockedUntil.remove(counterKey, blockUntil); // window rolled — resume counting
+        }
+
+        // Buffer this request's increment locally; the batch flush below writes it to the shared
+        // counter. windowEndByKey records the key's expiry for the flush and for eviction.
+        windowEndByKey.putIfAbsent(counterKey, windowEndMillis);
+        pending.computeIfAbsent(counterKey, k -> new AtomicLong()).incrementAndGet();
+        totalPending.increment();
+
+        maybeFlush(counters, nowMillis);
+
+        // Estimate after any flush: lastKnownGlobal (fleet count as of the last successful flush,
+        // which already includes this instance's earlier flushes) + whatever is still buffered
+        // locally for this key. A concurrent flush may have just reset the pending half to ~0 and
+        // bumped lastKnownGlobal — either ordering yields a sound best-effort estimate.
+        long estimate = lastKnownGlobal.getOrDefault(counterKey, 0L) + currentPending(counterKey);
+        if (estimate > maxRequests) {
             blocked.increment();
-            long retryAfter = (windowEndMillis - nowMillis + 999) / 1000; // ceil to seconds
-            if (retryAfter < 1) retryAfter = 1;
-            return tooMany(retryAfter);
+            blockedUntil.putIfAbsent(counterKey, windowEndMillis); // arm the negative cache
+            return tooMany(retryAfterSeconds(windowEndMillis, nowMillis));
         }
         allowed.increment();
         return null;
+    }
+
+    private long currentPending(String counterKey) {
+        var adder = pending.get(counterKey);
+        return adder == null ? 0L : adder.get();
+    }
+
+    private static long retryAfterSeconds(long untilMillis, long nowMillis) {
+        long retryAfter = (untilMillis - nowMillis + 999) / 1000; // ceil to seconds
+        return retryAfter < 1 ? 1 : retryAfter;
+    }
+
+    /**
+     * Flush the local buffer to the shared counter when it has reached {@code flushThreshold},
+     * unless another thread is already flushing or we're backing off after a recent failure. A
+     * single thread wins the {@link #flushing} CAS and performs the batch; the rest skip and let
+     * their increments ride the next flush. No time-based flush is needed: while fewer than
+     * {@code flushThreshold} (= maxRequests) requests are buffered, no key can have breached the
+     * limit, so there is nothing a timer would catch that the buffer-full trigger does not.
+     */
+    /**
+     * Flush batch size for this limiter: {@code maxRequests / batchDivisor}, floored at 1 and capped
+     * at {@link #MAX_FLUSH_BATCH}. Read live so the {@code Brace.rateLimitBatchDivisor} knob applies
+     * even to limiters created before {@code start()}.
+     */
+    private int flushThreshold() {
+        int threshold = maxRequests / batchDivisor;
+        if (threshold < 1) {
+            threshold = 1;
+        }
+        return Math.min(threshold, MAX_FLUSH_BATCH);
+    }
+
+    private void maybeFlush(Counters counters, long nowMillis) {
+        if (totalPending.sum() < flushThreshold()) {
+            return;
+        }
+        if (nowMillis < flushCooldownUntilMillis) {
+            return; // backing off DB retries after a failed flush; keep counting per-instance
+        }
+        if (!flushing.compareAndSet(false, true)) {
+            return; // another thread is flushing
+        }
+        try {
+            flush(counters, nowMillis);
+            flushCooldownUntilMillis = 0L;
+        } catch (RuntimeException e) {
+            // Shared-counter (DB) error. The buffered counts were restored (see flush), so the
+            // limiter keeps enforcing per-instance — mirroring the old per-request fallback ("a
+            // brief DB blip causes per-instance approximation") instead of 500-ing the endpoint.
+            // Back off retries so a sustained outage isn't hammered once per request.
+            Log.warn("rate-limiter: shared-counter flush failed, counting per-instance until retry — " + e.getMessage());
+            flushCooldownUntilMillis = nowMillis + FLUSH_RETRY_COOLDOWN_MILLIS;
+        } finally {
+            flushing.set(false);
+        }
+    }
+
+    /**
+     * Drain the pending buffer and write it as one batch. Entries whose window has already rolled
+     * are dropped (their counter row is irrelevant). On a DB failure every captured delta is added
+     * back to the buffer so no count is lost and per-instance enforcement continues; the exception
+     * propagates so {@link #maybeFlush} arms the retry cooldown.
+     */
+    private void flush(Counters counters, long nowMillis) {
+        var updates = new ArrayList<Counters.CounterUpdate>();
+        long pulled = 0;
+        for (var entry : pending.entrySet()) {
+            String counterKey = entry.getKey();
+            Long windowEnd = windowEndByKey.get(counterKey);
+            if (windowEnd == null || windowEnd <= nowMillis) {
+                // Window rolled: drop the key entirely (new requests use a new slot's key).
+                pulled += entry.getValue().getAndSet(0);
+                pending.remove(counterKey);
+                windowEndByKey.remove(counterKey);
+                lastKnownGlobal.remove(counterKey);
+                blockedUntil.remove(counterKey);
+                continue;
+            }
+            long delta = entry.getValue().getAndSet(0);
+            if (delta <= 0) {
+                continue;
+            }
+            pulled += delta;
+            updates.add(new Counters.CounterUpdate(counterKey, delta, Instant.ofEpochMilli(windowEnd)));
+        }
+        totalPending.add(-pulled);
+        if (updates.isEmpty()) {
+            return;
+        }
+        try {
+            counters.incrementBatch(updates).forEach(lastKnownGlobal::put);
+        } catch (RuntimeException e) {
+            long restored = 0;
+            for (var u : updates) {
+                pending.computeIfAbsent(u.key(), k -> new AtomicLong()).addAndGet(u.delta());
+                restored += u.delta();
+            }
+            totalPending.add(restored);
+            throw e;
+        }
     }
 
     private static Result tooMany(long retryAfterSeconds) {
@@ -259,6 +442,27 @@ public class RateLimiter {
     private void evictExpired() {
         var now = Instant.now();
         windows.entrySet().removeIf(entry -> entry.getValue().expired(now));
+
+        // M17: drop batched-counter state for windows that have rolled. Without traffic a flush
+        // never runs, so keys for an expired window would otherwise sit in the maps until the next
+        // flush. Negative-cache entries self-clear on access, but a blocked key with no further
+        // traffic is reaped here too. Bounded anyway (≤ flushThreshold buffered), this just trims.
+        long nowMillis = now.toEpochMilli();
+        windowEndByKey.entrySet().removeIf(entry -> {
+            if (entry.getValue() > nowMillis) {
+                return false;
+            }
+            String counterKey = entry.getKey();
+            var adder = pending.remove(counterKey);
+            if (adder != null) {
+                totalPending.add(-adder.get());
+            }
+            lastKnownGlobal.remove(counterKey);
+            blockedUntil.remove(counterKey);
+            return true;
+        });
+        blockedUntil.entrySet().removeIf(entry -> entry.getValue() <= nowMillis);
+
         // Reap expired shared-counter rows (space reclamation; expiry is enforced on read too). The
         // delete is global and idempotent, so running it from each limiter's cleanup is redundant
         // but harmless.

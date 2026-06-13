@@ -48,6 +48,8 @@ public class Brace {
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private WsRegistry wsRegistry;
     private long wsMaxQueuedBytes = 4L * 1024 * 1024; // M18: per-connection outgoing backlog cap (4 MB)
+    private boolean sharedRateLimiting = true; // M17: count rate limits fleet-wide via the DB on Postgres
+    private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
     private int jobRetentionDays = 7;
     private String httpStatsInterval = "60s";
@@ -244,6 +246,46 @@ public class Brace {
      */
     public Brace opsProfiler(boolean enabled) {
         this.opsProfilerEnabled = enabled;
+        return this;
+    }
+
+    /**
+     * Enables or disables DB-backed (fleet-wide) rate limiting. Default {@code true}: on Postgres,
+     * rate limiters count cluster-wide through a shared counter so a limit of {@code N} is enforced
+     * across the whole fleet, not {@code N} times per instance. Counting is batched and best-effort
+     * (M17) — abusive clients are short-circuited locally and writes are bounded by request rate, so
+     * the DB load is small — but it is not zero.
+     *
+     * <p>Set {@code false} to eliminate <em>all</em> rate-limiter database traffic: every limiter
+     * then counts purely per-instance in memory. The trade-off is that a limit becomes per-instance,
+     * so across a fleet of {@code K} instances the effective limit is roughly {@code K × N}. Off
+     * Postgres (single process, H2, no database) limiters are already per-instance and this flag has
+     * no effect. See {@code docs/2026-06-07-rate-limiter-load.md}.
+     */
+    public Brace sharedRateLimiting(boolean enabled) {
+        this.sharedRateLimiting = enabled;
+        return this;
+    }
+
+    /**
+     * Tunes the batching of DB-backed (shared) rate limiting — the trade-off between rate-limiter
+     * database load and how tightly a limit is enforced across a multi-instance fleet (M17). Each
+     * instance flushes its buffered counts to the shared counter every {@code maxRequests / divisor}
+     * requests. Default {@value RateLimiter#DEFAULT_BATCH_DIVISOR}.
+     *
+     * <p>Higher divisor → smaller batches → tighter fleet accuracy but more DB writes. Lower → bigger
+     * batches → fewer writes but a looser fleet view: on a burst spread evenly across {@code K}
+     * instances (assume no sticky routing) the limit can overshoot by up to about
+     * {@code maxRequests / divisor × K} before enforcement engages. A divisor of 1 batches maximally
+     * (one flush per {@code maxRequests}); set it high to approach exact per-request counting.
+     *
+     * <p>This only affects fleet-wide accuracy. Abuse from a single client hitting a single instance
+     * is always caught immediately (an instance sees its own count with no lag), and an already-over
+     * key is served from a local negative cache with no DB call at all. Has no effect when shared
+     * rate limiting is off or unavailable (see {@link #sharedRateLimiting(boolean)}).
+     */
+    public Brace rateLimitBatchDivisor(int divisor) {
+        this.rateLimitBatchDivisor = Math.max(1, divisor);
         return this;
     }
 
@@ -683,7 +725,10 @@ public class Brace {
 
         // On Postgres, rate limiters count cluster-wide via a shared DB counter (B4) so a limit is
         // enforced across the fleet, not N times too loosely. Off Postgres they stay per-process.
-        if (databaseFactory != null && databaseFactory.isPostgres()) {
+        // sharedRateLimiting(false) opts out of all rate-limiter DB traffic (M17) — limiters then
+        // count purely per-instance (effective limit ≈ instances × N).
+        if (sharedRateLimiting && databaseFactory != null && databaseFactory.isPostgres()) {
+            RateLimiter.setBatchDivisor(rateLimitBatchDivisor);
             RateLimiter.useSharedBackend(new Counters(databaseFactory));
         }
 
