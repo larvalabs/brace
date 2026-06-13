@@ -30,9 +30,10 @@ public class View extends Result {
 
     private final String template;
     private final Map<String, Object> params;
+    private boolean rendered;
 
-    private View(String template, Map<String, Object> params, String renderedHtml) {
-        super(200, "text/html", renderedHtml);
+    private View(String template, Map<String, Object> params) {
+        super(200, "text/html", null);
         this.template = template;
         this.params = params;
     }
@@ -46,6 +47,11 @@ public class View extends Result {
         for (int i = 0; i < keyValues.length - 1; i += 2) {
             params.put((String) keyValues[i], keyValues[i + 1]);
         }
+        // Resolve the request-scoped CSRF field and flash NOW, while their ThreadLocals are still set
+        // (the handler is mid-flight). getCsrfField() mints the token, so the session is marked modified
+        // here — before the cookie-write decision — exactly as it was when rendering happened eagerly.
+        // The template render itself is deferred to materialize() (M12); the resolved values ride along
+        // in params, so it no longer depends on the ThreadLocals, which are cleared before it runs.
         String csrfField = getCsrfField();
         if (csrfField != null) {
             params.put("csrfField", csrfField);
@@ -54,13 +60,31 @@ public class View extends Result {
         if (flash != null) {
             params.put("flash", flash);
         }
+        return new View(template, params);
+    }
+
+    /**
+     * Renders the template (M12). Deferred from {@link #of} so it runs after the request transaction
+     * commits and its DB connection is released — a slow render no longer caps pool throughput. A render
+     * failure here surfaces as a 500 with the transaction already committed: under StatelessSession the
+     * render reads no transactional state, and every other post-handler step (after-middleware, cookie
+     * write, socket write) is already post-commit, so rendering is treated as response delivery, not part
+     * of the unit of work. Idempotent — guarded so a lazy {@link #body()} read and the framework's
+     * explicit call don't render twice.
+     */
+    @Override
+    void materialize() {
+        if (rendered) {
+            return;
+        }
+        rendered = true;
         String html;
         if (engine != null) {
             html = engine.render(template, params);
         } else {
             html = "[Template: " + template + " | Params: " + params.keySet() + "]";
         }
-        return new View(template, params, html);
+        setRenderedBody(html);
     }
 
     public static String render(String template, Object... keyValues) {

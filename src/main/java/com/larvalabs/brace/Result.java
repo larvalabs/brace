@@ -122,8 +122,21 @@ public class Result {
 
     public int status() { return status; }
     public String contentType() { return contentType; }
-    public String body() { return body; }
+    public String body() { materialize(); return body; }
     public byte[] rawBytes() { return rawBytes; }
+
+    /**
+     * Renders any deferred body (M12). A plain {@code Result} is already materialized, so this is a
+     * no-op; {@link View} overrides it to run the template engine. The framework calls this once after
+     * the request transaction commits and its DB connection is released, so template rendering — which
+     * touches no transactional state under StatelessSession — no longer holds a pooled connection.
+     * Also invoked lazily by {@link #body()} so any earlier reader (a body-rewriting after-middleware,
+     * the page cache snapshot) still sees a fully rendered response. Idempotent.
+     */
+    void materialize() {}
+
+    /** Sets the body produced by a deferred {@link #materialize()} render. */
+    void setRenderedBody(String rendered) { this.body = rendered; }
     public Map<String, String> headers() { return headers; }
 
     /** All {@code Set-Cookie} values for this response, in the order they were added. */

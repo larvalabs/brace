@@ -341,8 +341,9 @@ public class Cache {
         public Result apply(Request request) {
             // Cache the rendered response, not the Result object: a RenderedResponse is a
             // serializable snapshot, so a page rendered on one server can be replayed by any other
-            // across a shared backend. (Result is eagerly rendered by the time it reaches here —
-            // View.of renders at construction — so the snapshot is just its materialized fields.)
+            // across a shared backend. RenderedResponse.from reads result.body(), which materializes a
+            // deferred View render (M12) right here — fine, since cached routes are plain no-DB Handlers,
+            // so no connection is held to begin with.
             var key = pageKey(request);
             var cached = cache.get(key, RenderedResponse.class);
             if (cached != null) return cached.toResult();

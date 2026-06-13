@@ -361,6 +361,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.clearFlash();
             }
 
+            // M12: render now, after commit and after the pooled connection is released above. A View
+            // defers its template render out of the handler to here, so a slow render no longer holds a
+            // DB connection (StatelessSession faults in nothing, so the render needs none). A render
+            // failure throws to the 500 catch below with the transaction already committed — deliberate:
+            // rendering is response delivery, not part of the unit of work. Plain Results are no-ops.
+            result.materialize();
+
             // Run after middleware first — after-middleware may return a brand-new Result
             // instance (e.g. a wrapper that rewrites the body). Attaching the session cookie
             // before this step would silently discard it whenever the instance changed (M6).

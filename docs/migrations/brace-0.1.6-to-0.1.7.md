@@ -1244,3 +1244,46 @@ image and skip steps 1–2, prod mode still works — it eager-compiles all temp
 at startup (slower boot, same steady-state behavior).
 
 Newly scaffolded projects (`brace new`) get a Dockerfile with all of this in place.
+
+## Changed: template rendering now happens after the transaction commits
+
+**Who is affected:** apps with a handler that **mutates the database and then returns a
+`View` whose template throws at render time** — and only when that render actually fails.
+Successful renders are unaffected. Apps that follow POST-redirect-GET (mutate, then 302 to
+a GET that renders) are not affected at all, because the mutating request returns a
+`Redirect`, not a `View`.
+
+Previously a `View` rendered its template *inside* the handler, before the per-request
+transaction committed. A render failure therefore threw before the commit and rolled the
+transaction back. Now rendering is deferred until **after** the transaction commits and its
+pooled DB connection is released — so a slow template render no longer holds a connection
+(under StatelessSession the render faults in nothing, so it needs none), which lifts a
+throughput ceiling on render-heavy DB routes.
+
+The deliberate consequence: **if a deferred render throws, the response is still a 500, but
+the transaction has already committed** — the write persists. This matches how every other
+post-handler step already behaved (after-middleware, the session-cookie write, and the
+socket write all run post-commit), and it matches HTTP semantics, where a 500 means
+"indeterminate," not "nothing happened" (a clean "nothing happened" is a `4xx`, and those
+paths reject before mutating). It also fails toward availability: a cosmetic template bug
+no longer makes a committed action impossible to complete — it surfaces as "the action
+worked but the confirmation page errored" rather than "the action keeps failing."
+
+```java
+// If this render throws (e.g. a template bug), the post is now COMMITTED and the client
+// gets a 500. Previously the insert was rolled back.
+app.post("/posts", (FullHandler) (req, db, session) -> {
+    var post = new Post();
+    post.apply(req.form(PostForm.class).value());
+    db.insert(post);
+    return View.of("posts/show", "post", post);   // deferred render, runs post-commit
+});
+```
+
+**Action required:** none for most apps. If you have a **non-idempotent** mutation that
+renders its result inline (rather than redirecting), be aware that a retry after a
+render-failure 500 can now repeat the mutation. The standard remedies apply and are
+recommended regardless of this change: use POST-redirect-GET, or an idempotency key. If you
+specifically relied on render-failure rolling back a write, move the work that must be
+atomic with the response out of the template — validate/serialize it in the handler, before
+returning the `View`.
