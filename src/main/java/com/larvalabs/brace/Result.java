@@ -73,6 +73,11 @@ public class Result {
         return new Result(204, "text/plain", "");
     }
 
+    /** A 304 Not Modified with an empty body, for conditional-GET revalidation hits. */
+    public static Result notModified() {
+        return new Result(304, "text/plain", "");
+    }
+
     public static Result unauthorized(String message) {
         return new Result(401, "text/plain", message);
     }

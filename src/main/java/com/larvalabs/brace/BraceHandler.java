@@ -1,5 +1,7 @@
 package com.larvalabs.brace;
 
+import org.eclipse.jetty.http.DateGenerator;
+import org.eclipse.jetty.http.DateParser;
 import org.eclipse.jetty.http.HttpField;
 import org.eclipse.jetty.http.MultiPart;
 import org.eclipse.jetty.http.MultiPartFormData;
@@ -238,7 +240,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Check static file mappings if no route matched
             if (match == null) {
-                Result staticResult = serveStaticFile(path);
+                Result staticResult = serveStaticFile(braceRequest);
                 if (staticResult != null) {
                     writeResult(staticResult, response, callback);
                     return true;
@@ -511,7 +513,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         response.write(true, ByteBuffer.wrap(bytes), callback);
     }
 
-    private Result serveStaticFile(String requestPath) {
+    private Result serveStaticFile(Request request) {
+        String requestPath = request.path();
         if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
             return Result.bytes(htmxJs, "text/javascript; charset=utf-8")
                 .header("X-Content-Type-Options", "nosniff");
@@ -545,16 +548,65 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return Result.notFound();
             }
 
+            // L21: emit validators + Cache-Control so browsers/CDNs can cache and revalidate.
+            // A fingerprinted "?v=" URL (Assets.url) is content-addressed, so it's immutable for a
+            // year; any other URL stays revalidate-always and is served via a conditional GET when
+            // the client already holds a current copy — avoiding the per-request full disk read.
+            long mtime = file.lastModified();
+            long length = file.length();
+            String etag = "\"" + Long.toHexString(length) + "-" + Long.toHexString(mtime) + "\"";
+            String cacheControl = request.queryParams().containsKey("v")
+                ? "public, max-age=31536000, immutable"
+                : "public, max-age=0, must-revalidate";
+
+            if (isNotModified(request, etag, mtime)) {
+                return Result.notModified()
+                    .header("ETag", etag)
+                    .header("Cache-Control", cacheControl);
+            }
+
             try {
                 byte[] fileBytes = Files.readAllBytes(filePath);
                 String contentType = contentTypeForPath(filePath.toString());
-                return Result.bytes(fileBytes, contentType)
-                    .header("X-Content-Type-Options", "nosniff");
+                Result result = Result.bytes(fileBytes, contentType)
+                    .header("X-Content-Type-Options", "nosniff")
+                    .header("ETag", etag)
+                    .header("Cache-Control", cacheControl);
+                if (mtime > 0) {
+                    result.header("Last-Modified", DateGenerator.formatDate(mtime));
+                }
+                return result;
             } catch (Exception e) {
                 return Result.error(500, "Internal Server Error");
             }
         }
         return null;
+    }
+
+    /** True when the client's conditional-GET headers show it already holds the current file. */
+    private static boolean isNotModified(Request request, String etag, long mtime) {
+        String ifNoneMatch = request.header("If-None-Match");
+        if (ifNoneMatch != null) {
+            // ETag wins over If-Modified-Since per RFC 9110 when both are present.
+            String header = ifNoneMatch.trim();
+            if (header.equals("*")) return true;
+            String want = stripWeakPrefix(etag);
+            for (String candidate : ifNoneMatch.split(",")) {
+                if (stripWeakPrefix(candidate.trim()).equals(want)) return true;
+            }
+            return false;
+        }
+        String ifModifiedSince = request.header("If-Modified-Since");
+        if (ifModifiedSince != null && mtime > 0) {
+            long since = DateParser.parseDate(ifModifiedSince);
+            // HTTP dates carry second resolution — compare truncated to seconds.
+            return since >= 0 && mtime / 1000 <= since / 1000;
+        }
+        return false;
+    }
+
+    private static String stripWeakPrefix(String etag) {
+        return etag.startsWith("W/") ? etag.substring(2) : etag;
     }
 
     private String contentTypeForPath(String path) {
