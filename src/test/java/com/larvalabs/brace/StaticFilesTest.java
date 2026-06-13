@@ -205,11 +205,44 @@ class StaticFilesTest {
 
     @Test
     void fingerprintedUrlGetsImmutableCacheControl() throws Exception {
-        // L21: an Assets.url-style "?v=" fingerprinted URL is content-addressed → cache for a year.
-        var response = get("/assets/style.css?v=abc123");
+        // L21: a GENUINE current "?v=" fingerprint (the value Assets.url mints) is content-addressed
+        // → cache for a year. Must use the real hash, since immutability is now verified against it.
+        String fingerprinted = Assets.url("/assets/style.css"); // /assets/style.css?v=<realhash>
+        assertTrue(fingerprinted.contains("?v="), "expected a fingerprinted URL, got: " + fingerprinted);
+        var response = get(fingerprinted);
         assertEquals(200, response.statusCode());
         assertEquals("public, max-age=31536000, immutable",
             response.headers().firstValue("Cache-Control").orElse(null));
+    }
+
+    @Test
+    void staleOrBogusVersionParamDoesNotGetImmutable() throws Exception {
+        // A "?v=" that is NOT the file's current fingerprint (a stale hash, a hand-rolled value,
+        // or one appended by a CDN/client) must fall back to revalidate-always — never pinned as
+        // immutable content-addressed, or wrong/old bytes could be cached for a year.
+        var response = get("/assets/style.css?v=deadbeef");
+        assertEquals(200, response.statusCode());
+        assertEquals("public, max-age=0, must-revalidate",
+            response.headers().firstValue("Cache-Control").orElse(null));
+    }
+
+    @Test
+    void htmxBundleIsCacheableAndRevalidates() throws Exception {
+        var first = get("/__brace/htmx.min.js");
+        assertEquals(200, first.statusCode());
+        String etag = first.headers().firstValue("ETag").orElse(null);
+        assertNotNull(etag, "bundled htmx should carry an ETag");
+        // Version-pinned, not immutable: revalidate so a brace upgrade isn't masked by a year-long cache.
+        assertEquals("public, max-age=0, must-revalidate",
+            first.headers().firstValue("Cache-Control").orElse(null));
+
+        var conditional = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/__brace/htmx.min.js"))
+            .header("If-None-Match", etag)
+            .GET()
+            .build();
+        var revalidated = client.send(conditional, HttpResponse.BodyHandlers.ofString());
+        assertEquals(304, revalidated.statusCode(), "matching ETag should revalidate to 304");
     }
 
     @Test

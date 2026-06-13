@@ -17,10 +17,6 @@ public class Route {
     private final String staticPath;
     private boolean csrfRequired;
 
-    public Route(String method, String pattern, Object handler) {
-        this(method, pattern, handler, null, true);
-    }
-
     public Route(String method, String pattern, Object handler, Invoker invoker) {
         this(method, pattern, handler, invoker, true);
     }

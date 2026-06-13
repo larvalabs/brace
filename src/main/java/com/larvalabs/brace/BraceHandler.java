@@ -9,12 +9,12 @@ import org.eclipse.jetty.io.Content;
 import org.eclipse.jetty.server.Response;
 import org.eclipse.jetty.util.Callback;
 
-import java.io.File;
 import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,6 +36,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final Storage storage;
     private final TrustedProxies trustedProxies;
     private final byte[] htmxJs;
+    private final String htmxEtag; // content-derived validator for the bundled htmx asset (L21)
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -140,6 +141,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         } catch (Exception ignored) {}
         this.htmxJs = htmxBytes;
+        // Content-derived ETag computed once: changes if the bundled bytes change across a brace
+        // upgrade (length + array hash), so revalidation can't return a false 304 after an upgrade.
+        this.htmxEtag = htmxBytes == null ? null
+            : "\"htmx-" + Long.toHexString(htmxBytes.length) + "-"
+                + Integer.toHexString(java.util.Arrays.hashCode(htmxBytes)) + "\"";
     }
 
     @Override
@@ -249,14 +255,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return true;
             }
 
-            // Build the invoker
-            Invoker invoker;
-            if (match.route().invoker() != null) {
-                invoker = match.route().invoker();
-            } else {
-                Handler handler = (Handler) match.route().handler();
-                invoker = Invoker.fromFunction(handler);
-            }
+            // Every Route is registered with a non-null invoker — Router.add builds one for every
+            // handler type, including plain Handler (L1) — so this is a direct read, no per-request
+            // Invoker allocation and no fallback.
+            Invoker invoker = match.route().invoker();
 
             // Build session if needed
             Session session = null;
@@ -516,8 +518,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private Result serveStaticFile(Request request) {
         String requestPath = request.path();
         if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
+            // Bundled, version-pinned asset served from memory. NOT immutable — a brace upgrade can
+            // change the bytes at this fixed URL — so use an ETag + revalidate-always, letting
+            // browsers skip the ~50KB re-download on each page via a conditional GET (L21).
+            String cacheControl = "public, max-age=0, must-revalidate";
+            if (isNotModified(request, htmxEtag, 0)) {
+                return Result.notModified()
+                    .header("ETag", htmxEtag)
+                    .header("Cache-Control", cacheControl);
+            }
             return Result.bytes(htmxJs, "text/javascript; charset=utf-8")
-                .header("X-Content-Type-Options", "nosniff");
+                .header("X-Content-Type-Options", "nosniff")
+                .header("ETag", htmxEtag)
+                .header("Cache-Control", cacheControl);
         }
         for (var mapping : staticFileMappings) {
             String prefix = mapping.urlPrefix();
@@ -543,19 +556,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return Result.notFound();
             }
 
-            File file = filePath.toFile();
-            if (!file.exists() || !file.isFile()) {
+            BasicFileAttributes attrs;
+            try {
+                // One stat for existence + regular-file + size + mtime, vs four separate File
+                // syscalls (exists/isFile/length/lastModified) on this hot path.
+                attrs = Files.readAttributes(filePath, BasicFileAttributes.class);
+            } catch (java.io.IOException e) {
+                return Result.notFound(); // missing file (NoSuchFileException) or unreadable
+            }
+            if (!attrs.isRegularFile()) {
                 return Result.notFound();
             }
 
             // L21: emit validators + Cache-Control so browsers/CDNs can cache and revalidate.
-            // A fingerprinted "?v=" URL (Assets.url) is content-addressed, so it's immutable for a
-            // year; any other URL stays revalidate-always and is served via a conditional GET when
-            // the client already holds a current copy — avoiding the per-request full disk read.
-            long mtime = file.lastModified();
-            long length = file.length();
+            // Only a "?v=" whose value matches the file's CURRENT content fingerprint (the one
+            // Assets.url would mint) earns the immutable year — a stale or hand-rolled "?v=" falls
+            // back to revalidate-always, so wrong/old bytes are never pinned content-addressed.
+            // Otherwise the client holding a current copy revalidates via a cheap conditional GET.
+            long mtime = attrs.lastModifiedTime().toMillis();
+            long length = attrs.size();
             String etag = "\"" + Long.toHexString(length) + "-" + Long.toHexString(mtime) + "\"";
-            String cacheControl = request.queryParams().containsKey("v")
+            String version = request.queryParam("v");
+            boolean immutable = version != null && version.equals(Assets.currentVersion(requestPath));
+            String cacheControl = immutable
                 ? "public, max-age=31536000, immutable"
                 : "public, max-age=0, must-revalidate";
 
@@ -588,8 +611,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         String ifNoneMatch = request.header("If-None-Match");
         if (ifNoneMatch != null) {
             // ETag wins over If-Modified-Since per RFC 9110 when both are present.
-            String header = ifNoneMatch.trim();
-            if (header.equals("*")) return true;
+            if (ifNoneMatch.trim().equals("*")) return true;
             String want = stripWeakPrefix(etag);
             for (String candidate : ifNoneMatch.split(",")) {
                 if (stripWeakPrefix(candidate.trim()).equals(want)) return true;
