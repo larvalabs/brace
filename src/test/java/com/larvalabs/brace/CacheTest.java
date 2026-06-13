@@ -3,6 +3,7 @@ package com.larvalabs.brace;
 import org.junit.jupiter.api.*;
 
 import java.util.Map;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -64,6 +65,86 @@ class CacheTest {
         var result = cache.getOrSet("key", "5m", () -> { counter.incrementAndGet(); return "second"; });
         assertEquals("first", result);
         assertEquals(1, counter.get());
+    }
+
+    @Test
+    void getOrSetIsSingleFlightUnderContention() throws Exception {
+        // M15: many threads hit the same cold key at once; the supplier (a slow "DB query") must run
+        // exactly once and every caller gets that one value. The supplier now runs outside any
+        // ConcurrentHashMap bin lock, but the per-server single-flight guarantee must survive.
+        int threads = 16;
+        var supplierRuns = new AtomicInteger();
+        var startGate = new CountDownLatch(1);
+        var done = new CountDownLatch(threads);
+        var results = new ConcurrentLinkedQueue<String>();
+        var pool = Executors.newFixedThreadPool(threads);
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();
+                    results.add(cache.getOrSet("cold", "5m", () -> {
+                        supplierRuns.incrementAndGet();
+                        try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                        return "value";
+                    }));
+                } catch (Exception ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        startGate.countDown(); // release all at once
+        assertTrue(done.await(10, TimeUnit.SECONDS), "all callers should finish");
+        pool.shutdownNow();
+        assertEquals(1, supplierRuns.get(), "supplier must run exactly once across concurrent cold-key callers");
+        assertEquals(threads, results.size());
+        assertTrue(results.stream().allMatch("value"::equals), "all callers see the single computed value");
+    }
+
+    @Test
+    void getOrSetSupplierExceptionDoesNotCacheAndRetries() {
+        // A throwing supplier propagates (original type, not wrapped), caches nothing, and the key
+        // recovers on the next call.
+        var runs = new AtomicInteger();
+        assertThrows(IllegalStateException.class, () ->
+            cache.getOrSet("k", "5m", () -> { runs.incrementAndGet(); throw new IllegalStateException("boom"); }));
+        var v = cache.getOrSet("k", "5m", () -> { runs.incrementAndGet(); return "ok"; });
+        assertEquals("ok", v);
+        assertEquals(2, runs.get(), "first call ran and threw, second re-ran — nothing was cached in between");
+        assertEquals("ok", cache.get("k", String.class));
+    }
+
+    @Test
+    void getOrSetConcurrentCallersSeeUnwrappedSupplierException() throws Exception {
+        // M15: callers awaiting a failed in-flight computation must observe the supplier's actual
+        // exception type, not a CompletionException wrapper — and nothing is cached.
+        int threads = 8;
+        var startGate = new CountDownLatch(1);
+        var done = new CountDownLatch(threads);
+        var thrown = new ConcurrentLinkedQueue<Class<?>>();
+        var pool = Executors.newFixedThreadPool(threads);
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();
+                    cache.getOrSet("boom-key", "5m", () -> {
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                        throw new IllegalStateException("boom");
+                    });
+                } catch (Throwable t) {
+                    thrown.add(t.getClass());
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        startGate.countDown();
+        assertTrue(done.await(10, TimeUnit.SECONDS), "all callers should finish");
+        pool.shutdownNow();
+        assertEquals(threads, thrown.size());
+        assertTrue(thrown.stream().allMatch(c -> c == IllegalStateException.class),
+            "every caller should see the original exception type, got " + thrown);
+        assertNull(cache.get("boom-key", String.class), "a failed computation caches nothing");
     }
 
     @Test
