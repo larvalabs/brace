@@ -167,6 +167,18 @@ or resume one of these reviews, read that file first.
 - **Don't rename or backfill silently.** If you find a missing guide for an already-released step, surface it rather than reconstructing history as part of an unrelated change.
 - **The upgrade flow ends with a docs refresh:** after bumping `<brace.version>`, projects run `brace agents-md` to rewrite their `BRACE-AGENTS.md` from the new version's jar — guides can assume this step and don't need to repeat it.
 
+### Migration gate (verify the guide actually works before tagging)
+A migration guide is only as good as an agent's ability to follow it. Before tagging a release, run the agent-assisted migration gate in the `ai-benchmark` repo: it hands a headless agent the in-progress guide(s) for this version step plus a real app pinned to the previous version, lets it perform the upgrade, and asserts the app's full test suite stays green (a migration is behavior-preserving, so the existing suite is the oracle).
+
+```bash
+cd ../ai-benchmark
+./run-migrate.sh --from <prev-released> --to <this-version>   # e.g. --from 0.1.6 --to 0.1.7-SNAPSHOT
+```
+
+- **Merge gate:** require `behavior_preserved == true`. **A clean pass is zero fix loops** (`fix_attempts: 0`) — fix loops mean the guide left work the agent had to discover by trial and error, i.e. a gap in `docs/migrations/brace-FROM-to-TO.md`. Close the gap (add the missing before/after section) and re-run until clean.
+- The gate's fixture (`ai-benchmark/migrate-fixture/`) carries a small "admin surface" so breaking changes that aren't plain CRUD (middleware patterns, page-cache `.vary`, etc.) are actually exercised. When a release introduces a breaking change the fixture doesn't yet touch, extend the fixture + `tests/test_migrate_ops.py` so the gate bites on it.
+- **After the release ships,** promote the migrated app to become the next cycle's fixture (see `ai-benchmark/migrate-fixture/README.md`).
+
 ### Release checklist (version references)
 `pom.xml` `<version>` is the single source of truth for the framework version. The one place a concrete version must still be hardcoded for users to copy is the install example in `README.md` (Maven/Gradle dependency + the "Replace `vX.Y.Z`" line). When cutting a release, update those `README.md` examples to the new tag. Don't reintroduce hardcoded versions into this file or `BRACE-AGENTS.md` — reference `pom.xml`.
 
