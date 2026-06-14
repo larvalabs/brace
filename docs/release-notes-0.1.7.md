@@ -55,7 +55,11 @@ the five breaking cases.
   single-line, and `brace compile`/`brace test` print condensed, deduplicated
   diagnostics when piped.
 
-## Developer experience
+## Developer experience & agent token efficiency
+
+Brace is built to be cheap for a coding agent to work in: smaller, more explicit APIs mean
+fewer tokens read and written per change, and the generated docs keep an agent on the
+current API instead of guessing.
 
 - **Session auth guards.** `app.requireSession("/admin/*", "userId", "/login")`, or
   custom logic via the session-aware `before(pattern, (req, session) -> ...)` overload.
@@ -87,7 +91,7 @@ the five breaking cases.
 ## Performance
 
 0.1.7 includes the fix set from a model-driven runtime-performance review of the
-codebase (record in `docs/reviews/`). The user-visible changes:
+codebase ([review record](https://github.com/larvalabs/brace/blob/v0.1.7/docs/reviews/2026-06-runtime-performance-fable-5.md)). The user-visible changes:
 
 - **Templates are precompiled for prod.** `brace compile`/`brace run` precompile JTE
   templates, and in `brace.mode=prod` the engine loads the compiled classes instead of
@@ -123,7 +127,7 @@ cache backend is also now capped at 10,000 entries (`CacheBackend.inMemory(maxEn
 ## Security
 
 0.1.7 includes the fix set from a model-driven security review of the codebase (25
-findings; record in `docs/reviews/`):
+findings; [review record](https://github.com/larvalabs/brace/blob/v0.1.7/docs/reviews/2026-06-security-fable-5.md)):
 
 - **Server-enforced session expiry.** A session cookie stops working after the
   configured `maxAge` (default 14 days), regardless of the client-side hint.
@@ -147,9 +151,11 @@ findings; record in `docs/reviews/`):
 - A real-Postgres Testcontainers tier (`mvn verify`) now runs the shipped migrations and
   the concurrency-sensitive paths (upserts, job claims, fan-out) against actual
   Postgres. This is what caught the Flyway packaging bug.
-- Three full-codebase model reviews (security, token-efficiency, runtime performance)
-  with public records under `docs/reviews/`, each merged through multi-agent code-review
-  gates.
+- Three full-codebase model reviews — [security](https://github.com/larvalabs/brace/blob/v0.1.7/docs/reviews/2026-06-security-fable-5.md),
+  [token efficiency](https://github.com/larvalabs/brace/blob/v0.1.7/docs/reviews/2026-06-token-efficiency-fable-5.md),
+  [runtime performance](https://github.com/larvalabs/brace/blob/v0.1.7/docs/reviews/2026-06-runtime-performance-fable-5.md)
+  ([index](https://github.com/larvalabs/brace/blob/v0.1.7/docs/reviews/README.md)) — each merged through multi-agent
+  code-review gates.
 
 ## Upgrading
 
