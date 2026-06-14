@@ -75,7 +75,7 @@ public class Cli {
                 yield 0;
             }
             case "self-update" -> CliSelfUpdate.run(args);
-            case "compile" -> requireSrc(cwd, () -> BuildCommands.compile(cwd));
+            case "compile" -> requireSrc(cwd, () -> BuildCommands.compileCommand(cwd));
             case "run"     -> requireSrc(cwd, () -> BuildCommands.run(cwd));
             case "dev"     -> requireSrc(cwd, () -> BuildCommands.dev(cwd));
             case "test"    -> requireSrc(cwd, () -> BuildCommands.test(cwd, args));

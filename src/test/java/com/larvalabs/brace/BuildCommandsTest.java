@@ -160,14 +160,17 @@ public class BuildCommandsTest {
     // --- app launch command ------------------------------------------------
 
     @Test
-    public void devRunsAppInDevModeRunDoesNot(@TempDir Path dir) {
+    public void devRunsDevModeRunRunsProdMode(@TempDir Path dir) {
         List<String> dev = BuildCommands.appCommand(dir, "app.App", true);
         List<String> run = BuildCommands.appCommand(dir, "app.App", false);
-        // brace dev must activate %dev. config overrides (the scaffold's H2 db)
-        // and dev-only behavior; brace run is the production-style launch.
+        // brace dev → dev mode (%dev. config, on-demand templates with hot reload, 404 hints).
+        // brace run → prod mode: %prod. config AND the prod TemplateEngine loads the precompiled
+        // JTE classes brace run built, instead of compiling on first render (M7/M20).
         assertTrue(dev.contains("-Dbrace.mode=dev"), dev.toString());
+        assertTrue(run.contains("-Dbrace.mode=prod"), run.toString());
         assertFalse(run.contains("-Dbrace.mode=dev"), run.toString());
         assertEquals("app.App", dev.get(dev.size() - 1));
+        assertEquals("app.App", run.get(run.size() - 1));
     }
 
     // --- H7: summarizeTestRun ---------------------------------------------

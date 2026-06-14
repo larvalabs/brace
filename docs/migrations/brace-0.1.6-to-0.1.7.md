@@ -1056,8 +1056,11 @@ Two small additions in the same cleanup: `brace logs` accepts `--limit <n>`
 Relatedly, `brace dev` launches the app JVM with `-Dbrace.mode=dev` (the old printed
 incantation set this by hand), so the `%dev.` config overrides — the scaffold's
 in-memory H2 database, the dev port — and dev-only behavior like 404 route suggestions
-apply under the command named for them. `brace run` deliberately sets no mode: it is
-the production-style launch.
+apply under the command named for them. `brace run` launches with `-Dbrace.mode=prod`
+(the production launch): `%prod.` config overrides apply, and the prod `TemplateEngine`
+loads the precompiled JTE classes `brace run` builds rather than compiling on first
+render. See the dedicated `brace.mode`/`BRACE_JAVA_OPTS` section below for the full
+behavior and the config-key hazard.
 
 ## Changed: `brace compile` prints condensed, deduplicated diagnostics
 

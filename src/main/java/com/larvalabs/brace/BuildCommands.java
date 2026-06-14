@@ -193,8 +193,55 @@ final class BuildCommands {
 
     // --- run -------------------------------------------------------------
 
+    /**
+     * The {@code brace compile} CLI command: compile Java, then precompile JTE templates so
+     * {@code target/jte-classes} is built for a prod launch (or a Docker {@code COPY target/jte-classes}).
+     * Kept separate from {@link #compile} so the internal compile step that {@code brace dev} reruns on
+     * every change does NOT precompile (dev wants on-demand templates with hot reload).
+     */
+    static int compileCommand(Path cwd) throws Exception {
+        if (compile(cwd) != 0) return 1;
+        return precompileTemplates(cwd);
+    }
+
+    /**
+     * Precompiles JTE templates under {@code views/}/{@code templates/} into {@code target/jte-classes}
+     * via {@link TemplatePrecompiler} in a child JVM on the project classpath (M7). No-op when the
+     * project has no template directory. The prod {@link TemplateEngine} loads these classes instead
+     * of compiling on first render.
+     */
+    static int precompileTemplates(Path cwd) throws Exception {
+        String templates = findTemplateDir(cwd);
+        if (templates == null) return 0;
+        CliOutput.printInfo("Precompiling templates (" + templates + "/)...");
+        int rc = new ProcessBuilder(
+                "java", "-cp", projectClasspath(cwd),
+                TemplatePrecompiler.class.getName(), templates, "target/jte-classes")
+                .directory(cwd.toFile())
+                .inheritIO()
+                .start()
+                .waitFor();
+        if (rc == 0) CliOutput.printSuccess("Templates precompiled");
+        else CliOutput.printError("Template precompilation failed");
+        return rc;
+    }
+
+    /** The conventional template directory ({@code views/} or {@code templates/}) holding {@code .jte}
+     *  files, or null when the project has none. */
+    private static String findTemplateDir(Path cwd) throws IOException {
+        for (String name : List.of("views", "templates")) {
+            Path dir = cwd.resolve(name);
+            if (!Files.isDirectory(dir)) continue;
+            try (var s = Files.walk(dir)) {
+                if (s.anyMatch(p -> p.toString().endsWith(".jte"))) return name;
+            }
+        }
+        return null;
+    }
+
     static int run(Path cwd) throws Exception {
         if (compile(cwd) != 0) return 1;
+        if (precompileTemplates(cwd) != 0) return 1; // prod launch loads these (M7)
         String mainClass = findMainClass(cwd);
         CliOutput.printInfo("Starting " + mainClass);
         Process app = new ProcessBuilder(appCommand(cwd, mainClass, false))
@@ -265,15 +312,24 @@ final class BuildCommands {
     }
 
     /**
-     * Command line for the app JVM. {@code brace dev} runs the app in dev mode
-     * ({@code -Dbrace.mode=dev}), which activates {@code %dev.} config overrides
-     * (the scaffold's in-memory H2 database, dev port) and dev-only behavior like
-     * 404 route suggestions. {@code brace run} deliberately sets no mode — it is
-     * the production-style launch, where config comes from the base keys and env vars.
+     * Command line for the app JVM. {@code brace dev} runs in dev mode
+     * ({@code -Dbrace.mode=dev}) — {@code %dev.} config overrides (the scaffold's in-memory H2,
+     * dev port), on-demand template compile with hot reload, and dev-only behavior like 404 route
+     * suggestions. {@code brace run} runs in <strong>prod</strong> mode ({@code -Dbrace.mode=prod}):
+     * {@code %prod.} config overrides apply ({@code %dev.} don't), and — critically — the
+     * {@link TemplateEngine} loads the precompiled JTE classes {@code brace run} just built
+     * (M7/M20), instead of paying a first-render javac compile and keeping {@code jdk.compiler} in
+     * metaspace. Our {@code -Dbrace.mode} is emitted first so a user {@code -Dbrace.mode} in
+     * {@code BRACE_JAVA_OPTS} wins (last {@code -D} wins).
      */
     static List<String> appCommand(Path cwd, String mainClass, boolean devMode) {
         List<String> cmd = new ArrayList<>(List.of("java"));
-        if (devMode) cmd.add("-Dbrace.mode=dev");
+        cmd.add("-Dbrace.mode=" + (devMode ? "dev" : "prod"));
+        // BRACE_JAVA_OPTS passthrough (M20): heap sizing, GC flags, a -Dbrace.mode override, etc.
+        String opts = System.getenv("BRACE_JAVA_OPTS");
+        if (opts != null && !opts.isBlank()) {
+            cmd.addAll(List.of(opts.trim().split("\\s+")));
+        }
         cmd.addAll(List.of("-cp", projectClasspath(cwd), mainClass));
         return cmd;
     }
