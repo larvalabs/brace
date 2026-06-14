@@ -1,4 +1,34 @@
-# Security Review — Fable 5 (June 2026)
+# Security Review: Fable 5 (June 2026)
+
+## Summary
+
+All 25 findings (4 High, 11 Medium, 10 Low) were fixed on the `security-review-2026-06`
+branch, one commit per finding. The substantive changes:
+
+- Ops auth no longer lets a read-only caller obtain a control token (H1), and the auth
+  scheme now binds each signature to its key plus a nonce so a captured request cannot be
+  replayed (M3). Ops keys and CLI tokens are written with owner-only file permissions (M11).
+- `X-Forwarded-For` is no longer trusted from the spoofable leftmost entry; the client IP
+  is resolved only through configured trusted-proxy CIDRs (H2).
+- Request bodies are capped, so an oversized body returns 413 instead of risking
+  out-of-memory (H3).
+- Sessions gained server-side expiry (M2); the PBKDF2 session key is cached instead of
+  re-derived on every request (M1).
+- Scaffolds stopped shipping a placeholder session secret (H4). Error paths, log lines,
+  and stats redact value-shaped secrets (M10). CSRF now covers PATCH and the documented
+  token-persistence gap (M5).
+- Smaller hardening: a safe local-redirect helper (L1), quote-escaping in the ops
+  dashboard (L2), tighter `?`-to-positional SQL conversion (L3), validated field, class,
+  and project names (L4/L5/L8), page-cache key encoding (L6), `nosniff` on static
+  responses (L7), and a login-enumeration timing mitigation (L9).
+
+A follow-up code-review pass over the branch found five regressions the fixes themselves
+introduced (CR1 through CR5, all fixed): a DNS-resolution stall in XFF handling, a
+bypassable local-redirect denylist, a rate-limit lockout from shared null keys, a
+ConcurrentHashMap contract violation in the key cache, and a crash on blank XFF segments.
+Several smaller issues were then closed on `main` after merge (sink-level redaction,
+non-injective cache encoding, a CLI v1 fallback for older servers, migration-guide
+accuracy). Remaining follow-ups are listed at the end.
 
 First review under the [periodic model review process](README.md). Full-codebase
 security review of Brace at 0.1.7-SNAPSHOT, run with Fable 5 across five dimensions:
@@ -6,7 +36,7 @@ crypto/sessions, HTTP lifecycle, ops surface, database/injection, files/CLI.
 
 - **Findings doc (canonical tracker):** [`docs/2026-06-09-security-review-todos.md`](../2026-06-09-security-review-todos.md)
 - **Fix branch:** `security-review-2026-06`
-- **Result:** 25 findings (4 High, 11 Medium, 10 Low) — **all fixed**, one commit per
+- **Result:** 25 findings (4 High, 11 Medium, 10 Low). **All fixed**, one commit per
   finding, full `mvn test` green after each commit (724 → 765 tests over the branch).
 
 ## Findings and fix commits
@@ -17,15 +47,15 @@ crypto/sessions, HTTP lifecycle, ops surface, database/injection, files/CLI.
 |---|---|---|
 | H1 | Ops dashboard mints CONTROL tokens for READ callers | `9da6482` |
 | H2 | X-Forwarded-For trusts the leftmost (spoofable) entry | `d3a70fe` |
-| H3 | Unbounded request-body read (OOM DoS) — 413 cap | `5fd2c56` |
+| H3 | Unbounded request-body read (OOM DoS); 413 cap | `5fd2c56` |
 | H4 | Scaffold ships a placeholder session secret | `b5ab8a8` |
 
 ### Medium
 
 | ID | Finding | Commit |
 |---|---|---|
-| M1 | PBKDF2 re-derived per request — key cache | `81d2f3b` |
-| M2 | No server-side session expiry — `_exp` in encrypted payload | `94ab761` |
+| M1 | PBKDF2 re-derived per request; key cache | `81d2f3b` |
+| M2 | No server-side session expiry; `_exp` in encrypted payload | `94ab761` |
 | M3 | Ops auth v2: bind signature to key + nonce, suppress replay | `c720d7a` |
 | M4 | `?token=` URL auth fallback dropped | `ec27e2a` |
 | M5 | CSRF gaps: PATCH method, doc mismatch, token persistence | `86ba072` |
@@ -64,11 +94,11 @@ one commit per finding:
 
 | ID | Finding | Commit |
 |---|---|---|
-| CR1 | H2 regression: XFF trust checks resolved hostname-shaped entries via DNS (request-stall DoS) — TrustedProxies now accepts only IP literals, never resolves | `fba62f1` |
-| CR2 | L1 incomplete: `Redirect.toLocal` denylist bypassable (`/\evil.com`, `https:/evil.com`) — replaced with shared allowlist (`/`-prefixed, no `\`, no control chars) | `9ea8f96` |
-| CR3 | M7 regression: null/blank rate-limit keys were bucketed together (site-wide lockout via the documented login example) — restored null-key exemption | `b70a872` |
-| CR4 | M1/M2 hazard: `keyCache.clear()` inside `computeIfAbsent`'s mapping function (CHM contract violation) — eviction moved outside | `0cd4082` |
-| CR5 | H2 regression: blank XFF segments returned `""` from `ip()`; bare `,` header threw AIOOBE — blanks skipped, fallback to remoteAddr | `1434ac5` |
+| CR1 | H2 regression: XFF trust checks resolved hostname-shaped entries via DNS (request-stall DoS); TrustedProxies now accepts only IP literals, never resolves | `fba62f1` |
+| CR2 | L1 incomplete: `Redirect.toLocal` denylist bypassable (`/\evil.com`, `https:/evil.com`); replaced with shared allowlist (`/`-prefixed, no `\`, no control chars) | `9ea8f96` |
+| CR3 | M7 regression: null/blank rate-limit keys were bucketed together (site-wide lockout via the documented login example); restored null-key exemption | `b70a872` |
+| CR4 | M1/M2 hazard: `keyCache.clear()` inside `computeIfAbsent`'s mapping function (CHM contract violation); eviction moved outside | `0cd4082` |
+| CR5 | H2 regression: blank XFF segments returned `""` from `ip()`; bare `,` header threw AIOOBE; blanks skipped, fallback to remoteAddr | `1434ac5` |
 
 Confirmed but deferred (lower severity):
 
@@ -79,13 +109,13 @@ Confirmed but deferred (lower severity):
   `Stats.recordError` (served on `/ops/status`) and `Log.error` (stdout); access logs
   record raw paths (the Redactor Javadoc's own `/password-reset/<token>` example leaks
   on every successful request).~~ **Fixed on main post-merge:** value-shaped redaction
-  now runs in the sinks — `Log.request`/`Log.error` (path + message) and
+  now runs in the sinks: `Log.request`/`Log.error` (path + message) and
   `Stats.recordRequest` (route key) / `Stats.recordError` (message).
 - `SecurityHeaders.defaults()` (after-middleware) never applies to responses written
   outside the after loop: static files (nosniff only), framework 404, CSRF 403, 500,
   and the new 413s.
 - ~~`Cache.percentEncode` is non-injective for non-ASCII (`'中'` and `"ӢD"` collide) and
-  its comment contradicts the code — use `URLEncoder.encode(v, UTF_8)`.~~
+  its comment contradicts the code; use `URLEncoder.encode(v, UTF_8)`.~~
   **Fixed on main post-merge**, with the colliding pair as a regression test.
 - ~~0.1.7 CLI sends ops-auth v2 only; against a 0.1.6 server Jackson rejects the unknown
   fields → CLI-first upgrades break, and the migration guide says "no action".~~
@@ -96,7 +126,7 @@ Confirmed but deferred (lower severity):
   (interior-wildcard middleware patterns, `?token=` removal).
 - Ops auth accepts `ttlSeconds <= 0` (mints an already-expired token; fail-closed).
 - Dead weak-secret check: `Brace.java:210` tests a mixed-case literal against a
-  lowercased string — can never match.
+  lowercased string, so it can never match.
 - Cleanup batch: duplicated session-cookie-write block in BraceHandler, fourth inline
   SHA-256-hex, secret-generation in four places, per-call `Pattern.compile` /
   `MessageDigest.getInstance` / entity-reflection on hot paths.
@@ -132,20 +162,20 @@ note, entity-serialization guidance, redaction trade-offs, nonce wording).
 3. **Multiple X-Forwarded-For header instances:** the request header map is
    last-one-wins (BraceHandler builds a single-value map), not comma-joined. Last-wins
    keeps the proxy-appended header, but the comment in `Request.ip()` overstates the
-   guarantee — worth a look.
-4. **Multipart overflow still surfaces as 500, not 413** — no clean single exception
+   guarantee; worth a look.
+4. **Multipart overflow still surfaces as 500, not 413**: no clean single exception
    type to catch from Jetty's MultiPart parser. Cosmetic/correctness follow-up.
 5. **Stack traces in error records are deliberately unredacted** (M10 trade-off:
    primary diagnostic signal; only exposed via READ-gated `/ops/errors` JSON). The
    rendered message/route/path fields are scrubbed. Documented in SECURITY.md.
 6. ~~**M8 doc sweep may be incomplete:** README.md / BRACE-AGENTS.md may still describe
-   the old `/*` middleware semantics — grep for `/*"` pattern docs.~~
+   the old `/*` middleware semantics; grep for `/*"` pattern docs.~~
    **Swept on main post-merge:** neither file stated the old semantics; BRACE-AGENTS.md
    now documents the new rules (trailing `/*` covers the bare prefix; interior
    wildcards rejected at startup).
 7. **Cosmetic:** `ClaudeMdGenerator.java:17` links `github.com/matth/brace`; everything
    else uses `larvalabs/brace`.
-8. **`Counters` is no longer `final`** (M7 made it subclassable for a test stub) —
+8. **`Counters` is no longer `final`** (M7 made it subclassable for a test stub);
    fine, but flag if an API-surface review cares.
 
 ## Design-intent note

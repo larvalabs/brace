@@ -1,4 +1,35 @@
-# Token Efficiency Review — Fable 5 (June 2026)
+# Token Efficiency Review: Fable 5 (June 2026)
+
+## Summary
+
+All 35 findings (8 High, 16 Medium, 11 Low) were fixed on the
+`token-efficiency-review-2026-06` branch, one commit per finding. The goal was to lower
+what it costs an agent to build and operate a Brace app: fewer boilerplate lines per
+route, lighter and less stale docs, and quieter tool output. The substantive changes:
+
+- Route registration gained unambiguous typed methods and read-only variants (H1). JSON
+  request bodies get declarative validation and stop returning 500 on malformed input
+  (H2). Common per-route boilerplate collapsed into helpers: `db.findOr404` (M2),
+  `Json.obj` (M3), `db.queryPage` (M4), `db.exists` (M5), and broader FormBinder type
+  coverage (M16).
+- The agent reference was split into a dev core plus a separate ops reference (H3), the
+  ops-keypair docs were corrected to match the shipped CLI (H4), and generated and agent
+  docs were brought current (M9, M14, M15, L1, L5, L6, L7).
+- Ops and CLI output got less wasteful for agents: `/ops/errors` defaults to a summary
+  with a per-id detail endpoint instead of dumping full traces (H5), `/ops/status`
+  slimmed down and `brace status` now exits non-zero on errors (H6), and `brace test` and
+  `brace compile` produce condensed, deduplicated output (H7/H8). Agent-mode CLI JSON is
+  compact (M12) and third-party startup log noise was quieted (M13).
+- Scaffold and test ergonomics: a reusable `App.routes(Brace)` extraction (M7), pom fixes
+  for false-green tests and a broken Dockerfile (M8), a richer TestApp harness (M6), and
+  `brace agents-md` to refresh docs from the pinned jar (M10).
+
+Two code-review rounds over the branch followed. The first caught ten regressions the
+per-finding fixes introduced (F1 through F10, all fixed), plus a guard-loop warning and
+several cleanups. The second (R1 through R10) reworked the flash and session write-back
+paths at a lower altitude rather than patching them; R10, a `requireSession`
+misconfiguration that now throws at startup, was decided and applied on `main` after
+merge. Remaining follow-ups are listed at the end.
 
 Second review under the [periodic model review process](README.md). Full-codebase
 token-efficiency review of Brace at 0.1.7-SNAPSHOT, run with Fable 5 across five
@@ -9,7 +40,7 @@ informal 2026-06-10 pass that was filed straight into `TODO.md`.
 
 - **Findings doc (canonical tracker):** [`docs/2026-06-11-token-efficiency-review-todos.md`](../2026-06-11-token-efficiency-review-todos.md)
 - **Fix branch:** `token-efficiency-review-2026-06`
-- **Result:** 35 findings (8 High, 16 Medium, 11 Low) — **all fixed**, one commit per
+- **Result:** 35 findings (8 High, 16 Medium, 11 Low). **All fixed**, one commit per
   finding, full `mvn test` green after each commit (795 → 933 tests over the branch).
 - **Method:** five parallel review agents for the sweep; every High verified directly
   against source before listing (the route-overload ambiguity by compile test). Fixes
@@ -38,14 +69,14 @@ informal 2026-06-10 pass that was filed straight into `TODO.md`.
 |---|---|---|
 | M1 | Session-aware before-middleware + `requireSession` guard | `9419f50` |
 | M2 | `db.findOr404` / `db.queryOneOr404` (the 3-line preamble appeared 32× in the benchmark app) | `19aa918` |
-| M3 | `Json.obj` — ordered, null-tolerant one-line JSON shapes | `a1583c4` |
+| M3 | `Json.obj`: ordered, null-tolerant one-line JSON shapes | `a1583c4` |
 | M4 | `db.queryPage` + ORDER-BY-in-fragment pinned as supported semantics | `07ca63a` |
 | M5 | `db.exists(type, where, params)` + token-minimizing patterns doc section | `cdf82fd` |
 | M6 | TestApp request builder, CSRF helpers, session variants, JSON assertions | `ae66a5b` |
 | M7 | Scaffold extracts reusable `App.routes(Brace)` + test idiom | `c7313b2` |
 | M8 | Scaffold pom: surefire pin (false-green `mvn test`) + shade packaging (broken Dockerfile) | `43931df` |
 | M9 | Generated CLAUDE.md: capability gaps, stale link/PATCH, merged ops sections | `c763ef6` |
-| M10 | `brace agents-md` — version-matched doc refresh from the pinned jar | `d461f9d` |
+| M10 | `brace agents-md`: version-matched doc refresh from the pinned jar | `d461f9d` |
 | M11 | `http.error` log lines carry an `at` first-app-frame field | `36ad777` |
 | M12 | Agent-mode CLI JSON compact, not pretty-printed | `b9458f2` |
 | M13 | Third-party startup log noise quieted (JUL config + slf4j-jdk14; ~80 lines → 2) | `5c633bc` |
@@ -62,7 +93,7 @@ informal 2026-06-10 pass that was filed straight into `TODO.md`.
 | L3 | Dev-mode 404s list near-miss registered routes | `b580de8` |
 | L4 | CLI nits: unknown command exits 1, `logs --limit`, scaffold suggests `brace dev` | `e5920af` |
 | L5 | README API drift (PATCH, wrong reference link, non-compiling Job lambdas) | `eeeab06` + `21ad102` |
-| L6 | README/BRACE-AGENTS duplication — kept the tour, added release-checklist drift sweep | `b548613` |
+| L6 | README/BRACE-AGENTS duplication: kept the tour, added release-checklist drift sweep | `b548613` |
 | L7 | BRACE-AGENTS currency sweep (413 cap, session expiry, Url.to, log levels) + open-redirect docs | `4e7b8b2` |
 | L8 | Migration guide: 44-row index table + narration compression | `c765094` + `16e3843` |
 | L9 | Sample relabeled as smoke app; reachable admin route; no fake version strings | `bcfb6ce` |
@@ -71,20 +102,20 @@ informal 2026-06-10 pass that was filed straight into `TODO.md`.
 
 ## Notable spec deviations (recorded in the findings doc per item)
 
-- **M4:** `queryPage` is a distinct method, not a `db.query` overload — the overload
+- **M4:** `queryPage` is a distinct method, not a `db.query` overload; the overload
   would have silently reinterpreted existing positional int params as limit/offset.
 - **H7:** `System.console() == null` proved unreliable for TTY detection (JLine-backed
   JDKs); `bin/brace` now passes `[ -t 1 ]` via `-Dbrace.stdout.tty` with fallbacks.
 - **M13:** the log-level override is a system property (`-Dlog.level.<logger>=`), not a
-  config key — the noisy libraries boot before any app config is loaded; Jetty added to
+  config key: the noisy libraries boot before any app config is loaded; Jetty added to
   the quiet list (shipping a provider would otherwise have *surfaced* its INFO lines).
-- **H3:** dev core landed at 853 lines, not the ≤750 target — the file had grown +205
+- **H3:** dev core landed at 853 lines, not the ≤750 target; the file had grown +205
   lines of new API reference during this very review; the remainder is dense signatures.
   Ops reference ships as `/brace/agent-ops-guide.md` in the jar, scaffolds and refreshes
   as `BRACE-OPS.md` (via `brace new` and `brace agents-md`).
 - **M6:** explicit-session sends evict the cookie jar's `brace_session` (two cookies
   raced nondeterministically); plain `post(...)` deliberately never auto-injects CSRF.
-- **L6/L9 decisions:** README API tour kept (drift is a process problem — release-checklist
+- **L6/L9 decisions:** README API tour kept (drift is a process problem; release-checklist
   sweep added) rather than trimmed; sample relabeled as a minimal smoke app rather than
   expanded (a golden-path sample is separately tracked in TODO.md Tier 3).
 
@@ -94,9 +125,9 @@ informal 2026-06-10 pass that was filed straight into `TODO.md`.
 - `mvn verify` (full suite + real-Postgres Testcontainers ITs, 30 IT tests):
   **BUILD SUCCESS** at branch tip (2026-06-11).
 - `tests/cli/test-distribution.sh` (shell e2e against the packaged zip) run by the
-  H7/H8, M10/L4, and H3 agents in their worktrees — all green, including new
+  H7/H8, M10/L4, and H3 agents in their worktrees, all green, including new
   assertions for condensed test output, `brace agents-md`, and the BRACE-OPS scaffold.
-- Code-review pass over the full branch diff (process step 5): **done** — see the
+- Code-review pass over the full branch diff (process step 5): **done**, see the
   fix round below; `mvn verify` green again after it.
 
 ## Code-review fix round (2026-06-11, post-35/35)
@@ -107,13 +138,13 @@ exposed. All confirmed findings fixed, one commit per finding where independent:
 
 | Finding | Commit |
 |---|---|
-| F1 `brace dev` never set `-Dbrace.mode=dev` — fresh scaffold's printed next step crashed on first run; dev-404 dead under its own command | `9c3da2c` |
+| F1 `brace dev` never set `-Dbrace.mode=dev`, so a fresh scaffold's printed next step crashed on first run; dev-404 dead under its own command | `9c3da2c` |
 | F2 legacy `post(path, params, session)` ignored the explicit session whenever the jar held a minted cookie | `a4d2811` |
 | F3 concise `brace test` dropped container-level failures (`@BeforeAll`, constructor) when a method failure parsed | `dc6590d` |
 | F4 condensed javac diagnostics lost the symbol detail (line 2) and deduped distinct missing symbols into one line | `3c90422` |
 | F5 BeforeSession mutations silently dropped on static-file and 404 paths | `a28612b` |
-| F6 `buildSession` consumed flash for any guarded route — racing polls and the `requireSession` redirect destroyed pending flash | `a745609` |
-| F7+F8 no-database apps: `errors.count` never shrank (status red until restart) and stack traces were remotely unreachable — `/ops/errors{,/{id},/{id}/resolve}` now serve the in-memory Stats records with stable ids | `89f3e1f` |
+| F6 `buildSession` consumed flash for any guarded route; racing polls and the `requireSession` redirect destroyed pending flash | `a745609` |
+| F7+F8 no-database apps: `errors.count` never shrank (status red until restart) and stack traces were remotely unreachable; `/ops/errors{,/{id},/{id}/resolve}` now serve the in-memory Stats records with stable ids | `89f3e1f` |
 | F9 `autoMode` keyed on `System.console()` instead of `stdoutIsTty()` | `10366a8` |
 | F10 `-Dlog.level.<logger>=DEBUG/TRACE` was a silent no-op (ConsoleHandler stayed at INFO) | `62f6614` |
 | `requireSession` without `.sessions(secret)` now warns at startup (silent guard-loop) | `da8025c` |
@@ -125,26 +156,26 @@ exposed. All confirmed findings fixed, one commit per finding where independent:
 ## Code-review fix round 2 (2026-06-12)
 
 The `/code-review` pass over fix round 1 (7 finder angles, ~30 candidates, 1 refuted)
-said F5 and F6 needed a second pass at a lower altitude, not spot patches — plus seven
+said F5 and F6 needed a second pass at a lower altitude, not spot patches, plus seven
 smaller findings. Findings doc: `docs/2026-06-11-token-review-fix-round-2-todos.md`.
 All fixed except R10 (a startup-throw decision left for Matt); one commit per finding,
 `mvn test` green per commit, `mvn verify` + CLI distribution tests green at the end:
 
 | Finding | Commit |
 |---|---|
-| R2 session write-back choke point — every response path (CSRF-403, thrown-404, 500 included) persists guard mutations through one `writeResult` overload | `784ad1d` |
-| R1 flash consumed at View render time with cookie-borne provenance — PRG to plain-Handler pages displays flash, guard-set flash survives its own request, guards can read pending flash | `aece711` |
+| R2 session write-back choke point: every response path (CSRF-403, thrown-404, 500 included) persists guard mutations through one `writeResult` overload | `784ad1d` |
+| R1 flash consumed at View render time with cookie-borne provenance: PRG to plain-Handler pages displays flash, guard-set flash survives its own request, guards can read pending flash | `aece711` |
 | R3 `Cache-Control: private` on session-cookie responses (heuristic-cacheability leak via force-cache proxies) + SECURITY.md note | `c2239fa` |
 | R4 in-memory `/ops/errors?since=` filters `firstSeen` like the DB path | `dbd5e84` |
 | R5 ClaudeMdGenerator emitted the removed `?full=true` | `77678cc` |
-| R6 `/ops/status` errors.recent — one row shape in both deployment modes (`firstSeen` + `at` added to the DB rows) | `79c19e4` |
+| R6 `/ops/status` errors.recent: one row shape in both deployment modes (`firstSeen` + `at` added to the DB rows) | `79c19e4` |
 | R7 `/ops/errors` 500-row cap applies only to unfiltered lists; `since` windows are complete; cap documented | `10c7002` |
 | R8 single-pass pair parsing, cached form map on Request, `List.copyOf` at the multi-value accessors | `1b5187a` |
 | R9 `resolveError` 404s on malformed ids instead of 500ing (which re-recorded a framework error) | `b863c51` |
 | Below-cut batch: CSRF `_csrf` through the shared parser (last divergent copy), resolveError/Stats/ErrorStore dedup, ProjectGenerator shares CliAgentsMd's jar-entry constants, parseFailures shared transition | `c941ccc` |
 
 **R10 (decided 2026-06-12, post-merge on main):** `requireSession` without
-`.sessions(secret)` now **throws `IllegalStateException` at `start()`** — it is a
+`.sessions(secret)` now **throws `IllegalStateException` at `start()`**: it is a
 provable infinite redirect loop, and the round-1 WARN (`da8025c`) scrolled past while
 the browser symptom (ERR_TOO_MANY_REDIRECTS) pointed nowhere. A generic session-aware
 `before(...)` keeps the WARN (it may be read-only or tolerant of an empty session).
@@ -161,21 +192,21 @@ summaries (H5), and the `/ops/status` compact snapshot (H6).
 ## Follow-ups surfaced during the work (not new findings)
 
 1. **README Quick Start contradiction:** `app.get("/", cache.wrap("5m", posts::index))`
-   vs a `index(Request, Database)` controller — `Cache.wrap` only takes the
+   vs a `index(Request, Database)` controller; `Cache.wrap` only takes the
    request-only `Handler`. Needs a design decision about cached DB handlers (L5 agent,
    reported-not-fixed).
 2. **Migration-guide cosmetics** (L8 agent): the OpsDashboard-escaping section says
    "Through 0.1.7" where it means 0.1.6; the open-redirect section's "Through 0.1.7,
    `Redirect.to` accepted any string" is misleading (`Redirect.to` is unchanged).
-3. **FormBinder `List<String>` components** deferred from L11 — multi-value reads go
+3. **FormBinder `List<String>` components** deferred from L11; multi-value reads go
    through the new accessors for now.
 4. **M11's optional dev-mode 500 body** (type + message + app-trimmed trace when
-   `brace.mode=dev`) deferred — design-gated on information-disclosure review.
+   `brace.mode=dev`) deferred, design-gated on information-disclosure review.
 5. **ai-benchmark cross-repo items:** harness bugs (duplicated CLAUDE.md context
    blocks, broken route listing) already filed in that repo's TODO.md; its
    `brace-template/CLAUDE.md` should be rewritten with the new canonical idioms
    (typed routes, `findOr404`, `jsonForm`, `Json.obj`) before the planned F1–F5
-   re-run — the benchmark's published numbers predate every fix on this branch.
+   re-run; the benchmark's published numbers predate every fix on this branch.
 6. **`Cache.wrap` handler shapes** (related to 1): wrapping DB-backed handlers is a
    natural ask the API can't express; candidate for the next API-ergonomics pass.
 7. **v1 ops auth removal** (carried from the security review): when v1 is dropped,
