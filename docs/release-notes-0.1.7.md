@@ -1,7 +1,7 @@
-# Brace 0.1.7 draft release notes
+# Brace 0.1.7 release notes
 
-> Draft for the GitHub release at tag time. Source of truth for every item (with
-> before/after examples) is `docs/migrations/brace-0.1.6-to-0.1.7.md`.
+> Source of truth for every item (with before/after examples) is
+> `docs/migrations/brace-0.1.6-to-0.1.7.md`.
 
 ---
 
