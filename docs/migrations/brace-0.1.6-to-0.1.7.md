@@ -9,7 +9,7 @@ body-read ordering, smarter `?` parameter conversion) plus several **security fi
 new **server-enforced session expiry**, and a **replay-resistant ops auth protocol, v2**)
 covered at the end of this guide.
 
-Four narrow cases **are breaking** and need action:
+Five narrow cases **are breaking** and need action:
 
 - Middleware patterns with an **interior wildcard** (e.g. `/api/*/admin`) are now
   rejected at startup with an `IllegalArgumentException` — see "middleware trailing
@@ -27,6 +27,11 @@ Four narrow cases **are breaking** and need action:
   `/ops/errors/{id}` (for stack traces). Also note `brace status` now actually exits
   non-zero when unresolved errors exist — a bug fix, but a behavior change for scripts.
   See "`/ops/status` is now a compact snapshot" below.
+- Apps using route-level page caching (`cache.wrap(...)`) on routes whose content
+  depends on **query params** must now declare those params with `.vary(...)` — query
+  params are ignored by default, so an undeclared param serves one entry for all values
+  (e.g. `?page=2` returning page 1). See "cached routes ignore query params unless
+  declared with `.vary(...)`" below.
 
 Also note: the session-expiry change alters how long a stolen cookie stays valid — see
 "sessions now carry a server-enforced expiry" below — and the old ops auth protocol (v1)
@@ -92,6 +97,23 @@ summary; this is the scan/jump table.
 | `Passwords.dummyCheck` timing helper | new-optional | add to user-not-found login path | [§](#security-fix-bcrypt-helper-for-constant-time-enumeration-timing-mitigation) |
 | TrustedProxies dual-stack guidance (docs) | cleanup | list both `127.0.0.1` and `::1` on dual-stack | [§](#security-fix-trustedproxies-dual-stack-ipv6-representation-mismatch-documentation) |
 | High-entropy path segments redacted in logs/stats | behavior change | log tooling matching token paths: match `[redacted]` | [§](#security-fix-high-entropy-path-segments-redacted-in-access-logs-and-ops-stats) |
+| `opsProfiler(false)` opt out of JFR profiler | new-optional | none — profiler stays on by default | [§](#new-opsprofilerboolean--opt-out-of-the-always-on-jfr-profiler) |
+| Async stdout logging (single writer thread) | behavior change | none | [§](#changed-stdout-logging-is-now-asynchronous-single-writer-thread) |
+| Minimum log level | new-optional | none — opt in via config | [§](#new-minimum-log-level) |
+| CSRF token minting is lazy | behavior change | none | [§](#changed-csrf-token-minting-is-lazy-csrffalse-routes-skip-session-crypto-entirely) |
+| `/ops/status` route stats keyed by route pattern | behavior change | none — update dashboards keyed on raw paths | [§](#changed-opsstatus-route-stats-are-keyed-by-route-pattern) |
+| Finished durable jobs pruned after 7 days | behavior change | none — set retention if you need longer | [§](#changed-finished-durable-jobs-are-pruned-after-7-days-configurable) |
+| Durable-job concurrency bounded by the pool | behavior change | none | [§](#changed-durable-job-concurrency-is-bounded-by-the-connection-pool) |
+| Error recording coalesced (~2s flush) | behavior change | none | [§](#changed-error-recording-is-coalesced-2s-flush-so-error-storms-cant-starve-the-pool) |
+| Cached routes ignore query params unless `.vary(...)` | breaking | audit `cache.wrap(...)`; add `.vary(...)` for params that change the page | [§](#breaking-cached-routes-ignore-query-params-unless-declared-with-vary) |
+| Mailer no longer retains sent emails in prod | behavior change | none — `sentCount()` widens to `long` (recompile) | [§](#changed-mailer-no-longer-retains-sent-emails-in-production) |
+| Storage requests now time out | behavior change | none — tune `s3.timeoutSeconds` | [§](#changed-storage-requests-now-time-out-60s-default-configurable) |
+| `sendAsync()` — email off the request thread | new-optional | none — additive | [§](#new-optional-sendasync--email-off-the-request-thread) |
+| `brace dev`/`run` set `brace.mode` + pass `BRACE_JAVA_OPTS` | behavior change | none — `%dev.`/`%prod.` config keys now apply | [§](#changed-brace-devbrace-run-now-set-bracemode-devprod-and-pass-brace_java_opts) |
+| Templates precompiled for prod | behavior change | none — precompile in your image for non-CLI launches | [§](#changed-templates-are-precompiled-for-prod-bracemodeprod) |
+| Template render happens after commit | behavior change | none | [§](#changed-template-rendering-now-happens-after-the-transaction-commits) |
+| WebSocket slow-consumer backpressure | new-optional | none — force-close cap is configurable | [§](#new-websocket-slow-consumer-backpressure-force-close-past-a-queue-cap) |
+| DB-backed rate limiting batched/best-effort | behavior change | none — counts approximate under burst | [§](#changed-db-backed-rate-limiting-is-now-batched-and-best-effort-was-exact-per-request) |
 
 ## Recommended cleanup: drop the manual `flyway-database-postgresql` dependency
 
