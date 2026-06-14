@@ -7,7 +7,7 @@ Brace is a full-stack Java web framework. Requires JDK 21+; JDK 25 LTS recommend
 ## Project Structure
 
 ```
-src/main/java/com/larvalabs/brace/     # Framework source (~15k lines including the CLI)
+src/main/java/com/larvalabs/brace/     # Framework source (~18k lines including the CLI)
 src/test/java/com/larvalabs/brace/     # Tests (run with `mvn test`)
 src/test/resources/          # Test templates, migrations
 src/assembly/distribution.xml # Assembly descriptor for the brace CLI zip

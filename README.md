@@ -10,7 +10,7 @@ Current web frameworks were designed for human developers. They avoid boilerplat
 
 Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
 
-Brace is both simple and complete. A compact set of core types, ~15k lines of framework code (CLI included), 800+ tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+Brace is both simple and complete. A compact set of core types, ~18k lines of framework code (CLI included), 1,000+ tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
 
 ### AI Token Efficiency
 
@@ -202,8 +202,7 @@ public class PostController {
     }
 
     public Result show(Request req, Database db) {
-        var post = db.find(Post.class, req.intPathParam("id"));
-        if (post == null) return Result.notFound();
+        var post = db.findOr404(Post.class, req.intPathParam("id"));  // throws a 404 if missing
         return Result.view("posts/show", "post", post);
     }
 
@@ -236,12 +235,16 @@ app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putF
 
 // CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
 app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API
+
+// Json.obj builds an ordered, null-tolerant map for explicit JSON response shapes
+app.getRead("/api/me", (req, db) -> Json.of(Json.obj("id", userId, "name", name)));
 ```
 
 ## Database
 
 ```java
 db.find(Post.class, id)                          // find by ID
+db.findOr404(Post.class, id)                      // find by ID or throw 404
 db.insert(post)                                   // insert
 db.update(post)                                   // update
 db.delete(post)                                   // delete
@@ -250,8 +253,10 @@ db.query(Post.class, "author.id = ?", userId)     // HQL where clause
 db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY inside the where-fragment
 db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // limit, offset (page 2)
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
+db.queryOneOr404(Post.class, "slug = ?", slug)    // single result or throw 404
 db.queryIn(Post.class, "id", List.of(1, 2, 3))   // batch lookup with IN clause
 db.count(Post.class, "published = ?", true)       // count with condition
+db.exists(Post.class, "author.id = ?", userId)    // existence check with HQL where
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL
 
 // Constrained helpers for common single-field queries
@@ -287,6 +292,9 @@ public record PostForm(
 
 var form = req.form(PostForm.class);
 if (form.hasErrors()) return Result.view("posts/new", "form", form);
+
+// JSON request bodies bind the same way; malformed JSON becomes a field error, not a 500
+var jsonForm = req.jsonForm(PostForm.class);
 ```
 
 ## Sessions
@@ -517,7 +525,7 @@ session.secret=change-me
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~15k lines of framework code (CLI included). 800+ tests.**
+**~18k lines of framework code (CLI included). 1,000+ tests.**
 
 ## Security
 
