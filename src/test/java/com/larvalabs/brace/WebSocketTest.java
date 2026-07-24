@@ -34,10 +34,17 @@ class WebSocketTest {
     }
 
     public static class RoomSocket {
+        // connect() returns when the *client* handshake completes; onConnect (and the join it
+        // performs) runs server-side afterwards. Without waiting for the join, a broadcast sent
+        // straight after connect can reach an empty room — a race that shows up as a null poll
+        // under suite load, not a product bug.
+        static final java.util.concurrent.atomic.AtomicInteger joined =
+            new java.util.concurrent.atomic.AtomicInteger();
         private final WsContext ws;
         public RoomSocket(WsContext ws) { this.ws = ws; }
         public void onConnect() {
             ws.join("lobby");
+            joined.incrementAndGet();
         }
         public void onMessage(String message) {
             ws.broadcast("lobby", "broadcast:" + message);
@@ -176,8 +183,16 @@ class WebSocketTest {
         var listener1 = new WsTestClient();
         var listener2 = new WsTestClient();
 
+        RoomSocket.joined.set(0);
         var ws1 = connect("/room", listener1);
         var ws2 = connect("/room", listener2);
+        // Both connections must have completed their server-side join before the broadcast, or
+        // it fans out to a room that isn't fully populated yet.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (RoomSocket.joined.get() < 2 && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(2, RoomSocket.joined.get(), "both sockets should have joined the room");
 
         // ws1 sends a message — both should receive the broadcast
         ws1.sendText("hi", true);

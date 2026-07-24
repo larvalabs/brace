@@ -304,6 +304,13 @@ class DurableJobTest {
                 t.join();
             }
             // fast2 completed while the four gated jobs are still blocked: no head-of-line stall.
+            // fast1 belongs to the *first* batch, whose threads we deliberately don't join (the
+            // gated ones are still blocked), so wait for its counter increment rather than
+            // assuming it landed before fast2's join returned.
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (TestJob.runCount.get() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
             assertEquals(2, TestJob.runCount.get(), "both fast jobs done despite running slow jobs");
         } finally {
             GatedJob.gate.countDown();
