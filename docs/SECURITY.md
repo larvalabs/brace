@@ -10,6 +10,8 @@ This document describes Brace's security features and best practices for buildin
 - [Open Redirects](#open-redirects)
 - [Trusted Proxies](#trusted-proxies)
 - [Cookie Security](#cookie-security)
+- [Static Files](#static-files)
+- [WebSockets](#websockets)
 - [File Uploads](#file-uploads)
 - [Rate Limiting](#rate-limiting)
 - [Ops Endpoints](#ops-endpoints)
@@ -304,11 +306,39 @@ app.sessions(SessionOptions.of("your-secret")
 | Attribute | Default | Purpose |
 |-----------|---------|---------|
 | `HttpOnly` | `true` | Prevents JavaScript access (XSS mitigation) |
-| `Secure` | `false` | HTTPS only (set to `true` in production) |
+| `Secure` | resolved per request | HTTPS only — on for every non-loopback request (see below) |
 | `SameSite` | `Lax` | CSRF protection (`Strict`, `Lax`, or `None`) |
 | `Max-Age` | session | Cookie lifetime (use `maxAgeDays()` to set) |
 | `Path` | `/` | Scope to specific path |
 | `Domain` | none | Share across subdomains |
+
+### The `Secure` attribute is resolved per request
+
+With no explicit `.secure(...)`, Brace decides the `Secure` attribute per response:
+
+- `X-Forwarded-Proto: https` from a **trusted** proxy → `Secure` on. This wins outright, so
+  a proxy that rewrites `Host` to the upstream still gets the attribute.
+- Otherwise, on unless the request's `Host` is a loopback address (`localhost`,
+  `127.0.0.0/8`, `::1`).
+
+Brace serves cleartext HTTP/1.1 and expects TLS to be terminated by a reverse proxy, so it
+cannot read the scheme off its own connector. Before 0.1.8 the attribute simply defaulted to
+`false`, which meant every app built the documented way — `.sessions(secret)` — shipped a
+session cookie a network attacker could read off any cleartext request to the domain. A
+fixed `true` would have been no better: it breaks every app and test suite on
+`http://localhost`. Hence the per-request rule, which needs no configuration in either
+environment.
+
+An explicit `.secure(true)` or `.secure(false)` always wins. An app genuinely served over
+plain HTTP on a real hostname must opt out, and startup logs a warning when it has:
+
+```java
+app.sessions(SessionOptions.of("secret").secure(false));
+```
+
+An attacker cannot use the `Host` header to strip `Secure` from someone else's cookie: the
+header they control is on their own request, and the `Set-Cookie` it shapes comes back to
+them.
 
 ### Production Recommendations
 
@@ -318,7 +348,8 @@ app.sessions(SessionOptions.secure("secret")
     .sameSiteLax());
 ```
 
-This sets: `HttpOnly=true`, `Secure=true`, `SameSite=Lax`, `Max-Age=1209600` (14 days)
+This sets: `HttpOnly=true`, `Secure=true` (explicitly, regardless of request),
+`SameSite=Lax`, `Max-Age=1209600` (14 days)
 
 ### Session Cookies and Shared Caches
 
@@ -351,6 +382,11 @@ app.maxUploadSize("10M");  // 10 megabytes (default)
 app.maxUploadSize("50M");  // 50 megabytes
 ```
 
+Since 0.1.8 the body is read **after** before-middleware runs, so a rate limiter or auth
+guard can shed a request before its bytes are buffered. A guard that returns a result wins
+over the `413`; middleware that reads `req.body()` itself (a webhook signature check) still
+triggers the read at that point.
+
 ### Security Considerations
 
 1. **Validate file types:** Check `file.contentType()` and extension
@@ -367,6 +403,72 @@ String key = "uploads/" + file.name(); // ❌ Unsafe
 // DO: Generate safe keys
 String key = storage.safeKey("uploads", file.name()); // ✅ Safe
 ```
+
+`Storage.put`, `delete`, and `url` reject keys containing `.`/`..` segments or a leading `/`
+outright: the SigV4 canonical URI and the request URL are built from the same unnormalized
+string, so a traversing key would have been *validly signed* for the path it escaped to.
+
+### Serving user-supplied filenames
+
+`Result.download(bytes, contentType, filename)` is safe to call with a user-supplied name.
+It drops any directory component and emits the RFC 6266 pair — an ASCII-safe
+`filename="…"` plus `filename*=UTF-8''…` — so a name containing quotes cannot inject
+`Content-Disposition` parameters, and non-ASCII names survive intact.
+
+`Http.multipart().field(name, bytes, filename)` on the **outbound** side throws
+`IllegalArgumentException` for a name or filename containing control characters, rather
+than letting CR/LF terminate the part headers and forge extra parts in the request.
+
+---
+
+## Static Files
+
+`app.staticFiles(urlPrefix, directory)` confines serving to `directory`. The check resolves
+symlinks (`toRealPath`) before comparing, so a symlink under the served tree cannot serve a
+file outside it — a lexical `normalize()` + `startsWith` check does not catch that, because
+the traversal happens in the filesystem rather than in the path string.
+
+Symlinks that stay inside the served directory keep working. To serve a directory that
+lives elsewhere, register it as its own mapping rather than linking it into the web root:
+
+```java
+app.staticFiles("/assets", "public");
+app.staticFiles("/assets/uploads", "/var/app/uploads");
+```
+
+Static responses carry `X-Content-Type-Options: nosniff`, and — since 0.1.8 — the app's
+after-middleware, so `app.after(SecurityHeaders.defaults())` reaches them too. That matters
+most when a static directory holds user-supplied content: those are exactly the responses
+that need `X-Frame-Options` and a CSP.
+
+---
+
+## WebSockets
+
+WebSocket upgrades are validated against the request's `Origin`. A handshake is **not**
+subject to the same-origin policy, so without this an attacker's page could open a socket
+to your app, have the browser attach the victim's session cookie, and hold an authenticated
+socket for its lifetime (cross-site WebSocket hijacking).
+
+- A cross-host `Origin` is rejected with 403.
+- A **missing** `Origin` is allowed: only browsers are required to send one, and only
+  browsers are what the policy protects. Rejecting would break every non-browser client for
+  no gain.
+- Hosts are compared without scheme or port, so TLS terminated at a proxy is fine.
+
+Declare deliberate cross-origin clients:
+
+```java
+app.wsAllowedOrigins("https://studio.example.com")   // full origin, or a bare host
+   .ws("/live", ctx -> new LiveHandler(ctx));
+```
+
+`"*"` disables the check — sound only if the socket carries no ambient authority, i.e. it
+does not rely on the session cookie for authorization.
+
+Do not rely on `SameSite` alone for this. The default `SameSite=Lax` session cookie does
+make modern browsers withhold the cookie on a cross-site handshake, but that protection
+disappears the moment an app calls `sameSiteNone()`.
 
 ---
 
@@ -461,6 +563,19 @@ of server time and the nonce is fresh random (16+ bytes, base64url) per attempt.
 public key into the signed message means a captured signature is only valid for the key that
 produced it; the nonce makes each signed request single-use. The exact wire format is in
 `docs/agent-ops-guide.md`.
+
+Protocol **v1 is removed** as of 0.1.8. It signed the timestamp alone — not bound to the key,
+no nonce — so a captured request was replayable verbatim inside the ±30 s window to mint a
+fresh token at the key's full scope ceiling. A v1 body now gets a 401 naming the cause; clients
+older than 0.1.7 must be upgraded.
+
+**Caching.** Every `/ops/*` response carries `Cache-Control: no-store`. This matters for the
+cookie channel specifically: RFC 9111 already forbids shared caches from storing a response to
+a request carrying `Authorization`, but no such rule covers a cookie-authenticated GET, and
+`/ops/dashboard` embeds a live bearer token in its HTML.
+
+The `__brace_ops_session` cookie is scoped to `Path=/ops`, so an operator credential is not
+attached to every application request where any handler could read it via `req.cookie(...)`.
 
 **Credential channels (general endpoints).** All ops endpoints except the browser exchange
 handoff accept credentials through exactly two channels:

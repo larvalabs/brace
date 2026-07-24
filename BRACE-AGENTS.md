@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
 
 ## Routing
 
@@ -231,7 +231,9 @@ Result.forbidden()                          // 403 — or forbidden("msg")
 Result.badRequest("invalid input")          // 400
 Result.created("/posts/42")                 // 201 with Location header
 Result.bytes(data, "image/png")             // binary response
-Result.download(data, "text/csv", "f.csv")  // Content-Disposition attachment
+Result.download(data, "text/csv", "f.csv")  // Content-Disposition attachment; filename is
+                                            // sanitized + RFC 6266 encoded, so a user-supplied
+                                            // name is safe to pass
 Result.view("posts/index", "posts", posts)      // render JTE template
 View.render("emails/welcome", "user", user)     // render to String (for emails)
 Result.json(object)                         // 200 JSON — or json(object, 201) with status
@@ -267,6 +269,7 @@ Url.to("/users/{id}", 42)                   // "/users/42"
 // Headers and cookies
 result.header("X-Custom", "value")          // set a response header (single-value)
 result.cookie("theme", "dark", 3600, true, true, "Lax")  // name, value, maxAge, httpOnly, secure, sameSite
+result.cookie("t", "v", 3600, true, true, "Lax", "/admin")  // ...plus an explicit Path
 ```
 
 `Set-Cookie` is the one repeatable header: multiple `result.cookie(...)` calls all reach the
@@ -453,6 +456,8 @@ session.clear();                       // remove all
 ```
 
 Configure cookie security with `app.sessions(SessionOptions.secure("secret").maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `path(String)`, `domain(String)`.
+
+**The `Secure` attribute is on by default.** With no explicit `.secure(...)`, Brace resolves it per request: on unless the request's `Host` is a loopback address, and always on when a trusted proxy reports `X-Forwarded-Proto: https`. So production gets `Secure` with no configuration and `http://localhost` (dev, `Brace.test()`) keeps working. An app genuinely served over plain HTTP on a real hostname must opt out with `.secure(false)`, which logs a startup warning. Do not add `.secure(false)` to make a local setup work — check the Host first.
 
 Flash messages (display once, on the next request): `session.flash("notice", "Post created")` sets; the message is consumed when the next page renders — any handler type, e.g. a redirect-after-POST landing on a plain `Handler` view — and is available to templates as the `flash` map (`flash.get("notice")`). `session.flash("notice")` reads it programmatically: reading a pending message from a previous request consumes it (read-once); reading one set during the current request peeks without consuming, so it still displays next request. `session.flashData()` returns the consumed entries as a Map.
 
@@ -671,6 +676,8 @@ app.ws("/chat", ctx -> new ChatHandler(ctx));
 Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 
 **Slow-consumer backpressure.** `send`/`broadcast` are non-blocking. A connection that stops reading would otherwise make its outgoing frames pile up in Jetty's queue without bound (a per-connection memory leak). Brace bounds each connection's queued-but-unflushed bytes and force-closes a connection that exceeds the cap (`TRY_AGAIN_LATER`); the bound is per connection, so one slow client never blocks healthy members of the same room. Tune with `app.wsMaxQueuedBytes(bytes)` (default 4 MB).
+
+**Origin checking.** Upgrades from a cross-host `Origin` are rejected with 403 — a WebSocket handshake is not subject to the same-origin policy, so without this an attacker page could open a socket that the browser authenticates with the victim's session cookie. A missing `Origin` is allowed (non-browser clients); hosts are compared without scheme or port, so TLS at a proxy is fine. Declare deliberate cross-origin browser clients with `app.wsAllowedOrigins("https://studio.example.com")` (full origin or bare host; `"*"` disables the check).
 
 ## Rate Limiting
 
