@@ -156,4 +156,71 @@ public class TrustedProxiesTest {
         assertFalse(trusted.isTrusted("localhost"));
         assertFalse(trusted.isTrusted("evil.example.org"));
     }
+
+    // --- Cloudflare preset ---
+
+    @Test
+    public void testCloudflarePresetTrustsPublishedRanges() {
+        var trusted = TrustedProxies.cloudflare();
+        // One address from several bundled ranges, v4 and v6
+        assertTrue(trusted.isTrusted("173.245.48.1"));   // 173.245.48.0/20
+        assertTrue(trusted.isTrusted("104.16.0.1"));     // 104.16.0.0/13
+        assertTrue(trusted.isTrusted("172.64.0.1"));     // 172.64.0.0/13
+        assertTrue(trusted.isTrusted("2400:cb00::1"));   // 2400:cb00::/32
+        assertTrue(trusted.isTrusted("2606:4700::1"));   // 2606:4700::/32
+        // Not Cloudflare
+        assertFalse(trusted.isTrusted("8.8.8.8"));
+        assertFalse(trusted.isTrusted("192.168.1.1"));
+        assertFalse(trusted.isTrusted("2001:db8::1"));
+    }
+
+    @Test
+    public void testPlusAddsExtraProxies() {
+        var trusted = TrustedProxies.cloudflare().plus("127.0.0.1", "::1");
+        assertTrue(trusted.isTrusted("127.0.0.1"));
+        assertTrue(trusted.isTrusted("::1"));
+        assertTrue(trusted.isTrusted("173.245.48.1")); // Cloudflare ranges still present
+        assertFalse(trusted.isTrusted("127.0.0.2"));   // single IP, not a range
+    }
+
+    @Test
+    public void testPlusOnPlainInstance() {
+        var trusted = new TrustedProxies("10.0.0.0/8").plus("127.0.0.1");
+        assertTrue(trusted.isTrusted("10.1.2.3"));
+        assertTrue(trusted.isTrusted("127.0.0.1"));
+    }
+
+    @Test
+    public void testPlusRejectsInvalidCidrWithoutMutating() {
+        var trusted = TrustedProxies.cloudflare();
+        assertThrows(IllegalArgumentException.class, () -> trusted.plus("not-a-cidr/99"));
+        assertTrue(trusted.isTrusted("173.245.48.1")); // unchanged
+    }
+
+    @Test
+    public void testRefreshReplacesProviderRangesButKeepsExtras() {
+        var trusted = TrustedProxies.cloudflare().plus("127.0.0.1");
+        trusted.applyProviderCidrs(java.util.List.of("198.51.100.0/24", "2001:db8::/32"));
+        assertTrue(trusted.isTrusted("198.51.100.5"));  // new provider range
+        assertTrue(trusted.isTrusted("2001:db8::1"));
+        assertTrue(trusted.isTrusted("127.0.0.1"));     // plus() survives refresh
+        assertFalse(trusted.isTrusted("173.245.48.1")); // old provider range replaced
+    }
+
+    @Test
+    public void testRefreshRejectedWholesaleOnBadEntry() {
+        var trusted = TrustedProxies.cloudflare();
+        assertThrows(IllegalArgumentException.class,
+            () -> trusted.applyProviderCidrs(java.util.List.of("198.51.100.0/24", "not-a-cidr/99")));
+        assertThrows(IllegalArgumentException.class,
+            () -> trusted.applyProviderCidrs(java.util.List.of()));
+        // Failed refresh leaves the bundled list fully in place
+        assertTrue(trusted.isTrusted("173.245.48.1"));
+        assertFalse(trusted.isTrusted("198.51.100.5"));
+    }
+
+    @Test
+    public void testAutoRefreshOnlyOnCloudflarePreset() {
+        assertThrows(IllegalStateException.class, () -> new TrustedProxies("10.0.0.0/8").autoRefresh());
+    }
 }

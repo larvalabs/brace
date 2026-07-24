@@ -13,7 +13,7 @@ Active plans:
 Unmerged branches (open work that already has code; rebase onto `main` before merging):
 - `origin/claude/correctness-review-ey31yz` — correctness review (2026-07-26), 17 commits, 54 behind `main`: M6–M12 and L1–L12 fixes (DST-correct daily jobs, `SameSite=None` implies `Secure`, isolated WebSocket sends, header-injection/encoding/validation fixes), migration-guide entries and a review record. Some fixes already landed separately (0.1.9's `Url.to` path encoding, `SameSite=None` turning on `Secure`); reconcile on rebase.
 - `origin/claude/brace-streaming-uploads-7uwm7s` — streaming uploads and responses (2026-07-26), 6 commits, 31 behind: multipart spill-to-disk, streaming `Storage` uploads, streamed response bodies with Range support, docs. Closes the Tier 2 upload-spooling item.
-- `origin/claude/rate-limiter-proxy-aware-am8rhb` — `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies (1 commit, 61 behind).
+- ~~`origin/claude/rate-limiter-proxy-aware-am8rhb`~~ — landed on `0.1.10/proxies`: `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies.
 - `origin/claude/htmx-v4-upgrade-assessment-nkmydq` — htmx 4.0.0 GA assessment doc (1 commit): adopt later, as its own release.
 - `origin/begin-0.1.10-snapshot` — bumps `pom.xml` to `0.1.10-SNAPSHOT` (1 commit, on top of `main`).
 

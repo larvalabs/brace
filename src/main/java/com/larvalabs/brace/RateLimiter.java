@@ -119,7 +119,25 @@ public class RateLimiter {
                 var ip = req.ip();
                 return ip != null ? ip : "unknown";
             }, "perIp(" + maxRequests + "/" + duration + ")");
-        return limiter::check;
+        return new PerIpCheck(limiter);
+    }
+
+    /**
+     * The middleware returned by {@link #perIp}. A named type rather than a lambda so
+     * {@code Brace.start()} can spot an IP-keyed limiter registered without
+     * {@code app.trustedProxies(...)} and warn about proxy-IP bucketing.
+     */
+    static final class PerIpCheck implements Middleware.Before {
+        private final RateLimiter limiter;
+
+        private PerIpCheck(RateLimiter limiter) {
+            this.limiter = limiter;
+        }
+
+        @Override
+        public Result handle(Request req) {
+            return limiter.check(req);
+        }
     }
 
     /**
