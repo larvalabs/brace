@@ -161,8 +161,12 @@ Moving off LISTEN/NOTIFY entirely (Redis, a dedicated bus). The article's whole 
 | Job in-process wake on enqueue | Medium | Medium | Near-zero pickup, single-instance only |
 | Job LISTEN/NOTIFY on enqueue | — | High | **Rejected** — regresses the request path |
 
-## Adjacent finding, outside this doc's scope
+## Adjacent finding — FIXED (2026-07-24)
 
-No stale-claim recovery exists. If an instance dies between `claimBatchPostgres` setting `started_at` and the terminal mark being written, the row has `started_at` set with both `completed_at` and `failed_at` null. No claim path will ever select it again (`started_at IS NULL` is in both claim predicates), and `purgeFinishedJobs` won't remove it either, since it filters on the terminal timestamps. The job is stranded permanently.
+No stale-claim recovery existed. If an instance died between `claimBatchPostgres` setting `started_at` and the terminal mark being written, the row was left with `started_at` set and both `completed_at` and `failed_at` null. No claim path would ever select it again (`started_at IS NULL` is in both claim predicates), and `purgeFinishedJobs` wouldn't remove it either, since it filters on the terminal timestamps. The job was stranded permanently — and since `Brace.stop()` never joins the per-job virtual threads, every ordinary deploy could strand up to `poolSize/2` jobs per instance.
 
-Surfaced by the article's "polling as the safety net for lost work" framing. The fix is a lease: add `OR started_at < now() - <lease>` to the claim predicate, or reset stranded rows from a periodic job. Worth tracking separately — it is a durability bug, not a latency one.
+Surfaced by the article's "polling as the safety net for lost work" framing.
+
+Fixed by `JobPoller.reclaimStalledJobs` plus a background sweeper, with the lease configurable via `Brace.jobLease(Duration)` (default 15 minutes). Implementation note relevant to Part 1: recovery **clears `started_at`** rather than widening the claim predicate to `OR started_at < …`. That keeps the hot claim query and its `V15` index exactly as the perf review left them — including the ordered-scan early termination that Option A depends on — and leaves the H2 per-row re-claim guard unchanged. The sweep's own scan is served by a new `V16` partial index over currently-claimed rows.
+
+The sweeper runs on its own thread rather than inside `pollLoop` deliberately: when every execution slot is held by a hung job the poll loop is parked in `limiter.acquire()`, which is exactly the case that most needs a sweep, since recovery has to come from a sibling instance.

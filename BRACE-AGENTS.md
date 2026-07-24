@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobLease()`, `group()`.
 
 ## Routing
 
@@ -558,6 +558,14 @@ Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they s
 connection pool with web handlers), and the poller claims more work as slots free — a slow job
 doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
 
+A job holds its claim for at most `app.jobLease(Duration)` (default 15 minutes). If the instance
+running it dies before the job finishes — an ordinary deploy is enough, since JVM exit kills
+in-flight jobs — the claim expires and the job is returned to the queue, or failed outright if its
+`maxAttempts` are already spent. Set the lease above the longest job you expect to run: a lease
+can't tell a dead instance from a slow job, so a job still running when its lease expires may be
+picked up again elsewhere. That's the at-least-once contract `DurableJob` already carries — **jobs
+should be idempotent**. `jobLease(null)` disables recovery.
+
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 
 Job lambdas receive `(Database, JobContext)`. Use `ctx.message("Retrieved " + n + " new listings")`
@@ -594,6 +602,10 @@ mail.to("user@example.com")
     .text("Plain text body")
     .send();
 ```
+
+SMTP timeouts are bounded by default — 10s connect, 30s per read/write — so a wedged relay fails
+the send instead of hanging the caller forever. Override with `.connectTimeout(Duration)` and
+`.timeout(Duration)` for a slow relay or large attachments.
 
 `sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
 Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.
