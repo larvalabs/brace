@@ -1,9 +1,48 @@
 package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class MailerTest {
+
+    // Jakarta Mail defaults every SMTP timeout to infinite, so a blackholed relay would hang
+    // Transport.send forever — and with it the DurableJob execution slot and pooled DB connection
+    // the send is holding. These assert the bound exists rather than standing up an SMTP server.
+
+    @Test
+    void smtpTimeoutsAreBoundedByDefault() {
+        var props = new Mailer("smtp://mail.example.com:587")
+            .smtpProperties("mail.example.com", 587, "smtp");
+
+        assertEquals("10000", props.get("mail.smtp.connectiontimeout"));
+        assertEquals("30000", props.get("mail.smtp.timeout"));
+        assertEquals("30000", props.get("mail.smtp.writetimeout"));
+    }
+
+    @Test
+    void smtpTimeoutsAreOverridable() {
+        var props = new Mailer("smtp://mail.example.com:587")
+            .connectTimeout(Duration.ofSeconds(3))
+            .timeout(Duration.ofSeconds(90))
+            .smtpProperties("mail.example.com", 587, "smtp");
+
+        assertEquals("3000", props.get("mail.smtp.connectiontimeout"));
+        assertEquals("90000", props.get("mail.smtp.timeout"));
+        assertEquals("90000", props.get("mail.smtp.writetimeout"));
+    }
+
+    @Test
+    void smtpsStillGetsTimeoutsAndTls() {
+        var props = new Mailer("smtps://mail.example.com:465")
+            .smtpProperties("mail.example.com", 465, "smtps");
+
+        assertEquals("true", props.get("mail.smtp.ssl.enable"));
+        assertNull(props.get("mail.smtp.starttls.enable"));
+        assertEquals("10000", props.get("mail.smtp.connectiontimeout"));
+    }
 
     @Test
     void captureMode() {
