@@ -607,11 +607,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return Result.notFound();
             }
 
+            // H1: the check above is lexical — Path.normalize() collapses ".." in the *string*
+            // and does not resolve symlinks, while the reads below follow them. A symlink under
+            // the served directory pointing outside it therefore passed containment and served
+            // the target's bytes. Re-check against the real (link-resolved) paths so containment
+            // holds in the filesystem, not just in the path text. Links that stay inside the
+            // served tree keep working. IOException here means missing/broken/unreadable → 404.
+            Path realFile;
+            try {
+                realFile = filePath.toRealPath();
+                if (!realFile.startsWith(baseDir.toRealPath())) {
+                    return Result.notFound();
+                }
+            } catch (java.io.IOException e) {
+                return Result.notFound();
+            }
+
             BasicFileAttributes attrs;
             try {
                 // One stat for existence + regular-file + size + mtime, vs four separate File
                 // syscalls (exists/isFile/length/lastModified) on this hot path.
-                attrs = Files.readAttributes(filePath, BasicFileAttributes.class);
+                attrs = Files.readAttributes(realFile, BasicFileAttributes.class);
             } catch (java.io.IOException e) {
                 return Result.notFound(); // missing file (NoSuchFileException) or unreadable
             }
@@ -640,7 +656,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             try {
-                byte[] fileBytes = Files.readAllBytes(filePath);
+                byte[] fileBytes = Files.readAllBytes(realFile);
                 String contentType = contentTypeForPath(filePath.toString());
                 Result result = Result.bytes(fileBytes, contentType)
                     .header("X-Content-Type-Options", "nosniff")

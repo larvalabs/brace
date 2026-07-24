@@ -112,6 +112,15 @@ public class Assets {
             var base = mapping.base();
             var file = base.resolve(relative).normalize();
             if (!file.startsWith(base)) return null;
+            // Same link-resolved containment check the static-file handler applies (H1), so the
+            // two agree on what counts as in-root: normalize() is lexical and does not follow
+            // symlinks. Keeps a symlinked file from being fingerprinted as a managed asset.
+            try {
+                var real = file.toRealPath();
+                if (!real.startsWith(base.toRealPath())) return null;
+            } catch (IOException e) {
+                return null;
+            }
             if (!Files.isRegularFile(file)) return null;
             return file;
         }

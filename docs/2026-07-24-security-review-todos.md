@@ -16,7 +16,7 @@ the fix is, not how severe the bug is.
 
 ## High
 
-- [ ] **H1: Static-file serving follows symlinks out of the served directory**, `BraceHandler.java:603-620`
+- [x] **H1: Static-file serving follows symlinks out of the served directory**, `BraceHandler.java:603-620`
   - `serveStaticFile` normalizes lexically (`Path.normalize()`) and then checks
     `filePath.startsWith(baseDir)`. `normalize()` is a pure string operation — it does not
     resolve symlinks — and `Files.readAttributes` / `Files.readAllBytes` follow them by
