@@ -38,7 +38,7 @@ the fix is, not how severe the bug is.
     file unaffected.
   - **Model: Sonnet 4.6**, well-specified, fully testable.
 
-- [ ] **H2: Session cookies are not `Secure` by default**, `SessionOptions.java:13,31-33`
+- [x] **H2: Session cookies are not `Secure` by default**, `SessionOptions.java:13,31-33`
   - `SessionOptions.of(secret)` sets `secure = false`, and `Brace.sessions(String)` — the
     documented one-liner used by every sample, scaffold, and doc example — builds its
     options through exactly that factory. So an app written the documented way emits

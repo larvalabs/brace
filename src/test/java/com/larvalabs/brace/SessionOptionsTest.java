@@ -13,7 +13,9 @@ public class SessionOptionsTest {
         var opts = SessionOptions.of("secret123");
         assertEquals("secret123", opts.secret());
         assertTrue(opts.httpOnly());
-        assertFalse(opts.secure());
+        // H2 (2026-07 review): with no explicit .secure(...), the attribute is resolved per
+        // request and reported as on — it holds for every non-loopback request.
+        assertTrue(opts.secure());
         assertEquals("Lax", opts.sameSite());
         assertNull(opts.maxAge());
         assertEquals("/", opts.path());
@@ -88,7 +90,14 @@ public class SessionOptionsTest {
     public void testBuildSetCookieBasic() {
         var opts = SessionOptions.of("secret");
         var cookie = opts.buildSetCookie("cookievalue123");
-        assertEquals("brace_session=cookievalue123; Path=/; HttpOnly; SameSite=Lax", cookie);
+        assertEquals("brace_session=cookievalue123; Path=/; HttpOnly; Secure; SameSite=Lax", cookie);
+    }
+
+    @Test
+    public void testBuildSetCookieExplicitlyInsecure() {
+        var opts = SessionOptions.of("secret").secure(false);
+        assertEquals("brace_session=cookievalue123; Path=/; HttpOnly; SameSite=Lax",
+            opts.buildSetCookie("cookievalue123"));
     }
 
     @Test

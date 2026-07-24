@@ -645,6 +645,15 @@ public class Brace {
             }
         }
 
+        // A session cookie without Secure is disclosed to a network attacker on any cleartext
+        // request to the domain. Since H2 the attribute is on for every non-loopback request
+        // unless the app opted out; say that opt-out out loud once at startup.
+        if (sessionOptions != null && !sessionOptions.secure()) {
+            Log.warn("Session cookies are configured with .secure(false), so they carry no Secure "
+                + "attribute and will travel in cleartext on any http:// request to this domain. "
+                + "Drop the explicit .secure(false) once the app is served over HTTPS.");
+        }
+
         // Create ErrorStore if database is available
         if (databaseFactory != null) {
             int maxErrors = 1000;
@@ -1096,6 +1105,8 @@ public class Brace {
                 .mailer(mailer);
 
             if (secret != null) {
+                // No .secure(false) needed: the harness talks to http://localhost, and the H2
+                // Secure resolution treats a loopback Host as "not a real deployment".
                 app.sessions(secret);
             }
 
