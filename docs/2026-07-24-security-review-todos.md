@@ -218,7 +218,7 @@ the fix is, not how severe the bug is.
     normal filenames unchanged.
   - **Model: Sonnet 4.6**.
 
-- [ ] **M8: `brace ops dashboard` passes a server-supplied token through `cmd /c start`**, `CliOps.java:167-172,180-187`
+- [x] **M8: `brace ops dashboard` passes a server-supplied token through `cmd /c start`**, `CliOps.java:167-172,180-187`
   - `loginToken` is read from the server's `/ops/auth/login-token` JSON response and
     concatenated into `dashboardUrl`, which `openBrowser` hands to
     `new ProcessBuilder("cmd", "/c", "start", url)` on Windows. `cmd.exe` re-parses its
