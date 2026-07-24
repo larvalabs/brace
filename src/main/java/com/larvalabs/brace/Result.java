@@ -238,14 +238,64 @@ public class Result {
      * @return this Result for chaining
      */
     public Result cookie(String name, String value, int maxAge, boolean httpOnly, boolean secure, String sameSite) {
+        return cookie(name, value, maxAge, httpOnly, secure, sameSite, "/");
+    }
+
+    /**
+     * Set a cookie on the response, scoped to {@code path}.
+     * @param path Cookie Path attribute — narrow it so the cookie is not attached to every
+     *             request to the app (e.g. {@code "/ops"} for an ops-only credential)
+     * @see #cookie(String, String, int, boolean, boolean, String)
+     */
+    public Result cookie(String name, String value, int maxAge, boolean httpOnly, boolean secure,
+                         String sameSite, String path) {
+        requireCookieToken(name, "name");
+        requireCookieValue(value);
         var cookie = new StringBuilder();
         cookie.append(name).append("=").append(value);
         cookie.append("; Max-Age=").append(maxAge);
-        cookie.append("; Path=/");
+        cookie.append("; Path=").append(path == null ? "/" : path);
         if (httpOnly) cookie.append("; HttpOnly");
         if (secure) cookie.append("; Secure");
         if (sameSite != null) cookie.append("; SameSite=").append(sameSite);
         header("Set-Cookie", cookie.toString());
         return this;
+    }
+
+    /**
+     * Reject a cookie value that could inject attributes (2026-07 review, L1).
+     *
+     * <p>The value was appended raw ahead of the framework's own attributes, so a {@code ;} in it
+     * injected cookie-av entries — verified on the wire, where a value of
+     * {@code 1; Path=/; Domain=evil} produced
+     * {@code Set-Cookie: c=1; Path=/; Domain=evil; Max-Age=60; …}. A handler setting a cookie
+     * from user input (a theme, a locale, a returnTo) could have its cookie re-scoped by that
+     * input. CR/LF is folded to a space by Jetty's generator, so this was attribute injection
+     * rather than header injection — still worth failing on rather than emitting.
+     */
+    private static void requireCookieValue(String value) {
+        if (value == null) return;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < 0x20 || c == 0x7F || c == ';' || c == ',' || c == '"' || c == '\\' || c == ' ') {
+                throw new IllegalArgumentException(
+                    "Cookie value must not contain control characters, spaces, quotes, backslashes, "
+                        + "';' or ',' (they inject cookie attributes) — URL-encode it first. Got: " + value);
+            }
+        }
+    }
+
+    /** Validate a cookie name against the RFC 6265 token grammar (2026-07 review, L1). */
+    private static void requireCookieToken(String name, String what) {
+        if (name == null || name.isEmpty()) {
+            throw new IllegalArgumentException("Cookie " + what + " must not be empty");
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c <= 0x20 || c >= 0x7F || "()<>@,;:\\\"/[]?={}".indexOf(c) >= 0) {
+                throw new IllegalArgumentException(
+                    "Cookie " + what + " must be an RFC 6265 token; got: " + name);
+            }
+        }
     }
 }

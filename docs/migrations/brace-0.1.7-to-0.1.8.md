@@ -251,3 +251,45 @@ or catch:
 var safeName = upload.filename().replaceAll("[\\p{Cntrl}]", "");
 Http.post(url).multipart().field("file", upload.bytes(), safeName).fetch();
 ```
+
+---
+
+## Security fix: `Result.cookie` validates names and values
+
+The cookie value was appended raw ahead of the framework's own attributes, so a `;` in it
+injected cookie attributes: a value of `1; Path=/; Domain=evil` produced
+`Set-Cookie: c=1; Path=/; Domain=evil; Max-Age=60; …`. A handler setting a cookie from user
+input — a theme, a locale, a `returnTo` — could have that cookie re-scoped by the input.
+
+`Result.cookie(...)` now throws `IllegalArgumentException` for a value containing control
+characters, spaces, quotes, backslashes, `;` or `,`, and for a name that isn't an RFC 6265
+token.
+
+**Action required only if** you pass raw user input as a cookie value. URL-encode it:
+
+```java
+// Before: could inject attributes
+result.cookie("returnTo", req.queryParam("next"), 600, true, true, "Lax");
+
+// After
+result.cookie("returnTo",
+    URLEncoder.encode(req.queryParam("next"), StandardCharsets.UTF_8),
+    600, true, true, "Lax");
+```
+
+There is also a new overload taking an explicit `path`, so a cookie can be scoped to a
+subtree instead of the hardcoded `/`:
+
+```java
+result.cookie(name, value, maxAge, httpOnly, secure, sameSite, "/admin");
+```
+
+---
+
+## Security fix: ops session cookie is scoped to `/ops`
+
+`__brace_ops_session` was set with `Path=/`, so an operator credential was attached to every
+request to the application — readable by any handler through `req.cookie(...)` and captured
+by any request logging the app does. Every endpoint that accepts it lives under `/ops`, so
+that is where it is now scoped. **No action required**; existing sessions simply re-issue on
+next login.

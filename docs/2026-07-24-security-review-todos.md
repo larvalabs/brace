@@ -238,7 +238,7 @@ the fix is, not how severe the bug is.
 
 ## Low
 
-- [ ] **L1: `Result.cookie` does not validate the cookie name or value**, `Result.java:196-207`
+- [x] **L1: `Result.cookie` does not validate the cookie name or value**, `Result.java:196-207`
   - The value is appended raw before the framework's own attributes, so a `;` in it injects
     cookie attributes. **Verified:** value `1; Path=/; Domain=evil` produced
     `Set-Cookie: c=1; Path=/; Domain=evil; Max-Age=60; Path=/; HttpOnly; SameSite=Lax`.
@@ -249,7 +249,7 @@ the fix is, not how severe the bug is.
     validate the name against the RFC 6265 token grammar.
   - **Model: Haiku 4.5.**
 
-- [ ] **L2: The ops session cookie is scoped to `Path=/`**, `OpsHandler.java:218` via `Result.java:201`
+- [x] **L2: The ops session cookie is scoped to `Path=/`**, `OpsHandler.java:218` via `Result.java:201`
   - `result.cookie(OPS_COOKIE_NAME, …)` inherits `Result.cookie`'s hardcoded `Path=/`, so the
     ops session token is attached to **every** request to the app, not just `/ops/*` — it
     reaches application handlers, which can read it via `req.cookie(...)`, and any

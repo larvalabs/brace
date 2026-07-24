@@ -215,7 +215,11 @@ public class OpsHandler {
         String sessionToken = OpsToken.create(tokenSecret, SESSION_TTL_SECONDS, claims.scope(), claims.kid());
 
         var result = Redirect.to("/ops/dashboard");
-        result.cookie(OPS_COOKIE_NAME, sessionToken, SESSION_TTL_SECONDS, true, true, "Strict");
+        // Scoped to /ops (L1/L2): the ops session token is an operator credential and has no
+        // business being attached to every application request, where any handler can read it
+        // via req.cookie(...) and any request logging can capture it. Every endpoint that
+        // accepts it lives under /ops.
+        result.cookie(OPS_COOKIE_NAME, sessionToken, SESSION_TTL_SECONDS, true, true, "Strict", "/ops");
         // no-referrer: the token is in our URL — prevent it leaking to any outbound link the
         // dashboard renders. no-store: prevent proxy / browser caches from recording the URL.
         result.header("Referrer-Policy", "no-referrer");
