@@ -173,6 +173,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // same Secure attribute the try-path would have. Recomputed inside the try once headers
         // are parsed; the conservative default holds if we fail before that.
         boolean cookieSecure = true;
+        // Hoisted for the same reason as session/cookieSecure: the catch paths (thrown 404, 500)
+        // need it to run after-middleware over their responses (M1). Null until the route is
+        // matched, which is before any response can be written.
+        Request braceRequest = null;
         try {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
@@ -216,7 +220,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
-            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, bodySource, remoteAddr, trustedProxies);
+            braceRequest = new Request(method, path, pathParams, queryParams, headers, bodySource, remoteAddr, trustedProxies);
             braceRequest.setRawQuery(rawQuery);
             if (storage != null) {
                 braceRequest.setStorage(storage);
@@ -226,7 +230,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             for (var before : beforeMiddleware) {
                 Result earlyResult = before.apply(braceRequest);
                 if (earlyResult != null) {
-                    writeResult(earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    writeResult(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
                     return true;
                 }
             }
@@ -247,7 +251,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         // A short-circuiting guard may have mutated the session (e.g. a
                         // flash message before redirecting to login) — persisted by the
                         // write-back choke point.
-                        writeResult(earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                        writeResult(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
                         return true;
                     }
                 }
@@ -260,11 +264,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (match == null) {
                 Result staticResult = serveStaticFile(braceRequest);
                 if (staticResult != null) {
-                    writeResult(staticResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    writeResult(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure);
                     return true;
                 }
                 Result notFoundResult = noRouteFound(method, path);
-                writeResult(notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
+                writeResult(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
                 return true;
             }
 
@@ -275,7 +279,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             try {
                 braceRequest.resolveBody();
             } catch (PayloadTooLargeException e) {
-                writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession, cookieSecure);
+                writeResult(braceRequest, Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession, cookieSecure);
                 return true;
             }
 
@@ -320,7 +324,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     }
                     if (!Csrf.validateToken(csrfSession, submittedToken)) {
                         // Choke point persists guard mutations on the 403 too.
-                        writeResult(Result.json(java.util.Map.of("error", "csrf_required"), 403),
+                        writeResult(braceRequest, Result.json(java.util.Map.of("error", "csrf_required"), 403),
                             response, callback, session, csrfOnlySession, cookieSecure);
                         return true;
                     }
@@ -395,12 +399,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.clearFlash();
             }
 
-            // Run after middleware first — after-middleware may return a brand-new Result
-            // instance (e.g. a wrapper that rewrites the body). Attaching the session cookie
-            // before this step would silently discard it whenever the instance changed (M6).
-            for (var after : afterMiddleware) {
-                result = after.apply(braceRequest, result);
-            }
+            // After-middleware runs inside writeResult now (M1), so it covers every response
+            // leaving handle() rather than only this path. Ordering is unchanged: it still runs
+            // before the session cookie is attached, so a middleware that returns a brand-new
+            // Result instance cannot silently discard the cookie (M6).
 
             // Add Vary header for htmx requests (caching correctness)
             if ("true".equals(braceRequest.header("HX-Request"))) {
@@ -409,7 +411,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
-            writeResult(result, response, callback, session, csrfOnlySession, cookieSecure);
+            writeResult(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure);
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             if (stats != null) {
                 int qc = db != null ? db.queryCount() : 0;
@@ -421,8 +423,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
         } catch (NotFoundException e) {
             var durationUs = (System.nanoTime() - startNanos) / 1000;
-            Result notFoundResult = Result.notFound();
-            writeResult(notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
+            Result notFoundResult = applyAfterQuietly(braceRequest, Result.notFound());
+            writeResult(null, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
             if (stats != null) {
                 String errorMethod = jettyRequest.getMethod();
                 String errorPath = jettyRequest.getHttpURI().getPath();
@@ -471,8 +473,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.
-            Result errorResult = Result.error(500, "Internal Server Error");
-            writeResult(errorResult, response, callback, session, csrfOnlySession, cookieSecure);
+            Result errorResult = applyAfterQuietly(braceRequest, Result.error(500, "Internal Server Error"));
+            writeResult(null, errorResult, response, callback, session, csrfOnlySession, cookieSecure);
             return true;
         }
     }
@@ -485,11 +487,40 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * is the M5c local session (non-null only when the handler had no Session param) —
      * never both non-null. Attachment is a no-op for unmodified sessions.
      */
-    private void writeResult(Result result, Response response, Callback callback,
+    private void writeResult(Request req, Result result, Response response, Callback callback,
                              Session session, Session csrfOnlySession, boolean cookieSecure) {
+        // M1: after-middleware used to run only on the handler path, so an app that added
+        // SecurityHeaders.defaults() got no X-Frame-Options / Referrer-Policy / CSP on static
+        // files, 404s, 500s, CSRF 403s or 413s — verifiably, and on exactly the responses that
+        // most need them. Applying it here means every exit from handle() is covered. A null
+        // request means "already applied, or nothing to apply it against" (the catch paths,
+        // which decorate defensively via applyAfterQuietly first).
+        if (req != null) {
+            for (var after : afterMiddleware) {
+                result = after.apply(req, result);
+            }
+        }
         attachSessionCookie(result, session, cookieSecure);
         attachSessionCookie(result, csrfOnlySession, cookieSecure);
         writeResult(result, response, callback);
+    }
+
+    /**
+     * Run the after-middleware chain over an <em>error</em> response, swallowing any failure.
+     * The normal paths let an after-middleware exception surface as a 500, but here we are
+     * already writing an error response — a throwing middleware must not stop it from reaching
+     * the client, and must not recurse back into the catch block that called us.
+     */
+    private Result applyAfterQuietly(Request req, Result result) {
+        if (req == null) return result;
+        for (var after : afterMiddleware) {
+            try {
+                result = after.apply(req, result);
+            } catch (Exception e) {
+                Log.warn("after-middleware threw while decorating an error response: " + e);
+            }
+        }
+        return result;
     }
 
     /**

@@ -140,3 +140,23 @@ app.before("/webhooks/*", req ->
 
 The `maxUploadSize` cap itself is unchanged: a request that reaches a handler with an
 oversized body still gets `413`.
+
+---
+
+## Security fix: security headers now apply to static files, 404s, 500s and 413s
+
+After-middleware — including `app.after(SecurityHeaders.defaults())` — used to run only on
+the normal handler path. Every other response left the server undecorated: static files
+(which got `nosniff` and nothing else), unmatched-route 404s, handler-thrown 404s, CSRF
+403s, 500s, and `413 Payload Too Large`. An app that followed the documented hardening step
+had no `X-Frame-Options`, `Referrer-Policy`, or CSP on exactly the responses that most need
+them.
+
+After-middleware now runs for every response leaving the handler. **No action required.**
+
+Path-scoped middleware is unaffected — `app.after("/admin/*", …)` still only fires for
+matching paths, including for static files and error responses under that prefix.
+
+One nuance: on the 404-thrown and 500 paths, an after-middleware that itself throws is
+logged and skipped rather than replacing the error response. On all other paths a throwing
+after-middleware surfaces as a 500, as before.

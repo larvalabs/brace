@@ -68,7 +68,7 @@ the fix is, not how severe the bug is.
 
 ## Medium
 
-- [ ] **M1: `SecurityHeaders` never reaches static files, 404s, 500s, CSRF 403s, or 413s**, `BraceHandler.java:406-408`
+- [x] **M1: `SecurityHeaders` never reaches static files, 404s, 500s, CSRF 403s, or 413s**, `BraceHandler.java:406-408`
   - After-middleware runs only on the normal handler path. Every other exit from `handle`
     goes straight to `writeResult`: the before-middleware short-circuit, the static-file
     branch, the no-route 404, the thrown-`NotFoundException` 404, the CSRF 403, the 500
