@@ -199,7 +199,7 @@ the fix is, not how severe the bug is.
     non-ASCII filename round-trips via `filename*`; plain ASCII name unchanged.
   - **Model: Sonnet 4.6**, RFC 6266 encoding has edge cases worth getting right.
 
-- [ ] **M7: `Http.Multipart` interpolates part name/filename into part headers unescaped**, `Http.java:176-189`
+- [x] **M7: `Http.Multipart` interpolates part name/filename into part headers unescaped**, `Http.java:176-189`
   - `finalizeBody()` writes
     `Content-Disposition: form-data; name="<name>"; filename="<filename>"` with raw string
     concatenation, then `writeAscii` emits it verbatim. CR/LF in either value is written

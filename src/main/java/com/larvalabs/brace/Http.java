@@ -175,13 +175,13 @@ public class Http {
                 for (var part : parts) {
                     writeAscii(out, "--" + boundary + "\r\n");
                     if (part.filename != null) {
-                        writeAscii(out, "Content-Disposition: form-data; name=\"" + part.name
-                            + "\"; filename=\"" + part.filename + "\"\r\n");
+                        writeAscii(out, "Content-Disposition: form-data; name=\"" + escapePartValue(part.name)
+                            + "\"; filename=\"" + escapePartValue(part.filename) + "\"\r\n");
                         writeAscii(out, "Content-Type: "
-                            + (part.contentType != null ? part.contentType : "application/octet-stream")
+                            + escapePartValue(part.contentType != null ? part.contentType : "application/octet-stream")
                             + "\r\n");
                     } else {
-                        writeAscii(out, "Content-Disposition: form-data; name=\"" + part.name + "\"\r\n");
+                        writeAscii(out, "Content-Disposition: form-data; name=\"" + escapePartValue(part.name) + "\"\r\n");
                     }
                     writeAscii(out, "\r\n");
                     out.write(part.bytes);
@@ -197,6 +197,34 @@ public class Http {
 
         private static void writeAscii(ByteArrayOutputStream out, String s) throws IOException {
             out.write(s.getBytes(StandardCharsets.US_ASCII));
+        }
+
+        /**
+         * Make a value safe to place inside a quoted-string in a multipart part header
+         * (2026-07 review, M7).
+         *
+         * <p>Part names and filenames were concatenated into
+         * {@code Content-Disposition: form-data; name="…"; filename="…"} raw and written
+         * verbatim, so CR/LF in either value terminated the part headers and let the caller
+         * forge <em>additional parts</em> in the outbound request — parameter smuggling into
+         * whatever third-party API the app is calling. A user-supplied upload filename is the
+         * obvious way that value becomes attacker-controlled.
+         *
+         * <p>Control characters are a hard failure rather than a silent strip: for an outbound
+         * API call, a request that quietly differs from what the caller asked for is worse than
+         * one that doesn't happen. Quotes and backslashes are escaped per RFC 7578 §4.2.
+         */
+        static String escapePartValue(String value) {
+            if (value == null) return "";
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (c < 0x20 || c == 0x7F) {
+                    throw new IllegalArgumentException(
+                        "Multipart part name/filename must not contain control characters "
+                            + "(found 0x" + Integer.toHexString(c) + "): " + value);
+                }
+            }
+            return value.replace("\\", "\\\\").replace("\"", "\\\"");
         }
 
         private static String guessContentType(String filename) {
