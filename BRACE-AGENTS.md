@@ -558,13 +558,24 @@ Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they s
 connection pool with web handlers), and the poller claims more work as slots free — a slow job
 doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
 
-A job holds its claim for at most `app.jobLease(Duration)` (default 15 minutes). If the instance
+A job holds its claim for at most `app.jobLease(...)` (default 15 minutes). If the instance
 running it dies before the job finishes — an ordinary deploy is enough, since JVM exit kills
 in-flight jobs — the claim expires and the job is returned to the queue, or failed outright if its
 `maxAttempts` are already spent. Set the lease above the longest job you expect to run: a lease
 can't tell a dead instance from a slow job, so a job still running when its lease expires may be
 picked up again elsewhere. That's the at-least-once contract `DurableJob` already carries — **jobs
-should be idempotent**. `jobLease(null)` disables recovery.
+should be idempotent**.
+
+Takes an interval string (`"30s"`, `"15m"`, `"2h"` — same format as `every()`) or a `Duration`, so
+it can come straight from config:
+
+```java
+app.jobLease("2h");                                // literal
+app.jobLease(config.get("jobs.lease", "15m"));     // conf file or JOBS_LEASE env var
+```
+
+A null/blank string keeps the default rather than disabling, so a missing config key can't silently
+strand jobs. To disable recovery deliberately: `jobLease("0s")` or `jobLease((Duration) null)`.
 
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 

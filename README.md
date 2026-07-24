@@ -335,9 +335,14 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
 Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
 `0` to keep forever).
 
-A job holds its claim for at most `app.jobLease(Duration)` (default 15 minutes). If the instance
-running it dies mid-job — an ordinary deploy is enough — the claim expires and the job returns to
-the queue, so jobs should be idempotent. Raise the lease above your longest-running job.
+A job holds its claim for at most `app.jobLease("15m")` (the default). If the instance running it
+dies mid-job — an ordinary deploy is enough — the claim expires and the job returns to the queue,
+so jobs should be idempotent. Raise the lease above your longest-running job; it takes an interval
+string or a `Duration`, so it can come from config directly:
+
+```java
+app.jobLease(config.get("jobs.lease", "15m"));
+```
 
 ## Mailer
 

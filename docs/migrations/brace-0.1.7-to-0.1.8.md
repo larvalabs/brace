@@ -56,7 +56,8 @@ when its lease expires **will be picked up again elsewhere**. This is consistent
 at-least-once contract `DurableJob` already carried, but it makes idempotency matter in a case
 where it previously didn't come up.
 
-If you have long-running jobs, raise the lease above your longest expected runtime:
+If you have long-running jobs, raise the lease above your longest expected runtime. It takes either
+an interval string (`"30s"`, `"15m"`, `"2h"` — the same format `every()` uses) or a `Duration`:
 
 ```java
 // Before (0.1.7): no lease existed; a killed job was stranded forever.
@@ -66,15 +67,35 @@ var app = Brace.app()
 // After (0.1.8): default is 15 minutes. Raise it if jobs run longer.
 var app = Brace.app()
     .database(dbFactory)
-    .jobLease(Duration.ofHours(2));     // nightly report job takes ~90 min
+    .jobLease("2h");                    // nightly report job takes ~90 min
 ```
+
+Because it accepts a string, the lease can be tuned per environment from your existing config
+without a code change — `Config.get` falls back to an environment variable, so this reads
+`jobs.lease` from the conf file or `JOBS_LEASE` from the environment:
+
+```java
+var app = Brace.app()
+    .database(dbFactory)
+    .jobLease(config.get("jobs.lease", "15m"));
+```
+
+```
+# brace.conf — a longer lease in production, where the nightly rollup runs
+jobs.lease=15m
+%prod.jobs.lease=2h
+```
+
+Keep the `"15m"` fallback in the `config.get` call. A null or blank string is treated as "keep the
+default" rather than "disable", specifically so a missing key can't silently turn off recovery —
+but relying on that is less clear than stating the default at the call site.
 
 To keep the 0.1.7 behavior exactly — no recovery, stranded jobs stay stranded:
 
 ```java
 var app = Brace.app()
     .database(dbFactory)
-    .jobLease(null);        // or Duration.ZERO
+    .jobLease("0s");        // or jobLease((Duration) null)
 ```
 
 ### Cleaning up rows stranded before the upgrade

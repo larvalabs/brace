@@ -397,6 +397,33 @@ public class Brace {
         return this;
     }
 
+    /**
+     * {@link #jobLease(java.time.Duration)} as an interval string — {@code "30s"}, {@code "15m"},
+     * {@code "2h"} — the same format {@link #every(String, String, Job)} takes. Lets the lease come
+     * straight from config without the caller parsing it:
+     *
+     * <pre>{@code
+     * app.jobLease(config.get("jobs.lease", "15m"));
+     * }</pre>
+     *
+     * <p>A {@code null} or blank value <em>keeps the current default</em> rather than disabling
+     * recovery, so a missing config key can't silently strand jobs. To actually disable, pass
+     * {@code "0s"} or {@link #jobLease(java.time.Duration) jobLease((Duration) null)}.
+     */
+    public Brace jobLease(String interval) {
+        if (interval == null || interval.isBlank()) {
+            return this;
+        }
+        long millis = JobScheduler.parseInterval(interval.trim());
+        this.jobLease = millis > 0 ? java.time.Duration.ofMillis(millis) : null;
+        return this;
+    }
+
+    /** The configured job lease; {@code null} means stalled-job recovery is off. For tests. */
+    java.time.Duration jobLease() {
+        return jobLease;
+    }
+
     // Route registration
 
     public RouteConfig get(String pattern, Handler handler) {

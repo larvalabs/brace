@@ -550,6 +550,34 @@ class DurableJobTest {
     }
 
     @Test
+    void jobLeaseAcceptsIntervalStrings() {
+        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease("15m").jobLease());
+        assertEquals(Duration.ofHours(2), Brace.app().jobLease("2h").jobLease());
+        assertEquals(Duration.ofSeconds(90), Brace.app().jobLease("90s").jobLease());
+        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease(), "default when never set");
+    }
+
+    @Test
+    void jobLeaseStringDisablesOnlyOnExplicitZero() {
+        assertNull(Brace.app().jobLease("0s").jobLease());
+
+        // A missing config key must not silently strand jobs — config.get("jobs.lease") with no
+        // default returns null, and that has to leave the default in place rather than disable.
+        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease((String) null).jobLease());
+        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease("   ").jobLease());
+
+        // Disabling deliberately still works through the Duration overload.
+        assertNull(Brace.app().jobLease((Duration) null).jobLease());
+    }
+
+    @Test
+    void jobLeaseRejectsMalformedIntervals() {
+        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15"));
+        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15d"));
+        assertThrows(NumberFormatException.class, () -> Brace.app().jobLease("abcm"));
+    }
+
+    @Test
     void reclaimingStrandedParentUnblocksItsDependents() {
         long parent = scheduleJob(new TestJob("parent"), new JobOptions());
         scheduleJob(new TestJob("child"), JobOptions.after(parent));
