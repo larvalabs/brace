@@ -195,54 +195,28 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             cookieSecure = resolveCookieSecure(
                 headers, org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest));
 
-            // Match route first. Static files, 404s, and before-middleware short-circuits
-            // must not pay request-body or multipart-parsing cost — the body is read only
-            // once we know a route will consume it. (This also keeps an unmatched POST with a
-            // large multipart body from being fully parsed into memory before the 404.)
+            // Match route first. Static files and 404s must not pay request-body or
+            // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
+            // body from being fully parsed into memory before the 404.)
             RouteMatch match = router.match(method, path);
 
-            // Read request body — multipart or plain — only for matched routes.
-            String body = "";
-            Map<String, List<UploadedFile>> uploadedFiles = Map.of();
-            if (match != null) {
-                String requestContentType = headers.getOrDefault("Content-Type", "");
-                if (requestContentType.contains("multipart/form-data")) {
-                    var parsed = parseMultipart(jettyRequest, requestContentType);
-                    body = parsed.formBody();
-                    uploadedFiles = parsed.files();
-                } else {
-                    // Fast-reject on Content-Length before reading any bytes.
-                    String contentLengthHeader = headers.get("Content-Length");
-                    if (contentLengthHeader != null) {
-                        try {
-                            long declaredLength = Long.parseLong(contentLengthHeader.strip());
-                            if (declaredLength > maxUploadSize) {
-                                writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession, cookieSecure);
-                                return true;
-                            }
-                        } catch (NumberFormatException ignored) {
-                            // malformed Content-Length — fall through and let the read cap it
-                        }
-                    }
-                    // Bounded incremental read: cap at maxUploadSize bytes regardless of
-                    // Content-Length (which clients can lie about or omit for chunked bodies).
-                    // Read maxUploadSize+1 bytes: if we get more than maxUploadSize the body
-                    // is too large and we return 413.
-                    byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
-                    if (bodyBytes == null) {
-                        writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession, cookieSecure);
-                        return true;
-                    }
-                    body = new String(bodyBytes, StandardCharsets.UTF_8);
-                }
-            }
+            // M2: the body is *supplied* here, not read. Buffering it before the before-middleware
+            // loops put the cost ahead of the layer that exists to shed it — a rate limiter or auth
+            // guard could not reject a request until up to maxUploadSize had already been read into
+            // the heap, on virtual threads with no pool bounding in-flight concurrency. The supplier
+            // runs on first access to body/form/files: either a middleware that genuinely needs the
+            // body (a webhook signature guard) or the forced resolution below, once the guards have
+            // had their say.
+            java.util.function.Supplier<Request.BodyContent> bodySource =
+                match == null ? () -> new Request.BodyContent("", Map.of())
+                              : () -> readRequestBody(jettyRequest, headers);
 
             // Extract remote address from socket
             String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
 
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
-            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles, remoteAddr, trustedProxies);
+            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, bodySource, remoteAddr, trustedProxies);
             braceRequest.setRawQuery(rawQuery);
             if (storage != null) {
                 braceRequest.setStorage(storage);
@@ -291,6 +265,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
                 Result notFoundResult = noRouteFound(method, path);
                 writeResult(notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
+                return true;
+            }
+
+            // M2: guards have run and none rejected the request, so the body is now worth reading.
+            // Forcing it here (rather than leaving it to the first handler access) keeps the 413 at
+            // the same point in the lifecycle it has always occupied — ahead of CSRF extraction and
+            // the handler — so nothing downstream sees a half-set-up request.
+            try {
+                braceRequest.resolveBody();
+            } catch (PayloadTooLargeException e) {
+                writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession, cookieSecure);
                 return true;
             }
 
@@ -882,6 +867,48 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 out.write(buf, 0, n);
             }
             return out.toByteArray();
+        }
+    }
+
+    /**
+     * Read and parse the request body — multipart or plain — enforcing {@code maxUploadSize}.
+     * Invoked lazily through the supplier handed to {@link Request} (M2), so the cost lands only
+     * on requests that survive before-middleware, or that need the bytes earlier for a reason.
+     *
+     * @throws PayloadTooLargeException when the body exceeds the cap (the caller writes the 413)
+     */
+    private Request.BodyContent readRequestBody(org.eclipse.jetty.server.Request jettyRequest,
+                                                Map<String, String> headers) {
+        try {
+            String requestContentType = headers.getOrDefault("Content-Type", "");
+            if (requestContentType.contains("multipart/form-data")) {
+                var parsed = parseMultipart(jettyRequest, requestContentType);
+                return new Request.BodyContent(parsed.formBody(), parsed.files());
+            }
+            // Fast-reject on Content-Length before reading any bytes.
+            String contentLengthHeader = headers.get("Content-Length");
+            if (contentLengthHeader != null) {
+                try {
+                    long declaredLength = Long.parseLong(contentLengthHeader.strip());
+                    if (declaredLength > maxUploadSize) {
+                        throw new PayloadTooLargeException();
+                    }
+                } catch (NumberFormatException ignored) {
+                    // malformed Content-Length — fall through and let the read cap it
+                }
+            }
+            // Bounded incremental read: cap at maxUploadSize bytes regardless of Content-Length
+            // (which clients can lie about or omit for chunked bodies). Read maxUploadSize+1
+            // bytes: if we get more than maxUploadSize the body is too large.
+            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
+            if (bodyBytes == null) {
+                throw new PayloadTooLargeException();
+            }
+            return new Request.BodyContent(new String(bodyBytes, StandardCharsets.UTF_8), Map.of());
+        } catch (PayloadTooLargeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read request body", e);
         }
     }
 

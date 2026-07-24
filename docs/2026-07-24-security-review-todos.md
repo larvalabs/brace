@@ -93,7 +93,7 @@ the fix is, not how severe the bug is.
   - **Prior art:** listed as a deferred follow-up in the 2026-06 review record and never
     fixed; now verified end to end.
 
-- [ ] **M2: Request bodies are fully buffered before before-middleware runs**, `BraceHandler.java:194-248`
+- [x] **M2: Request bodies are fully buffered before before-middleware runs**, `BraceHandler.java:194-248`
   - Order in `handle` is: match route → **read/parse the entire body** (up to
     `maxUploadSize`, 10 MB default; multipart is parsed with `setMaxMemoryFileSize(-1)`,
     i.e. entirely in memory) → *then* run before-middleware.

@@ -112,3 +112,31 @@ app.staticFiles("/assets/uploads", "/var/app/uploads");
 ```
 
 Symlinks that stay **inside** the served directory keep working unchanged.
+
+---
+
+## Security fix: request bodies are read after before-middleware
+
+The request body (including multipart parsing) used to be buffered *before* the
+`before(...)` middleware chain ran, so a rate limiter or auth guard could not reject a
+request until up to `maxUploadSize` had already been read into the heap — with handlers on
+virtual threads, nothing bounded how many of those were in flight at once.
+
+The body is now read lazily, after the guards have run. **No action required.**
+
+Two consequences worth knowing:
+
+- A request rejected by before-middleware now returns the **guard's** status rather than
+  `413`, even when the body was oversized. Previously an oversized body on a guarded route
+  returned `413` before the guard was consulted.
+- Middleware that genuinely needs the body — a webhook signature check, say — still works
+  unchanged; reading `req.body()` inside a guard triggers the read at that point.
+
+```java
+// Still works: the body read happens on access, inside the guard.
+app.before("/webhooks/*", req ->
+    verifySignature(req.header("X-Signature"), req.body()) ? null : Result.unauthorized());
+```
+
+The `maxUploadSize` cap itself is unchanged: a request that reaches a handler with an
+oversized body still gets `413`.
