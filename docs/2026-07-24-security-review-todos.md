@@ -182,7 +182,7 @@ the fix is, not how severe the bug is.
   - **Model: Sonnet 4.6**, mechanical removal but it touches six test classes; the risk is
     silently losing coverage rather than migrating it.
 
-- [ ] **M6: `Result.download` does not quote the filename into `Content-Disposition`**, `Result.java:38-41`
+- [x] **M6: `Result.download` does not quote the filename into `Content-Disposition`**, `Result.java:38-41`
   - `"attachment; filename=\"" + filename + "\""` with no escaping. A filename containing a
     double quote closes the quoted-string early and everything after it is parsed by the
     client as further `Content-Disposition` parameters.

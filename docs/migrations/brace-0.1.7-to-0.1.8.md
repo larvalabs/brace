@@ -202,3 +202,52 @@ embeds a live bearer token in its HTML, so an intermediary could store one opera
 dashboard and serve it — token included — to the next requester.
 
 Every `/ops/*` response now carries `Cache-Control: no-store`. **No action required.**
+
+---
+
+## Security fix: `Result.download` escapes the filename
+
+`Result.download(bytes, contentType, filename)` interpolated the filename raw into
+`Content-Disposition: attachment; filename="…"`. A name containing a double quote closed the
+quoted-string early and everything after it was parsed by the client as further parameters —
+`Result.download(b, "text/plain", "x\"; name=\"y")` put
+`Content-Disposition: attachment; filename="x"; name="y"` on the wire. Serving a user-uploaded
+file under its original name is the method's primary use case, which is exactly where the
+value is attacker-supplied.
+
+The header is now built safely and emits the RFC 6266 pair — an ASCII-safe `filename="…"`
+plus `filename*=UTF-8''…` carrying the exact name. Directory components are dropped (a
+download name is a leaf), and characters that can't appear literally in a quoted-string are
+replaced with `_` in the ASCII form.
+
+**No action required.** One visible improvement: non-ASCII filenames now reach the browser
+intact instead of being mangled.
+
+```java
+Result.download(pdf, "application/pdf", "отчёт.pdf");
+// Content-Disposition: attachment; filename="______.pdf"; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82.pdf
+```
+
+---
+
+## Security fix: `Http.multipart` rejects control characters in part names
+
+`Http.post(url).multipart().field(name, bytes, filename)` wrote part names and filenames into
+the multipart headers verbatim, so CR/LF in either value terminated the part headers and let
+the caller forge **additional parts** in the outbound request — parameter smuggling into
+whatever third-party API the app was calling (adding a `visibility=public` part to an upload,
+say).
+
+Quotes and backslashes are now escaped per RFC 7578, and a control character throws
+`IllegalArgumentException` rather than being silently stripped: for an outbound API call, a
+request that quietly differs from what the caller asked for is worse than one that doesn't
+happen.
+
+**Action required only if** you pass raw user-supplied filenames straight through. Sanitize
+or catch:
+
+```java
+// A filename from an upload — now rejected loudly instead of smuggling parts.
+var safeName = upload.filename().replaceAll("[\\p{Cntrl}]", "");
+Http.post(url).multipart().field("file", upload.bytes(), safeName).fetch();
+```

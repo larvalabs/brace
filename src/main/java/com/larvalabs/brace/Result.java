@@ -37,7 +37,51 @@ public class Result {
 
     public static Result download(byte[] bytes, String contentType, String filename) {
         return new Result(200, contentType, bytes)
-            .header("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+            .header("Content-Disposition", contentDisposition(filename));
+    }
+
+    /**
+     * Build a safe {@code Content-Disposition} value for a download (2026-07 review, M6).
+     *
+     * <p>The filename used to be interpolated into {@code attachment; filename="…"} raw, so a
+     * name containing a double quote closed the quoted-string early and everything after it was
+     * parsed by the client as further parameters — verified on the wire with a filename of
+     * {@code x"; name="y}. Serving a user-uploaded file under its original name is this method's
+     * primary use case, which is exactly where the name is attacker-supplied.
+     *
+     * <p>Emits the RFC 6266 pair: an ASCII-safe {@code filename="…"} that every client
+     * understands, plus {@code filename*=UTF-8''…} carrying the exact name for clients that
+     * support RFC 5987. Any directory component is dropped (a download name is a leaf), and
+     * characters that cannot appear literally in a quoted-string — quotes, backslashes,
+     * control characters, non-ASCII — are replaced with {@code _} in the ASCII form.
+     */
+    static String contentDisposition(String filename) {
+        if (filename == null || filename.isBlank()) return "attachment";
+        // A download name is a leaf: drop anything before the last separator of either flavour.
+        String leaf = filename;
+        int slash = Math.max(leaf.lastIndexOf('/'), leaf.lastIndexOf('\\'));
+        if (slash >= 0) leaf = leaf.substring(slash + 1);
+        if (leaf.isBlank() || leaf.equals(".") || leaf.equals("..")) return "attachment";
+
+        var ascii = new StringBuilder(leaf.length());
+        for (int i = 0; i < leaf.length(); i++) {
+            char c = leaf.charAt(i);
+            ascii.append(c < 0x20 || c > 0x7E || c == '"' || c == '\\' ? '_' : c);
+        }
+
+        var encoded = new StringBuilder();
+        for (byte b : leaf.getBytes(StandardCharsets.UTF_8)) {
+            int v = b & 0xFF;
+            // RFC 5987 attr-char: alphanumerics plus a fixed punctuation set; everything else
+            // is percent-encoded.
+            if ((v >= 'A' && v <= 'Z') || (v >= 'a' && v <= 'z') || (v >= '0' && v <= '9')
+                    || "!#$&+-.^_`|~".indexOf(v) >= 0) {
+                encoded.append((char) v);
+            } else {
+                encoded.append('%').append(String.format("%02X", v));
+            }
+        }
+        return "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" + encoded;
     }
 
     /**
