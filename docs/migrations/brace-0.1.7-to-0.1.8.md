@@ -11,7 +11,7 @@ apps that never touched the relevant configuration:
   hanging the calling thread forever.
 
 Both ship as new *defaults*. The only reason to touch your code is if you run jobs longer
-than 15 minutes, or talk to an unusually slow SMTP relay — see below.
+than 30 minutes, or talk to an unusually slow SMTP relay — see below.
 
 ---
 
@@ -36,7 +36,7 @@ ordering, taxing every subsequent poll on every instance.
 
 ### What changed
 
-Jobs now hold their claim under a **lease**, default **15 minutes**. A background sweeper returns
+Jobs now hold their claim under a **lease**, default **30 minutes**. A background sweeper returns
 expired claims to the queue:
 
 - **Attempts remain** → `started_at` is cleared and the job is claimable again. The attempt the
@@ -49,7 +49,7 @@ Nothing in the claim path changed — recovered rows re-enter through the ordina
 
 ### What you may need to do
 
-**If all your jobs finish well within 15 minutes: nothing.**
+**If all your jobs finish well within 30 minutes: nothing.**
 
 A lease cannot distinguish a dead instance from a job that is merely slow, so a job still running
 when its lease expires **will be picked up again elsewhere**. This is consistent with the
@@ -64,7 +64,7 @@ an interval string (`"30s"`, `"15m"`, `"2h"` — the same format `every()` uses)
 var app = Brace.app()
     .database(dbFactory);
 
-// After (0.1.8): default is 15 minutes. Raise it if jobs run longer.
+// After (0.1.8): default is 30 minutes. Raise it if jobs run longer.
 var app = Brace.app()
     .database(dbFactory)
     .jobLease("2h");                    // nightly report job takes ~90 min
@@ -77,16 +77,16 @@ without a code change — `Config.get` falls back to an environment variable, so
 ```java
 var app = Brace.app()
     .database(dbFactory)
-    .jobLease(config.get("jobs.lease", "15m"));
+    .jobLease(config.get("jobs.lease", "30m"));
 ```
 
 ```
 # brace.conf — a longer lease in production, where the nightly rollup runs
-jobs.lease=15m
+jobs.lease=30m
 %prod.jobs.lease=2h
 ```
 
-Keep the `"15m"` fallback in the `config.get` call. A null or blank string is treated as "keep the
+Keep the `"30m"` fallback in the `config.get` call. A null or blank string is treated as "keep the
 default" rather than "disable", specifically so a missing key can't silently turn off recovery —
 but relying on that is less clear than stating the default at the call site.
 

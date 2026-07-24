@@ -12,7 +12,7 @@ public class JobPoller {
      * How long a claimed-but-unfinished job may sit before {@link #reclaimStalledJobs} assumes the
      * instance running it died and returns the row to the queue. See {@link #sweepLoop}.
      */
-    static final Duration DEFAULT_LEASE = Duration.ofMinutes(15);
+    static final Duration DEFAULT_LEASE = Duration.ofMinutes(30);
 
     /** How often the sweeper checks for expired leases. Well under {@link #DEFAULT_LEASE}. */
     private static final long SWEEP_INTERVAL_MS = 60_000;

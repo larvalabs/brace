@@ -554,7 +554,7 @@ class DurableJobTest {
         assertEquals(Duration.ofMinutes(15), Brace.app().jobLease("15m").jobLease());
         assertEquals(Duration.ofHours(2), Brace.app().jobLease("2h").jobLease());
         assertEquals(Duration.ofSeconds(90), Brace.app().jobLease("90s").jobLease());
-        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease(), "default when never set");
+        assertEquals(Duration.ofMinutes(30), Brace.app().jobLease(), "default when never set");
     }
 
     @Test
@@ -563,8 +563,8 @@ class DurableJobTest {
 
         // A missing config key must not silently strand jobs — config.get("jobs.lease") with no
         // default returns null, and that has to leave the default in place rather than disable.
-        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease((String) null).jobLease());
-        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease("   ").jobLease());
+        assertEquals(Duration.ofMinutes(30), Brace.app().jobLease((String) null).jobLease());
+        assertEquals(Duration.ofMinutes(30), Brace.app().jobLease("   ").jobLease());
 
         // Disabling deliberately still works through the Duration overload.
         assertNull(Brace.app().jobLease((Duration) null).jobLease());

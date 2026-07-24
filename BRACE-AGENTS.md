@@ -558,7 +558,7 @@ Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they s
 connection pool with web handlers), and the poller claims more work as slots free — a slow job
 doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
 
-A job holds its claim for at most `app.jobLease(...)` (default 15 minutes). If the instance
+A job holds its claim for at most `app.jobLease(...)` (default 30 minutes). If the instance
 running it dies before the job finishes — an ordinary deploy is enough, since JVM exit kills
 in-flight jobs — the claim expires and the job is returned to the queue, or failed outright if its
 `maxAttempts` are already spent. Set the lease above the longest job you expect to run: a lease
@@ -571,7 +571,7 @@ it can come straight from config:
 
 ```java
 app.jobLease("2h");                                // literal
-app.jobLease(config.get("jobs.lease", "15m"));     // conf file or JOBS_LEASE env var
+app.jobLease(config.get("jobs.lease", "30m"));     // conf file or JOBS_LEASE env var
 ```
 
 A null/blank string keeps the default rather than disabling, so a missing config key can't silently

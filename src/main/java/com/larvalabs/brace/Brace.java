@@ -380,7 +380,8 @@ public class Brace {
 
     /**
      * How long a durable job may hold its claim before the framework assumes the instance running
-     * it died and returns the job to the queue. Default 15 minutes.
+     * it died and returns the job to the queue. Default 30 minutes — deliberately generous, so the
+     * lease does not reclaim a job that is merely slow on an app that never tuned it.
      *
      * <p>Without this, a job whose process is killed mid-run (an ordinary deploy is enough — JVM
      * exit kills in-flight jobs) leaves a row that no poller will ever claim again and no prune
@@ -403,7 +404,7 @@ public class Brace {
      * straight from config without the caller parsing it:
      *
      * <pre>{@code
-     * app.jobLease(config.get("jobs.lease", "15m"));
+     * app.jobLease(config.get("jobs.lease", "30m"));
      * }</pre>
      *
      * <p>A {@code null} or blank value <em>keeps the current default</em> rather than disabling
