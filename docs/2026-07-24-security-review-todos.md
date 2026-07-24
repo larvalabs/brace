@@ -119,7 +119,7 @@ the fix is, not how severe the bug is.
   - **Model: Opus 5**, the laziness has to thread through `Request`'s constructor, the CSRF
     `_csrf` extraction, and the 413 paths without changing observable behavior.
 
-- [ ] **M3: WebSocket upgrades are not `Origin`-checked**, `Brace.java:729-747`
+- [x] **M3: WebSocket upgrades are not `Origin`-checked**, `Brace.java:729-747`
   - `container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> …)` accepts
     every upgrade and immediately decrypts the `brace_session` cookie into the handler's
     `WsContext`, with no check on the request's `Origin`. Jetty does not enforce one by

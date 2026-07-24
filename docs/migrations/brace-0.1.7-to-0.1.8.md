@@ -160,3 +160,32 @@ matching paths, including for static files and error responses under that prefix
 One nuance: on the 404-thrown and 500 paths, an after-middleware that itself throws is
 logged and skipped rather than replacing the error response. On all other paths a throwing
 after-middleware surfaces as a 500, as before.
+
+---
+
+## Security fix: WebSocket upgrades are `Origin`-checked
+
+`app.ws(path, …)` accepted an upgrade from any origin and then decrypted the
+`brace_session` cookie straight into the handler's `WsContext`. A WebSocket handshake is
+not subject to the same-origin policy, so an attacker's page could open a socket to your
+app, have the browser attach the victim's session cookie, and hold an authenticated socket
+for its lifetime — cross-site WebSocket hijacking. The only thing standing in the way was
+the default `SameSite=Lax` cookie, which an app disables the moment it calls
+`sameSiteNone()`.
+
+Upgrades whose `Origin` names a different host are now rejected with 403.
+
+**No action required** for same-origin browser clients or for non-browser clients (a
+missing `Origin` is allowed — only browsers send one, and only browsers need the check).
+The host is compared without scheme or port, so TLS terminated at a proxy is fine.
+
+**Action required** only for a deliberately cross-origin browser client:
+
+```java
+var app = Brace.app()
+    .wsAllowedOrigins("https://studio.example.com")   // full origin, or a bare host
+    .ws("/live", ctx -> new LiveHandler(ctx));
+```
+
+Pass `"*"` to disable the check entirely — sound only if the socket carries no ambient
+authority (i.e. it does not rely on the session cookie for authorization).
