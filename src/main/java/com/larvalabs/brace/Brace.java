@@ -715,20 +715,20 @@ public class Brace {
             }
             // Ops POSTs use signed-payload or bearer auth, not cookies — CSRF is the wrong layer
             // and would block the CLI on any app that also calls .sessions(...).
-            router.add("POST", "/ops/auth", (Handler) opsHandler::auth).setCsrfRequired(false);
-            router.add("POST", "/ops/auth/login-token", (Handler) opsHandler::loginToken).setCsrfRequired(false);
-            router.add("GET", "/ops/auth/exchange", (Handler) opsHandler::exchange);
-            router.add("GET", "/ops/status", (Handler) opsHandler::status);
-            router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
-            router.add("GET", "/ops/logs", (Handler) opsHandler::logs);
-            router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
-            router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
-            router.add("GET", "/ops/errors/{id}", (Handler) opsHandler::errorDetail);
-            router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError).setCsrfRequired(false);
-            router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache).setCsrfRequired(false);
-            router.add("GET", "/ops/cache", (Handler) opsHandler::cacheStats);
-            router.add("GET", "/ops/regressions", (Handler) opsHandler::regressions);
-            router.add("POST", "/ops/regressions/{id}/acknowledge", (Handler) opsHandler::acknowledgeRegression).setCsrfRequired(false);
+            router.add("POST", "/ops/auth", noStore(opsHandler::auth)).setCsrfRequired(false);
+            router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken)).setCsrfRequired(false);
+            router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange));
+            router.add("GET", "/ops/status", noStore(opsHandler::status));
+            router.add("GET", "/ops/routes", noStore(opsHandler::routes));
+            router.add("GET", "/ops/logs", noStore(opsHandler::logs));
+            router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard));
+            router.add("GET", "/ops/errors", noStore(opsHandler::errors));
+            router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail));
+            router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError)).setCsrfRequired(false);
+            router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache)).setCsrfRequired(false);
+            router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats));
+            router.add("GET", "/ops/regressions", noStore(opsHandler::regressions));
+            router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression)).setCsrfRequired(false);
         }
 
         var threadPool = new QueuedThreadPool();
@@ -1083,6 +1083,34 @@ public class Brace {
         if (s.endsWith("m")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024;
         if (s.endsWith("g")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024 * 1024;
         return Long.parseLong(s);
+    }
+
+    /**
+     * Wrap an ops handler so its response is never stored by a cache (M4).
+     *
+     * <p>Ops responses carry credentials and operational detail: {@code /ops/dashboard} embeds a
+     * live bearer token in the page HTML (on the polling div and each action button), and the
+     * others expose error messages, stack traces, and log lines. Only {@code /ops/auth/exchange}
+     * used to say {@code no-store} — because its token is in the URL — which left every other
+     * endpoint relying on the caller's credential channel to suppress caching.
+     *
+     * <p>That holds for the CLI's {@code Authorization} header, which RFC 9111 forbids shared
+     * caches from storing a response to. It does <em>not</em> hold for the browser channel, which
+     * authenticates with the {@code __brace_ops_session} cookie: a response with no
+     * {@code Cache-Control} is heuristically cacheable, so an intermediary could store one
+     * operator's dashboard — embedded token and all — and serve it to the next requester.
+     *
+     * <p>Applied at registration so a new ops endpoint gets it by construction rather than by
+     * remembering. An explicit {@code Cache-Control} set by the handler wins.
+     */
+    private static Handler noStore(Handler handler) {
+        return req -> {
+            Result result = handler.apply(req);
+            if (result != null && result.header("Cache-Control") == null) {
+                result.header("Cache-Control", "no-store");
+            }
+            return result;
+        };
     }
 
     /**

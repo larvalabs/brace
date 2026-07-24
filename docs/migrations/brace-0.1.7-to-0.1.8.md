@@ -189,3 +189,16 @@ var app = Brace.app()
 
 Pass `"*"` to disable the check entirely — sound only if the socket carries no ambient
 authority (i.e. it does not rely on the session cookie for authorization).
+
+---
+
+## Security fix: `/ops/*` responses are `no-store`
+
+Only `/ops/auth/exchange` sent `Cache-Control: no-store`. Every other ops endpoint relied
+on the caller's credential channel to suppress caching — which RFC 9111 guarantees for the
+CLI's `Authorization` header, but *not* for the `__brace_ops_session` cookie a browser
+uses. A response with no `Cache-Control` is heuristically cacheable, and `/ops/dashboard`
+embeds a live bearer token in its HTML, so an intermediary could store one operator's
+dashboard and serve it — token included — to the next requester.
+
+Every `/ops/*` response now carries `Cache-Control: no-store`. **No action required.**

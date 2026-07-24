@@ -141,7 +141,7 @@ the fix is, not how severe the bug is.
   - **Model: Sonnet 4.6**, the rule is small; the care is in not breaking non-browser
     clients that send no `Origin`.
 
-- [ ] **M4: Ops responses carry no `Cache-Control: no-store`**, `OpsHandler.java:430-438` (and every other ops endpoint bar `exchange`)
+- [x] **M4: Ops responses carry no `Cache-Control: no-store`**, `OpsHandler.java:430-438` (and every other ops endpoint bar `exchange`)
   - `dashboard()` returns `Result.html(...)` with no cache headers, and the HTML embeds a
     live 2-hour bearer token (in `hx-headers` on the polling div and on each action button).
     `status()`, `errors()`, `logs()`, `routes()`, `cache()`, and `regressions()` likewise
