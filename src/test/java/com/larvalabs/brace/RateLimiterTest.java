@@ -397,4 +397,18 @@ class RateLimiterTest {
             assertEquals(200, response.statusCode());
         }
     }
+
+    @Test
+    void perIpWithoutTrustedProxiesTriggersStartupWarning() {
+        var perIp = List.of(new Middleware.BoundBefore(null, RateLimiter.perIp(5, "1m")));
+        assertTrue(Brace.perIpLimiterWithoutTrustedProxies(perIp, null));
+        // Configured proxies → no warning
+        assertFalse(Brace.perIpLimiterWithoutTrustedProxies(perIp, new TrustedProxies("127.0.0.1")));
+        // Non-limiter middleware → no warning
+        var plain = List.of(new Middleware.BoundBefore(null, req -> null));
+        assertFalse(Brace.perIpLimiterWithoutTrustedProxies(plain, null));
+        // perKey limiters don't key on IP → no warning
+        var perKey = List.of(new Middleware.BoundBefore(null, RateLimiter.perKey(req -> "k", 5, "1m")));
+        assertFalse(Brace.perIpLimiterWithoutTrustedProxies(perKey, null));
+    }
 }

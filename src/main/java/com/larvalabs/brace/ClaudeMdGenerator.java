@@ -59,7 +59,7 @@ Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check t
 - **Storage** — S3-compatible. `storage.put()`, `.delete()`, `.url()`, `.putGenerated()`.
 - **WebSocket** — `app.ws("/path", ctx -> handler)`. Rooms, broadcast, session access.
 - **Rate Limiting** — `RateLimiter.perIp(count, window)`, `.perKey(fn, count, window)`.
-- **Security** — `app.trustedProxies(cidrs)` for IP forwarding. `SecurityHeaders.defaults()` for nosniff, frame-options, etc.
+- **Security** — `app.trustedProxies(cidrs)` for IP forwarding (`TrustedProxies.cloudflare().autoRefresh()` behind Cloudflare). `SecurityHeaders.defaults()` for nosniff, frame-options, etc.
 - **Metrics** — `Stats.counter(name)`, `.gauge(name, fn)`, `.timer(name, ms)`. Appear in ops dashboard.
 - **Middleware** — `app.before(req -> ...)` returns null to continue or Result to short-circuit. `app.after((req, result) -> ...)`.
 - **htmx** — Bundled 2.0.4 at `/__brace/htmx.min.js`. `req.isHtmx()` for partial responses. `Vary: HX-Request` set automatically.

@@ -101,6 +101,15 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Use a pre-built {@link TrustedProxies} — e.g.
+     * {@code app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1").autoRefresh())}.
+     */
+    public Brace trustedProxies(TrustedProxies proxies) {
+        this.trustedProxies = proxies;
+        return this;
+    }
+
     public Brace port(int port) {
         this.port = port;
         return this;
@@ -623,6 +632,23 @@ public class Brace {
 
     // Server lifecycle
 
+    /**
+     * True when an IP-keyed rate limiter is registered but no trusted proxies are configured —
+     * the condition the start()-time warning fires on. Static and package-private for tests.
+     */
+    static boolean perIpLimiterWithoutTrustedProxies(List<Middleware.BoundBefore> beforeMiddleware,
+                                                    TrustedProxies trustedProxies) {
+        if (trustedProxies != null) {
+            return false;
+        }
+        for (var bound : beforeMiddleware) {
+            if (bound.handler() instanceof RateLimiter.PerIpCheck) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void start() throws Exception {
         // Session-aware middleware without .sessions(secret) is a silent trap: every
         // request gets a fresh empty Session. For requireSession that is *provably* an
@@ -643,6 +669,19 @@ public class Brace {
                     + "every request sees an empty session, so session reads return null and mutations "
                     + "are not persisted.");
             }
+        }
+
+        // Per-IP rate limiting without trusted proxies is a quieter trap: behind a reverse
+        // proxy or CDN, req.ip() is the proxy's address, so every client shares one bucket and
+        // the per-IP limit is effectively site-wide. Direct-exposure apps are legitimate, so
+        // this can't be fatal — warn loudly instead.
+        if (perIpLimiterWithoutTrustedProxies(beforeMiddleware, trustedProxies)) {
+            Log.warn("RateLimiter.perIp(...) is registered but no trusted proxies are configured. "
+                + "If this app runs behind a reverse proxy or CDN (nginx, Cloudflare, ...), req.ip() "
+                + "returns the proxy's address, so all clients share one rate-limit bucket and the "
+                + "per-IP limit is effectively site-wide. Configure app.trustedProxies(...) — e.g. "
+                + "TrustedProxies.cloudflare() behind Cloudflare, or \"127.0.0.1\" behind a local "
+                + "reverse proxy. Ignore this warning if clients connect to this app directly.");
         }
 
         // Create ErrorStore if database is available

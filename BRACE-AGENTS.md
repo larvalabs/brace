@@ -698,6 +698,16 @@ app.trustedProxies("10.0.0.0/8", "172.16.0.0/12");  // CIDRs (here: RFC1918 priv
 
 Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
 
+For apps behind Cloudflare, `TrustedProxies.cloudflare()` is pre-loaded with Cloudflare's published egress ranges:
+
+```java
+app.trustedProxies(TrustedProxies.cloudflare().autoRefresh());
+// with nginx between Cloudflare and the app, also trust the local hop:
+app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefresh());
+```
+
+`.autoRefresh()` re-fetches cloudflare.com/ips-v4 + /ips-v6 on a background virtual thread (daily; the bundled list serves until the first fetch, and a failed fetch keeps the current list). `.plus(cidrs)` adds proxies of your own that survive refreshes. Without trusted proxies configured, `RateLimiter.perIp(...)` logs a startup warning: behind a proxy every request shares the proxy's IP, so a per-IP limit is effectively site-wide.
+
 ### Security Headers
 
 `app.after(SecurityHeaders.defaults())` adds `X-Content-Type-Options: nosniff`,

@@ -239,6 +239,28 @@ app.trustedProxies("10.0.0.5", "10.0.0.6");
 app.trustedProxies("10.0.0.0/8");
 ```
 
+**Behind Cloudflare**, use the built-in preset instead of pasting CIDRs. It ships with
+Cloudflare's published egress ranges (cloudflare.com/ips); `.autoRefresh()` keeps them synced
+by re-fetching the published lists on a background virtual thread (daily, hourly retry after a
+failure — the bundled list serves until the first fetch succeeds, and a failed or partial fetch
+is discarded wholesale so the trust set never shrinks on a network blip). `.plus(...)` trusts
+additional hops of your own — those survive refreshes:
+
+```java
+app.trustedProxies(TrustedProxies.cloudflare().autoRefresh());
+
+// with nginx between Cloudflare and the app, also trust the local hop:
+app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefresh());
+```
+
+Trusting Cloudflare's ranges is only sound when the origin is reachable exclusively through
+Cloudflare (firewall the origin, or use Authenticated Origin Pulls at your TLS terminator).
+A client that connects to the origin directly is an untrusted peer whose forwarding headers
+are ignored — the safe failure mode — but hiding the origin is what keeps attackers from
+bypassing Cloudflare entirely. Note that Cloudflare's egress IPs are shared across all
+Cloudflare customers; the rightmost-untrusted algorithm below stays spoof-safe regardless,
+because Cloudflare itself appends the true connecting address to `X-Forwarded-For`.
+
 ### Behavior
 
 - **Without configuration:** `req.ip()` uses socket remote address only (ignores headers)
@@ -419,6 +441,11 @@ trusted proxies configured, Brace uses **rightmost-untrusted** semantics on `X-F
 See the [Trusted Proxies](#trusted-proxies) section for configuration. Configuring trusted proxies
 correctly is a prerequisite for effective IP-based rate limiting — without it an attacker can
 bypass per-IP limits by forging `X-Forwarded-For`.
+
+Because this misconfiguration is silent (behind a proxy or CDN every request shares the proxy's
+address, so a per-IP limit quietly becomes site-wide), `Brace.start()` logs a warning when a
+`RateLimiter.perIp` middleware is registered without `app.trustedProxies(...)`. Ignore the
+warning only if clients genuinely connect to the app directly.
 
 ### Database failure posture
 

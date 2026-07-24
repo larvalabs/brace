@@ -176,7 +176,7 @@ public class App {
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs
-- **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware
+- **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
