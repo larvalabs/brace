@@ -86,6 +86,7 @@ public class Storage {
      * Returns the public URL for a given object key.
      */
     public String url(String key) {
+        requireSafeKey(key);
         var encoded = uriEncodePath(key);
         if (publicUrl != null) {
             return publicUrl + "/" + encoded;
@@ -122,6 +123,7 @@ public class Storage {
      * Upload bytes to storage. Returns the public URL.
      */
     public String put(String key, byte[] data, String contentType) {
+        requireSafeKey(key);
         try {
             var now = Instant.now();
             var amzDate = AMZ_DATE_FORMAT.format(now);
@@ -207,6 +209,7 @@ public class Storage {
      * Delete an object from storage. Logs warning on failure but does not throw.
      */
     public void delete(String key) {
+        requireSafeKey(key);
         try {
             var now = Instant.now();
             var amzDate = AMZ_DATE_FORMAT.format(now);
@@ -318,6 +321,33 @@ public class Storage {
             return "/" + bucket + "/" + encoded;
         }
         return "/" + encoded;
+    }
+
+    /**
+     * Reject an object key that would resolve outside its intended prefix (2026-07 review, L5).
+     *
+     * <p>{@link #uriEncodePath} splits on {@code /} and percent-encodes each segment, but {@code .}
+     * is unreserved — so a {@code ..} segment survived encoding intact, and
+     * {@link #buildUploadUrl} and {@link #canonicalUri} built the same unnormalized path. The
+     * request was therefore <em>validly signed</em> for the traversed key, and an endpoint that
+     * normalizes the path would act on it. {@link #putGenerated} is unaffected (UUID keys); the
+     * exposure is {@link #put(String, byte[], String)} with an app-assembled key containing user
+     * input.
+     */
+    static void requireSafeKey(String key) {
+        if (key == null || key.isEmpty()) {
+            throw new IllegalArgumentException("Storage key must not be empty");
+        }
+        if (key.startsWith("/")) {
+            throw new IllegalArgumentException("Storage key must not start with '/': " + key);
+        }
+        for (var segment : key.split("/", -1)) {
+            if (segment.equals("..") || segment.equals(".")) {
+                throw new IllegalArgumentException(
+                    "Storage key must not contain '.' or '..' path segments (use Storage.safeKey "
+                        + "to build a key from user input): " + key);
+            }
+        }
     }
 
     static String uriEncodePath(String key) {

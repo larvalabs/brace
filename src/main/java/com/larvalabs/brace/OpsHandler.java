@@ -139,6 +139,12 @@ public class OpsHandler {
 
             // Issue token — check for client-requested TTL
             int requestedTtl = auth.ttlSeconds != null ? auth.ttlSeconds : 3600; // default: 1 hour
+            if (requestedTtl <= 0) {
+                // The cap below bounded the top but not the bottom, so ttlSeconds: -1 minted a
+                // token that was already expired — fail-closed, but a confusing 401 rather than
+                // an error naming the cause (L7).
+                return Result.badRequest("ttlSeconds must be positive");
+            }
             int ttl = Math.min(requestedTtl, 86400); // cap at 24 hours
 
             // Scope: cap the requested scope at the key's ceiling. A read-only key can

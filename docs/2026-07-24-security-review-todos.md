@@ -258,7 +258,7 @@ the fix is, not how severe the bug is.
     `Set-Cookie` string directly) and scope it to `/ops`.
   - **Model: Haiku 4.5.**
 
-- [ ] **L3: Dead branch in the weak-secret check**, `Brace.java:220`
+- [x] **L3: Dead branch in the weak-secret check**, `Brace.java:220`
   - `lower.contains("CHANGE-ME-to-a-random-string-at-least-32-chars")` tests a mixed-case
     literal against a string that was just lowercased, so it can never match. Harmless — the
     adjacent `changeme` / `change-me` / `change_me` checks already cover the scaffold value —
@@ -266,14 +266,14 @@ the fix is, not how severe the bug is.
   - **Fix:** delete the clause (redundant) or lowercase the literal.
   - **Model: Haiku 4.5.** (Carried over from the 2026-06 review's cleanup list, still open.)
 
-- [ ] **L4: `Csrf.validateToken` encodes with the platform default charset**, `Csrf.java:33`
+- [x] **L4: `Csrf.validateToken` encodes with the platform default charset**, `Csrf.java:33`
   - `expected.getBytes()` / `submittedToken.getBytes()` use the JVM default charset. Tokens
     are base64url so today the bytes are identical under every realistic default, but a
     charset-dependent comparison in a CSRF check is a latent correctness bug.
   - **Fix:** `getBytes(StandardCharsets.UTF_8)` on both sides.
   - **Model: Haiku 4.5.**
 
-- [ ] **L5: `Storage.put`/`delete` accept keys containing `..` segments**, `Storage.java:323-330`
+- [x] **L5: `Storage.put`/`delete` accept keys containing `..` segments**, `Storage.java:323-330`
   - `uriEncodePath` splits on `/` and percent-encodes each segment, but `.` is unreserved, so
     a `..` segment survives encoding intact. `buildUploadUrl` and `canonicalUri` build the
     same unnormalized path, so the request is **validly signed** for the traversed key and an
@@ -283,14 +283,14 @@ the fix is, not how severe the bug is.
     `delete`, and `url`, with a clear `IllegalArgumentException` pointing at `safeKey`.
   - **Model: Haiku 4.5.**
 
-- [ ] **L6: `Csrf.hiddenField` does not HTML-escape the token**, `Csrf.java:36-38`
+- [x] **L6: `Csrf.hiddenField` does not HTML-escape the token**, `Csrf.java:36-38`
   - The token is framework-generated base64url, so this is not currently exploitable — but
     `session.set("_csrf", …)` is reachable from application code (the reserved-key guard in
     `Session.set` covers only `_exp`), and the field is injected into templates as raw HTML.
   - **Fix:** escape the value, and/or reserve `_csrf` in `Session.set` the way `_exp` is.
   - **Model: Haiku 4.5.**
 
-- [ ] **L7: `OpsToken.create` accepts `ttlSeconds <= 0`**, `OpsToken.java:70-71` and `OpsHandler.java:141-142`
+- [x] **L7: `OpsToken.create` accepts `ttlSeconds <= 0`**, `OpsToken.java:70-71` and `OpsHandler.java:141-142`
   - `Math.min(requestedTtl, 86400)` caps the top but not the bottom, so a client requesting
     `ttlSeconds: -1` gets a token that is already expired. Fail-closed (verification rejects
     it immediately), so the impact is a confusing 401 rather than a vulnerability.

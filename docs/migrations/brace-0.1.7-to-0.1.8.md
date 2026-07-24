@@ -293,3 +293,36 @@ request to the application — readable by any handler through `req.cookie(...)`
 by any request logging the app does. Every endpoint that accepts it lives under `/ops`, so
 that is where it is now scoped. **No action required**; existing sessions simply re-issue on
 next login.
+
+---
+
+## Security fix: `Storage` rejects traversal segments in object keys
+
+`Storage.uriEncodePath` percent-encodes each `/`-separated segment, but `.` is unreserved, so
+a `..` segment survived encoding intact — and `buildUploadUrl` and `canonicalUri` built the
+same unnormalized path, meaning the request was *validly signed* for the traversed key. An
+endpoint that normalizes the path would then act on it.
+
+`put`, `delete`, and `url` now throw `IllegalArgumentException` for a key with a `.` or `..`
+segment or a leading `/`.
+
+**Action required only if** you assemble keys from user input. `Storage.safeKey` /
+`putGenerated` were never affected (UUID keys):
+
+```java
+// Safe — the extension is sanitized and the name is a UUID
+var stored = storage.putGenerated("avatars", upload);
+```
+
+---
+
+## Smaller hardening (no action required)
+
+- **`Csrf.validateToken`** compares with an explicit UTF-8 encoding instead of the platform
+  default charset.
+- **`Csrf.hiddenField`** HTML-escapes the token value.
+- **`/ops/auth`** returns `400` for a non-positive `ttlSeconds` instead of minting an
+  already-expired token that then fails with a confusing `401`.
+- A dead clause in the weak-secret startup check (a mixed-case literal compared against a
+  lowercased string, so it could never match) was removed; the `change-me` checks beside it
+  already covered the scaffold placeholder.
