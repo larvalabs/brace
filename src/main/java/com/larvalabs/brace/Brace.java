@@ -55,6 +55,7 @@ public class Brace {
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
     private int jobRetentionDays = 7;
+    private java.time.Duration jobLease = JobPoller.DEFAULT_LEASE;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -374,6 +375,25 @@ public class Brace {
      */
     public Brace jobRetention(int days) {
         this.jobRetentionDays = days;
+        return this;
+    }
+
+    /**
+     * How long a durable job may hold its claim before the framework assumes the instance running
+     * it died and returns the job to the queue. Default 15 minutes.
+     *
+     * <p>Without this, a job whose process is killed mid-run (an ordinary deploy is enough — JVM
+     * exit kills in-flight jobs) leaves a row that no poller will ever claim again and no prune
+     * will ever delete. See {@link JobPoller#reclaimStalledJobs}.
+     *
+     * <p>Set this above the longest job you expect to run. A lease cannot tell a dead instance
+     * from a slow job, so a job still running when its lease expires gets picked up again
+     * elsewhere — consistent with {@link DurableJob}'s at-least-once contract, but it assumes your
+     * jobs are idempotent. Pass {@code null} or {@link java.time.Duration#ZERO} to disable
+     * recovery and keep the pre-0.1.8 behavior.
+     */
+    public Brace jobLease(java.time.Duration lease) {
+        this.jobLease = lease;
         return this;
     }
 
@@ -795,6 +815,7 @@ public class Brace {
 
         jobScheduler.start(databaseFactory);
         if (databaseFactory != null) {
+            jobPoller.lease(jobLease);
             jobPoller.start(databaseFactory);
         }
 
