@@ -162,7 +162,7 @@ the fix is, not how severe the bug is.
     automatically.
   - **Model: Haiku 4.5**, mechanical once the wrapper location is chosen.
 
-- [ ] **M5: Ops auth protocol v1 is still accepted**, `OpsHandler.java:126-134`
+- [x] **M5: Ops auth protocol v1 is still accepted**, `OpsHandler.java:126-134`
   - v1 signs the timestamp alone: the signature is not bound to the public key and carries
     no nonce, so a captured `/ops/auth` body can be replayed verbatim by anyone within the
     ±30 s acceptance window to mint a fresh token at the key's full scope ceiling.

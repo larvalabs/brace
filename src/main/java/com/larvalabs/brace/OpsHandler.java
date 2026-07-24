@@ -80,10 +80,10 @@ public class OpsHandler {
      * into the signed message kills cross-key confusion; the nonce (rejected on reuse, see
      * {@link #seenNonces}) makes a captured tuple single-purpose on this instance.
      *
-     * <p>Protocol v1 (deprecated, shipped in 0.1.6): no {@code v}/{@code nonce}, signature over
-     * the timestamp alone — replayable within the ±30s window. Accepted this release with a
-     * deprecation warning; will be rejected in a future release (see the 0.1.6→0.1.7 migration
-     * guide). Optional fields for both: {@code ttlSeconds}, {@code scope}.
+     * <p>Protocol v1 (shipped in 0.1.6, deprecated in 0.1.7, <strong>removed in 0.1.8</strong>):
+     * no {@code v}/{@code nonce}, signature over the timestamp alone, so a captured request was
+     * replayable verbatim within the ±30s window. A v1 body now gets a 401 naming the cause.
+     * Optional fields: {@code ttlSeconds}, {@code scope}.
      */
     public Result auth(Request req) {
         try {
@@ -124,17 +124,17 @@ public class OpsHandler {
                     return Result.unauthorized("Nonce already used");
                 }
             } else if (auth.v == null || "1".equals(auth.v)) {
-                // Legacy v1: signature over the timestamp only — not bound to the key, no nonce,
-                // replayable within the ±30s window. Kept for one release because v1 shipped in
-                // 0.1.6; removal is documented in the migration guide.
-                Log.warn("ops auth protocol v1 is deprecated and will be rejected in a future release"
-                    + " — upgrade the brace CLI (key " + OpsKeys.fingerprint(auth.publicKey) + ")");
-                if (!OpsKeys.verify(auth.timestamp, auth.signature, auth.publicKey)) {
-                    return Result.unauthorized("Invalid signature");
-                }
+                // v1 signed the timestamp alone: not bound to the key, no nonce, so a captured
+                // request was replayable verbatim within the ±30s window to mint a fresh token at
+                // the key's full scope ceiling. It shipped in 0.1.6, was deprecated in 0.1.7 with
+                // notice that a future release would reject it, and that release is this one (M5).
+                Log.warn("rejected ops auth protocol v1 (removed in 0.1.8) — upgrade the brace CLI"
+                    + " (key " + OpsKeys.fingerprint(auth.publicKey) + ")");
+                return Result.unauthorized("Ops auth protocol v1 was removed in 0.1.8 because it is "
+                    + "replayable — upgrade the brace CLI to 0.1.7 or later");
             } else {
                 return Result.unauthorized("Unsupported ops auth protocol version \"" + auth.v
-                    + "\" — this server accepts v2 (and v1, deprecated)");
+                    + "\" — this server accepts v2");
             }
 
             // Issue token — check for client-requested TTL

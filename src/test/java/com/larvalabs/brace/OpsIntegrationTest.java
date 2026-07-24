@@ -293,17 +293,28 @@ class OpsIntegrationTest {
     }
 
     @Test
-    void authV1StillAcceptedThisRelease() throws Exception {
-        // v1 (no "v" field, signature over the timestamp alone) shipped in 0.1.6, so it is
-        // accepted for one release with a deprecation warning. Removal is documented in the
-        // 0.1.6 -> 0.1.7 migration guide; flip this test to expect 401 when v1 is dropped.
+    void authV1IsRejected() throws Exception {
+        // v1 (no "v" field, signature over the timestamp alone) is not bound to the key and
+        // carries no nonce, so a captured request was replayable verbatim inside the +/-30s
+        // window to mint a fresh token at the key's full scope ceiling. It shipped in 0.1.6,
+        // was deprecated in 0.1.7, and is removed in 0.1.8 (M5).
         String timestamp = java.time.Instant.now().toString();
         String signature = OpsKeys.sign(timestamp, keypair.privateKey());
         String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"signature\":\"" + signature + "\"}";
         var response = postAuth(port, body);
-        assertEquals(200, response.statusCode(), "v1 auth should still succeed this release: " + response.body());
-        assertTrue(response.body().contains("\"token\""));
+        assertEquals(401, response.statusCode(), "v1 auth must be rejected: " + response.body());
+        assertFalse(response.body().contains("\"token\""));
+        assertTrue(response.body().contains("v1"), "the 401 should name the cause: " + response.body());
+    }
+
+    @Test
+    void authV1WithExplicitVersionFieldIsAlsoRejected() throws Exception {
+        String timestamp = java.time.Instant.now().toString();
+        String signature = OpsKeys.sign(timestamp, keypair.privateKey());
+        String body = "{\"v\":\"1\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"signature\":\"" + signature + "\"}";
+        assertEquals(401, postAuth(port, body).statusCode());
     }
 
     @Test

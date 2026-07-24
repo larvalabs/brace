@@ -87,6 +87,45 @@ working with no change: a loopback `Host` resolves to no `Secure` attribute.
 
 ---
 
+## Breaking: ops auth protocol v1 removed
+
+Protocol v1 signed the timestamp alone: the signature was not bound to the public key and
+carried no nonce, so a captured `/ops/auth` request could be replayed verbatim by anyone
+within the ±30 s acceptance window to mint a fresh token at the key's full scope ceiling.
+
+v1 shipped in 0.1.6 and was deprecated in 0.1.7, which stated that a future release would
+reject it. This is that release: a v1 body (no `v` field, or `v: "1"`) now gets a 401 naming
+the cause.
+
+**Who needs to act.** Anyone still running a `brace` CLI older than 0.1.7, or a hand-rolled
+`/ops/auth` client that has not moved to v2.
+
+**Upgrade the CLI** — 0.1.7 and later send v2 natively. (The CLI's own v1 fallback, which
+retried with a v1 body when a pre-0.1.7 server rejected v2, is removed too: a 401 now means
+what it says instead of silently downgrading to a replayable protocol.)
+
+**Hand-rolled clients** sign `publicKey + "\n" + timestamp + "\n" + nonce` and send the
+envelope:
+
+```jsonc
+// Before (v1) — removed
+{ "publicKey": "...", "timestamp": "2026-07-24T12:00:00Z", "signature": "<sign(timestamp)>" }
+
+// After (v2)
+{
+  "v": "2",
+  "publicKey": "...",
+  "timestamp": "2026-07-24T12:00:00Z",
+  "nonce": "<base64url of 16+ random bytes, fresh per attempt>",
+  "signature": "<sign(publicKey + \"\\n\" + timestamp + \"\\n\" + nonce)>"
+}
+```
+
+`OpsKeys.v2AuthMessage(publicKey, timestamp, nonce)` builds the canonical signed message if
+you are calling from Java.
+
+---
+
 ## Security fix: static files no longer follow symlinks out of the served directory
 
 `app.staticFiles(prefix, dir)` checked containment with `Path.normalize()` +

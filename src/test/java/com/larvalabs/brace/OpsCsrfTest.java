@@ -46,12 +46,21 @@ class OpsCsrfTest {
         if (app != null) app.stop();
     }
 
-    private HttpResponse<String> postAuth() throws Exception {
+/** A v2 ops-auth body: signature over publicKey + timestamp + nonce (v1 was removed in 0.1.8). */
+    private static String v2AuthBody(OpsKeys.Keypair kp) {
         String timestamp = java.time.Instant.now().toString();
-        String signature = OpsKeys.sign(timestamp, keypair.privateKey());
-        String body = "{\"publicKey\":\"" + keypair.publicKey() + "\","
-            + "\"timestamp\":\"" + timestamp + "\","
+        byte[] nonceBytes = new byte[16];
+        new java.security.SecureRandom().nextBytes(nonceBytes);
+        String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
+        String signature = OpsKeys.sign(
+            OpsKeys.v2AuthMessage(kp.publicKey(), timestamp, nonce), kp.privateKey());
+        return "{\"v\":\"2\",\"publicKey\":\"" + kp.publicKey() + "\","
+            + "\"timestamp\":\"" + timestamp + "\",\"nonce\":\"" + nonce + "\","
             + "\"signature\":\"" + signature + "\"}";
+    }
+
+    private HttpResponse<String> postAuth() throws Exception {
+        String body = v2AuthBody(keypair);
         return client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/ops/auth"))
