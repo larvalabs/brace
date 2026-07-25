@@ -9,7 +9,7 @@ behavior that contradicts its own documentation. It is not a security or perform
 where a finding also has a security or perf flavor, that is noted but is not the reason it
 is listed.
 
-25 findings: 4 High, 12 Medium, 9 Low. Every High and most Mediums were reproduced against
+28 findings: 4 High, 12 Medium, 12 Low. Every High and most Mediums were reproduced against
 a running app with a throwaway probe test, not just read — the reproduction is recorded
 inline as "Confirmed:".
 
@@ -18,7 +18,7 @@ after the job-system work landed on `main`: **H4 is resolved upstream** (see its
 fix is `96f37a2`, and it is a better fix than the one specified here). `cdc4f07` bounded the
 Mailer's SMTP timeouts but did not touch M10 (credentials are still not percent-decoded).
 Nothing on `main` touched `Stats`, `BraceHandler`, `Route`, `FormBinder`, or `Url`, so H1, H2,
-H3 and every Medium and Low below stand as written. Remaining: **3 High, 12 Medium, 9 Low.**
+H3 and every Medium and Low below stand as written. Remaining: **3 High, 12 Medium, 12 Low.**
 
 Branch: `claude/correctness-review-ey31yz`. One commit per finding,
 `fix(correctness): <ID> <summary>`, each commit ticks its checkbox here and passes
@@ -213,7 +213,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
 
 ## Medium
 
-- [ ] **M1: Multipart form fields collapse to a single value per name**
+- [x] **M1: Multipart form fields collapse to a single value per name**
   - Files: `BraceHandler.java:849,875,882-888`.
   - `parseMultipart` accumulates non-file parts into a `LinkedHashMap<String,String>` (last wins) and
     only then re-encodes them into the `&`-joined body that `Request.formParams` re-parses. A
@@ -223,6 +223,10 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: append each part to the encoded body as it is parsed instead of routing through a map. The
     downstream single-value view already does last-wins, so nothing else changes.
   - Model: smaller model OK.
+  - **Resolved as:** exactly that — `parseMultipart` builds the encoded body directly, no
+    intermediate map. `formParam(name)` is unchanged (last-wins downstream). Tests added to
+    `MultiValueParamsTest` so the multipart and urlencoded cases sit side by side: repeats in
+    order, single values, values needing encoding, and interleaved field names.
 
 - [ ] **M2: `boolean` form fields don't bind HTML checkboxes**
   - Files: `FormBinder.java:130`.

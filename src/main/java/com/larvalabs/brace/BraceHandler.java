@@ -412,9 +412,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 result = after.apply(braceRequest, result);
             }
 
-            // Add Vary header for htmx requests (caching correctness)
+            // Add Vary header for htmx requests (caching correctness). M3: APPEND — Vary is a
+            // list header, and overwriting it dropped whatever dimension the handler or an
+            // after-middleware declared (Accept-Encoding, Accept-Language), leaving a shared
+            // cache varying on the wrong axis and serving the wrong variant.
             if ("true".equals(braceRequest.header("HX-Request"))) {
-                result.header("Vary", "HX-Request");
+                result.header("Vary", appendVary(result.header("Vary")));
             }
 
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
@@ -629,6 +632,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             body.append(method).append(' ').append(picks.get(i));
         }
         return Result.error(404, body.toString());
+    }
+
+    /**
+     * Add {@code HX-Request} to an existing {@code Vary} value (M3), or return it alone when there
+     * is none. Idempotent: a handler that already declared {@code HX-Request} isn't given a
+     * duplicate. Matching is case-insensitive on the token, since field names in a {@code Vary}
+     * list are case-insensitive.
+     */
+    private static String appendVary(String existing) {
+        if (existing == null || existing.isBlank()) {
+            return "HX-Request";
+        }
+        for (String token : existing.split(",")) {
+            if (token.trim().equalsIgnoreCase("HX-Request") || token.trim().equals("*")) {
+                return existing;
+            }
+        }
+        return existing + ", HX-Request";
     }
 
     /** Length of the common leading character prefix of {@code a} and {@code b}. */
@@ -925,7 +946,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
         MultiPartFormData.Parts parts = parser.parse(jettyRequest).join();
 
-        var formParams = new LinkedHashMap<String, String>();
+        // M1: append pairs straight to the encoded body instead of collapsing them through a
+        // Map<String,String> first. A repeated field — a checkbox group, a <select multiple> —
+        // used to keep only its LAST value here, so the same submission yielded one value as
+        // multipart and all of them as x-www-form-urlencoded. The single-value view downstream
+        // (Request.parseSingleValues) still does last-wins, so formParam(name) is unchanged.
+        var formBody = new StringBuilder();
         var files = new LinkedHashMap<String, List<UploadedFile>>();
 
         try {
@@ -951,19 +977,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     var uploaded = new UploadedFile(fileName, partContentType, bytes);
                     files.computeIfAbsent(name, k -> new ArrayList<>()).add(uploaded);
                 } else {
-                    formParams.put(name, part.getContentAsString(StandardCharsets.UTF_8));
+                    if (!formBody.isEmpty()) formBody.append('&');
+                    formBody.append(java.net.URLEncoder.encode(name, StandardCharsets.UTF_8));
+                    formBody.append('=');
+                    formBody.append(java.net.URLEncoder.encode(
+                        part.getContentAsString(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
                 }
             }
         } finally {
             parts.close();
-        }
-
-        var formBody = new StringBuilder();
-        for (var entry : formParams.entrySet()) {
-            if (!formBody.isEmpty()) formBody.append('&');
-            formBody.append(java.net.URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8));
-            formBody.append('=');
-            formBody.append(java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
         }
 
         return new MultipartResult(formBody.toString(), files);
