@@ -293,7 +293,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     rather than a leak that grows; fixing it means giving `RateLimiter` a close() and a lifecycle
     owner, which is a bigger change than this finding. Recorded here rather than silently left.
 
-- [ ] **M6: `Url.to` doesn't encode substituted values**
+- [x] **M6: `Url.to` doesn't encode substituted values**
   - Files: `Url.java:11-30`.
   - Values are appended raw. A value containing `/` silently adds a path segment; one containing a
     space, `?`, `#`, or `&` produces an invalid or truncated URL. `Url.to` is the framework's answer
@@ -303,8 +303,16 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: percent-encode each substituted value as a path segment (not form encoding — `+` must stay
     `%2B`, space must be `%20`). Pairs with H3: encode on the way out, decode on the way in.
   - Model: smaller model OK (but keep H3's decoder and this encoder as inverse pairs in one place).
+  - **Resolved as:** `Url.encodeSegment`, RFC 3986 unreserved-set encoding — deliberately not
+    `URLEncoder`, which would emit `+` for a space and so not invert H3's path decoder. The two are
+    now a genuine inverse pair, covered by a round-trip test through a live route.
+  - **Transport limit found while testing** (not a Brace bug, worth knowing): a value containing
+    `/` or `%` encodes correctly but still cannot ride in a path segment, because Jetty's default
+    `UriCompliance` rejects `%2F` (ambiguous separator) and `%25` (ambiguous encoding) with a 400
+    before the handler runs. Apps needing those values should use the query string. Asserted
+    explicitly in the test so the boundary is documented rather than discovered.
 
-- [ ] **M7: `db.hql(...)` and `db.sqlQuery(...)` lie about their return type for single-column selects**
+- [x] **M7: `db.hql(...)` and `db.sqlQuery(...)` lie about their return type for single-column selects**
   - Files: `Database.java:310-319` (`hql`), `:330-339` (`sqlQuery`); contrast `:341-353` (`sqlQueryLong`).
   - Both declare `List<Object[]>` and get there through an unchecked cast. Hibernate returns a list of
     **scalars** when the select has one item, so `for (Object[] row : db.sqlQuery("SELECT id FROM t"))`
