@@ -29,6 +29,7 @@ public class Brace {
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
+    private boolean ownsDatabaseFactory = true; // M4: stop() closes the pool unless told otherwise
     private String sessionSecret;
     private String opsSecret;
     private String deployMarker;
@@ -119,6 +120,25 @@ public class Brace {
 
     public Brace database(DatabaseFactory factory) {
         this.databaseFactory = factory;
+        return this;
+    }
+
+    /**
+     * Whether {@link #stop()} closes the {@link DatabaseFactory} — its HikariCP pool and Hibernate
+     * {@code SessionFactory}. Default {@code true}.
+     *
+     * <p>The factory is constructed by the app and handed in via {@link #database}, so ownership is
+     * a genuine question rather than an obvious default. Closing is the right default because the
+     * overwhelmingly common shape is one factory per app: leaving it open means a "graceful"
+     * shutdown never drains the pool (Hikari runs with {@code minimumIdle == maximumPoolSize}, so
+     * that is {@code poolSize} live connections the database only sees vanish at process exit).
+     *
+     * <p>Pass {@code false} when the factory outlives this {@code Brace} — several apps sharing one
+     * pool in a single JVM, or a test fixture that reuses a factory across cases. Then closing it
+     * is the caller's job.
+     */
+    public Brace ownsDatabase(boolean owns) {
+        this.ownsDatabaseFactory = owns;
         return this;
     }
 
@@ -1097,6 +1117,20 @@ public class Brace {
         }
         if (wsRegistry != null) {
             wsRegistry.close();
+        }
+        // M5: the rate limiter's shared-counter backend and its registry are process-global
+        // statics installed by start(). Left in place they point at THIS app's (now closed)
+        // DatabaseFactory, so a second app in the same JVM counts against a dead pool, and
+        // /ops keeps reporting limiters that no longer serve anything. Release before the
+        // factory closes below.
+        RateLimiter.disableSharedBackend();
+        RateLimiter.forgetLimiters();
+        // M4: close the connection pool. Hikari runs with minimumIdle == maximumPoolSize, so
+        // every un-closed factory holds poolSize live connections plus a Hibernate
+        // SessionFactory — a large steady leak across a test suite, and in production a
+        // "graceful" shutdown that never actually drains.
+        if (ownsDatabaseFactory && databaseFactory != null) {
+            databaseFactory.close();
         }
         // Drain any structured log lines still queued in the async writer (H1) so a stop()
         // immediately followed by assertions (tests) or process exit loses nothing.

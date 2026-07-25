@@ -153,9 +153,19 @@ public class RateLimiter {
         sharedCounters = counters;
     }
 
-    /** Revert to per-process counting (test teardown). */
+    /** Revert to per-process counting. Called by {@code Brace.stop()} and in test teardown. */
     static void disableSharedBackend() {
         sharedCounters = null;
+    }
+
+    /**
+     * Drop every registered limiter from the ops registry (M5). {@link #ALL} is a process-global
+     * list that limiters only ever joined, so across app restarts in one JVM — tests, or several
+     * {@code Brace} instances — {@link #allStats()} kept reporting limiters whose app was long
+     * gone, with their final counts frozen. Called by {@code Brace.stop()}.
+     */
+    static void forgetLimiters() {
+        synchronized (ALL) { ALL.clear(); }
     }
 
     Result check(Request req) {

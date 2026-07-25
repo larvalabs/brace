@@ -255,7 +255,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     case-insensitive) and `*` treated as already-covering. Idempotent, so a handler that declared
     `HX-Request` itself doesn't get a duplicate.
 
-- [ ] **M4: `Brace.stop()` never closes the `DatabaseFactory`**
+- [x] **M4: `Brace.stop()` never closes the `DatabaseFactory`**
   - Files: `Brace.java:988-1011`; `DatabaseFactory.java:117-119` (`close()`), `:182-183`
     (`minimumIdle == maximumPoolSize`); `TestApp.java:286-288`.
   - `DatabaseFactory.close()` exists and is called from nowhere in `src/main`. Because Hikari is
@@ -269,8 +269,13 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     add `.ownsDatabase(false)` for apps that share one factory across several `Brace` instances.
     State the choice in the migration guide.
   - Model: frontier (lifecycle ownership is user-visible and easy to get wrong for shared factories).
+  - **Resolved as:** `stop()` closes the factory, with `app.ownsDatabase(false)` as the opt-out for
+    a factory that outlives the app (several apps sharing one pool, or a fixture reusing one across
+    cases). Close-by-default is right because one-factory-per-app is the overwhelmingly common
+    shape, and the failure mode of the old behavior was silent. Note this makes `TestApp.stop()`
+    actually release its H2 pool, which is where the suite-wide leak was.
 
-- [ ] **M5: `Brace.stop()` leaves process-global rate-limiter state pointing at the stopped app**
+- [x] **M5: `Brace.stop()` leaves process-global rate-limiter state pointing at the stopped app**
   - Files: `Brace.java:805-808`, `:988-1011`; `RateLimiter.java:22` (`ALL`), `:33` (`sharedCounters`),
     `:156-159` (`disableSharedBackend`).
   - `start()` installs a static `Counters` built from this app's `DatabaseFactory`; `stop()` never
@@ -280,6 +285,13 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: clear `sharedCounters` in `stop()`; either scope `ALL` per app or deregister a limiter's
     entry when its owning app stops (and stop its cleanup virtual thread, which also runs forever).
   - Model: smaller model OK.
+  - **Resolved as:** `stop()` calls `disableSharedBackend()` (already existed for test teardown,
+    just never wired to the lifecycle) and a new `forgetLimiters()` that clears `ALL`. Ordered
+    before the M4 factory close, so nothing can reach a closed pool on the way down.
+  - **Deferred:** the per-limiter cleanup virtual thread still runs for the life of the JVM. It
+    sleeps 60s between sweeps over now-unreferenced maps, so the cost is a parked virtual thread
+    rather than a leak that grows; fixing it means giving `RateLimiter` a close() and a lifecycle
+    owner, which is a bigger change than this finding. Recorded here rather than silently left.
 
 - [ ] **M6: `Url.to` doesn't encode substituted values**
   - Files: `Url.java:11-30`.
