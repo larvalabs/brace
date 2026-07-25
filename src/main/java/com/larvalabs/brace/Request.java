@@ -191,6 +191,75 @@ public class Request {
         }
     }
 
+    /**
+     * Percent-decode one URL <em>path</em> segment (H3).
+     *
+     * <p>Deliberately not {@link URLDecoder}, which implements
+     * {@code application/x-www-form-urlencoded}: there {@code +} means space, but in a path a
+     * {@code +} is a literal plus, so decoding {@code /files/a+b} with the form decoder silently
+     * renames the file. {@code URLDecoder} also <em>throws</em> on a malformed escape, which on a
+     * request path would turn a stray {@code %} into a 500; here an incomplete or non-hex escape
+     * is kept literally, matching how browsers and every mainstream server treat it.
+     *
+     * <p>Callers must decode <strong>per segment</strong>, never a whole path at once. A
+     * {@code %2F} inside one segment decodes to a literal {@code /}, and decoding across
+     * separators would let it forge a segment boundary — the standard traversal trick.
+     */
+    static String decodePathSegment(String segment) {
+        if (segment == null || segment.indexOf('%') < 0) {
+            return segment; // the overwhelmingly common case: nothing to do, no allocation
+        }
+        var bytes = new java.io.ByteArrayOutputStream(segment.length());
+        int i = 0;
+        while (i < segment.length()) {
+            char c = segment.charAt(i);
+            if (c == '%' && i + 2 < segment.length()) {
+                int hi = Character.digit(segment.charAt(i + 1), 16);
+                int lo = Character.digit(segment.charAt(i + 2), 16);
+                if (hi >= 0 && lo >= 0) {
+                    bytes.write((hi << 4) + lo);
+                    i += 3;
+                    continue;
+                }
+            }
+            if (c < 0x80) {
+                bytes.write(c);
+                i++;
+            } else {
+                // Non-ASCII shouldn't reach a raw request path, but if it does, re-encode the
+                // whole run at once so surrogate pairs stay intact.
+                int start = i;
+                while (i < segment.length() && segment.charAt(i) >= 0x80) i++;
+                byte[] encoded = segment.substring(start, i).getBytes(StandardCharsets.UTF_8);
+                bytes.write(encoded, 0, encoded.length);
+            }
+        }
+        return bytes.toString(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Percent-decode every segment of a {@code /}-separated path, preserving the separators.
+     * Each segment goes through {@link #decodePathSegment}, so a {@code %2F} decodes to a literal
+     * {@code /} <em>within</em> its segment and callers must still reject {@code ..} on the
+     * decoded result before touching the filesystem.
+     */
+    static String decodePath(String path) {
+        if (path == null || path.indexOf('%') < 0) {
+            return path;
+        }
+        var out = new StringBuilder(path.length());
+        int start = 0;
+        while (true) {
+            int slash = path.indexOf('/', start);
+            if (slash < 0) {
+                out.append(decodePathSegment(path.substring(start)));
+                return out.toString();
+            }
+            out.append(decodePathSegment(path.substring(start, slash))).append('/');
+            start = slash + 1;
+        }
+    }
+
     /** Multi-value view of {@link #scanPairs}: keys map to their values in order of appearance. */
     static Map<String, List<String>> parsePairs(String raw, boolean bareKeyOnLeadingEq) {
         if (raw == null || raw.isEmpty()) return Map.of();

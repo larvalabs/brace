@@ -127,7 +127,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     New `ShortCircuitStatsTest` covers the 429, the guard redirect, the CSRF 403, the unmatched
     404, static hits and misses, and that a normal response is counted exactly once.
 
-- [ ] **H3: Path parameters are never URL-decoded**
+- [x] **H3: Path parameters are never URL-decoded**
   - Severity: High. Files: `BraceHandler.java:174` (`getHttpURI().getPath()`), `Route.java:70-78`,
     `BraceHandler.java:569-658` (static files).
   - The router matches against Jetty's **raw**, still-percent-encoded path and copies regex groups
@@ -146,6 +146,27 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     against decoded input (`%2e%2e%2f` must not escape the base directory).
   - Model: frontier (traversal-adjacent; the decode-after-match ordering is the whole correctness
     argument, and getting it backwards is a path-traversal hole).
+  - **Resolved as:** `Request.decodePathSegment` / `Request.decodePath` (deliberately not
+    `URLDecoder`, which is form decoding: it treats `+` as a space, silently renaming
+    `/files/a+b`, and *throws* on a malformed escape, which on a request path would turn a stray
+    `%` into a 500 — the new decoder keeps bad escapes literal, as browsers and mainstream servers
+    do). `Route.match` decodes each captured group **after** the regex match, so a `%2F` stays
+    inside the value it was written in. Static files decode **before** the `..` check (decoding
+    after it would let `%2e%2e` slip past) and before `resolve`/`normalize`/`startsWith`, and
+    `Assets.currentVersion` now receives the decoded URL path so an encoded filename can still
+    match its own fingerprint.
+  - **Correction to the finding's risk framing:** the traversal exposure was smaller than stated.
+    Jetty's default `UriCompliance` rejects `%2F`, `%25`, `%2e` and malformed escapes with a 400
+    before the handler runs, so those inputs never reached the old `..` check either. The
+    decode-after-match ordering is still the right design — compliance is configurable and
+    `Route.match` is public API callable directly — but this was a data-correctness bug, not a
+    live traversal hole. `PathDecodingTest` splits along that seam: HTTP-level tests for what
+    actually crosses the wire (spaces, UTF-8, `+`, `&`, `=`, `?`, `#`), unit tests for the
+    encodings Jetty refuses to forward, and a traversal test that asserts 4xx-and-no-leak rather
+    than pinning which layer said no.
+  - Left alone deliberately: `req.path()` still returns the RAW path. It feeds route matching,
+    middleware `PathPattern`, `Redactor`, and stats keys, all of which want the raw form;
+    decoded values are what `pathParam` is for. Matches how Express and friends split it.
 
 - [x] **H4: A durable job whose process dies mid-execution is stuck "running" forever**
   - Severity: High. Files (as reviewed, at `b3409ee`): `JobPoller.java:181-191` (PG claim), `:257`

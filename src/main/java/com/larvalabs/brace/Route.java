@@ -67,12 +67,22 @@ public class Route {
         this.csrfRequired = required;
     }
 
+    /**
+     * Match {@code path} (the RAW, still percent-encoded request path) against this route,
+     * returning the captured parameters or null.
+     *
+     * <p>Matching runs on the raw path and captured values are decoded <em>afterwards</em> (H3).
+     * The order is the whole safety argument: decoding first would turn a {@code %2F} into a real
+     * separator, so {@code /files/a%2F..%2Fb} would match a two-segment route and hand a handler
+     * an escaped path. Decoding after the capture keeps {@code %2F} inside the value it was
+     * written in, where it is just a character.
+     */
     public Map<String, String> match(String path) {
         var matcher = compiledPattern.matcher(path);
         if (!matcher.matches()) return null;
         var params = new LinkedHashMap<String, String>();
         for (int i = 0; i < paramNames.size(); i++) {
-            params.put(paramNames.get(i), matcher.group(i + 1));
+            params.put(paramNames.get(i), Request.decodePathSegment(matcher.group(i + 1)));
         }
         return params;
     }

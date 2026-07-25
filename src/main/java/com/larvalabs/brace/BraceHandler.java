@@ -660,16 +660,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String prefix = mapping.urlPrefix();
             if (!requestPath.startsWith(prefix)) continue;
 
-            if (requestPath.contains("..")) {
-                return Result.notFound();
-            }
-
             String relativePath = requestPath.substring(prefix.length());
             if (relativePath.startsWith("/")) {
                 relativePath = relativePath.substring(1);
             }
 
-            if (relativePath.isEmpty()) {
+            // Decode BEFORE the traversal checks (H3). Serving from the raw path meant
+            // /assets/my%20file.css looked for a literal "my%20file.css" and 404'd; decoding
+            // after the ".." check would have been worse, letting %2e%2e slip past it.
+            // decodePath decodes per segment, so a %2F cannot invent a separator that wasn't
+            // in the request — and the checks below run on what actually reaches the disk.
+            relativePath = Request.decodePath(relativePath);
+
+            if (relativePath.isEmpty() || relativePath.contains("..")) {
                 return Result.notFound();
             }
 
@@ -701,7 +704,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             long length = attrs.size();
             String etag = "\"" + Long.toHexString(length) + "-" + Long.toHexString(mtime) + "\"";
             String version = request.queryParam("v");
-            boolean immutable = version != null && version.equals(Assets.currentVersion(requestPath));
+            // Decoded URL path: Assets resolves it back to a file, so it has to see the same
+            // name the lookup above did, or an encoded filename never matches its fingerprint.
+            String decodedUrlPath = prefix + (prefix.endsWith("/") ? "" : "/") + relativePath;
+            boolean immutable = version != null && version.equals(Assets.currentVersion(decodedUrlPath));
             String cacheControl = immutable
                 ? "public, max-age=31536000, immutable"
                 : "public, max-age=0, must-revalidate";
