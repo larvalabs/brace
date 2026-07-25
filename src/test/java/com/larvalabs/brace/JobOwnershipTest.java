@@ -397,7 +397,9 @@ class JobOwnershipTest {
 
     @Test
     void braceShutdownHookStopsTheAppAndReleasesRunningJobs() throws Exception {
-        var app = Brace.app().port(0).database(factory).jobShutdownTimeout(Duration.ofMillis(200));
+        // The factory is shared across tests, so the app must not close it on stop().
+        var app = Brace.app().port(0).database(factory).ownsDatabase(false)
+            .jobShutdownTimeout(Duration.ofMillis(200));
         app.start();
         long id = schedule(new BlockingJob(), new JobOptions()); // wakes the app's poller
         awaitUntil(() -> BlockingJob.started.get() == 1);
@@ -414,7 +416,7 @@ class JobOwnershipTest {
 
     @Test
     void explicitStopRemovesTheShutdownHook() throws Exception {
-        var app = Brace.app().port(0).database(factory);
+        var app = Brace.app().port(0).database(factory).ownsDatabase(false);
         app.start();
         var hook = app.shutdownHook();
         app.stop();
