@@ -106,7 +106,7 @@ Use the `Read` variants for handlers that only query: GET routes are almost alwa
 `getRead` (or `getReadFull` if they need the session). They skip the per-request
 transaction entirely, which is both faster and signals intent.
 
-Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`.
+Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`. Values are percent-decoded.
 
 Grouping:
 
@@ -163,9 +163,11 @@ app.after("/api/*", (req, result) -> result.header("X-Api-Version", "1"));
 
 ```java
 req.method()                  // "GET", "POST", etc.
-req.path()                    // "/posts/42"
+req.path()                    // "/posts/42" — RAW, still percent-encoded
 
-// Path parameters (from route pattern like /posts/{id})
+// Path parameters (from route pattern like /posts/{id}) — percent-decoded.
+// "/users/John%20Doe" gives "John Doe"; don't decode again. Note "+" is a literal
+// plus in a path (not a space, unlike a form body).
 req.pathParam("id")           // path param as String
 req.intPathParam("id")        // as int
 req.longPathParam("id")       // as long

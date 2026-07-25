@@ -3,16 +3,21 @@
 **This release has no breaking changes.** No application code needs to change.
 
 It fixes two ways a durable job could be lost or wedged forever, both of which apply to
-apps that never touched the relevant configuration, and cuts durable-job pickup latency:
+apps that never touched the relevant configuration, cuts durable-job pickup latency, and
+lands the first three findings of the correctness review:
 
 - **Durable jobs claimed by an instance that dies are now recovered** instead of being
   stranded permanently.
 - **`Mailer` now bounds its SMTP timeouts**, so a wedged relay fails the send instead of
   hanging the calling thread forever.
 - **Durable jobs now start within ~1 second** on an idle app, down from up to 10.
+- **Path parameters are now URL-decoded** — `/users/John%20Doe` gives you `John Doe`, not
+  `John%20Doe`. If you were decoding by hand, stop.
+- **`/ops/routes` now shows route patterns instead of concrete URLs**, and **every response
+  is now counted** — including 429s, CSRF 403s and 404s that were previously invisible.
 
-All three ship as new *defaults*. The only reason to touch your code is if you run jobs longer
-than 30 minutes, talk to an unusually slow SMTP relay, or want to tune the poll rate — see below.
+They all ship as new *defaults*. The two that can change what your code sees are the path
+decoding (if you worked around it) and the ops output shape (if you parse it) — both below.
 
 ---
 
@@ -239,6 +244,115 @@ need to cover total transfer time for a large message — only the slowest singl
 
 If a previously-hanging send now surfaces as a failure, that is the fix working: the error was
 always there, it just used to present as a stuck thread instead of an exception.
+
+---
+
+## Path parameters are URL-decoded (correctness review H3)
+
+### What was wrong
+
+`req.pathParam(...)` returned the **raw, percent-encoded** segment, while `req.queryParam(...)`
+and `req.formParam(...)` returned decoded values. The same string round-tripped differently
+depending on where it rode:
+
+```java
+// 0.1.7 — GET /users/John%20Doe
+req.pathParam("name")            // "John%20Doe"   ← raw
+req.queryParam("name")           // "John Doe"     ← decoded, for ?name=John%20Doe
+```
+
+Anything but a bare integer id was affected — slugs, emails, filenames, tags. A lookup on the
+value silently missed rather than failing loudly:
+
+```java
+// 0.1.7: never matched a user whose email contains an encoded character
+var user = db.findBy(User.class, "email", req.pathParam("email"));
+```
+
+Static files had the same defect: `/assets/my%20file.css` looked for a file literally named
+`my%20file.css` and 404'd.
+
+### What changed
+
+Captured path parameters are percent-decoded, after the route match rather than before (so an
+encoded `%2F` stays inside the value and cannot forge a segment boundary). Static-file paths are
+decoded before the traversal checks. `+` is a **literal plus** in a path, not a space — this is
+path decoding, not form decoding. A malformed escape (`%zz`, a trailing `%`) is kept literally
+rather than throwing.
+
+`req.path()` is unchanged and still returns the raw path — it feeds route matching, middleware
+path patterns, log redaction and stats keys, all of which want the raw form.
+
+### What you may need to do
+
+**If you were decoding by hand, remove it** — you will now double-decode:
+
+```java
+// Before (0.1.7): the workaround
+var name = URLDecoder.decode(req.pathParam("name"), StandardCharsets.UTF_8);
+
+// After (0.1.8): already decoded
+var name = req.pathParam("name");
+```
+
+Double-decoding is not merely redundant, it is wrong: a name legitimately containing `%20` as
+text now decodes to a space. Grep for `decode(` near `pathParam` before upgrading.
+
+If you built links with `Url.to(...)`, note it does **not** yet encode its values (correctness
+review M6); encode values containing `/`, `?`, `#`, `&` or spaces yourself for now.
+
+---
+
+## Ops: route patterns, and every response counted (correctness review H1, H2)
+
+### What changed
+
+**`/ops/routes` and per-route stats are keyed by route pattern, not the request URL.** Previously
+`GET /users/1` and `GET /users/2` were separate rows, so the table filled with one entry per URL
+ever requested — unbounded, and per-route latency averages were meaningless because every row had
+a count of 1. Now they aggregate under `GET /users/{id}`.
+
+```
+# Before (0.1.7)                    # After (0.1.8)
+GET /users/1     count=1            GET /users/{id}    count=48210
+GET /users/2     count=1            GET /posts/{slug}  count=9930
+GET /users/3     count=1            GET (unmatched)    count=412
+...one row per id, forever...       GET (static)       count=88301
+```
+
+Two constant buckets cover requests with no route: `(unmatched)` for 404s and `(static)` for files
+served from a `staticFiles` mapping. They are constants on purpose — the URL there is
+client-supplied, so a row per `/random-404-url` would be unbounded in whatever an attacker types.
+
+**Every response is now counted.** Before, only the handler success path and the two error paths
+recorded anything, so `/ops/status` under-reported total traffic and these were completely
+invisible:
+
+- rate-limiter 429s and other before-middleware short-circuits
+- auth-guard redirects
+- CSRF 403s
+- 413 payload-too-large
+- static-file serves
+- unmatched-route 404s
+
+Static-file requests now also appear in the request log. If that is too noisy for your deployment,
+raise the log level (`BRACE_LOG_LEVEL=WARN` or `-Dbrace.log.level=WARN`); serving assets from a
+CDN or reverse proxy avoids it entirely.
+
+A 500 still emits exactly one log line (`http.error`, with the exception and app frame) — the
+log shape is unchanged.
+
+### What you may need to do
+
+Nothing, unless you **parse `/ops/status` or `/ops/routes`**. If you do:
+
+- expect route patterns (`/users/{id}`) where you previously saw concrete URLs
+- expect the two literal keys `(unmatched)` and `(static)`
+- expect request counts and status-code totals to go **up**, because they now include traffic
+  that was previously dropped on the floor rather than because traffic changed
+
+If you were relying on the routes table to find out *which* URLs 404, use `/ops/logs` or the error
+store instead — the log still records the concrete (redacted) path for every request.
 
 ---
 
