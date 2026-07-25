@@ -79,6 +79,50 @@ class MultiValueParamsTest {
         assertEquals("|null", res.body());
     }
 
+    // --- Multipart (correctness review M1) ---
+
+    /**
+     * A repeated field must survive multipart parsing. The parser used to accumulate non-file
+     * parts into a {@code Map<String,String>} before re-encoding them, so a checkbox group
+     * submitted as multipart kept only its last value while the byte-identical urlencoded
+     * submission kept all of them.
+     */
+    @Test
+    void multipartFormParamsReturnsAllValuesInOrder() {
+        assertEquals("a,b,c|c", multipartPost("tag", "a", "tag", "b", "tag", "c"));
+    }
+
+    @Test
+    void multipartSingleValueIsUnchanged() {
+        assertEquals("only|only", multipartPost("tag", "only"));
+    }
+
+    @Test
+    void multipartValuesNeedingEncodingRoundTrip() {
+        assertEquals("a&b,c=d,e f|e f", multipartPost("tag", "a&b", "tag", "c=d", "tag", "e f"));
+    }
+
+    @Test
+    void multipartInterleavedFieldsKeepPerNameOrder() {
+        assertEquals("a,b|b", multipartPost("tag", "a", "other", "x", "tag", "b"));
+    }
+
+    /** POST the given name/value pairs as {@code multipart/form-data}, returning "/f"'s body. */
+    private static String multipartPost(String... namesAndValues) {
+        String boundary = "----braceMultiValueTest";
+        var body = new StringBuilder();
+        for (int i = 0; i < namesAndValues.length; i += 2) {
+            body.append("--").append(boundary).append("\r\n")
+                .append("Content-Disposition: form-data; name=\"").append(namesAndValues[i])
+                .append("\"\r\n\r\n")
+                .append(namesAndValues[i + 1]).append("\r\n");
+        }
+        body.append("--").append(boundary).append("--\r\n");
+        return app.request("POST", "/f")
+            .body(body.toString(), "multipart/form-data; boundary=" + boundary)
+            .send().body();
+    }
+
     // --- Unit-level: hand-constructed Request (no raw query string available) ---
 
     @Test
