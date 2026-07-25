@@ -169,6 +169,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // mutations too — see the write-back choke point on writeResult below.
         Session session = null;
         Session csrfOnlySession = null;
+        // Hoisted for the same reason: the catch paths record stats against the matched
+        // ROUTE PATTERN, not the concrete URL (H1), and can only do that if they can see
+        // the match. It stays null when the throw happened before routing (e.g. a malformed
+        // percent-escape in the query string).
+        RouteMatch match = null;
         try {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
@@ -189,7 +194,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // must not pay request-body or multipart-parsing cost — the body is read only
             // once we know a route will consume it. (This also keeps an unmatched POST with a
             // large multipart body from being fully parsed into memory before the 404.)
-            RouteMatch match = router.match(method, path);
+            match = router.match(method, path);
 
             // Read request body — multipart or plain — only for matched routes.
             String body = "";
@@ -415,31 +420,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
             writeResult(result, response, callback, session, csrfOnlySession);
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
-            if (stats != null) {
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(method, path, result.status(), durationUs, qc, qu);
-                Log.request(method, path, result.status(), durationUs, qc, qu);
-            }
+            recordAndLog(match, method, path, result.status(), startNanos, db);
             return true;
 
         } catch (NotFoundException e) {
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
             Result notFoundResult = Result.notFound();
             writeResult(notFoundResult, response, callback, session, csrfOnlySession);
-            if (stats != null) {
-                String errorMethod = jettyRequest.getMethod();
-                String errorPath = jettyRequest.getHttpURI().getPath();
-                // db may be null (no route matched) or closed (query stats still readable)
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(errorMethod, errorPath, 404, durationUs, qc, qu);
-                Log.request(errorMethod, errorPath, 404, durationUs, qc, qu);
-            }
+            // db may be null (no route matched) or closed (query stats still readable)
+            recordAndLog(match, jettyRequest.getMethod(), jettyRequest.getHttpURI().getPath(),
+                404, startNanos, db);
             return true;
         } catch (Exception e) {
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
             String errorMethod = jettyRequest.getMethod();
             String errorPath = jettyRequest.getHttpURI().getPath();
             String errorQuery = jettyRequest.getHttpURI().getQuery();
@@ -454,7 +445,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             int qc = db != null ? db.queryCount() : 0;
             long qu = db != null ? db.queryDurationUs() : 0;
             if (stats != null) {
-                stats.recordRequest(errorMethod, errorPath, 500, durationUs, qc, qu);
+                stats.recordRequestPattern(errorMethod, routeKey(match), 500,
+                    (System.nanoTime() - startNanos) / 1000, qc, qu);
                 stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
                     routeInfo, stackTraceToString(e), requestInfo, "");
                 Log.error(errorMethod, errorPath, e);
@@ -480,6 +472,48 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             writeResult(errorResult, response, callback, session, csrfOnlySession);
             return true;
         }
+    }
+
+    /**
+     * Stats key for a request: the matched route's PATTERN, or {@link #UNMATCHED_ROUTE_KEY} when
+     * nothing matched (H1).
+     *
+     * <p>The concrete URL must never become a stats key. {@code Stats.routes} is a cumulative map
+     * that is never reset, so keying it by path leaks one entry — plus two {@code LongAdder}s — per
+     * distinct URL ever requested, for the life of the process. With ids in the path that is
+     * unbounded in the app's own data; on the unmatched path it is unbounded in whatever an
+     * attacker types, since every {@code /<random>} 404 would mint a permanent key. Patterns are
+     * code-site literals, so the map stays bounded by the route table.
+     *
+     * <p>This is also why patterns skip the {@code Redactor.redactPath} pass that
+     * {@code Stats.recordRequest} applies to raw paths: a pattern carries no user data, and
+     * redacting it would rewrite {@code /reset/{token}} into a key that no longer matches what the
+     * route table shows.
+     */
+    private static String routeKey(RouteMatch match) {
+        return match != null ? match.route().pattern() : UNMATCHED_ROUTE_KEY;
+    }
+
+    /** Stats bucket for requests that matched no route — see {@link #routeKey}. */
+    static final String UNMATCHED_ROUTE_KEY = "(unmatched)";
+
+    /**
+     * Record one finished request into {@link Stats} and the structured log.
+     *
+     * <p>Stats are keyed by route pattern ({@link #routeKey}); the log deliberately keeps the
+     * CONCRETE (redacted) path. They serve different purposes: the routes table is a bounded
+     * per-route latency aggregate, while the log is an unbounded stream where the actual URL is
+     * the entire diagnostic value — knowing that {@code GET /users/{id}} 404'd is useless without
+     * knowing which id.
+     */
+    private void recordAndLog(RouteMatch match, String method, String path, int status,
+                              long startNanos, Database db) {
+        if (stats == null) return;
+        long durationUs = (System.nanoTime() - startNanos) / 1000;
+        int qc = db != null ? db.queryCount() : 0;
+        long qu = db != null ? db.queryDurationUs() : 0;
+        stats.recordRequestPattern(method, routeKey(match), status, durationUs, qc, qu);
+        Log.request(method, path, status, durationUs, qc, qu);
     }
 
     /**

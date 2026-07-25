@@ -53,8 +53,14 @@ public class Stats {
     /**
      * Records a request against a raw URL path. The path is redacted (secrets must never
      * reach /ops/status) but remains concrete — {@code /users/1} and {@code /users/2} are
-     * distinct keys — so this is only for requests with no matched route. Matched requests
-     * go through {@link #recordRequestPattern} which is bounded by the route table (H7).
+     * distinct keys, so every distinct URL mints a permanent entry in the never-reset
+     * {@code routes} map.
+     *
+     * <p><strong>The framework does not use this.</strong> {@code BraceHandler} routes every
+     * request — matched or not — through {@link #recordRequestPattern}, which is bounded by the
+     * route table (H7, re-broken and re-fixed as correctness H1). It stays public for apps that
+     * want to record their own synthetic entries and can vouch for the key's cardinality; if the
+     * path is at all user-influenced, use {@link #recordRequestPattern} with a constant instead.
      */
     public void recordRequest(String method, String path, int status, long latencyUs,
                               int queryCount, long queryUs) {
