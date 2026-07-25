@@ -59,6 +59,13 @@
         <jbcrypt.version>0.4</jbcrypt.version>
         <slf4j.version>2.0.17</slf4j.version>
         <testcontainers.version>1.21.3</testcontainers.version>
+
+        <!-- Docker Engine API version used by the Testcontainers IT tier. Left unset, docker-java
+             negotiates 1.32, which Docker 29+ rejects outright ("client version 1.32 is too old.
+             Minimum supported API version is 1.40") — every connection strategy then fails and the
+             tier cannot start. 1.41 is the widest safe pin: supported by every daemon from Docker
+             20.10 through 29.x. Override with -Ddocker.api.version=... if a daemon needs otherwise. -->
+        <docker.api.version>1.41</docker.api.version>
     </properties>
 
     <dependencies>
@@ -252,6 +259,14 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>3.5.2</version>
+                <configuration>
+                    <systemPropertyVariables>
+                        <!-- Must reach the forked JVM: docker-java reads the `api.version` system
+                             property. The DOCKER_API_VERSION / API_VERSION env vars are NOT
+                             picked up here. -->
+                        <api.version>${docker.api.version}</api.version>
+                    </systemPropertyVariables>
+                </configuration>
                 <executions>
                     <execution>
                         <goals>

@@ -1,6 +1,5 @@
 package com.larvalabs.brace;
 
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -23,7 +22,8 @@ import java.util.Map;
  *       field on this base, so every IT subclass resolves to the same instance (the
  *       singleton-container pattern). Construction happens at class load (cheap, needs no
  *       Docker); it's started lazily in {@link #ensureStarted()} behind a Docker-availability
- *       check, so the class skips cleanly rather than erroring when Docker is absent.</li>
+ *       check, which <b>fails the build</b> rather than skipping when Docker is absent — see the
+ *       comment there for why silently skipping made {@code mvn verify} useless as a gate.</li>
  *   <li><b>Disposable-DB speed knobs.</b> tmpfs data dir + {@code fsync=off} +
  *       {@code full_page_writes=off} + {@code synchronous_commit=off}. Safe only because the DB
  *       is thrown away — NEVER use any of this in production.</li>
@@ -54,8 +54,28 @@ abstract class PostgresTestBase {
 
     @BeforeAll
     static void ensureStarted() {
-        Assumptions.assumeTrue(DockerClientFactory.instance().isDockerAvailable(),
-                "Docker not available — skipping Postgres integration tests");
+        if (!DockerClientFactory.instance().isDockerAvailable()) {
+            // Fail closed, deliberately. This used to be a JUnit assumption, which aborts the class
+            // — and failsafe reports an aborted class as `Tests run: 0`, NOT as skipped. So
+            // `mvn verify` printed BUILD SUCCESS while the entire Postgres tier silently tested
+            // nothing. Since AGENTS.md makes `mvn verify` the real-Postgres merge gate, a tier that
+            // cannot run must break the build rather than quietly pass it.
+            //
+            // This is not hypothetical: on Docker 29.x, docker-java negotiates API 1.32 while the
+            // daemon requires >= 1.40, so every connection strategy fails on a perfectly healthy
+            // Docker install and the gate went green regardless. See the docker.api.version
+            // property in pom.xml, which pins a version both ends accept.
+            //
+            // To skip this tier on purpose, use Maven's own switch: `mvn verify -DskipITs`. Don't
+            // reintroduce an assumption here — the whole point is that "couldn't run" != "passed".
+            throw new IllegalStateException(
+                    "Docker is not available, so the Postgres integration tier cannot run. "
+                    + "Refusing to pass `mvn verify` without it — that would report success while "
+                    + "testing nothing. Start Docker, run the Docker-free unit suite with "
+                    + "`mvn test`, or skip this tier explicitly with `mvn verify -DskipITs`. "
+                    + "If Docker IS running, check the Docker Engine API version "
+                    + "(see the docker.api.version property in pom.xml).");
+        }
         // Idempotent across subclasses: only the first to run actually starts the shared container.
         if (!POSTGRES.isRunning()) {
             POSTGRES.start();
