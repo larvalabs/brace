@@ -38,7 +38,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
 
 ## High
 
-- [ ] **H1: Per-route stats are keyed by the concrete URL, so the `routes` map grows without bound**
+- [x] **H1: Per-route stats are keyed by the concrete URL, so the `routes` map grows without bound**
   - Severity: High. Files: `BraceHandler.java:422,437,457`; `Stats.java:53-73` (`recordRequest` vs `recordRequestPattern`).
   - Every request-recording call site uses `stats.recordRequest(method, path, …)` — the **raw path**
     variant. `Stats.recordRequestPattern`, added by the runtime-performance review's H7 fix
@@ -60,11 +60,14 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
        multipart body, for instance) legitimately reaches the catch with no match.
     3. Point all three sites at it: `:422` (success), `:437` (`NotFoundException` — a handler on a
        matched route choosing to 404, so it has a pattern), `:457` (500).
-    4. `Log.request` takes the same value, so `/ops/logs` and stdout agree with `/ops/routes`.
-       Both variants keep their current redaction split: `recordRequest` runs
-       `Redactor.redactPath` because a raw path can carry a token; `recordRequestPattern` skips it
-       because patterns are code-site literals. Don't redact patterns — `/reset/{token}` would
-       otherwise be mangled into a different key than it renders as.
+    4. `Log.request` keeps the **concrete** (redacted) path. Correcting the spec above: making the
+       log agree with the routes table would be a real loss — the routes map is a bounded latency
+       aggregate, but the log is an unbounded stream where the actual URL is the whole diagnostic
+       value ("`GET /users/{id}` 404'd" is useless without the id). Only stats change.
+       The redaction split stays: `recordRequest` runs `Redactor.redactPath` because a raw path can
+       carry a token; `recordRequestPattern` skips it because patterns are code-site literals.
+       Don't redact patterns — `/reset/{token}` would otherwise be mangled into a different key
+       than it renders as.
     - Not part of this fix, but the two interlock: H2 moves recording to the `writeResult` choke
       point, which needs the same hoisted `match`. Landing H1 first is fine — H2 then relocates the
       call rather than changing what it records.
@@ -77,6 +80,19 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     `stats.routeStats().keySet()` holds exactly one entry after N requests to N distinct ids under
     one pattern. This exact fix existed once (perf review H7) and silently reverted, and nothing in
     the suite noticed.
+  - **Resolved as:** the plan above, with two adjustments found while implementing.
+    (a) `Log.request` keeps the concrete redacted path (see step 4) — the spec's "same value" would
+    have thrown away the log's diagnostic value to no benefit.
+    (b) The `match == null` fallback records a constant `(unmatched)` bucket rather than the raw
+    path. Keying the fallback by path would have left the leak wide open on exactly the input an
+    attacker controls: every `/<random>` that throws before routing would mint a permanent key.
+    `Stats.recordRequest` is now unused by the framework; kept public, with its Javadoc corrected
+    to stop claiming the handler uses it and to warn about key cardinality.
+    New `RouteStatsKeyTest` covers pattern-keying for 200s, handler-thrown 404s, and 500s; that no
+    concrete or unmatched URL ever becomes a key; and the pre-routing throw (a malformed
+    percent-escape in the query string, which `parseQuery` hits before `router.match`) landing in
+    the unmatched bucket. That last case needs a raw socket — `java.net.URI` rejects `%zz`
+    client-side, so the JDK HTTP client cannot produce the request.
 
 - [ ] **H2: Every response that short-circuits before the handler is invisible to stats and the request log**
   - Severity: High. Files: `BraceHandler.java:210,223,245,266,279,283,329` (early `return true`) vs the
