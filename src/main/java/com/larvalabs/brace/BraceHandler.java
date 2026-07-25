@@ -409,10 +409,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // discard the cookie (M6).
             //
             // One precedence nuance did change: the htmx Vary below used to be written *after* the
-            // middleware chain and therefore won; it is now written before, so an after-middleware
-            // that sets Vary overwrites it. Vary lives in the single-value header map and cannot be
-            // combined either way, so neither order is right for an app that sets its own Vary —
-            // such an app should append "HX-Request" itself.
+            // middleware chain and therefore won; it is now written before. It is appended to the
+            // handler's own Vary (M3 below), but an after-middleware that *sets* Vary still replaces
+            // the whole value, so such a middleware should append to result.header("Vary") instead.
 
             // Add Vary header for htmx requests (caching correctness). M3: APPEND — Vary is a
             // list header, and overwriting it dropped whatever dimension the handler or an
