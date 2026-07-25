@@ -8,9 +8,52 @@ import java.util.concurrent.Semaphore;
 
 public class JobPoller {
 
+    /**
+     * How long a claimed-but-unfinished job may sit before {@link #reclaimStalledJobs} assumes the
+     * instance running it died and returns the row to the queue. See {@link #sweepLoop}.
+     */
+    static final Duration DEFAULT_LEASE = Duration.ofMinutes(30);
+
+    /** How often the sweeper checks for expired leases. Well under {@link #DEFAULT_LEASE}. */
+    private static final long SWEEP_INTERVAL_MS = 60_000;
+
+    /**
+     * How long the poller waits before re-polling when the last claim did not fill every free
+     * execution slot — i.e. the queue is idle or nearly so. A full batch always re-polls
+     * immediately, so this is the pickup latency for work arriving at a quiet app, not a throughput
+     * limit.
+     *
+     * <p>An empty poll is cheap: the claim UPDATE matches no rows, so no tuple is written, no XID
+     * is assigned, and the commit needs no fsync — it costs one probe of the {@code V15} partial
+     * index plus the round trips. At 1s that is a fraction of a percent of one pooled connection
+     * per instance.
+     *
+     * <p>This is a safety net rather than the primary path: {@link Jobs#schedule} wakes the local
+     * poller as soon as the enqueuing transaction commits, so a job scheduled with no delay starts
+     * almost immediately. Polling covers everything a wake cannot reach — jobs with a future
+     * {@code run_at}, retries whose backoff has expired, rows freed by {@link #reclaimStalledJobs},
+     * work enqueued on a <em>different</em> instance, and anything already queued at startup.
+     *
+     * <p>Two cases where polling is not free, both worth knowing before lowering it:
+     * a high-RTT database (the round trips dominate), and a queue with wide {@code depends_on_id}
+     * fan-out — dependency-blocked children sit in the claim index with {@code run_at} in the past,
+     * so the scan walks them before reaching claimable work, and that cost scales with poll rate.
+     */
+    static final Duration DEFAULT_POLL_INTERVAL = Duration.ofSeconds(5);
+
     private volatile boolean running;
     private Thread pollerThread;
+    private Thread sweeperThread;
     private DatabaseFactory dbFactory;
+    private volatile Duration lease = DEFAULT_LEASE;
+    private volatile Duration pollInterval = DEFAULT_POLL_INTERVAL;
+
+    /**
+     * Wake signal for {@link #wake()}. A permit released while the poller is mid-poll is retained,
+     * so a job enqueued during a poll that missed it still triggers an immediate re-poll instead of
+     * waiting out the interval — the lost-wakeup case.
+     */
+    private final Semaphore wakeSignal = new Semaphore(0);
 
     // Execution-capacity limiter (perf review H4): jobs share the app's connection pool with web
     // handlers, so at most poolSize/2 jobs run at once — a burst can no longer take every Hikari
@@ -29,21 +72,78 @@ public class JobPoller {
 
     public record DurableJobStats(long pending, long running, long completed, long failed) {}
 
+    /**
+     * Set the claim lease; {@code null} or non-positive disables stalled-job recovery entirely
+     * (the pre-0.1.8 behavior). Must be called before {@link #start}.
+     */
+    public void lease(Duration lease) {
+        this.lease = lease;
+    }
+
+    /**
+     * Set the idle poll interval (see {@link #DEFAULT_POLL_INTERVAL}). Must be positive — there is
+     * no "disable" value, since zero would spin the poll loop against the database. Must be called
+     * before {@link #start}.
+     */
+    /**
+     * Poll again now instead of waiting out the interval. Called after a {@link Jobs#schedule}
+     * transaction commits, so the row is visible before the poller looks.
+     *
+     * <p>Best-effort by design: it only wakes <em>this</em> instance, and a missed wake costs
+     * latency, never correctness — polling still finds the job. That is what lets it stay this
+     * cheap, and why the poll interval is a safety net rather than dead weight.
+     *
+     * <p>The permit is capped at one. Bulk-scheduling collapses to a single extra poll rather than
+     * one per job, and the benign race where two threads both observe zero permits costs at most
+     * one additional poll.
+     */
+    void wake() {
+        if (wakeSignal.availablePermits() == 0) {
+            wakeSignal.release();
+        }
+    }
+
+    /** Whether a wake is queued but not yet consumed by the poll loop. For tests. */
+    boolean wakePending() {
+        return wakeSignal.availablePermits() > 0;
+    }
+
+    /** Queued wake permits; capped at one by {@link #wake()}. For tests. */
+    int wakePermits() {
+        return wakeSignal.availablePermits();
+    }
+
+    public void pollInterval(Duration pollInterval) {
+        if (pollInterval == null || pollInterval.isNegative() || pollInterval.isZero()) {
+            throw new IllegalArgumentException("Job poll interval must be positive, got: " + pollInterval);
+        }
+        this.pollInterval = pollInterval;
+    }
+
     public void start(DatabaseFactory dbFactory) {
         this.dbFactory = dbFactory;
         this.running = true;
         this.pollerThread = Thread.startVirtualThread(this::pollLoop);
+        if (lease != null && !lease.isNegative() && !lease.isZero()) {
+            this.sweeperThread = Thread.startVirtualThread(this::sweepLoop);
+        }
     }
 
     public void stop() {
         running = false;
-        if (pollerThread != null) {
-            pollerThread.interrupt();
-            try {
-                pollerThread.join(5000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        stopThread(pollerThread);
+        stopThread(sweeperThread);
+    }
+
+    private static void stopThread(Thread thread) {
+        if (thread == null) {
+            return;
+        }
+        thread.interrupt();
+        try {
+            thread.join(5000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -51,15 +151,20 @@ public class JobPoller {
         while (running) {
             try {
                 var batch = dispatch(dbFactory);
-                if (batch.claimed() == 0) {
-                    Thread.sleep(10_000);
-                } else if (batch.claimed() < batch.slots()) {
-                    Thread.sleep(1_000);
+                if (batch.claimed() < batch.slots()) {
+                    // Interruptible wait: returns early if wake() fired (a job was enqueued on
+                    // this instance), otherwise falls through on the poll interval.
+                    wakeSignal.tryAcquire(pollInterval.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
                 }
                 // Full batch: more work is likely queued — poll again immediately. dispatch
                 // itself blocks until an execution slot frees, so the loop re-polls as
                 // capacity opens up; it no longer joins the whole batch, which let one slow
                 // job stall every other queued job for its duration (H4).
+                //
+                // Anything short of a full batch waits pollInterval. This used to be two tiers
+                // (1s after a partial batch, 10s after an empty one); at the 1s default the two
+                // coincide, and collapsing them makes a configured interval mean exactly what it
+                // says rather than applying only to the idle case.
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -72,6 +177,58 @@ public class JobPoller {
                     Thread.currentThread().interrupt();
                     break;
                 }
+            }
+        }
+    }
+
+    /**
+     * Returns rows claimed by an instance that died before writing a terminal mark back to the
+     * queue. {@link #claimBatchPostgres} commits {@code started_at} <em>before</em> the job body
+     * runs (so other instances skip the row), and every terminal outcome — completed, failed,
+     * released-for-retry — is written by {@link #runJobBody} afterwards. If the process dies in
+     * between, the row is left {@code started_at IS NOT NULL} with both terminal timestamps NULL,
+     * which no claim predicate matches and {@link #purgeFinishedJobs} never deletes (it filters on
+     * the terminal timestamps): permanently invisible and permanently undeletable.
+     *
+     * <p>This is routine, not exotic. {@code stop()} halts the poll loop but never joins the
+     * per-job virtual threads, and virtual threads are always daemon — so JVM exit kills in-flight
+     * jobs mid-run and every ordinary deploy can strand up to {@code poolSize/2} of them. A
+     * stranded parent also blocks its whole {@code depends_on_id} subtree forever, and those
+     * blocked children sit at the head of the claim scan's {@code run_at} ordering, taxing every
+     * future poll.
+     *
+     * <p>Runs on its own thread rather than inside {@link #pollLoop} deliberately: when every
+     * execution slot is held by a hung job, the poll loop is parked in {@code limiter.acquire()}
+     * and would never reach a sweep folded into it — which is exactly the case that most needs one,
+     * since recovery has to come from a sibling instance.
+     */
+    private void sweepLoop() {
+        while (running) {
+            try {
+                Thread.sleep(SWEEP_INTERVAL_MS);
+                var db = new Database(dbFactory.openSession());
+                try {
+                    db.beginTransaction();
+                    var swept = reclaimStalledJobs(db, Instant.now().minus(lease));
+                    db.commitTransaction();
+                    if (swept.reclaimed() > 0 || swept.failed() > 0) {
+                        Log.event("jobs_stalled_swept", java.util.Map.of(
+                            "reclaimed", swept.reclaimed(),
+                            "failed", swept.failed(),
+                            "lease_seconds", lease.toSeconds()));
+                    }
+                } catch (RuntimeException e) {
+                    db.rollbackTransaction();
+                    throw e;
+                } finally {
+                    db.close();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                // Transient DB error — the next sweep retries. Never let it kill the thread.
+                System.err.println("JobPoller sweep error: " + e.getMessage());
             }
         }
     }
@@ -349,6 +506,65 @@ public class JobPoller {
 
     private static long toCount(Object value) {
         return value == null ? 0 : ((Number) value).longValue();
+    }
+
+    /** Outcome of one stalled-job sweep: rows returned to the queue, and rows failed outright. */
+    public record SweepResult(int reclaimed, int failed) {}
+
+    /**
+     * Recover jobs claimed before {@code cutoff} that never reached a terminal state — see
+     * {@link #sweepLoop} for how rows get stranded. Returns what it did.
+     *
+     * <p>Two disjoint outcomes, split on the attempt budget the claim already spent:
+     * <ul>
+     *   <li><b>Attempts remain</b> — clear {@code started_at}, returning the row to the normal
+     *       claimable set. {@code attempts} is deliberately left as-is: the claim incremented it
+     *       before the job ran, so a job that strands repeatedly burns its budget and eventually
+     *       lands in the branch below rather than looping forever. That guard already exists in
+     *       both claim predicates ({@code attempts < max_attempts}), so no new state is needed.
+     *   <li><b>Attempts exhausted</b> — set {@code failed_at}, matching what {@link #runJobBody}
+     *       writes when a live job exhausts its retries. Without this the row would clear the
+     *       lease but fail {@code attempts < max_attempts}, stranding it a second way.
+     * </ul>
+     *
+     * <p>Clearing {@code started_at} rather than widening the claim predicate to
+     * {@code OR started_at < ...} keeps the hot claim query and its {@code V15} partial index
+     * exactly as the perf review left them — recovered rows re-enter through the ordinary path,
+     * and the H2 per-row re-claim guard ({@code AND started_at IS NULL}) still holds unchanged.
+     *
+     * <p><b>Semantics.</b> A lease cannot distinguish a dead instance from a job that is merely
+     * slower than the lease, so a job still running past {@code cutoff} will be picked up again
+     * elsewhere. That is the at-least-once contract {@link DurableJob} already carries — jobs must
+     * be idempotent — but it means the lease must exceed the longest job you expect to run
+     * ({@link Brace#jobLease}).
+     *
+     * <p>{@code cutoff} is computed from the app clock while {@code started_at} is written from the
+     * database clock ({@code CURRENT_TIMESTAMP}), same as {@link #purgeFinishedJobs}. Skew of
+     * seconds is immaterial against a lease of minutes.
+     */
+    public static SweepResult reclaimStalledJobs(Database db, Instant cutoff) {
+        var ts = Timestamp.from(cutoff);
+        return db.jdbc(conn -> {
+            int reclaimed;
+            try (var ps = conn.prepareStatement(
+                    "UPDATE scheduled_jobs SET started_at = NULL, error = ? " +
+                    "WHERE started_at < ? AND completed_at IS NULL AND failed_at IS NULL " +
+                    "AND attempts < max_attempts")) {
+                ps.setString(1, "Reclaimed: claimed but never finished (lease expired)");
+                ps.setTimestamp(2, ts);
+                reclaimed = ps.executeUpdate();
+            }
+            int failed;
+            try (var ps = conn.prepareStatement(
+                    "UPDATE scheduled_jobs SET failed_at = CURRENT_TIMESTAMP, error = ? " +
+                    "WHERE started_at < ? AND completed_at IS NULL AND failed_at IS NULL " +
+                    "AND attempts >= max_attempts")) {
+                ps.setString(1, "Failed: claimed but never finished (lease expired, attempts exhausted)");
+                ps.setTimestamp(2, ts);
+                failed = ps.executeUpdate();
+            }
+            return new SweepResult(reclaimed, failed);
+        });
     }
 
     /**

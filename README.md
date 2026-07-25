@@ -340,6 +340,19 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
 Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
 `0` to keep forever).
 
+Scheduling a job with no delay wakes the poller as soon as your transaction commits, so it starts
+almost immediately. Polling continues underneath as a safety net at `app.jobPollInterval("5s")`
+(the default), covering delayed jobs, retries, and work enqueued on other instances.
+
+A job holds its claim for at most `app.jobLease("30m")` (the default). If the instance running it
+dies mid-job — an ordinary deploy is enough — the claim expires and the job returns to the queue,
+so jobs should be idempotent. Raise the lease above your longest-running job; it takes an interval
+string or a `Duration`, so it can come from config directly:
+
+```java
+app.jobLease(config.get("jobs.lease", "30m"));
+```
+
 ## Mailer
 
 ```java
@@ -348,6 +361,9 @@ mail.to("user@example.com")
     .html(View.render("emails/welcome", "user", user))
     .sendAsync();   // background virtual thread; send() blocks until delivered
 ```
+
+SMTP timeouts default to 10s connect / 30s per read-write, so a wedged relay fails the send rather
+than hanging the caller. Override with `.connectTimeout(Duration)` / `.timeout(Duration)`.
 
 Use `sendAsync()` from request handlers — `send()` does synchronous SMTP on the calling
 thread. Dev mode captures emails without sending (last 500). Access via `mailer.sent()` in tests.

@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobLease()`, `jobPollInterval()`, `group()`.
 
 ## Routing
 
@@ -563,6 +563,36 @@ Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they s
 connection pool with web handlers), and the poller claims more work as slots free — a slow job
 doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
 
+`Jobs.schedule(db, job, Duration.ZERO)` wakes the poller as soon as **your** transaction commits,
+so a job with no delay starts almost immediately — no polling delay in the common case. The wake is
+registered as an after-commit hook precisely because `schedule` runs inside the caller's
+transaction; waking any sooner would have the poller look before the row is visible.
+
+Polling continues underneath as the safety net, at `app.jobPollInterval(...)` (default `"5s"`,
+interval string or `Duration`, must be positive). It covers the five things a wake can't reach:
+jobs with a future `run_at`, retries whose backoff expired, rows freed by the stalled-job sweeper,
+work enqueued on a **different** instance, and anything already queued at startup. A missed wake
+costs latency, never correctness.
+
+A job holds its claim for at most `app.jobLease(...)` (default 30 minutes). If the instance
+running it dies before the job finishes — an ordinary deploy is enough, since JVM exit kills
+in-flight jobs — the claim expires and the job is returned to the queue, or failed outright if its
+`maxAttempts` are already spent. Set the lease above the longest job you expect to run: a lease
+can't tell a dead instance from a slow job, so a job still running when its lease expires may be
+picked up again elsewhere. That's the at-least-once contract `DurableJob` already carries — **jobs
+should be idempotent**.
+
+Takes an interval string (`"30s"`, `"15m"`, `"2h"` — same format as `every()`) or a `Duration`, so
+it can come straight from config:
+
+```java
+app.jobLease("2h");                                // literal
+app.jobLease(config.get("jobs.lease", "30m"));     // conf file or JOBS_LEASE env var
+```
+
+A null/blank string keeps the default rather than disabling, so a missing config key can't silently
+strand jobs. To disable recovery deliberately: `jobLease("0s")` or `jobLease((Duration) null)`.
+
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 
 Job lambdas receive `(Database, JobContext)`. Use `ctx.message("Retrieved " + n + " new listings")`
@@ -599,6 +629,10 @@ mail.to("user@example.com")
     .text("Plain text body")
     .send();
 ```
+
+SMTP timeouts are bounded by default — 10s connect, 30s per read/write — so a wedged relay fails
+the send instead of hanging the caller forever. Override with `.connectTimeout(Duration)` and
+`.timeout(Duration)` for a slow relay or large attachments.
 
 `sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
 Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.

@@ -427,4 +427,321 @@ class DurableJobTest {
             db2.close();
         }
     }
+
+    // --- Stalled-claim recovery -------------------------------------------------------------
+    //
+    // A row claimed by an instance that died mid-run keeps started_at set with both terminal
+    // timestamps NULL. No claim predicate matches it and purgeFinishedJobs never deletes it, so
+    // before JobPoller.reclaimStalledJobs it was invisible and undeletable forever.
+
+    private static long scheduleJob(DurableJob job, JobOptions options) {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            long id = Jobs.schedule(db, job, Duration.ZERO, options);
+            db.commitTransaction();
+            return id;
+        } finally {
+            db.close();
+        }
+    }
+
+    /** Reproduce a row stranded by a killed instance: claimed {@code age} ago, attempts spent,
+     *  no terminal mark ever written. */
+    private static void strandClaim(long jobId, Duration age, int attempts) {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            db.sql("UPDATE scheduled_jobs SET started_at = ?, attempts = ? WHERE id = ?",
+                java.sql.Timestamp.from(java.time.Instant.now().minus(age)), attempts, jobId);
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    /** {started_at, completed_at, failed_at, attempts, error} for one job. */
+    private static Object[] jobRow(long id) {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var rows = db.sqlQuery(
+                "SELECT started_at, completed_at, failed_at, attempts, error FROM scheduled_jobs WHERE id = ?", id);
+            db.commitTransaction();
+            return rows.get(0);
+        } finally {
+            db.close();
+        }
+    }
+
+    private static JobPoller.SweepResult sweep(Duration lease) {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            var result = JobPoller.reclaimStalledJobs(db, java.time.Instant.now().minus(lease));
+            db.commitTransaction();
+            return result;
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void stalledClaimIsReclaimedAndRunsAgain() {
+        long id = scheduleJob(new TestJob("stranded"), new JobOptions());
+        strandClaim(id, Duration.ofMinutes(30), 1);
+
+        // Stranded: the claim query cannot see it, so it would never run again.
+        assertEquals(0, new JobPoller().pollAndExecute(factory));
+        assertEquals(0, TestJob.runCount.get());
+
+        var swept = sweep(Duration.ofMinutes(15));
+        assertEquals(1, swept.reclaimed());
+        assertEquals(0, swept.failed());
+        assertNull(jobRow(id)[0], "started_at cleared, so the row re-enters the normal claim path");
+
+        assertEquals(1, new JobPoller().pollAndExecute(factory));
+        assertEquals(1, TestJob.runCount.get());
+    }
+
+    @Test
+    void stalledClaimKeepsSpentAttemptsSoItCannotLoopForever() {
+        long id = scheduleJob(new TestJob("repeat-stranded"), new JobOptions());
+        strandClaim(id, Duration.ofMinutes(30), 1);
+
+        sweep(Duration.ofMinutes(15));
+        // The claim already spent attempt 1; reclaiming must not refund it, or a job that strands
+        // every time would be reclaimed forever.
+        assertEquals(1, ((Number) jobRow(id)[3]).intValue());
+    }
+
+    @Test
+    void stalledClaimWithExhaustedAttemptsFailsInsteadOfReclaiming() {
+        long id = scheduleJob(new TestJob("doomed"), new JobOptions());
+        strandClaim(id, Duration.ofMinutes(30), 3); // default max_attempts is 3
+
+        var swept = sweep(Duration.ofMinutes(15));
+        assertEquals(0, swept.reclaimed());
+        assertEquals(1, swept.failed());
+
+        var row = jobRow(id);
+        assertNotNull(row[2], "failed_at set, so the row is terminal and purgeable");
+        assertTrue(((String) row[4]).contains("attempts exhausted"));
+
+        // Clearing the lease alone would have stranded it a second way: claimable-shaped but
+        // excluded by attempts < max_attempts.
+        assertEquals(0, new JobPoller().pollAndExecute(factory));
+    }
+
+    @Test
+    void sweepLeavesUnexpiredClaimsAlone() {
+        long id = scheduleJob(new TestJob("still-running"), new JobOptions());
+        strandClaim(id, Duration.ofMinutes(1), 1);
+
+        var swept = sweep(Duration.ofMinutes(15));
+        assertEquals(0, swept.reclaimed());
+        assertEquals(0, swept.failed());
+        assertNotNull(jobRow(id)[0], "a job inside its lease keeps its claim");
+    }
+
+    @Test
+    void sweepLeavesFinishedJobsAlone() {
+        long id = scheduleJob(new TestJob("finished"), new JobOptions());
+        assertEquals(1, new JobPoller().pollAndExecute(factory));
+        assertNotNull(jobRow(id)[1]);
+
+        var swept = sweep(Duration.ofMinutes(0)); // cutoff = now, so every started_at qualifies on age
+        assertEquals(0, swept.reclaimed());
+        assertEquals(0, swept.failed());
+        assertNotNull(jobRow(id)[1], "completed_at untouched");
+    }
+
+    @Test
+    void jobLeaseAcceptsIntervalStrings() {
+        assertEquals(Duration.ofMinutes(15), Brace.app().jobLease("15m").jobLease());
+        assertEquals(Duration.ofHours(2), Brace.app().jobLease("2h").jobLease());
+        assertEquals(Duration.ofSeconds(90), Brace.app().jobLease("90s").jobLease());
+        assertEquals(Duration.ofMinutes(30), Brace.app().jobLease(), "default when never set");
+    }
+
+    @Test
+    void jobLeaseStringDisablesOnlyOnExplicitZero() {
+        assertNull(Brace.app().jobLease("0s").jobLease());
+
+        // A missing config key must not silently strand jobs — config.get("jobs.lease") with no
+        // default returns null, and that has to leave the default in place rather than disable.
+        assertEquals(Duration.ofMinutes(30), Brace.app().jobLease((String) null).jobLease());
+        assertEquals(Duration.ofMinutes(30), Brace.app().jobLease("   ").jobLease());
+
+        // Disabling deliberately still works through the Duration overload.
+        assertNull(Brace.app().jobLease((Duration) null).jobLease());
+    }
+
+    @Test
+    void jobPollIntervalDefaultsToFiveSeconds() {
+        // Five, not one: Jobs.schedule wakes the poller directly for work that is due now, so
+        // polling only has to cover what a wake can't reach (future run_at, retries, reclaimed
+        // rows, other instances, startup).
+        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval());
+        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval("1s").jobPollInterval());
+        assertEquals(Duration.ofMinutes(2), Brace.app().jobPollInterval("2m").jobPollInterval());
+
+        // Missing config key keeps the default, same rule as jobLease.
+        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval((String) null).jobPollInterval());
+        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval("  ").jobPollInterval());
+    }
+
+    @Test
+    void jobPollIntervalMustBePositive() {
+        // No "disable" value — zero would spin the poll loop against the database. The guard lives
+        // on JobPoller, where start() applies it.
+        var poller = new JobPoller();
+        assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(Duration.ofSeconds(-1)));
+        assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(null));
+    }
+
+    // --- Wake on enqueue ---------------------------------------------------------------------
+
+    @Test
+    void afterCommitHookRunsOnlyAfterTheCommit() {
+        var fired = new AtomicInteger(0);
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            db.afterCommit(fired::incrementAndGet);
+            Jobs.schedule(db, new TestJob("x"), Duration.ZERO);
+            assertEquals(0, fired.get(), "must not fire while the row is still uncommitted");
+            db.commitTransaction();
+            assertEquals(1, fired.get());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void afterCommitHookIsDroppedOnRollback() {
+        var fired = new AtomicInteger(0);
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            db.afterCommit(fired::incrementAndGet);
+            db.rollbackTransaction();
+            assertEquals(0, fired.get(), "the work never landed, so the hook must not run");
+
+            // And it must not leak into a later commit on the same session.
+            db.beginTransaction();
+            db.commitTransaction();
+            assertEquals(0, fired.get());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void afterCommitHookFailureDoesNotBreakTheCommit() {
+        var db = new Database(factory.openSession());
+        long id;
+        try {
+            db.beginTransaction();
+            db.afterCommit(() -> { throw new RuntimeException("hook blew up"); });
+            id = Jobs.schedule(db, new TestJob("survives"), Duration.ZERO);
+            assertDoesNotThrow(db::commitTransaction);
+        } finally {
+            db.close();
+        }
+        // The transaction succeeded, so the job is really queued.
+        assertNotNull(jobRow(id));
+        assertEquals(1, new JobPoller().pollAndExecute(factory));
+    }
+
+    @Test
+    void schedulingWakesThePollerOnceCommitted() {
+        var poller = new JobPoller();
+        Runnable hook = poller::wake;
+        Jobs.onEnqueue(hook);
+        try {
+            var db = new Database(factory.openSession());
+            try {
+                db.beginTransaction();
+                Jobs.schedule(db, new TestJob("wakes"), Duration.ZERO);
+                assertFalse(poller.wakePending(), "no wake until the row is visible");
+                db.commitTransaction();
+                assertTrue(poller.wakePending(), "committed enqueue wakes the poller");
+            } finally {
+                db.close();
+            }
+        } finally {
+            Jobs.clearEnqueueHook(hook);
+        }
+    }
+
+    @Test
+    void schedulingDelayedWorkDoesNotWakeThePoller() {
+        var poller = new JobPoller();
+        Runnable hook = poller::wake;
+        Jobs.onEnqueue(hook);
+        try {
+            var db = new Database(factory.openSession());
+            try {
+                db.beginTransaction();
+                Jobs.schedule(db, new TestJob("later"), Duration.ofHours(1));
+                db.commitTransaction();
+            } finally {
+                db.close();
+            }
+            // Not runnable yet — an immediate poll would find nothing, so there is nothing to wake
+            // for. Polling picks it up when run_at arrives.
+            assertFalse(poller.wakePending());
+        } finally {
+            Jobs.clearEnqueueHook(hook);
+        }
+    }
+
+    @Test
+    void bulkSchedulingCollapsesToASingleWake() {
+        var poller = new JobPoller();
+        Runnable hook = poller::wake;
+        Jobs.onEnqueue(hook);
+        try {
+            for (int i = 0; i < 50; i++) {
+                var db = new Database(factory.openSession());
+                try {
+                    db.beginTransaction();
+                    Jobs.schedule(db, new TestJob("bulk" + i), Duration.ZERO);
+                    db.commitTransaction();
+                } finally {
+                    db.close();
+                }
+            }
+            // One pending permit, not 50 — the poller does one extra poll, not fifty.
+            assertEquals(1, poller.wakePermits());
+        } finally {
+            Jobs.clearEnqueueHook(hook);
+        }
+    }
+
+    @Test
+    void jobLeaseRejectsMalformedIntervals() {
+        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15"));
+        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15d"));
+        assertThrows(NumberFormatException.class, () -> Brace.app().jobLease("abcm"));
+    }
+
+    @Test
+    void reclaimingStrandedParentUnblocksItsDependents() {
+        long parent = scheduleJob(new TestJob("parent"), new JobOptions());
+        scheduleJob(new TestJob("child"), JobOptions.after(parent));
+        strandClaim(parent, Duration.ofMinutes(30), 1);
+
+        // The child is blocked behind a parent that will never complete — one killed job strands
+        // its whole dependent subtree.
+        assertEquals(0, new JobPoller().pollAndExecute(factory));
+
+        sweep(Duration.ofMinutes(15));
+
+        assertEquals(1, new JobPoller().pollAndExecute(factory)); // parent
+        assertEquals(1, new JobPoller().pollAndExecute(factory)); // child, now unblocked
+        assertEquals(2, TestJob.runCount.get());
+    }
 }

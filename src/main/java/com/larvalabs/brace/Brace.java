@@ -58,6 +58,9 @@ public class Brace {
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
     private int jobRetentionDays = 7;
+    private java.time.Duration jobLease = JobPoller.DEFAULT_LEASE;
+    private java.time.Duration jobPollInterval = JobPoller.DEFAULT_POLL_INTERVAL;
+    private Runnable enqueueHook;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -405,6 +408,95 @@ public class Brace {
     public Brace jobRetention(int days) {
         this.jobRetentionDays = days;
         return this;
+    }
+
+    /**
+     * How long a durable job may hold its claim before the framework assumes the instance running
+     * it died and returns the job to the queue. Default 30 minutes — deliberately generous, so the
+     * lease does not reclaim a job that is merely slow on an app that never tuned it.
+     *
+     * <p>Without this, a job whose process is killed mid-run (an ordinary deploy is enough — JVM
+     * exit kills in-flight jobs) leaves a row that no poller will ever claim again and no prune
+     * will ever delete. See {@link JobPoller#reclaimStalledJobs}.
+     *
+     * <p>Set this above the longest job you expect to run. A lease cannot tell a dead instance
+     * from a slow job, so a job still running when its lease expires gets picked up again
+     * elsewhere — consistent with {@link DurableJob}'s at-least-once contract, but it assumes your
+     * jobs are idempotent. Pass {@code null} or {@link java.time.Duration#ZERO} to disable
+     * recovery and keep the pre-0.1.8 behavior.
+     */
+    public Brace jobLease(java.time.Duration lease) {
+        this.jobLease = lease;
+        return this;
+    }
+
+    /**
+     * {@link #jobLease(java.time.Duration)} as an interval string — {@code "30s"}, {@code "15m"},
+     * {@code "2h"} — the same format {@link #every(String, String, Job)} takes. Lets the lease come
+     * straight from config without the caller parsing it:
+     *
+     * <pre>{@code
+     * app.jobLease(config.get("jobs.lease", "30m"));
+     * }</pre>
+     *
+     * <p>A {@code null} or blank value <em>keeps the current default</em> rather than disabling
+     * recovery, so a missing config key can't silently strand jobs. To actually disable, pass
+     * {@code "0s"} or {@link #jobLease(java.time.Duration) jobLease((Duration) null)}.
+     */
+    public Brace jobLease(String interval) {
+        if (interval == null || interval.isBlank()) {
+            return this;
+        }
+        long millis = JobScheduler.parseInterval(interval.trim());
+        this.jobLease = millis > 0 ? java.time.Duration.ofMillis(millis) : null;
+        return this;
+    }
+
+    /** The configured job lease; {@code null} means stalled-job recovery is off. For tests. */
+    java.time.Duration jobLease() {
+        return jobLease;
+    }
+
+    /**
+     * How long the durable-job poller waits before re-polling when it did not fill every free
+     * execution slot. Default 1 second — this is the pickup latency for a job enqueued on an
+     * otherwise idle app. A full batch always re-polls immediately, so this does not cap throughput.
+     *
+     * <p>Lower it for snappier pickup, raise it to cut background query volume on a fleet that
+     * enqueues rarely. An idle poll costs one index probe and no write (the claim matches no rows,
+     * so the commit needs no fsync), which is why 1s is affordable by default; see
+     * {@link JobPoller#DEFAULT_POLL_INTERVAL} for the two cases where it is not.
+     *
+     * <p>Must be positive — there is no "disable", since zero would spin against the database.
+     */
+    public Brace jobPollInterval(java.time.Duration interval) {
+        this.jobPollInterval = interval;
+        return this;
+    }
+
+    /**
+     * {@link #jobPollInterval(java.time.Duration)} as an interval string — {@code "500ms"} is not
+     * supported, but {@code "1s"}, {@code "30s"} and {@code "5m"} are — the same format
+     * {@link #every(String, String, Job)} takes. Lets the interval come from config:
+     *
+     * <pre>{@code
+     * app.jobPollInterval(config.get("jobs.poll-interval", "1s"));
+     * }</pre>
+     *
+     * <p>A {@code null} or blank value keeps the current default, so a missing config key can't
+     * accidentally change poll behavior.
+     */
+    public Brace jobPollInterval(String interval) {
+        if (interval == null || interval.isBlank()) {
+            return this;
+        }
+        this.jobPollInterval = java.time.Duration.ofMillis(JobScheduler.parseInterval(interval.trim()));
+        return this;
+    }
+
+    /** The configured job poll interval. For tests. */
+    java.time.Duration jobPollInterval() {
+        return jobPollInterval;
     }
 
     // Route registration
@@ -843,7 +935,13 @@ public class Brace {
 
         jobScheduler.start(databaseFactory);
         if (databaseFactory != null) {
+            jobPoller.lease(jobLease);
+            jobPoller.pollInterval(jobPollInterval);
             jobPoller.start(databaseFactory);
+            // Let Jobs.schedule nudge the poller after the enqueuing transaction commits, so a
+            // job with no delay starts without waiting out the poll interval.
+            enqueueHook = jobPoller::wake;
+            Jobs.onEnqueue(enqueueHook);
         }
 
         // On Postgres, rate limiters count cluster-wide via a shared DB counter (B4) so a limit is
@@ -1034,6 +1132,12 @@ public class Brace {
     }
 
     public void stop() throws Exception {
+        if (enqueueHook != null) {
+            // Identity-checked, so stopping this app doesn't unhook a different one that started
+            // after it (several apps in one JVM — tests).
+            Jobs.clearEnqueueHook(enqueueHook);
+            enqueueHook = null;
+        }
         jobPoller.stop();
         jobScheduler.stop();
         if (cache != null) {
