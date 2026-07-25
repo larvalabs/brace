@@ -228,7 +228,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     `MultiValueParamsTest` so the multipart and urlencoded cases sit side by side: repeats in
     order, single values, values needing encoding, and interleaved field names.
 
-- [ ] **M2: `boolean` form fields don't bind HTML checkboxes**
+- [x] **M2: `boolean` form fields don't bind HTML checkboxes**
   - Files: `FormBinder.java:130`.
   - `Boolean.parseBoolean(raw)` is `false` for everything except `"true"`. A checked HTML checkbox
     submits `name=on`. So an unchecked box binds false (right, by absence) and a **checked** box also
@@ -237,8 +237,11 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: accept `on`, `yes`, `1`, `true`, `checked` (case-insensitive) as true; anything else false.
     Document the accepted set in `BRACE-AGENTS.md` next to the form-binding section.
   - Model: smaller model OK.
+  - **Resolved as:** specified. Absence still binds false via `convert`'s empty branch, which is
+    what an unchecked box relies on; only a *present* value now consults the truthy set.
+    `jsonForm` shares the converter, and a real JSON `true` arrives as `"true"`, so it is covered.
 
-- [ ] **M3: The framework's `Vary: HX-Request` clobbers a handler's own `Vary`**
+- [x] **M3: The framework's `Vary: HX-Request` clobbers a handler's own `Vary`**
   - Files: `BraceHandler.java:411-413`; `Result.java:170-177`.
   - `result.header("Vary", "HX-Request")` writes into the single-value header map, replacing whatever
     the handler or an after-middleware set. A response that legitimately varies on `Accept-Encoding`
@@ -248,6 +251,9 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: append (`existing + ", HX-Request"`) when a `Vary` is already present, skipping if
     `HX-Request` is already listed.
   - Model: smaller model OK.
+  - **Resolved as:** specified, with case-insensitive token matching (Vary field names are
+    case-insensitive) and `*` treated as already-covering. Idempotent, so a handler that declared
+    `HX-Request` itself doesn't get a duplicate.
 
 - [ ] **M4: `Brace.stop()` never closes the `DatabaseFactory`**
   - Files: `Brace.java:988-1011`; `DatabaseFactory.java:117-119` (`close()`), `:182-183`
