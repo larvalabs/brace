@@ -13,6 +13,13 @@ is listed.
 a running app with a throwaway probe test, not just read — the reproduction is recorded
 inline as "Confirmed:".
 
+**Review baseline is `b3409ee`**; line numbers cite that commit. Rechecked against `ce085c0`
+after the job-system work landed on `main`: **H4 is resolved upstream** (see its entry — the
+fix is `96f37a2`, and it is a better fix than the one specified here). `cdc4f07` bounded the
+Mailer's SMTP timeouts but did not touch M10 (credentials are still not percent-decoded).
+Nothing on `main` touched `Stats`, `BraceHandler`, `Route`, `FormBinder`, or `Url`, so H1, H2,
+H3 and every Medium and Low below stand as written. Remaining: **3 High, 12 Medium, 9 Low.**
+
 Branch: `claude/correctness-review-ey31yz`. One commit per finding,
 `fix(correctness): <ID> <summary>`, each commit ticks its checkbox here and passes
 `mvn test`. User-visible changes get migration-guide entries per AGENTS.md.
@@ -42,11 +49,34 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     life of the process. `/ops/routes` degrades from a route table into a URL dump.
   - Confirmed: three requests to `/users/{id}` produced
     `routeStats().keySet() == [GET /users/1, GET /users/2, GET /users/3, …]`.
-  - Fix: on the matched path record `match.route().pattern()` via `recordRequestPattern`; keep raw-path
-    recording only for the unmatched-route 404 (where there is no pattern). The `NotFoundException`
-    catch has a match — thread the pattern through, or record before rethrowing.
-  - Model: smaller model OK (mechanical), but add a test asserting the map stays at one entry across
-    N distinct ids — that is the regression this fix exists to prevent, and it silently reverted once.
+  - Fix: record the **route pattern** whenever one exists, the raw path only when it doesn't.
+    1. Hoist `RouteMatch match` out of the `try` in `handle`, next to the already-hoisted `db`,
+       `session`, and `csrfOnlySession`. Today it is declared at `:192` inside the `try`, so neither
+       catch block can see it — which is why all three recording sites take the raw path.
+    2. Add a private helper — `recordAndLog(match, method, path, status, durationUs, qc, qu)` — that
+       calls `stats.recordRequestPattern(method, match.route().pattern(), …)` when `match != null`
+       and falls back to `stats.recordRequest(method, path, …)` otherwise. The fallback is load-
+       bearing, not defensive: an exception thrown before `router.match` returns (a malformed
+       multipart body, for instance) legitimately reaches the catch with no match.
+    3. Point all three sites at it: `:422` (success), `:437` (`NotFoundException` — a handler on a
+       matched route choosing to 404, so it has a pattern), `:457` (500).
+    4. `Log.request` takes the same value, so `/ops/logs` and stdout agree with `/ops/routes`.
+       Both variants keep their current redaction split: `recordRequest` runs
+       `Redactor.redactPath` because a raw path can carry a token; `recordRequestPattern` skips it
+       because patterns are code-site literals. Don't redact patterns — `/reset/{token}` would
+       otherwise be mangled into a different key than it renders as.
+    - Not part of this fix, but the two interlock: H2 moves recording to the `writeResult` choke
+      point, which needs the same hoisted `match`. Landing H1 first is fine — H2 then relocates the
+      call rather than changing what it records.
+  - User-visible: `/ops/routes` and the `route` field in request logs change from concrete URLs to
+    patterns (`GET /users/42` → `GET /users/{id}`). That is what the endpoint always claimed to
+    show, and it is what makes per-route latency averages meaningful, but it is a visible change to
+    anything parsing that output — it needs a migration-guide entry. The `routes` map is cumulative
+    and never reset, so entries accrued before the fix simply age out at the next restart.
+  - Model: smaller model OK (mechanical), but the test is the point: assert
+    `stats.routeStats().keySet()` holds exactly one entry after N requests to N distinct ids under
+    one pattern. This exact fix existed once (perf review H7) and silently reverted, and nothing in
+    the suite noticed.
 
 - [ ] **H2: Every response that short-circuits before the handler is invisible to stats and the request log**
   - Severity: High. Files: `BraceHandler.java:210,223,245,266,279,283,329` (early `return true`) vs the
@@ -85,9 +115,10 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Model: frontier (traversal-adjacent; the decode-after-match ordering is the whole correctness
     argument, and getting it backwards is a path-traversal hole).
 
-- [ ] **H4: A durable job whose process dies mid-execution is stuck "running" forever**
-  - Severity: High. Files: `JobPoller.java:181-191` (PG claim), `:257` (H2 claim), `:281-332`
-    (`runJobBody`), `:362-374` (`purgeFinishedJobs`); `Brace.java:988-1011` (`stop`).
+- [x] **H4: A durable job whose process dies mid-execution is stuck "running" forever**
+  - Severity: High. Files (as reviewed, at `b3409ee`): `JobPoller.java:181-191` (PG claim), `:257`
+    (H2 claim), `:281-332` (`runJobBody`), `:362-374` (`purgeFinishedJobs`); `Brace.java:988-1011`
+    (`stop`).
   - Both claim paths set `started_at`, and every claim predicate requires `started_at IS NULL`.
     `started_at` is reset in exactly one place: `runJobBody`'s retry branch (`:315`). If the JVM dies
     between the claim and the terminal mark — deploy, OOM, pod eviction, or plain `Brace.stop()`,
@@ -103,6 +134,27 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     threads with a bounded wait so clean shutdowns stop creating orphans in the first place.
   - Model: frontier (at-least-once semantics, multi-instance interplay with SKIP LOCKED, and a
     too-aggressive timeout causes concurrent duplicate execution).
+  - **Resolved upstream, independently, before this branch touched it** — `96f37a2` ("fix: recover
+    durable jobs stranded by a dead instance") on `main`, refined by `c9c679d`/`7681c47`. Rechecked
+    against `ce085c0`: `JobPoller.reclaimStalledJobs` runs the exact two-statement recovery this
+    finding specified (`attempts < max_attempts` → `started_at = NULL`; `attempts >= max_attempts` →
+    `failed_at`), the spent attempt deliberately not refunded so repeated stranding exhausts a budget
+    instead of looping; `Brace.jobLease` (Duration or interval string, default 30m, null/zero
+    disables) is the configurable timeout; `migration_pg/V16` indexes currently-claimed rows so the
+    sweep is an index scan. The sweeper runs on its own thread rather than inside `pollLoop` —
+    better than what this finding proposed, since a poll loop parked in `limiter.acquire()` with
+    every slot held by a hung job is exactly when a sweep is most needed and would never run.
+  - **Residual, deliberate, not reopened:** `stop()` still does not join per-job virtual threads, so
+    an ordinary deploy still strands up to `poolSize/2` jobs per instance — recovery covers them
+    rather than prevention avoiding them, at a cost of up to `lease + SWEEP_INTERVAL` (~31 min at
+    the default) before the work reruns. Draining on `stop()` would shrink that window for the
+    common case; it is a latency improvement, not a correctness one, so it belongs to a perf pass.
+  - Two lease artifacts worth knowing, both inherent to leases and consistent with `DurableJob`'s
+    documented at-least-once contract — noted here so a future reviewer doesn't re-file them:
+    a reclaimed-but-still-live job can write `completed_at` on a row a second runner later marks
+    `failed_at`, and `getDurableJobStats` then counts that row in both buckets; and a reclaim
+    overwrites `error`, so a genuine failure message from an earlier attempt is replaced by the
+    reclaim text.
 
 ---
 
