@@ -94,7 +94,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     the unmatched bucket. That last case needs a raw socket — `java.net.URI` rejects `%zz`
     client-side, so the JDK HTTP client cannot produce the request.
 
-- [ ] **H2: Every response that short-circuits before the handler is invisible to stats and the request log**
+- [x] **H2: Every response that short-circuits before the handler is invisible to stats and the request log**
   - Severity: High. Files: `BraceHandler.java:210,223,245,266,279,283,329` (early `return true`) vs the
     recording sites at `:419-424`, `:431-439`, `:456-461`.
   - Stats and `Log.request` run only on the success path and in the two catch blocks. Every other
@@ -110,6 +110,22 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     context. Keep the existing behavior that a null `Stats` disables both stats and logging.
   - Model: frontier (touches the choke point every path funnels through; must not double-count the
     success path, and must not start logging static-asset requests without a deliberate decision).
+  - **Resolved as:** a per-request `Exchange` holder (start time, method, path, match, db, plus
+    `recorded`/`logged` flags) built before the `try` so the catch paths share it, and
+    `recordAndLog` moved inside the choke-point `writeResult` overload. All ten exits are now
+    covered; `recorded` makes it idempotent so no path can double-count.
+    Three decisions the finding left open:
+    (a) **Static files are recorded and logged.** The alternative — a request log that silently
+    omits a class of request — is the same defect one level down, and a static serve that took
+    40ms of disk is real latency worth seeing. `Log.level`/`BRACE_LOG_LEVEL` is the volume knob.
+    (b) **A 500 stays one log line.** The error path already emits `http.error` with the exception
+    and app frame, so it sets `exchange.logged` and the choke point records stats without a
+    duplicate `http.request` line. Log shape is unchanged from before the fix; only stats gained.
+    (c) **Static files get their own `(static)` bucket**, not the `(unmatched)` one, so asset
+    traffic doesn't inflate the 404 count. Both are constants for the H1 reason: the filename is
+    client-supplied, so a miss like `/assets/<random>.css` must not mint a key.
+    New `ShortCircuitStatsTest` covers the 429, the guard redirect, the CSRF 403, the unmatched
+    404, static hits and misses, and that a normal response is counted exactly once.
 
 - [ ] **H3: Path parameters are never URL-decoded**
   - Severity: High. Files: `BraceHandler.java:174` (`getHttpURI().getPath()`), `Route.java:70-78`,
