@@ -571,6 +571,27 @@ class DurableJobTest {
     }
 
     @Test
+    void jobPollIntervalDefaultsToOneSecond() {
+        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval());
+        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval("5s").jobPollInterval());
+        assertEquals(Duration.ofMinutes(2), Brace.app().jobPollInterval("2m").jobPollInterval());
+
+        // Missing config key keeps the default, same rule as jobLease.
+        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval((String) null).jobPollInterval());
+        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval("  ").jobPollInterval());
+    }
+
+    @Test
+    void jobPollIntervalMustBePositive() {
+        // No "disable" value — zero would spin the poll loop against the database. The guard lives
+        // on JobPoller, where start() applies it.
+        var poller = new JobPoller();
+        assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(Duration.ofSeconds(-1)));
+        assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(null));
+    }
+
+    @Test
     void jobLeaseRejectsMalformedIntervals() {
         assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15"));
         assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15d"));

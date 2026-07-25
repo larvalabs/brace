@@ -3,15 +3,16 @@
 **This release has no breaking changes.** No application code needs to change.
 
 It fixes two ways a durable job could be lost or wedged forever, both of which apply to
-apps that never touched the relevant configuration:
+apps that never touched the relevant configuration, and cuts durable-job pickup latency:
 
 - **Durable jobs claimed by an instance that dies are now recovered** instead of being
   stranded permanently.
 - **`Mailer` now bounds its SMTP timeouts**, so a wedged relay fails the send instead of
   hanging the calling thread forever.
+- **Durable jobs now start within ~1 second** on an idle app, down from up to 10.
 
-Both ship as new *defaults*. The only reason to touch your code is if you run jobs longer
-than 30 minutes, or talk to an unusually slow SMTP relay — see below.
+All three ship as new *defaults*. The only reason to touch your code is if you run jobs longer
+than 30 minutes, talk to an unusually slow SMTP relay, or want to tune the poll rate — see below.
 
 ---
 
@@ -133,6 +134,68 @@ instance, so it costs effectively nothing to maintain.
 `JobPoller.reclaimStalledJobs(db, cutoff)` is public if you want to run recovery on your own
 schedule (it returns `SweepResult(reclaimed, failed)`), the same way `purgeFinishedJobs` is public
 for custom retention.
+
+---
+
+## Durable jobs are picked up in ~1 second (new default)
+
+### What changed
+
+The poller's idle wait dropped from **10 seconds to 1**. A job enqueued on an otherwise quiet app
+now starts about 10× sooner. Under load nothing changes — a full batch has always re-polled
+immediately, and the poller is paced by job completion, so the idle wait was never a throughput
+limit.
+
+The wait after a *partial* batch (previously a separate 1-second tier) is now the same configured
+interval. At the 1-second default the two coincide; if you raise the interval, it applies to both,
+so the setting means what it says rather than applying only to the fully-idle case.
+
+### Why this is affordable
+
+An empty poll matches no rows, so no tuple is written, no transaction ID is assigned, and the
+commit needs no fsync. It costs one probe of the claim index plus the round trips — a fraction of
+a percent of one pooled connection per instance, per second.
+
+### What you may need to do
+
+**For most apps: nothing.** The extra query volume is roughly one trivial query per second per
+instance.
+
+Two cases are worth a look before leaving it at the default:
+
+- **A high-RTT database.** If your app and database are far apart (say 5–10ms), an idle poll is
+  tens of milliseconds of connection hold rather than one or two. Still small, but no longer
+  nothing at 1s across many instances.
+- **Wide `depends_on_id` fan-out.** Dependency-blocked children sit in the claim index with
+  `run_at` in the past, and the scan walks them before reaching claimable work. If you routinely
+  have thousands of jobs blocked behind one unfinished parent, that per-poll cost now recurs 10×
+  as often.
+
+In either case, raise the interval:
+
+```java
+var app = Brace.app()
+    .database(dbFactory)
+    .jobPollInterval("5s");                                 // or a Duration
+
+// or from config, like the lease:
+var app = Brace.app()
+    .database(dbFactory)
+    .jobPollInterval(config.get("jobs.poll-interval", "1s"));
+```
+
+To restore the 0.1.7 idle behavior exactly, use `"10s"` — note this also makes partial batches wait
+10 seconds, which 0.1.7 did not.
+
+The interval must be positive; there is no disable value, since zero would spin the poll loop
+against the database.
+
+### What this does *not* fix
+
+Pickup latency is per *link*, not end-to-end. Each step in a `depends_on_id` chain still costs
+about one poll interval, because a child is invisible to the claim query until its parent's
+completion commits. A 5-deep chain on an idle app goes from ~50s to ~5s — a real improvement, but
+not to zero.
 
 ---
 

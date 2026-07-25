@@ -36,7 +36,9 @@ Reviewing Brace against it produced two separate conclusions, which is why this 
 
 The interval is a hardcoded literal. There is no config key for it (`Config` has no `jobs.*` keys today).
 
-## Option A — shorten the idle sleep to 1–2s
+## Option A — shorten the idle sleep to 1–2s — **DONE (2026-07-24)**
+
+Implemented as `Brace.jobPollInterval(...)`, default **1s**, accepting an interval string or a `Duration`. The partial-batch tier was folded into the same setting: at the 1s default the old 1s partial wait and the new idle wait coincide, and collapsing them makes a configured interval apply to every non-full poll rather than only the fully-idle case. The interval must be positive — there is no disable value, since zero spins the loop against the database.
 
 **This is the recommended first move**, and the analysis below is mostly an attempt to falsify it. It largely survives.
 
@@ -153,7 +155,7 @@ Moving off LISTEN/NOTIFY entirely (Redis, a dedicated bus). The article's whole 
 
 | Change | Effort | Risk | Value |
 |---|---|---|---|
-| **Job idle interval 10s → 1–2s, configurable** | Very low | Very low | 10× worst-case pickup latency |
+| ~~**Job idle interval 10s → 1–2s, configurable**~~ **DONE** | Very low | Very low | 10× worst-case pickup latency |
 | Message bus: move spill reap to scheduled job | Low | Low | Removes per-message delete from commit path |
 | Message bus: batch spill fetches | Low | Low | Removes listener head-of-line blocking |
 | **Message bus: buffer + coalesce NOTIFY** | Medium | Medium | The 20× throughput change |

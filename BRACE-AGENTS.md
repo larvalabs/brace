@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobLease()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobLease()`, `jobPollInterval()`, `group()`.
 
 ## Routing
 
@@ -557,6 +557,11 @@ another job still depends on are kept regardless of age.
 Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they share the
 connection pool with web handlers), and the poller claims more work as slots free — a slow job
 doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
+
+The poller re-polls immediately after a full batch, and otherwise waits `app.jobPollInterval(...)`
+(default `"1s"`) — so a job enqueued on an idle app starts within about a second. An idle poll is
+one index probe with no write, so this costs very little; raise it on a fleet that enqueues rarely,
+or lower it for snappier pickup. Takes an interval string or a `Duration`, and must be positive.
 
 A job holds its claim for at most `app.jobLease(...)` (default 30 minutes). If the instance
 running it dies before the job finishes — an ordinary deploy is enough, since JVM exit kills

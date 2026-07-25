@@ -17,11 +17,30 @@ public class JobPoller {
     /** How often the sweeper checks for expired leases. Well under {@link #DEFAULT_LEASE}. */
     private static final long SWEEP_INTERVAL_MS = 60_000;
 
+    /**
+     * How long the poller waits before re-polling when the last claim did not fill every free
+     * execution slot — i.e. the queue is idle or nearly so. A full batch always re-polls
+     * immediately, so this is the pickup latency for work arriving at a quiet app, not a throughput
+     * limit.
+     *
+     * <p>An empty poll is cheap: the claim UPDATE matches no rows, so no tuple is written, no XID
+     * is assigned, and the commit needs no fsync — it costs one probe of the {@code V15} partial
+     * index plus the round trips. At 1s that is a fraction of a percent of one pooled connection
+     * per instance.
+     *
+     * <p>Two cases where it is not free, both worth knowing before lowering it further:
+     * a high-RTT database (the round trips dominate), and a queue with wide {@code depends_on_id}
+     * fan-out — dependency-blocked children sit in the claim index with {@code run_at} in the past,
+     * so the scan walks them before reaching claimable work, and that cost scales with poll rate.
+     */
+    static final Duration DEFAULT_POLL_INTERVAL = Duration.ofSeconds(1);
+
     private volatile boolean running;
     private Thread pollerThread;
     private Thread sweeperThread;
     private DatabaseFactory dbFactory;
     private volatile Duration lease = DEFAULT_LEASE;
+    private volatile Duration pollInterval = DEFAULT_POLL_INTERVAL;
 
     // Execution-capacity limiter (perf review H4): jobs share the app's connection pool with web
     // handlers, so at most poolSize/2 jobs run at once — a burst can no longer take every Hikari
@@ -46,6 +65,18 @@ public class JobPoller {
      */
     public void lease(Duration lease) {
         this.lease = lease;
+    }
+
+    /**
+     * Set the idle poll interval (see {@link #DEFAULT_POLL_INTERVAL}). Must be positive — there is
+     * no "disable" value, since zero would spin the poll loop against the database. Must be called
+     * before {@link #start}.
+     */
+    public void pollInterval(Duration pollInterval) {
+        if (pollInterval == null || pollInterval.isNegative() || pollInterval.isZero()) {
+            throw new IllegalArgumentException("Job poll interval must be positive, got: " + pollInterval);
+        }
+        this.pollInterval = pollInterval;
     }
 
     public void start(DatabaseFactory dbFactory) {
@@ -79,15 +110,18 @@ public class JobPoller {
         while (running) {
             try {
                 var batch = dispatch(dbFactory);
-                if (batch.claimed() == 0) {
-                    Thread.sleep(10_000);
-                } else if (batch.claimed() < batch.slots()) {
-                    Thread.sleep(1_000);
+                if (batch.claimed() < batch.slots()) {
+                    Thread.sleep(pollInterval.toMillis());
                 }
                 // Full batch: more work is likely queued — poll again immediately. dispatch
                 // itself blocks until an execution slot frees, so the loop re-polls as
                 // capacity opens up; it no longer joins the whole batch, which let one slow
                 // job stall every other queued job for its duration (H4).
+                //
+                // Anything short of a full batch waits pollInterval. This used to be two tiers
+                // (1s after a partial batch, 10s after an empty one); at the 1s default the two
+                // coincide, and collapsing them makes a configured interval mean exactly what it
+                // says rather than applying only to the idle case.
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
