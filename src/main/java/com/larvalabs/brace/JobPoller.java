@@ -28,12 +28,18 @@ public class JobPoller {
      * index plus the round trips. At 1s that is a fraction of a percent of one pooled connection
      * per instance.
      *
-     * <p>Two cases where it is not free, both worth knowing before lowering it further:
+     * <p>This is a safety net rather than the primary path: {@link Jobs#schedule} wakes the local
+     * poller as soon as the enqueuing transaction commits, so a job scheduled with no delay starts
+     * almost immediately. Polling covers everything a wake cannot reach — jobs with a future
+     * {@code run_at}, retries whose backoff has expired, rows freed by {@link #reclaimStalledJobs},
+     * work enqueued on a <em>different</em> instance, and anything already queued at startup.
+     *
+     * <p>Two cases where polling is not free, both worth knowing before lowering it:
      * a high-RTT database (the round trips dominate), and a queue with wide {@code depends_on_id}
      * fan-out — dependency-blocked children sit in the claim index with {@code run_at} in the past,
      * so the scan walks them before reaching claimable work, and that cost scales with poll rate.
      */
-    static final Duration DEFAULT_POLL_INTERVAL = Duration.ofSeconds(1);
+    static final Duration DEFAULT_POLL_INTERVAL = Duration.ofSeconds(5);
 
     private volatile boolean running;
     private Thread pollerThread;
@@ -41,6 +47,13 @@ public class JobPoller {
     private DatabaseFactory dbFactory;
     private volatile Duration lease = DEFAULT_LEASE;
     private volatile Duration pollInterval = DEFAULT_POLL_INTERVAL;
+
+    /**
+     * Wake signal for {@link #wake()}. A permit released while the poller is mid-poll is retained,
+     * so a job enqueued during a poll that missed it still triggers an immediate re-poll instead of
+     * waiting out the interval — the lost-wakeup case.
+     */
+    private final Semaphore wakeSignal = new Semaphore(0);
 
     // Execution-capacity limiter (perf review H4): jobs share the app's connection pool with web
     // handlers, so at most poolSize/2 jobs run at once — a burst can no longer take every Hikari
@@ -72,6 +85,34 @@ public class JobPoller {
      * no "disable" value, since zero would spin the poll loop against the database. Must be called
      * before {@link #start}.
      */
+    /**
+     * Poll again now instead of waiting out the interval. Called after a {@link Jobs#schedule}
+     * transaction commits, so the row is visible before the poller looks.
+     *
+     * <p>Best-effort by design: it only wakes <em>this</em> instance, and a missed wake costs
+     * latency, never correctness — polling still finds the job. That is what lets it stay this
+     * cheap, and why the poll interval is a safety net rather than dead weight.
+     *
+     * <p>The permit is capped at one. Bulk-scheduling collapses to a single extra poll rather than
+     * one per job, and the benign race where two threads both observe zero permits costs at most
+     * one additional poll.
+     */
+    void wake() {
+        if (wakeSignal.availablePermits() == 0) {
+            wakeSignal.release();
+        }
+    }
+
+    /** Whether a wake is queued but not yet consumed by the poll loop. For tests. */
+    boolean wakePending() {
+        return wakeSignal.availablePermits() > 0;
+    }
+
+    /** Queued wake permits; capped at one by {@link #wake()}. For tests. */
+    int wakePermits() {
+        return wakeSignal.availablePermits();
+    }
+
     public void pollInterval(Duration pollInterval) {
         if (pollInterval == null || pollInterval.isNegative() || pollInterval.isZero()) {
             throw new IllegalArgumentException("Job poll interval must be positive, got: " + pollInterval);
@@ -111,7 +152,9 @@ public class JobPoller {
             try {
                 var batch = dispatch(dbFactory);
                 if (batch.claimed() < batch.slots()) {
-                    Thread.sleep(pollInterval.toMillis());
+                    // Interruptible wait: returns early if wake() fired (a job was enqueued on
+                    // this instance), otherwise falls through on the poll interval.
+                    wakeSignal.tryAcquire(pollInterval.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
                 }
                 // Full batch: more work is likely queued — poll again immediately. dispatch
                 // itself blocks until an execution slot frees, so the loop re-polls as

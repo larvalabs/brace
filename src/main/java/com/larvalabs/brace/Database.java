@@ -17,6 +17,7 @@ public class Database {
     private final StatelessSession session;
     private int queryCount = 0;
     private long queryDurationUs = 0;
+    private java.util.List<Runnable> afterCommit;
 
     public Database(StatelessSession session) {
         this.session = session;
@@ -390,11 +391,44 @@ public class Database {
         session.getTransaction().begin();
     }
 
+    /**
+     * Run {@code action} after this session's next successful commit, or drop it if that
+     * transaction rolls back. For side effects that must not fire until the data they describe is
+     * actually visible to other sessions — {@link Jobs#schedule} uses it to nudge the job poller,
+     * which under READ COMMITTED would otherwise look before the row exists and find nothing.
+     *
+     * <p>Callbacks run after the commit returns, on the committing thread, and their exceptions are
+     * logged rather than propagated: the transaction has already succeeded, so a failing hook must
+     * not turn that into an error for the caller. Keep them short and non-blocking.
+     *
+     * <p>A {@link Database} is confined to one request or job, so registration is not synchronized.
+     */
+    public void afterCommit(Runnable action) {
+        if (afterCommit == null) {
+            afterCommit = new java.util.ArrayList<>(2);
+        }
+        afterCommit.add(action);
+    }
+
     public void commitTransaction() {
         session.getTransaction().commit();
+        if (afterCommit != null) {
+            var actions = afterCommit;
+            afterCommit = null;
+            for (var action : actions) {
+                try {
+                    action.run();
+                } catch (Exception e) {
+                    Log.error("after-commit-hook-failed", e);
+                }
+            }
+        }
     }
 
     public void rollbackTransaction() {
+        // Drop the hooks first, so a throw from rollback still can't leak them into a later commit
+        // on this session — the work they describe never landed.
+        afterCommit = null;
         if (session.getTransaction().isActive()) {
             session.getTransaction().rollback();
         }

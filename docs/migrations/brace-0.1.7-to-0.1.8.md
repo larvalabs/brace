@@ -9,7 +9,8 @@ apps that never touched the relevant configuration, and cuts durable-job pickup 
   stranded permanently.
 - **`Mailer` now bounds its SMTP timeouts**, so a wedged relay fails the send instead of
   hanging the calling thread forever.
-- **Durable jobs now start within ~1 second** on an idle app, down from up to 10.
+- **Durable jobs now start as soon as the enqueuing transaction commits**, instead of
+  waiting up to 10 seconds for the next poll.
 
 All three ship as new *defaults*. The only reason to touch your code is if you run jobs longer
 than 30 minutes, talk to an unusually slow SMTP relay, or want to tune the poll rate — see below.
@@ -137,65 +138,74 @@ for custom retention.
 
 ---
 
-## Durable jobs are picked up in ~1 second (new default)
+## Durable jobs start on enqueue, not on the next poll (new default)
 
 ### What changed
 
-The poller's idle wait dropped from **10 seconds to 1**. A job enqueued on an otherwise quiet app
-now starts about 10× sooner. Under load nothing changes — a full batch has always re-polled
-immediately, and the poller is paced by job completion, so the idle wait was never a throughput
-limit.
+`Jobs.schedule(db, job, Duration.ZERO)` now wakes the poller directly, as an after-commit hook on
+the transaction doing the scheduling. A job with no delay starts as soon as your transaction
+commits rather than waiting for the next poll — previously up to 10 seconds on an idle app.
+
+The wake fires *after* the commit deliberately. `schedule` runs inside the caller's transaction
+(usually a web request's), so waking any sooner would have the poller look under READ COMMITTED
+before the row exists — it would find nothing and go back to sleep, which is worse than not waking,
+because it also consumes the poll that would otherwise have found the job.
+
+Polling continues underneath, now at **5 seconds** (was 10). It is a safety net rather than the
+primary path, covering the five cases a wake cannot reach:
+
+- jobs scheduled with a delay, whose `run_at` is in the future
+- retries whose backoff has expired
+- rows returned to the queue by the new stalled-job sweeper
+- work enqueued on a **different** instance (the wake is in-process only)
+- anything already queued when the app starts
+
+A missed wake costs latency, never correctness — polling still finds the job.
 
 The wait after a *partial* batch (previously a separate 1-second tier) is now the same configured
-interval. At the 1-second default the two coincide; if you raise the interval, it applies to both,
-so the setting means what it says rather than applying only to the fully-idle case.
-
-### Why this is affordable
-
-An empty poll matches no rows, so no tuple is written, no transaction ID is assigned, and the
-commit needs no fsync. It costs one probe of the claim index plus the round trips — a fraction of
-a percent of one pooled connection per instance, per second.
+interval, so the setting means what it says rather than applying only to the fully-idle case.
 
 ### What you may need to do
 
-**For most apps: nothing.** The extra query volume is roughly one trivial query per second per
-instance.
+**For most apps: nothing.** Job pickup gets faster and background query volume roughly halves.
 
-Two cases are worth a look before leaving it at the default:
+Tune the interval if either of these applies:
 
-- **A high-RTT database.** If your app and database are far apart (say 5–10ms), an idle poll is
-  tens of milliseconds of connection hold rather than one or two. Still small, but no longer
-  nothing at 1s across many instances.
-- **Wide `depends_on_id` fan-out.** Dependency-blocked children sit in the claim index with
-  `run_at` in the past, and the scan walks them before reaching claimable work. If you routinely
-  have thousands of jobs blocked behind one unfinished parent, that per-poll cost now recurs 10×
-  as often.
-
-In either case, raise the interval:
+- **Multi-instance with bursty load.** The wake is in-process, so a job enqueued on instance A
+  while A's slots are full waits for a poll before an idle instance B can take it. Lower the
+  interval if that matters.
+- **A high-RTT database, or wide `depends_on_id` fan-out.** Dependency-blocked children sit in the
+  claim index with `run_at` in the past, and the scan walks them before reaching claimable work.
+  Raise the interval if you routinely have thousands of jobs blocked behind one unfinished parent.
 
 ```java
 var app = Brace.app()
     .database(dbFactory)
-    .jobPollInterval("5s");                                 // or a Duration
+    .jobPollInterval("2s");                                 // or a Duration
 
 // or from config, like the lease:
 var app = Brace.app()
     .database(dbFactory)
-    .jobPollInterval(config.get("jobs.poll-interval", "1s"));
+    .jobPollInterval(config.get("jobs.poll-interval", "5s"));
 ```
 
-To restore the 0.1.7 idle behavior exactly, use `"10s"` — note this also makes partial batches wait
-10 seconds, which 0.1.7 did not.
-
 The interval must be positive; there is no disable value, since zero would spin the poll loop
-against the database.
+against the database. To restore 0.1.7's cadence exactly, use `"10s"` — note this also makes
+partial batches wait 10 seconds, which 0.1.7 did not.
+
+### New: after-commit hooks
+
+The mechanism behind the wake is public API: `db.afterCommit(Runnable)` runs an action after the
+session's next successful commit, or drops it if the transaction rolls back. Useful for any side
+effect that must not fire until the data it describes is visible to other sessions — enqueuing
+external work, invalidating a shared cache, sending a notification. Hook exceptions are logged, not
+propagated, since the transaction has already succeeded.
 
 ### What this does *not* fix
 
-Pickup latency is per *link*, not end-to-end. Each step in a `depends_on_id` chain still costs
-about one poll interval, because a child is invisible to the claim query until its parent's
-completion commits. A 5-deep chain on an idle app goes from ~50s to ~5s — a real improvement, but
-not to zero.
+Chained jobs still advance one poll interval per link. A child is invisible to the claim query
+until its parent's completion commits, and completing a job does not fire an enqueue wake, so a
+5-deep chain on an idle app takes about 5 poll intervals end to end.
 
 ---
 

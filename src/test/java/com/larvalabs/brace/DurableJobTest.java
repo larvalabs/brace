@@ -571,14 +571,17 @@ class DurableJobTest {
     }
 
     @Test
-    void jobPollIntervalDefaultsToOneSecond() {
-        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval());
-        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval("5s").jobPollInterval());
+    void jobPollIntervalDefaultsToFiveSeconds() {
+        // Five, not one: Jobs.schedule wakes the poller directly for work that is due now, so
+        // polling only has to cover what a wake can't reach (future run_at, retries, reclaimed
+        // rows, other instances, startup).
+        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval());
+        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval("1s").jobPollInterval());
         assertEquals(Duration.ofMinutes(2), Brace.app().jobPollInterval("2m").jobPollInterval());
 
         // Missing config key keeps the default, same rule as jobLease.
-        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval((String) null).jobPollInterval());
-        assertEquals(Duration.ofSeconds(1), Brace.app().jobPollInterval("  ").jobPollInterval());
+        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval((String) null).jobPollInterval());
+        assertEquals(Duration.ofSeconds(5), Brace.app().jobPollInterval("  ").jobPollInterval());
     }
 
     @Test
@@ -589,6 +592,126 @@ class DurableJobTest {
         assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(Duration.ZERO));
         assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(Duration.ofSeconds(-1)));
         assertThrows(IllegalArgumentException.class, () -> poller.pollInterval(null));
+    }
+
+    // --- Wake on enqueue ---------------------------------------------------------------------
+
+    @Test
+    void afterCommitHookRunsOnlyAfterTheCommit() {
+        var fired = new AtomicInteger(0);
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            db.afterCommit(fired::incrementAndGet);
+            Jobs.schedule(db, new TestJob("x"), Duration.ZERO);
+            assertEquals(0, fired.get(), "must not fire while the row is still uncommitted");
+            db.commitTransaction();
+            assertEquals(1, fired.get());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void afterCommitHookIsDroppedOnRollback() {
+        var fired = new AtomicInteger(0);
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            db.afterCommit(fired::incrementAndGet);
+            db.rollbackTransaction();
+            assertEquals(0, fired.get(), "the work never landed, so the hook must not run");
+
+            // And it must not leak into a later commit on the same session.
+            db.beginTransaction();
+            db.commitTransaction();
+            assertEquals(0, fired.get());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void afterCommitHookFailureDoesNotBreakTheCommit() {
+        var db = new Database(factory.openSession());
+        long id;
+        try {
+            db.beginTransaction();
+            db.afterCommit(() -> { throw new RuntimeException("hook blew up"); });
+            id = Jobs.schedule(db, new TestJob("survives"), Duration.ZERO);
+            assertDoesNotThrow(db::commitTransaction);
+        } finally {
+            db.close();
+        }
+        // The transaction succeeded, so the job is really queued.
+        assertNotNull(jobRow(id));
+        assertEquals(1, new JobPoller().pollAndExecute(factory));
+    }
+
+    @Test
+    void schedulingWakesThePollerOnceCommitted() {
+        var poller = new JobPoller();
+        Runnable hook = poller::wake;
+        Jobs.onEnqueue(hook);
+        try {
+            var db = new Database(factory.openSession());
+            try {
+                db.beginTransaction();
+                Jobs.schedule(db, new TestJob("wakes"), Duration.ZERO);
+                assertFalse(poller.wakePending(), "no wake until the row is visible");
+                db.commitTransaction();
+                assertTrue(poller.wakePending(), "committed enqueue wakes the poller");
+            } finally {
+                db.close();
+            }
+        } finally {
+            Jobs.clearEnqueueHook(hook);
+        }
+    }
+
+    @Test
+    void schedulingDelayedWorkDoesNotWakeThePoller() {
+        var poller = new JobPoller();
+        Runnable hook = poller::wake;
+        Jobs.onEnqueue(hook);
+        try {
+            var db = new Database(factory.openSession());
+            try {
+                db.beginTransaction();
+                Jobs.schedule(db, new TestJob("later"), Duration.ofHours(1));
+                db.commitTransaction();
+            } finally {
+                db.close();
+            }
+            // Not runnable yet — an immediate poll would find nothing, so there is nothing to wake
+            // for. Polling picks it up when run_at arrives.
+            assertFalse(poller.wakePending());
+        } finally {
+            Jobs.clearEnqueueHook(hook);
+        }
+    }
+
+    @Test
+    void bulkSchedulingCollapsesToASingleWake() {
+        var poller = new JobPoller();
+        Runnable hook = poller::wake;
+        Jobs.onEnqueue(hook);
+        try {
+            for (int i = 0; i < 50; i++) {
+                var db = new Database(factory.openSession());
+                try {
+                    db.beginTransaction();
+                    Jobs.schedule(db, new TestJob("bulk" + i), Duration.ZERO);
+                    db.commitTransaction();
+                } finally {
+                    db.close();
+                }
+            }
+            // One pending permit, not 50 — the poller does one extra poll, not fifty.
+            assertEquals(1, poller.wakePermits());
+        } finally {
+            Jobs.clearEnqueueHook(hook);
+        }
     }
 
     @Test

@@ -1,7 +1,12 @@
 # Plan: Job pickup latency and LISTEN/NOTIFY cost
 
-Status: Proposed — no code changes yet
+Status: Part 1 (job latency) implemented 2026-07-24 — Options A and C done, B and D declined.
+        Part 2 (`PostgresMessageBus`) still open.
 Date: 2026-07-24
+
+> The "Current behavior" and per-option analysis below is preserved as written, i.e. describing
+> the pre-change state. Each option carries its own outcome; the summary table at the end tracks
+> what shipped.
 
 ## Origin
 
@@ -38,7 +43,7 @@ The interval is a hardcoded literal. There is no config key for it (`Config` has
 
 ## Option A — shorten the idle sleep to 1–2s — **DONE (2026-07-24)**
 
-Implemented as `Brace.jobPollInterval(...)`, default **1s**, accepting an interval string or a `Duration`. The partial-batch tier was folded into the same setting: at the 1s default the old 1s partial wait and the new idle wait coincide, and collapsing them makes a configured interval apply to every non-full poll rather than only the fully-idle case. The interval must be positive — there is no disable value, since zero spins the loop against the database.
+Implemented as `Brace.jobPollInterval(...)`, accepting an interval string or a `Duration`. Shipped at 1s, then **relaxed to 5s once Option C landed** — with a wake covering the common case, polling only has to bound what a wake can't reach, so the extra query volume bought little. The partial-batch tier was folded into the same setting, so a configured interval applies to every non-full poll rather than only the fully-idle case. The interval must be positive — there is no disable value, since zero spins the loop against the database.
 
 **This is the recommended first move**, and the analysis below is mostly an attempt to falsify it. It largely survives.
 
@@ -90,22 +95,20 @@ But it is **not strictly better than a flat interval**, and it is worth being pr
 
 **Recommendation: defer.** Refinement on top of Option A, justified by a real workload, not up front.
 
-## Option C — in-process wake on enqueue
+## Option C — in-process wake on enqueue — **DONE (2026-07-24)**
 
-Correcting an earlier characterization of this as "zero DB cost, ~10 lines": it is meaningfully more subtle than that, and the subtlety is what makes Option A the better effort/reward trade.
+Implemented, and the subtlety flagged below turned out to be the whole design problem — worth recording because the naive version is actively worse than doing nothing.
 
-`Jobs.schedule()` (`Jobs.java:67-93`) inserts the row inside **the caller's** transaction, which is typically a web request transaction that `BraceHandler` commits later. Unparking the poller at insert time means the poller very likely polls *before* that commit, sees nothing under READ COMMITTED, and goes back to sleep for a full interval — so the naive wake is not merely ineffective, it can consume the poll you were relying on and make latency worse than not waking at all.
+`Jobs.schedule()` inserts inside **the caller's** transaction, typically a web request transaction `BraceHandler` commits later. Unparking the poller at insert time means it polls before that commit, sees nothing under READ COMMITTED, and sleeps a full interval — so the naive wake doesn't just fail to help, it *consumes the poll that would have found the job*.
 
-Doing it correctly needs one of:
+The fix is the post-commit hook this doc called "the right long-term shape": `Database.afterCommit(Runnable)`, drained in `commitTransaction()` and discarded in `rollbackTransaction()`. `BraceHandler` already commits through `Database.commitTransaction()`, so a handler-scheduled job wakes the poller exactly when its transaction lands, and a rolled-back transaction wakes nothing. The hook is public API — it generalizes to any side effect that must not fire until its data is visible.
 
-- **A post-commit hook on `Database`.** Correct, and the right long-term shape, but it is real plumbing that does not exist today and touches the request lifecycle.
-- **A defensive heuristic** — wake, sleep briefly, poll, and stay on a short interval for a few cycles if the first poll comes back empty. Cheap but imprecise, and it converges toward Option B anyway.
+Design notes:
 
-Also needs a guard so `Jobs.schedule(db, job, Duration.ofHours(1))` doesn't wake the poller for work that isn't due.
-
-Upside if built: near-zero pickup and near-zero chain latency for single-instance apps, which is most Brace deployments, with no database traffic at all.
-
-**Recommendation: defer.** Revisit if sub-second pickup becomes a requirement; prefer the post-commit-hook version over the heuristic if so.
+- **Wake only for work due now** (`delay <= 0`). A delayed job isn't runnable, so an immediate poll would find nothing; polling picks it up when `run_at` arrives.
+- **Permit capped at one** (`Semaphore`, released only when zero permits are outstanding). Bulk-scheduling 10k jobs collapses to one extra poll rather than 10k, and a permit released *during* a poll is retained, so the lost-wakeup case re-polls instead of waiting out the interval.
+- **Best-effort by contract.** The wake is in-process only and a missed wake costs latency, never correctness. That is what keeps it cheap, and it is why polling stays — see the five cases in Part 1's summary.
+- **Static hook, last-one-wins** across multiple apps in one JVM (tests). Deliberate: a wake landing on another app's poller costs one empty poll and nothing else. Cleared on `stop()` with an identity check so stopping one app can't unhook another.
 
 ## Option D — LISTEN/NOTIFY on enqueue
 
@@ -160,7 +163,7 @@ Moving off LISTEN/NOTIFY entirely (Redis, a dedicated bus). The article's whole 
 | Message bus: batch spill fetches | Low | Low | Removes listener head-of-line blocking |
 | **Message bus: buffer + coalesce NOTIFY** | Medium | Medium | The 20× throughput change |
 | Job exponential idle backoff | Low | Low | Situational; not strictly better than flat |
-| Job in-process wake on enqueue | Medium | Medium | Near-zero pickup, single-instance only |
+| ~~Job in-process wake on enqueue~~ **DONE** | Medium | Medium | Near-zero pickup, single-instance only |
 | Job LISTEN/NOTIFY on enqueue | — | High | **Rejected** — regresses the request path |
 
 ## Adjacent finding — FIXED (2026-07-24)

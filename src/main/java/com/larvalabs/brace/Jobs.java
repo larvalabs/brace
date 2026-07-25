@@ -18,6 +18,28 @@ public class Jobs {
     private static final LongAdder ASYNC_FAILED = new LongAdder();
 
     /**
+     * Nudges the running {@link JobPoller} when a job is enqueued, so it doesn't wait out its poll
+     * interval. Registered by {@code Brace.start} and cleared by {@code Brace.stop}.
+     *
+     * <p>Static because {@link #schedule} is, and it holds one hook rather than a set: with several
+     * apps in one JVM (tests) the last one started wins. That is deliberate rather than overlooked
+     * — a wake is best-effort, so a hook pointing at another app's poller costs that poller one
+     * empty poll and nothing else, while every app still picks its own work up by polling.
+     */
+    private static volatile Runnable enqueueHook;
+
+    static void onEnqueue(Runnable hook) {
+        enqueueHook = hook;
+    }
+
+    /** Clear the hook only if it is still the one {@code hook} registered (see {@link #onEnqueue}). */
+    static void clearEnqueueHook(Runnable hook) {
+        if (enqueueHook == hook) {
+            enqueueHook = null;
+        }
+    }
+
+    /**
      * Fire-and-forget background work on a virtual thread. Exceptions are caught and
      * logged via {@link Log#error(String, Throwable)} so a failed task never silently
      * eats the calling thread.
@@ -69,6 +91,20 @@ public class Jobs {
         var name = job.getClass().getSimpleName();
         var jobClass = job.getClass().getName();
         var data = job.data();
+
+        // Wake the poller once this insert is actually visible. Registering the wake for after the
+        // commit is the whole point: schedule() runs inside the caller's transaction (usually a web
+        // request's), so waking immediately would have the poller look under READ COMMITTED before
+        // the row exists, find nothing, and go back to sleep — worse than not waking at all,
+        // because it also consumes the poll that would have found it.
+        //
+        // Only for work that is due now. A job with a real delay isn't runnable yet, so there is
+        // nothing for an immediate poll to find; polling picks it up when run_at arrives.
+        boolean dueNow = delay.isZero() || delay.isNegative();
+        var hook = enqueueHook;
+        if (dueNow && hook != null) {
+            db.afterCommit(hook);
+        }
 
         return db.jdbc(conn -> {
             var ps = conn.prepareStatement(

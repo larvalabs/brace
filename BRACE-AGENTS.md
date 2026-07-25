@@ -558,10 +558,16 @@ Durable jobs run on virtual threads, at most `poolSize / 2` concurrently (they s
 connection pool with web handlers), and the poller claims more work as slots free — a slow job
 doesn't block the rest of the queue. Need more parallelism? Raise the `DatabaseFactory` pool size.
 
-The poller re-polls immediately after a full batch, and otherwise waits `app.jobPollInterval(...)`
-(default `"1s"`) — so a job enqueued on an idle app starts within about a second. An idle poll is
-one index probe with no write, so this costs very little; raise it on a fleet that enqueues rarely,
-or lower it for snappier pickup. Takes an interval string or a `Duration`, and must be positive.
+`Jobs.schedule(db, job, Duration.ZERO)` wakes the poller as soon as **your** transaction commits,
+so a job with no delay starts almost immediately — no polling delay in the common case. The wake is
+registered as an after-commit hook precisely because `schedule` runs inside the caller's
+transaction; waking any sooner would have the poller look before the row is visible.
+
+Polling continues underneath as the safety net, at `app.jobPollInterval(...)` (default `"5s"`,
+interval string or `Duration`, must be positive). It covers the five things a wake can't reach:
+jobs with a future `run_at`, retries whose backoff expired, rows freed by the stalled-job sweeper,
+work enqueued on a **different** instance, and anything already queued at startup. A missed wake
+costs latency, never correctness.
 
 A job holds its claim for at most `app.jobLease(...)` (default 30 minutes). If the instance
 running it dies before the job finishes — an ordinary deploy is enough, since JVM exit kills

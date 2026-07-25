@@ -335,8 +335,9 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
 Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
 `0` to keep forever).
 
-A job enqueued on an idle app starts within about a second — the poller re-polls immediately while
-work is queued, and otherwise waits `app.jobPollInterval("1s")` (the default).
+Scheduling a job with no delay wakes the poller as soon as your transaction commits, so it starts
+almost immediately. Polling continues underneath as a safety net at `app.jobPollInterval("5s")`
+(the default), covering delayed jobs, retries, and work enqueued on other instances.
 
 A job holds its claim for at most `app.jobLease("30m")` (the default). If the instance running it
 dies mid-job — an ordinary deploy is enough — the claim expires and the job returns to the queue,

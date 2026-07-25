@@ -57,6 +57,7 @@ public class Brace {
     private int jobRetentionDays = 7;
     private java.time.Duration jobLease = JobPoller.DEFAULT_LEASE;
     private java.time.Duration jobPollInterval = JobPoller.DEFAULT_POLL_INTERVAL;
+    private Runnable enqueueHook;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -889,6 +890,10 @@ public class Brace {
             jobPoller.lease(jobLease);
             jobPoller.pollInterval(jobPollInterval);
             jobPoller.start(databaseFactory);
+            // Let Jobs.schedule nudge the poller after the enqueuing transaction commits, so a
+            // job with no delay starts without waiting out the poll interval.
+            enqueueHook = jobPoller::wake;
+            Jobs.onEnqueue(enqueueHook);
         }
 
         // On Postgres, rate limiters count cluster-wide via a shared DB counter (B4) so a limit is
@@ -1079,6 +1084,12 @@ public class Brace {
     }
 
     public void stop() throws Exception {
+        if (enqueueHook != null) {
+            // Identity-checked, so stopping this app doesn't unhook a different one that started
+            // after it (several apps in one JVM — tests).
+            Jobs.clearEnqueueHook(enqueueHook);
+            enqueueHook = null;
+        }
         jobPoller.stop();
         jobScheduler.stop();
         if (cache != null) {
