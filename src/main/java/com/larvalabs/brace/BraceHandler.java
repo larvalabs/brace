@@ -275,13 +275,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // M2: guards have run and none rejected the request, so the body is now worth reading.
             // Forcing it here (rather than leaving it to the first handler access) keeps the 413 at
             // the same point in the lifecycle it has always occupied — ahead of CSRF extraction and
-            // the handler — so nothing downstream sees a half-set-up request.
-            try {
-                braceRequest.resolveBody();
-            } catch (PayloadTooLargeException e) {
-                writeResult(braceRequest, Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession, cookieSecure);
-                return true;
-            }
+            // the handler — so nothing downstream sees a half-set-up request. An over-limit body
+            // throws to the PayloadTooLargeException catch below, which owns every 413 regardless of
+            // who triggered the read.
+            braceRequest.resolveBody();
 
             // Build the invoker
             Invoker invoker;
@@ -400,9 +397,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             // After-middleware runs inside writeResult now (M1), so it covers every response
-            // leaving handle() rather than only this path. Ordering is unchanged: it still runs
-            // before the session cookie is attached, so a middleware that returns a brand-new
-            // Result instance cannot silently discard the cookie (M6).
+            // leaving handle() rather than only this path. It still runs before the session cookie
+            // is attached, so a middleware returning a brand-new Result instance cannot silently
+            // discard the cookie (M6).
+            //
+            // One precedence nuance did change: the htmx Vary below used to be written *after* the
+            // middleware chain and therefore won; it is now written before, so an after-middleware
+            // that sets Vary overwrites it. Vary lives in the single-value header map and cannot be
+            // combined either way, so neither order is right for an app that sets its own Vary —
+            // such an app should append "HX-Request" itself.
 
             // Add Vary header for htmx requests (caching correctness)
             if ("true".equals(braceRequest.header("HX-Request"))) {
@@ -421,6 +424,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             return true;
 
+        } catch (PayloadTooLargeException e) {
+            // Owns every 413, wherever the body read was triggered from. A before-middleware that
+            // reads the body itself (a webhook signature guard) throws from *inside* the guard
+            // loop, which the narrower catch around the forced resolution never saw: the request
+            // fell through to the generic handler below and became a 500 that also recorded a
+            // framework error — so an unauthenticated client could flood the error store and the
+            // regression notifier just by POSTing oversized bodies. Deliberately records no error:
+            // an over-limit body is a client mistake, not an application fault.
+            writeResult(braceRequest, Result.error(413, "Payload Too Large"),
+                response, callback, session, csrfOnlySession, cookieSecure);
+            return true;
         } catch (NotFoundException e) {
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             Result notFoundResult = applyAfterQuietly(braceRequest, Result.notFound());

@@ -87,6 +87,10 @@ public class Request {
         if (bodySource == null) return;
         var source = bodySource;
         bodySource = null; // clear first: a throwing source must not be retried against a drained stream
+        // Empty state first, so a caller that catches the supplier's exception (a guard wrapping
+        // its own body read in try/catch) still sees a usable Request rather than null fields.
+        this.body = "";
+        this.uploadedFiles = Map.of();
         var content = source.get();
         this.body = content.body();
         this.uploadedFiles = content.files();

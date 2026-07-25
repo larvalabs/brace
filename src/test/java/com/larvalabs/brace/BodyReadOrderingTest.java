@@ -73,6 +73,21 @@ class BodyReadOrderingTest {
     }
 
     @Test
+    void oversizedBodyReadByAGuardStillReturns413() throws Exception {
+        // Regression (code-review pass over the M2 branch): a guard that reads the body itself
+        // triggers the read from inside the before-middleware loop, which the narrow catch around
+        // the forced resolution never saw. The request became a 500 *and* recorded a framework
+        // error, so an unauthenticated client could flood the error store and the regression
+        // notifier by POSTing oversized bodies at any body-reading route.
+        var before = app.stats().recentErrors().size();
+        var resp = post("/signed/hook", "x".repeat(4096));
+        assertEquals(413, resp.statusCode(),
+            "a guard's own body read must still produce 413, got: " + resp.body());
+        assertEquals(before, app.stats().recentErrors().size(),
+            "an over-limit body is a client mistake and must not be recorded as an app error");
+    }
+
+    @Test
     void oversizedBodyStillReturns413WhenNoGuardRejectsIt() throws Exception {
         assertEquals(413, post("/plain", "x".repeat(4096)).statusCode(),
             "the cap must still be enforced for requests that reach a handler");
