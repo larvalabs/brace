@@ -91,9 +91,12 @@ class OpsSharedSecretTest {
 
     private static String authenticate(int port) throws Exception {
         String ts = java.time.Instant.now().toString();
-        String sig = OpsKeys.sign(ts, keypair.privateKey());
-        String body = "{\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + ts
-            + "\",\"signature\":\"" + sig + "\"}";
+        byte[] nonceBytes = new byte[16];
+        new java.security.SecureRandom().nextBytes(nonceBytes);
+        String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
+        String sig = OpsKeys.sign(OpsKeys.v2AuthMessage(keypair.publicKey(), ts, nonce), keypair.privateKey());
+        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + ts
+            + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + sig + "\"}";
         var resp = client.send(HttpRequest.newBuilder()
             .uri(URI.create("http://localhost:" + port + "/ops/auth"))
             .header("Content-Type", "application/json")

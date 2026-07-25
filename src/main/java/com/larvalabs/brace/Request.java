@@ -14,8 +14,13 @@ public class Request {
     private final Map<String, String> pathParams;
     private final Map<String, String> queryParams;
     private final Map<String, String> headers;
-    private final String body;
-    private final Map<String, List<UploadedFile>> uploadedFiles;
+    // M2: body and uploaded files are resolved lazily through bodySource so before-middleware
+    // (rate limiting, auth) runs BEFORE the bytes are buffered. Once resolved they are cached
+    // here — the underlying request stream can only be read once. bodySource is null for the
+    // eager constructors (unit tests, hand-built Requests), where body is supplied directly.
+    private String body;
+    private Map<String, List<UploadedFile>> uploadedFiles;
+    private java.util.function.Supplier<BodyContent> bodySource;
     private final String remoteAddr;
     private final TrustedProxies trustedProxies;
     private Storage storage;
@@ -48,6 +53,47 @@ public class Request {
         this.uploadedFiles = uploadedFiles;
         this.remoteAddr = remoteAddr;
         this.trustedProxies = trustedProxies;
+    }
+
+    /** A resolved request body: the form-encoded text plus any multipart file parts. */
+    record BodyContent(String body, Map<String, List<UploadedFile>> files) {}
+
+    /**
+     * The framework constructor (M2): the body is not read yet. {@code bodySource} is invoked
+     * at most once, on the first access to the body, form params, or uploaded files — which
+     * {@link BraceHandler} forces after before-middleware has run, so a request that a guard
+     * rejects never buffers its bytes.
+     */
+    Request(String method, String path, Map<String, String> pathParams,
+            Map<String, String> queryParams, Map<String, String> headers,
+            java.util.function.Supplier<BodyContent> bodySource,
+            String remoteAddr, TrustedProxies trustedProxies) {
+        this.method = method;
+        this.path = path;
+        this.pathParams = pathParams;
+        this.queryParams = queryParams;
+        this.headers = caseInsensitive(headers);
+        this.bodySource = bodySource;
+        this.remoteAddr = remoteAddr;
+        this.trustedProxies = trustedProxies;
+    }
+
+    /**
+     * Resolve the deferred body exactly once. Idempotent, and a no-op for eagerly-constructed
+     * Requests. Propagates {@link PayloadTooLargeException} to the caller — {@link BraceHandler}
+     * forces resolution at a point where it can turn that into a 413.
+     */
+    void resolveBody() {
+        if (bodySource == null) return;
+        var source = bodySource;
+        bodySource = null; // clear first: a throwing source must not be retried against a drained stream
+        // Empty state first, so a caller that catches the supplier's exception (a guard wrapping
+        // its own body read in try/catch) still sees a usable Request rather than null fields.
+        this.body = "";
+        this.uploadedFiles = Map.of();
+        var content = source.get();
+        this.body = content.body();
+        this.uploadedFiles = content.files();
     }
 
     public String method() { return method; }
@@ -163,6 +209,7 @@ public class Request {
     public List<String> formParams(String name) {
         // Mirror parseFormBody's split rules: a pair without '=' is a bare key with an
         // empty value; a leading '=' means an empty-string key.
+        resolveBody();
         return valuesOf(body, name, false);
     }
 
@@ -265,21 +312,23 @@ public class Request {
         return "true".equals(header("HX-Request"));
     }
 
-    public String body() { return body; }
+    public String body() { resolveBody(); return body; }
 
     public UploadedFile file(String name) {
+        resolveBody();
         var files = uploadedFiles.get(name);
         if (files == null || files.isEmpty()) return null;
         return files.getFirst();
     }
 
     public List<UploadedFile> files(String name) {
+        resolveBody();
         return uploadedFiles.getOrDefault(name, List.of());
     }
 
     public <T> T bodyAs(Class<T> type) {
         try {
-            return Json.mapper().readValue(body, type);
+            return Json.mapper().readValue(body(), type);
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse request body as " + type.getSimpleName(), e);
         }
@@ -485,6 +534,7 @@ public class Request {
      */
     Map<String, String> parsedFormBody() {
         if (formBodyParams == null) {
+            resolveBody();
             formBodyParams = parseSingleValues(body, false);
         }
         return formBodyParams;

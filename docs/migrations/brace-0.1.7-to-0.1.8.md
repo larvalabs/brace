@@ -1,9 +1,22 @@
 # Migrating from Brace 0.1.7 → 0.1.8
 
-**This release has no breaking changes.** No application code needs to change.
+This release combines the findings of the [2026-07 security review](../2026-07-24-security-review-todos.md),
+which tightened several framework defaults, with fixes for two ways a durable job could be
+lost or wedged forever and a cut to durable-job pickup latency.
 
-It fixes two ways a durable job could be lost or wedged forever, both of which apply to
-apps that never touched the relevant configuration, and cuts durable-job pickup latency:
+Two cases **are breaking** and need action:
+
+- **Session cookies now carry `Secure`** on every non-loopback request. An app deliberately
+  served over plain HTTP on a real hostname will stop receiving its session cookie back
+  until it opts out with `.secure(false)` — see
+  "session cookies are `Secure` by default" below. Local development, `http://localhost`,
+  and in-process test suites are unaffected.
+- **Ops auth protocol v1 is rejected.** A `brace` CLI older than 0.1.7 can no longer
+  authenticate against a 0.1.8 server — see "ops auth v1 removed" below.
+
+The job and mailer changes ship as new **defaults** and need no code change. The only reason
+to touch your code for those is if you run jobs longer than 30 minutes, talk to an unusually
+slow SMTP relay, or want to tune the poll rate:
 
 - **Durable jobs claimed by an instance that dies are now recovered** instead of being
   stranded permanently.
@@ -12,8 +25,360 @@ apps that never touched the relevant configuration, and cuts durable-job pickup 
 - **Durable jobs now start as soon as the enqueuing transaction commits**, instead of
   waiting up to 10 seconds for the next poll.
 
-All three ship as new *defaults*. The only reason to touch your code is if you run jobs longer
-than 30 minutes, talk to an unusually slow SMTP relay, or want to tune the poll rate — see below.
+Everything else is a hardening change with no action required.
+
+## Index
+
+| Change | Type | Action required | Anchor |
+|---|---|---|---|
+| Session cookies `Secure` by default | breaking | plain-HTTP prod deployments: add `.secure(false)` | [§](#breaking-session-cookies-are-secure-by-default) |
+| Ops auth v1 removed | breaking | upgrade the `brace` CLI to 0.1.7+ | [§](#breaking-ops-auth-protocol-v1-removed) |
+| Static files no longer follow symlinks out of the root | behavior change | re-point symlinked assets inside the served directory | [§](#security-fix-static-files-no-longer-follow-symlinks-out-of-the-served-directory) |
+| Security headers now cover errors and static files | behavior change | none | [§](#security-fix-security-headers-now-apply-to-static-files-404s-500s-and-413s) |
+| `/ops/*` responses are `no-store` | behavior change | none | [§](#security-fix-ops-responses-are-no-store) |
+| WebSocket upgrades are `Origin`-checked | behavior change | cross-origin WS clients: declare `wsAllowedOrigins(...)` | [§](#security-fix-websocket-upgrades-are-origin-checked) |
+| Request bodies read after before-middleware | behavior change | before-middleware reading `req.body()` still works | [§](#security-fix-request-bodies-are-read-after-before-middleware) |
+| `Result.download` escapes the filename | behavior change | none | [§](#security-fix-resultdownload-escapes-the-filename) |
+| `Http.multipart` rejects control chars in part names | behavior change | none unless passing raw user filenames | [§](#security-fix-httpmultipart-rejects-control-characters-in-part-names) |
+| `Result.cookie` rejects invalid names/values | behavior change | none unless setting cookies from raw user input | [§](#security-fix-resultcookie-validates-names-and-values) |
+| Ops session cookie scoped to `/ops` | behavior change | none | [§](#security-fix-ops-session-cookie-is-scoped-to-ops) |
+| `Storage` rejects traversal in keys | behavior change | none unless building keys from user input | [§](#security-fix-storage-rejects-traversal-segments-in-object-keys) |
+| Stalled durable jobs are recovered | new default | raise `jobLease(...)` if jobs run >30 min | [§](#stalled-durable-jobs-are-recovered-new-default) |
+| Durable jobs start on enqueue | new default | none; tune `jobPollInterval(...)` if multi-instance | [§](#durable-jobs-start-on-enqueue-not-on-the-next-poll-new-default) |
+| Mailer SMTP timeouts bounded | new default | raise timeouts for a slow relay | [§](#mailer-smtp-timeouts-are-bounded-new-default) |
+
+---
+
+## Breaking: session cookies are `Secure` by default
+
+**What changed.** `SessionOptions` no longer defaults `secure` to `false`. With no explicit
+setting the `Secure` attribute is now resolved **per request**: on for every request, off
+only when the request's `Host` is a loopback address (`localhost`, `127.0.0.0/8`, `::1`).
+An `X-Forwarded-Proto: https` from a **trusted** proxy forces it on regardless of `Host`.
+
+**Why.** Brace serves cleartext HTTP/1.1 and expects TLS to be terminated by a reverse
+proxy, so it cannot read the scheme off its own connector. The old fixed `false` meant
+every app built the documented way — `.sessions(secret)` — shipped a session cookie with no
+`Secure` attribute, and the cookie *is* the session: any cleartext request to the domain
+(a typed `http://` URL, a stale bookmark, a first visit before HSTS is pinned) handed it to
+a network attacker. A fixed `true` would have been no better — it silently breaks every app
+and test suite on `http://localhost` — hence the per-request resolution.
+
+**Who needs to act.** Only an app served over **plain HTTP on a real hostname** in
+production. It will now set a `Secure` cookie the browser refuses to send back, so sessions
+appear to reset on every request.
+
+**Before (0.1.7) — cookie had no `Secure` attribute:**
+
+```java
+var app = Brace.app().sessions(System.getenv("SESSION_SECRET"));
+// Set-Cookie: brace_session=...; Path=/; HttpOnly; SameSite=Lax
+```
+
+**After (0.1.8) — same code, `Secure` added off-loopback:**
+
+```java
+var app = Brace.app().sessions(System.getenv("SESSION_SECRET"));
+// Set-Cookie: brace_session=...; Path=/; HttpOnly; Secure; SameSite=Lax
+```
+
+**Opting out** (plain-HTTP deployment on a private network, a prod smoke test):
+
+```java
+var app = Brace.app()
+    .sessions(SessionOptions.of(System.getenv("SESSION_SECRET")).secure(false));
+```
+
+Startup logs a warning whenever that opt-out is in effect, so the state is visible rather
+than silent. `SessionOptions.secure(secret)` and `.sameSiteNone()` still force `Secure` on,
+and an explicit `.secure(true)` / `.secure(false)` always wins over the per-request
+resolution.
+
+**Tests are unaffected.** `Brace.test()` and any suite hitting `http://localhost` keep
+working with no change: a loopback `Host` resolves to no `Secure` attribute.
+
+**If you set `Secure` explicitly already**, nothing changes — your value still wins.
+
+---
+
+## Breaking: ops auth protocol v1 removed
+
+Protocol v1 signed the timestamp alone: the signature was not bound to the public key and
+carried no nonce, so a captured `/ops/auth` request could be replayed verbatim by anyone
+within the ±30 s acceptance window to mint a fresh token at the key's full scope ceiling.
+
+v1 shipped in 0.1.6 and was deprecated in 0.1.7, which stated that a future release would
+reject it. This is that release: a v1 body (no `v` field, or `v: "1"`) now gets a 401 naming
+the cause.
+
+**Who needs to act.** Anyone still running a `brace` CLI older than 0.1.7, or a hand-rolled
+`/ops/auth` client that has not moved to v2.
+
+**Upgrade the CLI** — 0.1.7 and later send v2 natively. (The CLI's own v1 fallback, which
+retried with a v1 body when a pre-0.1.7 server rejected v2, is removed too: a 401 now means
+what it says instead of silently downgrading to a replayable protocol.)
+
+**Hand-rolled clients** sign `publicKey + "\n" + timestamp + "\n" + nonce` and send the
+envelope:
+
+```jsonc
+// Before (v1) — removed
+{ "publicKey": "...", "timestamp": "2026-07-24T12:00:00Z", "signature": "<sign(timestamp)>" }
+
+// After (v2)
+{
+  "v": "2",
+  "publicKey": "...",
+  "timestamp": "2026-07-24T12:00:00Z",
+  "nonce": "<base64url of 16+ random bytes, fresh per attempt>",
+  "signature": "<sign(publicKey + \"\\n\" + timestamp + \"\\n\" + nonce)>"
+}
+```
+
+`OpsKeys.v2AuthMessage(publicKey, timestamp, nonce)` builds the canonical signed message if
+you are calling from Java.
+
+---
+
+## Security fix: static files no longer follow symlinks out of the served directory
+
+`app.staticFiles(prefix, dir)` checked containment with `Path.normalize()` +
+`startsWith(baseDir)`. That is a lexical check — it collapses `..` in the path *string* and
+does not resolve symlinks — while the file read follows them. A symlink anywhere under a
+served directory therefore served whatever it pointed at, **including files outside the web
+root**.
+
+Containment is now re-checked against the link-resolved paths (`toRealPath()` on both the
+candidate and the base directory).
+
+**Action required only if** you relied on a symlink pointing *out* of a served directory —
+e.g. `public/uploads` → `/var/app/uploads`. That now returns 404. Either move the target
+inside the served tree, or register the target directory as its own mapping:
+
+```java
+// Before: public/uploads was a symlink to /var/app/uploads
+app.staticFiles("/assets", "public");
+
+// After: serve the real directory directly
+app.staticFiles("/assets", "public");
+app.staticFiles("/assets/uploads", "/var/app/uploads");
+```
+
+Symlinks that stay **inside** the served directory keep working unchanged.
+
+---
+
+## Security fix: request bodies are read after before-middleware
+
+The request body (including multipart parsing) used to be buffered *before* the
+`before(...)` middleware chain ran, so a rate limiter or auth guard could not reject a
+request until up to `maxUploadSize` had already been read into the heap — with handlers on
+virtual threads, nothing bounded how many of those were in flight at once.
+
+The body is now read lazily, after the guards have run. **No action required.**
+
+Two consequences worth knowing:
+
+- A request rejected by before-middleware now returns the **guard's** status rather than
+  `413`, even when the body was oversized. Previously an oversized body on a guarded route
+  returned `413` before the guard was consulted.
+- Middleware that genuinely needs the body — a webhook signature check, say — still works
+  unchanged; reading `req.body()` inside a guard triggers the read at that point.
+
+```java
+// Still works: the body read happens on access, inside the guard.
+app.before("/webhooks/*", req ->
+    verifySignature(req.header("X-Signature"), req.body()) ? null : Result.unauthorized());
+```
+
+The `maxUploadSize` cap itself is unchanged: a request that reaches a handler with an
+oversized body still gets `413`.
+
+---
+
+## Security fix: security headers now apply to static files, 404s, 500s and 413s
+
+After-middleware — including `app.after(SecurityHeaders.defaults())` — used to run only on
+the normal handler path. Every other response left the server undecorated: static files
+(which got `nosniff` and nothing else), unmatched-route 404s, handler-thrown 404s, CSRF
+403s, 500s, and `413 Payload Too Large`. An app that followed the documented hardening step
+had no `X-Frame-Options`, `Referrer-Policy`, or CSP on exactly the responses that most need
+them.
+
+After-middleware now runs for every response leaving the handler. **No action required.**
+
+Path-scoped middleware is unaffected — `app.after("/admin/*", …)` still only fires for
+matching paths, including for static files and error responses under that prefix.
+
+One nuance: on the 404-thrown and 500 paths, an after-middleware that itself throws is
+logged and skipped rather than replacing the error response. On all other paths a throwing
+after-middleware surfaces as a 500, as before.
+
+---
+
+## Security fix: WebSocket upgrades are `Origin`-checked
+
+`app.ws(path, …)` accepted an upgrade from any origin and then decrypted the
+`brace_session` cookie straight into the handler's `WsContext`. A WebSocket handshake is
+not subject to the same-origin policy, so an attacker's page could open a socket to your
+app, have the browser attach the victim's session cookie, and hold an authenticated socket
+for its lifetime — cross-site WebSocket hijacking. The only thing standing in the way was
+the default `SameSite=Lax` cookie, which an app disables the moment it calls
+`sameSiteNone()`.
+
+Upgrades whose `Origin` names a different host are now rejected with 403.
+
+**No action required** for same-origin browser clients or for non-browser clients (a
+missing `Origin` is allowed — only browsers send one, and only browsers need the check).
+The host is compared without scheme or port, so TLS terminated at a proxy is fine.
+
+**Action required** only for a deliberately cross-origin browser client:
+
+```java
+var app = Brace.app()
+    .wsAllowedOrigins("https://studio.example.com")   // full origin, or a bare host
+    .ws("/live", ctx -> new LiveHandler(ctx));
+```
+
+Pass `"*"` to disable the check entirely — sound only if the socket carries no ambient
+authority (i.e. it does not rely on the session cookie for authorization).
+
+---
+
+## Security fix: `/ops/*` responses are `no-store`
+
+Only `/ops/auth/exchange` sent `Cache-Control: no-store`. Every other ops endpoint relied
+on the caller's credential channel to suppress caching — which RFC 9111 guarantees for the
+CLI's `Authorization` header, but *not* for the `__brace_ops_session` cookie a browser
+uses. A response with no `Cache-Control` is heuristically cacheable, and `/ops/dashboard`
+embeds a live bearer token in its HTML, so an intermediary could store one operator's
+dashboard and serve it — token included — to the next requester.
+
+Every `/ops/*` response now carries `Cache-Control: no-store`. **No action required.**
+
+---
+
+## Security fix: `Result.download` escapes the filename
+
+`Result.download(bytes, contentType, filename)` interpolated the filename raw into
+`Content-Disposition: attachment; filename="…"`. A name containing a double quote closed the
+quoted-string early and everything after it was parsed by the client as further parameters —
+`Result.download(b, "text/plain", "x\"; name=\"y")` put
+`Content-Disposition: attachment; filename="x"; name="y"` on the wire. Serving a user-uploaded
+file under its original name is the method's primary use case, which is exactly where the
+value is attacker-supplied.
+
+The header is now built safely and emits the RFC 6266 pair — an ASCII-safe `filename="…"`
+plus `filename*=UTF-8''…` carrying the exact name. Directory components are dropped (a
+download name is a leaf), and characters that can't appear literally in a quoted-string are
+replaced with `_` in the ASCII form.
+
+**No action required.** One visible improvement: non-ASCII filenames now reach the browser
+intact instead of being mangled.
+
+```java
+Result.download(pdf, "application/pdf", "отчёт.pdf");
+// Content-Disposition: attachment; filename="______.pdf"; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82.pdf
+```
+
+---
+
+## Security fix: `Http.multipart` rejects control characters in part names
+
+`Http.post(url).multipart().field(name, bytes, filename)` wrote part names and filenames into
+the multipart headers verbatim, so CR/LF in either value terminated the part headers and let
+the caller forge **additional parts** in the outbound request — parameter smuggling into
+whatever third-party API the app was calling (adding a `visibility=public` part to an upload,
+say).
+
+Quotes and backslashes are now escaped per RFC 7578, and a control character throws
+`IllegalArgumentException` rather than being silently stripped: for an outbound API call, a
+request that quietly differs from what the caller asked for is worse than one that doesn't
+happen.
+
+**Action required only if** you pass raw user-supplied filenames straight through. Sanitize
+or catch:
+
+```java
+// A filename from an upload — now rejected loudly instead of smuggling parts.
+var safeName = upload.filename().replaceAll("[\\p{Cntrl}]", "");
+Http.post(url).multipart().field("file", upload.bytes(), safeName).fetch();
+```
+
+---
+
+## Security fix: `Result.cookie` validates names and values
+
+The cookie value was appended raw ahead of the framework's own attributes, so a `;` in it
+injected cookie attributes: a value of `1; Path=/; Domain=evil` produced
+`Set-Cookie: c=1; Path=/; Domain=evil; Max-Age=60; …`. A handler setting a cookie from user
+input — a theme, a locale, a `returnTo` — could have that cookie re-scoped by the input.
+
+`Result.cookie(...)` now throws `IllegalArgumentException` for a value containing control
+characters, spaces, quotes, backslashes, `;` or `,`, and for a name that isn't an RFC 6265
+token.
+
+**Action required only if** you pass raw user input as a cookie value. URL-encode it:
+
+```java
+// Before: could inject attributes
+result.cookie("returnTo", req.queryParam("next"), 600, true, true, "Lax");
+
+// After
+result.cookie("returnTo",
+    URLEncoder.encode(req.queryParam("next"), StandardCharsets.UTF_8),
+    600, true, true, "Lax");
+```
+
+There is also a new overload taking an explicit `path`, so a cookie can be scoped to a
+subtree instead of the hardcoded `/`:
+
+```java
+result.cookie(name, value, maxAge, httpOnly, secure, sameSite, "/admin");
+```
+
+---
+
+## Security fix: ops session cookie is scoped to `/ops`
+
+`__brace_ops_session` was set with `Path=/`, so an operator credential was attached to every
+request to the application — readable by any handler through `req.cookie(...)` and captured
+by any request logging the app does. Every endpoint that accepts it lives under `/ops`, so
+that is where it is now scoped. **No action required**; existing sessions simply re-issue on
+next login.
+
+---
+
+## Security fix: `Storage` rejects traversal segments in object keys
+
+`Storage.uriEncodePath` percent-encodes each `/`-separated segment, but `.` is unreserved, so
+a `..` segment survived encoding intact — and `buildUploadUrl` and `canonicalUri` built the
+same unnormalized path, meaning the request was *validly signed* for the traversed key. An
+endpoint that normalizes the path would then act on it.
+
+`put`, `delete`, and `url` now throw `IllegalArgumentException` for a key with a `.` or `..`
+segment or a leading `/`.
+
+**Action required only if** you assemble keys from user input. `Storage.safeKey` /
+`putGenerated` were never affected (UUID keys):
+
+```java
+// Safe — the extension is sanitized and the name is a UUID
+var stored = storage.putGenerated("avatars", upload);
+```
+
+---
+
+## Smaller hardening (no action required)
+
+- **`Csrf.validateToken`** compares with an explicit UTF-8 encoding instead of the platform
+  default charset.
+- **`Csrf.hiddenField`** HTML-escapes the token value.
+- **`/ops/auth`** returns `400` for a non-positive `ttlSeconds` instead of minting an
+  already-expired token that then fails with a confusing `401`.
+- A dead clause in the weak-secret startup check (a mixed-case literal compared against a
+  lowercased string, so it could never match) was removed; the `change-me` checks beside it
+  already covered the scaffold placeholder.
 
 ---
 

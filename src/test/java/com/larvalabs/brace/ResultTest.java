@@ -181,7 +181,10 @@ class ResultTest {
     @Test
     void downloadSetsContentDispositionHeader() {
         var result = Result.download(new byte[]{1, 2, 3}, "application/pdf", "report.pdf");
-        assertEquals("attachment; filename=\"report.pdf\"", result.header("Content-Disposition"));
+        // Since M6 (2026-07 review) the header carries the RFC 6266 pair: an ASCII-safe
+        // filename plus filename* with the exact name. See DownloadFilenameTest.
+        assertEquals("attachment; filename=\"report.pdf\"; filename*=UTF-8''report.pdf",
+            result.header("Content-Disposition"));
     }
 
     @Test

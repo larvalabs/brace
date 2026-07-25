@@ -60,10 +60,15 @@ class OpsScopeIntegrationTest {
     /** Mint a token for the given key, optionally requesting a scope. Returns the parsed JSON response. */
     private static JsonResponse authenticate(OpsKeys.Keypair kp, String requestedScope) throws Exception {
         String ts = java.time.Instant.now().toString();
-        String sig = OpsKeys.sign(ts, kp.privateKey());
+        byte[] nonceBytes = new byte[16];
+        new java.security.SecureRandom().nextBytes(nonceBytes);
+        String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
+        String sig = OpsKeys.sign(OpsKeys.v2AuthMessage(kp.publicKey(), ts, nonce), kp.privateKey());
         var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("v", "2");
         body.put("publicKey", kp.publicKey());
         body.put("timestamp", ts);
+        body.put("nonce", nonce);
         body.put("signature", sig);
         if (requestedScope != null) body.put("scope", requestedScope);
         var resp = client.send(

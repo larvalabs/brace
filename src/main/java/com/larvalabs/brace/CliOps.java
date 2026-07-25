@@ -166,7 +166,18 @@ public class CliOps {
 
             JsonNode parsed = Json.mapper().readTree(loginResponse.body());
             String loginToken = parsed.get("loginToken").asText();
+            // M8: the token comes off the wire, and openBrowser hands the assembled URL to a
+            // shell-parsed command on Windows. Validate the server's value before it can become
+            // part of a command line.
+            if (!isBase64Url(loginToken)) {
+                CliOutput.printError("Server returned a malformed login token; refusing to open it.");
+                return 1;
+            }
             String dashboardUrl = cfg.url() + "/ops/auth/exchange?token=" + loginToken;
+            if (!dashboardUrl.startsWith("http://") && !dashboardUrl.startsWith("https://")) {
+                CliOutput.printError("Refusing to open a non-http(s) dashboard URL: " + dashboardUrl);
+                return 1;
+            }
 
             System.out.println("Opening dashboard...");
             openBrowser(dashboardUrl);
@@ -177,12 +188,40 @@ public class CliOps {
         }
     }
 
+    /**
+     * A login token is base64url — the only shape {@code OpsToken} ever mints. Anything else
+     * came from a server that is malfunctioning or hostile, and must not reach a command line
+     * (M8).
+     */
+    static boolean isBase64Url(String token) {
+        if (token == null || token.isEmpty() || token.length() > 4096) return false;
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            boolean ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                || c == '-' || c == '_' || c == '.' || c == '=';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Open a URL in the user's browser.
+     *
+     * <p><strong>Windows (M8).</strong> This used to run {@code cmd /c start <url>}. {@code cmd}
+     * re-parses its command line, so an {@code &} in the URL terminates {@code start} and begins
+     * a second command — and the URL carries a token the *server* supplied. A compromised app
+     * server, a hostile server an operator was asked to inspect, or a MITM on a plain-http
+     * {@code cfg.url()} could therefore execute code on the operator's workstation. Neither
+     * {@code rundll32 url.dll,FileProtocolHandler} nor the macOS/Linux openers go through a
+     * shell parser: they take the URL as a single argv entry.
+     */
     private static void openBrowser(String url) {
         try {
             String os = System.getProperty("os.name").toLowerCase();
             if (os.contains("mac")) new ProcessBuilder("open", url).start();
-            else if (os.contains("linux")) new ProcessBuilder("xdg-open", url).start();
-            else if (os.contains("win")) new ProcessBuilder("cmd", "/c", "start", url).start();
+            else if (os.contains("win")) {
+                new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start();
+            } else new ProcessBuilder("xdg-open", url).start();
         } catch (Exception ignored) {}
     }
 }

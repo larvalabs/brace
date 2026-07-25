@@ -169,6 +169,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // mutations too — see the write-back choke point on writeResult below.
         Session session = null;
         Session csrfOnlySession = null;
+        // Hoisted with session/csrfOnlySession so the catch paths (thrown 404, 500) resolve the
+        // same Secure attribute the try-path would have. Recomputed inside the try once headers
+        // are parsed; the conservative default holds if we fail before that.
+        boolean cookieSecure = true;
+        // Hoisted for the same reason as session/cookieSecure: the catch paths (thrown 404, 500)
+        // need it to run after-middleware over their responses (M1). Null until the route is
+        // matched, which is before any response can be written.
+        Request braceRequest = null;
         try {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
@@ -185,54 +193,34 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 headers.put(field.getName(), field.getValue());
             }
 
-            // Match route first. Static files, 404s, and before-middleware short-circuits
-            // must not pay request-body or multipart-parsing cost — the body is read only
-            // once we know a route will consume it. (This also keeps an unmatched POST with a
-            // large multipart body from being fully parsed into memory before the 404.)
+            // Resolve the session cookie's Secure attribute from this request (H2). Computed here,
+            // before the first writeResult can fire, and threaded through the choke point so every
+            // exit path agrees. See SessionOptions.resolveSecure for the rule.
+            cookieSecure = resolveCookieSecure(
+                headers, org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest));
+
+            // Match route first. Static files and 404s must not pay request-body or
+            // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
+            // body from being fully parsed into memory before the 404.)
             RouteMatch match = router.match(method, path);
 
-            // Read request body — multipart or plain — only for matched routes.
-            String body = "";
-            Map<String, List<UploadedFile>> uploadedFiles = Map.of();
-            if (match != null) {
-                String requestContentType = headers.getOrDefault("Content-Type", "");
-                if (requestContentType.contains("multipart/form-data")) {
-                    var parsed = parseMultipart(jettyRequest, requestContentType);
-                    body = parsed.formBody();
-                    uploadedFiles = parsed.files();
-                } else {
-                    // Fast-reject on Content-Length before reading any bytes.
-                    String contentLengthHeader = headers.get("Content-Length");
-                    if (contentLengthHeader != null) {
-                        try {
-                            long declaredLength = Long.parseLong(contentLengthHeader.strip());
-                            if (declaredLength > maxUploadSize) {
-                                writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession);
-                                return true;
-                            }
-                        } catch (NumberFormatException ignored) {
-                            // malformed Content-Length — fall through and let the read cap it
-                        }
-                    }
-                    // Bounded incremental read: cap at maxUploadSize bytes regardless of
-                    // Content-Length (which clients can lie about or omit for chunked bodies).
-                    // Read maxUploadSize+1 bytes: if we get more than maxUploadSize the body
-                    // is too large and we return 413.
-                    byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
-                    if (bodyBytes == null) {
-                        writeResult(Result.error(413, "Payload Too Large"), response, callback, session, csrfOnlySession);
-                        return true;
-                    }
-                    body = new String(bodyBytes, StandardCharsets.UTF_8);
-                }
-            }
+            // M2: the body is *supplied* here, not read. Buffering it before the before-middleware
+            // loops put the cost ahead of the layer that exists to shed it — a rate limiter or auth
+            // guard could not reject a request until up to maxUploadSize had already been read into
+            // the heap, on virtual threads with no pool bounding in-flight concurrency. The supplier
+            // runs on first access to body/form/files: either a middleware that genuinely needs the
+            // body (a webhook signature guard) or the forced resolution below, once the guards have
+            // had their say.
+            java.util.function.Supplier<Request.BodyContent> bodySource =
+                match == null ? () -> new Request.BodyContent("", Map.of())
+                              : () -> readRequestBody(jettyRequest, headers);
 
             // Extract remote address from socket
             String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
 
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
-            Request braceRequest = new Request(method, path, pathParams, queryParams, headers, body, uploadedFiles, remoteAddr, trustedProxies);
+            braceRequest = new Request(method, path, pathParams, queryParams, headers, bodySource, remoteAddr, trustedProxies);
             braceRequest.setRawQuery(rawQuery);
             if (storage != null) {
                 braceRequest.setStorage(storage);
@@ -242,7 +230,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             for (var before : beforeMiddleware) {
                 Result earlyResult = before.apply(braceRequest);
                 if (earlyResult != null) {
-                    writeResult(earlyResult, response, callback, session, csrfOnlySession);
+                    writeResult(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
                     return true;
                 }
             }
@@ -263,7 +251,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         // A short-circuiting guard may have mutated the session (e.g. a
                         // flash message before redirecting to login) — persisted by the
                         // write-back choke point.
-                        writeResult(earlyResult, response, callback, session, csrfOnlySession);
+                        writeResult(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
                         return true;
                     }
                 }
@@ -276,13 +264,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (match == null) {
                 Result staticResult = serveStaticFile(braceRequest);
                 if (staticResult != null) {
-                    writeResult(staticResult, response, callback, session, csrfOnlySession);
+                    writeResult(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure);
                     return true;
                 }
                 Result notFoundResult = noRouteFound(method, path);
-                writeResult(notFoundResult, response, callback, session, csrfOnlySession);
+                writeResult(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
                 return true;
             }
+
+            // M2: guards have run and none rejected the request, so the body is now worth reading.
+            // Forcing it here (rather than leaving it to the first handler access) keeps the 413 at
+            // the same point in the lifecycle it has always occupied — ahead of CSRF extraction and
+            // the handler — so nothing downstream sees a half-set-up request. An over-limit body
+            // throws to the PayloadTooLargeException catch below, which owns every 413 regardless of
+            // who triggered the read.
+            braceRequest.resolveBody();
 
             // Build the invoker
             Invoker invoker;
@@ -325,8 +321,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     }
                     if (!Csrf.validateToken(csrfSession, submittedToken)) {
                         // Choke point persists guard mutations on the 403 too.
-                        writeResult(Result.json(java.util.Map.of("error", "csrf_required"), 403),
-                            response, callback, session, csrfOnlySession);
+                        writeResult(braceRequest, Result.json(java.util.Map.of("error", "csrf_required"), 403),
+                            response, callback, session, csrfOnlySession, cookieSecure);
                         return true;
                     }
                 }
@@ -400,12 +396,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.clearFlash();
             }
 
-            // Run after middleware first — after-middleware may return a brand-new Result
-            // instance (e.g. a wrapper that rewrites the body). Attaching the session cookie
-            // before this step would silently discard it whenever the instance changed (M6).
-            for (var after : afterMiddleware) {
-                result = after.apply(braceRequest, result);
-            }
+            // After-middleware runs inside writeResult now (M1), so it covers every response
+            // leaving handle() rather than only this path. It still runs before the session cookie
+            // is attached, so a middleware returning a brand-new Result instance cannot silently
+            // discard the cookie (M6).
+            //
+            // One precedence nuance did change: the htmx Vary below used to be written *after* the
+            // middleware chain and therefore won; it is now written before, so an after-middleware
+            // that sets Vary overwrites it. Vary lives in the single-value header map and cannot be
+            // combined either way, so neither order is right for an app that sets its own Vary —
+            // such an app should append "HX-Request" itself.
 
             // Add Vary header for htmx requests (caching correctness)
             if ("true".equals(braceRequest.header("HX-Request"))) {
@@ -414,7 +414,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
-            writeResult(result, response, callback, session, csrfOnlySession);
+            writeResult(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure);
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             if (stats != null) {
                 int qc = db != null ? db.queryCount() : 0;
@@ -424,10 +424,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             return true;
 
+        } catch (PayloadTooLargeException e) {
+            // Owns every 413, wherever the body read was triggered from. A before-middleware that
+            // reads the body itself (a webhook signature guard) throws from *inside* the guard
+            // loop, which the narrower catch around the forced resolution never saw: the request
+            // fell through to the generic handler below and became a 500 that also recorded a
+            // framework error — so an unauthenticated client could flood the error store and the
+            // regression notifier just by POSTing oversized bodies. Deliberately records no error:
+            // an over-limit body is a client mistake, not an application fault.
+            writeResult(braceRequest, Result.error(413, "Payload Too Large"),
+                response, callback, session, csrfOnlySession, cookieSecure);
+            return true;
         } catch (NotFoundException e) {
             var durationUs = (System.nanoTime() - startNanos) / 1000;
-            Result notFoundResult = Result.notFound();
-            writeResult(notFoundResult, response, callback, session, csrfOnlySession);
+            Result notFoundResult = applyAfterQuietly(braceRequest, Result.notFound());
+            writeResult(null, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
             if (stats != null) {
                 String errorMethod = jettyRequest.getMethod();
                 String errorPath = jettyRequest.getHttpURI().getPath();
@@ -476,8 +487,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.
-            Result errorResult = Result.error(500, "Internal Server Error");
-            writeResult(errorResult, response, callback, session, csrfOnlySession);
+            Result errorResult = applyAfterQuietly(braceRequest, Result.error(500, "Internal Server Error"));
+            writeResult(null, errorResult, response, callback, session, csrfOnlySession, cookieSecure);
             return true;
         }
     }
@@ -490,11 +501,77 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * is the M5c local session (non-null only when the handler had no Session param) —
      * never both non-null. Attachment is a no-op for unmodified sessions.
      */
-    private void writeResult(Result result, Response response, Callback callback,
-                             Session session, Session csrfOnlySession) {
-        attachSessionCookie(result, session);
-        attachSessionCookie(result, csrfOnlySession);
+    private void writeResult(Request req, Result result, Response response, Callback callback,
+                             Session session, Session csrfOnlySession, boolean cookieSecure) {
+        // M1: after-middleware used to run only on the handler path, so an app that added
+        // SecurityHeaders.defaults() got no X-Frame-Options / Referrer-Policy / CSP on static
+        // files, 404s, 500s, CSRF 403s or 413s — verifiably, and on exactly the responses that
+        // most need them. Applying it here means every exit from handle() is covered. A null
+        // request means "already applied, or nothing to apply it against" (the catch paths,
+        // which decorate defensively via applyAfterQuietly first).
+        if (req != null) {
+            for (var after : afterMiddleware) {
+                result = after.apply(req, result);
+            }
+        }
+        attachSessionCookie(result, session, cookieSecure);
+        attachSessionCookie(result, csrfOnlySession, cookieSecure);
         writeResult(result, response, callback);
+    }
+
+    /**
+     * Run the after-middleware chain over an <em>error</em> response, swallowing any failure.
+     * The normal paths let an after-middleware exception surface as a 500, but here we are
+     * already writing an error response — a throwing middleware must not stop it from reaching
+     * the client, and must not recurse back into the catch block that called us.
+     */
+    private Result applyAfterQuietly(Request req, Result result) {
+        if (req == null) return result;
+        for (var after : afterMiddleware) {
+            try {
+                result = after.apply(req, result);
+            } catch (Exception e) {
+                Log.warn("after-middleware threw while decorating an error response: " + e);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Whether the session cookie for this request should carry {@code Secure} when the app has
+     * not set it explicitly (H2). Delegates the policy to {@link SessionOptions#resolveSecure};
+     * this method's job is only to extract the two request signals.
+     *
+     * <p>{@code X-Forwarded-Proto} is honoured only when the immediate peer is a configured
+     * trusted proxy — the same trust gate {@link Request#ip()} applies, so a client cannot claim
+     * https (or, more to the point, cannot claim anything at all) by sending the header itself.
+     */
+    private boolean resolveCookieSecure(Map<String, String> headers, String remoteAddr) {
+        if (sessionOptions == null) return false; // legacy fallback cookie: unchanged behavior
+        boolean forwardedHttps = false;
+        if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
+            String proto = headers.get("X-Forwarded-Proto");
+            if (proto != null) {
+                // A multi-hop chain appends, so the original client's scheme is the leftmost entry.
+                int comma = proto.indexOf(',');
+                if (comma >= 0) proto = proto.substring(0, comma);
+                forwardedHttps = "https".equalsIgnoreCase(proto.strip());
+            }
+        }
+        return sessionOptions.resolveSecure(isLoopbackHost(headers.get("Host")), forwardedHttps);
+    }
+
+    /**
+     * True when the request's {@code Host} names a loopback address — {@code localhost},
+     * {@code 127.0.0.0/8}, or {@code ::1}, with or without a port. A missing or unparseable
+     * Host is treated as non-loopback (the safe direction: cookie gets {@code Secure}).
+     */
+    static boolean isLoopbackHost(String host) {
+        if (host == null || host.isBlank()) return false;
+        String h = Request.stripPort(host.strip());
+        if (h.equalsIgnoreCase("localhost")) return true;
+        if (h.equals("::1") || h.equals("0:0:0:0:0:0:0:1")) return true;
+        return h.startsWith("127.") && TrustedProxies.isIpLiteral(h);
     }
 
     private void writeResult(Result result, Response response, Callback callback) {
@@ -607,11 +684,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return Result.notFound();
             }
 
+            // H1: the check above is lexical — Path.normalize() collapses ".." in the *string*
+            // and does not resolve symlinks, while the reads below follow them. A symlink under
+            // the served directory pointing outside it therefore passed containment and served
+            // the target's bytes. Re-check against the real (link-resolved) paths so containment
+            // holds in the filesystem, not just in the path text. Links that stay inside the
+            // served tree keep working. IOException here means missing/broken/unreadable → 404.
+            Path realFile;
+            try {
+                realFile = filePath.toRealPath();
+                if (!realFile.startsWith(baseDir.toRealPath())) {
+                    return Result.notFound();
+                }
+            } catch (java.io.IOException e) {
+                return Result.notFound();
+            }
+
             BasicFileAttributes attrs;
             try {
                 // One stat for existence + regular-file + size + mtime, vs four separate File
                 // syscalls (exists/isFile/length/lastModified) on this hot path.
-                attrs = Files.readAttributes(filePath, BasicFileAttributes.class);
+                attrs = Files.readAttributes(realFile, BasicFileAttributes.class);
             } catch (java.io.IOException e) {
                 return Result.notFound(); // missing file (NoSuchFileException) or unreadable
             }
@@ -640,7 +733,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             try {
-                byte[] fileBytes = Files.readAllBytes(filePath);
+                byte[] fileBytes = Files.readAllBytes(realFile);
                 String contentType = contentTypeForPath(filePath.toString());
                 Result result = Result.bytes(fileBytes, contentType)
                     .header("X-Content-Type-Options", "nosniff")
@@ -737,12 +830,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
-    private void attachSessionCookie(Result result, Session session) {
+    private void attachSessionCookie(Result result, Session session, boolean cookieSecure) {
         if (session == null || !session.isModified() || sessionSecret == null) return;
         session.maxAgeSeconds(sessionMaxAgeSeconds());
         String cookieValue = session.toCookie(sessionSecret);
         if (sessionOptions != null) {
-            result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue));
+            result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue, cookieSecure));
         } else {
             // Fallback for backward compatibility
             result.header("Set-Cookie",
@@ -819,6 +912,48 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 out.write(buf, 0, n);
             }
             return out.toByteArray();
+        }
+    }
+
+    /**
+     * Read and parse the request body — multipart or plain — enforcing {@code maxUploadSize}.
+     * Invoked lazily through the supplier handed to {@link Request} (M2), so the cost lands only
+     * on requests that survive before-middleware, or that need the bytes earlier for a reason.
+     *
+     * @throws PayloadTooLargeException when the body exceeds the cap (the caller writes the 413)
+     */
+    private Request.BodyContent readRequestBody(org.eclipse.jetty.server.Request jettyRequest,
+                                                Map<String, String> headers) {
+        try {
+            String requestContentType = headers.getOrDefault("Content-Type", "");
+            if (requestContentType.contains("multipart/form-data")) {
+                var parsed = parseMultipart(jettyRequest, requestContentType);
+                return new Request.BodyContent(parsed.formBody(), parsed.files());
+            }
+            // Fast-reject on Content-Length before reading any bytes.
+            String contentLengthHeader = headers.get("Content-Length");
+            if (contentLengthHeader != null) {
+                try {
+                    long declaredLength = Long.parseLong(contentLengthHeader.strip());
+                    if (declaredLength > maxUploadSize) {
+                        throw new PayloadTooLargeException();
+                    }
+                } catch (NumberFormatException ignored) {
+                    // malformed Content-Length — fall through and let the read cap it
+                }
+            }
+            // Bounded incremental read: cap at maxUploadSize bytes regardless of Content-Length
+            // (which clients can lie about or omit for chunked bodies). Read maxUploadSize+1
+            // bytes: if we get more than maxUploadSize the body is too large.
+            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
+            if (bodyBytes == null) {
+                throw new PayloadTooLargeException();
+            }
+            return new Request.BodyContent(new String(bodyBytes, StandardCharsets.UTF_8), Map.of());
+        } catch (PayloadTooLargeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read request body", e);
         }
     }
 

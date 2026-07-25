@@ -51,6 +51,9 @@ public class Brace {
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
     private WsRegistry wsRegistry;
     private long wsMaxQueuedBytes = 4L * 1024 * 1024; // M18: per-connection outgoing backlog cap (4 MB)
+    // M3: extra origins allowed to open a WebSocket. Same-origin is always allowed; this is the
+    // opt-in for deliberate cross-origin clients. Empty = same-origin only.
+    private final List<String> wsAllowedOrigins = new ArrayList<>();
     private boolean sharedRateLimiting = true; // M17: count rate limits fleet-wide via the DB on Postgres
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
@@ -219,8 +222,11 @@ public class Brace {
         }
         // Warn about obvious placeholder values (including old scaffolds)
         String lower = secret.toLowerCase();
+        // The old scaffold placeholder ("CHANGE-ME-to-a-random-string-at-least-32-chars") had its
+        // own clause here, comparing a mixed-case literal against a string that was just
+        // lowercased — it could never match (2026-07 review, L3). The change-me checks below
+        // already cover it; the dead clause is gone rather than repaired.
         if (lower.contains("changeme") || lower.contains("change-me") || lower.contains("change_me") ||
-            lower.contains("CHANGE-ME-to-a-random-string-at-least-32-chars") ||
             lower.contains("secret") || lower.contains("password") ||
             lower.contains("test") || lower.equals("placeholder") || lower.matches("^[a-z]+$")) {
             Log.warn("Weak " + type + " secret detected - use a cryptographically random value in production");
@@ -354,6 +360,30 @@ public class Brace {
      */
     public Brace wsMaxQueuedBytes(long bytes) {
         this.wsMaxQueuedBytes = bytes;
+        return this;
+    }
+
+    /**
+     * Additional origins permitted to open a WebSocket connection (M3). Same-origin upgrades are
+     * always allowed and need no configuration; this is the deliberate opt-in for a browser client
+     * served from a different origin.
+     *
+     * <p>Accepts either a full origin ({@code "https://app.example.com"}) or a bare host
+     * ({@code "app.example.com"}), matched case-insensitively. Pass {@code "*"} to disable the
+     * check entirely — only sound when the socket carries no ambient authority (no reliance on
+     * the session cookie for authorization).
+     *
+     * <p><strong>Why the check exists.</strong> A WebSocket handshake is not subject to the
+     * same-origin policy: without an Origin check, an attacker's page can open a socket to your
+     * app, the browser attaches the victim's session cookie, and the socket is authenticated as
+     * the victim for its lifetime — cross-site WebSocket hijacking. The default
+     * {@code SameSite=Lax} session cookie makes modern browsers withhold the cookie on a
+     * cross-site handshake, but that mitigation disappears the moment an app calls
+     * {@link SessionOptions#sameSiteNone()}, and it is a browser-side control the server should
+     * not silently depend on.
+     */
+    public Brace wsAllowedOrigins(String... origins) {
+        this.wsAllowedOrigins.addAll(List.of(origins));
         return this;
     }
 
@@ -737,6 +767,15 @@ public class Brace {
             }
         }
 
+        // A session cookie without Secure is disclosed to a network attacker on any cleartext
+        // request to the domain. Since H2 the attribute is on for every non-loopback request
+        // unless the app opted out; say that opt-out out loud once at startup.
+        if (sessionOptions != null && !sessionOptions.secure()) {
+            Log.warn("Session cookies are configured with .secure(false), so they carry no Secure "
+                + "attribute and will travel in cleartext on any http:// request to this domain. "
+                + "Drop the explicit .secure(false) once the app is served over HTTPS.");
+        }
+
         // Create ErrorStore if database is available
         if (databaseFactory != null) {
             int maxErrors = 1000;
@@ -771,20 +810,20 @@ public class Brace {
             }
             // Ops POSTs use signed-payload or bearer auth, not cookies — CSRF is the wrong layer
             // and would block the CLI on any app that also calls .sessions(...).
-            router.add("POST", "/ops/auth", (Handler) opsHandler::auth).setCsrfRequired(false);
-            router.add("POST", "/ops/auth/login-token", (Handler) opsHandler::loginToken).setCsrfRequired(false);
-            router.add("GET", "/ops/auth/exchange", (Handler) opsHandler::exchange);
-            router.add("GET", "/ops/status", (Handler) opsHandler::status);
-            router.add("GET", "/ops/routes", (Handler) opsHandler::routes);
-            router.add("GET", "/ops/logs", (Handler) opsHandler::logs);
-            router.add("GET", "/ops/dashboard", (Handler) opsHandler::dashboard);
-            router.add("GET", "/ops/errors", (Handler) opsHandler::errors);
-            router.add("GET", "/ops/errors/{id}", (Handler) opsHandler::errorDetail);
-            router.add("POST", "/ops/errors/{id}/resolve", (Handler) opsHandler::resolveError).setCsrfRequired(false);
-            router.add("POST", "/ops/cache/clear", (Handler) opsHandler::clearCache).setCsrfRequired(false);
-            router.add("GET", "/ops/cache", (Handler) opsHandler::cacheStats);
-            router.add("GET", "/ops/regressions", (Handler) opsHandler::regressions);
-            router.add("POST", "/ops/regressions/{id}/acknowledge", (Handler) opsHandler::acknowledgeRegression).setCsrfRequired(false);
+            router.add("POST", "/ops/auth", noStore(opsHandler::auth)).setCsrfRequired(false);
+            router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken)).setCsrfRequired(false);
+            router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange));
+            router.add("GET", "/ops/status", noStore(opsHandler::status));
+            router.add("GET", "/ops/routes", noStore(opsHandler::routes));
+            router.add("GET", "/ops/logs", noStore(opsHandler::logs));
+            router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard));
+            router.add("GET", "/ops/errors", noStore(opsHandler::errors));
+            router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail));
+            router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError)).setCsrfRequired(false);
+            router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache)).setCsrfRequired(false);
+            router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats));
+            router.add("GET", "/ops/regressions", noStore(opsHandler::regressions));
+            router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression)).setCsrfRequired(false);
         }
 
         var threadPool = new QueuedThreadPool();
@@ -817,12 +856,21 @@ public class Brace {
                 : new InProcessMessageBus();
             wsRegistry = new WsRegistry(messageBus, wsMaxQueuedBytes);
             final WsRegistry wsRegistryRef = wsRegistry;
+            final List<String> allowedOrigins = List.copyOf(wsAllowedOrigins);
             // Wrap with WebSocketUpgradeHandler for WebSocket support
             var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {
                 for (var entry : wsRoutes.entrySet()) {
                     String wsPath = entry.getKey();
                     Function<WsContext, Object> factory = entry.getValue();
                     container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> {
+                        // M3: reject a cross-origin handshake before the session cookie below turns
+                        // it into an authenticated socket. Returning null declines the upgrade.
+                        if (!originAllowed(upgradeRequest.getHeaders().get("Origin"),
+                                           upgradeRequest.getHeaders().get("Host"),
+                                           allowedOrigins)) {
+                            upgradeResponse.setStatus(403);
+                            return null;
+                        }
                         // Extract session from upgrade request cookie
                         Session braceSession = null;
                         if (sessionSecret != null) {
@@ -1144,6 +1192,78 @@ public class Brace {
         return Long.parseLong(s);
     }
 
+    /**
+     * Wrap an ops handler so its response is never stored by a cache (M4).
+     *
+     * <p>Ops responses carry credentials and operational detail: {@code /ops/dashboard} embeds a
+     * live bearer token in the page HTML (on the polling div and each action button), and the
+     * others expose error messages, stack traces, and log lines. Only {@code /ops/auth/exchange}
+     * used to say {@code no-store} — because its token is in the URL — which left every other
+     * endpoint relying on the caller's credential channel to suppress caching.
+     *
+     * <p>That holds for the CLI's {@code Authorization} header, which RFC 9111 forbids shared
+     * caches from storing a response to. It does <em>not</em> hold for the browser channel, which
+     * authenticates with the {@code __brace_ops_session} cookie: a response with no
+     * {@code Cache-Control} is heuristically cacheable, so an intermediary could store one
+     * operator's dashboard — embedded token and all — and serve it to the next requester.
+     *
+     * <p>Applied at registration so a new ops endpoint gets it by construction rather than by
+     * remembering. An explicit {@code Cache-Control} set by the handler wins.
+     */
+    private static Handler noStore(Handler handler) {
+        return req -> {
+            Result result = handler.apply(req);
+            if (result != null && result.header("Cache-Control") == null) {
+                result.header("Cache-Control", "no-store");
+            }
+            return result;
+        };
+    }
+
+    /**
+     * Whether a WebSocket upgrade carrying {@code origin} may proceed against a server reached
+     * as {@code hostHeader} (M3).
+     *
+     * <ul>
+     *   <li><strong>No Origin header</strong> → allowed. Only browsers are required to send one,
+     *       and they are the only clients the same-origin policy is about; rejecting here would
+     *       break every non-browser WebSocket client for no security gain.</li>
+     *   <li><strong>Same host</strong> → allowed. Compared on host only, not scheme or port: TLS
+     *       is terminated at a proxy, so the browser's origin is {@code https://app.example.com}
+     *       while the app sees {@code app.example.com:8080}.</li>
+     *   <li><strong>Listed in {@code allowed}</strong> → allowed. Entries match either the full
+     *       origin or the bare host; {@code "*"} disables the check.</li>
+     * </ul>
+     */
+    static boolean originAllowed(String origin, String hostHeader, List<String> allowed) {
+        if (origin == null || origin.isBlank()) return true;   // non-browser client
+        if (allowed.contains("*")) return true;                // check explicitly disabled
+        String originHost = hostOf(origin);
+        if (originHost == null) return false;                  // unparseable Origin — fail closed
+        if (hostHeader != null && originHost.equalsIgnoreCase(Request.stripPort(hostHeader.strip()))) {
+            return true;
+        }
+        for (String entry : allowed) {
+            if (entry == null || entry.isBlank()) continue;
+            String candidate = entry.strip();
+            if (candidate.equalsIgnoreCase(origin.strip())) return true;
+            String candidateHost = hostOf(candidate);
+            if (candidateHost != null && candidateHost.equalsIgnoreCase(originHost)) return true;
+        }
+        return false;
+    }
+
+    /** Host portion of an origin or bare host string, or null when it can't be determined. */
+    private static String hostOf(String value) {
+        String v = value.strip();
+        int scheme = v.indexOf("://");
+        if (scheme >= 0) v = v.substring(scheme + 3);
+        int slash = v.indexOf('/');
+        if (slash >= 0) v = v.substring(0, slash);
+        if (v.isEmpty()) return null;
+        return Request.stripPort(v);
+    }
+
     // --- Test support ---
 
     public static TestAppBuilder test() {
@@ -1200,6 +1320,8 @@ public class Brace {
                 .mailer(mailer);
 
             if (secret != null) {
+                // No .secure(false) needed: the harness talks to http://localhost, and the H2
+                // Secure resolution treats a loopback Host as "not a real deployment".
                 app.sessions(secret);
             }
 

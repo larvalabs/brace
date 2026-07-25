@@ -95,35 +95,20 @@ class CliAuthTest {
     }
 
     @Test
-    void fallsBackToV1AgainstPre017Server() throws Exception {
-        // Simulate a 0.1.6 /ops/auth: its OpsAuthRequest record has no v/nonce fields,
-        // so Jackson fails on the unknown properties and the endpoint answers a plain
-        // 401. A v1 body (signature over the timestamp only) is verified and accepted.
+    void noV1FallbackAgainstAServerThatRejectsV2() throws Exception {
+        // The CLI used to retry with a v1 body (signature over the timestamp alone) when a
+        // pre-0.1.7 server 401'd the v2 body. That fallback went away with server-side v1
+        // support in 0.1.8 (M5): a 401 now means what it says, and must not be papered over
+        // by silently downgrading to a replayable protocol.
         var server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress(0), 0);
+        var sawV1 = new java.util.concurrent.atomic.AtomicBoolean(false);
         server.createContext("/ops/auth", exchange -> {
-            int status;
-            byte[] resp;
             try {
                 JsonNode n = Json.mapper().readTree(exchange.getRequestBody().readAllBytes());
-                if (n.has("v") || n.has("nonce")) {
-                    status = 401;
-                    resp = "Authentication failed".getBytes();
-                } else if (keypair.publicKey().equals(n.get("publicKey").asText())
-                        && OpsKeys.verify(n.get("timestamp").asText(),
-                            n.get("signature").asText(), n.get("publicKey").asText())) {
-                    status = 200;
-                    resp = Json.mapper().writeValueAsString(Map.of(
-                        "token", "v1-fallback-token",
-                        "expiresAt", Instant.now().plusSeconds(3600).toString())).getBytes();
-                } else {
-                    status = 401;
-                    resp = "Invalid signature".getBytes();
-                }
-            } catch (Exception e) {
-                status = 500;
-                resp = new byte[0];
-            }
-            exchange.sendResponseHeaders(status, resp.length);
+                if (!n.has("v") && !n.has("nonce")) sawV1.set(true);
+            } catch (Exception ignored) {}
+            byte[] resp = "Authentication failed".getBytes();
+            exchange.sendResponseHeaders(401, resp.length);
             exchange.getResponseBody().write(resp);
             exchange.close();
         });
@@ -132,8 +117,9 @@ class CliAuthTest {
             var cfg = new CliConfig("http://localhost:" + server.getAddress().getPort(),
                 tmp.resolve("ops-private.key").toString(),
                 "authorized-keys", "local", Map.of());
-            assertEquals("v1-fallback-token", CliAuth.bearer(cfg, tmp),
-                "CLI should fall back to v1 auth against a pre-0.1.7 server");
+            assertThrows(CliAuth.OpsAuthFailure.class, () -> CliAuth.bearer(cfg, tmp),
+                "a 401 must surface, not trigger a v1 downgrade");
+            assertFalse(sawV1.get(), "the CLI must never send a v1 auth body");
         } finally {
             server.stop(0);
         }
