@@ -118,9 +118,13 @@ public class Mailer {
             String user = null;
             String pass = null;
             if (url.getUserInfo() != null) {
+                // M10: percent-decode, matching DatabaseFactory.parseDbConfig. A password
+                // containing '@', '/' or ':' MUST be encoded to survive URI parsing at all, and
+                // without decoding here it would then authenticate with the literal "%40" — an
+                // auth failure whose cause is invisible from the error.
                 var parts = url.getUserInfo().split(":", 2);
-                user = parts[0];
-                pass = parts.length > 1 ? parts[1] : null;
+                user = decodeUserInfo(parts[0]);
+                pass = parts.length > 1 ? decodeUserInfo(parts[1]) : null;
             }
 
             var props = smtpProperties(host, port, scheme);
@@ -186,6 +190,11 @@ public class Mailer {
         props.put("mail.smtp.writetimeout", String.valueOf(timeout.toMillis()));
 
         return props;
+    }
+
+    /** Percent-decode one half of a URI user-info component. See the call site (M10). */
+    private static String decodeUserInfo(String value) {
+        return java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     public record CapturedEmail(String to, String cc, String subject, String text, String html, String from) {}

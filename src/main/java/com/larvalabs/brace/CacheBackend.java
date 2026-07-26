@@ -60,6 +60,32 @@ public interface CacheBackend {
         throw new UnsupportedOperationException("backend does not store live objects");
     }
 
+    /** Result of {@link #getOrCompute}: the value, plus whether it was already cached. */
+    record Computed(Object value, boolean hit) {}
+
+    /**
+     * Get-or-compute for a live-object backend, backing {@code Cache.getOrSet} (M9).
+     *
+     * <p>This is on the SPI rather than being a cast to the built-in backend. {@code Cache.getOrSet}
+     * used to branch on {@link #requiresSerialization()} and then cast the backend to the concrete
+     * {@code InMemoryBackend} — so any third-party non-serializing backend threw
+     * {@code ClassCastException} on the cache call the docs recommend most.
+     *
+     * <p>The default is a plain get / compute / set, which is what the serializing path does. The
+     * built-in in-memory backend overrides it to add per-key single-flight, so concurrent callers
+     * for the same cold key run the supplier exactly once. That is an optimization, not a contract:
+     * an implementation is free to leave the default and let concurrent misses each compute.
+     */
+    default Computed getOrCompute(String key, Duration ttl, java.util.function.Supplier<?> supplier) {
+        Object existing = getObject(key);
+        if (existing != null) {
+            return new Computed(existing, true);
+        }
+        Object computed = supplier.get();
+        setObject(key, computed, ttl, new String[0]);
+        return new Computed(computed, false);
+    }
+
     // --- Value-agnostic ops (every backend implements these) ---
 
     void delete(String key);

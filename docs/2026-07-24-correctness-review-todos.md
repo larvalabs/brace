@@ -322,7 +322,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     the declared type is always true. Add a test for the one-column case on both methods.
   - Model: smaller model OK.
 
-- [ ] **M8: WebSocket broadcast has no per-member error isolation, and a failed send leaks the backpressure counter**
+- [x] **M8: WebSocket broadcast has no per-member error isolation, and a failed send leaks the backpressure counter**
   - Files: `WsRegistry.java:66-73` (`deliverLocal`); `WsContext.java:52-70` (`send`).
   - `deliverLocal` iterates room members calling `ctx.send(message)` with no guard: anything thrown by
     one member aborts delivery to every remaining member — a single bad connection silently drops the
@@ -333,8 +333,12 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: try/catch per member in `deliverLocal` (log and continue); in `send`, add to `queuedBytes`
     only after `sendText` returns, or decrement in a catch around it.
   - Model: smaller model OK.
+  - **Resolved as:** both. `deliverLocal` catches per member and logs `ws-broadcast-send-failed`;
+    `send` releases its reservation in a catch around `sendText` and marks the context closed
+    before rethrowing (the reservation must be taken before the call, since the success callback
+    can fire during it).
 
-- [ ] **M9: `Cache.getOrSet` hard-casts the backend to the concrete `InMemoryBackend`**
+- [x] **M9: `Cache.getOrSet` hard-casts the backend to the concrete `InMemoryBackend`**
   - Files: `Cache.java:105-127` (`:108`); `CacheBackend.java` (the public SPI).
   - `CacheBackend` is a documented public SPI ("Storage SPI behind `Cache`"), and `getOrSet` branches
     on the SPI method `requiresSerialization()` — then casts to the default implementation. Any
@@ -343,8 +347,14 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: lift single-flight onto the SPI as a default method (default = plain get/compute/set, which
     is what the serializing path already does), and let `InMemoryBackend` override it.
   - Model: smaller model OK.
+  - **Resolved as:** specified. `CacheBackend.getOrCompute` (with `Computed` moved onto the SPI)
+    defaults to get/compute/set; `InMemoryBackend` overrides it with the existing single-flight.
+    The Javadoc states that single-flight is an optimization, not a contract, so an implementer
+    knows the default is legitimate. `CustomCacheBackendTest` defines a minimal third-party
+    live-object backend and drives `getOrSet` through it — the exact call that used to throw —
+    and re-asserts that concurrent misses on the built-in backend still compute once.
 
-- [ ] **M10: SMTP credentials embedded in `smtpUrl` are not percent-decoded**
+- [x] **M10: SMTP credentials embedded in `smtpUrl` are not percent-decoded**
   - Files: `Mailer.java` (`sendSmtp`, `url.getUserInfo().split(":", 2)`); contrast
     `DatabaseFactory.java:243-246,277-279`.
   - `DatabaseFactory` explicitly decodes URL-embedded credentials ("libpq parity"); `Mailer` does not.
@@ -352,6 +362,8 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     then authenticates with the literal `%40` — an auth failure whose cause is invisible.
   - Fix: `URLDecoder.decode` both halves of the user-info, matching `DatabaseFactory`.
   - Model: smaller model OK.
+  - **Resolved as:** specified. Note the earlier `cdc4f07` on `main` bounded the Mailer's SMTP
+    timeouts but did not touch this.
 
 - [ ] **M11: `daily(...)` drifts an hour across DST and can silently skip a day**
   - Files: `JobScheduler.java:61-80` (`daily`), `:200-241` (`claimRun`), `:308-315` (`computeDelayUntil`).
