@@ -43,8 +43,33 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
     private final boolean devMode;
+    /**
+     * Multipart parts above this spill to a temp file instead of the heap. Mutable for the same
+     * reason {@code devMode} is a property read: eight telescoping public constructors is already
+     * one too many to widen. {@link Brace} sets both before the server starts.
+     */
+    private long uploadMemoryThreshold = DEFAULT_UPLOAD_MEMORY_THRESHOLD;
+    private Path uploadTempDir = DEFAULT_UPLOAD_TEMP_DIR;
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
+
+    /**
+     * Default spill threshold. Chosen well below {@link #DEFAULT_MAX_UPLOAD_SIZE} so the default
+     * configuration cannot pin 10 MB of heap per in-flight upload, and well above the size of the
+     * uploads most apps actually take (avatars, CSVs, attachments), which stay in memory and never
+     * touch the disk.
+     */
+    static final long DEFAULT_UPLOAD_MEMORY_THRESHOLD = 1024 * 1024; // 1MB
+
+    static final Path DEFAULT_UPLOAD_TEMP_DIR =
+        Path.of(System.getProperty("java.io.tmpdir"), "brace-uploads");
+
+    /** Set by {@link Brace} before start; see {@link #uploadMemoryThreshold}. */
+    void setUploadSpill(Path tempDir, long memoryThreshold) {
+        this.uploadTempDir = tempDir;
+        this.uploadMemoryThreshold = memoryThreshold;
+        prepareUploadTempDir(tempDir);
+    }
 
     record StaticFileMapping(String urlPrefix, String directory) {}
 
@@ -142,6 +167,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.maxUploadSize = maxUploadSize;
         this.storage = storage;
         this.trustedProxies = trustedProxies;
+        // Eagerly, not lazily on first upload: the directory's permissions have to be right before
+        // any request can arrive, and a lazy guard would race two concurrent first-uploads into
+        // letting Jetty create the directory itself under the ambient umask.
+        prepareUploadTempDir(uploadTempDir);
         byte[] htmxBytes = null;
         try {
             var stream = BraceHandler.class.getResourceAsStream("/brace/htmx.min.js");
@@ -490,6 +519,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Result errorResult = applyAfterQuietly(braceRequest, Result.error(500, "Internal Server Error"));
             writeResult(null, errorResult, response, callback, session, csrfOnlySession, cookieSecure);
             return true;
+        } finally {
+            // Every exit from handle() releases the temp files this request's uploads spilled to —
+            // including the ones that never reached a handler (413, CSRF 403, thrown 404/500) and
+            // the ones that threw halfway through. A missed path here is not a leak of one file,
+            // it is an unbounded disk fill that any client can drive.
+            //
+            // A streaming response is the one case this must NOT do: its bytes are still being
+            // written when handle() returns, so writeResult takes ownership of the cleanup and the
+            // call below finds nothing left to release.
+            if (braceRequest != null) braceRequest.releaseUploads();
         }
     }
 
@@ -926,11 +965,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                                                 Map<String, String> headers) {
         try {
             String requestContentType = headers.getOrDefault("Content-Type", "");
-            if (requestContentType.contains("multipart/form-data")) {
-                var parsed = parseMultipart(jettyRequest, requestContentType);
-                return new Request.BodyContent(parsed.formBody(), parsed.files());
-            }
-            // Fast-reject on Content-Length before reading any bytes.
+            // Fast-reject on Content-Length before reading any bytes. Hoisted above the multipart
+            // branch (it used to sit below it, covering only plain bodies), because an oversized
+            // multipart body reached Jetty's own maxLength check instead — and that throws an
+            // IllegalStateException, which fell through to the generic 500 handler. So the
+            // documented "413 for anything over maxUploadSize" was in fact a 500 for multipart,
+            // and every oversized upload recorded a framework error and fed the regression
+            // notifier: exactly the error-store flood the PayloadTooLargeException catch was added
+            // to prevent, just reached by a different door.
             String contentLengthHeader = headers.get("Content-Length");
             if (contentLengthHeader != null) {
                 try {
@@ -941,6 +983,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 } catch (NumberFormatException ignored) {
                     // malformed Content-Length — fall through and let the read cap it
                 }
+            }
+            if (requestContentType.contains("multipart/form-data")) {
+                var parsed = parseMultipart(jettyRequest, requestContentType);
+                return new Request.BodyContent(parsed.formBody(), parsed.files(), parsed.cleanup());
             }
             // Bounded incremental read: cap at maxUploadSize bytes regardless of Content-Length
             // (which clients can lie about or omit for chunked bodies). Read maxUploadSize+1
@@ -953,11 +999,40 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         } catch (PayloadTooLargeException e) {
             throw e;
         } catch (Exception e) {
+            if (isSizeViolation(e)) throw new PayloadTooLargeException();
             throw new RuntimeException("Failed to read request body", e);
         }
     }
 
-    private record MultipartResult(String formBody, Map<String, List<UploadedFile>> files) {}
+    /**
+     * Whether an exception from multipart parsing is Jetty reporting a size cap, which is a 413
+     * rather than a 500.
+     *
+     * <p>The Content-Length fast-reject above catches the ordinary case — browsers always send a
+     * length for multipart — so this is the backstop for a chunked body that declares no length and
+     * only reveals its size as it arrives. Jetty signals all three of its caps with a plain
+     * {@link IllegalStateException} ({@code MultiPartFormData.Parser}), so the message is the only
+     * discriminator available; blanket-mapping every IllegalStateException here would swallow
+     * genuine framework faults as client errors.
+     *
+     * <p>Matching on a message is fragile across a Jetty upgrade, but it fails in the safe
+     * direction — a changed message reverts to today's 500 rather than mis-classifying something —
+     * and {@code UploadSpillTest} pins the behavior so the upgrade fails loudly instead of quietly.
+     */
+    private static boolean isSizeViolation(Throwable e) {
+        for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause()) {
+            if (t instanceof IllegalStateException && t.getMessage() != null
+                    && (t.getMessage().startsWith("max length exceeded")
+                        || t.getMessage().startsWith("max file size exceeded")
+                        || t.getMessage().startsWith("max memory file size exceeded"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private record MultipartResult(String formBody, Map<String, List<UploadedFile>> files,
+                                   java.io.Closeable cleanup) {}
 
     private MultipartResult parseMultipart(org.eclipse.jetty.server.Request jettyRequest, String contentType) throws Exception {
         String boundary = null;
@@ -972,46 +1047,63 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         if (boundary == null) {
-            return new MultipartResult("", Map.of());
+            return new MultipartResult("", Map.of(), null);
         }
 
         var parser = new MultiPartFormData.Parser(boundary);
         parser.setMaxLength(maxUploadSize);
-        parser.setMaxMemoryFileSize(-1);
+        // Parts above the threshold spill to a temp file instead of living in the heap for the
+        // duration of the request. This used to be setMaxMemoryFileSize(-1) — "unlimited memory
+        // file size" — which meant a maxUploadSize-sized heap allocation per in-flight upload, on
+        // virtual threads with nothing bounding in-flight concurrency.
+        parser.setFilesDirectory(uploadTempDir);
+        parser.setMaxMemoryFileSize(uploadMemoryThreshold);
+        // Without this, Jetty treats the threshold as a hard *limit* for parts that have no
+        // filename — an ordinary form field over the threshold fails the request with "max memory
+        // file size exceeded" rather than spilling. Large text fields are legitimate, so let them
+        // spill too. Brace still classifies file-vs-field by getFileName(), not by storage.
+        parser.setUseFilesForPartsWithoutFileName(true);
 
         MultiPartFormData.Parts parts = parser.parse(jettyRequest).join();
 
         var formParams = new LinkedHashMap<String, String>();
         var files = new LinkedHashMap<String, List<UploadedFile>>();
 
+        // NOTE: parts are deliberately NOT closed here. Closing a part deletes the temp file
+        // behind it, and the UploadedFiles built below are handed to the handler — closing at the
+        // end of parsing would hand out uploads whose bytes had already been deleted. The Parts
+        // handle is returned as the request's cleanup token and closed by handle()'s finally.
+        boolean ok = false;
         try {
             for (var part : parts) {
                 String name = part.getName();
                 String fileName = part.getFileName();
 
                 if (fileName != null) {
-                    byte[] bytes;
-                    var source = part.getContentSource();
-                    if (source != null) {
-                        var buf = Content.Source.asByteBuffer(source);
-                        bytes = new byte[buf.remaining()];
-                        buf.get(bytes);
-                    } else {
-                        bytes = part.getContentAsString(StandardCharsets.ISO_8859_1).getBytes(StandardCharsets.ISO_8859_1);
-                    }
                     String partContentType = "application/octet-stream";
                     HttpField ctField = part.getHeaders().getField("Content-Type");
                     if (ctField != null) {
                         partContentType = ctField.getValue();
                     }
-                    var uploaded = new UploadedFile(fileName, partContentType, bytes);
+                    long size = part.getLength();
+                    if (size < 0) {
+                        // Length is only unknown for sources that can't report one; fall back to
+                        // draining once so size() stays truthful rather than negative.
+                        try (var in = Content.Source.asInputStream(part.newContentSource())) {
+                            size = in.transferTo(java.io.OutputStream.nullOutputStream());
+                        }
+                    }
+                    var uploaded = new UploadedFile(part, fileName, partContentType, size);
                     files.computeIfAbsent(name, k -> new ArrayList<>()).add(uploaded);
                 } else {
                     formParams.put(name, part.getContentAsString(StandardCharsets.UTF_8));
                 }
             }
+            ok = true;
         } finally {
-            parts.close();
+            // Only on the failure path: nothing downstream will ever get the cleanup handle, so
+            // release here rather than leaking every temp file this request spilled.
+            if (!ok) parts.close();
         }
 
         var formBody = new StringBuilder();
@@ -1022,6 +1114,66 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             formBody.append(java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
         }
 
-        return new MultipartResult(formBody.toString(), files);
+        return new MultipartResult(formBody.toString(), files, parts);
+    }
+
+    /**
+     * Creates the upload spill directory with owner-only permissions, and sweeps orphans left by a
+     * previous process.
+     *
+     * <p>Jetty creates the individual temp files with {@code Files.createTempFile}, which is
+     * owner-only on POSIX, but it creates the <em>directory</em> with a plain
+     * {@code createDirectories} under the ambient umask. Uploaded content is untrusted and may be
+     * sensitive, so the directory is created here instead, with 700.
+     *
+     * <p>The sweep exists because a hard kill (SIGKILL, OOM, container eviction) skips every
+     * cleanup path there is. Files older than {@link #UPLOAD_ORPHAN_AGE_MS} are from a dead
+     * process by definition — a live request cannot outlive {@code maxUploadSize} bytes by hours.
+     */
+    static void prepareUploadTempDir(Path dir) {
+        try {
+            if (!Files.exists(dir)) {
+                try {
+                    var ownerOnly = java.nio.file.attribute.PosixFilePermissions.fromString("rwx------");
+                    Files.createDirectories(dir,
+                        java.nio.file.attribute.PosixFilePermissions.asFileAttribute(ownerOnly));
+                } catch (UnsupportedOperationException e) {
+                    Files.createDirectories(dir); // non-POSIX filesystem
+                }
+            }
+            sweepOrphanedUploads(dir);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to prepare upload temp directory: " + dir, e);
+        }
+    }
+
+    /** Age past which a spilled upload can only belong to a process that is no longer running. */
+    static final long UPLOAD_ORPHAN_AGE_MS = 6 * 60 * 60 * 1000L;
+
+    static void sweepOrphanedUploads(Path dir) {
+        long cutoff = System.currentTimeMillis() - UPLOAD_ORPHAN_AGE_MS;
+        int swept = 0;
+        // Depth 1 and no symlink following: this walks a directory of untrusted-content temp files,
+        // and a symlink planted in it must not turn the sweep into an arbitrary-delete primitive.
+        try (var entries = Files.newDirectoryStream(dir)) {
+            for (var entry : entries) {
+                try {
+                    var attrs = Files.readAttributes(entry, BasicFileAttributes.class,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                    if (!attrs.isRegularFile()) continue;
+                    if (attrs.lastModifiedTime().toMillis() > cutoff) continue;
+                    Files.deleteIfExists(entry);
+                    swept++;
+                } catch (Exception ignored) {
+                    // Racing with another instance sharing the directory, or a permissions issue.
+                }
+            }
+        } catch (Exception e) {
+            Log.warn("upload temp sweep failed for " + dir + ": " + e);
+            return;
+        }
+        if (swept > 0) {
+            Log.event("brace.uploads.sweep", Map.of("directory", dir.toString(), "deleted", swept));
+        }
     }
 }

@@ -57,6 +57,8 @@ public class Brace {
     private boolean sharedRateLimiting = true; // M17: count rate limits fleet-wide via the DB on Postgres
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
+    private long uploadMemoryThreshold = BraceHandler.DEFAULT_UPLOAD_MEMORY_THRESHOLD;
+    private java.nio.file.Path uploadTempDir = BraceHandler.DEFAULT_UPLOAD_TEMP_DIR;
     private int jobRetentionDays = 7;
     private java.time.Duration jobLease = JobPoller.DEFAULT_LEASE;
     private java.time.Duration jobPollInterval = JobPoller.DEFAULT_POLL_INTERVAL;
@@ -344,6 +346,47 @@ public class Brace {
 
     public Brace maxUploadSize(long bytes) {
         this.maxUploadSize = bytes;
+        return this;
+    }
+
+    /**
+     * Size above which an uploaded part is spilled to a temp file instead of being held in the
+     * heap for the duration of the request. Default 1 MB.
+     *
+     * <p>This is a memory/disk trade, not a limit: a part over the threshold is still accepted (up
+     * to {@link #maxUploadSize(String)}), it just stops costing heap. Raise it if your uploads are
+     * reliably small and you would rather never touch the disk; lower it if you run a large
+     * {@code maxUploadSize} and want the heap floor as low as possible.
+     *
+     * <pre>{@code
+     * app.maxUploadSize("500M")            // accept large media
+     *    .uploadMemoryThreshold("256K");   // ...without ever holding it in heap
+     * }</pre>
+     */
+    public Brace uploadMemoryThreshold(String size) {
+        return uploadMemoryThreshold(parseSize(size));
+    }
+
+    public Brace uploadMemoryThreshold(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException(
+                "uploadMemoryThreshold must not be negative (a negative value disables spilling "
+                    + "entirely, which is the unbounded-heap behavior this setting exists to fix)");
+        }
+        this.uploadMemoryThreshold = bytes;
+        return this;
+    }
+
+    /**
+     * Directory for upload spill files. Default {@code ${java.io.tmpdir}/brace-uploads}.
+     *
+     * <p>Created with owner-only permissions if it does not exist. Point it at a volume with room
+     * for {@code maxUploadSize × peak concurrent uploads}, and prefer one on the same filesystem as
+     * wherever {@link UploadedFile#saveTo(java.nio.file.Path)} writes — a same-filesystem save is a
+     * rename rather than a copy.
+     */
+    public Brace uploadTempDir(java.nio.file.Path dir) {
+        this.uploadTempDir = dir;
         return this;
     }
 
@@ -847,6 +890,7 @@ public class Brace {
         var staticMappingsCopy = List.copyOf(staticFileMappings);
         Assets.init(staticMappingsCopy);
         var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
+        handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
 
         if (!wsRoutes.isEmpty()) {
