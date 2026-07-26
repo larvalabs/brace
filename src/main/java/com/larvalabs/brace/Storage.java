@@ -8,7 +8,12 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.URI;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -121,24 +126,97 @@ public class Storage {
 
     /**
      * Upload bytes to storage. Returns the public URL.
+     *
+     * <p>Holds the whole object in heap by definition. For anything that might be large, prefer
+     * {@link #put(String, Path, String)} or {@link #put(String, UploadedFile)}, which stream.
      */
     public String put(String key, byte[] data, String contentType) {
+        return putStreaming(key, () -> new java.io.ByteArrayInputStream(data), data.length, contentType);
+    }
+
+    /**
+     * Upload a file from disk without reading it into the heap. Returns the public URL.
+     */
+    public String put(String key, Path path, String contentType) {
+        long length;
+        try {
+            length = Files.size(path);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot read " + path, e);
+        }
+        return putStreaming(key, () -> {
+            try {
+                return Files.newInputStream(path);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }, length, contentType);
+    }
+
+    /**
+     * Upload an UploadedFile with a user-specified key. Returns a StoredFile record.
+     *
+     * <p>Streams: an upload that spilled to a temp file goes to storage without ever being
+     * materialized in the heap.
+     */
+    public StoredFile put(String key, UploadedFile file) {
+        String url = putStreaming(key, file::stream, file.size(), file.contentType());
+        return new StoredFile(key, url);
+    }
+
+    /**
+     * Upload an UploadedFile with an auto-generated safe key (UUID-based).
+     * Returns a StoredFile record containing the generated key and public URL.
+     */
+    public StoredFile putGenerated(String folder, UploadedFile file) {
+        String key = safeKey(folder, file.filename());
+        String url = putStreaming(key, file::stream, file.size(), file.contentType());
+        return new StoredFile(key, url);
+    }
+
+    /**
+     * The single upload path: hash the content, then send it, reading it twice and buffering none
+     * of it.
+     *
+     * <p>SigV4 signs {@code x-amz-content-sha256}, so the digest has to be known before the first
+     * byte goes out — which is why {@code source} must be repeatable rather than a one-shot stream.
+     * The alternative is {@code UNSIGNED-PAYLOAD}, which drops the payload from the signature
+     * entirely; keeping a real digest means the request stays byte-for-byte verifiable and works
+     * identically on S3, R2, MinIO, and Spaces. The second pass is usually served from page cache.
+     *
+     * <p>{@code fromPublisher(..., length)} rather than a bare {@code ofInputStream}: the latter
+     * publishes with an unknown length, so the JDK client falls back to chunked transfer encoding,
+     * which S3 rejects for a plain {@code PUT}.
+     */
+    private String putStreaming(String key, java.util.function.Supplier<InputStream> source,
+                                long length, String contentType) {
         requireSafeKey(key);
+        if (length < 0) {
+            throw new IllegalArgumentException(
+                "Upload length must be known before signing (got " + length + " for key " + key + ")");
+        }
+        if (length > MAX_SINGLE_PUT_BYTES) {
+            throw new IllegalArgumentException(
+                "Object is " + length + " bytes; a single S3 PUT is capped at " + MAX_SINGLE_PUT_BYTES
+                    + " (5 GiB). Objects above this need the multipart upload API, which Brace does "
+                    + "not implement yet — upload directly to the bucket instead.");
+        }
         try {
             var now = Instant.now();
             var amzDate = AMZ_DATE_FORMAT.format(now);
             var dateStamp = DATE_STAMP_FORMAT.format(now);
 
-            var payloadHash = sha256Hex(data);
+            var payloadHash = sha256Hex(source);
             var auth = buildAuthHeader("PUT", key, contentType, payloadHash, amzDate, dateStamp);
 
             var uploadUrl = buildUploadUrl(key);
+            var body = HttpRequest.BodyPublishers.fromPublisher(
+                    HttpRequest.BodyPublishers.ofInputStream(source::get), length);
             var request = HttpRequest.newBuilder()
                     .uri(URI.create(uploadUrl))
                     .timeout(requestTimeout)
-                    .method("PUT", HttpRequest.BodyPublishers.ofByteArray(data))
+                    .method("PUT", body)
                     .header("Content-Type", contentType)
-                    .header("Host", host)
                     .header("x-amz-content-sha256", payloadHash)
                     .header("x-amz-date", amzDate)
                     .header("Authorization", auth)
@@ -159,23 +237,8 @@ public class Storage {
         }
     }
 
-    /**
-     * Upload an UploadedFile with a user-specified key. Returns a StoredFile record.
-     */
-    public StoredFile put(String key, UploadedFile file) {
-        String url = put(key, file.bytes(), file.contentType());
-        return new StoredFile(key, url);
-    }
-
-    /**
-     * Upload an UploadedFile with an auto-generated safe key (UUID-based).
-     * Returns a StoredFile record containing the generated key and public URL.
-     */
-    public StoredFile putGenerated(String folder, UploadedFile file) {
-        String key = safeKey(folder, file.filename());
-        String url = put(key, file.bytes(), file.contentType());
-        return new StoredFile(key, url);
-    }
+    /** S3's hard ceiling for a single PUT; larger objects require the multipart upload API. */
+    static final long MAX_SINGLE_PUT_BYTES = 5L * 1024 * 1024 * 1024;
 
     /**
      * Generate a safe storage key from a folder and original filename.
@@ -223,7 +286,6 @@ public class Storage {
                     .uri(URI.create(deleteUrl))
                     .timeout(requestTimeout)
                     .method("DELETE", HttpRequest.BodyPublishers.noBody())
-                    .header("Host", host)
                     .header("x-amz-content-sha256", payloadHash)
                     .header("x-amz-date", amzDate)
                     .header("Authorization", auth)
@@ -242,6 +304,15 @@ public class Storage {
     /**
      * Build the Authorization header for an AWS Signature V4 signed request.
      * Package-private for testing.
+     *
+     * <p>{@code host} is signed but never set as a request header: {@code Host} is on the JDK
+     * HttpClient's restricted list, and passing it to {@code HttpRequest.Builder.header} throws
+     * {@code IllegalArgumentException: restricted header name: "Host"} unless the JVM was started
+     * with {@code -Djdk.httpclient.allowRestrictedHeaders=host}. Every {@code put} and
+     * {@code delete} used to set it, so both threw on every call in any JVM without that flag.
+     * The client derives {@code Host} from the request URI, and {@link #host} is built from that
+     * same URI's authority, so the signed value and the sent value agree without our help —
+     * {@code StorageStreamingTest.signedHostMatchesTheHostActuallySent} pins that.
      */
     String buildAuthHeader(String method, String key, String contentType,
                            String payloadHash, String amzDate, String dateStamp) {
@@ -363,6 +434,25 @@ public class Storage {
         try {
             var digest = MessageDigest.getInstance("SHA-256");
             return bytesToHex(digest.digest(data));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** Streaming digest — the first of {@code putStreaming}'s two passes. Buffers nothing. */
+    static String sha256Hex(java.util.function.Supplier<InputStream> source) {
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            var buf = new byte[64 * 1024];
+            try (var in = source.get()) {
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    digest.update(buf, 0, n);
+                }
+            }
+            return bytesToHex(digest.digest());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to hash upload payload", e);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
