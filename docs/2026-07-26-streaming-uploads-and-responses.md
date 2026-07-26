@@ -1,6 +1,6 @@
 # Plan: Streaming uploads and responses
 
-Status: Draft — not implemented
+Status: Draft — not implemented. Targets 0.1.8; security-reviewed on the PR before merge.
 Date: 2026-07-26
 
 ## Goal
@@ -373,29 +373,62 @@ New coverage:
 
 ## Rollout
 
-`pom.xml` is at `0.1.8-SNAPSHOT` and `docs/migrations/brace-0.1.7-to-0.1.8.md` already reads as a
-focused security-review release. **Recommend landing streaming in 0.1.9** rather than widening 0.1.8
-— the phases here touch the request lifecycle, the response choke point, and the temp-file
-lifecycle, and mixing them into a release whose migration gate is about security defaults makes both
-harder to verify.
+Ships in **0.1.8** (`pom.xml` is at `0.1.8-SNAPSHOT`, untagged), alongside the 2026-07 security
+review's changes. A dedicated security review runs on the PR before merge — see "Security review
+scope" below for what it should aim at, since these phases touch the request lifecycle, the response
+choke point, and a temp-file lifecycle that did not previously exist.
 
-Suggested grouping:
+Two PRs rather than one, sequenced for reviewability, both landing in 0.1.8:
 
-| Release | Phases | Why together |
+| PR | Phases | Why together |
 |---|---|---|
-| 0.1.9 | 1, 2, 5, 6 | The whole "large files stop touching heap" story, all non-breaking |
-| 0.1.10 | 3, 4, 7 | New opt-in API surface: streaming routes, presigned URLs, storage reads |
+| 1 | 1, 2, 5, 6 | The whole "large files stop touching heap" story, all non-breaking, no new API to review |
+| 2 | 3, 4, 7 | New opt-in API surface: streaming routes, presigned URLs, storage reads |
 
-Per `AGENTS.md`, `docs/migrations/brace-0.1.8-to-0.1.9.md` is required even though there are no
-breaking changes, and needs entries for the observable behavior changes: uploads above 1 MB now
-touch disk, static files stream and advertise `Accept-Ranges`, and streaming results cannot be page
-cached. Then run the migration gate in `ai-benchmark` (`./run-migrate.sh --from 0.1.8 --to
-0.1.9-SNAPSHOT`) and require `fix_attempts: 0`.
+Splitting this way keeps the temp-file lifecycle (PR 1) and the CSRF-relevant streaming-route flag
+(PR 2) in separate diffs — they are the two highest-risk pieces and they fail in unrelated ways.
+
+**Migration guide:** `docs/migrations/brace-0.1.7-to-0.1.8.md` already exists, so these are *added*
+to it rather than starting a new guide — new sections plus rows in its Index table at line 30. The
+observable behavior changes needing entries: uploads above 1 MB now touch disk (and where the temp
+dir lives), static files stream and advertise `Accept-Ranges`, streaming results cannot be page
+cached, and `X-CSRF-Token` is mandatory on streaming routes. All are behavior changes with no action
+required except the last, which only affects code that opts into `.streaming()`.
+
+**Migration gate:** re-run `./run-migrate.sh --from 0.1.7 --to 0.1.8-SNAPSHOT` in `ai-benchmark`
+after these land — the guide will have grown substantially since its last clean pass, and
+`fix_attempts: 0` has to still hold against the widened guide. The fixture does not currently
+exercise uploads at all; if the gate is to bite on this work, extend
+`ai-benchmark/migrate-fixture/` with an upload endpoint and a static-asset fetch.
 
 Docs to update on the way out: `BRACE-AGENTS.md` and `README.md` (new public API, per the
 "Updating documentation" convention), `docs/SECURITY.md` §File Uploads (temp-file handling,
 streaming-route CSRF rule), and `docs/scaling.md:129-132` — where the L13 caveat gets rewritten from
 "known limitation" to "resolved, here's the knob."
+
+### Security review scope
+
+The review on the PR should aim at these specifically, all of which are new attack surface rather
+than refinements of existing surface:
+
+- **Temp-file handling.** Directory permissions (700, not umask-dependent), predictable-name
+  attacks, symlink attacks on the temp dir, and whether cleanup truly covers every exit from
+  `handle()` — a missed path is a disk-fill DoS, not just a leak. The startup sweep must not follow
+  symlinks out of the temp dir (same class of bug as the 0.1.8 static-file symlink fix).
+- **`saveTo` and app-supplied paths.** The move fast-path means an attacker-influenced destination
+  now relocates a file rather than writing bytes; confirm traversal handling is unchanged.
+- **CSRF on streaming routes.** The registration-time enforcement is the whole defense. Verify it
+  cannot be bypassed by a route registered before the flag, or by a `Content-Type` that makes the
+  framework think a body was parsed when it was not.
+- **`maxUploadSize` in the streaming path.** The counting wrapper is now the only enforcement point
+  for `.streaming()` routes; the Content-Length fast-reject at `BraceHandler.java:934-940` does not
+  cover a chunked body.
+- **`UNSIGNED-PAYLOAD`** (Phase 2, option 2) if it ships — it removes payload integrity from the
+  signature and should be opt-in with that stated plainly.
+- **Presigned URLs** (Phase 4) — expiry defaults, whether the client can influence the key, and
+  whether a presigned `PUT` can overwrite an existing object.
+- **Range parsing** — integer overflow on absurd ranges, negative suffix lengths, and 416 handling
+  that does not leak whether a file exists beyond what a 200/404 already leaks.
 
 ## Sequencing for an app hitting this today
 
