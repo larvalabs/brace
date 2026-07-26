@@ -1,7 +1,16 @@
 # Plan: Streaming uploads and responses
 
-Status: Draft — not implemented. Targets 0.1.8; security-reviewed on the PR before merge.
+Status: PR 1 implemented (Phases 0, 1, 2, 5, 6). PR 2 (Phases 3, 4, 7) not started.
+Targets 0.1.10 (originally 0.1.8; rebased onto the 0.1.10 line on 2026-10-02); security-reviewed on
+the PR before merge.
 Date: 2026-07-26
+
+> **Implementation notes.** Three things turned up in the build that the plan did not predict, all
+> recorded in the phases below: Jetty fails rather than spills for non-file parts over the threshold
+> (Phase 0); `Storage.put`/`delete` were entirely non-functional because they set the restricted
+> `Host` header (Phase 2); and oversized *multipart* uploads returned 500 rather than 413, feeding
+> the error store on every one (Phase 1). The last two are pre-existing bugs, both verified against
+> the unmodified tree before being fixed here.
 
 ## Goal
 
@@ -394,12 +403,12 @@ New coverage:
 
 ## Rollout
 
-Ships in **0.1.8** (`pom.xml` is at `0.1.8-SNAPSHOT`, untagged), alongside the 2026-07 security
-review's changes. A dedicated security review runs on the PR before merge — see "Security review
+Ships in **0.1.10** (`pom.xml` is at `0.1.10-SNAPSHOT`, untagged), on the `0.1.10/streaming-io`
+branch. A dedicated security review runs on the PR before merge — see "Security review
 scope" below for what it should aim at, since these phases touch the request lifecycle, the response
 choke point, and a temp-file lifecycle that did not previously exist.
 
-Two PRs rather than one, sequenced for reviewability, both landing in 0.1.8:
+Two PRs rather than one, sequenced for reviewability, both landing in 0.1.10:
 
 | PR | Phases | Why together |
 |---|---|---|
@@ -409,18 +418,16 @@ Two PRs rather than one, sequenced for reviewability, both landing in 0.1.8:
 Splitting this way keeps the temp-file lifecycle (PR 1) and the CSRF-relevant streaming-route flag
 (PR 2) in separate diffs — they are the two highest-risk pieces and they fail in unrelated ways.
 
-**Migration guide:** `docs/migrations/brace-0.1.7-to-0.1.8.md` already exists, so these are *added*
-to it rather than starting a new guide — new sections plus rows in its Index table at line 30. The
-observable behavior changes needing entries: uploads above 1 MB now touch disk (and where the temp
-dir lives), static files stream and advertise `Accept-Ranges`, streaming results cannot be page
-cached, and `X-CSRF-Token` is mandatory on streaming routes. All are behavior changes with no action
-required except the last, which only affects code that opts into `.streaming()`.
+**Migration guide:** entries go in the `streaming-io` section of
+`docs/migrations/brace-0.1.9-to-0.1.10.md`. The observable behavior changes needing entries: uploads
+above 1 MB now touch disk (and where the temp dir lives), an `UploadedFile` no longer outlives its
+request, static files stream and advertise `Accept-Ranges`, and streaming results cannot be page
+cached. PR 2's `X-CSRF-Token` rule on streaming routes will need an entry when it lands.
 
-**Migration gate:** re-run `./run-migrate.sh --from 0.1.7 --to 0.1.8-SNAPSHOT` in `ai-benchmark`
-after these land — the guide will have grown substantially since its last clean pass, and
-`fix_attempts: 0` has to still hold against the widened guide. The fixture does not currently
-exercise uploads at all; if the gate is to bite on this work, extend
-`ai-benchmark/migrate-fixture/` with an upload endpoint and a static-asset fetch.
+**Migration gate:** run `./run-migrate.sh --from 0.1.9 --to 0.1.10-SNAPSHOT` in `ai-benchmark` once
+the 0.1.10 guide is assembled. The fixture does not currently exercise uploads at all; if the gate
+is to bite on this work, extend `ai-benchmark/migrate-fixture/` with an upload endpoint and a
+static-asset fetch.
 
 Docs to update on the way out: `BRACE-AGENTS.md` and `README.md` (new public API, per the
 "Updating documentation" convention), `docs/SECURITY.md` §File Uploads (temp-file handling,
