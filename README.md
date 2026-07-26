@@ -393,6 +393,27 @@ app.post("/upload-manual", req -> {
 });
 ```
 
+Uploads and downloads stream. Multipart parts over `uploadMemoryThreshold` (default 1MB) spill to a
+temp file instead of the heap, `storage.put(key, file)` sends from that file without materializing
+it, and responses can stream back:
+
+```java
+app.maxUploadSize("500M")                     // accept large media...
+   .uploadMemoryThreshold("256K")             // ...without holding it in heap
+   .uploadTempDir(Path.of("/var/lib/uploads"));
+
+try (var in = file.stream()) { ... }          // repeatable, bounded memory
+file.saveTo(path);                            // a filesystem move for a spilled part
+
+Result.file(path)                             // stream out: Content-Length, Range, typed by extension
+Result.download(path, "report.csv")           // ...as an attachment
+Result.stream(inputStream, "image/png")       // ...from a stream (chunked)
+Result.stream(out -> writeCsv(out), "text/csv");  // ...generated as it is produced
+```
+
+Static files stream too, and answer `Range` requests — so seeking in a served video works rather
+than re-fetching from the start.
+
 ## Custom Metrics
 
 Built-in counters, gauges, and timers — no external metrics server needed. Metrics auto-render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.

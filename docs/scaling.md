@@ -126,11 +126,14 @@ fleet dashboard (instance picker + liveness) is a planned follow-up.
   default 10 can approach the ceiling — size `N × poolSize` to leave headroom for migrations, admin
   tools, and `psql`. Tune the pool via the `DatabaseFactory(url, user, password, entities, poolSize)`
   constructor before `app.database(dbFactory)`; `minimumIdle` is not separately configurable by design.
-- **Object storage buffers whole objects in heap.** `Storage.put(...)` holds the entire object as a
-  `byte[]` (and an uploaded file arrives already buffered via `UploadedFile.bytes()`), so a single
-  upload transiently costs ≥2× the object size in heap. Fine for typical avatars/attachments; for
-  large media, cap upload size (`app.maxUploadSize(...)`) and size the heap accordingly. A streaming
-  variant (temp-file + `BodyPublishers.ofFile`) is a documented future option, not yet implemented.
+- **Large uploads and downloads stream; the heap cost is bounded.** Multipart parts over
+  `app.uploadMemoryThreshold(...)` (default 1MB) spill to a temp file, `Storage.put(...)` hashes and
+  sends from that file without materializing it, and `Result.file(...)` / `Result.stream(...)` write
+  responses with a bounded buffer. Static files stream too. Two things still cost the full object in
+  heap, by choice: `UploadedFile.bytes()` and `Storage.put(key, byte[], type)` — avoid both for
+  large media. Budget **disk** rather than heap for uploads: concurrent uploads × `maxUploadSize`,
+  in `app.uploadTempDir(...)`. Objects over S3's 5 GiB single-PUT ceiling are rejected; Brace does
+  not implement the multipart upload API.
 - **WebSocket broadcast cost on Postgres.** Cross-instance fan-out (`ws.broadcast`) issues a session +
   transaction + `pg_notify` round-trip per broadcast. This is correct and fine at human chat rates;
   if you build a high-fan-in firehose (many messages per tick), coalescing/batching `pg_notify` would

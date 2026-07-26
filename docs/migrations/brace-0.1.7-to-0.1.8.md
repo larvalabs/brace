@@ -47,6 +47,12 @@ Everything else is a hardening change with no action required.
 | Durable jobs start on enqueue | new default | none; tune `jobPollInterval(...)` if multi-instance | [§](#durable-jobs-start-on-enqueue-not-on-the-next-poll-new-default) |
 | Mailer SMTP timeouts bounded | new default | raise timeouts for a slow relay | [§](#mailer-smtp-timeouts-are-bounded-new-default) |
 | Bundled htmx 2.0.4 → 2.0.10 | dependency bump | none | [§](#bundled-htmx-is-now-2010) |
+| Large uploads spill to disk | behavior change | budget disk; point `uploadTempDir(...)` at a real volume | [§](#large-uploads-now-spill-to-disk-new-default) |
+| `Storage.put` streams | behavior change | none | [§](#storageput-streams-instead-of-buffering) |
+| `Storage` write paths were broken | bug fix | none — they now work | [§](#bug-fix-storage-put-and-delete-threw-on-every-call) |
+| Oversized multipart is 413, not 500 | bug fix | none | [§](#bug-fix-oversized-multipart-uploads-return-413-instead-of-500) |
+| Streaming responses (`Result.file`/`stream`) | new capability | none | [§](#new-streaming-responses-and-range-support) |
+| Static files stream and support `Range` | behavior change | none | [§](#new-streaming-responses-and-range-support) |
 
 ---
 
@@ -617,6 +623,117 @@ If a previously-hanging send now surfaces as a failure, that is the fix working:
 always there, it just used to present as a stuck thread instead of an exception.
 
 ---
+
+## Large uploads now spill to disk (new default)
+
+**What changed.** Multipart parsing used to be configured with `setMaxMemoryFileSize(-1)` —
+"unlimited memory file size" — so every uploaded part was held in the heap for the whole request.
+Parts over the new `uploadMemoryThreshold` (default **1MB**) are now written to a temp file instead.
+
+**Why.** The old shape cost `concurrent uploads × maxUploadSize × ~2` in heap, with virtual threads
+leaving concurrency unbounded. The default configuration could be made to pin 10MB of heap per
+in-flight request by any client.
+
+**Action required: none for your code.** `UploadedFile.bytes()` still works — it reads the file back
+— so existing handlers are unaffected.
+
+**Action required for your deployment:** the spill directory needs room for
+`concurrent uploads × maxUploadSize`. It defaults to `${java.io.tmpdir}/brace-uploads`, which on a
+container with a small writable layer may not be where you want it.
+
+```java
+app.maxUploadSize("500M")                            // accept large media
+   .uploadMemoryThreshold("256K")                    // ...without holding it in heap
+   .uploadTempDir(Path.of("/var/lib/myapp/uploads")); // ...on a volume with room
+```
+
+New `UploadedFile` methods, all bounded-memory:
+
+```java
+// Before — materializes the whole upload in heap
+byte[] data = file.bytes();
+storage.put(key, file.bytes(), file.contentType());
+
+// After — nothing materializes
+try (var in = file.stream()) { ... }   // repeatable
+file.transferTo(outputStream);
+file.saveTo(path);                     // a filesystem move for a spilled part
+storage.put(key, file);                // streams
+```
+
+`bytes()` is still correct for small uploads and is not deprecated. It is simply the one method that
+costs the whole object in heap, so it is the wrong choice once uploads get large.
+
+**One lifetime rule:** an `UploadedFile` is valid only for the duration of its request. Spill files
+are deleted when the handler returns, so save or upload the file before then rather than handing it
+to a background job. Reading one afterwards throws a message saying so.
+
+## `Storage.put` streams instead of buffering
+
+`Storage.put(key, UploadedFile)` and `putGenerated(...)` now stream: the payload is hashed and sent
+without being read into the heap, so an upload that spilled to disk goes to S3 without a heap round
+trip. New `put(key, Path, contentType)` for content already on disk. `put(key, byte[], contentType)`
+is unchanged and still buffers by definition.
+
+Objects over S3's 5 GiB single-`PUT` ceiling are now rejected with a message naming that limit,
+rather than failing opaquely at the endpoint after a long upload. Brace does not implement the
+multipart upload API; upload such objects to the bucket directly.
+
+## Bug fix: `Storage` put and delete threw on every call
+
+**Both `Storage.put(...)` and `Storage.delete(...)` were non-functional in every release that
+shipped them.** They set the `Host` header explicitly, and `Host` is on the JDK HttpClient's
+restricted list, so each call threw:
+
+```
+IllegalArgumentException: restricted header name: "Host"
+```
+
+unless the JVM happened to be started with `-Djdk.httpclient.allowRestrictedHeaders=host`.
+
+**Action required: none.** The header is no longer set; the client derives `Host` from the request
+URI, and the SigV4 signature is built from that same authority, so signing still matches. If you
+added `-Djdk.httpclient.allowRestrictedHeaders=host` to work around this, you can drop it.
+
+## Bug fix: oversized multipart uploads return 413 instead of 500
+
+The `Content-Length` fast-reject ran only for non-multipart bodies, so an oversized **multipart**
+upload reached Jetty's internal cap and surfaced as a `500` — recording a framework error and
+feeding the regression notifier every time. An unauthenticated client could flood both just by
+POSTing large files. Oversized uploads are now `413` with no error recorded, matching what the
+documentation already claimed and what non-multipart bodies already did.
+
+## New: streaming responses and `Range` support
+
+Response bodies can now be streamed rather than materialized:
+
+```java
+Result.file(path)                          // Content-Length, Range, type from extension
+Result.file(path, "video/mp4")
+Result.download(path, "report.csv")        // streaming Content-Disposition attachment
+Result.stream(inputStream, "image/png")    // unknown length, chunked
+Result.stream(inputStream, "image/png", n) // known length
+Result.stream(out -> { ... }, "text/csv")  // generated as it is produced
+```
+
+**Static files stream too**, with no code change on your side. Serving a large asset no longer costs
+its full size in heap per concurrent request, and responses now carry `Accept-Ranges: bytes` and
+answer `Range` requests with `206` — so seeking in a served video works instead of re-fetching from
+the start. Conditional GETs (`ETag` / `If-None-Match` / `304`) behave exactly as before.
+
+Three constraints are worth knowing before you reach for a streaming response:
+
+1. **It cannot be page cached.** `Cache.wrap` over a streaming result throws rather than caching an
+   empty body. Cache the underlying data and build the response per request.
+2. **It cannot read from the request's `Database`.** The transaction commits and its connection
+   returns to the pool before the response is written. For a large export, open a dedicated session
+   inside the writer — and note that a slow client then holds that connection for the download.
+3. **It cannot change status mid-stream.** Once bytes are on the wire the status line is gone, so a
+   source that fails partway aborts the connection. That is deliberate: the alternative is a clean
+   `200` carrying a silently truncated body.
+
+An after-middleware that rewrites response bodies should check `result.isStreaming()` and pass
+through — `body()` and `rawBytes()` are null for a streaming result.
 
 ## Bundled htmx is now 2.0.10
 

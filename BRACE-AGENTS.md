@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobLease()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobLease()`, `jobPollInterval()`, `group()`.
 
 ## Routing
 
@@ -209,7 +209,15 @@ req.files("photos")           // List<UploadedFile>
 req.storage()                 // Storage instance
 ```
 
-**UploadedFile:** `filename()`, `contentType()`, `bytes()`, `size()`, `saveTo(Path)`.
+**UploadedFile:** `filename()`, `contentType()`, `size()`, `stream()`, `transferTo(OutputStream)`,
+`saveTo(Path)`, `bytes()`.
+
+Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
+living in the heap for the request; below it they stay in memory. Either way the API is the same.
+`stream()` is repeatable and bounded-memory, `saveTo(Path)` is a filesystem move for a spilled part,
+and `bytes()` materializes the whole part in heap — fine for small uploads, wrong for large ones.
+Spill files are deleted when the request ends, so save or upload a file before the handler returns;
+`app.uploadTempDir(Path)` chooses where they land (owner-only, created if missing).
 
 **Body size cap:** `maxUploadSize` (builder, default 10MB) bounds **every** request body, not
 just file uploads — a non-multipart body (JSON, form post, raw bytes) over the limit is
@@ -231,6 +239,12 @@ Result.forbidden()                          // 403 — or forbidden("msg")
 Result.badRequest("invalid input")          // 400
 Result.created("/posts/42")                 // 201 with Location header
 Result.bytes(data, "image/png")             // binary response
+Result.file(path)                           // stream a file (Content-Length, Range, typed by extension)
+Result.file(path, "video/mp4")              // ...with an explicit content type
+Result.download(path, "report.csv")         // stream as an attachment
+Result.stream(inputStream, "image/png")     // stream of unknown length (chunked)
+Result.stream(inputStream, "image/png", n)  // ...of known length
+Result.stream(out -> {...}, "text/csv")     // generated content, written as it is produced
 Result.download(data, "text/csv", "f.csv")  // Content-Disposition attachment; filename is
                                             // sanitized + RFC 6266 encoded, so a user-supplied
                                             // name is safe to pass

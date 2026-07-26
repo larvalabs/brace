@@ -1,7 +1,15 @@
 # Plan: Streaming uploads and responses
 
-Status: Draft — not implemented. Targets 0.1.8; security-reviewed on the PR before merge.
+Status: PR 1 implemented (Phases 0, 1, 2, 5, 6). PR 2 (Phases 3, 4, 7) not started.
+Targets 0.1.8; security-reviewed on the PR before merge.
 Date: 2026-07-26
+
+> **Implementation notes.** Three things turned up in the build that the plan did not predict, all
+> recorded in the phases below: Jetty fails rather than spills for non-file parts over the threshold
+> (Phase 0); `Storage.put`/`delete` were entirely non-functional because they set the restricted
+> `Host` header (Phase 2); and oversized *multipart* uploads returned 500 rather than 413, feeding
+> the error store on every one (Phase 1). The last two are pre-existing bugs, both verified against
+> the unmodified tree before being fixed here.
 
 ## Goal
 
