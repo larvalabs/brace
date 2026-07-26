@@ -15,9 +15,12 @@ lands the first three findings of the correctness review:
   `John%20Doe`. If you were decoding by hand, stop.
 - **`/ops/routes` now shows route patterns instead of concrete URLs**, and **every response
   is now counted** — including 429s, CSRF 403s and 404s that were previously invisible.
+- **HTML checkboxes bind to `boolean`**, repeated multipart fields survive, a trailing slash
+  matches, and 20-odd other correctness fixes — see "Other correctness fixes" below.
 
-They all ship as new *defaults*. The two that can change what your code sees are the path
-decoding (if you worked around it) and the ops output shape (if you parse it) — both below.
+They all ship as new *defaults*. The changes that can affect existing code are the ones where you
+may have written a workaround: path decoding, `Url.to` encoding, single-column
+`sqlQuery`/`hql` results, and checkbox binding. Each is called out with a before/after below.
 
 ---
 
@@ -353,6 +356,82 @@ Nothing, unless you **parse `/ops/status` or `/ops/routes`**. If you do:
 
 If you were relying on the routes table to find out *which* URLs 404, use `/ops/logs` or the error
 store instead — the log still records the concrete (redacted) path for every request.
+
+---
+
+## Other correctness fixes (behavior changes worth knowing)
+
+The rest of the correctness review is bug fixes that need no action from you. These few change
+observable behavior, so check them against your code:
+
+**HTML checkboxes now bind to `boolean` (M2).** `Boolean.parseBoolean` is true only for the literal
+`"true"`, so a *checked* checkbox — which submits `name=on` — used to bind `false`. If you worked
+around it by declaring the field as `String` and comparing to `"on"` yourself, you can switch to
+`boolean`. If you kept a `String` field, nothing changes.
+
+```java
+// The workaround you can now drop:
+record Signup(String email, String agree) {}   // then: "on".equals(form.value().agree())
+record Signup(String email, boolean agree) {}  // 0.1.8: just works
+```
+
+Accepted as true: `on`, `true`, `1`, `yes`, `checked` (case-insensitive). Everything else, and
+absence, is false.
+
+**Repeated multipart fields are preserved (M1).** `req.formParams("tag")` returns every value for a
+`multipart/form-data` submission, as it already did for `application/x-www-form-urlencoded`. It
+previously returned only the last. `req.formParam("tag")` is unchanged (last wins).
+
+**A trailing slash now matches (L1).** `GET /users/` reaches the `/users` handler instead of 404ing.
+Matching rather than redirecting is deliberate: a 301 would turn a `POST /users/` into a GET and
+drop its body. If you relied on the 404 to reject trailing slashes, add an explicit check.
+
+**`sameSite("None")` now implies `Secure`, and invalid values throw (M12).** Browsers reject
+`SameSite=None` without `Secure`, so that combination was silently discarding your session cookie.
+An unrecognized value (`"Loose"`, `""`, null) now throws instead of being written verbatim into the
+header, where browsers ignored the attribute entirely. Valid values: `Strict`, `Lax`, `None`.
+
+**`Url.to(...)` percent-encodes its values (M6).** Previously they were appended raw, so a value
+containing `/` added a path segment and one containing a space produced an invalid URL. If you were
+encoding values before passing them in, remove that — you will now double-encode.
+
+Note a value containing `/` or `%` still cannot ride in a path segment: Jetty's default URI
+compliance rejects `%2F` and `%25` with a 400 before your handler runs. Put those in the query
+string.
+
+**`db.sqlQuery(...)` / `db.hql(...)` return real rows for single-column selects (M7).** They always
+declared `List<Object[]>` but returned bare scalars when the select had one item, so
+`for (Object[] row : ...)` threw `ClassCastException`. Now every row is an `Object[]`; read
+`row[0]`. If you worked around it by casting to `List<Object>` and calling `toString()`, switch to
+`row[0]`:
+
+```java
+// Before (0.1.7): the workaround
+var names = (List<Object>) (List<?>) db.sqlQuery("SELECT name FROM users");
+for (var n : names) { use(n.toString()); }
+
+// After (0.1.8)
+for (var row : db.sqlQuery("SELECT name FROM users")) { use(String.valueOf(row[0])); }
+```
+
+**`View.of(...)` throws on an odd argument count (L3).** It used to silently drop a trailing key, so
+a typo rendered a template missing a variable with no error. If a call was quietly relying on that,
+it now fails loudly at render time — which is the point.
+
+**`stop()` closes the `DatabaseFactory` (M4).** If several `Brace` instances share one factory, or a
+test fixture reuses one across cases, call `.ownsDatabase(false)` and close it yourself:
+
+```java
+app.database(sharedFactory).ownsDatabase(false);
+```
+
+**`daily(...)` jobs no longer drift across DST (M11).** They reschedule from the wall clock instead
+of assuming 24h of elapsed time, and dedupe on the local calendar day. If your instances run in
+different time zones, put them all in one (UTC is the usual choice) — that was already required for
+a local firing time to mean anything across a fleet.
+
+**Interval strings accept `d` (L8).** `every("1d", ...)` and `jobLease("15d")` work now; they used
+to throw while `cache.set(k, v, "1d")` accepted the same string.
 
 ---
 
