@@ -23,9 +23,6 @@ class InMemoryBackend implements CacheBackend {
         }
     }
 
-    /** Result of {@link #getOrCompute}: the value plus whether it was already cached. */
-    record Computed(Object value, boolean hit) {}
-
     static final int DEFAULT_MAX_ENTRIES = 10_000;
 
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
@@ -106,7 +103,8 @@ class InMemoryBackend implements CacheBackend {
      * and the exception propagates to every caller currently awaiting this key (each retries on its
      * next call). The non-concurrent case is identical to before — throw, cache nothing, retry next time.
      */
-    Computed getOrCompute(String key, Duration ttl, Supplier<?> supplier) {
+    @Override
+    public Computed getOrCompute(String key, Duration ttl, Supplier<?> supplier) {
         var current = store.get(key);
         if (current != null && !current.expired()) {
             return new Computed(current.value(), true);
