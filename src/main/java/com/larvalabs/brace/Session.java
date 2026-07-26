@@ -120,8 +120,14 @@ public class Session {
         if (EXPIRY_KEY.equals(key)) {
             return;
         }
-        data.put(key, value);
-        modified = true;
+        // L4: only a real change marks the session modified. A no-op write used to force a full
+        // AES-GCM re-mint, a Set-Cookie, and (via attachSessionCookie) Cache-Control: private on
+        // the response — so a guard doing an unconditional session.set(...) made every response
+        // uncacheable and re-issued the cookie on every request.
+        var previous = data.put(key, value);
+        if (!java.util.Objects.equals(previous, value)) {
+            modified = true;
+        }
     }
 
     /**
@@ -143,13 +149,17 @@ public class Session {
     }
 
     public void remove(String key) {
-        data.remove(key);
-        modified = true;
+        // Removing an absent key changes nothing — see the note in set(). (L4)
+        if (data.remove(key) != null) {
+            modified = true;
+        }
     }
 
     public void clear() {
-        data.clear();
-        modified = true;
+        if (!data.isEmpty()) {
+            data.clear();
+            modified = true;
+        }
     }
 
     public boolean isModified() {

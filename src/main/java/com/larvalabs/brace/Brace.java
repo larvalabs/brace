@@ -238,8 +238,11 @@ public class Brace {
         }
         // Warn about obvious placeholder values (including old scaffolds)
         String lower = secret.toLowerCase();
+        // L2: the old list carried a mixed-case literal
+        // ("CHANGE-ME-to-a-random-string-at-least-32-chars") compared against an already-lowercased
+        // string, so that clause could never match — a dead branch pretending to be a guard. The
+        // scaffold value it was aiming at is already caught by "change-me" below.
         if (lower.contains("changeme") || lower.contains("change-me") || lower.contains("change_me") ||
-            lower.contains("CHANGE-ME-to-a-random-string-at-least-32-chars") ||
             lower.contains("secret") || lower.contains("password") ||
             lower.contains("test") || lower.equals("placeholder") || lower.matches("^[a-z]+$")) {
             Log.warn("Weak " + type + " secret detected - use a cryptographically random value in production");

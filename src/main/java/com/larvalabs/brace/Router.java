@@ -41,6 +41,20 @@ public class Router {
     }
 
     public RouteMatch match(String method, String path) {
+        var found = matchExact(method, path);
+        if (found != null) return found;
+        // L1: a trailing slash is not a different resource. "/users/" compiled to nothing that
+        // could match "/users", so a user who typed the trailing slash — or a link that carried
+        // one — got a bare 404 with no hint. Retry once against the canonical form rather than
+        // registering two routes or redirecting (a redirect would turn a POST into a GET).
+        // "/" itself is canonical and is handled by the exact pass above.
+        if (path.length() > 1 && path.endsWith("/")) {
+            return matchExact(method, stripTrailingSlashes(path));
+        }
+        return null;
+    }
+
+    private RouteMatch matchExact(String method, String path) {
         var route = staticRoutes.get(method + ' ' + path);
         if (route != null) return new RouteMatch(route, Map.of());
         for (var candidate : dynamicRoutes.getOrDefault(method, List.of())) {
@@ -48,6 +62,13 @@ public class Router {
             if (params != null) return new RouteMatch(candidate, params);
         }
         return null;
+    }
+
+    /** Drop trailing slashes, keeping at least "/" — {@code "/a//"} and {@code "/a/"} → {@code "/a"}. */
+    private static String stripTrailingSlashes(String path) {
+        int end = path.length();
+        while (end > 1 && path.charAt(end - 1) == '/') end--;
+        return path.substring(0, end);
     }
 
     public List<Route> routes() {

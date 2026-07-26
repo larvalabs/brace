@@ -46,10 +46,7 @@ public class View extends Result {
     }
 
     public static View of(String template, Object... keyValues) {
-        var params = new LinkedHashMap<String, Object>();
-        for (int i = 0; i < keyValues.length - 1; i += 2) {
-            params.put((String) keyValues[i], keyValues[i + 1]);
-        }
+        var params = toParams(template, keyValues);
         // Resolve the request-scoped CSRF field and flash NOW, while their ThreadLocals are still set
         // (the handler is mid-flight). getCsrfField() mints the token, so the session is marked modified
         // here — before the cookie-write decision — exactly as it was when rendering happened eagerly.
@@ -93,14 +90,32 @@ public class View extends Result {
     }
 
     public static String render(String template, Object... keyValues) {
-        var params = new LinkedHashMap<String, Object>();
-        for (int i = 0; i < keyValues.length - 1; i += 2) {
-            params.put((String) keyValues[i], keyValues[i + 1]);
-        }
+        var params = toParams(template, keyValues);
         if (engine != null) {
             return engine.render(template, params);
         }
         return "[Template: " + template + " | Params: " + params.keySet() + "]";
+    }
+
+    /**
+     * Build the parameter map from alternating key/value varargs, rejecting an odd count (L3).
+     *
+     * <p>The loop used to stop at {@code length - 1}, silently discarding a trailing key: a typo'd
+     * {@code View.of("page", "a", 1, "b")} rendered a template missing {@code b} with no error
+     * anywhere, and the failure surfaced as a blank spot in the page. {@code Session.of} has always
+     * thrown on an odd count; this makes the two agree.
+     */
+    private static LinkedHashMap<String, Object> toParams(String template, Object... keyValues) {
+        if (keyValues.length % 2 != 0) {
+            throw new IllegalArgumentException(
+                "View params for \"" + template + "\" must be key-value pairs, but got "
+                    + keyValues.length + " arguments (trailing key: " + keyValues[keyValues.length - 1] + ")");
+        }
+        var params = new LinkedHashMap<String, Object>();
+        for (int i = 0; i < keyValues.length; i += 2) {
+            params.put((String) keyValues[i], keyValues[i + 1]);
+        }
+        return params;
     }
 
     public String template() { return template; }

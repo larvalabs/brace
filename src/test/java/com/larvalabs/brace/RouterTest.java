@@ -82,11 +82,32 @@ class RouterTest {
 
     @Test
     void trailingSlashPatternNormalized() {
-        // "/about/" compiles to the same matcher as "/about": the bare path matches,
-        // a trailing-slash request does not.
+        // "/about/" compiles to the same matcher as "/about", so the bare path matches.
         router.add("GET", "/about/", this::dummyHandler);
         assertNotNull(router.match("GET", "/about"));
-        assertNull(router.match("GET", "/about/"));
+        // ...and since correctness review L1, so does the trailing-slash request. This assertion
+        // used to be assertNull, which pinned the bug rather than a requirement: registering
+        // "/about/" and then 404ing a request for "/about/" is indefensible either way round.
+        assertNotNull(router.match("GET", "/about/"));
+    }
+
+    @Test
+    void trailingSlashMatchesTheCanonicalRoute() {
+        // L1: a trailing slash is not a different resource. Matching (rather than redirecting)
+        // keeps non-GET verbs intact — a 301 would turn a POST into a GET and drop its body.
+        router.add("GET", "/users", this::dummyHandler);
+        router.add("GET", "/posts/{id}", this::dummyHandler);
+
+        assertNotNull(router.match("GET", "/users/"));
+        assertNotNull(router.match("GET", "/posts/42/"));
+        assertEquals("42", router.match("GET", "/posts/42/").pathParams().get("id"));
+    }
+
+    @Test
+    void trailingSlashDoesNotInventRoutes() {
+        router.add("GET", "/users", this::dummyHandler);
+        assertNull(router.match("GET", "/unknown/"));
+        assertNull(router.match("POST", "/users/"), "the method must still have to match");
     }
 
     @Test
