@@ -62,7 +62,7 @@ Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check t
 - **Security** — `app.trustedProxies(cidrs)` for IP forwarding. `SecurityHeaders.defaults()` for nosniff, frame-options, etc.
 - **Metrics** — `Stats.counter(name)`, `.gauge(name, fn)`, `.timer(name, ms)`. Appear in ops dashboard.
 - **Middleware** — `app.before(req -> ...)` returns null to continue or Result to short-circuit. `app.after((req, result) -> ...)`.
-- **htmx** — Bundled 2.0.4 at `/__brace/htmx.min.js`. `req.isHtmx()` for partial responses. `Vary: HX-Request` set automatically.
+- **htmx** — Bundled 2.0.10 at `/__brace/htmx.min.js`. `req.isHtmx()` for partial responses. `Vary: HX-Request` set automatically.
 - **Logging** — `Log.debug/info/error(msg)` (each takes optional `Map.of(...)` data), `Log.event("name", Map.of(...))`. Structured JSON to stdout.
 - **Passwords** — `Passwords.hash(pw)`, `Passwords.check(pw, hash)` (bcrypt).
 - **Testing** — `Brace.test().start(app -> ...)` returns `TestApp`. `.get()`, `.post()`, `.postJson()`, `.withDb()`. H2 in-memory.

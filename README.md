@@ -184,7 +184,7 @@ public class App {
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
-- **htmx** — Bundled htmx 2.0.4, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
+- **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, JFR profiling, Ed25519 token auth
 - **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding, `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
@@ -463,7 +463,7 @@ app.group("/admin", admin -> {
 
 ## htmx
 
-Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.4 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.
+Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.10 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.
 
 ```java
 // In your layout: <script src="/__brace/htmx.min.js"></script>

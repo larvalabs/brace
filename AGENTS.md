@@ -123,7 +123,7 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 - **Secret validation.** Session secrets must be 32+ characters. Warns about weak patterns on startup.
 - **Stats use LongAdder/AtomicLong** — lock-free, zero contention on the hot path.
 - **The Postgres IT tier fails closed.** `PostgresTestBase` throws if Docker is unreachable rather than skipping. A JUnit assumption there aborts the class, which failsafe reports as `Tests run: 0` (not "skipped"), so `mvn verify` printed BUILD SUCCESS while the whole tier silently tested nothing — worthless as a merge gate. Skip the tier deliberately with `mvn verify -DskipITs`; never by weakening the check. `docker.api.version` in `pom.xml` pins the Docker Engine API version, because docker-java otherwise negotiates 1.32 and Docker 29+ requires >= 1.40.
-- **htmx for dynamic pages.** Bundled htmx 2.0.4 served from `/__brace/htmx.min.js`. Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize with `req.isHtmx()` to return partials when needed. `Vary: HX-Request` header set automatically.
+- **htmx for dynamic pages.** Bundled htmx 2.0.10 served from `/__brace/htmx.min.js`. Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize with `req.isHtmx()` to return partials when needed. `Vary: HX-Request` header set automatically.
 
 ## File Conventions
 

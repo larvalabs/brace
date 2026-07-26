@@ -46,6 +46,7 @@ Everything else is a hardening change with no action required.
 | Stalled durable jobs are recovered | new default | raise `jobLease(...)` if jobs run >30 min | [§](#stalled-durable-jobs-are-recovered-new-default) |
 | Durable jobs start on enqueue | new default | none; tune `jobPollInterval(...)` if multi-instance | [§](#durable-jobs-start-on-enqueue-not-on-the-next-poll-new-default) |
 | Mailer SMTP timeouts bounded | new default | raise timeouts for a slow relay | [§](#mailer-smtp-timeouts-are-bounded-new-default) |
+| Bundled htmx 2.0.4 → 2.0.10 | dependency bump | none | [§](#bundled-htmx-is-now-2010) |
 
 ---
 
@@ -614,6 +615,39 @@ need to cover total transfer time for a large message — only the slowest singl
 
 If a previously-hanging send now surfaces as a failure, that is the fix working: the error was
 always there, it just used to present as a stuck thread instead of an exception.
+
+---
+
+## Bundled htmx is now 2.0.10
+
+**What changed.** The htmx served from `/__brace/htmx.min.js` moved from 2.0.4 (Dec 2024) to
+2.0.10 (Apr 2026) — the current stable release. There is no framework API change:
+`req.isHtmx()`, the automatic `Vary: HX-Request`, and the `Cache` page-key split behave
+exactly as before.
+
+**What you need to do.** Nothing. htmx 2.0.5–2.0.10 are bug-fix releases with no breaking
+changes to attributes, headers, or events.
+
+The `ETag` on `/__brace/htmx.min.js` is derived from the file's bytes, so browsers and
+proxies pick up the new asset on the first request after deploy without a cache bust.
+
+**What you get.** The history cache moved from `localStorage` to `sessionStorage` (2.0.5),
+so history DOM snapshots no longer persist across tabs; `parseHTML` uses
+`Document.parseHTMLUnsafe()` for Web Components, and `hx-sync`/`htmx:abort` work inside
+Shadow DOM (2.0.8); `HX-Location` honors `replace` when `push` is false, and
+`hx-disabled-elt` no longer re-enables elements that were already disabled in the source
+HTML (2.0.9); settle lookup escapes selectors with `CSS.escape()` (2.0.10).
+
+**If you pin your own htmx** — a CDN `<script>` rather than `/__brace/htmx.min.js` — this
+change does not affect you.
+
+**On htmx 4.** htmx 4 is in beta (`4.0.0-beta6` as of this release) and Brace does **not**
+bundle it. There is no rush: the htmx maintainers plan to keep 2.x as npm `latest` into
+early 2027 and have committed to supporting 2.0 indefinitely. See
+[the htmx 4 evaluation](../2026-07-26-htmx-4-evaluation.md) for what adopting it would cost
+and what it would buy — the short version is that `HX-Request` is unchanged in v4, so
+`req.isHtmx()` and `Vary` survive, but v4 swaps 4xx/5xx responses by default and drops
+implicit attribute inheritance, both of which need an audit of app-side htmx code.
 
 ---
 

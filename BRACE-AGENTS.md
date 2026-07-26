@@ -902,7 +902,7 @@ entirely — they reach neither stdout nor `/ops/logs`.
 
 ## htmx
 
-Bundled htmx 2.0.4 — add `<script src="/__brace/htmx.min.js"></script>` to your layout.
+Bundled htmx 2.0.10 — add `<script src="/__brace/htmx.min.js"></script>` to your layout.
 Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize by detecting htmx requests:
 
 ```java
