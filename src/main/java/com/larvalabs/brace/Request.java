@@ -21,6 +21,8 @@ public class Request {
     private String body;
     private Map<String, List<UploadedFile>> uploadedFiles;
     private java.util.function.Supplier<BodyContent> bodySource;
+    /** Releases the temp files behind {@link #uploadedFiles}; see {@link #releaseUploads()}. */
+    private java.io.Closeable uploadCleanup;
     private final String remoteAddr;
     private final TrustedProxies trustedProxies;
     private Storage storage;
@@ -55,8 +57,20 @@ public class Request {
         this.trustedProxies = trustedProxies;
     }
 
-    /** A resolved request body: the form-encoded text plus any multipart file parts. */
-    record BodyContent(String body, Map<String, List<UploadedFile>> files) {}
+    /**
+     * A resolved request body: the form-encoded text, any multipart file parts, and the handle that
+     * releases whatever backs them.
+     *
+     * <p>{@code cleanup} is Jetty's {@code Parts} for a multipart body, and closing it deletes every
+     * temp file the parser spilled. It must therefore run at the <em>end of the request</em>, not at
+     * the end of parsing — the uploads are handed to the handler and are only valid until it does.
+     * {@link BraceHandler} owns that call; nothing else should close it.
+     */
+    record BodyContent(String body, Map<String, List<UploadedFile>> files, java.io.Closeable cleanup) {
+        BodyContent(String body, Map<String, List<UploadedFile>> files) {
+            this(body, files, null);
+        }
+    }
 
     /**
      * The framework constructor (M2): the body is not read yet. {@code bodySource} is invoked
@@ -94,6 +108,39 @@ public class Request {
         var content = source.get();
         this.body = content.body();
         this.uploadedFiles = content.files();
+        this.uploadCleanup = content.cleanup();
+    }
+
+    /**
+     * Releases whatever backs this request's uploads — the temp files Jetty spilled large parts to.
+     *
+     * <p>Called by {@link BraceHandler} in a finally that covers every exit from the request,
+     * including the ones that never reached a handler (413, CSRF 403, thrown 404/500). Idempotent,
+     * and never throws: a failure to delete a temp file is a leak to be logged, not a reason to
+     * fail a response that has already been written. Parts moved out by
+     * {@link UploadedFile#saveTo(Path)} are already detached and are left alone.
+     */
+    void releaseUploads() {
+        var cleanup = takeUploadCleanup();
+        if (cleanup == null) return;
+        try {
+            cleanup.close();
+        } catch (Throwable t) {
+            Log.warn("failed to release upload temp files: " + t);
+        }
+    }
+
+    /**
+     * Transfers ownership of the upload cleanup to the caller, which becomes responsible for
+     * closing it. Used by the streaming-response path: the response is still being written when
+     * {@code handle()} returns, so the end-of-request release would delete the temp files out from
+     * under a response that is streaming one of them back. After this call
+     * {@link #releaseUploads()} is a no-op.
+     */
+    java.io.Closeable takeUploadCleanup() {
+        var cleanup = this.uploadCleanup;
+        this.uploadCleanup = null;
+        return cleanup;
     }
 
     public String method() { return method; }

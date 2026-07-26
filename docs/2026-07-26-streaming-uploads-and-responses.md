@@ -330,23 +330,44 @@ S3's `Content-Range` forwarded back.
 
 ---
 
-## Phase 0: Verify the Jetty API surface first
+## Phase 0: Verify the Jetty API surface first — DONE (Jetty 12.0.33)
 
-This plan was written without a resolvable Maven repository in the working container, so the
-following were reasoned from the Jetty 12 API rather than read from the jar. Confirm each before
-implementing — the design does not change if a name differs, but the code does:
+Everything the plan assumed is present and behaves as assumed:
 
-- `MultiPartFormData.Parser.setMaxMemoryFileSize(long)` semantics (that `-1` means "unlimited in
-  memory" and a positive value spills), plus `setFilesDirectory(Path)` and whether `Parts.close()`
-  is what deletes spilled files.
-- `MultiPart.Part.getContentSource()` returning a re-readable source, and whether `Part.writeTo(Path)`
-  exists and can move rather than copy.
-- `Content.Source.from(Path)` / `from(ByteBufferPool, Path, long offset, long length)` for
-  Range-limited file sources.
-- `Content.copy(Content.Source, Content.Sink, Callback)` and `Content.Sink.asOutputStream(Sink)`.
+- `Parser.setMaxMemoryFileSize(long)` — `-1` is documented as "unlimited memory file size"
+  (`MultiPartFormData.java:640`); a value `>= 0` spills above the threshold. Plus
+  `setFilesDirectory(Path)`, `setMaxFileSize(long)`, `setMaxParts(long)`,
+  `setUseFilesForPartsWithoutFileName(boolean)`.
+- `MultiPart.Part.newContentSource()` returns a **fresh, re-readable** source each call (both
+  `ChunksPart` and `PathPart`) — which is what makes Phase 2's hash-then-send two-pass upload
+  possible without spooling.
+- `Part.writeTo(Path)` is exactly the primitive `saveTo` wants: `Files.move` when the part is
+  file-backed, a streaming copy when it is memory-backed, and it sets `temporary = false` so the
+  subsequent `close()` does not delete the file it just moved (`MultiPart.java:326-348`).
+- `Content.Source.from(Path)` and `from(Path, long offset, long length)` — the Range-limited file
+  source. Also `from(InputStream)`.
+- `Content.copy(Source, Sink, Callback)` and `Content.Sink.asOutputStream(Sink)`.
 
-`Content.Source.asInputStream` is already used at `BraceHandler.java:900`, so that family is
-confirmed present.
+Two findings that **change the design**:
+
+1. **Non-file parts fail rather than spill.** For a part with no filename — an ordinary form field —
+   `MultiPartFormData.java:765-775` treats `maxMemoryFileSize` as a hard limit and fails the request
+   with "max memory file size exceeded" instead of spilling. So setting a 1 MB threshold naively
+   would break any app posting a form field larger than 1 MB (a long markdown body, a base64 blob).
+   The fix is to pair the threshold with `setUseFilesForPartsWithoutFileName(true)`, so large form
+   fields spill like file parts do; Brace still classifies file-vs-field by `getFileName() != null`,
+   so nothing downstream changes.
+2. **Jetty's own `Parts.close()` is the deleter** — it closes each part, and `Part.close()` runs
+   `Files.deleteIfExists` on the backing file (`MultiPart.java:380-387`). This confirms the hazard
+   the plan predicted: the existing `finally { parts.close(); }` at `BraceHandler.java:1013-1015`
+   would delete every spilled file before the handler ever runs. The `Parts` handle is also the
+   natural per-request cleanup token — one `Closeable` covering all parts, rather than tracking
+   files individually.
+
+Jetty creates spilled files with `Files.createTempFile(dir, "MultiPart", "")`
+(`MultiPartFormData.java:1000`), which is owner-only on POSIX. It calls plain
+`Files.createDirectories(dir)` for the directory, though, so **Brace must pre-create the temp
+directory with 700** rather than letting Jetty create it under the ambient umask.
 
 ## Tests
 
