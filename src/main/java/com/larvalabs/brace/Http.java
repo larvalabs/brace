@@ -15,6 +15,10 @@ import java.util.Map;
 
 public class Http {
 
+    /**
+     * Shared client. {@code followRedirects} is deliberately left at the JDK default
+     * ({@code NEVER}) — see {@link #fetch()} (L7).
+     */
     private static final HttpClient CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
         .build();
@@ -100,6 +104,21 @@ public class Http {
         return builder.build();
     }
 
+    /**
+     * Send the request and return the response, <strong>whatever its status</strong>. A 4xx or 5xx
+     * is a {@link Response} with that {@link Response#status()}, not an exception — check
+     * {@link Response#ok()} yourself. Only a transport failure (connect refused, timeout, DNS)
+     * throws.
+     *
+     * <p>Redirects are <strong>not</strong> followed: a 301/302 comes back as itself, so read
+     * {@code header("Location")} and re-issue if you want to follow it. This is the JDK's default
+     * and is kept because silently following a redirect can replay a request body or leak an
+     * {@code Authorization} header to another host.
+     *
+     * <p>{@link #fetchBytes()} is the exception to the first rule: it throws on a non-2xx, because
+     * a caller asking for bytes has nowhere to put an error body. (L7 — the asymmetry is
+     * deliberate but was previously undocumented.)
+     */
     public Response fetch() {
         try {
             var httpResponse = CLIENT.send(buildRequest(), HttpResponse.BodyHandlers.ofString());
@@ -112,15 +131,27 @@ public class Http {
         }
     }
 
+    /**
+     * Send the request and parse the body as JSON, <strong>whatever the status</strong>. On a 500
+     * returning an HTML error page this fails with a parse error, not an HTTP error — the
+     * exception message carries the status and body so the cause is visible. Call {@link #fetch()}
+     * and check {@link Response#ok()} first if you need to distinguish the two. (L7)
+     */
     public <T> T fetchJson(Class<T> type) {
         var response = fetch();
         return response.as(type);
     }
 
+    /** Send the request and return the body as a String, whatever the status. See {@link #fetch()}. */
     public String fetchString() {
         return fetch().body();
     }
 
+    /**
+     * Send the request and return the raw body bytes, <strong>throwing on a non-2xx status</strong>
+     * — unlike {@link #fetch()} and friends, which hand the status back. A caller asking for bytes
+     * has nowhere to put an error body, so failing loudly is the useful behavior. (L7)
+     */
     public byte[] fetchBytes() {
         try {
             var httpResponse = CLIENT.send(buildRequest(), HttpResponse.BodyHandlers.ofByteArray());
@@ -164,9 +195,29 @@ public class Http {
         public Multipart bearer(String token) { http.bearer(token); return this; }
         public Multipart timeout(Duration timeout) { http.timeout(timeout); return this; }
 
-        public Response fetch() { finalizeBody(); return http.fetch(); }
+        /**
+     * Send the request and return the response, <strong>whatever its status</strong>. A 4xx or 5xx
+     * is a {@link Response} with that {@link Response#status()}, not an exception — check
+     * {@link Response#ok()} yourself. Only a transport failure (connect refused, timeout, DNS)
+     * throws.
+     *
+     * <p>Redirects are <strong>not</strong> followed: a 301/302 comes back as itself, so read
+     * {@code header("Location")} and re-issue if you want to follow it. This is the JDK's default
+     * and is kept because silently following a redirect can replay a request body or leak an
+     * {@code Authorization} header to another host.
+     *
+     * <p>{@link #fetchBytes()} is the exception to the first rule: it throws on a non-2xx, because
+     * a caller asking for bytes has nowhere to put an error body. (L7 — the asymmetry is
+     * deliberate but was previously undocumented.)
+     */
+    public Response fetch() { finalizeBody(); return http.fetch(); }
         public String fetchString() { finalizeBody(); return http.fetchString(); }
-        public byte[] fetchBytes() { finalizeBody(); return http.fetchBytes(); }
+        /**
+     * Send the request and return the raw body bytes, <strong>throwing on a non-2xx status</strong>
+     * — unlike {@link #fetch()} and friends, which hand the status back. A caller asking for bytes
+     * has nowhere to put an error body, so failing loudly is the useful behavior. (L7)
+     */
+    public byte[] fetchBytes() { finalizeBody(); return http.fetchBytes(); }
         public <T> T fetchJson(Class<T> type) { finalizeBody(); return http.fetchJson(type); }
 
         private void finalizeBody() {
@@ -175,13 +226,13 @@ public class Http {
                 for (var part : parts) {
                     writeAscii(out, "--" + boundary + "\r\n");
                     if (part.filename != null) {
-                        writeAscii(out, "Content-Disposition: form-data; name=\"" + part.name
-                            + "\"; filename=\"" + part.filename + "\"\r\n");
+                        writeAscii(out, "Content-Disposition: form-data; name=\"" + quoted(part.name)
+                            + "\"; filename=\"" + quoted(part.filename) + "\"\r\n");
                         writeAscii(out, "Content-Type: "
                             + (part.contentType != null ? part.contentType : "application/octet-stream")
                             + "\r\n");
                     } else {
-                        writeAscii(out, "Content-Disposition: form-data; name=\"" + part.name + "\"\r\n");
+                        writeAscii(out, "Content-Disposition: form-data; name=\"" + quoted(part.name) + "\"\r\n");
                     }
                     writeAscii(out, "\r\n");
                     out.write(part.bytes);
@@ -193,6 +244,27 @@ public class Http {
             }
             http.bodyPublisher = HttpRequest.BodyPublishers.ofByteArray(out.toByteArray());
             http.headers.put("Content-Type", "multipart/form-data; boundary=" + boundary);
+        }
+
+        /**
+         * Sanitize a value destined for a quoted {@code Content-Disposition} parameter (L6).
+         *
+         * <p>These headers were built by raw concatenation, and a filename usually comes from
+         * {@code UploadedFile.filename()} — i.e. from a remote client. A quote corrupted the body
+         * and a CR/LF injected arbitrary part headers. CR and LF are dropped outright (there is no
+         * correct escaping for them in a header) and a quote or backslash is backslash-escaped, per
+         * RFC 6266's quoted-string rules.
+         */
+        private static String quoted(String value) {
+            if (value == null) return "";
+            var out = new StringBuilder(value.length());
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (c == '\r' || c == '\n') continue;
+                if (c == '"' || c == '\\') out.append('\\');
+                out.append(c);
+            }
+            return out.toString();
         }
 
         private static void writeAscii(ByteArrayOutputStream out, String s) throws IOException {

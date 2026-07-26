@@ -3,7 +3,6 @@ package com.larvalabs.brace;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -320,11 +319,25 @@ public class Storage {
         return "/" + encoded;
     }
 
+    /**
+     * URI-encode an object key for both the request URL and the SigV4 canonical request (L5).
+     *
+     * <p>Not {@link URLEncoder}, which is {@code application/x-www-form-urlencoded} and diverges
+     * from SigV4's required set in both directions: it leaves {@code *} literal where SigV4 wants
+     * {@code %2A}, and encodes {@code ~} as {@code %7E} where SigV4 wants it literal. A key
+     * containing either character produced a canonical request that did not match what S3
+     * recomputed, i.e. {@code SignatureDoesNotMatch}. (The default {@link #safeKey} path — UUID
+     * plus an alphanumeric extension — never hits it, so this only reached callers passing their
+     * own keys.)
+     *
+     * <p>SigV4's unreserved set is exactly RFC 3986's: {@code A-Za-z0-9-._~}. Everything else is
+     * percent-encoded over its UTF-8 bytes, with {@code /} preserved as the separator.
+     */
     static String uriEncodePath(String key) {
         var sb = new StringBuilder();
         for (var segment : key.split("/", -1)) {
             if (!sb.isEmpty()) sb.append("/");
-            sb.append(URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20"));
+            sb.append(Url.encodeSegment(segment));
         }
         return sb.toString();
     }

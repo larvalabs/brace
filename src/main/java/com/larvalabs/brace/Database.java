@@ -483,7 +483,12 @@ public class Database {
             char c = hql.charAt(i);
 
             // ── E-string: E'...' or e'...' — backslash escapes active ──────────────────────
-            if ((c == 'E' || c == 'e') && i + 1 < n && hql.charAt(i + 1) == '\'') {
+            // L11: the E must START a token. Without that check the trailing 'E' of any identifier
+            // or keyword immediately followed by a quote — "... LIKE'%x%'" — opened backslash-escape
+            // mode, where a literal backslash before the closing quote swallows the terminator and
+            // every following '?' is mis-numbered.
+            if ((c == 'E' || c == 'e') && i + 1 < n && hql.charAt(i + 1) == '\''
+                    && !isIdentifierChar(i > 0 ? hql.charAt(i - 1) : ' ')) {
                 sb.append(c);               // emit the E/e prefix
                 i++;
                 sb.append('\'');            // emit the opening quote
@@ -637,6 +642,11 @@ public class Database {
             rows.add(row instanceof Object[] array ? array : new Object[]{row});
         }
         return rows;
+    }
+
+    /** True for a character that can appear inside a SQL identifier or keyword (see L11). */
+    private static boolean isIdentifierChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
     }
 
     private void bindParams(Query<?> query, Object[] params) {

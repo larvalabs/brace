@@ -361,7 +361,12 @@ public class JobScheduler {
             case 's' -> value * 1000;
             case 'm' -> value * 60 * 1000;
             case 'h' -> value * 60 * 60 * 1000;
-            default -> throw new IllegalArgumentException("Unknown time unit: " + unit + " in interval: " + interval);
+            // L8: 'd' accepted so this grammar matches Cache.parseTtl's. every("1d", ...) used to
+            // throw while cache.set(k, v, "1d") worked — two grammars behind identical-looking
+            // duration strings, with no hint which was which.
+            case 'd' -> value * 24 * 60 * 60 * 1000;
+            default -> throw new IllegalArgumentException(
+                "Unknown time unit: " + unit + " in interval: " + interval + " (expected s, m, h, or d)");
         };
     }
 

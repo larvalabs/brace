@@ -119,6 +119,15 @@ public class TrustedProxies {
                 var parts = cidr.split("/");
                 var addr = InetAddress.getByName(parts[0]);
                 var prefix = Integer.parseInt(parts[1]);
+                // L9: bound the prefix. createMask(-1, 4) produced an all-zero mask, which matches
+                // EVERY address — so a typo like "10.0.0.0/-1" silently became "trust every
+                // forwarding header", the exact opposite of what the caller was configuring. An
+                // over-wide prefix was silently clamped instead of reported.
+                int maxPrefix = addr.getAddress().length * 8;
+                if (prefix < 0 || prefix > maxPrefix) {
+                    throw new IllegalArgumentException("Prefix length must be 0.." + maxPrefix
+                        + " for " + addr.getHostAddress() + ", got /" + prefix);
+                }
                 return new CidrRange(addr, prefix);
             } catch (Exception e) {
                 throw new IllegalArgumentException("Invalid CIDR: " + cidr, e);

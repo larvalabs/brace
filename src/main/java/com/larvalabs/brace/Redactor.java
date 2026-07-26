@@ -205,23 +205,36 @@ public class Redactor {
         if (message == null || message.isEmpty()) return message;
         // Check for JWT at the whole-message level first (message may be just a token)
         if (JWT_SHAPE.matcher(message).matches()) return PLACEHOLDER;
-        String[] tokens = MESSAGE_DELIMITERS.split(message, -1);
-        // Fast path: no token is long enough to be a secret
-        boolean anyCandidate = false;
-        for (String t : tokens) {
-            if (t.length() >= MIN_SECRET_LENGTH) { anyCandidate = true; break; }
+        // L12: splice redacted spans into the ORIGINAL string instead of splitting into tokens and
+        // rejoining with single spaces. The old rebuild replaced every delimiter run — commas,
+        // colons, brackets, quotes, newlines — with one space, so a Hibernate message like
+        // `could not execute statement [n/a]; SQL: select ...` lost its punctuation and line
+        // structure even when nothing in it was actually redacted. This text is what
+        // `ops_errors.message` stores and `/ops/errors` shows.
+        var matcher = MESSAGE_DELIMITERS.matcher(message);
+        StringBuilder out = null; // stays null until something is actually redacted
+        int cursor = 0;
+        int tokenStart = 0;
+        while (true) {
+            boolean atEnd = !matcher.find(cursor);
+            int tokenEnd = atEnd ? message.length() : matcher.start();
+            if (tokenEnd > tokenStart) {
+                String token = message.substring(tokenStart, tokenEnd);
+                if (token.length() >= MIN_SECRET_LENGTH && isSecretShaped(token)) {
+                    if (out == null) out = new StringBuilder(message.length()).append(message, 0, tokenStart);
+                    out.append("[redacted]");
+                } else if (out != null) {
+                    out.append(token);
+                }
+            }
+            if (atEnd) break;
+            // Copy the delimiter run through verbatim — that is the structure being preserved.
+            if (out != null) out.append(message, matcher.start(), matcher.end());
+            cursor = matcher.end();
+            tokenStart = cursor;
+            if (cursor >= message.length()) break;
         }
-        if (!anyCandidate) return message;
-        // Replace token by token; rebuild with single spaces as separators so the
-        // message stays readable. Leading/trailing delimiters produce empty strings
-        // at the split edges — these are included as empty strings in the output.
-        var out = new StringBuilder(message.length());
-        for (int i = 0; i < tokens.length; i++) {
-            if (i > 0) out.append(' ');
-            String t = tokens[i];
-            out.append(isSecretShaped(t) ? "[redacted]" : t);
-        }
-        return out.toString();
+        return out == null ? message : out.toString();
     }
 
     /**

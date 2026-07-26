@@ -594,8 +594,18 @@ class DurableJobTest {
     @Test
     void jobLeaseRejectsMalformedIntervals() {
         assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15"));
-        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15d"));
+        // "15y" stands in for what "15d" used to test. Correctness review L8 added 'd' to the
+        // interval grammar so it matches Cache.parseTtl's — this test was pinning the absence of
+        // the unit rather than a deliberate rejection of day-length leases, which are a perfectly
+        // sensible thing to express.
+        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobLease("15y"));
         assertThrows(NumberFormatException.class, () -> Brace.app().jobLease("abcm"));
+    }
+
+    @Test
+    void jobLeaseAcceptsDayIntervals() {
+        assertEquals(Duration.ofDays(15).toMillis(),
+            JobScheduler.parseInterval("15d"));
     }
 
     @Test

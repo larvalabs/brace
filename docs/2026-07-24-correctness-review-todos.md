@@ -447,44 +447,47 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     present, and `clear` checks the map was non-empty. Flash and CSRF paths are unaffected — they
     only ever write real changes.
 
-- [ ] **L5: `Storage.uriEncodePath` uses form encoding, not the SigV4 unreserved set**
+- [x] **L5: `Storage.uriEncodePath` uses form encoding, not the SigV4 unreserved set**
   - Files: `Storage.java:323-330`.
   - `URLEncoder` leaves `*` literal and encodes `~` as `%7E`; SigV4's unreserved set is
     `A-Za-z0-9-._~` — exactly inverted for both characters. Keys containing `*` or `~` risk
     `SignatureDoesNotMatch`. The default `safeKey` path (UUID + alnum extension) is unaffected, so
     this only reaches callers passing their own keys to `put(key, …)`.
 
-- [ ] **L6: `Http.Multipart` doesn't escape quotes or CRLF in part names and filenames**
+- [x] **L6: `Http.Multipart` doesn't escape quotes or CRLF in part names and filenames**
   - Files: `Http.java:172-196`.
   - `Content-Disposition: form-data; name="…"; filename="…"` is built by concatenation. Filenames
     usually come from `UploadedFile.filename()`, i.e. from a remote client, so a quote corrupts the
     body and a CRLF injects part headers. Escape or reject both.
 
-- [ ] **L7: `Http.fetch()`/`fetchJson()` ignore the HTTP status while `fetchBytes()` checks it**
+- [x] **L7: `Http.fetch()`/`fetchJson()` ignore the HTTP status while `fetchBytes()` checks it**
   - Files: `Http.java:103-137`, `:242-249`.
   - `fetchJson` on a 500 tries to parse the error body and surfaces a Jackson failure instead of the
     status. Also the shared `HttpClient` is built with the JDK default `Redirect.NEVER`, so 301/302
     responses come back as the redirect itself. Both are defensible; neither is documented.
 
-- [ ] **L8: `JobScheduler.parseInterval` rejects `d`, but `Cache.parseTtl` accepts it**
+- [x] **L8: `JobScheduler.parseInterval` rejects `d`, but `Cache.parseTtl` accepts it**
   - Files: `JobScheduler.java:293-306`; `Cache.java:293-304`.
   - `every("1d", …)` throws `Unknown time unit: d` while `cache.set(k, v, "1d")` works. Two grammars
     behind identical-looking duration strings. Add `d` to `parseInterval`.
 
-- [ ] **L9: `TrustedProxies` accepts a negative CIDR prefix as trust-everything**
+- [x] **L9: `TrustedProxies` accepts a negative CIDR prefix as trust-everything**
   - Files: `TrustedProxies.java:111-126`, `:141-152`.
   - `createMask(-1, 4)` produces an all-zero mask, so `new TrustedProxies("10.0.0.0/-1")` matches
     every address — silently turning a config typo into "trust all forwarding headers". A prefix
     wider than the address is silently clamped too. Validate `0 <= prefix <= addressLength * 8` and
     throw the same `IllegalArgumentException` the parser already uses.
 
-- [ ] **L10: `Log.error(String, Throwable)` writes the raw exception message**
+- [x] **L10: `Log.error(String, Throwable)` writes the raw exception message**
   - Files: `Log.java:279-288`; contrast `:147-162`.
   - It stores `throwable.getMessage()` under the key `errorMessage`, which `Redactor.isSensitive`
     does not match, while the request-path `Log.error(method, path, Throwable)` runs
     `Redactor.redactMessage`. Same sink (stdout + `/ops/logs`), two redaction levels.
+  - **Resolved as:** the overload now runs `Redactor.redactMessage` too. The name-based pass in
+    `println` could never have caught it — `errorMessage` is not a sensitive-looking *name*, and
+    the risk is in the value.
 
-- [ ] **L11: The E-string branch in `convertPositionalParams` fires on any `e` immediately before a quote**
+- [x] **L11: The E-string branch in `convertPositionalParams` fires on any `e` immediately before a quote**
   - Files: `Database.java:487-508`.
   - The scanner treats every `E'`/`e'` as a backslash-escaping E-string opener, including the `E'` in
     `... LIKE'%x%'`. Inside that state a literal backslash before the closing quote swallows the
@@ -492,7 +495,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     Windows paths or regex literals. Gate on the `E` being a token start (preceding character is not
     an identifier character).
 
-- [ ] **L12: `Redactor.redactMessage` destroys message structure even when it redacts nothing**
+- [x] **L12: `Redactor.redactMessage` destroys message structure even when it redacts nothing**
   - Files: `Redactor.java:204-225`.
   - Once any token reaches 16 characters, the message is split on the delimiter class and rejoined
     with single spaces — so commas, colons, brackets, quotes, and newlines are replaced wholesale in
@@ -500,3 +503,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     (`Could not execute statement [n/a]; SQL: …`) are exactly this shape, and this text is what
     `ops_errors.message` and `/ops/errors` show. Rebuild by splicing redacted spans into the original
     string instead of re-joining tokens.
+  - **Resolved as:** specified — redacted spans are spliced into the original string, and
+    delimiter runs are copied through verbatim. Also allocates nothing at all when no token is
+    actually redacted (the common case), instead of rebuilding every message that merely contained
+    a long word.

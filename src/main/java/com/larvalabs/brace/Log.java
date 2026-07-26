@@ -283,7 +283,11 @@ public class Log {
         entry.put("level", "ERROR");
         entry.put("message", message);
         entry.put("error", throwable.getClass().getSimpleName());
-        entry.put("errorMessage", throwable.getMessage());
+        // L10: value-shaped redaction, matching the request-path error(method, path, Throwable)
+        // above. println's redact() pass is NAME-based, and "errorMessage" is not a sensitive-
+        // looking name, so a raw exception message carrying a bearer token or SQL literal used to
+        // reach stdout and /ops/logs untouched from this overload only.
+        entry.put("errorMessage", Redactor.redactMessage(throwable.getMessage()));
         println(entry);
     }
 
