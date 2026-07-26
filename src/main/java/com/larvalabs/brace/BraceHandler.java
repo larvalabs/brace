@@ -555,7 +555,60 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         }
         attachSessionCookie(result, session, cookieSecure);
         attachSessionCookie(result, csrfOnlySession, cookieSecure);
+        if (req != null && result instanceof StreamResult streamResult) {
+            result = applyRange(req, streamResult);
+            // A streaming response outlives handle(): its bytes are still going out when the
+            // end-of-request finally runs. Take the upload cleanup with it, or a handler streaming
+            // an upload straight back would have the file deleted mid-response.
+            writeResult(result, response, callback, req.takeUploadCleanup());
+            return;
+        }
         writeResult(result, response, callback);
+    }
+
+    /**
+     * Narrows a streaming response to the client's requested byte range, or leaves it whole.
+     *
+     * <p>Only file-backed streams can be ranged — seeking is the whole mechanism, and a one-shot
+     * InputStream or a generated writer cannot be seeked. Those keep serving 200s regardless of
+     * what the client asks for, which is why {@code Accept-Ranges} is only set by
+     * {@link Result#file}.
+     */
+    private Result applyRange(Request req, StreamResult result) {
+        if (result.status() != 200) return result;
+        if (!(result.streamBody() instanceof StreamResult.FileBody file)) return result;
+        String header = req.header("Range");
+        if (header == null) return result;
+        // If-Range: only honour the range when the client's copy still matches, otherwise it would
+        // splice new bytes into a stale download.
+        String ifRange = req.header("If-Range");
+        if (ifRange != null) {
+            String etag = result.header("ETag");
+            if (etag == null || !stripWeakPrefix(ifRange.strip()).equals(stripWeakPrefix(etag))) {
+                return result;
+            }
+        }
+
+        long total = file.length() >= 0 ? file.length() : result.totalLength();
+        ByteRange range = ByteRange.parse(header, total);
+        if (range == ByteRange.UNSUPPORTED) return result;
+        if (range == ByteRange.UNSATISFIABLE) {
+            return Result.error(416, "Range Not Satisfiable")
+                .header("Content-Range", "bytes */" + total)
+                .header("Accept-Ranges", "bytes");
+        }
+
+        var ranged = new StreamResult(206, result.contentType(),
+            new StreamResult.FileBody(file.path(), file.offset() + range.first(), range.length()),
+            range.length());
+        // Carry the original's headers (ETag, Cache-Control, nosniff, ...), minus the full-body
+        // Content-Length, which the constructor has already replaced with the range's length.
+        result.headers().forEach((name, value) -> {
+            if (!name.equalsIgnoreCase("Content-Length")) ranged.header(name, value);
+        });
+        result.setCookies().forEach(cookie -> ranged.header("Set-Cookie", cookie));
+        return ranged.header("Content-Range",
+            "bytes " + range.first() + "-" + range.last() + "/" + total);
     }
 
     /**
@@ -614,6 +667,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     private void writeResult(Result result, Response response, Callback callback) {
+        writeResult(result, response, callback, null);
+    }
+
+    /**
+     * @param onWritten released when the response is done with the request's resources — for a
+     *                  streaming response that is when the last byte is on the wire, not when this
+     *                  method returns. Null when there is nothing to release.
+     */
+    private void writeResult(Result result, Response response, Callback callback,
+                             java.io.Closeable onWritten) {
         response.setStatus(result.status());
         response.getHeaders().put("Content-Type", result.contentType());
         for (var entry : result.headers().entrySet()) {
@@ -623,6 +686,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         for (var setCookie : result.setCookies()) {
             response.getHeaders().add("Set-Cookie", setCookie);
         }
+        if (result instanceof StreamResult streamResult) {
+            writeStream(streamResult, response, callback, onWritten);
+            return;
+        }
         byte[] bytes;
         if (result.rawBytes() != null) {
             bytes = result.rawBytes();
@@ -631,7 +698,87 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         } else {
             bytes = new byte[0];
         }
+        closeQuietly(onWritten);
         response.write(true, ByteBuffer.wrap(bytes), callback);
+    }
+
+    /**
+     * Pumps a {@link StreamResult} to the client with a bounded buffer.
+     *
+     * <p>File and stream bodies go through {@code Content.copy}, which is asynchronous and applies
+     * backpressure — it reads the next chunk only once the previous one has been flushed, so a slow
+     * client throttles the read instead of filling memory. A writer body is generated inline on the
+     * request thread (a virtual thread, where blocking on the socket is the right thing to do).
+     *
+     * <p>Whatever the shape, once the first chunk is written the status line is gone: a failure
+     * after that point can only be signalled by failing the callback, which aborts the connection.
+     * A truncated transfer is a visible error to the client; a short 200 would not be.
+     */
+    private void writeStream(StreamResult result, Response response, Callback callback,
+                             java.io.Closeable onWritten) {
+        Callback wrapped = Callback.from(
+            () -> closeQuietly(onWritten),
+            t -> {
+                closeQuietly(onWritten);
+                Log.event("response.stream.failed", Map.of(
+                    "status", result.status(),
+                    "error", String.valueOf(t)));
+            });
+        // Callback.from(Runnable, Consumer) builds a callback whose completion does NOT propagate,
+        // so chain the real one explicitly: release our resources first, then complete the request.
+        Callback completing = new Callback() {
+            @Override
+            public void succeeded() {
+                wrapped.succeeded();
+                callback.succeeded();
+            }
+
+            @Override
+            public void failed(Throwable t) {
+                wrapped.failed(t);
+                callback.failed(t);
+            }
+        };
+
+        switch (result.streamBody()) {
+            case StreamResult.FileBody file -> {
+                Content.Source source;
+                try {
+                    source = Content.Source.from(file.path(), file.offset(), file.length());
+                } catch (Throwable t) {
+                    completing.failed(t);
+                    return;
+                }
+                Content.copy(source, response, completing);
+            }
+            case StreamResult.StreamBody stream ->
+                Content.copy(Content.Source.from(stream.stream()), response, completing);
+            case StreamResult.WriterBody writer -> {
+                // Deliberately NOT try-with-resources. Closing this stream writes the terminal
+                // chunk, which completes the response *successfully* — so an automatic close on
+                // the exception path would turn a generator that died halfway into a clean 200
+                // carrying a silently truncated body. The close happens only when the writer
+                // returned normally; a failure aborts instead.
+                var out = Content.Sink.asOutputStream(response);
+                try {
+                    writer.writer().accept(out);
+                    out.close();
+                } catch (Throwable t) {
+                    completing.failed(t);
+                    return;
+                }
+                completing.succeeded();
+            }
+        }
+    }
+
+    private static void closeQuietly(java.io.Closeable closeable) {
+        if (closeable == null) return;
+        try {
+            closeable.close();
+        } catch (Throwable t) {
+            Log.warn("failed to release request resources after response: " + t);
+        }
     }
 
     /**
@@ -772,9 +919,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             try {
-                byte[] fileBytes = Files.readAllBytes(realFile);
                 String contentType = contentTypeForPath(filePath.toString());
-                Result result = Result.bytes(fileBytes, contentType)
+                // Streamed, not read whole: this used to be Files.readAllBytes, so serving a large
+                // asset cost its full size in heap for every concurrent request. Range support
+                // rides along with the streaming result, which is what makes seeking in a served
+                // video work rather than re-fetching from byte zero.
+                Result result = Result.file(realFile, contentType)
                     .header("X-Content-Type-Options", "nosniff")
                     .header("ETag", etag)
                     .header("Cache-Control", cacheControl);

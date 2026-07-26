@@ -251,6 +251,34 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+                <configuration>
+                    <!-- *MemoryTest runs in its own small-heap fork below; keep it out of the
+                         default execution, which inherits the ambient (large) heap and would
+                         therefore pass whether or not anything actually streams. -->
+                    <excludes>
+                        <exclude>**/*MemoryTest.java</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <!-- The bounded-memory tier. Every other test passes just as happily against a
+                         fully-buffered implementation; these move a payload several times the heap
+                         and only pass if nothing along the path materializes it. Part of `mvn test`
+                         on purpose: the memory bound is a merge gate, not an optional check. -->
+                    <execution>
+                        <id>memory-tests</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <argLine>-Xmx128m</argLine>
+                            <excludes combine.self="override"/>
+                            <includes>
+                                <include>**/*MemoryTest.java</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <!-- Integration-test tier: runs *IT tests (e.g. the Postgres testcontainer
                  tests) in the integration-test/verify phases. `mvn test` (surefire) stays
