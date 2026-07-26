@@ -53,11 +53,31 @@ public class SessionOptions {
     }
 
     /**
-     * Set SameSite attribute: "Strict", "Lax", or "None".
-     * Note: "None" requires Secure=true.
+     * Set the SameSite attribute: {@code "Strict"}, {@code "Lax"}, or {@code "None"}
+     * (case-insensitive). Any other value is rejected — it would otherwise be written verbatim into
+     * the header, where browsers ignore the whole attribute and silently fall back to their own
+     * default.
+     *
+     * <p>{@code "None"} also sets {@code Secure} (M12). Every current browser rejects
+     * {@code SameSite=None} without {@code Secure} outright, so the combination doesn't weaken the
+     * cookie — it discards it, and the symptom (nobody stays logged in) points nowhere near the
+     * config line. {@link #sameSiteNone()} already did this; the string form silently did not.
      */
     public SessionOptions sameSite(String sameSite) {
-        this.sameSite = sameSite;
+        if (sameSite == null) {
+            throw new IllegalArgumentException("sameSite must be one of: Strict, Lax, None");
+        }
+        var normalized = switch (sameSite.trim().toLowerCase()) {
+            case "strict" -> "Strict";
+            case "lax" -> "Lax";
+            case "none" -> "None";
+            default -> throw new IllegalArgumentException(
+                "Invalid SameSite value: \"" + sameSite + "\". Must be Strict, Lax, or None.");
+        };
+        this.sameSite = normalized;
+        if (normalized.equals("None")) {
+            this.secure = true; // SameSite=None without Secure is rejected by browsers
+        }
         return this;
     }
 
