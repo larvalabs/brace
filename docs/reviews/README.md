@@ -47,7 +47,7 @@ whatever its secondary flavor.
 | 2026-06 | Security | Fable 5 | [2026-06-security-fable-5.md](2026-06-security-fable-5.md) | [security-review-todos](../2026-06-09-security-review-todos.md) |
 | 2026-06 | Token Efficiency | Fable 5 | [2026-06-token-efficiency-fable-5.md](2026-06-token-efficiency-fable-5.md) | [token-efficiency-review-todos](../2026-06-11-token-efficiency-review-todos.md) |
 | 2026-06 | Runtime Performance | Fable 5 | [2026-06-runtime-performance-fable-5.md](2026-06-runtime-performance-fable-5.md) | [runtime-performance-review-todos](../2026-06-11-runtime-performance-review-todos.md) |
-| 2026-07 | Correctness | Opus 5 | _(pending — fix branch in progress)_ | [correctness-review-todos](../2026-07-24-correctness-review-todos.md) |
+| 2026-07 | Correctness | Opus 5 | [2026-07-correctness-opus-5.md](2026-07-correctness-opus-5.md) | [correctness-review-todos](../2026-07-24-correctness-review-todos.md) |
 
 The 2026-06-11 token-efficiency review formalizes and supersedes an informal 2026-06-10
 pass that came out of the ai-benchmark project's review of agent-generated Brace apps
