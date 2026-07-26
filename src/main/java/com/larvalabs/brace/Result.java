@@ -1,6 +1,11 @@
 package com.larvalabs.brace;
 
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.function.Consumer;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,6 +43,111 @@ public class Result {
     public static Result download(byte[] bytes, String contentType, String filename) {
         return new Result(200, contentType, bytes)
             .header("Content-Disposition", contentDisposition(filename));
+    }
+
+    /**
+     * Streams a file from disk, with a {@code Content-Length} and {@code Range} support. The
+     * content type is guessed from the extension.
+     *
+     * <p>Costs a bounded buffer regardless of the file's size — the whole point, versus reading it
+     * into a {@code byte[]} first.
+     */
+    public static Result file(Path path) {
+        return file(path, contentTypeForFile(path));
+    }
+
+    /** Streams a file from disk with an explicit content type. */
+    public static Result file(Path path, String contentType) {
+        long length;
+        try {
+            length = Files.size(path);
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException("Cannot serve " + path, e);
+        }
+        return new StreamResult(200, contentType,
+            new StreamResult.FileBody(path, 0, length), length)
+            .header("Accept-Ranges", "bytes");
+    }
+
+    /**
+     * Streams a file as a download, under {@code filename}. The streaming counterpart of
+     * {@link #download(byte[], String, String)}; the filename is escaped identically.
+     */
+    public static Result download(Path path, String filename) {
+        return file(path, contentTypeForFile(path))
+            .header("Content-Disposition", contentDisposition(filename));
+    }
+
+    /**
+     * Streams an {@link InputStream} of unknown length (chunked transfer encoding). The stream is
+     * closed by the framework when the response completes or fails.
+     */
+    public static Result stream(InputStream in, String contentType) {
+        return new StreamResult(200, contentType, new StreamResult.StreamBody(in, -1), -1);
+    }
+
+    /** Streams an {@link InputStream} whose length is known, so a {@code Content-Length} is set. */
+    public static Result stream(InputStream in, String contentType, long contentLength) {
+        return new StreamResult(200, contentType,
+            new StreamResult.StreamBody(in, contentLength), contentLength);
+    }
+
+    /**
+     * Streams generated content — a CSV export, a ZIP, an NDJSON feed. The writer is handed an
+     * {@link OutputStream} and its output goes to the client as it is produced, chunked.
+     *
+     * <pre>{@code
+     * return Result.stream(out -> {
+     *     var w = new PrintWriter(out);
+     *     w.println("id,name");
+     *     for (var row : rows) w.println(row.id() + "," + row.name());
+     *     w.flush();
+     * }, "text/csv");
+     * }</pre>
+     *
+     * <p>The writer runs <em>after</em> the request transaction has committed and its connection
+     * has been returned to the pool, so it must not touch the request's {@code Database} — see
+     * {@link StreamResult} for what to do instead.
+     */
+    public static Result stream(Consumer<OutputStream> writer, String contentType) {
+        return new StreamResult(200, contentType, new StreamResult.WriterBody(writer), -1);
+    }
+
+    /** Whether this response's body is streamed rather than materialized. */
+    public boolean isStreaming() {
+        return false;
+    }
+
+    /** Extension-based content type for the streaming file helpers. */
+    private static String contentTypeForFile(Path path) {
+        String name = path.getFileName() == null ? "" : path.getFileName().toString().toLowerCase();
+        int dot = name.lastIndexOf('.');
+        String ext = dot < 0 ? "" : name.substring(dot + 1);
+        return switch (ext) {
+            case "html", "htm" -> "text/html; charset=utf-8";
+            case "css" -> "text/css; charset=utf-8";
+            case "js", "mjs" -> "text/javascript; charset=utf-8";
+            case "json" -> "application/json";
+            case "xml" -> "application/xml";
+            case "txt", "md" -> "text/plain; charset=utf-8";
+            case "csv" -> "text/csv; charset=utf-8";
+            case "png" -> "image/png";
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "gif" -> "image/gif";
+            case "webp" -> "image/webp";
+            case "svg" -> "image/svg+xml";
+            case "ico" -> "image/x-icon";
+            case "pdf" -> "application/pdf";
+            case "zip" -> "application/zip";
+            case "gz" -> "application/gzip";
+            case "mp4" -> "video/mp4";
+            case "webm" -> "video/webm";
+            case "mp3" -> "audio/mpeg";
+            case "wav" -> "audio/wav";
+            case "woff" -> "font/woff";
+            case "woff2" -> "font/woff2";
+            default -> "application/octet-stream";
+        };
     }
 
     /**

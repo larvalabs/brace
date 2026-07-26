@@ -181,6 +181,15 @@ public class Cache {
      */
     public record RenderedResponse(int status, String contentType, Map<String, String> headers, byte[] body) {
         static RenderedResponse from(Result result) {
+            if (result.isStreaming()) {
+                // Silently caching it would store an empty body and then serve that empty body to
+                // every subsequent request — a page cache turning a working download into a 0-byte
+                // one, with nothing in the logs. Fail at the point the mistake is made instead.
+                throw new IllegalStateException(
+                    "A streaming response cannot be page cached: its body is never materialized, so "
+                        + "there is nothing to store. Cache the underlying data and build the "
+                        + "response per request, or drop the cache wrapper from this route.");
+            }
             byte[] body;
             if (result.rawBytes() != null) {
                 body = result.rawBytes();
