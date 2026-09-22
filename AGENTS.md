@@ -186,6 +186,9 @@ cd ../ai-benchmark
 
 Also sweep `README.md`'s API tour sections (Controllers through Configuration, roughly lines 193–486) against `BRACE-AGENTS.md` for drift. They duplicate deliberately — the README is the GitHub landing page and the tour has adoption value — but the README copy isn't session-loaded by agents, so it rots independently and only this checklist catches it.
 
+### Commits and pull requests
+Don't add a Claude Code footer ("Generated with Claude Code"), a Claude session link (`Claude-Session:` trailer, `claude.ai/code/session_...` URL), or a `Co-Authored-By: Claude ...` trailer to commit messages, PR titles, or PR descriptions.
+
 ### Adding dynamic page updates with htmx
 1. Include `<script src="/__brace/htmx.min.js"></script>` in your layout
 2. Add `hx-get`, `hx-target`, `hx-select`, `hx-trigger` attributes to HTML elements
