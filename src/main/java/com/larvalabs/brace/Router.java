@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 public class Router {
 
@@ -12,6 +13,9 @@ public class Router {
     private final Map<String, Route> staticRoutes = new HashMap<>();
     // Dynamic routes partitioned by method so a match only scans candidates that could win.
     private final Map<String, List<Route>> dynamicRoutes = new HashMap<>();
+    // Named routes for reverse routing (Url.to(name, ...)). Sorted so error messages and
+    // ops listings are stable.
+    private final Map<String, Route> namedRoutes = new TreeMap<>();
 
     public Route add(String method, String pattern, Handler handler) {
         // L1: build the plain-Handler invoker once at registration — every other handler type
@@ -38,6 +42,45 @@ public class Router {
             dynamicRoutes.computeIfAbsent(route.method(), m -> new ArrayList<>()).add(route);
         }
         return route;
+    }
+
+    /**
+     * Assign a name to a registered route so {@code Url.to(name, params...)} can build its
+     * URL. Names must be non-blank and must not start with {@code /} (that is how
+     * {@code Url.to} tells a name from a literal pattern). Each name maps to exactly one
+     * route, and a route carries at most one name; violating either fails here, at
+     * registration, rather than at first render.
+     */
+    void name(Route route, String name) {
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("Route name must not be blank (route "
+                + route.method() + " " + route.pattern() + ")");
+        }
+        if (name.startsWith("/")) {
+            throw new IllegalArgumentException("Route name \"" + name + "\" must not start with '/' "
+                + "— names are looked up by Url.to(name, ...), which treats a leading '/' as a literal pattern");
+        }
+        if (route.name() != null) {
+            throw new IllegalStateException("Route " + route.method() + " " + route.pattern()
+                + " is already named \"" + route.name() + "\"; cannot also name it \"" + name + "\"");
+        }
+        var existing = namedRoutes.putIfAbsent(name, route);
+        if (existing != null) {
+            throw new IllegalStateException("Duplicate route name \"" + name + "\": already used by "
+                + existing.method() + " " + existing.pattern() + ", cannot reuse for "
+                + route.method() + " " + route.pattern());
+        }
+        route.setName(name);
+    }
+
+    /** The route registered under {@code name}, or {@code null}. */
+    public Route byName(String name) {
+        return namedRoutes.get(name);
+    }
+
+    /** All registered route names, sorted. */
+    public List<String> names() {
+        return List.copyOf(namedRoutes.keySet());
     }
 
     public RouteMatch match(String method, String path) {

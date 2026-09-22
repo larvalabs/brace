@@ -181,11 +181,30 @@ public class App {
      */
     public static void routes(Brace app) {
         var home = new HomeController();
-        app.get("/", home::index);
+        app.get("/", home::index).name(Routes.HOME);
         // DB-backed routes use the typed registration methods, e.g.:
-        //   app.getRead("/posts", posts::index);   // read-only DB handler
-        //   app.postDb("/posts", posts::create);   // transactional DB handler
+        //   app.getRead("/posts", posts::index).name(Routes.POSTS);   // read-only DB handler
+        //   app.postDb("/posts", posts::create);                      // transactional DB handler
     }
+}
+""");
+
+            // Routes.java — route-name constants for reverse routing
+            Files.writeString(root.resolve("src/main/java/app/Routes.java"), """
+package app;
+
+/**
+ * Route names, used at registration ({@code .name(Routes.HOME)}) and everywhere a link
+ * is built ({@code Url.to(Routes.HOME)}, {@code Url.to(Routes.POST, post.id)}). Both sides
+ * share the constant, so a route's path is defined exactly once and links never go stale.
+ * Templates: {@code @import app.Routes} and {@code @import com.larvalabs.brace.Url}.
+ */
+public final class Routes {
+    public static final String HOME = "home";
+    // public static final String POSTS = "posts";        // Url.to(Routes.POSTS)         -> /posts
+    // public static final String POST = "posts.show";    // Url.to(Routes.POST, id)      -> /posts/{id}
+
+    private Routes() {}
 }
 """);
 
@@ -304,11 +323,13 @@ class HomeControllerTest {
 
             // views/home/index.jte
             Files.writeString(root.resolve("views/home/index.jte"), """
+@import app.Routes
+@import com.larvalabs.brace.Url
 @param String title
 
 @template.layout.main(title = title, content = @`
     <h1>${title}</h1>
-    <p>Your Brace app is running.</p>
+    <p>Your Brace app is running. <a href="${Url.to(Routes.HOME)}">Home</a></p>
 `)
 """);
 

@@ -73,6 +73,16 @@ public class Brace {
         return new Brace();
     }
 
+    private Brace() {
+        // Register this app's router as the process default for Url.to(name, ...) so
+        // templates and services can reverse-route without an app reference (same
+        // static-facade shape as Log). Last-constructed app wins; that is the one under
+        // test in a sequential suite.
+        Url.router(router);
+    }
+
+    Router router() { return router; }
+
     public static Cache cache() {
         return new Cache();
     }
@@ -846,6 +856,15 @@ public class Brace {
 
         var staticMappingsCopy = List.copyOf(staticFileMappings);
         Assets.init(staticMappingsCopy);
+        // Adoption aid for named routes: once any route is named, report how many app
+        // routes still aren't (framework /ops/* routes are excluded — apps can't name them).
+        if (!router.names().isEmpty()) {
+            long unnamed = router.routes().stream()
+                .filter(r -> r.name() == null && !r.pattern().startsWith("/ops/")).count();
+            if (unnamed > 0) {
+                Log.debug("routes.unnamed", Map.of("unnamed", unnamed, "named", router.names().size()));
+            }
+        }
         var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
 

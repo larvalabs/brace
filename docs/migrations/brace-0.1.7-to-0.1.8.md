@@ -27,6 +27,10 @@ slow SMTP relay, or want to tune the poll rate:
 
 Everything else is a hardening change with no action required.
 
+One **new optional capability**: named routes (reverse routing). Register with
+`.name(Routes.POST)` and build links with `Url.to(Routes.POST, id)` — also from templates —
+so a path is written exactly once. Purely additive; see "named routes" below.
+
 ## Index
 
 | Change | Type | Action required | Anchor |
@@ -47,6 +51,7 @@ Everything else is a hardening change with no action required.
 | Durable jobs start on enqueue | new default | none; tune `jobPollInterval(...)` if multi-instance | [§](#durable-jobs-start-on-enqueue-not-on-the-next-poll-new-default) |
 | Mailer SMTP timeouts bounded | new default | raise timeouts for a slow relay | [§](#mailer-smtp-timeouts-are-bounded-new-default) |
 | Bundled htmx 2.0.4 → 2.0.10 | dependency bump | none | [§](#bundled-htmx-is-now-2010) |
+| Named routes / reverse routing (`.name(...)`, `Url.to(name, …)`) | new-optional | none — additive | [§](#new-optional-named-routes--reverse-routing) |
 
 ---
 
@@ -650,6 +655,71 @@ and what it would buy — the short version is that `HX-Request` is unchanged in
 implicit attribute inheritance, both of which need an audit of app-side htmx code.
 
 ---
+
+## New (optional): named routes / reverse routing
+
+**Nothing to do** — purely additive. Before 0.1.8 every internal link was a hardcoded
+path (`"/posts/" + id`, or `Url.to("/posts/{id}", id)`, which repeats the pattern), so a
+route change silently broke links. 0.1.8 lets you name a route at registration and build
+its URL by name anywhere — handlers, redirects, JTE templates — so the path is written
+exactly once. See "Routing → Named routes" in `BRACE-AGENTS.md`.
+
+Recommended convention: keep names as `String` constants in one `Routes` class and use
+the constant on both sides. A typo then fails to compile, and the string value never
+matters. `brace new` now scaffolds `src/main/java/app/Routes.java`; existing projects can
+add the class by hand.
+
+**Before (all versions, still works):**
+
+```java
+app.getRead("/posts/{id}", posts::show);
+// ...
+return Result.redirect("/posts/" + post.id);
+```
+
+```html
+<a href="/posts/${post.id}">${post.title}</a>
+```
+
+**After (0.1.8+):**
+
+```java
+// app/Routes.java
+public final class Routes {
+    public static final String POST = "posts.show";
+    private Routes() {}
+}
+
+// registration — on app and group routes; .csrf(false) may follow .name(...)
+app.getRead("/posts/{id}", posts::show).name(Routes.POST);
+
+// handlers
+return Result.redirect(Url.to(Routes.POST, post.id));   // "/posts/42"
+```
+
+```html
+@import app.Routes
+@import com.larvalabs.brace.Url
+<a href="${Url.to(Routes.POST, post.id)}">${post.title}</a>
+```
+
+Details:
+
+- `Url.to(first, params...)` treats `first` as a route name unless it starts with `/`, in
+  which case it is the literal pattern exactly as before. Path params fill in registration
+  order.
+- Group prefixes are included: a route registered inside `app.group("/admin", …)` resolves
+  to its full `/admin/...` path.
+- Names must be unique and must not start with `/`. A duplicate name throws
+  `IllegalStateException` at registration (startup), not at render time. An unknown name
+  throws `IllegalArgumentException` at the first `Url.to` call with the registered names
+  listed.
+- Named lookups resolve against the most recently constructed `Brace` app, so templates
+  and services need no app reference and `Brace.test()` works without extra wiring.
+- `GET /ops/routes` now includes a `name` field for named routes (omitted for unnamed
+  ones). Scripts that parse the listing are unaffected unless they reject unknown keys.
+- When at least one route is named, `start()` logs a debug-level `routes.unnamed` event
+  with the unnamed count, to help find stragglers while adopting the convention.
 
 ## Upgrading
 

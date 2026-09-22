@@ -2,7 +2,7 @@ package com.larvalabs.brace;
 
 /**
  * Fluent configuration for a just-registered route.
- * Allows customizing route behavior like CSRF protection.
+ * Allows naming the route for reverse routing and customizing behavior like CSRF protection.
  */
 public class RouteConfig {
 
@@ -12,6 +12,18 @@ public class RouteConfig {
     RouteConfig(Brace app, Route route) {
         this.app = app;
         this.route = route;
+    }
+
+    /**
+     * Name this route so {@code Url.to(name, params...)} can build its URL without repeating
+     * the pattern. Names must be unique across the app and must not start with {@code /}.
+     * Returns this config so {@code .csrf(false)} can follow.
+     *
+     * @throws IllegalStateException if the name is already used by another route
+     */
+    public RouteConfig name(String name) {
+        app.router().name(route, name);
+        return this;
     }
 
     /**

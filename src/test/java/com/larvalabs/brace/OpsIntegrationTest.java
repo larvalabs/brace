@@ -31,7 +31,7 @@ class OpsIntegrationTest {
 
         app = Brace.app().port(0).ops(keysFilePath);
 
-        app.get("/hello", req -> Result.text("Hello!"));
+        app.get("/hello", req -> Result.text("Hello!")).name("hello");
         app.get("/error", req -> { throw new RuntimeException("test error"); });
 
         app.start();
@@ -129,6 +129,8 @@ class OpsIntegrationTest {
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("/hello"));
         assertTrue(response.body().contains("GET"));
+        assertTrue(response.body().contains("\"name\":\"hello\""), "named routes expose their name: " + response.body());
+        assertFalse(response.body().contains("\"name\":null"), "unnamed routes omit the key: " + response.body());
     }
 
     @Test

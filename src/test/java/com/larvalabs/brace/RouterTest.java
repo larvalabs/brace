@@ -97,4 +97,49 @@ class RouterTest {
         var routes = router.routes();
         assertEquals(3, routes.size());
     }
+
+    // Route naming
+
+    @Test
+    void nameRegistersLookupByName() {
+        var route = router.add("GET", "/posts/{id}", this::dummyHandler);
+        router.name(route, "posts.show");
+        assertSame(route, router.byName("posts.show"));
+        assertEquals("posts.show", route.name());
+        assertEquals(java.util.List.of("posts.show"), router.names());
+    }
+
+    @Test
+    void duplicateNameThrowsAtRegistration() {
+        router.name(router.add("GET", "/posts/{id}", this::dummyHandler), "posts.show");
+        var other = router.add("GET", "/articles/{id}", this::dummyHandler);
+        var ex = assertThrows(IllegalStateException.class, () -> router.name(other, "posts.show"));
+        assertTrue(ex.getMessage().contains("/posts/{id}"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("/articles/{id}"), ex.getMessage());
+        assertNull(other.name(), "failed naming must not leave a partial name on the route");
+    }
+
+    @Test
+    void routeCannotHaveTwoNames() {
+        var route = router.add("GET", "/posts/{id}", this::dummyHandler);
+        router.name(route, "posts.show");
+        assertThrows(IllegalStateException.class, () -> router.name(route, "posts.view"));
+        assertNull(router.byName("posts.view"));
+    }
+
+    @Test
+    void nameMustNotStartWithSlashOrBeBlank() {
+        var route = router.add("GET", "/posts", this::dummyHandler);
+        assertThrows(IllegalArgumentException.class, () -> router.name(route, "/posts"));
+        assertThrows(IllegalArgumentException.class, () -> router.name(route, " "));
+        assertThrows(IllegalArgumentException.class, () -> router.name(route, null));
+        assertNull(route.name());
+    }
+
+    @Test
+    void unnamedRoutesAreNotListed() {
+        router.add("GET", "/posts", this::dummyHandler);
+        assertTrue(router.names().isEmpty());
+        assertNull(router.byName("posts"));
+    }
 }

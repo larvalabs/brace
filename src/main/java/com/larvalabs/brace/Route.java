@@ -16,6 +16,7 @@ public class Route {
     private final List<String> paramNames;
     private final String staticPath;
     private boolean csrfRequired;
+    private String name;
 
     public Route(String method, String pattern, Object handler, Invoker invoker) {
         this(method, pattern, handler, invoker, true);
@@ -62,9 +63,15 @@ public class Route {
     /** Normalized literal path for static routes, {@code null} for parameterized ones. */
     String staticPath() { return staticPath; }
     public boolean csrfRequired() { return csrfRequired; }
+    /** Route name for reverse routing ({@code Url.to(name, ...)}), or {@code null} if unnamed. */
+    public String name() { return name; }
 
     void setCsrfRequired(boolean required) {
         this.csrfRequired = required;
+    }
+
+    void setName(String name) {
+        this.name = name;
     }
 
     public Map<String, String> match(String path) {

@@ -455,6 +455,7 @@ public class OpsHandler {
             var r = new LinkedHashMap<String, Object>();
             r.put("method", route.method());
             r.put("pattern", route.pattern());
+            if (route.name() != null) r.put("name", route.name());
             routeList.add(r);
         }
         return Json.of(routeList);

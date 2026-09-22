@@ -213,6 +213,15 @@ class ProjectGeneratorTest {
         assertTrue(appJava.contains("routes(app);"),
             "main() should call routes(app)");
 
+        assertTrue(appJava.contains(".name(Routes.HOME)"),
+            "scaffold should name its route through the Routes constants");
+        var routesJava = Files.readString(projDir.resolve("src/main/java/app/Routes.java"));
+        assertTrue(routesJava.contains("HOME = \"home\""),
+            "scaffold should ship a Routes class holding route-name constants");
+        var indexJte = Files.readString(projDir.resolve("views/home/index.jte"));
+        assertTrue(indexJte.contains("Url.to(Routes.HOME)"),
+            "scaffold template should demonstrate reverse routing");
+
         var testJava = Files.readString(projDir.resolve("src/test/java/app/HomeControllerTest.java"));
         assertTrue(testJava.contains("App::routes"),
             "generated test should reuse App.routes instead of re-registering routes");

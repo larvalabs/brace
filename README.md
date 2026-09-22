@@ -461,6 +461,36 @@ app.group("/admin", admin -> {
 });
 ```
 
+## Named Routes
+
+Name a route once at registration and build its URL by name everywhere else — handlers,
+redirects, and templates — so changing a path never leaves a stale link behind. Keep the
+names as constants in a `Routes` class and use the constant on both sides; a typo then
+fails to compile.
+
+```java
+public final class Routes {
+    public static final String POSTS = "posts";
+    public static final String POST  = "posts.show";
+}
+
+app.getRead("/posts", posts::index).name(Routes.POSTS);
+app.getRead("/posts/{id}", posts::show).name(Routes.POST);
+
+Url.to(Routes.POST, 42)                // "/posts/42"
+Result.redirect(Url.to(Routes.POSTS))  // "/posts"
+```
+
+```html
+@import app.Routes
+@import com.larvalabs.brace.Url
+<a href="${Url.to(Routes.POST, post.id)}">${post.title}</a>
+```
+
+Group prefixes are included automatically. Duplicate names fail at startup; unknown names
+fail at the first `Url.to` call with the registered names listed. `brace new` scaffolds
+the `Routes` class for you.
+
 ## htmx
 
 Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.10 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.

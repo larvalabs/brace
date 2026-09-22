@@ -12,6 +12,8 @@ public class RouteGroup {
         this.router = router;
     }
 
+    Router router() { return router; }
+
     private String path(String pattern) {
         return prefix + pattern;
     }

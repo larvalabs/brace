@@ -117,6 +117,43 @@ app.group("/admin", g -> {
 });
 ```
 
+Named routes (reverse routing) — name a route at registration, then build its URL by name
+anywhere (handlers, redirects, JTE templates) with `Url.to(name, params...)`. Path params
+fill in registration order. Keep names as `String` constants in one `Routes` class and use
+the constant on *both* sides, so a route's path is written exactly once and a typo fails to
+compile:
+
+```java
+// app/Routes.java
+public final class Routes {
+    public static final String POSTS = "posts";
+    public static final String POST  = "posts.show";
+    public static final String ADMIN_USERS = "admin.users";
+}
+
+// registration — .name(...) is available on app and group routes; .csrf(false) can follow it
+app.getRead("/posts", posts::index).name(Routes.POSTS);
+app.getRead("/posts/{id}", posts::show).name(Routes.POST);
+app.group("/admin", g -> g.getRead("/users", admin::list).name(Routes.ADMIN_USERS));
+
+// anywhere else
+Url.to(Routes.POST, post.id)          // "/posts/42"
+Url.to(Routes.ADMIN_USERS)            // "/admin/users" (group prefix included)
+Result.redirect(Url.to(Routes.POSTS))
+```
+
+```html
+@import app.Routes
+@import com.larvalabs.brace.Url
+<a href="${Url.to(Routes.POST, post.id)}">${post.title}</a>
+```
+
+Names must be unique and must not start with `/` (a leading `/` means a literal pattern).
+A duplicate name throws at registration; an unknown name throws at the first `Url.to` with
+the registered names listed. `Url.to` resolves against the most recently constructed app,
+so it works in tests via `Brace.test()` without extra wiring. `/ops/routes` shows each
+route's name.
+
 ## Middleware
 
 Before middleware runs before the handler. Return `null` to continue, or a `Result` to short-circuit:
@@ -263,8 +300,9 @@ Redirect.toLocal(req.queryParam("next"))    // 302, local paths only — use for
                                             // paths: rejects absolute and protocol-relative
                                             // URLs (open redirect). 301: Redirect.permanentLocal
 
-// URL generation from route patterns
+// URL generation from route patterns or route names (see Routing → Named routes)
 Url.to("/users/{id}", 42)                   // "/users/42"
+Url.to(Routes.USER, 42)                     // same, from app.get("/users/{id}", ...).name(Routes.USER)
 
 // Headers and cookies
 result.header("X-Custom", "value")          // set a response header (single-value)
