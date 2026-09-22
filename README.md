@@ -1,47 +1,42 @@
 # Brace
 
-A full-stack Java web framework built for AI agents. Designed for token-efficient development, full production observability for autonomous agents (and humans), and first class runtime performance and scalability.
+A full-stack Java web framework designed for development by AI coding agents. APIs are explicit and checked by the compiler, per-request overhead is low, and the framework includes most of the components a production website needs.
 
 ![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
 
 ## Why Brace Exists
 
-Current web frameworks were designed for human developers. They avoid boilerplate through magic: auto-configuration, bean scoping, proxy chains, conditional loading. AI coding agents write better code when frameworks are explicit and predictable, and they work best when guided by strict compile-time checking and unit tests.
+Most web frameworks are designed around human developers and reduce boilerplate with implicit behavior: auto-configuration, bean scoping, proxy chains, conditional loading. Coding agents work more reliably with explicit, predictable code, and with fast feedback from the compiler and unit tests.
 
-Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
+Microframeworks avoid the implicit behavior but leave each project to assemble its own set of packages, each with its own conventions, configuration, and error handling. An agent has to keep all of those in context.
 
-Brace is both simple and complete. A compact set of core types, ~18k lines of framework code (CLI included), 1,000+ tests, and everything you need to build and operate a production application — HTTP, database, templates, sessions, forms, cache, jobs, mailer, storage, WebSocket, and an ops dashboard — all with consistent conventions. One dependency to learn, not ten.
+Brace provides a small set of core types and a full set of components that share one set of conventions, in a single dependency.
 
-### AI Token Efficiency
+### Explicit, Compiler-Checked APIs
 
-Everything flows through parameters. A controller method's signature tells you exactly what it has access to — no guessing about what's injected, what's ThreadLocal, what's magic. Templates fail the build if parameters are wrong. Wrong types are caught at compile time, not when a user hits the page.
+Request-scoped dependencies are passed as parameters, so a controller method's signature lists everything it can access. There is no DI container, no classpath scanning, and no bytecode enhancement. Routes, middleware, entities, and jobs are all registered in `main()`.
 
-In benchmarks measuring AI token cost to build and extend a Conference Manager API (10 entities, 117 tests), Brace costs 31% less than Spring Boot on feature additions ($5.62 vs $8.16) — and the saving holds fairly steady at about a third per feature round:
+Handler types are functional interfaces, forms bind to Java records, and JTE templates declare typed parameters, so a wrong parameter or type is a compile error. Mistakes show up as a compile error or a failing test with a specific message rather than at runtime. For a coding agent, this means less code to read before making a change and a short, precise signal when a change is wrong.
 
-| Phase | Brace | Spring | Saving |
-|---|---|---|---|
-| Greenfield build (6 entities, 35 tests) | $2.24 | $2.38 | 6% |
-| + Speaker Availability | $1.01 | $1.59 | 36% |
-| + Waitlist with Auto-Promotion | $1.02 | $1.14 | 11% |
-| + Ratings & Speaker Stats | $0.75 | $1.18 | 36% |
-| + Multi-Day Events & Tracks | $1.29 | $1.96 | 34% |
-| + Notifications & Activity Feed | $1.54 | $2.29 | 33% |
-
-The greenfield build is roughly tied — both frameworks are cheap when the codebase is empty. The advantage emerges as features accumulate and the AI has to read and modify existing code. Brace's context scales linearly (read the controller and its dependencies) while Spring's scales super-linearly (trace the DI graph, understand conditional beans, check profiles). Hono (TypeScript) performed comparably to Brace on token cost ($5.79 for feature additions) but trades runtime performance for simplicity. Full benchmark data and methodology: [ai-benchmark](https://github.com/larvalabs/ai-benchmark).
-
-### Agent Observability
-
-No existing framework exposes a structured diagnostics API designed for AI agents. Brace does.
-
-`GET /ops/status` returns everything an agent needs to triage any problem in one compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. Drill-downs stay one call away — `GET /ops/errors/{id}` for a full error (stack trace, request details, queries that ran before the error), `?include=timeseries,profiling` for per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data visually.
-
-Ops endpoints use Ed25519 keypair authentication with short-lived tokens — agents authenticate securely without shared secrets. An AI agent can deploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
+[BRACE-AGENTS.md](BRACE-AGENTS.md) is a single framework reference matched to the framework version (`brace agents-md` regenerates it from the jar). `brace test` and `brace compile` print condensed summaries sized for an agent's context window.
 
 ### Runtime Performance
 
-The same design choices that help AI also eliminate runtime overhead. No DI container means no proxy indirection. Hibernate's StatelessSession skips dirty checking and persistence context management. JTE templates compile to Java classes. Jetty 12 runs on virtual threads.
+With no DI container there is no proxy indirection. Hibernate's StatelessSession skips dirty checking and persistence-context management. JTE templates compile to Java classes. Jetty 12 runs each request on a virtual thread. Read-only handlers run without an explicit transaction, views render after the database connection is returned to the pool, and request stats are lock-free.
 
-For a full-stack page render (5 DB queries + template), Brace with PostgreSQL is roughly 2x faster than the equivalent Spring Boot stack. Not because of any single optimization, but because every layer has less overhead: framework dispatch (~33μs vs ~125μs), no ORM lifecycle tax, compiled templates (~180μs vs ~480μs for Thymeleaf).
+The repo includes a TechEmpower-style [benchmark suite](benchmark/) and JMH micro-benchmarks. Each [runtime performance review](docs/reviews/README.md) records before/after throughput and tail latency for its fixes.
+
+### Included Components
+
+Brace covers HTTP and routing, database and migrations, typed templates, encrypted sessions, forms and validation, CSRF, caching, recurring and durable jobs, email, object storage, an outbound HTTP client, WebSocket, rate limiting, htmx, custom metrics, and ops tooling. The components share configuration, error handling, and the test harness, and the set is expanding with each release. See [What's Included](#whats-included) for details.
+
+### Agent Observability
+
+Brace exposes a structured diagnostics API designed so agents can detect, diagnose and fix problems themselves.
+
+`GET /ops/status` returns a compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
+
+Ops endpoints use Ed25519 keypair authentication with short-lived tokens, so agents authenticate without a shared secret.
 
 AI agents: read [BRACE-AGENTS.md](BRACE-AGENTS.md) for the complete framework reference, and [docs/agent-ops-guide.md](docs/agent-ops-guide.md) (written into projects as `BRACE-OPS.md`) for operating a running app.
 
@@ -122,7 +117,7 @@ Replace `v0.1.7` with the [latest release tag](https://github.com/larvalabs/brac
 
 ## Quick Start
 
-Brace wires everything explicitly in `main()`, making the app self-documenting. An agent can read one file and knows every route, middleware, entity, and job. No separate architecture docs to maintain or drift out of sync.
+Every route, middleware, entity, and job is registered in `main()`, so this one file describes the app's structure.
 
 
 ```java
@@ -170,23 +165,26 @@ public class App {
 
 ## What's Included
 
-- **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, static file serving
-- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access. PostgreSQL JDBC driver bundled — no extra dependency to add
+Components included in the framework jar as of this release:
+
+- **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting
+- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs
-- **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware
+- **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware, bcrypt password hashing
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
-- **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry
+- **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
+- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
-- **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, JFR profiling, Ed25519 token auth
+- **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
 - **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding, `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
 - **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
 
@@ -400,7 +398,7 @@ app.post("/upload-manual", req -> {
 
 ## Custom Metrics
 
-Built-in counters, gauges, and timers — no external metrics server needed. Metrics auto-render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
+Counters, gauges, and timers, with no external metrics server. Metrics render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
 
 ```java
 // Counter — tracks rate (events per minute)
@@ -581,11 +579,11 @@ session.secret=change-me
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~18k lines of framework code (CLI included). 1,000+ tests.**
+**~20k lines of framework code (CLI included). 1,000+ tests.**
 
 ## Security
 
-See [docs/SECURITY.md](docs/SECURITY.md) for comprehensive security documentation including:
+See [docs/SECURITY.md](docs/SECURITY.md) for security documentation covering:
 - Encrypted sessions (AES-256-GCM)
 - Trusted proxy configuration
 - CSRF protection
@@ -596,4 +594,4 @@ See [docs/SECURITY.md](docs/SECURITY.md) for comprehensive security documentatio
 
 ## Periodic Model Reviews
 
-Brace is re-reviewed end to end whenever a notably more capable AI model becomes available — each new model generation can find real issues the previous one missed, so the review repeats even when the code hasn't changed. Reviews run in three categories: **Security**, **Token Efficiency**, and **Runtime Performance**. Each produces a findings doc, a fix branch with one commit per finding, and a permanent record you can audit — see the [review process and index](docs/reviews/README.md). The first completed review is the [Fable 5 security review](docs/reviews/2026-06-security-fable-5.md) (June 2026): 25 findings, all fixed, each traceable to its commit.
+Brace is reviewed end to end whenever a notably more capable AI model becomes available, since a newer model can find issues an earlier one missed. The review repeats even when the code hasn't changed. Reviews run in three categories: **Security**, **Token Efficiency**, and **Runtime Performance**. Each produces a findings doc and a fix branch with one commit per finding; see the [review process and index](docs/reviews/README.md). The first completed review is the [Fable 5 security review](docs/reviews/2026-06-security-fable-5.md) (June 2026): 25 findings, all fixed, each traceable to its commit.
