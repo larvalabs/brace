@@ -58,9 +58,12 @@ public class Brace {
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
     private int jobRetentionDays = 7;
-    private java.time.Duration jobLease = JobPoller.DEFAULT_LEASE;
+    private java.time.Duration jobTimeout; // null = no per-attempt limit (the default)
+    private java.time.Duration jobShutdownTimeout = JobPoller.DEFAULT_SHUTDOWN_TIMEOUT;
     private java.time.Duration jobPollInterval = JobPoller.DEFAULT_POLL_INTERVAL;
     private Runnable enqueueHook;
+    private volatile Thread shutdownHook;
+    private final java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean();
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -421,76 +424,113 @@ public class Brace {
     }
 
     /**
-     * How long a durable job may hold its claim before the framework assumes the instance running
-     * it died and returns the job to the queue. Default 30 minutes — deliberately generous, so the
-     * lease does not reclaim a job that is merely slow on an app that never tuned it.
+     * Maximum run time for one attempt of a durable job. <strong>Off by default</strong> — a job
+     * may run as long as it needs, and the framework never runs a second copy of a job whose
+     * instance is still alive (see {@link JobPoller} for how dead instances are detected).
      *
-     * <p>Without this, a job whose process is killed mid-run (an ordinary deploy is enough — JVM
-     * exit kills in-flight jobs) leaves a row that no poller will ever claim again and no prune
-     * will ever delete. See {@link JobPoller#reclaimStalledJobs}.
+     * <p>Set it when you want a deliberate ceiling — a job that hangs on a stuck socket should fail
+     * and retry rather than hold its execution slot forever. When an attempt exceeds the timeout,
+     * the instance running it interrupts the job's thread and the attempt fails and retries under
+     * the job's normal backoff (or fails outright if its attempts are spent). Interruption is
+     * cooperative: blocking I/O and {@code sleep} respond to it; a loop that never blocks or checks
+     * {@link Thread#isInterrupted()} does not, and is logged rather than run twice.
      *
-     * <p>Set this above the longest job you expect to run. A lease cannot tell a dead instance
-     * from a slow job, so a job still running when its lease expires gets picked up again
-     * elsewhere — consistent with {@link DurableJob}'s at-least-once contract, but it assumes your
-     * jobs are idempotent. Pass {@code null} or {@link java.time.Duration#ZERO} to disable
-     * recovery and keep the pre-0.1.8 behavior.
+     * <p>Pass {@code null} or {@link java.time.Duration#ZERO} to turn it off.
      */
-    public Brace jobLease(java.time.Duration lease) {
-        this.jobLease = lease;
+    public Brace jobTimeout(java.time.Duration timeout) {
+        this.jobTimeout = timeout == null || timeout.isNegative() || timeout.isZero() ? null : timeout;
         return this;
     }
 
     /**
-     * {@link #jobLease(java.time.Duration)} as an interval string — {@code "30s"}, {@code "15m"},
-     * {@code "2h"} — the same format {@link #every(String, String, Job)} takes. Lets the lease come
-     * straight from config without the caller parsing it:
+     * {@link #jobTimeout(java.time.Duration)} as an interval string — {@code "30s"}, {@code "15m"},
+     * {@code "2h"} — the same format {@link #every(String, String, Job)} takes, so it can come
+     * straight from config:
      *
      * <pre>{@code
-     * app.jobLease(config.get("jobs.lease", "30m"));
+     * app.jobTimeout(config.get("jobs.timeout"));   // unset key: no timeout
      * }</pre>
      *
-     * <p>A {@code null} or blank value <em>keeps the current default</em> rather than disabling
-     * recovery, so a missing config key can't silently strand jobs. To actually disable, pass
-     * {@code "0s"} or {@link #jobLease(java.time.Duration) jobLease((Duration) null)}.
+     * <p>A {@code null} or blank value leaves the current setting unchanged; {@code "0s"} turns the
+     * timeout off.
      */
-    public Brace jobLease(String interval) {
+    public Brace jobTimeout(String interval) {
         if (interval == null || interval.isBlank()) {
             return this;
         }
-        long millis = JobScheduler.parseInterval(interval.trim());
-        this.jobLease = millis > 0 ? java.time.Duration.ofMillis(millis) : null;
+        return jobTimeout(java.time.Duration.ofMillis(JobScheduler.parseInterval(interval.trim())));
+    }
+
+    /** The configured job timeout; {@code null} means none. For tests. */
+    java.time.Duration jobTimeout() {
+        return jobTimeout;
+    }
+
+    /**
+     * How long shutdown waits for running durable jobs before interrupting them. Default 3 seconds.
+     * A job that doesn't finish in time is not lost or penalized: it is returned to the queue with
+     * the attempt refunded, and another instance (or this one, after restart) runs it again.
+     *
+     * <p>Keep it a few seconds under your platform's kill timeout — Docker's default is 10s,
+     * Kubernetes' 30s, Fly.io's 5s. A process killed before it can release its jobs falls back to
+     * heartbeat recovery, which takes about two minutes and spends the attempt. Zero means
+     * "interrupt immediately".
+     */
+    public Brace jobShutdownTimeout(java.time.Duration timeout) {
+        if (timeout == null || timeout.isNegative()) {
+            throw new IllegalArgumentException("Job shutdown timeout must be zero or positive, got: " + timeout);
+        }
+        this.jobShutdownTimeout = timeout;
         return this;
     }
 
-    /** The configured job lease; {@code null} means stalled-job recovery is off. For tests. */
-    java.time.Duration jobLease() {
-        return jobLease;
+    /**
+     * {@link #jobShutdownTimeout(java.time.Duration)} as an interval string ({@code "3s"},
+     * {@code "25s"}). A {@code null} or blank value keeps the current setting.
+     */
+    public Brace jobShutdownTimeout(String interval) {
+        if (interval == null || interval.isBlank()) {
+            return this;
+        }
+        return jobShutdownTimeout(java.time.Duration.ofMillis(JobScheduler.parseInterval(interval.trim())));
+    }
+
+    /** The configured shutdown timeout. For tests. */
+    java.time.Duration jobShutdownTimeout() {
+        return jobShutdownTimeout;
     }
 
     /**
      * How long the durable-job poller waits before re-polling when it did not fill every free
-     * execution slot. Default 1 second — this is the pickup latency for a job enqueued on an
-     * otherwise idle app. A full batch always re-polls immediately, so this does not cap throughput.
+     * execution slot. Default 5 seconds. {@link Jobs#schedule} wakes the poller as soon as a job
+     * that is due now is committed, so this is not the pickup latency for ordinary enqueues — it
+     * bounds how late the poller notices work a wake can't signal: a delayed job whose
+     * {@code run_at} arrives, a retry whose backoff expires, a recovered job, or work enqueued on
+     * a different instance. A full batch always re-polls immediately, so this does not cap
+     * throughput.
      *
-     * <p>Lower it for snappier pickup, raise it to cut background query volume on a fleet that
-     * enqueues rarely. An idle poll costs one index probe and no write (the claim matches no rows,
-     * so the commit needs no fsync), which is why 1s is affordable by default; see
-     * {@link JobPoller#DEFAULT_POLL_INTERVAL} for the two cases where it is not.
+     * <p>Lower it for snappier pickup of those cases, raise it to cut background query volume on a
+     * fleet that enqueues rarely. An idle poll costs one index probe and no write (the claim
+     * matches no rows, so the commit needs no fsync); see {@link JobPoller#DEFAULT_POLL_INTERVAL}
+     * for the two cases where it is not cheap.
      *
      * <p>Must be positive — there is no "disable", since zero would spin against the database.
      */
     public Brace jobPollInterval(java.time.Duration interval) {
+        if (interval == null || interval.isNegative() || interval.isZero()) {
+            throw new IllegalArgumentException("Job poll interval must be positive, got: " + interval);
+        }
         this.jobPollInterval = interval;
         return this;
     }
 
     /**
-     * {@link #jobPollInterval(java.time.Duration)} as an interval string — {@code "500ms"} is not
-     * supported, but {@code "1s"}, {@code "30s"} and {@code "5m"} are — the same format
+     * {@link #jobPollInterval(java.time.Duration)} as an interval string — {@code "1s"},
+     * {@code "30s"}, {@code "5m"} (sub-second values are not supported) — the same format
      * {@link #every(String, String, Job)} takes. Lets the interval come from config:
      *
      * <pre>{@code
-     * app.jobPollInterval(config.get("jobs.poll-interval", "1s"));
+     * app.jobPollInterval(config.get("jobs.poll-interval", "5s"));
      * }</pre>
      *
      * <p>A {@code null} or blank value keeps the current default, so a missing config key can't
@@ -500,8 +540,7 @@ public class Brace {
         if (interval == null || interval.isBlank()) {
             return this;
         }
-        this.jobPollInterval = java.time.Duration.ofMillis(JobScheduler.parseInterval(interval.trim()));
-        return this;
+        return jobPollInterval(java.time.Duration.ofMillis(JobScheduler.parseInterval(interval.trim())));
     }
 
     /** The configured job poll interval. For tests. */
@@ -954,14 +993,23 @@ public class Brace {
 
         jobScheduler.start(databaseFactory);
         if (databaseFactory != null) {
-            jobPoller.lease(jobLease);
+            jobPoller.timeout(jobTimeout);
+            jobPoller.shutdownTimeout(jobShutdownTimeout);
             jobPoller.pollInterval(jobPollInterval);
+            jobPoller.instanceLabel(instanceId);
             jobPoller.start(databaseFactory);
             // Let Jobs.schedule nudge the poller after the enqueuing transaction commits, so a
             // job with no delay starts without waiting out the poll interval.
             enqueueHook = jobPoller::wake;
             Jobs.onEnqueue(enqueueHook);
         }
+
+        // Stop gracefully on SIGTERM — which is how every orchestrator ends a deploy. Without this,
+        // JVM exit kills in-flight durable jobs mid-run (virtual threads are daemon) and leaves
+        // their rows for heartbeat recovery; with it, stop() lets them finish or releases them
+        // with the attempt refunded. Removed again by an explicit stop().
+        shutdownHook = new Thread(this::stopFromShutdownHook, "brace-shutdown");
+        Runtime.getRuntime().addShutdownHook(shutdownHook);
 
         // On Postgres, rate limiters count cluster-wide via a shared DB counter (B4) so a limit is
         // enforced across the fleet, not N times too loosely. Off Postgres they stay per-process.
@@ -1151,6 +1199,19 @@ public class Brace {
     }
 
     public void stop() throws Exception {
+        // Idempotent: the shutdown hook and an explicit stop() (or an app's own hook) may both call it.
+        if (!stopped.compareAndSet(false, true)) {
+            return;
+        }
+        var hook = shutdownHook;
+        shutdownHook = null;
+        if (hook != null && Thread.currentThread() != hook) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(hook);
+            } catch (IllegalStateException alreadyShuttingDown) {
+                // The JVM is exiting and our hook is queued to run; it will find stopped == true.
+            }
+        }
         if (enqueueHook != null) {
             // Identity-checked, so stopping this app doesn't unhook a different one that started
             // after it (several apps in one JVM — tests).
@@ -1179,6 +1240,19 @@ public class Brace {
         // Drain any structured log lines still queued in the async writer (H1) so a stop()
         // immediately followed by assertions (tests) or process exit loses nothing.
         Log.flush();
+    }
+
+    /** The registered JVM shutdown hook, or {@code null} before start / after stop. For tests. */
+    Thread shutdownHook() {
+        return shutdownHook;
+    }
+
+    private void stopFromShutdownHook() {
+        try {
+            stop();
+        } catch (Exception e) {
+            System.err.println("Brace shutdown error: " + e);
+        }
     }
 
     /** The error store, for tests that need to flush the H9 buffer deterministically. */

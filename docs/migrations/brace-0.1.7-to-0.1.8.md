@@ -15,11 +15,12 @@ Two cases **are breaking** and need action:
   authenticate against a 0.1.8 server — see "ops auth v1 removed" below.
 
 The job and mailer changes ship as new **defaults** and need no code change. The only reason
-to touch your code for those is if you run jobs longer than 30 minutes, talk to an unusually
-slow SMTP relay, or want to tune the poll rate:
+to touch your code for those is if you want a per-job timeout, run on a platform with a very
+short kill timeout, talk to an unusually slow SMTP relay, or want to tune the poll rate:
 
-- **Durable jobs claimed by an instance that dies are now recovered** instead of being
-  stranded permanently.
+- **Durable jobs survive deploys and crashes.** SIGTERM now shuts down gracefully and returns
+  unfinished jobs to the queue; a job whose instance dies outright is recovered once the
+  instance stops heartbeating. Nothing is stranded, and a slow job is never run twice.
 - **`Mailer` now bounds its SMTP timeouts**, so a wedged relay fails the send instead of
   hanging the calling thread forever.
 - **Durable jobs now start as soon as the enqueuing transaction commits**, instead of
@@ -47,7 +48,7 @@ so a path is written exactly once. Purely additive; see "named routes" below.
 | `Result.cookie` rejects invalid names/values | behavior change | none unless setting cookies from raw user input | [§](#security-fix-resultcookie-validates-names-and-values) |
 | Ops session cookie scoped to `/ops` | behavior change | none | [§](#security-fix-ops-session-cookie-is-scoped-to-ops) |
 | `Storage` rejects traversal in keys | behavior change | none unless building keys from user input | [§](#security-fix-storage-rejects-traversal-segments-in-object-keys) |
-| Stalled durable jobs are recovered | new default | raise `jobLease(...)` if jobs run >30 min | [§](#stalled-durable-jobs-are-recovered-new-default) |
+| Durable jobs survive deploys and crashes | new default | none; optional `jobTimeout(...)`, `jobShutdownTimeout(...)` | [§](#durable-jobs-survive-deploys-and-crashes-new-default) |
 | Durable jobs start on enqueue | new default | none; tune `jobPollInterval(...)` if multi-instance | [§](#durable-jobs-start-on-enqueue-not-on-the-next-poll-new-default) |
 | Mailer SMTP timeouts bounded | new default | raise timeouts for a slow relay | [§](#mailer-smtp-timeouts-are-bounded-new-default) |
 | Bundled htmx 2.0.4 → 2.0.10 | dependency bump | none | [§](#bundled-htmx-is-now-2010) |
@@ -388,7 +389,7 @@ var stored = storage.putGenerated("avatars", upload);
 
 ---
 
-## Stalled durable jobs are recovered (new default)
+## Durable jobs survive deploys and crashes (new default)
 
 ### What was wrong
 
@@ -399,113 +400,124 @@ timestamps NULL. No claim predicate matched it (all of them require `started_at 
 `purgeFinishedJobs` never deleted it (it filters on the terminal timestamps). The job was
 permanently invisible and permanently undeletable.
 
-This was not limited to crashes. `Brace.stop()` halts the poll loop but never joins the per-job
-virtual threads, and virtual threads are always daemon — so **JVM exit kills in-flight jobs
-mid-run, and every ordinary deploy could strand up to `poolSize / 2` jobs per instance.**
-
-The knock-on effects compounded: a stranded parent blocked its entire `depends_on_id` subtree
-forever, and those permanently-blocked children sat at the head of the claim query's `run_at`
-ordering, taxing every subsequent poll on every instance.
+This was not limited to crashes. A production app registered no shutdown hook, `Brace.stop()`
+never waited for running jobs, and virtual threads are always daemon — so **JVM exit killed
+in-flight jobs mid-run, and every ordinary deploy could strand up to `poolSize / 2` jobs per
+instance.** A stranded parent also blocked its entire `depends_on_id` subtree forever.
 
 ### What changed
 
-Jobs now hold their claim under a **lease**, default **30 minutes**. A background sweeper returns
-expired claims to the queue:
+Three mechanisms, each covering what the one before cannot. None needs configuration.
 
-- **Attempts remain** → `started_at` is cleared and the job is claimable again. The attempt the
-  original claim spent is *not* refunded, so a job that strands repeatedly exhausts its budget
-  rather than looping forever.
-- **Attempts exhausted** → `failed_at` is set, matching what a live job writes when it runs out of
-  retries. The row becomes terminal and prunable.
+**1. Graceful shutdown.** `Brace.start()` now registers a JVM shutdown hook that calls
+`stop()`, so SIGTERM — how Docker, Kubernetes, Fly, Render and systemd end a process — shuts the
+app down cleanly. The job poller stops claiming, gives running jobs up to
+`jobShutdownTimeout` (default **3 seconds**) to finish, interrupts the rest, and returns them to
+the queue **with the attempt refunded**: an interrupted job did not fail. A deploy no longer
+strands anything, and a job that finished during the grace period is not re-run. (On an H2
+*file* database, H2's own shutdown hook closes the database concurrently, so the release falls
+back to heartbeat recovery. Postgres is unaffected.)
 
-Nothing in the claim path changed — recovered rows re-enter through the ordinary query and index.
+**2. Worker heartbeat.** Each instance's poller registers a row in the new `brace_job_workers`
+table and refreshes it every 15 seconds; every claim records its owner in the new
+`scheduled_jobs.claimed_by` column. Every instance sweeps periodically, and a claimed job is
+returned to the queue **only when its owner has missed heartbeats for 2 minutes**. This covers
+what a shutdown hook can't reach — SIGKILL, an OOM kill, a lost host.
+
+- A job on a live instance is never taken away from it, however long it runs. There is no
+  lease to tune and no "slow job gets run twice" failure mode.
+- The attempt the dead instance's claim spent is **not** refunded — the job may be what killed
+  it, and the attempt budget stops a poison job from taking down instance after instance.
+  Attempts exhausted → the job is marked failed.
+- Every terminal write checks `claimed_by`, so if an instance that was presumed dead (a very
+  long GC pause, a network partition) comes back and finishes the job, it can't overwrite the
+  outcome of the run that replaced it.
+
+**3. Optional per-attempt timeout — off by default.** If you want a ceiling on how long an
+attempt may run, set one deliberately. The instance running the job interrupts it and the
+attempt fails and retries under the job's normal backoff. It is never handed to a second
+instance while the first copy is still running.
 
 ### What you may need to do
 
-**If all your jobs finish well within 30 minutes: nothing.**
+**Nothing, for most apps.** In particular, long-running jobs need no configuration.
 
-A lease cannot distinguish a dead instance from a job that is merely slow, so a job still running
-when its lease expires **will be picked up again elsewhere**. This is consistent with the
-at-least-once contract `DurableJob` already carried, but it makes idempotency matter in a case
-where it previously didn't come up.
-
-If you have long-running jobs, raise the lease above your longest expected runtime. It takes either
-an interval string (`"30s"`, `"15m"`, `"2h"` — the same format `every()` uses) or a `Duration`:
-
-```java
-// Before (0.1.7): no lease existed; a killed job was stranded forever.
-var app = Brace.app()
-    .database(dbFactory);
-
-// After (0.1.8): default is 30 minutes. Raise it if jobs run longer.
-var app = Brace.app()
-    .database(dbFactory)
-    .jobLease("2h");                    // nightly report job takes ~90 min
-```
-
-Because it accepts a string, the lease can be tuned per environment from your existing config
-without a code change — `Config.get` falls back to an environment variable, so this reads
-`jobs.lease` from the conf file or `JOBS_LEASE` from the environment:
+**If your platform's kill timeout is short**, make sure `jobShutdownTimeout` fits inside it with
+room for the rest of shutdown. Docker's default is 10s, Kubernetes' 30s, Fly.io's 5s. If the
+process is SIGKILLed before it releases its jobs, nothing is lost — heartbeat recovery picks them
+up in about two minutes — but the attempt is spent. Raise it if your jobs are usually a few
+seconds from finishing and your platform allows the time:
 
 ```java
 var app = Brace.app()
     .database(dbFactory)
-    .jobLease(config.get("jobs.lease", "30m"));
+    .jobShutdownTimeout("20s");   // Kubernetes gives 30s by default
 ```
 
-```
-# brace.conf — a longer lease in production, where the nightly rollup runs
-jobs.lease=30m
-%prod.jobs.lease=2h
-```
-
-Keep the `"30m"` fallback in the `config.get` call. A null or blank string is treated as "keep the
-default" rather than "disable", specifically so a missing key can't silently turn off recovery —
-but relying on that is less clear than stating the default at the call site.
-
-To keep the 0.1.7 behavior exactly — no recovery, stranded jobs stay stranded:
+**If you want a timeout** (a job that hangs on a stuck socket should fail and retry rather than
+hold its slot forever):
 
 ```java
+// Before (0.1.7): no timeout existed.
+// After (0.1.8): opt in. Off unless you set it.
 var app = Brace.app()
     .database(dbFactory)
-    .jobLease("0s");        // or jobLease((Duration) null)
+    .jobTimeout("2h");                            // literal
+    // .jobTimeout(config.get("jobs.timeout"))   // or from config; an unset key leaves it off
 ```
+
+Interruption is cooperative: blocking I/O, JDBC calls and `sleep` respond to it; a loop that
+never blocks or checks `Thread.currentThread().isInterrupted()` does not, and is logged rather
+than run twice.
+
+**If you already call `app.stop()` from your own shutdown hook**, you can keep it or remove it —
+`stop()` is idempotent, and whichever runs second returns immediately.
+
+**Jobs must still be idempotent.** Delivery is at-least-once, as it always was: a job whose
+instance is SIGKILLed after its side effect but before its completion is recorded will run again.
 
 ### Cleaning up rows stranded before the upgrade
 
-Jobs stranded by earlier deploys are still in `scheduled_jobs`. On startup the sweeper picks them
-up automatically — they are indistinguishable from a fresh stall — so they will be retried (or
-failed, if their attempts were spent) within a sweep interval of the first 0.1.8 boot.
+Rows stranded by earlier deploys have `claimed_by = NULL`, because 0.1.7 didn't record an owner.
+During a rolling upgrade, a 0.1.7 instance may still be running such a job, so the sweep leaves
+unowned claims alone until they are **24 hours** old and then recovers them like any other.
 
-**If you'd rather inspect them first**, before upgrading:
+**If you'd rather deal with them now**, after every instance runs 0.1.8:
 
 ```sql
+-- Inspect
 SELECT id, name, started_at, attempts, max_attempts
 FROM scheduled_jobs
-WHERE started_at IS NOT NULL AND completed_at IS NULL AND failed_at IS NULL
+WHERE started_at IS NOT NULL AND completed_at IS NULL AND failed_at IS NULL AND claimed_by IS NULL
 ORDER BY started_at;
-```
 
-Anything with an old `started_at` is stranded work. If some of it is stale enough that re-running
-would be wrong (an expired promotional email, say), mark those rows failed before upgrading:
+-- Return them to the queue now...
+UPDATE scheduled_jobs SET started_at = NULL
+WHERE started_at IS NOT NULL AND completed_at IS NULL AND failed_at IS NULL AND claimed_by IS NULL;
 
-```sql
+-- ...or, where re-running would be wrong (an expired promotional email), mark them failed
 UPDATE scheduled_jobs SET failed_at = CURRENT_TIMESTAMP, error = 'abandoned before 0.1.8 upgrade'
-WHERE started_at < '2026-01-01' AND completed_at IS NULL AND failed_at IS NULL;
+WHERE started_at < '2026-01-01' AND completed_at IS NULL AND failed_at IS NULL AND claimed_by IS NULL;
 ```
 
-### New framework migration
+### New framework migrations
 
-`V16__brace_scheduled_jobs_stalled_index.sql` (Postgres only) adds a partial index over
-currently-claimed, unfinished rows so the sweep is an index scan rather than a sequential one. It
-applies automatically on startup. In steady state the index holds at most `poolSize / 2` rows per
-instance, so it costs effectively nothing to maintain.
+Both apply automatically on startup:
 
-### Manual sweeps
+- `V16__brace_scheduled_jobs_stalled_index.sql` (Postgres only) — a partial index over
+  currently-claimed, unfinished rows, so the sweep is an index scan. In steady state it holds at
+  most `poolSize / 2` rows per instance.
+- `V17__brace_job_workers.sql` (H2 and Postgres) — the `brace_job_workers` table and the
+  `scheduled_jobs.claimed_by` column. Adding a nullable column is a metadata-only change on
+  Postgres, so it does not rewrite or lock `scheduled_jobs` for long.
 
-`JobPoller.reclaimStalledJobs(db, cutoff)` is public if you want to run recovery on your own
-schedule (it returns `SweepResult(reclaimed, failed)`), the same way `purgeFinishedJobs` is public
-for custom retention.
+### Operational visibility
+
+Recovery logs structured events you can alert on: `jobs_released_on_shutdown`,
+`jobs_orphans_recovered` (a dead instance's jobs were reclaimed — expected after a crash,
+suspicious if frequent), `job_timeout`, and `job_claim_lost` (an instance presumed dead finished
+a job that had already been recovered elsewhere). `SELECT * FROM brace_job_workers` shows every
+live poller and its last heartbeat.
 
 ---
 
@@ -527,7 +539,7 @@ primary path, covering the five cases a wake cannot reach:
 
 - jobs scheduled with a delay, whose `run_at` is in the future
 - retries whose backoff has expired
-- rows returned to the queue by the new stalled-job sweeper
+- jobs returned to the queue by shutdown release or dead-instance recovery
 - work enqueued on a **different** instance (the wake is in-process only)
 - anything already queued when the app starts
 
@@ -554,7 +566,7 @@ var app = Brace.app()
     .database(dbFactory)
     .jobPollInterval("2s");                                 // or a Duration
 
-// or from config, like the lease:
+// or from config:
 var app = Brace.app()
     .database(dbFactory)
     .jobPollInterval(config.get("jobs.poll-interval", "5s"));

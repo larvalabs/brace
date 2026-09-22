@@ -344,14 +344,17 @@ Scheduling a job with no delay wakes the poller as soon as your transaction comm
 almost immediately. Polling continues underneath as a safety net at `app.jobPollInterval("5s")`
 (the default), covering delayed jobs, retries, and work enqueued on other instances.
 
-A job holds its claim for at most `app.jobLease("30m")` (the default). If the instance running it
-dies mid-job — an ordinary deploy is enough — the claim expires and the job returns to the queue,
-so jobs should be idempotent. Raise the lease above your longest-running job; it takes an interval
-string or a `Duration`, so it can come from config directly:
+Jobs survive deploys and crashes without configuration. On SIGTERM the app shuts down gracefully:
+running jobs get `app.jobShutdownTimeout("3s")` (the default) to finish, and the rest go back to the
+queue with the attempt refunded. If an instance dies outright, its jobs are recovered once it stops
+heartbeating — never while it is alive, however long a job runs. A per-attempt timeout is available
+but off by default:
 
 ```java
-app.jobLease(config.get("jobs.lease", "30m"));
+app.jobTimeout(config.get("jobs.timeout"));   // e.g. "2h"; unset means no timeout
 ```
+
+Delivery is at-least-once, so jobs should be idempotent.
 
 ## Mailer
 

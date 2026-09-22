@@ -59,7 +59,13 @@ public class Log {
         t.setDaemon(true);
         t.start();
         // Daemon thread: flush whatever is queued when the JVM exits normally.
-        Runtime.getRuntime().addShutdownHook(new Thread(Log::flush, "brace-log-flush"));
+        try {
+            Runtime.getRuntime().addShutdownHook(new Thread(Log::flush, "brace-log-flush"));
+        } catch (IllegalStateException shutdownInProgress) {
+            // First use of Log is itself inside a shutdown hook (an app that logged nothing before
+            // SIGTERM). Throwing here would fail class initialization and make Log unusable for
+            // the rest of shutdown; callers there flush explicitly (Brace.stop), so skip the hook.
+        }
     }
 
     private static void writeLoop() {

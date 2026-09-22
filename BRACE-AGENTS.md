@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobLease()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 ## Routing
 
@@ -608,28 +608,32 @@ transaction; waking any sooner would have the poller look before the row is visi
 
 Polling continues underneath as the safety net, at `app.jobPollInterval(...)` (default `"5s"`,
 interval string or `Duration`, must be positive). It covers the five things a wake can't reach:
-jobs with a future `run_at`, retries whose backoff expired, rows freed by the stalled-job sweeper,
+jobs with a future `run_at`, retries whose backoff expired, jobs recovered from a stopped or dead instance,
 work enqueued on a **different** instance, and anything already queued at startup. A missed wake
 costs latency, never correctness.
 
-A job holds its claim for at most `app.jobLease(...)` (default 30 minutes). If the instance
-running it dies before the job finishes — an ordinary deploy is enough, since JVM exit kills
-in-flight jobs — the claim expires and the job is returned to the queue, or failed outright if its
-`maxAttempts` are already spent. Set the lease above the longest job you expect to run: a lease
-can't tell a dead instance from a slow job, so a job still running when its lease expires may be
-picked up again elsewhere. That's the at-least-once contract `DurableJob` already carries — **jobs
-should be idempotent**.
+Jobs survive deploys and crashes with no configuration:
 
-Takes an interval string (`"30s"`, `"15m"`, `"2h"` — same format as `every()`) or a `Duration`, so
-it can come straight from config:
+- **Deploys (SIGTERM).** `start()` registers a shutdown hook that calls `stop()`. The poller stops
+  claiming, gives running jobs `app.jobShutdownTimeout(...)` (default `"3s"`) to finish, interrupts
+  the rest and returns them to the queue with the attempt refunded. Keep it under your platform's
+  kill timeout (Docker 10s, Kubernetes 30s, Fly.io 5s).
+- **Crashes (SIGKILL, OOM, lost host).** Each instance heartbeats a row in `brace_job_workers`
+  every 15s and every claim records its owner in `scheduled_jobs.claimed_by`. A job is recovered
+  only after its owner misses heartbeats for 2 minutes — the attempt stays spent, and exhausted
+  attempts fail the job. A job on a live instance is never taken from it, however long it runs.
+- **Optional timeout, off by default.** `app.jobTimeout("2h")` interrupts an attempt that runs
+  longer; the attempt fails and retries under the job's backoff. Interruption is cooperative
+  (blocking I/O, JDBC and `sleep` respond; a busy loop must check `Thread.interrupted()`).
+  Interval string or `Duration`; a null/blank string leaves it unchanged, `"0s"` turns it off.
+
+Delivery is at-least-once — a job whose instance is killed after its side effect but before
+completion is recorded runs again — so **jobs should be idempotent**.
 
 ```java
-app.jobLease("2h");                                // literal
-app.jobLease(config.get("jobs.lease", "30m"));     // conf file or JOBS_LEASE env var
+app.jobTimeout(config.get("jobs.timeout"));          // unset key: no timeout
+app.jobShutdownTimeout("20s");                       // e.g. on Kubernetes
 ```
-
-A null/blank string keeps the default rather than disabling, so a missing config key can't silently
-strand jobs. To disable recovery deliberately: `jobLease("0s")` or `jobLease((Duration) null)`.
 
 Parallel utility: `Jobs.parallel(items, concurrency, item -> process(item))`.
 

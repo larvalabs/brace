@@ -172,6 +172,8 @@ No stale-claim recovery existed. If an instance died between `claimBatchPostgres
 
 Surfaced by the article's "polling as the safety net for lost work" framing.
 
+> **Superseded before release (2026-09-22).** The fixed lease described below was replaced for 0.1.8 by graceful release on shutdown plus a per-worker heartbeat (`brace_job_workers`, `scheduled_jobs.claimed_by`) and an opt-in per-attempt `jobTimeout`, because a fixed lease cannot tell a dead instance from a slow job and so re-ran healthy long jobs. See `JobPoller` and the 0.1.7→0.1.8 migration guide. The original note follows.
+
 Fixed by `JobPoller.reclaimStalledJobs` plus a background sweeper, with the lease configurable via `Brace.jobLease(...)` (default 30 minutes). Implementation note relevant to Part 1: recovery **clears `started_at`** rather than widening the claim predicate to `OR started_at < …`. That keeps the hot claim query and its `V15` index exactly as the perf review left them — including the ordered-scan early termination that Option A depends on — and leaves the H2 per-row re-claim guard unchanged. The sweep's own scan is served by a new `V16` partial index over currently-claimed rows.
 
 The sweeper runs on its own thread rather than inside `pollLoop` deliberately: when every execution slot is held by a hung job the poll loop is parked in `limiter.acquire()`, which is exactly the case that most needs a sweep, since recovery has to come from a sibling instance.
