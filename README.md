@@ -1,42 +1,42 @@
 # Brace
 
-A full-stack Java web framework built for AI agents (and the humans working alongside them). Simple, compiler-checked APIs that agents get right; excellent runtime performance; and batteries included: a growing set of built-in features that covers most of what you need to build and run a production website.
+A full-stack Java web framework designed for development by AI coding agents. APIs are explicit and checked by the compiler, per-request overhead is low, and the framework includes most of the components a production website needs.
 
 ![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
 
 ## Why Brace Exists
 
-Current web frameworks were designed for human developers. They avoid boilerplate through magic: auto-configuration, bean scoping, proxy chains, conditional loading. AI coding agents write better code when frameworks are explicit and predictable, and they work best when guided by strict compile-time checking and unit tests.
+Most web frameworks are designed around human developers and reduce boilerplate with implicit behavior: auto-configuration, bean scoping, proxy chains, conditional loading. Coding agents work more reliably with explicit, predictable code, and with fast feedback from the compiler and unit tests.
 
-Microframeworks solve the complexity problem but create a different one: every project becomes a bespoke assembly of packages, each with their own conventions, config, and error handling. The AI has to hold all of that in context.
+Microframeworks avoid the implicit behavior but leave each project to assemble its own set of packages, each with its own conventions, configuration, and error handling. An agent has to keep all of those in context.
 
-Brace is both simple and complete: a compact set of core types, one set of conventions, and one dependency to learn instead of ten.
+Brace provides a small set of core types and a full set of components that share one set of conventions, in a single dependency.
 
-### Simple, Compiler-Checked APIs
+### Explicit, Compiler-Checked APIs
 
-Everything flows through parameters. A controller method's signature tells you exactly what it has access to: no guessing about what's injected, what's ThreadLocal, what's magic. There is no DI container, no classpath scanning, and no bytecode enhancement. Every route, middleware, entity, and job is wired explicitly in `main()`, so reading one file tells you how the whole app fits together.
+Request-scoped dependencies are passed as parameters, so a controller method's signature lists everything it can access. There is no DI container, no classpath scanning, and no bytecode enhancement. Routes, middleware, entities, and jobs are all registered in `main()`.
 
-The compiler does the checking. Handler types are plain functional interfaces, forms bind to Java records, and JTE templates declare typed parameters and fail the build when a caller gets them wrong. Mistakes surface as a compile error or a failing test with a precise message, not as a runtime surprise when a user hits the page. That short, exact feedback loop is what coding agents work best with: less to read before making a change, fewer wrong guesses, and a fast signal when a guess is wrong.
+Handler types are functional interfaces, forms bind to Java records, and JTE templates declare typed parameters, so a wrong parameter or type is a compile error. Mistakes show up as a compile error or a failing test with a specific message rather than at runtime. For a coding agent, this means less code to read before making a change and a short, precise signal when a change is wrong.
 
-The agent tooling follows the same idea. [BRACE-AGENTS.md](BRACE-AGENTS.md) is a single, version-matched reference that `brace agents-md` keeps in sync with the framework jar, and `brace test`/`brace compile` print concise summaries shaped for an agent's context window.
+[BRACE-AGENTS.md](BRACE-AGENTS.md) is a single framework reference matched to the framework version (`brace agents-md` regenerates it from the jar). `brace test` and `brace compile` print condensed summaries sized for an agent's context window.
 
 ### Runtime Performance
 
-The design choices that keep the API simple also keep the runtime lean. No DI container means no proxy indirection. Hibernate's StatelessSession skips dirty checking and persistence-context management. JTE templates compile to plain Java classes. Jetty 12 runs every request on a virtual thread. Read-only handlers skip the transaction round-trips entirely, views render after the database connection is back in the pool, and request stats are lock-free.
+With no DI container there is no proxy indirection. Hibernate's StatelessSession skips dirty checking and persistence-context management. JTE templates compile to Java classes. Jetty 12 runs each request on a virtual thread. Read-only handlers run without an explicit transaction, views render after the database connection is returned to the pool, and request stats are lock-free.
 
-Performance is measured, not assumed: Brace ships a TechEmpower-style [benchmark suite](benchmark/) and JMH micro-benchmarks, and each [runtime performance review](docs/reviews/README.md) records before/after throughput and tail latency for every fix.
+The repo includes a TechEmpower-style [benchmark suite](benchmark/) and JMH micro-benchmarks. Each [runtime performance review](docs/reviews/README.md) records before/after throughput and tail latency for its fixes.
 
-### Batteries Included
+### Included Components
 
-Brace aims to cover most of what a production website needs without reaching for another library: HTTP and routing, database and migrations, type-safe templates, encrypted sessions, forms and validation, CSRF, cache, recurring and durable jobs, email, object storage, an outbound HTTP client, WebSocket, rate limiting, htmx, custom metrics, and a full ops surface. The set keeps growing with each release, and every piece shares the same conventions, config, error handling, and test harness. See [What's Included](#whats-included) for the full list.
+Brace covers HTTP and routing, database and migrations, typed templates, encrypted sessions, forms and validation, CSRF, caching, recurring and durable jobs, email, object storage, an outbound HTTP client, WebSocket, rate limiting, htmx, custom metrics, and ops tooling. The components share configuration, error handling, and the test harness, and the set is expanding with each release. See [What's Included](#whats-included) for details.
 
 ### Agent Observability
 
-No existing framework exposes a structured diagnostics API designed for AI agents. Brace does.
+Brace exposes a structured diagnostics API designed so agents can detect, diagnose and fix problems themselves.
 
-`GET /ops/status` returns everything an agent needs to triage any problem in one compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. Drill-downs stay one call away — `GET /ops/errors/{id}` for a full error (stack trace, request details, queries that ran before the error), `?include=timeseries,profiling` for per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data visually.
+`GET /ops/status` returns a compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
 
-Ops endpoints use Ed25519 keypair authentication with short-lived tokens — agents authenticate securely without shared secrets. An AI agent can deploy, monitor via `/ops/status`, detect problems, fix code, and redeploy — autonomously.
+Ops endpoints use Ed25519 keypair authentication with short-lived tokens, so agents authenticate without a shared secret.
 
 AI agents: read [BRACE-AGENTS.md](BRACE-AGENTS.md) for the complete framework reference, and [docs/agent-ops-guide.md](docs/agent-ops-guide.md) (written into projects as `BRACE-OPS.md`) for operating a running app.
 
@@ -117,7 +117,7 @@ Replace `v0.1.7` with the [latest release tag](https://github.com/larvalabs/brac
 
 ## Quick Start
 
-Brace wires everything explicitly in `main()`, making the app self-documenting. An agent can read one file and knows every route, middleware, entity, and job. No separate architecture docs to maintain or drift out of sync.
+Every route, middleware, entity, and job is registered in `main()`, so this one file describes the app's structure.
 
 
 ```java
@@ -165,7 +165,7 @@ public class App {
 
 ## What's Included
 
-The goal is to cover most of what you need to build and run a website in one dependency, with one set of conventions. The list grows each release.
+Components included in the framework jar as of this release:
 
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
@@ -398,7 +398,7 @@ app.post("/upload-manual", req -> {
 
 ## Custom Metrics
 
-Built-in counters, gauges, and timers — no external metrics server needed. Metrics auto-render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
+Counters, gauges, and timers, with no external metrics server. Metrics render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
 
 ```java
 // Counter — tracks rate (events per minute)
@@ -583,7 +583,7 @@ session.secret=change-me
 
 ## Security
 
-See [docs/SECURITY.md](docs/SECURITY.md) for comprehensive security documentation including:
+See [docs/SECURITY.md](docs/SECURITY.md) for security documentation covering:
 - Encrypted sessions (AES-256-GCM)
 - Trusted proxy configuration
 - CSRF protection
@@ -594,4 +594,4 @@ See [docs/SECURITY.md](docs/SECURITY.md) for comprehensive security documentatio
 
 ## Periodic Model Reviews
 
-Brace is re-reviewed end to end whenever a notably more capable AI model becomes available — each new model generation can find real issues the previous one missed, so the review repeats even when the code hasn't changed. Reviews run in three categories: **Security**, **Token Efficiency**, and **Runtime Performance**. Each produces a findings doc, a fix branch with one commit per finding, and a permanent record you can audit — see the [review process and index](docs/reviews/README.md). The first completed review is the [Fable 5 security review](docs/reviews/2026-06-security-fable-5.md) (June 2026): 25 findings, all fixed, each traceable to its commit.
+Brace is reviewed end to end whenever a notably more capable AI model becomes available, since a newer model can find issues an earlier one missed. The review repeats even when the code hasn't changed. Reviews run in three categories: **Security**, **Token Efficiency**, and **Runtime Performance**. Each produces a findings doc and a fix branch with one commit per finding; see the [review process and index](docs/reviews/README.md). The first completed review is the [Fable 5 security review](docs/reviews/2026-06-security-fable-5.md) (June 2026): 25 findings, all fixed, each traceable to its commit.
