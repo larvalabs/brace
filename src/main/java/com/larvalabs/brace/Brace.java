@@ -915,6 +915,7 @@ public class Brace {
             wsRegistry = new WsRegistry(messageBus, wsMaxQueuedBytes);
             final WsRegistry wsRegistryRef = wsRegistry;
             final List<String> allowedOrigins = List.copyOf(wsAllowedOrigins);
+            final TrustedProxies wsTrustedProxies = trustedProxies;
             // Wrap with WebSocketUpgradeHandler for WebSocket support
             var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {
                 for (var entry : wsRoutes.entrySet()) {
@@ -923,9 +924,15 @@ public class Brace {
                     container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> {
                         // M3: reject a cross-origin handshake before the session cookie below turns
                         // it into an authenticated socket. Returning null declines the upgrade.
-                        if (!originAllowed(upgradeRequest.getHeaders().get("Origin"),
-                                           upgradeRequest.getHeaders().get("Host"),
-                                           allowedOrigins)) {
+                        // The host is the one the client addressed: X-Forwarded-Host when a trusted
+                        // proxy sent it, else Host.
+                        String origin = upgradeRequest.getHeaders().get("Origin");
+                        String host = ProxyHeaders.effectiveHost(upgradeRequest.getHeaders()::get,
+                            org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest), wsTrustedProxies);
+                        if (!originAllowed(origin, host, allowedOrigins)) {
+                            if (host != null && BraceHandler.isLoopbackHost(host)) {
+                                ProxyHeaders.warnWebSocketHostRewrite(origin, host);
+                            }
                             upgradeResponse.setStatus(403);
                             return null;
                         }
@@ -1315,7 +1322,8 @@ public class Brace {
 
     /**
      * Whether a WebSocket upgrade carrying {@code origin} may proceed against a server reached
-     * as {@code hostHeader} (M3).
+     * as {@code host} (M3). {@code host} is the host the client addressed — see
+     * {@link ProxyHeaders#effectiveHost}.
      *
      * <ul>
      *   <li><strong>No Origin header</strong> → allowed. Only browsers are required to send one,
@@ -1324,37 +1332,50 @@ public class Brace {
      *   <li><strong>Same host</strong> → allowed. Compared on host only, not scheme or port: TLS
      *       is terminated at a proxy, so the browser's origin is {@code https://app.example.com}
      *       while the app sees {@code app.example.com:8080}.</li>
-     *   <li><strong>Listed in {@code allowed}</strong> → allowed. Entries match either the full
-     *       origin or the bare host; {@code "*"} disables the check.</li>
+     *   <li><strong>Listed in {@code allowed}</strong> → allowed. An entry with a scheme
+     *       ({@code "https://studio.example.com"}) must match the origin exactly — scheme, host and
+     *       port — so listing the https origin does not also admit its cleartext twin. A bare host
+     *       ({@code "studio.example.com"}) matches that host on any scheme or port. {@code "*"}
+     *       disables the check.</li>
      * </ul>
      */
-    static boolean originAllowed(String origin, String hostHeader, List<String> allowed) {
+    static boolean originAllowed(String origin, String host, List<String> allowed) {
         if (origin == null || origin.isBlank()) return true;   // non-browser client
         if (allowed.contains("*")) return true;                // check explicitly disabled
-        String originHost = hostOf(origin);
+        String originHost = ProxyHeaders.hostOf(origin);
         if (originHost == null) return false;                  // unparseable Origin — fail closed
-        if (hostHeader != null && originHost.equalsIgnoreCase(Request.stripPort(hostHeader.strip()))) {
+        if (host != null && originHost.equalsIgnoreCase(Request.stripPort(host.strip()))) {
             return true;
         }
+        String normalizedOrigin = origin.contains("://") ? normalizeOrigin(origin) : null;
         for (String entry : allowed) {
             if (entry == null || entry.isBlank()) continue;
             String candidate = entry.strip();
-            if (candidate.equalsIgnoreCase(origin.strip())) return true;
-            String candidateHost = hostOf(candidate);
-            if (candidateHost != null && candidateHost.equalsIgnoreCase(originHost)) return true;
+            if (candidate.contains("://")) {
+                if (normalizeOrigin(candidate).equals(normalizedOrigin)) return true; // null-safe: never equal
+            } else {
+                String candidateHost = ProxyHeaders.hostOf(candidate);
+                if (candidateHost != null && candidateHost.equalsIgnoreCase(originHost)) return true;
+            }
         }
         return false;
     }
 
-    /** Host portion of an origin or bare host string, or null when it can't be determined. */
-    private static String hostOf(String value) {
-        String v = value.strip();
-        int scheme = v.indexOf("://");
-        if (scheme >= 0) v = v.substring(scheme + 3);
-        int slash = v.indexOf('/');
-        if (slash >= 0) v = v.substring(0, slash);
-        if (v.isEmpty()) return null;
-        return Request.stripPort(v);
+    /**
+     * Lower-cased {@code scheme://host[:port]} with the scheme's default port dropped, the way a
+     * browser serializes an Origin, so {@code "https://App.example.com:443/"} and
+     * {@code "https://app.example.com"} compare equal.
+     */
+    static String normalizeOrigin(String value) {
+        String v = value.strip().toLowerCase(java.util.Locale.ROOT);
+        int schemeEnd = v.indexOf("://");
+        String scheme = v.substring(0, schemeEnd);
+        String rest = v.substring(schemeEnd + 3);
+        int slash = rest.indexOf('/');
+        if (slash >= 0) rest = rest.substring(0, slash);
+        if (scheme.equals("https") && rest.endsWith(":443")) rest = rest.substring(0, rest.length() - 4);
+        if (scheme.equals("http") && rest.endsWith(":80")) rest = rest.substring(0, rest.length() - 3);
+        return scheme + "://" + rest;
     }
 
     // --- Test support ---

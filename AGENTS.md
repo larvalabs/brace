@@ -195,6 +195,6 @@ Also sweep `README.md`'s API tour sections (Controllers through Configuration, r
 
 ## Dependencies
 
-Jetty 12, Hibernate 7, PostgreSQL JDBC (runtime), H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, htmx 2.0.4, JUnit 5.
+Jetty 12, Hibernate 7, PostgreSQL JDBC (runtime), H2 (test), HikariCP, Flyway, JTE, Jackson, jBCrypt, Jakarta Mail, htmx 2.0.10, JUnit 5.
 
 Single Maven artifact: `com.larvalabs.brace:brace` — the current version lives in `pom.xml` (`<version>`), the single source of truth. Don't hardcode the framework version in this file; reference `pom.xml` instead.

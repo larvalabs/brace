@@ -276,6 +276,48 @@ app.trustedProxies("10.0.0.0/8", "::ffff:10.0.0.0/104");  // if proxies may use 
 
 - `X-Forwarded-For` (most common)
 - `Forwarded` (RFC 7239) — elements correctly split on `,`, parameters on `;`
+- `X-Forwarded-Proto` — the original scheme, for the session cookie's `Secure` attribute
+- `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision and the
+  WebSocket `Origin` check (leftmost entry)
+
+All of them are ignored unless the immediate peer is a trusted proxy.
+
+### Pass the real `Host` through
+
+Brace uses the request's host to tell production from local development (the `Secure`
+attribute) and to recognise same-origin WebSocket upgrades. **nginx's default `proxy_pass`
+replaces `Host` with the upstream address**, so every request arrives as `Host: 127.0.0.1:8080`
+— which looks exactly like a developer's machine. Symptoms: session cookies without `Secure`,
+and every browser WebSocket rejected with 403. Brace logs a one-time warning when it sees the
+pattern (a loopback `Host` from a browser on an `https://` page), and uses that browser signal
+to set `Secure` where it can, but requests without an `Origin`/`Referer` can't be recognised.
+Fix the proxy:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location /live {                       # each WebSocket path
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade           $http_upgrade;
+    proxy_set_header Connection        "upgrade";
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+```java
+app.trustedProxies("127.0.0.1", "::1");   // nginx on the same host
+```
+
+Caddy's `reverse_proxy` already passes `Host` through and sets `X-Forwarded-*`; configure
+`trustedProxies` so they are honoured. Load balancers that must rewrite `Host` should send
+`X-Forwarded-Host` instead.
 
 ---
 
@@ -318,8 +360,12 @@ With no explicit `.secure(...)`, Brace decides the `Secure` attribute per respon
 
 - `X-Forwarded-Proto: https` from a **trusted** proxy → `Secure` on. This wins outright, so
   a proxy that rewrites `Host` to the upstream still gets the attribute.
-- Otherwise, on unless the request's `Host` is a loopback address (`localhost`,
-  `127.0.0.0/8`, `::1`).
+- Otherwise, on unless the request's host is a loopback address (`localhost`,
+  `127.0.0.0/8`, `::1`). The host is `X-Forwarded-Host` from a trusted proxy, else `Host`.
+- A loopback host from a browser whose `Origin` (or `Referer`) is an `https://` page on a
+  real host is treated as production: that request was relayed by a TLS proxy rewriting
+  `Host`. This signal can only add `Secure`, never remove it. See "Pass the real `Host`
+  through" above for the proper fix.
 
 Brace serves cleartext HTTP/1.1 and expects TLS to be terminated by a reverse proxy, so it
 cannot read the scheme off its own connector. Before 0.1.8 the attribute simply defaulted to
@@ -454,14 +500,21 @@ socket for its lifetime (cross-site WebSocket hijacking).
 - A **missing** `Origin` is allowed: only browsers are required to send one, and only
   browsers are what the policy protects. Rejecting would break every non-browser client for
   no gain.
-- Hosts are compared without scheme or port, so TLS terminated at a proxy is fine.
+- Hosts are compared without scheme or port, so TLS terminated at a proxy is fine. The app's
+  host is `X-Forwarded-Host` from a trusted proxy, else `Host` — a proxy that rewrites `Host`
+  to the upstream makes every same-origin socket look cross-origin (403, with a one-time
+  warning). See "Pass the real `Host` through".
 
 Declare deliberate cross-origin clients:
 
 ```java
-app.wsAllowedOrigins("https://studio.example.com")   // full origin, or a bare host
+app.wsAllowedOrigins("https://studio.example.com")   // exact origin: scheme, host and port
    .ws("/live", ctx -> new LiveHandler(ctx));
+app.wsAllowedOrigins("studio.example.com")           // bare host: any scheme or port
 ```
+
+Prefer the full origin: listing `https://studio.example.com` does not admit
+`http://studio.example.com`, whose page a network attacker could inject into.
 
 `"*"` disables the check — sound only if the socket carries no ambient authority, i.e. it
 does not rely on the session cookie for authorization.

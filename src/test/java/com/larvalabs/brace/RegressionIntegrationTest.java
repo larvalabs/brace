@@ -85,7 +85,10 @@ class RegressionIntegrationTest {
 
         String control = token(controlKey);
         JsonNode regs = null;
-        for (int i = 0; i < 20 && (regs == null || regs.size() == 0); i++) {
+        // Up to 10s: detection is asynchronous, and under a loaded full-suite run the old 1s budget
+        // occasionally expired first (a flake, not a detection bug — it passed in isolation).
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+        while ((regs == null || regs.size() == 0) && System.nanoTime() < deadline) {
             Thread.sleep(50);
             regs = regressions(control);
         }

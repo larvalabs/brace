@@ -158,4 +158,22 @@ public class SessionOptionsTest {
         assertEquals("/api", opts.path());
         assertEquals(".example.com", opts.domain());
     }
+
+    @Test
+    void attributeSettersRejectInjection() {
+        var opts = SessionOptions.of("secret");
+        assertThrows(IllegalArgumentException.class, () -> opts.path("/app; Domain=evil.com"));
+        assertThrows(IllegalArgumentException.class, () -> opts.path("app"));
+        assertThrows(IllegalArgumentException.class, () -> opts.domain("example.com; Path=/"));
+        assertThrows(IllegalArgumentException.class, () -> opts.domain("a.com, b.com"));
+        assertThrows(IllegalArgumentException.class, () -> opts.sameSite("Lax; Secure"));
+    }
+
+    @Test
+    void sameSiteStringIsCanonicalisedAndNoneImpliesSecure() {
+        assertEquals("Strict", SessionOptions.of("secret").sameSite("strict").sameSite());
+        var none = SessionOptions.of("secret").sameSite("none");
+        assertEquals("None", none.sameSite());
+        assertTrue(none.resolveSecure(true, false), "browsers drop SameSite=None cookies without Secure");
+    }
 }

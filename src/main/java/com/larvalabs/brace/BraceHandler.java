@@ -542,9 +542,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * not set it explicitly (H2). Delegates the policy to {@link SessionOptions#resolveSecure};
      * this method's job is only to extract the two request signals.
      *
-     * <p>{@code X-Forwarded-Proto} is honoured only when the immediate peer is a configured
-     * trusted proxy — the same trust gate {@link Request#ip()} applies, so a client cannot claim
-     * https (or, more to the point, cannot claim anything at all) by sending the header itself.
+     * <p>{@code X-Forwarded-Proto} and {@code X-Forwarded-Host} are honoured only when the
+     * immediate peer is a configured trusted proxy — the same trust gate {@link Request#ip()}
+     * applies, so a client cannot claim https (or, more to the point, cannot claim anything at all)
+     * by sending the header itself.
+     *
+     * <p>A loopback host is overruled when the browser reports being on an https page of a real
+     * host ({@link ProxyHeaders#httpsPageHost}): a TLS-terminating proxy that rewrites {@code Host}
+     * — nginx's default — otherwise makes every production request look like local development.
+     * That signal can only add {@code Secure}, never remove it, so a forged Origin gains nothing.
      */
     private boolean resolveCookieSecure(Map<String, String> headers, String remoteAddr) {
         if (sessionOptions == null) return false; // legacy fallback cookie: unchanged behavior
@@ -558,7 +564,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 forwardedHttps = "https".equalsIgnoreCase(proto.strip());
             }
         }
-        return sessionOptions.resolveSecure(isLoopbackHost(headers.get("Host")), forwardedHttps);
+        boolean loopback = isLoopbackHost(ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies));
+        if (loopback) {
+            String pageHost = ProxyHeaders.httpsPageHost(headers.get("Origin"), headers.get("Referer"));
+            if (pageHost != null) {
+                loopback = false;
+                ProxyHeaders.warnHostRewrite(pageHost);
+            }
+        }
+        return sessionOptions.resolveSecure(loopback, forwardedHttps);
     }
 
     /**

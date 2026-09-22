@@ -89,11 +89,15 @@ public class SessionOptions {
     }
 
     /**
-     * Set SameSite attribute: "Strict", "Lax", or "None".
-     * Note: "None" requires Secure=true.
+     * Set SameSite attribute: "Strict", "Lax", or "None" (case-insensitive; anything else is
+     * rejected). "None" behaves like {@link #sameSiteNone()} and turns Secure on, since browsers
+     * discard a {@code SameSite=None} cookie without it.
      */
     public SessionOptions sameSite(String sameSite) {
-        this.sameSite = sameSite;
+        this.sameSite = Result.requireSameSite(sameSite);
+        if ("None".equals(this.sameSite)) {
+            this.secure = true;
+        }
         return this;
     }
 
@@ -127,13 +131,15 @@ public class SessionOptions {
         return this;
     }
 
+    /** Cookie Path; must start with {@code /} and contain no {@code ;} or control characters. */
     public SessionOptions path(String path) {
-        this.path = path;
+        this.path = Result.requireCookiePath(path);
         return this;
     }
 
+    /** Cookie Domain; must contain no {@code ;}, {@code ,}, whitespace or control characters. */
     public SessionOptions domain(String domain) {
-        this.domain = domain;
+        this.domain = domain == null ? null : Result.requireCookieDomain(domain);
         return this;
     }
 

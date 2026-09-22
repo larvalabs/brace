@@ -36,12 +36,12 @@ so a path is written exactly once. Purely additive; see "named routes" below.
 
 | Change | Type | Action required | Anchor |
 |---|---|---|---|
-| Session cookies `Secure` by default | breaking | plain-HTTP prod deployments: add `.secure(false)` | [§](#breaking-session-cookies-are-secure-by-default) |
+| Session cookies `Secure` by default | breaking | plain-HTTP prod deployments: add `.secure(false)`; nginx: pass `Host` through | [§](#breaking-session-cookies-are-secure-by-default) |
 | Ops auth v1 removed | breaking | upgrade the `brace` CLI to 0.1.7+ | [§](#breaking-ops-auth-protocol-v1-removed) |
 | Static files no longer follow symlinks out of the root | behavior change | re-point symlinked assets inside the served directory | [§](#security-fix-static-files-no-longer-follow-symlinks-out-of-the-served-directory) |
 | Security headers now cover errors and static files | behavior change | none | [§](#security-fix-security-headers-now-apply-to-static-files-404s-500s-and-413s) |
 | `/ops/*` responses are `no-store` | behavior change | none | [§](#security-fix-ops-responses-are-no-store) |
-| WebSocket upgrades are `Origin`-checked | behavior change | cross-origin WS clients: declare `wsAllowedOrigins(...)` | [§](#security-fix-websocket-upgrades-are-origin-checked) |
+| WebSocket upgrades are `Origin`-checked | behavior change | cross-origin WS clients: declare `wsAllowedOrigins(...)`; nginx: pass `Host` through | [§](#security-fix-websocket-upgrades-are-origin-checked) |
 | Request bodies read after before-middleware | behavior change | before-middleware reading `req.body()` still works | [§](#security-fix-request-bodies-are-read-after-before-middleware) |
 | `Result.download` escapes the filename | behavior change | none | [§](#security-fix-resultdownload-escapes-the-filename) |
 | `Http.multipart` rejects control chars in part names | behavior change | none unless passing raw user filenames | [§](#security-fix-httpmultipart-rejects-control-characters-in-part-names) |
@@ -105,6 +105,15 @@ resolution.
 working with no change: a loopback `Host` resolves to no `Secure` attribute.
 
 **If you set `Secure` explicitly already**, nothing changes — your value still wins.
+
+**Behind nginx, check the proxy passes `Host` through.** nginx's default `proxy_pass`
+rewrites `Host` to the upstream (`127.0.0.1:8080`), which reads as local development. Brace
+honours `X-Forwarded-Host` from a trusted proxy, and treats a loopback `Host` as production
+when the browser's `Origin`/`Referer` is an `https://` page — logging a one-time warning when
+it does — but a request carrying neither can't be recognised, and would get a cookie without
+`Secure`. Add `proxy_set_header Host $host;` and `proxy_set_header X-Forwarded-Proto $scheme;`,
+and name the proxy in `app.trustedProxies(...)`. The full snippet is in `docs/SECURITY.md`
+("Pass the real `Host` through"). Caddy's defaults are already correct.
 
 ---
 
@@ -239,6 +248,13 @@ Upgrades whose `Origin` names a different host are now rejected with 403.
 missing `Origin` is allowed — only browsers send one, and only browsers need the check).
 The host is compared without scheme or port, so TLS terminated at a proxy is fine.
 
+**Action required behind a proxy that rewrites `Host`** — nginx does by default. The app then
+sees `Host: 127.0.0.1:8080` while the browser's `Origin` is `https://app.example.com`, so every
+socket is rejected with 403 (and a one-time warning is logged). Add
+`proxy_set_header Host $host;` to the WebSocket location, or have the proxy send
+`X-Forwarded-Host` and name it in `app.trustedProxies(...)`. Don't reach for
+`wsAllowedOrigins("*")` to make the 403 go away — that turns the protection off.
+
 **Action required** only for a deliberately cross-origin browser client:
 
 ```java
@@ -246,6 +262,10 @@ var app = Brace.app()
     .wsAllowedOrigins("https://studio.example.com")   // full origin, or a bare host
     .ws("/live", ctx -> new LiveHandler(ctx));
 ```
+
+An entry with a scheme must match the origin exactly — scheme, host and port — so listing
+`https://studio.example.com` does not admit `http://studio.example.com`. A bare host
+(`"studio.example.com"`) matches that host on any scheme or port.
 
 Pass `"*"` to disable the check entirely — sound only if the socket carries no ambient
 authority (i.e. it does not rely on the session cookie for authorization).
@@ -323,7 +343,11 @@ input — a theme, a locale, a `returnTo` — could have that cookie re-scoped b
 
 `Result.cookie(...)` now throws `IllegalArgumentException` for a value containing control
 characters, spaces, quotes, backslashes, `;` or `,`, and for a name that isn't an RFC 6265
-token.
+token. The other attributes are checked the same way: `path` must start with `/` and contain
+no `;` or control characters, and `sameSite` must be `Strict`, `Lax` or `None` (any case —
+it is emitted canonically). `SessionOptions.path(...)`, `.domain(...)` and `.sameSite(...)`
+apply the same rules, and `SessionOptions.sameSite("None")` now turns `Secure` on exactly as
+`sameSiteNone()` does, since browsers drop a `SameSite=None` cookie without it.
 
 **Action required only if** you pass raw user input as a cookie value. URL-encode it:
 

@@ -62,6 +62,17 @@ class WsOriginTest {
     }
 
     @Test
+    void anEntryWithASchemeMustMatchSchemeAndPort() {
+        var allowed = List.of("https://studio.example.com");
+        // Listing the https origin must not also admit its cleartext twin, or another port.
+        assertFalse(Brace.originAllowed("http://studio.example.com", "app.example.com", allowed));
+        assertFalse(Brace.originAllowed("https://studio.example.com:8443", "app.example.com", allowed));
+        // Browsers omit the default port; an entry spelling it out still matches.
+        assertTrue(Brace.originAllowed("https://studio.example.com", "app.example.com",
+            List.of("https://Studio.Example.com:443/")));
+    }
+
+    @Test
     void wildcardDisablesTheCheck() {
         assertTrue(Brace.originAllowed("https://evil.com", "app.example.com", List.of("*")));
     }

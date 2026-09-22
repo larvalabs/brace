@@ -237,4 +237,24 @@ class ResultTest {
         assertFalse(result.headers().containsKey("Set-Cookie"));
         assertEquals("x=1", result.header("Set-Cookie"));
     }
+
+    @Test
+    void cookiePathAndSameSiteCannotInjectAttributes() {
+        var r = Result.text("ok");
+        assertThrows(IllegalArgumentException.class,
+            () -> r.cookie("c", "1", 60, true, true, "Lax", "/x; Domain=evil.com"));
+        assertThrows(IllegalArgumentException.class,
+            () -> r.cookie("c", "1", 60, true, true, "Lax", "relative"));
+        assertThrows(IllegalArgumentException.class,
+            () -> r.cookie("c", "1", 60, true, true, "Lax; Domain=evil.com", "/"));
+        assertThrows(IllegalArgumentException.class,
+            () -> r.cookie("c", "1", 60, true, true, "Laxx", "/"), "unknown SameSite is silently ignored by browsers");
+    }
+
+    @Test
+    void cookieSameSiteIsCanonicalised() {
+        var r = Result.text("ok").cookie("c", "1", 60, true, true, "strict", "/ops");
+        assertTrue(r.header("Set-Cookie").endsWith("; Path=/ops; HttpOnly; Secure; SameSite=Strict"),
+            r.header("Set-Cookie"));
+    }
 }

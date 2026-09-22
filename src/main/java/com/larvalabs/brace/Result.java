@@ -251,13 +251,15 @@ public class Result {
                          String sameSite, String path) {
         requireCookieToken(name, "name");
         requireCookieValue(value);
+        String cookiePath = path == null ? "/" : requireCookiePath(path);
+        String cookieSameSite = sameSite == null ? null : requireSameSite(sameSite);
         var cookie = new StringBuilder();
         cookie.append(name).append("=").append(value);
         cookie.append("; Max-Age=").append(maxAge);
-        cookie.append("; Path=").append(path == null ? "/" : path);
+        cookie.append("; Path=").append(cookiePath);
         if (httpOnly) cookie.append("; HttpOnly");
         if (secure) cookie.append("; Secure");
-        if (sameSite != null) cookie.append("; SameSite=").append(sameSite);
+        if (cookieSameSite != null) cookie.append("; SameSite=").append(cookieSameSite);
         header("Set-Cookie", cookie.toString());
         return this;
     }
@@ -281,6 +283,57 @@ public class Result {
                 throw new IllegalArgumentException(
                     "Cookie value must not contain control characters, spaces, quotes, backslashes, "
                         + "';' or ',' (they inject cookie attributes) — URL-encode it first. Got: " + value);
+            }
+        }
+    }
+
+    /**
+     * Validate a cookie {@code Path}: it must start with {@code /} and, per RFC 6265, contain no
+     * control characters or {@code ;} — a {@code ;} would inject further attributes, the same
+     * hole {@link #requireCookieValue} closes for the value. Returns the path.
+     */
+    static String requireCookiePath(String path) {
+        if (!path.startsWith("/")) {
+            throw new IllegalArgumentException("Cookie path must start with '/'; got: " + path);
+        }
+        requireAttributeChars(path, "path", false);
+        return path;
+    }
+
+    /**
+     * Validate a cookie {@code Domain}: a host name, so no control characters, whitespace,
+     * {@code ;} or {@code ,}. Returns the domain.
+     */
+    static String requireCookieDomain(String domain) {
+        if (domain.isBlank()) {
+            throw new IllegalArgumentException("Cookie domain must not be blank");
+        }
+        requireAttributeChars(domain, "domain", true);
+        return domain;
+    }
+
+    /**
+     * Validate a {@code SameSite} value and return its canonical spelling — {@code Strict},
+     * {@code Lax} or {@code None}. Anything else is rejected rather than emitted: a browser treats
+     * an unknown value as absent, silently changing the cookie's cross-site behavior.
+     */
+    static String requireSameSite(String sameSite) {
+        return switch (sameSite.strip().toLowerCase(java.util.Locale.ROOT)) {
+            case "strict" -> "Strict";
+            case "lax" -> "Lax";
+            case "none" -> "None";
+            default -> throw new IllegalArgumentException(
+                "SameSite must be Strict, Lax or None; got: " + sameSite);
+        };
+    }
+
+    private static void requireAttributeChars(String v, String what, boolean hostLike) {
+        for (int i = 0; i < v.length(); i++) {
+            char c = v.charAt(i);
+            if (c < 0x20 || c == 0x7F || c == ';' || (hostLike && (c == ' ' || c == ','))) {
+                throw new IllegalArgumentException("Cookie " + what
+                    + " must not contain control characters or ';'" + (hostLike ? ", spaces or ','" : "")
+                    + "; got: " + v);
             }
         }
     }

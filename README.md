@@ -322,7 +322,9 @@ app.sessions(SessionOptions.secure("secret")
 The `Secure` attribute is on by default — resolved per request, so it is set for every
 non-loopback request and omitted on `http://localhost` (local dev and in-process tests keep
 working untouched). An app genuinely served over plain HTTP on a real hostname opts out with
-`SessionOptions.of("secret").secure(false)`.
+`SessionOptions.of("secret").secure(false)`. Behind nginx, pass the real host through
+(`proxy_set_header Host $host;`) — its default rewrites `Host` to `127.0.0.1`, which looks like
+local development; see `docs/SECURITY.md`.
 
 ## Jobs
 

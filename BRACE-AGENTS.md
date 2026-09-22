@@ -357,6 +357,8 @@ db.sqlQueryLong("SELECT count(*) FROM posts")      // native SQL returning Long
 db.jdbc(conn -> { /* raw JDBC */ })                // raw Connection access
 ```
 
+`db.afterCommit(() -> ...)` runs an action after the current transaction commits (dropped on rollback) — for side effects that must not fire before the data they describe is visible to other sessions. Keep it short; exceptions are logged, not propagated.
+
 HQL/SQL uses `?` positional params — the framework converts to `?1`, `?2` for Hibernate 7.
 The converter leaves alone any `?` inside single-quoted string literals or SQL comments; to
 write a literal `?` operator (e.g. Postgres JSONB `?`/`?|`/`?&`), escape it as `??`. For SQL
@@ -495,7 +497,7 @@ session.clear();                       // remove all
 
 Configure cookie security with `app.sessions(SessionOptions.secure("secret").maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `path(String)`, `domain(String)`.
 
-**The `Secure` attribute is on by default.** With no explicit `.secure(...)`, Brace resolves it per request: on unless the request's `Host` is a loopback address, and always on when a trusted proxy reports `X-Forwarded-Proto: https`. So production gets `Secure` with no configuration and `http://localhost` (dev, `Brace.test()`) keeps working. An app genuinely served over plain HTTP on a real hostname must opt out with `.secure(false)`, which logs a startup warning. Do not add `.secure(false)` to make a local setup work — check the Host first.
+**The `Secure` attribute is on by default.** With no explicit `.secure(...)`, Brace resolves it per request: on unless the request's host is a loopback address, and always on when a trusted proxy reports `X-Forwarded-Proto: https`. The host is `X-Forwarded-Host` when a trusted proxy sends it, else `Host`; a loopback host is still treated as production when the browser's `Origin`/`Referer` is an `https://` page on a real host (a proxy rewriting `Host` — nginx's default — logs a one-time warning naming the fix: `proxy_set_header Host $host;`). So production gets `Secure` with no configuration and `http://localhost` (dev, `Brace.test()`) keeps working. An app genuinely served over plain HTTP on a real hostname must opt out with `.secure(false)`, which logs a startup warning. Do not add `.secure(false)` to make a local setup work — check the Host first.
 
 Flash messages (display once, on the next request): `session.flash("notice", "Post created")` sets; the message is consumed when the next page renders — any handler type, e.g. a redirect-after-POST landing on a plain `Handler` view — and is available to templates as the `flash` map (`flash.get("notice")`). `session.flash("notice")` reads it programmatically: reading a pending message from a previous request consumes it (read-once); reading one set during the current request peeks without consuming, so it still displays next request. `session.flashData()` returns the consumed entries as a Map.
 
@@ -753,7 +755,7 @@ Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 
 **Slow-consumer backpressure.** `send`/`broadcast` are non-blocking. A connection that stops reading would otherwise make its outgoing frames pile up in Jetty's queue without bound (a per-connection memory leak). Brace bounds each connection's queued-but-unflushed bytes and force-closes a connection that exceeds the cap (`TRY_AGAIN_LATER`); the bound is per connection, so one slow client never blocks healthy members of the same room. Tune with `app.wsMaxQueuedBytes(bytes)` (default 4 MB).
 
-**Origin checking.** Upgrades from a cross-host `Origin` are rejected with 403 — a WebSocket handshake is not subject to the same-origin policy, so without this an attacker page could open a socket that the browser authenticates with the victim's session cookie. A missing `Origin` is allowed (non-browser clients); hosts are compared without scheme or port, so TLS at a proxy is fine. Declare deliberate cross-origin browser clients with `app.wsAllowedOrigins("https://studio.example.com")` (full origin or bare host; `"*"` disables the check).
+**Origin checking.** Upgrades from a cross-host `Origin` are rejected with 403 — a WebSocket handshake is not subject to the same-origin policy, so without this an attacker page could open a socket that the browser authenticates with the victim's session cookie. A missing `Origin` is allowed (non-browser clients); hosts are compared without scheme or port, so TLS at a proxy is fine (the app's host is `X-Forwarded-Host` from a trusted proxy, else `Host` — a proxy that rewrites `Host` to `127.0.0.1` makes every browser socket fail with 403 and a logged warning; fix the proxy with `proxy_set_header Host $host;`). Declare deliberate cross-origin browser clients with `app.wsAllowedOrigins("https://studio.example.com")` — an entry with a scheme must match scheme, host and port exactly; a bare host (`"studio.example.com"`) matches any scheme or port; `"*"` disables the check.
 
 ## Rate Limiting
 
