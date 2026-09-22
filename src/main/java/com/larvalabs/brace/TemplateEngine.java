@@ -73,7 +73,7 @@ public class TemplateEngine {
      * Renders straight to UTF-8 bytes (M6). With binaryStaticContent the template's static chunks are
      * written as pre-encoded byte[] and only the dynamic values are encoded, so the result is the
      * response body ready for the wire — no intermediate {@code String} and no second encode in
-     * {@code writeResult}. Used for {@link View} results; {@link #render} stays for the String API.
+     * {@code BraceHandler.writeToWire}. Used for {@link View} results; {@link #render} stays for the String API.
      */
     public byte[] renderToBytes(String template, Map<String, Object> params) {
         var output = new Utf8ByteOutput();

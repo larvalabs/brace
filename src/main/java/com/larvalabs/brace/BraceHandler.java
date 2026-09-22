@@ -166,7 +166,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         var startNanos = System.nanoTime();
         Database db = null;
         // Hoisted above the try so the catch paths (thrown 404, 500) can persist session
-        // mutations too — see the write-back choke point on writeResult below.
+        // mutations too — see the response choke point (respond / respondToError) below.
         Session session = null;
         Session csrfOnlySession = null;
         // Hoisted with session/csrfOnlySession so the catch paths (thrown 404, 500) resolve the
@@ -194,7 +194,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             // Resolve the session cookie's Secure attribute from this request (H2). Computed here,
-            // before the first writeResult can fire, and threaded through the choke point so every
+            // before the first response can be sent, and threaded through the choke point so every
             // exit path agrees. See SessionOptions.resolveSecure for the rule.
             cookieSecure = resolveCookieSecure(
                 headers, org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest));
@@ -230,7 +230,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             for (var before : beforeMiddleware) {
                 Result earlyResult = before.apply(braceRequest);
                 if (earlyResult != null) {
-                    writeResult(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
                     return true;
                 }
             }
@@ -251,7 +251,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         // A short-circuiting guard may have mutated the session (e.g. a
                         // flash message before redirecting to login) — persisted by the
                         // write-back choke point.
-                        writeResult(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                        respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
                         return true;
                     }
                 }
@@ -264,11 +264,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (match == null) {
                 Result staticResult = serveStaticFile(braceRequest);
                 if (staticResult != null) {
-                    writeResult(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure);
                     return true;
                 }
                 Result notFoundResult = noRouteFound(method, path);
-                writeResult(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
+                respond(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
                 return true;
             }
 
@@ -321,7 +321,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     }
                     if (!Csrf.validateToken(csrfSession, submittedToken)) {
                         // Choke point persists guard mutations on the 403 too.
-                        writeResult(braceRequest, Result.json(java.util.Map.of("error", "csrf_required"), 403),
+                        respond(braceRequest, Result.json(java.util.Map.of("error", "csrf_required"), 403),
                             response, callback, session, csrfOnlySession, cookieSecure);
                         return true;
                     }
@@ -396,7 +396,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 View.clearFlash();
             }
 
-            // After-middleware runs inside writeResult now (M1), so it covers every response
+            // After-middleware runs inside respond() now (M1), so it covers every response
             // leaving handle() rather than only this path. It still runs before the session cookie
             // is attached, so a middleware returning a brand-new Result instance cannot silently
             // discard the cookie (M6).
@@ -414,7 +414,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
-            writeResult(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure);
+            respond(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure);
             var durationUs = (System.nanoTime() - startNanos) / 1000;
             if (stats != null) {
                 int qc = db != null ? db.queryCount() : 0;
@@ -432,13 +432,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // framework error — so an unauthenticated client could flood the error store and the
             // regression notifier just by POSTing oversized bodies. Deliberately records no error:
             // an over-limit body is a client mistake, not an application fault.
-            writeResult(braceRequest, Result.error(413, "Payload Too Large"),
+            respondToError(braceRequest, Result.error(413, "Payload Too Large"),
                 response, callback, session, csrfOnlySession, cookieSecure);
             return true;
         } catch (NotFoundException e) {
             var durationUs = (System.nanoTime() - startNanos) / 1000;
-            Result notFoundResult = applyAfterQuietly(braceRequest, Result.notFound());
-            writeResult(null, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
+            respondToError(braceRequest, Result.notFound(), response, callback, session, csrfOnlySession, cookieSecure);
             if (stats != null) {
                 String errorMethod = jettyRequest.getMethod();
                 String errorPath = jettyRequest.getHttpURI().getPath();
@@ -487,54 +486,73 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.
-            Result errorResult = applyAfterQuietly(braceRequest, Result.error(500, "Internal Server Error"));
-            writeResult(null, errorResult, response, callback, session, csrfOnlySession, cookieSecure);
+            respondToError(braceRequest, Result.error(500, "Internal Server Error"),
+                response, callback, session, csrfOnlySession, cookieSecure);
             return true;
         }
     }
 
-    /**
-     * Write-back choke point: every response leaving {@link #handle} is routed through
-     * here, so a session mutated by a guard or handler is persisted no matter which path
-     * produced the result — early short-circuits, CSRF 403s, static files, thrown 404s,
-     * and 500s included. {@code session} is the handler/guard session; {@code csrfOnlySession}
-     * is the M5c local session (non-null only when the handler had no Session param) —
-     * never both non-null. Attachment is a no-op for unmodified sessions.
+    /*
+     * Response choke point. Every response leaving handle() goes through exactly one of
+     * respond() or respondToError(), and both end in send(). Between them they guarantee two
+     * things on every exit path — early short-circuits, static files, 404s, CSRF 403s, 413s and
+     * 500s included:
+     *
+     *   - after-middleware runs (M1). It used to run only on the handler path, so an app that
+     *     added SecurityHeaders.defaults() got no X-Frame-Options / Referrer-Policy / CSP on
+     *     exactly the responses that most need them. It runs before the session cookie is
+     *     attached, so a middleware returning a brand-new Result cannot discard the cookie (M6).
+     *   - a session mutated by a guard or handler is persisted (see send()).
+     *
+     * The two entry points differ only in what a throwing after-middleware does.
      */
-    private void writeResult(Request req, Result result, Response response, Callback callback,
-                             Session session, Session csrfOnlySession, boolean cookieSecure) {
-        // M1: after-middleware used to run only on the handler path, so an app that added
-        // SecurityHeaders.defaults() got no X-Frame-Options / Referrer-Policy / CSP on static
-        // files, 404s, 500s, CSRF 403s or 413s — verifiably, and on exactly the responses that
-        // most need them. Applying it here means every exit from handle() is covered. A null
-        // request means "already applied, or nothing to apply it against" (the catch paths,
-        // which decorate defensively via applyAfterQuietly first).
-        if (req != null) {
-            for (var after : afterMiddleware) {
-                result = after.apply(req, result);
-            }
+
+    /**
+     * Send a normal response: after-middleware runs strictly, so an exception from it propagates
+     * to {@link #handle}'s catch blocks and becomes a 500 like any other application fault.
+     */
+    private void respond(Request req, Result result, Response response, Callback callback,
+                         Session session, Session csrfOnlySession, boolean cookieSecure) {
+        for (var after : afterMiddleware) {
+            result = after.apply(req, result);
         }
-        attachSessionCookie(result, session, cookieSecure);
-        attachSessionCookie(result, csrfOnlySession, cookieSecure);
-        writeResult(result, response, callback);
+        send(result, response, callback, session, csrfOnlySession, cookieSecure);
     }
 
     /**
-     * Run the after-middleware chain over an <em>error</em> response, swallowing any failure.
-     * The normal paths let an after-middleware exception surface as a 500, but here we are
-     * already writing an error response — a throwing middleware must not stop it from reaching
-     * the client, and must not recurse back into the catch block that called us.
+     * Send an error response (404, 413, 500): after-middleware runs, but a failure in it is logged
+     * and skipped rather than propagated. We are already answering with an error — a broken
+     * decorator must not replace that status with a 500 (or, from a catch block, escape
+     * {@code handle()} altogether), and the middleware that did succeed keeps its headers.
+     * {@code req} is null only if the failure happened before the request was built, in which
+     * case there is nothing to run the chain against.
      */
-    private Result applyAfterQuietly(Request req, Result result) {
-        if (req == null) return result;
-        for (var after : afterMiddleware) {
-            try {
-                result = after.apply(req, result);
-            } catch (Exception e) {
-                Log.warn("after-middleware threw while decorating an error response: " + e);
+    private void respondToError(Request req, Result result, Response response, Callback callback,
+                                Session session, Session csrfOnlySession, boolean cookieSecure) {
+        if (req != null) {
+            for (var after : afterMiddleware) {
+                try {
+                    result = after.apply(req, result);
+                } catch (Exception e) {
+                    Log.warn("after-middleware threw while decorating an error response: " + e);
+                }
             }
         }
-        return result;
+        send(result, response, callback, session, csrfOnlySession, cookieSecure);
+    }
+
+    /**
+     * Attach the session cookie(s) and write the response. {@code session} is the handler/guard
+     * session; {@code csrfOnlySession} is the M5c local session (non-null only when the handler
+     * had no Session param) — never both non-null. Attachment is a no-op for unmodified sessions.
+     * Only {@link #respond} and {@link #respondToError} call this; nothing else may, or it would
+     * skip after-middleware.
+     */
+    private void send(Result result, Response response, Callback callback,
+                      Session session, Session csrfOnlySession, boolean cookieSecure) {
+        attachSessionCookie(result, session, cookieSecure);
+        attachSessionCookie(result, csrfOnlySession, cookieSecure);
+        writeToWire(result, response, callback);
     }
 
     /**
@@ -588,7 +606,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return h.startsWith("127.") && TrustedProxies.isIpLiteral(h);
     }
 
-    private void writeResult(Result result, Response response, Callback callback) {
+    /** Serialize a finished {@link Result} onto the Jetty response. No middleware, no cookies. */
+    private void writeToWire(Result result, Response response, Callback callback) {
         response.setStatus(result.status());
         response.getHeaders().put("Content-Type", result.contentType());
         for (var entry : result.headers().entrySet()) {

@@ -32,12 +32,18 @@ class SecurityHeaderCoverageTest {
         app.after(SecurityHeaders.defaults());
         // Scoped after-middleware must stay scoped — the fix must not make everything global.
         app.after("/admin/*", (req, result) -> result.header("X-Admin-Only", "yes"));
+        // An after-middleware that throws on every response under /fragile — the error paths must
+        // still deliver their own status rather than degrade to a bare 500.
+        app.after("/fragile/*", (req, result) -> { throw new IllegalStateException("decorator bug"); });
 
         app.get("/ok", req -> Result.text("ok"));
         app.get("/admin/panel", req -> Result.text("admin"));
         app.get("/boom", req -> { throw new RuntimeException("kaboom"); });
         app.get("/gone", req -> { throw new NotFoundException(); });
         app.post("/upload", req -> Result.text("got"));
+        app.post("/fragile/upload", req -> Result.text("got"));
+        app.get("/fragile/gone", req -> { throw new NotFoundException(); });
+        app.get("/fragile/ok", req -> Result.text("ok"));
         app.start();
         port = app.actualPort();
     }
@@ -129,5 +135,29 @@ class SecurityHeaderCoverageTest {
             "path-scoped after-middleware must not leak onto unrelated paths");
         assertTrue(get("/assets/app.css").headers().firstValue("X-Admin-Only").isEmpty(),
             "path-scoped after-middleware must not leak onto static files");
+    }
+
+    @Test
+    void errorResponsesSurviveAThrowingAfterMiddleware() throws Exception {
+        // Every error path decorates quietly: a broken after-middleware is logged, and the client
+        // still gets the real status with the headers the healthy middleware added. The 413 path
+        // used the strict chain, so the exception escaped handle() and the client got Jetty's 500.
+        var tooLarge = client().send(
+            HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/fragile/upload"))
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("x".repeat(4096))).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(413, tooLarge.statusCode());
+        assertHardened(tooLarge, "a 413 behind a throwing after-middleware");
+
+        var gone = get("/fragile/gone");
+        assertEquals(404, gone.statusCode());
+        assertHardened(gone, "a thrown 404 behind a throwing after-middleware");
+
+        // On a normal response the chain stays strict: a decorator bug is an application fault,
+        // surfaced as a 500 (itself hardened) rather than a 200 missing whatever it was meant to add.
+        var ok = get("/fragile/ok");
+        assertEquals(500, ok.statusCode());
+        assertHardened(ok, "the 500 from a throwing after-middleware");
     }
 }

@@ -177,7 +177,7 @@ public class Result {
     /**
      * The response body as a String. When the body is held as raw UTF-8 bytes (a {@link View} render or
      * a {@link Json} serialization — M6, which writes bytes directly to avoid a String round-trip on the
-     * hot path), it is decoded on demand and memoized. The wire path ({@code writeResult}) and the page
+     * hot path), it is decoded on demand and memoized. The wire path ({@code BraceHandler.writeToWire}) and the page
      * cache read {@link #rawBytes()} first, so this decode runs only for a caller that actually wants the
      * String form (e.g. a body-rewriting after-middleware).
      */
