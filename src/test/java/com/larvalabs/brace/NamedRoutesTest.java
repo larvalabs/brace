@@ -31,6 +31,8 @@ class NamedRoutesTest {
     @AfterAll
     static void teardown() throws Exception {
         testApp.stop();
+        // Static engine is process-wide; reset so stub-mode tests (ResultTest) are unaffected.
+        View.setEngine(null);
     }
 
     @Test

@@ -166,6 +166,8 @@ class ResultTest {
 
     @Test
     void viewStubResult() {
+        // Stub mode means no engine; don't depend on every earlier test class resetting it.
+        View.setEngine(null);
         var result = View.of("posts/show", "post", "hello");
         assertEquals(200, result.status());
         assertEquals("text/html", result.contentType());
