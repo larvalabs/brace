@@ -97,7 +97,7 @@ Brace is served from [JitPack](https://jitpack.io) — no authentication require
     <dependency>
         <groupId>com.github.larvalabs</groupId>
         <artifactId>brace</artifactId>
-        <version>v0.1.7</version>
+        <version>v0.1.8</version>
     </dependency>
 </dependencies>
 ```
@@ -109,11 +109,11 @@ repositories {
     maven { url = uri("https://jitpack.io") }
 }
 dependencies {
-    implementation("com.github.larvalabs:brace:v0.1.7")
+    implementation("com.github.larvalabs:brace:v0.1.8")
 }
 ```
 
-Replace `v0.1.7` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
+Replace `v0.1.8` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
 
 ## Quick Start
 
@@ -144,11 +144,13 @@ public class App {
             .staticFiles("/assets", "public");
 
         var posts = new PostController();
+        var pages = new PageController();
         var auth = new AuthController(mail);
 
         app.before(Auth::requireLogin);
-        app.get("/", cache.wrap("5m", posts::index));
-        app.getDb("/posts/{id}", posts::show);
+        app.getRead("/", posts::index);
+        app.getRead("/posts/{id}", posts::show);
+        app.get("/about", cache.wrap("1h", pages::about));  // page cache wraps request-only handlers
         app.postFull("/posts", posts::create);
         app.group("/auth", g -> {
             g.get("/login", auth::loginForm);
@@ -401,15 +403,17 @@ app.post("/upload-manual", req -> {
 Counters, gauges, and timers, with no external metrics server. Metrics render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
 
 ```java
+var stats = app.stats();  // pass to controllers and services through their constructors
+
 // Counter — tracks rate (events per minute)
-Stats.counter("talks.created");
-Stats.counter("bytes.uploaded", file.size());
+stats.counter("talks.created");
+stats.counter("bytes.uploaded", file.size());
 
 // Gauge — samples a value each minute
-Stats.gauge("queue.depth", () -> queue.size());
+stats.gauge("queue.depth", () -> (long) queue.size());
 
 // Timer — tracks count, avg, and max duration
-Stats.timer("api.external", durationMs);
+stats.timer("api.external", durationMs);
 ```
 
 ## Cache

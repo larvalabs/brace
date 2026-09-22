@@ -57,11 +57,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Use the curated release notes when the release has them; otherwise
+          # fall back to GitHub's generated commit list.
+          NOTES_FILE="docs/release-notes-${GITHUB_REF_NAME#v}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES_FILE")
+          else
+            NOTES_ARGS=(--generate-notes)
+          fi
           # target/brace-*.jar already matches both the main and -sources jars;
           # listing target/brace-*-sources.jar explicitly attaches it twice and
           # GitHub's upload endpoint returns 404 on the duplicate name.
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            "${NOTES_ARGS[@]}" \
             target/brace-*.jar \
             target/brace-*.zip

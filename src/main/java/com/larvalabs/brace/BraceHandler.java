@@ -477,12 +477,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 String errorMessage = Redactor.redactMessage(e.getMessage());
                 String stackTrace = stackTraceToString(e);
                 // Instant-of-failure context: how much DB work ran before the throw, and the
-                // redacted request headers. Captured synchronously (the Jetty request isn't safe
-                // to read off-thread), then persisted on a virtual thread.
+                // redacted request headers. record() only merges into the in-memory buffer (the
+                // flusher persists it), so it runs here, before the 500 is sent: once a client sees
+                // the response, the error is buffered and a flush() will persist it.
                 String queriesBefore = "{\"count\":" + qc + ",\"durationMs\":" + (Math.round(qu / 100.0) / 10.0) + "}";
                 String requestHeaders = captureRedactedHeaders(jettyRequest);
-                Thread.startVirtualThread(() -> errorStore.record(
-                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders));
+                errorStore.record(
+                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders);
             }
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.

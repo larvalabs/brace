@@ -662,7 +662,7 @@ always there, it just used to present as a stuck thread instead of an exception.
 ## Bundled htmx is now 2.0.10
 
 **What changed.** The htmx served from `/__brace/htmx.min.js` moved from 2.0.4 (Dec 2024) to
-2.0.10 (Apr 2026) — the current stable release. There is no framework API change:
+2.0.10 (Apr 2026). There is no framework API change:
 `req.isHtmx()`, the automatic `Vary: HX-Request`, and the `Cache` page-key split behave
 exactly as before.
 
@@ -682,9 +682,12 @@ HTML (2.0.9); settle lookup escapes selectors with `CSS.escape()` (2.0.10).
 **If you pin your own htmx** — a CDN `<script>` rather than `/__brace/htmx.min.js` — this
 change does not affect you.
 
-**On htmx 4.** htmx 4 is in beta (`4.0.0-beta6` as of this release) and Brace does **not**
-bundle it. There is no rush: the htmx maintainers plan to keep 2.x as npm `latest` into
-early 2027 and have committed to supporting 2.0 indefinitely. See
+**On newer htmx.** htmx 2.0.11 was published on the day of this release; it changes the
+default of `selfRequestsOnly` to `true` (cross-origin htmx requests are blocked unless the app
+sets it back), so Brace stays on 2.0.10 for 0.1.8. htmx 4.0.0 was released on 2026-08-28 under
+npm's `next` tag, and Brace does **not** bundle it. npm `latest` is still 2.x, and the htmx
+maintainers plan to keep it there into early 2027 and have committed to supporting 2.0
+indefinitely. See
 [the htmx 4 evaluation](../2026-07-26-htmx-4-evaluation.md) for what adopting it would cost
 and what it would buy — the short version is that `HX-Request` is unchanged in v4, so
 `req.isHtmx()` and `Vary` survive, but v4 swaps 4xx/5xx responses by default and drops
