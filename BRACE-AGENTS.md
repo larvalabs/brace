@@ -816,10 +816,11 @@ in the brace repo).
 ## Custom Metrics
 
 ```java
-Stats.counter("talks.created");              // increment by 1
-Stats.counter("bytes.uploaded", file.size()); // increment by amount
-Stats.gauge("queue.depth", () -> queue.size()); // sampled each minute
-Stats.timer("api.external", durationMs);     // tracks count, avg, max
+var stats = app.stats();                     // pass to controllers/services via constructors
+stats.counter("talks.created");              // increment by 1
+stats.counter("bytes.uploaded", file.size()); // increment by amount
+stats.gauge("queue.depth", () -> (long) queue.size()); // Supplier<Long>, sampled each minute
+stats.timer("api.external", durationMs);     // tracks count, avg, max
 ```
 
 Metrics appear in `/ops/status` JSON and as sparklines in the dashboard.
