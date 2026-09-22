@@ -24,6 +24,11 @@ class NamedRoutesTest {
                 admin.group("/v2", v2 -> v2.get("/users/{id}", req -> Result.text("u")).name("admin.v2.user"));
             });
             app.get("/links/{id}", req -> View.of("namedLink", "id", req.intPathParam("id")));
+            app.get("/users/{id}/posts", req -> {
+                var query = req.form(PostsQuery.class).value();
+                return Result.text("user " + req.pathParam("id") + " q=" + query.q() + " page=" + query.page());
+            }).name("users.posts");
+            app.get("/query-links/{id}", req -> View.of("namedQueryLink", "id", req.intPathParam("id")));
             app.get("/redirect/{id}", req -> Result.redirect(Url.to(POSTS_SHOW, req.pathParam("id"))));
         });
     }
@@ -74,6 +79,23 @@ class NamedRoutesTest {
         var response = testApp.get("/redirect/9");
         assertEquals(302, response.status());
         assertEquals("/posts/9", response.header("Location"));
+    }
+
+    @Test
+    void queryRecordLinkRoundTripsThroughTheHandler() {
+        var url = Url.to("users.posts", 7, new PostsQuery("red hat & co", 3));
+        assertEquals("/users/7/posts?q=red+hat+%26+co&page=3", url);
+        var response = testApp.get(url);
+        assertEquals(200, response.status());
+        assertEquals("user 7 q=red hat & co page=3", response.body());
+    }
+
+    @Test
+    void templatesCanBuildQueryRecordLinks() {
+        var response = testApp.get("/query-links/5");
+        assertEquals(200, response.status());
+        // JTE escapes '&' in attribute values; browsers decode it back.
+        assertTrue(response.body().contains("href=\"/users/5/posts?q=red+hat&amp;page=2\""), response.body());
     }
 
     @Test

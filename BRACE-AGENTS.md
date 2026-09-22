@@ -152,7 +152,48 @@ Names must be unique and must not start with `/` (a leading `/` means a literal 
 A duplicate name throws at registration; an unknown name throws at the first `Url.to` with
 the registered names listed. `Url.to` resolves against the most recently constructed app,
 so it works in tests via `Brace.test()` without extra wiring. `/ops/routes` shows each
-route's name.
+route's name. The number of path arguments must match the pattern's `{placeholders}`
+exactly — too few or too many throws.
+
+Query parameters — use one record on *both* sides. The handler reads the query with
+`req.form(Record.class)` (query params are bound like form fields); links pass an instance
+as the **last** `Url.to` argument and it becomes the query string. Parameter names are the
+record's component names, so an IDE rename updates the handler and every link together:
+
+```java
+// app/queries/ListQuery.java
+public record ListQuery(String project, String q, Integer page) {
+    public ListQuery {
+        if (q != null && q.isBlank()) q = null;       // normalize: no "q=" for blank searches
+        if (page != null && page == 1) page = null;   // default page never appears in URLs
+    }
+    public int currentPage() { return page == null ? 1 : page; }
+    public ListQuery withPage(int p) { return new ListQuery(project, q, p); }
+}
+
+// handler
+ListQuery query = req.form(ListQuery.class).value();
+
+// links, redirects, templates
+Url.to(Routes.LIST, new ListQuery("punks", "red hat", null))  // "/catalog/list?project=punks&q=red+hat"
+Url.to(Routes.USER_POSTS, user.id, new PostsQuery(2))          // "/users/42/posts?page=2"
+Url.to(Routes.LIST, query.withPage(query.currentPage() + 1))    // next page, filters kept
+```
+
+```html
+<a href="${Url.to(Routes.LIST, query.withPage(query.currentPage() + 1))}">Next</a>
+```
+
+Components are written in declaration order; `null` and empty-string components are
+skipped (an all-null record adds no `?`); primitives are always written, so use boxed types
+(`Integer`, `Boolean`) for optional parameters. Supported component types are the ones
+`req.form` reads back: `String`, `int`/`Integer`, `long`/`Long`, `double`/`Double`,
+`float`/`Float`, `boolean`/`Boolean`, `BigDecimal`, enums, `LocalDate`, `Instant` — any
+other type throws. A record anywhere but last throws. A malformed incoming value (e.g.
+`?page=abc`) binds as `null` with a form error, so `.value()` is still safe to use for
+filters. A query record's component names are
+its public URL contract: renaming one changes the URLs, so bookmarked old links need a
+redirect.
 
 ## Middleware
 
@@ -303,6 +344,7 @@ Redirect.toLocal(req.queryParam("next"))    // 302, local paths only — use for
 // URL generation from route patterns or route names (see Routing → Named routes)
 Url.to("/users/{id}", 42)                   // "/users/42"
 Url.to(Routes.USER, 42)                     // same, from app.get("/users/{id}", ...).name(Routes.USER)
+Url.to(Routes.USERS, new UserQuery("ann", 2)) // "/users?name=ann&page=2" — trailing record = query string
 
 // Headers and cookies
 result.header("X-Custom", "value")          // set a response header (single-value)
