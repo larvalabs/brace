@@ -214,11 +214,60 @@ class UrlTest {
     }
 
     @Test
-    void recordInNonFinalPositionThrows() {
+    void recordFollowedByAPathArgumentThrows() {
+        var ex = assertThrows(IllegalArgumentException.class,
+            () -> Url.to("/users/{id}/posts/{postId}", new UserId(42), 7));
+        assertTrue(ex.getMessage().contains("UserId"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("followed by a path argument"), ex.getMessage());
+    }
+
+    @Test
+    void typedIdRecordBeforeAQueryRecordFailsWithHint() {
+        // Both trailing records are taken as the query, which leaves {id} without a value.
         var ex = assertThrows(IllegalArgumentException.class,
             () -> Url.to("/users/{id}/posts", new UserId(42), new PageQuery(1)));
-        assertTrue(ex.getMessage().contains("UserId"), ex.getMessage());
-        assertTrue(ex.getMessage().contains("last argument"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("UserId record was used as the query string"), ex.getMessage());
+    }
+
+    // Several query records
+
+    record Filters(String project, String q) {}
+
+    @Test
+    void severalQueryRecordsAreWrittenInArgumentOrder() {
+        assertEquals("/catalog/list?project=punks&q=red+hat&page=2",
+            Url.to("/catalog/list", new Filters("punks", "red hat"), new PageQuery(2)));
+        assertEquals("/catalog/list?page=2&project=punks",
+            Url.to("/catalog/list", new PageQuery(2), new Filters("punks", null)));
+    }
+
+    @Test
+    void severalQueryRecordsAfterPathArgs() {
+        assertEquals("/users/42/posts?q=hat&page=3",
+            Url.to("/users/{id}/posts", 42, new Filters(null, "hat"), new PageQuery(3)));
+    }
+
+    @Test
+    void emptyQueryRecordsAddNoSeparators() {
+        assertEquals("/x", Url.to("/x", new Filters(null, null), new PageQuery(null)));
+        assertEquals("/x?page=2", Url.to("/x", new Filters(null, ""), new PageQuery(2)));
+        assertEquals("/x?q=a", Url.to("/x", new Filters(null, "a"), new PageQuery(null)));
+    }
+
+    @Test
+    void duplicateComponentNamesAcrossRecordsThrowEvenWhenNull() {
+        var ex = assertThrows(IllegalArgumentException.class,
+            () -> Url.to("/x", new ListQuery(null, null, null, null), new PageQuery(null)));
+        assertTrue(ex.getMessage().contains("ListQuery and PageQuery both have a component named 'page'"),
+            ex.getMessage());
+    }
+
+    @Test
+    void severalQueryRecordsRoundTripThroughFormBinder() {
+        var url = Url.to("/x", new Filters("punks", "red & hat"), new PageQuery(4));
+        var params = Request.parseSingleValues(url.substring(url.indexOf('?') + 1), true);
+        assertEquals(new Filters("punks", "red & hat"), FormBinder.bind(Filters.class, params).value());
+        assertEquals(new PageQuery(4), FormBinder.bind(PageQuery.class, params).value());
     }
 
     @Test

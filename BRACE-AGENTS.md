@@ -155,45 +155,49 @@ so it works in tests via `Brace.test()` without extra wiring. `/ops/routes` show
 route's name. The number of path arguments must match the pattern's `{placeholders}`
 exactly — too few or too many throws.
 
-Query parameters — use one record on *both* sides. The handler reads the query with
-`req.form(Record.class)` (query params are bound like form fields); links pass an instance
-as the **last** `Url.to` argument and it becomes the query string. Parameter names are the
-record's component names, so an IDE rename updates the handler and every link together:
+Query parameters — use records on *both* sides. The handler reads the query with
+`req.form(Record.class)` (query params are bound like form fields); links pass records
+**after** the path arguments and they become the query string. Parameter names are the
+records' component names, so an IDE rename updates the handler and every link together.
+Give each concern its own record: a plain record of filters per route, and pagination as
+one `Page` record shared by every paginated route, so page rules are written once:
 
 ```java
-// app/queries/ListQuery.java
-public record ListQuery(String project, String q, Integer page) {
-    public ListQuery {
-        if (q != null && q.isBlank()) q = null;       // normalize: no "q=" for blank searches
-        if (page != null && page == 1) page = null;   // default page never appears in URLs
-    }
-    public int currentPage() { return page == null ? 1 : page; }
-    public ListQuery withPage(int p) { return new ListQuery(project, q, p); }
+// app/queries/Page.java — shared by every paginated route
+public record Page(Integer page) {
+    public static Page of(int n) { return new Page(n <= 1 ? null : n); }  // page 1 has one URL
+    public int number() { return page == null || page < 1 ? 1 : page; }
 }
+
+// app/queries/ListQuery.java — just the filters
+public record ListQuery(String project, String q) {}
 
 // handler
 ListQuery query = req.form(ListQuery.class).value();
+int page = req.form(Page.class).value().number();
 
 // links, redirects, templates
-Url.to(Routes.LIST, new ListQuery("punks", "red hat", null))  // "/catalog/list?project=punks&q=red+hat"
-Url.to(Routes.USER_POSTS, user.id, new PostsQuery(2))          // "/users/42/posts?page=2"
-Url.to(Routes.LIST, query.withPage(query.currentPage() + 1))    // next page, filters kept
+Url.to(Routes.LIST, new ListQuery("punks", "red hat"))  // "/catalog/list?project=punks&q=red+hat"
+Url.to(Routes.USER_POSTS, user.id, Page.of(2))           // "/users/42/posts?page=2"
+Url.to(Routes.LIST, query, Page.of(page + 1))            // next page, filters kept
 ```
 
 ```html
-<a href="${Url.to(Routes.LIST, query.withPage(query.currentPage() + 1))}">Next</a>
+<a href="${Url.to(Routes.LIST, query, Page.of(page + 1))}">Next</a>
 ```
 
-Components are written in declaration order; `null` and empty-string components are
-skipped (an all-null record adds no `?`); primitives are always written, so use boxed types
-(`Integer`, `Boolean`) for optional parameters. Supported component types are the ones
-`req.form` reads back: `String`, `int`/`Integer`, `long`/`Long`, `double`/`Double`,
-`float`/`Float`, `boolean`/`Boolean`, `BigDecimal`, enums, `LocalDate`, `Instant` — any
-other type throws. A record anywhere but last throws. A malformed incoming value (e.g.
-`?page=abc`) binds as `null` with a form error, so `.value()` is still safe to use for
-filters. A query record's component names are
-its public URL contract: renaming one changes the URLs, so bookmarked old links need a
-redirect.
+Records are written in argument order and each record's components in declaration order;
+`null` and empty-string components are skipped (all-null records add no `?`); primitives
+are always written, so use boxed types (`Integer`, `Boolean`) for optional parameters. Two
+records declaring the same component name throw, as does a record followed by a path
+argument. Supported component types are the ones `req.form` reads back: `String`,
+`int`/`Integer`, `long`/`Long`, `double`/`Double`, `float`/`Float`, `boolean`/`Boolean`,
+`BigDecimal`, enums, `LocalDate`, `Instant` — any other type throws. A malformed incoming
+value (e.g. `?page=abc`) binds as `null` with a form error, so `.value()` is still safe to
+use for filters. Keep query records plain: normalize incoming values (case, blank strings)
+in the handler that reads them, and pass `null` for anything a link should leave out. A
+query record's component names are its public URL contract: renaming one changes the URLs,
+so bookmarked old links need a redirect.
 
 ## Middleware
 

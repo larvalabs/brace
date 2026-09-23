@@ -5,6 +5,7 @@ import java.lang.reflect.RecordComponent;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -19,11 +20,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * constructed {@link Brace} app (so they work from templates without an app reference) and
  * throw {@link IllegalArgumentException} for an unknown name, listing the registered names.
  * <p>
- * Query strings: if the <b>last</b> argument is a record, it becomes the query string —
- * {@code Url.to("catalog.list", new ListQuery("punks", null, 2))} →
- * {@code "/catalog/list?project=punks&page=2"}. Components are written in declaration order;
- * null and empty-string components are skipped. Use the same record to read the query in the
- * handler with {@code req.form(ListQuery.class)}, so parameter names are written once.
+ * Query strings: records at the <b>end</b> of the arguments become the query string —
+ * {@code Url.to("catalog.list", new ListQuery("punks", null), new Page(2))} →
+ * {@code "/catalog/list?project=punks&page=2"}. Records are written in argument order and each
+ * record's components in declaration order; null and empty-string components are skipped. Two
+ * records declaring the same component name throw. Use the same records to read the query in the
+ * handler with {@code req.form(ListQuery.class)}, so parameter names are written once; several
+ * records let one concern (such as pagination) be a single record shared by many routes.
  * Component types are limited to those {@link FormBinder} reads back.
  * <p>
  * The number of path arguments must match the pattern's {@code {placeholders}} exactly; too
@@ -47,28 +50,27 @@ public class Url {
         String pattern = patternOrName.isEmpty() || patternOrName.startsWith("/")
             ? patternOrName : patternFor(patternOrName);
 
-        Record query = null;
-        Object[] pathArgs = params;
-        if (params.length > 0 && params[params.length - 1] instanceof Record r) {
-            query = r;
-            pathArgs = Arrays.copyOf(params, params.length - 1);
-        }
+        // The trailing run of records is the query; everything before it is path arguments.
+        int firstQuery = params.length;
+        while (firstQuery > 0 && params[firstQuery - 1] instanceof Record) firstQuery--;
+        Object[] pathArgs = Arrays.copyOf(params, firstQuery);
+        Record[] queries = Arrays.copyOfRange(params, firstQuery, params.length, Record[].class);
         for (int i = 0; i < pathArgs.length; i++) {
             if (pathArgs[i] instanceof Record r) {
                 throw new IllegalArgumentException("Url.to(\"" + patternOrName + "\", ...): argument "
                     + (i + 1) + " of " + params.length + " is a record (" + r.getClass().getSimpleName()
-                    + "). A record is only accepted as the last argument, where it becomes the query "
-                    + "string. If it is a path value, pass its field instead (e.g. id.value()).");
+                    + ") followed by a path argument. Records are only accepted at the end, where they "
+                    + "become the query string. If it is a path value, pass its field instead (e.g. id.value()).");
             }
         }
 
-        var path = fromPattern(pattern, pathArgs, query);
-        if (query == null) return path;
+        var path = fromPattern(pattern, pathArgs, queries);
+        if (queries.length == 0) return path;
         if (pattern.indexOf('?') >= 0) {
             throw new IllegalArgumentException("Url.to(\"" + patternOrName + "\", ...): the pattern already "
                 + "contains '?', so a query record can't be appended to it. Move those parameters into the record.");
         }
-        var qs = queryString(query);
+        var qs = queryString(queries);
         return qs.isEmpty() ? path : path + "?" + qs;
     }
 
@@ -87,7 +89,7 @@ public class Url {
         return route.pattern();
     }
 
-    private static String fromPattern(String pattern, Object[] params, Record query) {
+    private static String fromPattern(String pattern, Object[] params, Record[] queries) {
         var result = new StringBuilder();
         int paramIndex = 0;
         var parts = pattern.split("/");
@@ -96,7 +98,7 @@ public class Url {
             result.append("/");
             if (part.startsWith("{") && part.endsWith("}")) {
                 if (paramIndex >= params.length) {
-                    var hint = query == null ? "" : " (the trailing " + query.getClass().getSimpleName()
+                    var hint = queries.length == 0 ? "" : " (the trailing " + queries[0].getClass().getSimpleName()
                         + " record was used as the query string; if it is a path value, pass its field instead)";
                     throw new IllegalArgumentException("Not enough params for pattern: " + pattern
                         + " (expected param for " + part + ")" + hint);
@@ -109,16 +111,32 @@ public class Url {
         if (paramIndex < params.length) {
             throw new IllegalArgumentException("Too many params for pattern: " + pattern + " — it has "
                 + paramIndex + " placeholder(s) but " + params.length + " path argument(s) were passed. "
-                + "For query parameters, pass a record as the last argument: "
+                + "For query parameters, pass records after the path arguments: "
                 + "Url.to(nameOrPattern, pathArgs..., new MyQuery(...)).");
         }
         if (result.isEmpty()) result.append("/");
         return result.toString();
     }
 
-    private static String queryString(Record query) {
-        var meta = QUERY_META.computeIfAbsent(query.getClass(), Url::buildQueryMeta);
+    private static String queryString(Record[] queries) {
         var qs = new StringBuilder();
+        Map<String, Class<?>> seen = queries.length > 1 ? new HashMap<>() : null;
+        for (var query : queries) appendQuery(qs, query, seen);
+        return qs.toString();
+    }
+
+    private static void appendQuery(StringBuilder qs, Record query, Map<String, Class<?>> seen) {
+        var meta = QUERY_META.computeIfAbsent(query.getClass(), Url::buildQueryMeta);
+        if (seen != null) {
+            for (var name : meta.names()) {
+                var other = seen.putIfAbsent(name, query.getClass());
+                if (other != null) {
+                    throw new IllegalArgumentException("Query records " + other.getSimpleName() + " and "
+                        + query.getClass().getSimpleName() + " both have a component named '" + name
+                        + "', so the query string would carry it twice. Rename one, or keep it in one record.");
+                }
+            }
+        }
         for (int i = 0; i < meta.names().length; i++) {
             Object value;
             try {
@@ -134,7 +152,6 @@ public class Url {
               .append('=')
               .append(URLEncoder.encode(text, StandardCharsets.UTF_8));
         }
-        return qs.toString();
     }
 
     /** Text form of a query value, chosen so {@link FormBinder} parses it back to an equal value. */

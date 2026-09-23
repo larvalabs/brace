@@ -10,12 +10,13 @@ used to drop silently.
 
 ## Routing
 
-- **Query strings from records.** Pass a record as the last `Url.to` argument and it
-  becomes the query string: `Url.to(Routes.LIST, new ListQuery("punks", 2))` →
-  `/catalog/list?project=punks&page=2`. The handler reads the same record with
+- **Query strings from records.** Records passed after the path arguments of `Url.to`
+  become the query string: `Url.to(Routes.LIST, new ListQuery("punks"), Page.of(2))` →
+  `/catalog/list?project=punks&page=2`. The handler reads the same records with
   `req.form(ListQuery.class)`, so parameter names are written once and an IDE rename
-  updates the handler and every link together. Nulls are skipped, values are form-encoded,
-  and component types are limited to those `req.form` reads back.
+  updates the handler and every link together. Several records combine, so a concern like
+  pagination can be one record shared by every route. Nulls are skipped, values are
+  form-encoded, and component types are limited to those `req.form` reads back.
 - **`Url.to` throws on surplus path arguments.** Extra arguments used to be ignored,
   producing a link that looked right but dropped a value (typically a filter). Too few and
   too many now both throw `IllegalArgumentException`. Calls with the right number of

@@ -487,7 +487,7 @@ app.getRead("/posts/{id}", posts::show).name(Routes.POST);
 Url.to(Routes.POST, 42)                // "/posts/42"
 Result.redirect(Url.to(Routes.POSTS))  // "/posts"
 
-// query strings: a trailing record, read back in the handler with req.form(PostsQuery.class)
+// query strings: trailing records, read back in the handler with req.form(PostsQuery.class)
 record PostsQuery(String tag, Integer page) {}
 Url.to(Routes.POSTS, new PostsQuery("java", 2))  // "/posts?tag=java&page=2"
 ```
