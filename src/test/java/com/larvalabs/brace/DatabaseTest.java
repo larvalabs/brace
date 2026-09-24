@@ -241,6 +241,102 @@ class DatabaseTest {
         }
     }
 
+    // --- paginate ---
+
+    @Test
+    void paginateCountsAndSlicesWithOrderBy() {
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 5);
+
+            db.beginTransaction();
+            int before = db.queryCount();
+            // ORDER BY in the fragment is dropped from the derived count query.
+            var page = db.paginate(Post.class, "title LIKE ? ORDER BY id DESC", 2, 2, prefix + "%");
+            assertEquals(2, db.queryCount() - before, "count + fetch");
+            assertEquals(5, page.totalCount());
+            assertEquals(3, page.totalPages());
+            assertEquals(2, page.page());
+            assertEquals(List.of(prefix + "_2", prefix + "_1"), page.items().stream().map(p -> p.title).toList());
+            assertTrue(page.hasPrev());
+            assertTrue(page.hasNext());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateClampsOutOfRangePages() {
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 5);
+
+            db.beginTransaction();
+            var past = db.paginate(Post.class, "title LIKE ? ORDER BY id ASC", 99, 2, prefix + "%");
+            assertEquals(3, past.page());
+            assertEquals(List.of(prefix + "_4"), past.items().stream().map(p -> p.title).toList());
+            assertFalse(past.hasNext());
+
+            var before = db.paginate(Post.class, "title LIKE ? ORDER BY id ASC", -3, 2, prefix + "%");
+            assertEquals(1, before.page());
+            assertEquals(2, before.items().size());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateEmptyResultIsPageOneOfOneWithOneQuery() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            int before = db.queryCount();
+            var page = db.paginate(Post.class, "title = ? ORDER BY id", 4, 10, "no-such-title-" + System.nanoTime());
+            assertEquals(1, db.queryCount() - before, "no fetch when the count is zero");
+            assertTrue(page.isEmpty());
+            assertEquals(1, page.page());
+            assertEquals(1, page.totalPages());
+            assertFalse(page.hasPrev());
+            assertFalse(page.hasNext());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateFromRequestReadsPageAndBuildsLinks() {
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 5);
+            var req = new Request("GET", "/posts", java.util.Map.of(),
+                java.util.Map.of("page", "2", "q", "red hat"), java.util.Map.of(), "");
+
+            db.beginTransaction();
+            var page = db.paginate(Post.class, "title LIKE ? ORDER BY id ASC", req, 2, prefix + "%");
+            assertEquals(2, page.page());
+            assertEquals("/posts?q=red+hat", page.prevUrl());
+            assertEquals("/posts?q=red+hat&page=3", page.nextUrl());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateRejectsNonPositivePerPage() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            assertThrows(IllegalArgumentException.class, () -> db.paginate(Post.class, "title = ?", 1, 0, "x"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
     @Test
     void queryPageInstrumentsQueryCount() {
         var db = new Database(factory.openSession());

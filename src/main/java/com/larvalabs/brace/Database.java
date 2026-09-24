@@ -115,6 +115,50 @@ public class Database {
     }
 
     /**
+     * One page of {@code type} plus the totals and links a pager needs. The page number is read
+     * from the request's {@code ?page=} (missing or unparseable is page 1) and clamped to the
+     * last page; the returned {@link Paged} builds its links from the request's URL, so filters
+     * in the query string carry over. Runs a count query and, unless it is zero, one page fetch.
+     *
+     * <pre>{@code
+     * var posts = db.paginate(Post.class, "published = true ORDER BY createdAt DESC", req, 20);
+     * }</pre>
+     *
+     * {@code ORDER BY} belongs in the where-fragment, as for {@link #queryPage}; always order, or
+     * page boundaries are unstable. The count ignores it.
+     */
+    public <T> Paged<T> paginate(Class<T> type, String hqlWhere, Request req, int perPage, Object... params) {
+        return paginate(type, hqlWhere, Paged.requestedPage(req), perPage, params).linkedTo(req);
+    }
+
+    /**
+     * Like {@link #paginate(Class, String, Request, int, Object...)} with an explicit page
+     * number, for JSON APIs and jobs. The result has no links unless you call
+     * {@link Paged#linkedTo(Request)}.
+     */
+    public <T> Paged<T> paginate(Class<T> type, String hqlWhere, int page, int perPage, Object... params) {
+        if (perPage <= 0) throw new IllegalArgumentException("perPage must be > 0 (was " + perPage + ")");
+        long start = System.nanoTime();
+        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        Query<T> query = session.createQuery(hql, type);
+        bindParams(query, params);
+        // Hibernate derives the count from the same query (ORDER BY dropped), so the where
+        // clause is written once.
+        long total = query.getResultCount();
+        queryCount++;
+        int p = Paged.clamp(page, Paged.totalPages(total, perPage));
+        List<T> items = List.of();
+        if (total > 0) {
+            query.setFirstResult((p - 1) * perPage);
+            query.setMaxResults(perPage);
+            items = query.getResultList();
+            queryCount++;
+        }
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        return Paged.of(items, p, perPage, total);
+    }
+
+    /**
      * Batch-fetch all rows of {@code type} where {@code field} is one of the given {@code values}.
      *
      * <p><strong>Security:</strong> {@code field} must be a trusted, hard-coded entity attribute
