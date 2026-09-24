@@ -1,11 +1,13 @@
 # Brace 0.1.9 release notes
 
-> Draft: 0.1.9 is in progress. Source of truth for every item (with before/after examples)
-> is `docs/migrations/brace-0.1.8-to-0.1.9.md`.
+> Source of truth for every item (with before/after examples) is
+> `docs/migrations/brace-0.1.8-to-0.1.9.md`.
 
 ---
 
-Brace 0.1.9 adds query strings and encoding to `Url.to`, and a pagination helper.
+Brace 0.1.9 adds query strings and encoding to `Url.to`, and a pagination helper. Both were
+checked by migrating a production app (larva2's catalog) and comparing 84 of its responses
+before and after.
 
 ## Routing
 
@@ -30,11 +32,16 @@ Brace 0.1.9 adds query strings and encoding to `Url.to`, and a pagination helper
   The page comes from `?page=` and is clamped; the count is derived from the same query.
   `paged.map(fn)` converts entities to view records or DTOs, `Paged.slice(list, req,
   perPage)` pages an in-memory list, and `Paged` serializes to JSON.
+- **An `ORDER BY`-only where-fragment lists every row.** `db.query(Post.class, "ORDER BY
+  id DESC")` and `db.paginate(Post.class, "ORDER BY createdAt DESC", req, 20)` used to build
+  `WHERE ORDER BY ...`, an HQL error, and needed `"1=1 ORDER BY ..."`.
 
 ## Fixes
 
-- **500 errors are recorded before the response is sent**, so a client or test that
-  reads `/ops/errors` right after a 500 always finds it.
+- **Exception messages keep their punctuation in logs and `/ops`.** Redacting secrets
+  from a message that contained any long word (an exception class, a hex address) used to
+  rebuild it with single spaces, dropping parentheses, commas, colons and quotes even when
+  nothing was redacted. Only the secret itself is replaced now.
 
 ## Upgrading
 

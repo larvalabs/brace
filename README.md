@@ -97,7 +97,7 @@ Brace is served from [JitPack](https://jitpack.io) — no authentication require
     <dependency>
         <groupId>com.github.larvalabs</groupId>
         <artifactId>brace</artifactId>
-        <version>v0.1.8</version>
+        <version>v0.1.9</version>
     </dependency>
 </dependencies>
 ```
@@ -109,11 +109,11 @@ repositories {
     maven { url = uri("https://jitpack.io") }
 }
 dependencies {
-    implementation("com.github.larvalabs:brace:v0.1.8")
+    implementation("com.github.larvalabs:brace:v0.1.9")
 }
 ```
 
-Replace `v0.1.8` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
+Replace `v0.1.9` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
 
 ## Quick Start
 
