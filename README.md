@@ -486,10 +486,6 @@ app.getRead("/posts/{id}", posts::show).name(Routes.POST);
 
 Url.to(Routes.POST, 42)                // "/posts/42"
 Result.redirect(Url.to(Routes.POSTS))  // "/posts"
-
-// query strings: trailing records, read back in the handler with req.form(PostsQuery.class)
-record PostsQuery(String tag, Integer page) {}
-Url.to(Routes.POSTS, new PostsQuery("java", 2))  // "/posts?tag=java&page=2"
 ```
 
 ```html
@@ -499,8 +495,7 @@ Url.to(Routes.POSTS, new PostsQuery("java", 2))  // "/posts?tag=java&page=2"
 ```
 
 Group prefixes are included automatically. Duplicate names fail at startup; unknown names
-fail at the first `Url.to` call with the registered names listed, and so does passing too
-few or too many path arguments. `brace new` scaffolds
+fail at the first `Url.to` call with the registered names listed. `brace new` scaffolds
 the `Routes` class for you.
 
 ## htmx

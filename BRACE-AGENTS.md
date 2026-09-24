@@ -152,52 +152,7 @@ Names must be unique and must not start with `/` (a leading `/` means a literal 
 A duplicate name throws at registration; an unknown name throws at the first `Url.to` with
 the registered names listed. `Url.to` resolves against the most recently constructed app,
 so it works in tests via `Brace.test()` without extra wiring. `/ops/routes` shows each
-route's name. The number of path arguments must match the pattern's `{placeholders}`
-exactly — too few or too many throws.
-
-Query parameters — use records on *both* sides. The handler reads the query with
-`req.form(Record.class)` (query params are bound like form fields); links pass records
-**after** the path arguments and they become the query string. Parameter names are the
-records' component names, so an IDE rename updates the handler and every link together.
-Give each concern its own record: a plain record of filters per route, and pagination as
-one `Page` record shared by every paginated route, so page rules are written once:
-
-```java
-// app/queries/Page.java — shared by every paginated route
-public record Page(Integer page) {
-    public static Page of(int n) { return new Page(n <= 1 ? null : n); }  // page 1 has one URL
-    public int number() { return page == null || page < 1 ? 1 : page; }
-}
-
-// app/queries/ListQuery.java — just the filters
-public record ListQuery(String project, String q) {}
-
-// handler
-ListQuery query = req.form(ListQuery.class).value();
-int page = req.form(Page.class).value().number();
-
-// links, redirects, templates
-Url.to(Routes.LIST, new ListQuery("punks", "red hat"))  // "/catalog/list?project=punks&q=red+hat"
-Url.to(Routes.USER_POSTS, user.id, Page.of(2))           // "/users/42/posts?page=2"
-Url.to(Routes.LIST, query, Page.of(page + 1))            // next page, filters kept
-```
-
-```html
-<a href="${Url.to(Routes.LIST, query, Page.of(page + 1))}">Next</a>
-```
-
-Records are written in argument order and each record's components in declaration order;
-`null` and empty-string components are skipped (all-null records add no `?`); primitives
-are always written, so use boxed types (`Integer`, `Boolean`) for optional parameters. Two
-records declaring the same component name throw, as does a record followed by a path
-argument. Supported component types are the ones `req.form` reads back: `String`,
-`int`/`Integer`, `long`/`Long`, `double`/`Double`, `float`/`Float`, `boolean`/`Boolean`,
-`BigDecimal`, enums, `LocalDate`, `Instant` — any other type throws. A malformed incoming
-value (e.g. `?page=abc`) binds as `null` with a form error, so `.value()` is still safe to
-use for filters. Keep query records plain: normalize incoming values (case, blank strings)
-in the handler that reads them, and pass `null` for anything a link should leave out. A
-query record's component names are its public URL contract: renaming one changes the URLs,
-so bookmarked old links need a redirect.
+route's name.
 
 ## Middleware
 
@@ -348,7 +303,6 @@ Redirect.toLocal(req.queryParam("next"))    // 302, local paths only — use for
 // URL generation from route patterns or route names (see Routing → Named routes)
 Url.to("/users/{id}", 42)                   // "/users/42"
 Url.to(Routes.USER, 42)                     // same, from app.get("/users/{id}", ...).name(Routes.USER)
-Url.to(Routes.USERS, new UserQuery("ann", 2)) // "/users?name=ann&page=2" — trailing record = query string
 
 // Headers and cookies
 result.header("X-Custom", "value")          // set a response header (single-value)
