@@ -1,7 +1,5 @@
 # Migrating from Brace 0.1.8 → 0.1.9
 
-> In progress: 0.1.9 is the current `-SNAPSHOT`. This guide is updated as changes land.
-
 This release finishes what 0.1.8's named routes started: query strings and path values are
 encoded for you, and a pagination helper replaces hand-built pagers.
 
@@ -22,7 +20,8 @@ wrong or broken link, or that decoded path parameters itself:
 | Path parameters are decoded | breaking | remove hand-written `URLDecoder.decode(req.pathParam(...))` | [§](#breaking-path-parameters-are-decoded) |
 | Query strings: `Url.query(...)` | new-optional | replace `Url.to(...) + "?k=" + v` | [§](#new-optional-query-strings-with-urlquery) |
 | Pagination: `db.paginate`, `Paged`, `req.urlWith` | new-optional | replace hand-built pagers | [§](#new-optional-pagination-with-paged) |
-| 500 errors are buffered before the response is sent | fix | none | [§](#fix-500-errors-are-buffered-before-the-response-is-sent) |
+| `ORDER BY`-only where-fragment lists every row | new-optional | none; `"1=1 ORDER BY ..."` still works | [§](#new-optional-pagination-with-paged) |
+| Exception messages keep their punctuation in logs and `/ops` | fix | none | [§](#fix-exception-messages-keep-their-punctuation) |
 
 ---
 
@@ -233,13 +232,16 @@ Details:
 
 ---
 
-## Fix: 500 errors are buffered before the response is sent
+## Fix: exception messages keep their punctuation
 
-**Nothing to do.** When a handler threw, `BraceHandler` handed the error to a separate
-virtual thread for recording and sent the 500 immediately, so a client (or a test) could
-see the 500 before the error was in `ErrorStore`'s buffer. The error is now recorded
-before the response is sent. Tests that trigger a 500 and then read `/ops/errors` or call
-`errorStore().flush()` no longer race.
+**Nothing to do.** Before logging an exception message (`http.error` lines, `/ops/status`,
+the `ops_errors` table), Brace redacts anything shaped like a secret. When the message
+contained any word of 16+ characters, such as an exception class name or a hex address, the
+redactor rebuilt the whole message with single spaces, even if nothing was redacted:
+`placeholder(s) ... Url.query(name, value, ...)` came out as
+`placeholder s ... Url.query name value ...`. Only the secret itself is replaced now, and a
+message with nothing to redact is logged unchanged. Errors are still grouped by exception
+type and route, so existing `ops_errors` rows and regression tracking are unaffected.
 
 ## Upgrading
 
