@@ -209,6 +209,10 @@ Details:
   past the end is clamped to the last page.
 - The total is counted from the same query with `ORDER BY` removed, so the where clause is
   written once. A zero count skips the fetch.
+- To page through every row, pass only the ordering: `db.paginate(Post.class, "ORDER BY
+  createdAt DESC", req, 20)`. This works for every where-fragment method (`query`,
+  `queryOne`, `queryPage`, `count`, `exists`); before 0.1.9 it produced
+  `FROM Post WHERE ORDER BY ...`, an HQL syntax error, and needed `"1=1 ORDER BY ..."`.
 - Links are the current URL with only `page` changed, so filters and sort order in the query
   string carry over. Page 1 leaves the parameter out. The URL is recorded when the `Paged` is
   built, so templates call `links()`, `prevUrl()` and `nextUrl()` with no arguments.

@@ -105,6 +105,16 @@ class DatabaseFactoryPostgresIT extends PostgresTestBase {
             assertEquals(5, page.totalCount());
             assertEquals(3, page.totalPages());
             assertEquals(List.of("page_2", "page_1"), page.items().stream().map(p -> p.title).toList());
+
+            // An ORDER BY-only fragment lists every row (no "WHERE ORDER BY"), and its count
+            // drops the ORDER BY, which Postgres would reject next to count(*).
+            db.beginTransaction();
+            var all = db.paginate(Post.class, "ORDER BY createdAt DESC", 1, 2);
+            long counted = db.count(Post.class, "ORDER BY createdAt");
+            db.commitTransaction();
+            assertEquals(5, all.totalCount());
+            assertEquals(5, counted);
+            assertEquals(List.of("page_4", "page_3"), all.items().stream().map(p -> p.title).toList());
         } finally {
             db.close();
         }

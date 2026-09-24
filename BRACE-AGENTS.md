@@ -350,6 +350,7 @@ db.delete(post)                                   // DELETE
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause, returns List
 db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY goes inside the where-fragment
+db.query(Post.class, "ORDER BY id DESC")          // no condition: every row, ordered (no "1=1" needed)
 db.paginate(Post.class, "published = true ORDER BY createdAt DESC", req, 20) // Paged<Post>: ?page=, totals, links
 db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // raw limit/offset, no count
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null

@@ -70,7 +70,7 @@ public class Database {
 
     public <T> List<T> query(Class<T> type, String hqlWhere, Object... params) {
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         List<T> result = query.getResultList();
@@ -103,7 +103,7 @@ public class Database {
         if (limit <= 0) throw new IllegalArgumentException("limit must be > 0 (was " + limit + ")");
         if (offset < 0) throw new IllegalArgumentException("offset must be >= 0 (was " + offset + ")");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         query.setMaxResults(limit);
@@ -139,7 +139,7 @@ public class Database {
     public <T> Paged<T> paginate(Class<T> type, String hqlWhere, int page, int perPage, Object... params) {
         if (perPage <= 0) throw new IllegalArgumentException("perPage must be > 0 (was " + perPage + ")");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         // Hibernate derives the count from the same query (ORDER BY dropped), so the where
@@ -193,7 +193,7 @@ public class Database {
         // Mirrors query() but caps the result set at one row: without setMaxResults(1),
         // a non-unique predicate fetched and hydrated every matching row to return the first.
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         query.setMaxResults(1);
@@ -235,7 +235,7 @@ public class Database {
 
     public <T> long count(Class<T> type, String hqlWhere, Object... params) {
         long start = System.nanoTime();
-        String hql = "SELECT count(*) FROM " + type.getSimpleName() + " WHERE " + convertPositionalParams(hqlWhere);
+        String hql = "SELECT count(*) FROM " + type.getSimpleName() + whereClause(hqlWhere, false);
         Query<Long> query = session.createQuery(hql, Long.class);
         bindParams(query, params);
         long result = query.getSingleResult();
@@ -536,6 +536,22 @@ public class Database {
      * operator) can be escaped as {@code ??}, which emits a single {@code ?}. For fully
      * hand-written SQL, {@link #jdbc(JdbcConsumer)} is the raw escape hatch.
      */
+    private static final Pattern ORDER_BY_ONLY = Pattern.compile("(?is)\\s*order\\s+by\\b.*");
+
+    /**
+     * The clause that follows {@code FROM Type} for a where-fragment: {@code " WHERE ..."}, or no
+     * {@code WHERE} when the fragment has no condition — blank, or only an {@code ORDER BY}
+     * ({@code db.paginate(Post.class, "ORDER BY createdAt DESC", req, 20)} lists every row).
+     * {@code keepOrderBy=false} drops an ORDER BY-only fragment entirely, for counts.
+     */
+    String whereClause(String hqlWhere, boolean keepOrderBy) {
+        if (hqlWhere == null || hqlWhere.isBlank()) return "";
+        if (ORDER_BY_ONLY.matcher(hqlWhere).matches()) {
+            return keepOrderBy ? " " + convertPositionalParams(hqlWhere.strip()) : "";
+        }
+        return " WHERE " + convertPositionalParams(hqlWhere);
+    }
+
     // L6: the rewrite is a pure function of the input string and the inputs are almost always
     // code literals (a naturally small, bounded set), so memoize it instead of re-scanning on
     // every execution. Bounded — once the cache is full we stop adding entries and fall back to a
