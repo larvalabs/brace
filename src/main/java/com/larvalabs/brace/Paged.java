@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * One page of results plus what a pager needs: page number, totals, and prev/next/numbered
@@ -83,6 +84,16 @@ public final class Paged<T> {
             if (!pair[0].equals(PARAM)) pairs.add(pair);
         }
         return new Paged<>(items, page, perPage, totalCount, req.path(), List.copyOf(pairs));
+    }
+
+    /**
+     * The same page with each item converted, keeping page, totals and links — entities to view
+     * records for a template, or to DTOs for {@code Result.json} (never serialize entities).
+     */
+    public <R> Paged<R> map(Function<? super T, ? extends R> fn) {
+        var mapped = new ArrayList<R>(items.size());
+        for (var item : items) mapped.add(fn.apply(item));
+        return new Paged<>(mapped, page, perPage, totalCount, path, query);
     }
 
     @JsonProperty public List<T> items() { return items; }

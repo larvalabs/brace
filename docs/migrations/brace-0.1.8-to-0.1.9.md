@@ -38,8 +38,9 @@ typical case is trying to pass a filter: `Url.to(Routes.LIST, collector)` agains
 `/catalog/list` returned `/catalog/list`, the unfiltered page.
 
 **Who needs to act.** Only code whose `Url.to` calls pass more arguments than the pattern
-uses. The error is thrown at render time, not startup, so exercise your pages (or grep for
-`Url.to(`) after upgrading.
+uses. `Url.to` takes `Object...`, so the compiler can't catch this: the error is thrown when
+the page renders, as a 500. After upgrading, grep for `Url.to(` (including calls that span
+lines) and load every page that builds links, or run a test suite that renders them.
 
 **Before (0.1.8), extra argument silently dropped:**
 
@@ -149,7 +150,18 @@ Details:
 
 To keep the current query and change one parameter (sort or filter toggles), use
 `req.urlWith(name, value)`: on `/posts?tag=java&sort=date`, `req.urlWith("sort", "name")`
-gives `/posts?tag=java&sort=name`, and a `null` value removes the parameter.
+gives `/posts?tag=java&sort=name`, and a `null` value removes the parameter. `req.url()` is
+the current path and query unchanged, which replaces hand-rolled "rebuild the current URL"
+loops for `next=` return addresses:
+
+```java
+// Before
+String next = req.path();
+if (!req.queryParams().isEmpty()) { /* loop, URLEncoder.encode each key and value, join */ }
+return Result.redirect(Url.to(Routes.LOGIN) + "?next=" + URLEncoder.encode(next, UTF_8));
+// After
+return Result.redirect(Url.to(Routes.LOGIN, Url.query("next", req.url())));
+```
 
 ---
 
@@ -202,10 +214,16 @@ Details:
   built, so templates call `links()`, `prevUrl()` and `nextUrl()` with no arguments.
 - `links()` is the first and last page plus two either side of the current one, with
   `Paged.Link.gap()` entries where pages are skipped. `links(n)` changes the spread.
+- `paged.map(fn)` converts the items (entities to view records, or to DTOs for JSON) and
+  keeps the page, totals and links: `db.paginate(Token.class, ..., req, 50).map(TokenView::of)`.
 - `Paged.slice(list, req, perPage)` pages an in-memory list.
   `Paged.of(items, page, perPage, total).linkedTo(req)` wraps a page you fetched yourself.
 - `db.paginate(type, where, page, perPage, params...)` takes an explicit page for JSON APIs;
   `Result.json(paged)` gives `{items, page, perPage, totalCount, totalPages}`.
+- Links repeat the query as the request sent it, so `?project=CryptoPunks&utm_source=x`
+  produces page links with `CryptoPunks` and `utm_source` in them. Your handler normalizes
+  what it reads, so the pages show the same content; only the URLs differ from a hand-built
+  canonical link.
 - If you had a shared `Page` query record carrying `?page=`, delete it. `req.form(Page.class)`
   and `Page.of(n)` links are replaced by `db.paginate(..., req, ...)` and `paged.url(n)`.
 

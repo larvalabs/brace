@@ -144,6 +144,17 @@ class PagedTest {
         assertThrows(IllegalArgumentException.class, () -> Paged.of(List.of(), 1, -1, 0));
     }
 
+    // --- map ---
+
+    @Test
+    void mapConvertsItemsAndKeepsPageAndLinks() {
+        var paged = Paged.slice(numbers(25), get("/n", "q=x&page=2"), 10).map(n -> "#" + n);
+        assertEquals("#11", paged.items().get(0));
+        assertEquals(2, paged.page());
+        assertEquals(25, paged.totalCount());
+        assertEquals("/n?q=x&page=3", paged.nextUrl());
+    }
+
     // --- JSON ---
 
     @Test
@@ -171,6 +182,12 @@ class PagedTest {
     @Test
     void urlWithReplacesRepeatedParamWithOneValue() {
         assertEquals("/posts?tag=rust&sort=date", get("/posts", "tag=java&sort=date&tag=go").urlWith("tag", "rust"));
+    }
+
+    @Test
+    void urlIsPathAndReEncodedQuery() {
+        assertEquals("/posts?tag=java&tag=go&q=a+b", get("/posts", "tag=java&tag=go&q=a%20b").url());
+        assertEquals("/posts", get("/posts", null).url());
     }
 
     @Test

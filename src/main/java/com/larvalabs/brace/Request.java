@@ -186,6 +186,17 @@ public class Request {
     }
 
     /**
+     * This request's path and query string, e.g. {@code /posts?tag=java} — for a {@code next=}
+     * return address or a canonical link. The query is re-encoded, so the result is safe to put in
+     * a link.
+     */
+    public String url() {
+        var qs = new StringBuilder();
+        for (var pair : queryPairs()) Url.appendPair(qs, pair[0], pair[1]);
+        return qs.isEmpty() ? path : path + "?" + qs;
+    }
+
+    /**
      * This request's path and query string with one query parameter set to {@code value},
      * everything else kept — for sort, filter and page links that preserve the current query:
      * {@code req.urlWith("sort", "name")} on {@code /posts?tag=java&sort=date} gives

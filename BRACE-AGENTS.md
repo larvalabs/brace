@@ -233,6 +233,7 @@ req.queryLong("offset", 0)    // with default — returns the default on missing
 req.hasQueryParam("filter")   // boolean
 req.queryParams()             // Map<String, String> (repeated keys: last value wins)
 req.queryParams("tag")        // List<String> of ALL values (?tag=a&tag=b), order preserved — multi-selects/checkbox groups
+req.url()                     // this request's path + query, re-encoded: /posts?tag=java — e.g. for next=
 req.urlWith("sort", "name")   // this URL with one query param set, rest kept: /posts?tag=java&sort=name (null removes)
 
 // Form parameters (from POST body application/x-www-form-urlencoded)
@@ -399,6 +400,7 @@ last page, and derives the count from the same query (ORDER BY is ignored for th
 var posts = db.paginate(Post.class, "tag = ? ORDER BY createdAt DESC", req, 20, tag);
 return View.of("posts/index", "posts", posts);
 
+posts.map(PostView::of)                       // convert items (entities → view records/DTOs), keeps page + links
 Paged.slice(rows, req, 50)                    // in-memory list
 Paged.of(items, page, perPage, total)         // page you fetched yourself; .linkedTo(req) for links
 db.paginate(Post.class, "...", page, 20)      // JSON APIs: explicit page, no links

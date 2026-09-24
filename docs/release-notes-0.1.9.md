@@ -14,7 +14,8 @@ Brace 0.1.9 adds query strings and encoding to `Url.to`, and a pagination helper
   `/catalog/list?project=punks&q=red+hat`. Values are encoded, `null` and empty values are
   left out, and a collection value repeats the name.
 - **`req.urlWith(name, value)`** returns the current URL with one query parameter changed,
-  for sort and filter links that keep the rest of the query.
+  for sort and filter links that keep the rest of the query. **`req.url()`** returns the
+  current path and query, for `next=` return addresses.
 - **Path values are encoded and path parameters decoded**, so `Url.to(Routes.TAG, "red
   hat")` gives `/tags/red%20hat` and the handler's `req.pathParam("name")` gives `"red
   hat"`. Values that can't be a single path segment (`/`, `%`, empty, `.`, `..`) throw.
@@ -27,7 +28,8 @@ Brace 0.1.9 adds query strings and encoding to `Url.to`, and a pagination helper
   `Paged<Post>` with the page's rows, `page()`, `totalPages()`, `totalCount()`, and
   `links()`/`prevUrl()`/`nextUrl()` built from the current URL, so filters carry over.
   The page comes from `?page=` and is clamped; the count is derived from the same query.
-  `Paged.slice(list, req, perPage)` pages an in-memory list, and `Paged` serializes to JSON.
+  `paged.map(fn)` converts entities to view records or DTOs, `Paged.slice(list, req,
+  perPage)` pages an in-memory list, and `Paged` serializes to JSON.
 
 ## Fixes
 
