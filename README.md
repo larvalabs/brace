@@ -170,7 +170,7 @@ public class App {
 Components included in the framework jar as of this release:
 
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting
-- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `withSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
+- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
@@ -251,6 +251,7 @@ db.delete(post)                                   // delete
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause
 db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY inside the where-fragment
+db.paginate(Post.class, "published = true ORDER BY createdAt DESC", req, 20) // Paged<Post>: ?page=, totals, links
 db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // limit, offset (page 2)
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryOneOr404(Post.class, "slug = ?", slug)    // single result or throw 404
@@ -486,6 +487,7 @@ app.getRead("/posts/{id}", posts::show).name(Routes.POST);
 
 Url.to(Routes.POST, 42)                // "/posts/42"
 Result.redirect(Url.to(Routes.POSTS))  // "/posts"
+Url.to(Routes.POSTS, Url.query("tag", "java", "q", q))  // "/posts?tag=java&q=red+hat" (nulls dropped)
 ```
 
 ```html
@@ -494,9 +496,28 @@ Result.redirect(Url.to(Routes.POSTS))  // "/posts"
 <a href="${Url.to(Routes.POST, post.id)}">${post.title}</a>
 ```
 
-Group prefixes are included automatically. Duplicate names fail at startup; unknown names
-fail at the first `Url.to` call with the registered names listed. `brace new` scaffolds
+Group prefixes are included automatically. Path and query values are encoded. Duplicate
+names fail at startup; unknown names fail at the first `Url.to` call with the registered
+names listed, and so does passing too few or too many path arguments. `brace new` scaffolds
 the `Routes` class for you.
+
+## Pagination
+
+`db.paginate` returns a `Paged<T>`: the page's rows, totals, and page links built from the
+current URL, so filters in the query string carry over with no extra code.
+
+```java
+var posts = db.paginate(Post.class, "tag = ? ORDER BY createdAt DESC", req, 20, tag);
+return View.of("posts/index", "posts", posts);
+```
+
+```html
+@for(var link : posts.links())
+  @if(link.gap())…@elseif(link.current())<b>${link.label()}</b>@else<a href="${link.url()}">${link.label()}</a>@endif
+@endfor
+```
+
+`Paged.slice(list, req, perPage)` does the same for an in-memory list.
 
 ## htmx
 

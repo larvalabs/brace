@@ -185,6 +185,53 @@ public class Request {
         return valuesOf(rawQuery, name, true);
     }
 
+    /**
+     * This request's path and query string, e.g. {@code /posts?tag=java} — for a {@code next=}
+     * return address or a canonical link. The query is re-encoded, so the result is safe to put in
+     * a link.
+     */
+    public String url() {
+        var qs = new StringBuilder();
+        for (var pair : queryPairs()) Url.appendPair(qs, pair[0], pair[1]);
+        return qs.isEmpty() ? path : path + "?" + qs;
+    }
+
+    /**
+     * This request's path and query string with one query parameter set to {@code value},
+     * everything else kept — for sort, filter and page links that preserve the current query:
+     * {@code req.urlWith("sort", "name")} on {@code /posts?tag=java&sort=date} gives
+     * {@code /posts?tag=java&sort=name}. A {@code null} or empty value removes the parameter.
+     * Values are re-encoded, so the result is safe to put in a link.
+     */
+    public String urlWith(String name, Object value) {
+        var text = Url.format(value);
+        var qs = new StringBuilder();
+        boolean placed = false;
+        for (var pair : queryPairs()) {
+            if (pair[0].equals(name)) {
+                // Replace in place (first occurrence) so parameter order stays stable across links.
+                if (!placed && text != null && !text.isEmpty()) Url.appendPair(qs, name, text);
+                placed = true;
+            } else {
+                Url.appendPair(qs, pair[0], pair[1]);
+            }
+        }
+        if (!placed && text != null && !text.isEmpty()) Url.appendPair(qs, name, text);
+        return qs.isEmpty() ? path : path + "?" + qs;
+    }
+
+    /** Decoded query {@code {name, value}} pairs in order of appearance, repeats included. */
+    List<String[]> queryPairs() {
+        var pairs = new java.util.ArrayList<String[]>();
+        if (rawQuery != null) {
+            if (!rawQuery.isEmpty()) scanPairs(rawQuery, true, (k, v) -> pairs.add(new String[]{k, v}));
+        } else {
+            // Hand-constructed Request (unit tests): only the single-value map is available.
+            queryParams.forEach((k, v) -> pairs.add(new String[]{k, v}));
+        }
+        return pairs;
+    }
+
     // Form parameter accessors
 
     public String formParam(String name) {

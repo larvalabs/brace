@@ -154,6 +154,21 @@ the registered names listed. `Url.to` resolves against the most recently constru
 so it works in tests via `Brace.test()` without extra wiring. `/ops/routes` shows each
 route's name.
 
+Path arguments must match the pattern's `{placeholders}` exactly (too few or too many
+throws) and are percent-encoded; handlers get them decoded from `req.pathParam`. A value
+containing `/` or `%`, or empty, throws — pass it as a query parameter. Query strings go in
+a trailing `Url.query(name, value, ...)`; never join `"?k=" + v` by hand (it isn't encoded):
+
+```java
+Url.to(Routes.LIST, Url.query("project", slug, "q", q))  // "/catalog/list?project=punks&q=red+hat"
+Url.to(Routes.USER, user.id, Url.query("tab", "posts"))  // "/users/42?tab=posts"
+Url.query("tag", List.of("a", "b"))                      // tag=a&tag=b
+```
+
+`null` and empty values are left out, so optional filters need no `if`s. To keep the current
+query and change one parameter (sort or filter links), use `req.urlWith(name, value)`; for
+page links use `Paged` (see Database → Pagination).
+
 ## Middleware
 
 Before middleware runs before the handler. Return `null` to continue, or a `Result` to short-circuit:
@@ -218,6 +233,8 @@ req.queryLong("offset", 0)    // with default — returns the default on missing
 req.hasQueryParam("filter")   // boolean
 req.queryParams()             // Map<String, String> (repeated keys: last value wins)
 req.queryParams("tag")        // List<String> of ALL values (?tag=a&tag=b), order preserved — multi-selects/checkbox groups
+req.url()                     // this request's path + query, re-encoded: /posts?tag=java — e.g. for next=
+req.urlWith("sort", "name")   // this URL with one query param set, rest kept: /posts?tag=java&sort=name (null removes)
 
 // Form parameters (from POST body application/x-www-form-urlencoded)
 req.formParam("title")        // form param as String
@@ -303,6 +320,7 @@ Redirect.toLocal(req.queryParam("next"))    // 302, local paths only — use for
 // URL generation from route patterns or route names (see Routing → Named routes)
 Url.to("/users/{id}", 42)                   // "/users/42"
 Url.to(Routes.USER, 42)                     // same, from app.get("/users/{id}", ...).name(Routes.USER)
+Url.to(Routes.USERS, Url.query("name", q))  // "/users?name=ann" — trailing Url.query = query string
 
 // Headers and cookies
 result.header("X-Custom", "value")          // set a response header (single-value)
@@ -332,8 +350,9 @@ db.delete(post)                                   // DELETE
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause, returns List
 db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY goes inside the where-fragment
-db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // limit 20, offset 20 → page 2
-//   total for the pager: db.count(Post.class, "published = true")
+db.query(Post.class, "ORDER BY id DESC")          // no condition: every row, ordered (no "1=1" needed)
+db.paginate(Post.class, "published = true ORDER BY createdAt DESC", req, 20) // Paged<Post>: ?page=, totals, links
+db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // raw limit/offset, no count
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryOneOr404(Post.class, "slug = ?", slug)    // single result, or throws 404
 db.queryIn(Post.class, "id", List.of(1, 2, 3))   // IN clause batch lookup
@@ -370,6 +389,39 @@ For DB access outside request lifecycle (jobs, WebSocket):
 dbFactory.withSession(db -> { db.insert(new AuditLog("event")); });
 var count = dbFactory.withSession(db -> db.count(User.class));
 ```
+
+### Pagination
+
+Use `Paged` for any paged list — don't hand-roll page math, page-link strips, or a page
+query record. `db.paginate` reads `?page=` (missing/garbage → 1), clamps past-the-end to the
+last page, and derives the count from the same query (ORDER BY is ignored for the count):
+
+```java
+// handler — pass req; filters stay in the query string and are read as usual
+var posts = db.paginate(Post.class, "tag = ? ORDER BY createdAt DESC", req, 20, tag);
+return View.of("posts/index", "posts", posts);
+
+posts.map(PostView::of)                       // convert items (entities → view records/DTOs), keeps page + links
+Paged.slice(rows, req, 50)                    // in-memory list
+Paged.of(items, page, perPage, total)         // page you fetched yourself; .linkedTo(req) for links
+db.paginate(Post.class, "...", page, 20)      // JSON APIs: explicit page, no links
+                                              // Result.json(paged) → {items, page, perPage, totalCount, totalPages}
+```
+
+```html
+@param Paged<Post> posts
+@for(var post : posts.items()) ... @endfor
+@if(posts.hasPrev())<a href="${posts.prevUrl()}">Prev</a>@endif
+@for(var link : posts.links())
+  @if(link.gap())…@elseif(link.current())<b>${link.label()}</b>@else<a href="${link.url()}">${link.label()}</a>@endif
+@endfor
+@if(posts.hasNext())<a href="${posts.nextUrl()}">Next</a>@endif
+```
+
+Links are the current URL with only `page` changed, so active filters and sort carry over;
+page 1 drops the parameter. `links()` is first, last, and two either side of the current
+page, with gaps (`links(n)` for a different spread). Also: `page()`, `totalPages()` (≥ 1),
+`totalCount()`, `perPage()`, `isEmpty()`, `url(n)`.
 
 ## Entities
 
@@ -1000,6 +1052,7 @@ use it instead of re-deriving the verbose version:
       .collect(Collectors.toMap(s -> s.id, s -> s));
   ```
 - **Sorting/paging:** ORDER BY belongs inside the query's where-fragment
-  (`db.query`/`db.queryPage`), not in-memory sorts — see §Database.
+  (`db.query`/`db.paginate`), not in-memory sorts; paged lists use `db.paginate` + `Paged`
+  links — see §Database → Pagination.
 - **Aggregates:** one `db.hql` projection (`SELECT AVG(...), COUNT(...) ...`), not
   fetch-rows-and-loop-sum — see §Database.

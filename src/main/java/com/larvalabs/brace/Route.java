@@ -79,8 +79,37 @@ public class Route {
         if (!matcher.matches()) return null;
         var params = new LinkedHashMap<String, String>();
         for (int i = 0; i < paramNames.size(); i++) {
-            params.put(paramNames.get(i), matcher.group(i + 1));
+            params.put(paramNames.get(i), decodeSegment(matcher.group(i + 1)));
         }
         return params;
+    }
+
+    /**
+     * Percent-decode a matched path segment (the request path arrives still encoded), so
+     * {@code /tags/red%20hat} gives {@code "red hat"} and round-trips with {@link Url#to}.
+     * Path decoding, not form decoding: {@code +} stays a literal plus. A malformed escape
+     * leaves the segment as it arrived.
+     */
+    static String decodeSegment(String segment) {
+        if (segment.indexOf('%') < 0) return segment;
+        var bytes = new java.io.ByteArrayOutputStream(segment.length());
+        for (int i = 0; i < segment.length(); i++) {
+            char c = segment.charAt(i);
+            if (c == '%') {
+                if (i + 2 >= segment.length()) return segment;
+                int hi = Character.digit(segment.charAt(i + 1), 16);
+                int lo = Character.digit(segment.charAt(i + 2), 16);
+                if (hi < 0 || lo < 0) return segment;
+                bytes.write((hi << 4) | lo);
+                i += 2;
+            } else if (c < 0x80) {
+                bytes.write(c);
+            } else {
+                int cp = segment.codePointAt(i);
+                bytes.writeBytes(Character.toString(cp).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                i += Character.charCount(cp) - 1;
+            }
+        }
+        return bytes.toString(java.nio.charset.StandardCharsets.UTF_8);
     }
 }

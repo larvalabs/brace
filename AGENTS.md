@@ -61,7 +61,8 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Http` | Fluent outbound HTTP client over `java.net.http` |
 | `RateLimiter` | Per-IP / per-key rate-limiting middleware |
 | `Assets` | Asset URL fingerprinting for cache busting |
-| `Url` | URL generation from route patterns (`Url.to("/users/{id}", 42)`) |
+| `Url` | URL generation from route patterns or names (`Url.to("/users/{id}", 42)`), `Url.query(...)` query strings |
+| `Paged` | One page of results plus totals and page links (`db.paginate`, `Paged.slice`) |
 | `WsContext` | WebSocket session wrapper (send, rooms, broadcast) |
 | `UploadedFile` | Multipart upload (filename, content type, bytes) |
 | `Notifier` | Regression notification hook — `LogNotifier`, `WebhookNotifier`, `MailerNotifier` |

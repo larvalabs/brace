@@ -142,4 +142,16 @@ class RouterTest {
         assertTrue(router.names().isEmpty());
         assertNull(router.byName("posts"));
     }
+
+    @Test
+    void pathParamsArePercentDecoded() {
+        router.add("GET", "/tags/{name}", this::dummyHandler);
+        assertEquals("red hat", router.match("GET", "/tags/red%20hat").pathParams().get("name"));
+        assertEquals("café", router.match("GET", "/tags/caf%C3%A9").pathParams().get("name"));
+        // Path decoding, not form decoding: '+' is a literal plus.
+        assertEquals("c++", router.match("GET", "/tags/c++").pathParams().get("name"));
+        // A malformed escape is left as it arrived rather than failing the match.
+        assertEquals("50%zz", router.match("GET", "/tags/50%zz").pathParams().get("name"));
+        assertEquals("abc", router.match("GET", "/tags/abc").pathParams().get("name"));
+    }
 }

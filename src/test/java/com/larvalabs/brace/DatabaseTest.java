@@ -241,6 +241,144 @@ class DatabaseTest {
         }
     }
 
+    // --- paginate ---
+
+    @Test
+    void paginateCountsAndSlicesWithOrderBy() {
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 5);
+
+            db.beginTransaction();
+            int before = db.queryCount();
+            // ORDER BY in the fragment is dropped from the derived count query.
+            var page = db.paginate(Post.class, "title LIKE ? ORDER BY id DESC", 2, 2, prefix + "%");
+            assertEquals(2, db.queryCount() - before, "count + fetch");
+            assertEquals(5, page.totalCount());
+            assertEquals(3, page.totalPages());
+            assertEquals(2, page.page());
+            assertEquals(List.of(prefix + "_2", prefix + "_1"), page.items().stream().map(p -> p.title).toList());
+            assertTrue(page.hasPrev());
+            assertTrue(page.hasNext());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateClampsOutOfRangePages() {
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 5);
+
+            db.beginTransaction();
+            var past = db.paginate(Post.class, "title LIKE ? ORDER BY id ASC", 99, 2, prefix + "%");
+            assertEquals(3, past.page());
+            assertEquals(List.of(prefix + "_4"), past.items().stream().map(p -> p.title).toList());
+            assertFalse(past.hasNext());
+
+            var before = db.paginate(Post.class, "title LIKE ? ORDER BY id ASC", -3, 2, prefix + "%");
+            assertEquals(1, before.page());
+            assertEquals(2, before.items().size());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateEmptyResultIsPageOneOfOneWithOneQuery() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            int before = db.queryCount();
+            var page = db.paginate(Post.class, "title = ? ORDER BY id", 4, 10, "no-such-title-" + System.nanoTime());
+            assertEquals(1, db.queryCount() - before, "no fetch when the count is zero");
+            assertTrue(page.isEmpty());
+            assertEquals(1, page.page());
+            assertEquals(1, page.totalPages());
+            assertFalse(page.hasPrev());
+            assertFalse(page.hasNext());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateFromRequestReadsPageAndBuildsLinks() {
+        var db = new Database(factory.openSession());
+        try {
+            String prefix = seedPosts(db, 5);
+            var req = new Request("GET", "/posts", java.util.Map.of(),
+                java.util.Map.of("page", "2", "q", "red hat"), java.util.Map.of(), "");
+
+            db.beginTransaction();
+            var page = db.paginate(Post.class, "title LIKE ? ORDER BY id ASC", req, 2, prefix + "%");
+            assertEquals(2, page.page());
+            assertEquals("/posts?q=red+hat", page.prevUrl());
+            assertEquals("/posts?q=red+hat&page=3", page.nextUrl());
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void orderByOnlyFragmentMeansEveryRow() {
+        var db = new Database(factory.openSession());
+        try {
+            seedPosts(db, 3);
+
+            db.beginTransaction();
+            long all = db.count(Post.class);
+            // Used to build "FROM Post WHERE ORDER BY id DESC", an HQL syntax error.
+            var desc = db.query(Post.class, "ORDER BY id DESC");
+            assertEquals(all, desc.size());
+            assertTrue(desc.get(0).id > desc.get(1).id);
+            assertEquals(desc.get(0).id, db.queryOne(Post.class, "  order by id desc").id);
+            assertEquals(2, db.queryPage(Post.class, "ORDER BY id", 2, 0).size());
+            var page = db.paginate(Post.class, "ORDER BY id DESC", 1, 2);
+            assertEquals(all, page.totalCount());
+            assertEquals(desc.get(0).id, page.items().get(0).id);
+            // Counts ignore an ORDER BY-only fragment; a blank fragment is every row too.
+            assertEquals(all, db.count(Post.class, "ORDER BY id"));
+            assertEquals(all, db.count(Post.class, ""));
+            assertTrue(db.exists(Post.class, "ORDER BY id"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void whereClauseKeepsConditionsAndDetectsOrderByOnly() {
+        var db = new Database(factory.openSession());
+        try {
+            assertEquals(" WHERE a = ?1 ORDER BY id", db.whereClause("a = ? ORDER BY id", true));
+            assertEquals(" ORDER BY id", db.whereClause("  ORDER BY id", true));
+            assertEquals("", db.whereClause("ORDER BY id", false));
+            assertEquals("", db.whereClause(" ", true));
+            // A column that merely starts with "order" is a condition, not an ORDER BY.
+            assertEquals(" WHERE orderBy = ?1", db.whereClause("orderBy = ?", true));
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void paginateRejectsNonPositivePerPage() {
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            assertThrows(IllegalArgumentException.class, () -> db.paginate(Post.class, "title = ?", 1, 0, "x"));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+    }
+
     @Test
     void queryPageInstrumentsQueryCount() {
         var db = new Database(factory.openSession());

@@ -20,7 +20,8 @@ file is indistinguishable from a *lost* one. Keep the in-progress guide (ending 
 | 0.1.4 → 0.1.5 | ✅ `brace-0.1.4-to-0.1.5.md` |
 | 0.1.5 → 0.1.6 | ✅ `brace-0.1.5-to-0.1.6.md` |
 | 0.1.6 → 0.1.7 | ✅ `brace-0.1.6-to-0.1.7.md` |
-| 0.1.7 → 0.1.8 | ✅ `brace-0.1.7-to-0.1.8.md` (in progress — 0.1.8 is the current `-SNAPSHOT`) |
+| 0.1.7 → 0.1.8 | ✅ `brace-0.1.7-to-0.1.8.md` |
+| 0.1.8 → 0.1.9 | ✅ `brace-0.1.8-to-0.1.9.md` (in progress — 0.1.9 is the current `-SNAPSHOT`) |
 
 ## Backfill complete
 

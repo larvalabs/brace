@@ -81,4 +81,42 @@ class DatabaseFactoryPostgresIT extends PostgresTestBase {
             db2.close();
         }
     }
+
+    @Test
+    void paginateDerivesCountFromAnOrderedQueryOnPostgres() {
+        // Postgres rejects an ORDER BY on a non-grouped column next to count(*), so this guards
+        // that Hibernate's getResultCount() really drops the ORDER BY from the where-fragment.
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            for (int i = 0; i < 5; i++) {
+                var p = new Post();
+                p.title = "page_" + i;
+                p.body = "b";
+                p.createdAt = Instant.now().plusSeconds(i);
+                db.insert(p);
+            }
+            db.commitTransaction();
+
+            db.beginTransaction();
+            var page = db.paginate(Post.class, "title LIKE ? ORDER BY createdAt DESC", 2, 2, "page_%");
+            db.commitTransaction();
+
+            assertEquals(5, page.totalCount());
+            assertEquals(3, page.totalPages());
+            assertEquals(List.of("page_2", "page_1"), page.items().stream().map(p -> p.title).toList());
+
+            // An ORDER BY-only fragment lists every row (no "WHERE ORDER BY"), and its count
+            // drops the ORDER BY, which Postgres would reject next to count(*).
+            db.beginTransaction();
+            var all = db.paginate(Post.class, "ORDER BY createdAt DESC", 1, 2);
+            long counted = db.count(Post.class, "ORDER BY createdAt");
+            db.commitTransaction();
+            assertEquals(5, all.totalCount());
+            assertEquals(5, counted);
+            assertEquals(List.of("page_4", "page_3"), all.items().stream().map(p -> p.title).toList());
+        } finally {
+            db.close();
+        }
+    }
 }
