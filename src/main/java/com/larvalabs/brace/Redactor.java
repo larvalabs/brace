@@ -86,11 +86,11 @@ public class Redactor {
         Pattern.compile("[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]+\\.[A-Za-z0-9_\\-]{10,}");
 
     /**
-     * Delimiters used to split exception messages into candidate tokens for
-     * value-shaped redaction: whitespace, quotes, commas, colons, semicolons,
-     * equals, and parentheses.
+     * A candidate token in an exception message for value-shaped redaction: a run of
+     * characters between delimiters (whitespace, quotes, commas, colons, semicolons,
+     * equals, parentheses and brackets).
      */
-    private static final Pattern MESSAGE_DELIMITERS = Pattern.compile("[\\s\"'`,;:=()\\[\\]{}]+");
+    private static final Pattern MESSAGE_TOKEN = Pattern.compile("[^\\s\"'`,;:=()\\[\\]{}]+");
 
     private Redactor() {}
 
@@ -192,36 +192,29 @@ public class Redactor {
     }
 
     /**
-     * Redact high-entropy tokens embedded in an exception message. The message is
-     * split on common delimiters (whitespace, quotes, punctuation) and each token
-     * that looks like a secret (same heuristic as {@link #redactPath}) is replaced
-     * with {@code [redacted]}.
-     *
-     * <p>Tokens that were joined by a delimiter run are reassembled with a single
-     * space so the resulting string is readable; the exact original whitespace is
-     * not preserved.
+     * Redact high-entropy tokens embedded in an exception message. Each token between
+     * common delimiters (whitespace, quotes, punctuation) that looks like a secret
+     * (same heuristic as {@link #redactPath}) is replaced with {@code [redacted]} in
+     * place; everything else, delimiters included, is kept exactly as it was. A
+     * message with nothing to redact is returned unchanged.
      */
     public static String redactMessage(String message) {
         if (message == null || message.isEmpty()) return message;
         // Check for JWT at the whole-message level first (message may be just a token)
         if (JWT_SHAPE.matcher(message).matches()) return PLACEHOLDER;
-        String[] tokens = MESSAGE_DELIMITERS.split(message, -1);
-        // Fast path: no token is long enough to be a secret
-        boolean anyCandidate = false;
-        for (String t : tokens) {
-            if (t.length() >= MIN_SECRET_LENGTH) { anyCandidate = true; break; }
+        var matcher = MESSAGE_TOKEN.matcher(message);
+        StringBuilder out = null;
+        int copied = 0;
+        while (matcher.find()) {
+            // Length check first: most tokens are short words and never reach the regexes.
+            if (matcher.end() - matcher.start() < MIN_SECRET_LENGTH) continue;
+            if (!isSecretShaped(matcher.group())) continue;
+            if (out == null) out = new StringBuilder(message.length());
+            out.append(message, copied, matcher.start()).append("[redacted]");
+            copied = matcher.end();
         }
-        if (!anyCandidate) return message;
-        // Replace token by token; rebuild with single spaces as separators so the
-        // message stays readable. Leading/trailing delimiters produce empty strings
-        // at the split edges — these are included as empty strings in the output.
-        var out = new StringBuilder(message.length());
-        for (int i = 0; i < tokens.length; i++) {
-            if (i > 0) out.append(' ');
-            String t = tokens[i];
-            out.append(isSecretShaped(t) ? "[redacted]" : t);
-        }
-        return out.toString();
+        if (out == null) return message;
+        return out.append(message, copied, message.length()).toString();
     }
 
     /**

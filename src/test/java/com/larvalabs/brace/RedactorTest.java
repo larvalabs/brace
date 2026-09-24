@@ -172,16 +172,27 @@ class RedactorTest {
 
     @Test
     void redactMessageLeavesShortTokensUntouched() {
-        // All tokens here are well below MIN_SECRET_LENGTH — nothing should be redacted.
-        // Note: the colon after "NullPointerException" is a delimiter, so the reconstructed
-        // message won't contain it, but no token should be replaced with [redacted].
         String message = "NullPointerException: field was null";
-        String result = Redactor.redactMessage(message);
-        assertFalse(result.contains("[redacted]"), "no token should be redacted in: " + result);
-        // All original words should still be present
-        assertTrue(result.contains("NullPointerException"));
-        assertTrue(result.contains("field"));
-        assertTrue(result.contains("null"));
+        assertEquals(message, Redactor.redactMessage(message));
+    }
+
+    @Test
+    void redactMessageKeepsPunctuationWhenNothingIsRedacted() {
+        // "IllegalArgumentException" is long enough to be a candidate, but isn't secret-shaped
+        // (no digit). The message used to come back rebuilt with single spaces, losing the
+        // parentheses, commas and colon: "placeholder s but 1 path argument s".
+        String message = "Too many params for pattern: /catalog/list — it has 0 placeholder(s) but "
+            + "1 path argument(s) were passed. Pass Url.query(name, value, ...) instead "
+            + "(IllegalArgumentException).";
+        assertEquals(message, Redactor.redactMessage(message));
+    }
+
+    @Test
+    void redactMessageReplacesOnlyTheSecretAndKeepsTheRest() {
+        String token = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        assertEquals("Bad token (key=[redacted], user: bob).",
+            Redactor.redactMessage("Bad token (key=" + token + ", user: bob)."));
+        assertEquals("  [redacted]\n[redacted]:", Redactor.redactMessage("  " + token + "\n" + token + ":"));
     }
 
     // ---- isSecretShaped tests ----
