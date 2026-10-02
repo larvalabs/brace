@@ -109,15 +109,16 @@ public class RegressionTracker implements ErrorStore.RegressionListener {
      * after this process's start are recorded (without notifying, ignoring warmup). Only meaningful
      * for the in-memory store — the shared Postgres store already persists the set across restarts,
      * so seeding there is unnecessary and skipped.
+     *
+     * <p>Reads the {@code since}-filtered list, which is uncapped: the unfiltered one stops at
+     * {@link ErrorStore#LIST_LIMIT}, and a kind left out of the seed would notify again if it
+     * were resolved and then recurred.
      */
     public void seed(ErrorStore errorStore) {
         if (errorStore == null || store instanceof PostgresRegressionStore) return;
-        for (var err : errorStore.list(null)) {
-            Instant firstSeen = (Instant) err.get("firstSeen");
-            if (firstSeen != null && !firstSeen.isBefore(startedAt)) {
-                add((String) err.get("errorType"), (String) err.get("route"),
-                    (String) err.get("message"), firstSeen, false);
-            }
+        for (var err : errorStore.list(null, startedAt)) {
+            add((String) err.get("errorType"), (String) err.get("route"),
+                (String) err.get("message"), (Instant) err.get("firstSeen"), false);
         }
     }
 
