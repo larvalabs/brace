@@ -12,7 +12,7 @@ Active plans:
 
 Unmerged branches (open work that already has code; rebase onto `main` before merging):
 - `origin/claude/correctness-review-ey31yz` — correctness review (2026-07-26), 17 commits, 54 behind `main`: M6–M12 and L1–L12 fixes (DST-correct daily jobs, `SameSite=None` implies `Secure`, isolated WebSocket sends, header-injection/encoding/validation fixes), migration-guide entries and a review record. Some fixes already landed separately (0.1.9's `Url.to` path encoding, `SameSite=None` turning on `Secure`); reconcile on rebase.
-- `origin/claude/brace-streaming-uploads-7uwm7s` — streaming uploads and responses (2026-07-26), 6 commits, 31 behind: multipart spill-to-disk, streaming `Storage` uploads, streamed response bodies with Range support, docs. Closes the Tier 2 upload-spooling item.
+- `origin/claude/brace-streaming-uploads-7uwm7s` — streaming uploads and responses (2026-07-26). *Landed: rebased onto the 0.1.10 line as `0.1.10/streaming-io` (2026-10-02); the old branch can be deleted once that merges.*
 - `origin/claude/rate-limiter-proxy-aware-am8rhb` — `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies (1 commit, 61 behind).
 - `origin/claude/htmx-v4-upgrade-assessment-nkmydq` — htmx 4.0.0 GA assessment doc (1 commit): adopt later, as its own release.
 - `origin/begin-0.1.10-snapshot` — bumps `pom.xml` to `0.1.10-SNAPSHOT` (1 commit, on top of `main`).
@@ -188,7 +188,7 @@ Surfaced 2026-06-04 by a full audit of single-server architecture assumptions �
 ## Tier 2 — Production Maturity
 
 - [x] Constant-time CSRF token comparison — use `MessageDigest.isEqual()` instead of `String.equals()` in Csrf.validateToken()
-- [ ] Upload spooling/streaming — small files in memory, larger files spooled to temp storage, configurable thresholds and limits *Implemented but unmerged: branch `claude/brace-streaming-uploads-7uwm7s` (multipart spill-to-disk, streaming `Storage` uploads, streamed responses with Range support, docs). 31 commits behind `main`; needs a rebase.*
+- [x] *Done (0.1.10): multipart parts over `uploadMemoryThreshold` (default 1MB) spill to `uploadTempDir`, `Storage.put` streams, `Result.file`/`stream` stream responses with Range support (branch `0.1.10/streaming-io`).* Upload spooling/streaming — small files in memory, larger files spooled to temp storage, configurable thresholds and limits
 - [ ] CSP helpers — `SecurityHeaders.Builder.contentSecurityPolicy(String)` exists as a raw setter (`SecurityHeaders.java:107`), but no structured CSP builder, no per-request nonce generation, no safe defaults preset (`default-src 'self'; script-src 'self' 'nonce-…'`). Adding the builder + a `csp(nonce)` template helper is the missing piece.
 - [x] *Done: `Cache-Control` + `ETag` on static files (see the Tier 1 `staticFiles` item). `Last-Modified` not sent; ETag revalidation covers it.* Static asset caching — `Cache-Control`, `ETag`, `Last-Modified`, optional immutable asset mode
 - [x] Asset fingerprinting helper + template tag — `Assets.url("/assets/app.css")` → `/assets/app.css?v=<md5-prefix>`. Hash computed from file contents, cached per `(path, mtime)`, so redeploys with unchanged files don't bust browser/CDN caches. Pairs with static-asset caching above: long `max-age` on the origin, cache invalidation via URL change.
