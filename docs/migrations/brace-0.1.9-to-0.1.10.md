@@ -91,4 +91,14 @@ shares (don't modify it afterwards).
 
 **Who needs to act.** No one.
 
+### Fix: an unfiltered error list is capped at 500 rows
+
+**What changed.** `GET /ops/errors` (and `ErrorStore.list(status)`) without `?since=` returns
+at most the 500 most recently seen errors again, newest first, instead of every stored row
+with its full stack trace and request detail. A `?since=`-filtered list is not capped. Per-id
+detail at `/ops/errors/{id}` is unchanged.
+
+**Who needs to act.** Only tooling that pages through the full unfiltered list expecting more
+than 500 rows. Pass `?since=` for a complete window instead.
+
 <!-- end section: merge-restore -->
