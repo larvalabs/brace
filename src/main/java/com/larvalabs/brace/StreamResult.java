@@ -10,7 +10,7 @@ import java.util.function.Consumer;
  * A response whose body is streamed rather than held in memory.
  *
  * <p>Built through the {@link Result} factories — {@link Result#file}, {@link Result#stream},
- * {@link Result#download(Path, String)} — not directly. The framework writes it with a bounded
+ * {@link Result#download(Path, String)}, {@link Result#sse} — not directly. The framework writes it with a bounded
  * buffer, so the response costs the same whether it is 4 KB or 4 GB.
  *
  * <h2>What a streaming response cannot do</h2>
@@ -34,7 +34,7 @@ import java.util.function.Consumer;
 public class StreamResult extends Result {
 
     /** Where the bytes come from. */
-    sealed interface Body permits FileBody, StreamBody, WriterBody {}
+    sealed interface Body permits FileBody, StreamBody, WriterBody, EventsBody {}
 
     /**
      * A byte range of a file. {@code offset}/{@code length} carry {@code Range} support:
@@ -47,6 +47,9 @@ public class StreamResult extends Result {
 
     /** Content generated on demand — CSV, ZIP, NDJSON. Always chunked. */
     record WriterBody(Consumer<OutputStream> writer) implements Body {}
+
+    /** A Server-Sent Events stream, open until the producer returns or the client leaves. */
+    record EventsBody(EventStream.Producer producer) implements Body {}
 
     private final Body streamBody;
 

@@ -443,14 +443,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
+            //
+            // An event stream is recorded before it is written: respond() runs it for as long as
+            // the client stays, and an hours-long "request" would swamp the latency figures. Its
+            // duration is the handler's, i.e. the time to open the stream.
+            boolean eventStream = result instanceof StreamResult s
+                && s.streamBody() instanceof StreamResult.EventsBody;
+            if (eventStream) recordRequest(method, path, result.status(), startNanos, db);
             respond(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure);
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
-            if (stats != null) {
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(method, path, result.status(), durationUs, qc, qu);
-                Log.request(method, path, result.status(), durationUs, qc, qu);
-            }
+            if (!eventStream) recordRequest(method, path, result.status(), startNanos, db);
             return true;
 
         } catch (PayloadTooLargeException e) {
@@ -530,6 +531,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // call below finds nothing left to release.
             if (braceRequest != null) braceRequest.releaseUploads();
         }
+    }
+
+    private void recordRequest(String method, String path, int status, long startNanos, Database db) {
+        if (stats == null) return;
+        var durationUs = (System.nanoTime() - startNanos) / 1000;
+        int qc = db != null ? db.queryCount() : 0;
+        long qu = db != null ? db.queryDurationUs() : 0;
+        stats.recordRequest(method, path, status, durationUs, qc, qu);
+        Log.request(method, path, status, durationUs, qc, qu);
     }
 
     /*
@@ -803,6 +813,23 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     return;
                 }
                 completing.succeeded();
+            }
+            case StreamResult.EventsBody events -> {
+                var stream = new EventStream(Content.Sink.asOutputStream(response));
+                // Server stop or idle timeout: Jetty fails the request without a write of ours
+                // failing, so wake the producer from here rather than at its next send.
+                response.getRequest().addFailureListener(stream::disconnect);
+                Throwable failure = stream.run(events.producer());
+                if (failure == null) {
+                    completing.succeeded();
+                } else if (stream.disconnected()) {
+                    // The client leaving is how an event stream normally ends, not a failed
+                    // response, so skip the response.stream.failed event.
+                    closeQuietly(onWritten);
+                    callback.failed(failure);
+                } else {
+                    completing.failed(failure);
+                }
             }
         }
     }

@@ -113,6 +113,31 @@ public class Result {
         return new StreamResult(200, contentType, new StreamResult.WriterBody(writer), -1);
     }
 
+    /**
+     * A Server-Sent Events stream. The producer runs once the handler returns, sends events
+     * through the {@link EventStream} as they happen, and ends the stream by returning. Each event
+     * is flushed as it is sent.
+     *
+     * <pre>{@code
+     * app.get("/feed", req -> Result.sse(events -> {
+     *     String since = req.header("Last-Event-ID");   // set when the browser reconnects
+     *     for (var item : feed.subscribe(since)) {        // blocks until the next item
+     *         events.send("item", item.html(), item.id());
+     *     }
+     * }));
+     * }</pre>
+     *
+     * <p>The producer runs after the request transaction commits, holding no database connection;
+     * see {@link EventStream} for database access, disconnects and heartbeats.
+     */
+    public static Result sse(EventStream.Producer producer) {
+        return new StreamResult(200, "text/event-stream", new StreamResult.EventsBody(producer), -1)
+            .header("Cache-Control", "no-cache")
+            // nginx buffers proxied responses by default, which holds events back until a buffer
+            // fills. This header turns that off per response; other proxies ignore it.
+            .header("X-Accel-Buffering", "no");
+    }
+
     /** Whether this response's body is streamed rather than materialized. */
     public boolean isStreaming() {
         return false;
