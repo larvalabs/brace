@@ -20,8 +20,18 @@ public class JobScheduler {
         int failCount, Instant nextRun, String lastMessage
     ) {}
 
+    /**
+     * {@code dailyAt} is the configured local time for a {@code daily(...)} job, null for an
+     * interval job. It is what makes DST-correct rescheduling possible (M11): the next run is
+     * recomputed from the wall clock each time rather than assumed to be exactly 24h later.
+     */
     private record RegisteredJob(String name, String schedule, long periodMs, long initialDelayMs,
-                                Job job, boolean local) {}
+                                Job job, boolean local, LocalTime dailyAt) {
+        RegisteredJob(String name, String schedule, long periodMs, long initialDelayMs,
+                      Job job, boolean local) {
+            this(name, schedule, periodMs, initialDelayMs, job, local, null);
+        }
+    }
 
     private final CopyOnWriteArrayList<RegisteredJob> registeredJobs = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<JobStatus> statuses = new CopyOnWriteArrayList<>();
@@ -62,7 +72,8 @@ public class JobScheduler {
         LocalTime targetTime = LocalTime.parse(time);
         long initialDelayMs = computeDelayUntil(targetTime);
         long periodMs = Duration.ofHours(24).toMillis();
-        var rj = new RegisteredJob(name, "daily at " + time, periodMs, initialDelayMs, job, false);
+        var rj = new RegisteredJob(name, "daily at " + time, periodMs, initialDelayMs, job, false,
+            targetTime);
         registeredJobs.add(rj);
         Instant nextRun = Instant.now().plusMillis(initialDelayMs);
         statuses.add(new JobStatus(name, "daily at " + time, null, 0, "pending", null, 0, nextRun, null));
@@ -73,10 +84,32 @@ public class JobScheduler {
         if (scheduler != null) {
             final int index = registeredJobs.size() - 1;
             seedRunRow(name);
-            scheduler.scheduleAtFixedRate(() -> {
-                Thread.startVirtualThread(() -> executeJob(index, rj));
-            }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
+            scheduleDaily(index, rj, rj.initialDelayMs());
         }
+    }
+
+    /**
+     * Schedule one firing of a daily job, which re-arms itself from the wall clock afterwards (M11).
+     *
+     * <p>Not {@code scheduleAtFixedRate} with a 24h period: a fixed period is 24h of elapsed time,
+     * but "daily at 03:00" is a wall-clock statement, and the two diverge at every DST transition.
+     * The old form drifted an hour — permanently, until restart — and, worse, could lose a day
+     * outright: cluster dedupe slots on {@code floor(epochMillis / 86_400_000)}, a UTC day, so for a
+     * job whose local time sits near the UTC-day boundary the shift could put two consecutive runs
+     * in the same slot, where the second is deduped away and simply never happens.
+     *
+     * <p>Recomputing the delay after each firing costs one {@code ZonedDateTime} per day and makes
+     * the schedule mean what it says in local time, across DST and across a zone change.
+     */
+    private void scheduleDaily(int index, RegisteredJob rj, long delayMs) {
+        scheduler.schedule(() -> {
+            Thread.startVirtualThread(() -> executeJob(index, rj));
+            // Re-arm before the body runs to completion — the next run is a function of the clock,
+            // not of how long this one takes.
+            if (scheduler != null && !scheduler.isShutdown()) {
+                scheduleDaily(index, rj, computeDelayUntil(rj.dailyAt()));
+            }
+        }, delayMs, TimeUnit.MILLISECONDS);
     }
 
     public void start(DatabaseFactory dbFactory) {
@@ -87,9 +120,13 @@ public class JobScheduler {
             var rj = registeredJobs.get(i);
             final int index = i;
             if (!rj.local()) seedRunRow(rj.name());
-            scheduler.scheduleAtFixedRate(() -> {
-                Thread.startVirtualThread(() -> executeJob(index, rj));
-            }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
+            if (rj.dailyAt() != null) {
+                scheduleDaily(index, rj, rj.initialDelayMs());
+            } else {
+                scheduler.scheduleAtFixedRate(() -> {
+                    Thread.startVirtualThread(() -> executeJob(index, rj));
+                }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
+            }
         }
     }
 
@@ -198,7 +235,7 @@ public class JobScheduler {
      * advisory lock.
      */
     private boolean claimRun(RegisteredJob rj) {
-        long currentSlot = Instant.now().toEpochMilli() / rj.periodMs();
+        long currentSlot = currentSlot(rj);
 
         // Fast path (M14): a NON-locking read. On a multi-instance cluster the slot is almost always
         // already claimed — by another instance, or by this one on an earlier tick within the same slot
@@ -288,6 +325,29 @@ public class JobScheduler {
         } finally {
             db.close();
         }
+    }
+
+    /**
+     * The time-slot a run belongs to, for cluster-wide exactly-once dedupe.
+     *
+     * <p>Interval jobs slot on {@code floor(now / period)} — every instance derives the same number
+     * from wall-clock, so a claim is exactly-once per interval regardless of tick stagger.
+     *
+     * <p>Daily jobs slot on the <strong>local calendar day</strong> (M11), not
+     * {@code floor(epochMillis / 86_400_000)} — which is a *UTC* day and therefore does not line up
+     * with "daily at 03:00" local. The mismatch was not just cosmetic: for a job whose local time
+     * sits near the UTC-day boundary, a DST shift could put two consecutive runs in the same UTC
+     * slot, and the second would be deduped away and never happen at all.
+     *
+     * <p>Assumes instances share a time zone, which is also what firing at a local time assumes:
+     * in mixed zones each instance fires at its own local 03:00, so they were never running at the
+     * same moment to begin with. Run the fleet in one zone (UTC is the usual choice).
+     */
+    private static long currentSlot(RegisteredJob rj) {
+        if (rj.dailyAt() != null) {
+            return java.time.LocalDate.now(ZoneId.systemDefault()).toEpochDay();
+        }
+        return Instant.now().toEpochMilli() / rj.periodMs();
     }
 
     static long parseInterval(String interval) {

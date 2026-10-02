@@ -365,7 +365,7 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - **Resolved as:** specified. Note the earlier `cdc4f07` on `main` bounded the Mailer's SMTP
     timeouts but did not touch this.
 
-- [ ] **M11: `daily(...)` drifts an hour across DST and can silently skip a day**
+- [x] **M11: `daily(...)` drifts an hour across DST and can silently skip a day**
   - Files: `JobScheduler.java:61-80` (`daily`), `:200-241` (`claimRun`), `:308-315` (`computeDelayUntil`).
   - `daily` computes the delay to the next local occurrence, then hands
     `scheduleAtFixedRate` a fixed 24h period. After a DST transition the job runs an hour off its
@@ -378,8 +378,17 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
     fixed-rate 24h period, and derive the dedupe slot from the intended **local** date rather than
     the UTC-millis quotient.
   - Model: frontier (time-zone arithmetic plus the exactly-once claim invariant).
+  - **Resolved as:** both halves. `daily` now schedules a self-rescheduling one-shot
+    (`scheduleDaily`) that recomputes its delay from `computeDelayUntil` after each firing, so the
+    schedule tracks the wall clock instead of accumulating 24h of elapsed time; and the dedupe slot
+    for a daily job is the **local calendar day** (`LocalDate.now().toEpochDay()`) rather than
+    `floor(epochMillis / 86_400_000)`, which is a UTC day and never matched the local firing time.
+    Interval jobs keep the elapsed-time slot, which is correct for them.
+    Documented assumption: instances share a time zone — which is what firing at a *local* time
+    already assumed, since in mixed zones each instance fires at its own local 03:00 and they were
+    never running together anyway.
 
-- [ ] **M12: `SessionOptions.sameSite("None")` doesn't imply `Secure`, so the cookie is rejected**
+- [x] **M12: `SessionOptions.sameSite("None")` doesn't imply `Secure`, so the cookie is rejected**
   - Files: `SessionOptions.java` (`sameSite(String)` vs `sameSiteNone()`).
   - `sameSiteNone()` sets `secure = true`; the string setter doesn't. Every current browser rejects
     `SameSite=None` without `Secure` outright, so `.sameSite("None")` silently disables sessions
@@ -388,6 +397,11 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
   - Fix: force `secure = true` in the string setter when the value is `None` (case-insensitive), and
     validate the value against `Strict`/`Lax`/`None` instead of writing arbitrary text into the header.
   - Model: smaller model OK.
+  - **Resolved upstream:** fixed on main first, during the 2026-07 security review follow-up
+    (`b0b4a20`, shipped in 0.1.8): `sameSite(String)` canonicalises through
+    `Result.requireSameSite`, rejects anything outside Strict/Lax/None, and `"None"` turns Secure
+    on. This branch's duplicate setter and test were dropped when it was rebased onto 0.1.10;
+    `SessionOptionsTest.sameSiteStringIsCanonicalisedAndNoneImpliesSecure` covers it.
 
 ---
 
