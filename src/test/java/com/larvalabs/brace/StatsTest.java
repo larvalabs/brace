@@ -320,4 +320,13 @@ class StatsTest {
         stats.recordRequestPattern("GET", "/a", 200, 1234, 0, 0);
         assertEquals(1234, stats.snapshot().p95LatencyUs());
     }
+
+    @Test
+    void minuteSnapshotKeepsPre0110Constructor() {
+        var snap = new Stats.MinuteSnapshot(java.time.Instant.EPOCH, 10, 1, 5000, 900, 3, 300, 64,
+            java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+        assertEquals(java.util.Map.of(), snap.routeCounts());
+        assertEquals(0, snap.p95LatencyUs());
+        assertEquals(0.5, snap.avgLatencyMs(), 0.001);
+    }
 }

@@ -364,6 +364,14 @@ public class Stats {
         Map<String, Long> routeCounts,
         long p95LatencyUs
     ) {
+        /** The pre-0.1.10 shape: no per-route counts, p95 unknown (0). Kept for source compatibility. */
+        public MinuteSnapshot(Instant ts, long requests, long errors, long totalLatencyUs, long maxLatencyUs,
+                              long queries, long queryUs, long heapUsedMB, Map<String, Long> counterDeltas,
+                              Map<String, Long> gaugeValues, Map<String, TimerSnapshot> timerValues) {
+            this(ts, requests, errors, totalLatencyUs, maxLatencyUs, queries, queryUs, heapUsedMB,
+                counterDeltas, gaugeValues, timerValues, Map.of(), 0);
+        }
+
         public double avgLatencyMs() {
             if (requests == 0) return 0.0;
             return (totalLatencyUs / (double) requests) / 1000.0;

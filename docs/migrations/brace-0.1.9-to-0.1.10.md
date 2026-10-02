@@ -50,9 +50,8 @@ _No entries yet._
 <!-- section: ops-dashboard -->
 ## Ops dashboard
 
-This section has no breaking changes for applications. `/ops/status` only gains fields,
-and the dashboard is framework-rendered. One thing to know if you consume `Stats`
-directly: see "`Stats.MinuteSnapshot` gained components" below.
+This section has no breaking changes. `/ops/status` only gains fields, the dashboard is
+framework-rendered, and `Stats.MinuteSnapshot` keeps its old constructor.
 
 ### Per-route stats are keyed by route pattern again
 
@@ -107,22 +106,12 @@ No action is required. `brace status` and `brace check` read only `statusCodes` 
 - Long method and class names stay on one line, truncated from the left (package first)
   with a leading `…`. Hover for the full name. Value columns no longer wrap.
 
-### `Stats.MinuteSnapshot` gained components
+### New `Stats` read-only data
 
-`MinuteSnapshot` is a record and gained two trailing components: `routeCounts`
-(`Map<String, Long>`, the per-route counts for that minute) and `p95LatencyUs` (with a
-`p95LatencyMs()` accessor). Code that reads snapshots from `stats.minuteSnapshots()`
-needs no change. Code that *constructs* a `MinuteSnapshot` itself, which is unusual
-outside tests, must pass the two new arguments:
-
-```java
-// before
-new Stats.MinuteSnapshot(ts, requests, errors, latencyUs, maxUs, queries, queryUs, heapMB,
-    counters, gauges, timers);
-// after
-new Stats.MinuteSnapshot(ts, requests, errors, latencyUs, maxUs, queries, queryUs, heapMB,
-    counters, gauges, timers, Map.of(), 0L);
-```
+`MinuteSnapshot` gained two trailing components: `routeCounts` (`Map<String, Long>`, the
+per-route counts for that minute) and `p95LatencyUs` (with a `p95LatencyMs()` accessor).
+The old 11-argument constructor still exists and fills them with `Map.of()` and `0`, so
+existing code compiles unchanged.
 
 New read-only helpers on `Stats`: `requestRate()` (null before the first minute) and
 `topRoutes(windowMinutes, limit)`.
