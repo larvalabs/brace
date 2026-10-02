@@ -33,6 +33,7 @@ class OpsIntegrationTest {
 
         app.get("/hello", req -> Result.text("Hello!")).name("hello");
         app.get("/error", req -> { throw new RuntimeException("test error"); });
+        app.get("/items/{id}", req -> Result.text("item " + req.pathParam("id")));
 
         app.start();
         port = app.actualPort();
@@ -138,6 +139,30 @@ class OpsIntegrationTest {
         get("/hello");
         var response = getWithToken("/ops/status");
         assertTrue(response.body().contains("\"statusCodes\""));
+    }
+
+    @Test
+    void matchedRequestsAreRecordedUnderRoutePattern() throws Exception {
+        // H7: distinct IDs must collapse into the route pattern, not leak one stats entry
+        // per concrete URL.
+        get("/items/101");
+        get("/items/202");
+        var routes = app.stats().routeStats();
+        assertTrue(routes.containsKey("GET /items/{id}"), "pattern key expected: " + routes.keySet());
+        assertTrue(routes.get("GET /items/{id}").count() >= 2);
+        assertTrue(routes.keySet().stream().noneMatch(k -> k.contains("/items/101")),
+            "concrete paths must not become route keys: " + routes.keySet());
+    }
+
+    @Test
+    void statusTopRoutesUsePatternKeys() throws Exception {
+        get("/items/7");
+        get("/items/8");
+        app.stats().snapshot(); // rotate a minute so the windowed counts exist
+        var body = getWithToken("/ops/status").body();
+        int top = body.indexOf("\"topRoutes\":[");
+        assertTrue(top > 0, body);
+        assertTrue(body.indexOf("{\"route\":\"GET /items/{id}\",\"count\":", top) > 0, body);
     }
 
     @Test
@@ -544,6 +569,16 @@ class OpsIntegrationTest {
         assertTrue(body.contains("talks.created"), "should include counter name");
         assertTrue(body.contains("queue.depth"), "should include gauge name");
         assertTrue(body.contains("api.latency"), "should include timer name");
+    }
+
+    @Test
+    void statusIncludesLifetimeTotalAndRequestRate() throws Exception {
+        var body = metricsGet("/ops/status").body();
+        assertTrue(body.contains("\"totalRequests\":"), body);
+        // The metrics app rotated a minute at startup, so the rate block is present.
+        assertTrue(body.contains("\"requestsPerMinute\":{\"lastMinute\":"), body);
+        assertTrue(body.contains("\"topRoutes\":["), body);
+        assertTrue(body.contains("\"topRoutesWindowMinutes\":"), body);
     }
 
     @Test

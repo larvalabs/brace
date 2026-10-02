@@ -495,7 +495,72 @@ _No entries yet._
 <!-- section: ops-dashboard -->
 ## Ops dashboard
 
-_No entries yet._
+This section has no breaking changes. `/ops/status` only gains fields, the dashboard is
+framework-rendered, and `Stats.MinuteSnapshot` keeps its old constructor.
+
+### Per-route stats are keyed by route pattern again
+
+**Type: fix. Action required: none.** Per-route stats (`http.slowestRoutes`, Top Routes) are
+keyed by route pattern again (H7), so they stay bounded by the route table instead of
+growing one entry per distinct URL.
+
+The 0.1.7 fix that recorded matched requests under their route pattern
+(`GET /users/{id}`) instead of the concrete path (`GET /users/42`) had been lost in a
+merge, so `http.slowestRoutes` again listed one entry per distinct URL and the per-route
+map grew with traffic. It is restored. If you had tooling matching concrete paths in
+`http.slowestRoutes`, match the pattern instead:
+
+```text
+before: { "route": "GET /users/42", ... }, { "route": "GET /users/43", ... }
+after:  { "route": "GET /users/{id}", "count": 2, ... }
+```
+
+Requests that matched no route are counted in the constant `(unmatched)` and `(static)`
+buckets; see "Fix: `/ops/routes` shows route patterns, and every response is counted" above.
+
+### New `/ops/status` fields (additive)
+
+```json
+"http": {
+  "statusCodes": { "200": 1523, "404": 12 },
+  "totalRequests": 1535,
+  "requestsPerMinute": { "lastMinute": 42, "avg": 25.6, "windowMinutes": 60 },
+  "slowestRoutes": [ ... ],
+  "topRoutes": [{ "route": "GET /posts/{id}", "count": 610, "perMinute": 122.0, "sharePct": 58.3 }],
+  "topRoutesWindowMinutes": 5
+}
+```
+
+- `totalRequests` is the lifetime total, the sum of `statusCodes`.
+- `requestsPerMinute` is absent until the first minute has rotated in.
+- `topRoutes` ranks routes by request count over the last 5 full minutes. Requests that
+  matched no route fold into a single `"(unmatched)"` entry.
+- `?include=timeseries` minutes gain `p95Ms` next to `avgMs`.
+
+No action is required. `brace status` and `brace check` read only `statusCodes` and
+`slowestRoutes`.
+
+### Dashboard changes
+
+- The **Requests** card is now **Req / Min**: the last full minute, with the average over
+  the retained minutes as the subtitle. The lifetime total moved to
+  `http.totalRequests` in `/ops/status`.
+- A **Top Routes** table (req/min and share over the last 5 minutes) sits next to
+  **Slowest Routes**, with or without JFR. With JFR, **Hot Methods** now pairs with
+  **Top Allocations**, and **Recent GC Pauses** gets its own full-width row.
+- A **Latency ms** sparkline shows per-minute average and p95.
+- Long method and class names stay on one line, truncated from the left (package first)
+  with a leading `…`. Hover for the full name. Value columns no longer wrap.
+
+### New `Stats` read-only data
+
+`MinuteSnapshot` gained two trailing components: `routeCounts` (`Map<String, Long>`, the
+per-route counts for that minute) and `p95LatencyUs` (with a `p95LatencyMs()` accessor).
+The old 11-argument constructor still exists and fills them with `Map.of()` and `0`, so
+existing code compiles unchanged.
+
+New read-only helpers on `Stats`: `requestRate()` (null before the first minute) and
+`topRoutes(windowMinutes, limit)`.
 
 <!-- end section: ops-dashboard -->
 

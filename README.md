@@ -34,7 +34,7 @@ Brace covers HTTP and routing, database and migrations, typed templates, encrypt
 
 Brace exposes a structured diagnostics API designed so agents can detect, diagnose and fix problems themselves.
 
-`GET /ops/status` returns a compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
+`GET /ops/status` returns a compact snapshot: request rate and stats, slowest and busiest routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
 
 Ops endpoints use Ed25519 keypair authentication with short-lived tokens, so agents authenticate without a shared secret.
 

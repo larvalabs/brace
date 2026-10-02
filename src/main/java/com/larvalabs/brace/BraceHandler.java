@@ -561,7 +561,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /** Stats bucket for requests that matched no route — see {@link #routeKey}. */
-    static final String UNMATCHED_ROUTE_KEY = "(unmatched)";
+    static final String UNMATCHED_ROUTE_KEY = Stats.UNMATCHED_ROUTE;
 
     /**
      * Stats bucket for requests served from a {@code staticFiles} mapping (or the bundled htmx
