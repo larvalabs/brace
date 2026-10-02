@@ -117,6 +117,10 @@ for (var row : db.sqlQuery("SELECT name FROM users")) use(String.valueOf(row[0])
 
 Multi-column selects are unchanged. `db.sqlQueryLong(...)` already handled both shapes.
 
+If you worked around the old shape by padding a single-column select with a dummy column
+(`SELECT name, 1 FROM users`) to get `Object[]` rows, that still works unchanged. You can drop
+the extra column whenever convenient.
+
 ### Breaking: `app.stop()` closes the `DatabaseFactory`
 
 **Type:** breaking (only when a factory is shared), plus a new optional builder method.
@@ -903,6 +907,26 @@ ENTRYPOINT ["sh", "-c", "exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar"]
 </plugin>
 ```
 
+**Multi-stage Dockerfiles** (Maven runs inside a build stage): the precompile step runs
+during `mvn package` from the project directory and reads `views/`, so the build stage must
+contain `views/` as well as `src/` and `pom.xml`, and the runtime stage must copy the classes
+out of it. A build stage that copies only `src/` fails at `mvn package`.
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-25 AS build
+WORKDIR /build
+COPY pom.xml ./
+COPY src/ src/
+COPY views/ views/
+RUN mvn -q package -DskipTests
+
+FROM eclipse-temurin:25-jre
+WORKDIR /app
+COPY --from=build /build/target/app.jar app.jar
+COPY --from=build /build/target/jte-classes/ target/jte-classes/
+# ...views/, public/, migrations/, config and ENTRYPOINT as in the single-stage example above
+```
+
 Keep the `exec` in the entrypoint. Without it `sh` stays PID 1, does not forward SIGTERM, and
 the container is killed after the stop timeout without a clean shutdown. Prod mode also applies
 `%prod.` config keys, so check for any your container wasn't using before.
@@ -1013,7 +1037,10 @@ unchanged. If you thread `app.stats()` into services only to record metrics, you
 plumbing. Keep using `app.stats()` in tests that read values (`counterTotal(name)`) or that run
 several apps in one JVM.
 
-There is no static `Stats.counter(...)`; older docs showed it, but it never compiled.
+There is no static `Stats.counter(...)`; older docs showed it, but it never compiled. The
+`CLAUDE.md` that `brace new` generated in earlier versions lists `Stats.counter(name)` too:
+change that line to `Metrics.counter(name)` (and `.gauge`, `.timer`) so agents working in your
+project don't reach for an API that doesn't exist.
 
 **Before (0.1.9):**
 
