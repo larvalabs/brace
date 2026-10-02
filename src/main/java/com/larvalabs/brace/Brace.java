@@ -40,7 +40,8 @@ public class Brace {
     private final JobScheduler jobScheduler = new JobScheduler();
     private final JobPoller jobPoller = new JobPoller();
     private String opsKeysPath;
-    private Stats stats = new Stats();
+    // Also the target of the static Metrics.counter/gauge/timer calls (last-constructed app wins).
+    private Stats stats = Metrics.register();
     private JfrProfiler profiler;
     private ErrorStore errorStore;
     private boolean opsProfilerEnabled = true;

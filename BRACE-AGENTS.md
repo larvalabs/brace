@@ -868,14 +868,18 @@ in the brace repo).
 ## Custom Metrics
 
 ```java
-var stats = app.stats();                     // pass to controllers/services via constructors
-stats.counter("talks.created");              // increment by 1
-stats.counter("bytes.uploaded", file.size()); // increment by amount
-stats.gauge("queue.depth", () -> (long) queue.size()); // Supplier<Long>, sampled each minute
-stats.timer("api.external", durationMs);     // tracks count, avg, max
+Metrics.counter("talks.created");              // increment by 1
+Metrics.counter("bytes.uploaded", file.size()); // increment by amount
+Metrics.gauge("queue.depth", () -> (long) queue.size()); // Supplier<Long>, sampled each minute
+Metrics.timer("api.external", durationMs);     // tracks count, avg, max
 ```
 
-Metrics appear in `/ops/status` JSON and as sparklines in the dashboard.
+`Metrics` is static (like `Log`), so call it from any controller or service; no need to pass
+anything in. It records into the app's `Stats` (the most recently constructed app; calls made
+before `Brace.app()` are kept and adopted by it). `app.stats()` is that same instance, with the
+same `counter`/`gauge`/`timer` methods plus `counterTotal(name)` for test assertions. `Stats` has
+no static methods: `Stats.counter(...)` does not compile. Metrics appear in `/ops/status` JSON
+and as sparklines in the dashboard.
 
 ## Testing
 

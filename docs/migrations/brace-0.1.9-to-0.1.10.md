@@ -208,4 +208,43 @@ session.secret=${SESSION_SECRET}
 (credentials embedded in it are used when `DB_USER`/`DB_PASS` are unset). Generate the secret
 once, for example `openssl rand -base64 32`, and keep it identical across instances and restarts.
 
+---
+
+### New (optional): static custom metrics with `Metrics`
+
+**What changed.** `Metrics.counter(...)`, `Metrics.gauge(...)` and `Metrics.timer(...)` are
+static, like `Log`, so a service can record a metric without being handed the app's `Stats`.
+They record into the same `Stats` that `app.stats()` returns: the most recently constructed
+app's. Metrics recorded before `Brace.app()` runs (for example a gauge registered in a service
+constructor earlier in `main()`) are kept and adopted by the first app.
+
+**Who needs to act.** Nobody. `app.stats()` and its `counter`/`gauge`/`timer` methods are
+unchanged. If you thread `app.stats()` into services only to record metrics, you can drop that
+plumbing. Keep using `app.stats()` in tests that read values (`counterTotal(name)`) or that run
+several apps in one JVM.
+
+There is no static `Stats.counter(...)`; older docs showed it, but it never compiled.
+
+**Before (0.1.9):**
+
+```java
+// main()
+var weather = new WeatherClient(http).withStats(app.stats());
+
+// WeatherClient
+private Stats stats;
+public WeatherClient withStats(Stats stats) { this.stats = stats; return this; }
+void fetch() { ...; if (stats != null) stats.counter("weather.calls"); }
+```
+
+**After (0.1.10):**
+
+```java
+// main()
+var weather = new WeatherClient(http);
+
+// WeatherClient
+void fetch() { ...; Metrics.counter("weather.calls"); }
+```
+
 <!-- end section: dx -->

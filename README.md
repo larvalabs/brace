@@ -404,18 +404,20 @@ app.post("/upload-manual", req -> {
 Counters, gauges, and timers, with no external metrics server. Metrics render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
 
 ```java
-var stats = app.stats();  // pass to controllers and services through their constructors
-
 // Counter — tracks rate (events per minute)
-stats.counter("talks.created");
-stats.counter("bytes.uploaded", file.size());
+Metrics.counter("talks.created");
+Metrics.counter("bytes.uploaded", file.size());
 
 // Gauge — samples a value each minute
-stats.gauge("queue.depth", () -> (long) queue.size());
+Metrics.gauge("queue.depth", () -> (long) queue.size());
 
 // Timer — tracks count, avg, and max duration
-stats.timer("api.external", durationMs);
+Metrics.timer("api.external", durationMs);
 ```
+
+`Metrics` is static, like `Log`: call it from any controller or service. It records into the
+running app's `Stats`; `app.stats()` returns the same instance with the same `counter`/`gauge`/`timer`
+methods, for tests or several apps in one JVM.
 
 ## Cache
 
