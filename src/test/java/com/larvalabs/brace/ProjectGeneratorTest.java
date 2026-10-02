@@ -299,6 +299,8 @@ class ProjectGeneratorTest {
         // A JRE has no javac, so templates must arrive precompiled and prod mode must load them.
         assertTrue(dockerfile.contains("COPY target/jte-classes/ target/jte-classes/"),
             "Dockerfile must ship the precompiled templates, got:\n" + dockerfile);
+        assertTrue(dockerfile.contains("`brace compile`"),
+            "Dockerfile must say how to produce target/jte-classes");
         // Exec form through sh -c: $JAVA_OPTS expands and exec makes java PID 1, so
         // SIGTERM reaches the JVM and Brace's shutdown hook runs.
         assertTrue(dockerfile.contains(

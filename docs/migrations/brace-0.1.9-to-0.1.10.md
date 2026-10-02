@@ -87,6 +87,12 @@ That image fails on the first rendered page, because JTE then compiles templates
 
 The scaffolded `pom.xml` also precompiles `views/` into `target/jte-classes` during
 `mvn package`, so the Dockerfile's single build step always ships classes that match the jar.
+`brace compile` writes the same directory.
+
+Forgetting the precompile step now fails at startup with a message naming `brace compile`: in
+prod mode on a JRE with no matching precompiled classes, `app.templates(...)` throws
+`IllegalStateException` instead of failing inside JTE's compiler. On a JDK, prod mode still
+compiles all templates at startup as before.
 
 **Who needs to act.** Existing projects keep the `Dockerfile` and `pom.xml` they were generated
 with; nothing regenerates them. If your Dockerfile still says `eclipse-temurin:21-jre` or

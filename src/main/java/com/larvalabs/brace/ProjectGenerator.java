@@ -392,7 +392,9 @@ h1 { margin-bottom: 1rem; }
                 "WORKDIR /app\n" +
                 "COPY target/app.jar app.jar\n" +
                 "COPY application.conf.example application.conf\n" +
-                "# Prod mode loads these instead of compiling templates at runtime.\n" +
+                "# Precompiled templates, which prod mode loads instead of compiling at runtime.\n" +
+                "# mvn package writes them (so does `brace compile`); run one of them before\n" +
+                "# `docker build` after any template change. Without them the build or startup fails.\n" +
                 "COPY target/jte-classes/ target/jte-classes/\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +
