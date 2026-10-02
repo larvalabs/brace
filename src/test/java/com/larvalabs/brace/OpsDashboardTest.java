@@ -60,7 +60,7 @@ class OpsDashboardTest {
             "value cells must not wrap (\"459 / MB\")");
         assertFalse(html.contains("<td style=\"text-align:right"), "inline right-align styles replaced by .num");
         assertTrue(html.contains("<td class=\"num c-purple\">459 MB</td>"), html);
-        assertTrue(html.contains("<td class=\"num c-amber\">1234567</td>"));
+        assertTrue(html.contains("<td class=\"num c-amber\">1,234,567</td>"));
         assertTrue(html.contains("<th class=\"num\">Size</th>"));
     }
 

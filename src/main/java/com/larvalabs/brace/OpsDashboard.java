@@ -431,7 +431,7 @@ public class OpsDashboard {
                 for (var m : hotMethods) {
                     String method = (String) m.get("method");
                     sb.append("<tr><td class=\"name\">").append(formatMethod(method))
-                      .append("</td><td class=\"num c-amber\">").append(m.get("samples")).append("</td></tr>");
+                      .append("</td><td class=\"num c-amber\">").append(String.format("%,d", ((Number) m.get("samples")).longValue())).append("</td></tr>");
                 }
                 sb.append("</table>");
             }
