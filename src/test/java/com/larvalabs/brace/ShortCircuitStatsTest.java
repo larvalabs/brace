@@ -47,10 +47,31 @@ class ShortCircuitStatsTest {
         return app.app().stats().statusCodeCounts().getOrDefault(status, 0L);
     }
 
+    private static long routeCount(String key) {
+        var route = app.app().stats().routeStats().get(key);
+        return route == null ? 0 : route.count();
+    }
+
+    /**
+     * A response is recorded after it is written, so the client can see it before the count moves
+     * (see {@link TestWait}). Every test waits for its own requests to land, which also keeps a
+     * straggler from one test out of the next test's {@code before} baseline.
+     */
+    private static void awaitCountOf(int status, long expected) {
+        TestWait.until(() -> countOf(status) >= expected,
+            () -> "status " + status + " count never reached " + expected + ", was " + countOf(status));
+    }
+
+    private static void awaitRouteCount(String key, long expected) {
+        TestWait.until(() -> routeCount(key) >= expected,
+            () -> key + " count never reached " + expected + ", was " + routeCount(key));
+    }
+
     @Test
     void beforeMiddlewareShortCircuitIsCounted() {
         long before = countOf(429);
         assertEquals(429, app.get("/blocked").status());
+        awaitCountOf(429, before + 1);
         assertEquals(before + 1, countOf(429), "a 429 from before-middleware must reach stats");
     }
 
@@ -58,6 +79,7 @@ class ShortCircuitStatsTest {
     void sessionMiddlewareShortCircuitIsCounted() {
         long before = countOf(302);
         assertEquals(302, app.get("/guarded").status());
+        awaitCountOf(302, before + 1);
         assertEquals(before + 1, countOf(302), "a guard redirect must reach stats");
     }
 
@@ -66,6 +88,7 @@ class ShortCircuitStatsTest {
         long before = countOf(403);
         // No _csrf param and no X-CSRF-Token: rejected before the handler runs.
         assertEquals(403, app.post("/mutate", Map.of("x", "1")).status());
+        awaitCountOf(403, before + 1);
         assertEquals(before + 1, countOf(403), "a CSRF 403 must reach stats");
     }
 
@@ -73,6 +96,7 @@ class ShortCircuitStatsTest {
     void unmatchedRouteIsCountedInTheUnmatchedBucket() {
         long before = countOf(404);
         assertEquals(404, app.get("/no-such-route-at-all").status());
+        awaitCountOf(404, before + 1);
         assertEquals(before + 1, countOf(404), "an unmatched 404 must reach stats");
         assertTrue(app.app().stats().routeStats()
                 .containsKey("GET " + BraceHandler.UNMATCHED_ROUTE_KEY),
@@ -81,7 +105,9 @@ class ShortCircuitStatsTest {
 
     @Test
     void staticFilesAreCountedUnderTheirOwnBucket() {
+        long before = routeCount("GET " + BraceHandler.STATIC_ROUTE_KEY);
         assertEquals(200, app.get("/assets/app.css").status());
+        awaitRouteCount("GET " + BraceHandler.STATIC_ROUTE_KEY, before + 1);
         var keys = app.app().stats().routeStats().keySet();
         assertTrue(keys.contains("GET " + BraceHandler.STATIC_ROUTE_KEY),
             "expected the static bucket, got: " + keys);
@@ -92,9 +118,12 @@ class ShortCircuitStatsTest {
 
     @Test
     void missingAssetsShareTheStaticBucketRatherThanMintingKeys() {
+        long before = countOf(404);
         for (int i = 0; i < 20; i++) {
             app.get("/assets/nope-" + i + ".css");
         }
+        // Until all 20 are recorded, a key check below would pass without having seen them.
+        awaitCountOf(404, before + 20);
         var keys = app.app().stats().routeStats().keySet();
         assertTrue(keys.stream().noneMatch(k -> k.contains("nope-")),
             "missing-asset URLs must not become stats keys: " + keys);
@@ -102,18 +131,17 @@ class ShortCircuitStatsTest {
 
     @Test
     void shortCircuitedResponsesAreAlsoLogged() {
-        // Stats and the http.request log line are recorded together at the choke point; the
-        // LogTap append is synchronous and precedes the write, so it is visible once we have
-        // the response.
+        // Stats and the http.request log line are recorded together at the choke point, after the
+        // response is written, so a line can land a moment after the client has the response.
         long mark = lastLogId();
         app.get("/blocked");
         app.post("/mutate", Map.of("x", "1"));
         app.get("/assets/app.css");
         app.get("/no-such-route-logged");
-        assertTrue(logged(mark, "GET", "/blocked", 429), "before-middleware 429 must be logged");
-        assertTrue(logged(mark, "POST", "/mutate", 403), "CSRF 403 must be logged");
-        assertTrue(logged(mark, "GET", "/assets/app.css", 200), "static file must be logged");
-        assertTrue(logged(mark, "GET", "/no-such-route-logged", 404), "unmatched 404 must be logged");
+        TestWait.until(() -> logged(mark, "GET", "/blocked", 429), "before-middleware 429 must be logged");
+        TestWait.until(() -> logged(mark, "POST", "/mutate", 403), "CSRF 403 must be logged");
+        TestWait.until(() -> logged(mark, "GET", "/assets/app.css", 200), "static file must be logged");
+        TestWait.until(() -> logged(mark, "GET", "/no-such-route-logged", 404), "unmatched 404 must be logged");
     }
 
     private static long lastLogId() {
@@ -133,6 +161,7 @@ class ShortCircuitStatsTest {
         for (int i = 0; i < 5; i++) {
             app.get("/ok");
         }
+        awaitCountOf(200, before + 5);
         assertEquals(before + 5, countOf(200), "each response must be recorded exactly once");
     }
 }

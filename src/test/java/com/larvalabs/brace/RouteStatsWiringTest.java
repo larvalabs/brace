@@ -44,6 +44,8 @@ class RouteStatsWiringTest {
         assertEquals(404, testApp.get("/wp-login.php").status()); // no route
         assertEquals(500, testApp.get("/scanner/x1").status());  // no route, middleware failure
 
+        // Requests are recorded after the response is written; wait for all seven (see TestWait).
+        TestWait.until(() -> recorded(stats) >= 7, () -> "only " + recorded(stats) + " of 7 requests recorded");
         var routes = stats.routeStats();
         assertNotNull(routes.get("GET /users/{id}"), "matched requests must be keyed by pattern: " + routes.keySet());
         assertEquals(3,routes.get("GET /users/{id}").count());
@@ -65,5 +67,9 @@ class RouteStatsWiringTest {
         assertEquals(2L, counts.get(Stats.UNMATCHED_ROUTE), "unmatched requests fold into (unmatched): " + counts);
         assertFalse(counts.containsKey("GET " + Stats.UNMATCHED_ROUTE), "no per-method unmatched entry: " + counts);
         assertTrue(counts.keySet().stream().noneMatch(k -> k.contains("/scanner/")), "no raw-path keys: " + counts);
+    }
+
+    private static long recorded(Stats stats) {
+        return stats.routeStats().values().stream().mapToLong(r -> r.count()).sum();
     }
 }

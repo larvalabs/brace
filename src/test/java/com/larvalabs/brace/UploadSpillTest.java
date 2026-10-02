@@ -108,6 +108,9 @@ class UploadSpillTest {
     void reset() {
         filesDuringRequest.set(null);
         savedTo.set(null);
+        // The directory is shared, and a previous test's release can still be in flight. Start
+        // from empty so the in-handler counts below see only this test's spill.
+        awaitNoFiles("a previous test's spill was never released");
     }
 
     // --- spilling ---
@@ -132,17 +135,28 @@ class UploadSpillTest {
             assertEquals(200, postFile("/keep", "f.bin", bytes(size)).statusCode());
             var file = kept.get();
             // The release runs in handle()'s finally, which can trail the response by a moment.
-            IllegalStateException released = null;
-            for (int i = 0; i < 100 && released == null; i++) {
-                try (var in = file.stream()) {
-                    Thread.sleep(20);
+            // Each probe opens and closes at once: a stream held open across the release has its
+            // source closed underneath it, and its close() then throws Jetty's "Closed". That, or
+            // anything else from a probe that lands mid-release, is the release still in progress,
+            // so probe again until the settled state shows.
+            var released = new AtomicReference<IllegalStateException>();
+            var raced = new AtomicReference<Exception>();
+            TestWait.until(() -> {
+                try {
+                    file.stream().close();
+                    raced.set(null);
+                    return false;
                 } catch (IllegalStateException e) {
-                    released = e;
+                    released.set(e);
+                    return true;
+                } catch (Exception e) {
+                    raced.set(e);
+                    return false;
                 }
-            }
-            assertNotNull(released, "size " + size + " should be unreadable after its request");
-            assertTrue(released.getMessage().contains("released when the request finished"),
-                released.getMessage());
+            }, () -> "size " + size + " should be unreadable after its request; last probe: "
+                + (raced.get() != null ? raced.get() : "still readable"));
+            assertTrue(released.get().getMessage().contains("released when the request finished"),
+                released.get().getMessage());
         }
     }
 
@@ -205,7 +219,7 @@ class UploadSpillTest {
 
         assertEquals(200, resp.statusCode(), "a form field over the threshold must not fail");
         assertEquals("" + BIG, resp.body());
-        assertEquals(0, countFiles(tempDir));
+        awaitNoFiles("the spilled form field should be released when the request ends");
     }
 
     // --- cleanup on non-happy paths ---
@@ -273,7 +287,7 @@ class UploadSpillTest {
 
             assertEquals(413, resp.statusCode(),
                 "a chunked oversized upload must be a 413, got: " + resp.body());
-            assertEquals(0, countFiles(tempDir));
+            awaitNoFiles("a chunked 413 must not leave the partial spill behind");
         } finally {
             small.stop();
         }
@@ -320,14 +334,11 @@ class UploadSpillTest {
     /**
      * Cleanup runs in handle()'s finally, which is not ordered against the client receiving the
      * response — the response write is asynchronous, so a test that checks the directory the
-     * instant the body arrives is racing the server. Poll instead of sleeping a fixed amount.
+     * instant the body arrives is racing the server (see {@link TestWait}).
      */
-    private static void awaitNoFiles(String message) throws Exception {
-        for (int i = 0; i < 200; i++) {
-            if (countFiles(tempDir) == 0) return;
-            Thread.sleep(10);
-        }
-        assertEquals(0, countFiles(tempDir), message);
+    private static void awaitNoFiles(String message) {
+        TestWait.until(() -> countFiles(tempDir) == 0,
+            () -> message + ": " + countFiles(tempDir) + " file(s) left in " + tempDir);
     }
 
     private static byte[] bytes(int n) {

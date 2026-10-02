@@ -7,6 +7,7 @@ import java.net.URI;
 import java.net.http.*;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -80,7 +81,28 @@ class RenderAfterCommitTest {
         View.setEngine(null);
     }
 
+    /** Requests this class has sent. Each is recorded in stats once, after its response is written. */
+    static final AtomicInteger sent = new AtomicInteger();
+
+    private static long recorded() {
+        return app.stats().statusCodeCounts().values().stream().mapToLong(Long::longValue).sum();
+    }
+
+    /** Stats lag the response (see {@link TestWait}); wait for every request sent so far to land. */
+    private static void awaitAllRecorded() {
+        TestWait.until(() -> recorded() >= sent.get(),
+            () -> "only " + recorded() + " of " + sent.get() + " requests recorded");
+    }
+
+    @BeforeEach
+    void settlePreviousTests() {
+        // A straggler from the previous test would otherwise land inside the next test's
+        // status-count baseline.
+        awaitAllRecorded();
+    }
+
     private HttpResponse<String> post(String path) throws Exception {
+        sent.incrementAndGet();
         return client.send(HttpRequest.newBuilder()
             .uri(URI.create("http://localhost:" + port + path))
             .POST(HttpRequest.BodyPublishers.noBody()).build(),
@@ -88,6 +110,7 @@ class RenderAfterCommitTest {
     }
 
     private int count(String title) throws Exception {
+        sent.incrementAndGet();
         var r = client.send(HttpRequest.newBuilder()
             .uri(URI.create("http://localhost:" + port + "/count/" + title)).GET().build(),
             HttpResponse.BodyHandlers.ofString());
@@ -131,6 +154,7 @@ class RenderAfterCommitTest {
         assertTrue(response.headers().allValues("Set-Cookie").stream().noneMatch(c -> c.startsWith("app_cookie=")),
             "handler cookies must not leak onto the 500: " + response.headers().allValues("Set-Cookie"));
         assertEquals("Internal Server Error", response.body());
+        awaitAllRecorded();
         assertEquals(1, stats.routeStats().get("POST /fail-render-with-headers").count(), "recorded once");
         assertEquals(failed + 1, stats.statusCodeCounts().getOrDefault(500, 0L), "recorded as the 500 sent");
         assertEquals(ok, stats.statusCodeCounts().getOrDefault(200, 0L), "never recorded as a 200");

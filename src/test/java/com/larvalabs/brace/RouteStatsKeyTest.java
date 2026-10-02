@@ -35,12 +35,24 @@ class RouteStatsKeyTest {
         app.stop();
     }
 
+    private static long routeCount(String key) {
+        var route = app.app().stats().routeStats().get(key);
+        return route == null ? 0 : route.count();
+    }
+
+    /** Requests are recorded after the response is written; wait for them (see {@link TestWait}). */
+    private static void awaitRouteCount(String key, long expected) {
+        TestWait.until(() -> routeCount(key) >= expected,
+            () -> key + " count never reached " + expected + ", was " + routeCount(key));
+    }
+
     @Test
     void manyIdsUnderOnePatternCollapseToOneKey() {
         var stats = app.app().stats();
         for (int i = 0; i < 25; i++) {
             app.get("/users/" + i);
         }
+        awaitRouteCount("GET /users/{id}", 25);
         assertTrue(stats.routeStats().containsKey("GET /users/{id}"),
             "expected the route pattern as the key, got: " + stats.routeStats().keySet());
         assertEquals(25, stats.routeStats().get("GET /users/{id}").count());
@@ -50,16 +62,19 @@ class RouteStatsKeyTest {
 
     /**
      * Unmatched URLs are attacker-controlled, so they must never reach the map. Note this asserts
-     * only the negative: whether an unmatched request is recorded <em>at all</em> is H2's business
-     * (today it is not — the no-route path returns before any recording), and the companion
-     * assertion that it lands in {@link BraceHandler#UNMATCHED_ROUTE_KEY} lives with that fix.
+     * only the negative: that an unmatched request lands in {@link BraceHandler#UNMATCHED_ROUTE_KEY}
+     * is H2's business and is asserted with it ({@link ShortCircuitStatsTest}); here that bucket's
+     * count is only how the test knows all 25 have been recorded.
      */
     @Test
     void unmatchedUrlsNeverBecomeStatsKeys() {
         var stats = app.app().stats();
+        long before = routeCount("GET " + BraceHandler.UNMATCHED_ROUTE_KEY);
         for (int i = 0; i < 25; i++) {
             app.get("/no-such-route-" + i);
         }
+        // Until all 25 are recorded, the negative check below would pass without having seen them.
+        awaitRouteCount("GET " + BraceHandler.UNMATCHED_ROUTE_KEY, before + 25);
         assertTrue(stats.routeStats().keySet().stream().noneMatch(k -> k.contains("no-such-route")),
             "unmatched URLs must not become stats keys: " + stats.routeStats().keySet());
     }
@@ -72,9 +87,11 @@ class RouteStatsKeyTest {
     @Test
     void throwBeforeRoutingFallsBackToTheUnmatchedBucket() throws Exception {
         var stats = app.app().stats();
+        long before = routeCount("GET " + BraceHandler.UNMATCHED_ROUTE_KEY);
         // Sent over a raw socket: java.net.URI rejects "%zz" client-side, so the JDK HTTP client
         // can't produce this request at all.
         rawGet("/users/1?bad=%zz");
+        awaitRouteCount("GET " + BraceHandler.UNMATCHED_ROUTE_KEY, before + 1);
         assertTrue(stats.routeStats().containsKey("GET " + BraceHandler.UNMATCHED_ROUTE_KEY),
             "expected the unmatched bucket, got: " + stats.routeStats().keySet());
         assertTrue(stats.routeStats().keySet().stream().noneMatch(k -> k.contains("%zz")),
@@ -97,6 +114,7 @@ class RouteStatsKeyTest {
         var stats = app.app().stats();
         app.get("/missing/7");
         app.get("/missing/8");
+        awaitRouteCount("GET /missing/{id}", 2);
         // A handler on a real route choosing to 404 still has a pattern — use it.
         assertEquals(2, stats.routeStats().get("GET /missing/{id}").count());
     }
@@ -106,6 +124,7 @@ class RouteStatsKeyTest {
         var stats = app.app().stats();
         app.get("/boom/7");
         app.get("/boom/8");
+        awaitRouteCount("GET /boom/{id}", 2);
         assertEquals(2, stats.routeStats().get("GET /boom/{id}").count());
     }
 }
