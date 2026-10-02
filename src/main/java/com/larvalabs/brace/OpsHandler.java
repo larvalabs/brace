@@ -290,6 +290,21 @@ public class OpsHandler {
                 routeList.add(r);
             });
         http.put("slowestRoutes", routeList);
+        // Busiest routes over the last few full minutes (windowed per-minute counts, not
+        // lifetime). Requests that matched no route are folded into one "(unmatched)" entry.
+        var topRoutes = stats.topRoutes(OpsDashboard.TOP_ROUTES_WINDOW_MINUTES, 5);
+        var topList = new ArrayList<Map<String, Object>>();
+        for (var r : topRoutes) {
+            var t = new LinkedHashMap<String, Object>();
+            t.put("route", r.route());
+            t.put("count", r.count());
+            t.put("perMinute", Math.round(r.perMinute() * 100.0) / 100.0);
+            t.put("sharePct", Math.round(r.share() * 1000.0) / 10.0);
+            topList.add(t);
+        }
+        http.put("topRoutes", topList);
+        http.put("topRoutesWindowMinutes", topRoutes.isEmpty()
+            ? OpsDashboard.TOP_ROUTES_WINDOW_MINUTES : topRoutes.getFirst().windowMinutes());
         data.put("http", http);
 
         // JVM (from JFR profiler or fallback to runtime). The profiling block (hot methods +

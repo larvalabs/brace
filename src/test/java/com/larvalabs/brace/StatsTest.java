@@ -244,4 +244,49 @@ class StatsTest {
         assertEquals(4.0, rate.avgPerMinute(), 0.001);
         assertEquals(2, rate.windowMinutes());
     }
+
+    @Test
+    void minuteSnapshotsCarryPerRouteCountsWithUnmatchedFolded() {
+        var stats = new Stats();
+        stats.recordRequestPattern("GET", "/users/{id}", 200, 100, 0, 0);
+        stats.recordRequestPattern("GET", "/users/{id}", 200, 100, 0, 0);
+        stats.recordRequestPattern("POST", "/login", 200, 100, 0, 0);
+        stats.recordRequest("GET", "/wp-login.php", 404, 100, 0, 0);
+        stats.recordRequest("GET", "/.env", 404, 100, 0, 0);
+
+        var counts = stats.snapshot().routeCounts();
+        assertEquals(2L, counts.get("GET /users/{id}"));
+        assertEquals(1L, counts.get("POST /login"));
+        assertEquals(2L, counts.get(Stats.UNMATCHED_ROUTE), "scanner paths fold into one row");
+        assertEquals(3, counts.size(), "raw paths never appear as their own keys: " + counts);
+
+        stats.recordRequestPattern("POST", "/login", 200, 100, 0, 0);
+        assertEquals(java.util.Map.of("POST /login", 1L), stats.snapshot().routeCounts(),
+            "counts reset at rotation; idle routes are omitted");
+        assertEquals(2, stats.routeStats().get("GET /users/{id}").count(), "cumulative count unaffected");
+    }
+
+    @Test
+    void topRoutesRankByWindowedCount() {
+        var stats = new Stats();
+        assertTrue(stats.topRoutes(5, 5).isEmpty());
+        // Old minute, outside a 2-minute window: /old dominated then.
+        for (int i = 0; i < 100; i++) stats.recordRequestPattern("GET", "/old", 200, 100, 0, 0);
+        stats.snapshot();
+        for (int i = 0; i < 6; i++) stats.recordRequestPattern("GET", "/hot", 200, 100, 0, 0);
+        stats.recordRequestPattern("GET", "/old", 200, 100, 0, 0);
+        stats.snapshot();
+        for (int i = 0; i < 2; i++) stats.recordRequestPattern("GET", "/hot", 200, 100, 0, 0);
+        stats.recordRequest("GET", "/wp-admin", 404, 100, 0, 0);
+        stats.snapshot();
+
+        var top = stats.topRoutes(2, 5);
+        assertEquals(3, top.size());
+        assertEquals("GET /hot", top.get(0).route());
+        assertEquals(8, top.get(0).count());
+        assertEquals(4.0, top.get(0).perMinute(), 0.001);
+        assertEquals(0.8, top.get(0).share(), 0.001);
+        assertEquals(2, top.get(0).windowMinutes());
+        assertEquals(1, stats.topRoutes(2, 1).size(), "limit applies");
+    }
 }

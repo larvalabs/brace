@@ -99,4 +99,25 @@ class OpsDashboardTest {
         assertTrue(html.contains("<div class=\"label\">Req / Min</div><div class=\"value c-blue\">1,500</div><div class=\"detail\">avg 752 · 2m</div>"), html);
         assertFalse(html.contains("<div class=\"label\">Requests</div>"));
     }
+
+    @Test
+    void topRoutesSitNextToSlowestRoutesInBothLayouts() {
+        var stats = new Stats();
+        for (int i = 0; i < 30; i++) stats.recordRequestPattern("GET", "/users/{id}", 200, 1000, 0, 0);
+        for (int i = 0; i < 10; i++) stats.recordRequest("GET", "/wp-login.php", 404, 100, 0, 0);
+        stats.snapshot();
+
+        for (var html : List.of(render(stats, profiler), render(stats, null))) {
+            int top = html.indexOf("Top Routes");
+            int slow = html.indexOf("Slowest Routes");
+            assertTrue(top > 0 && slow > top, "Top Routes precedes Slowest Routes");
+            assertEquals(html.lastIndexOf("<div class=\"two-col\">", top), html.lastIndexOf("<div class=\"two-col\">", slow),
+                "both tables share one two-col row");
+            assertTrue(html.contains("<th class=\"num\">Req/Min</th><th class=\"num\">Share</th>"));
+            assertTrue(html.contains("<td class=\"route\"><span class=\"c-green\">GET</span>&nbsp;/users/{id}</td>"
+                + "<td class=\"num c-blue\">30</td><td class=\"num c-muted\">75%</td>"), html);
+            assertTrue(html.contains("<td class=\"route c-muted\">(unmatched)</td><td class=\"num c-blue\">10</td>"));
+            assertFalse(html.contains("wp-login.php</td><td class=\"num c-blue\">"), "scanner paths never rank");
+        }
+    }
 }

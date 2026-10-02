@@ -9,6 +9,9 @@ import java.util.Map;
 
 public class OpsDashboard {
 
+    /** "Popular now" window for Top Routes (dashboard and /ops/status), in full minutes. */
+    static final int TOP_ROUTES_WINDOW_MINUTES = 5;
+
     /**
      * Render the dashboard for a caller holding {@code scope}. The embedded {@code token}
      * must be minted at that same scope (see {@code OpsHandler.dashboard}); mutating
@@ -42,6 +45,7 @@ public class OpsDashboard {
         var routeStats = stats.routeStats().entrySet().stream()
             .sorted((a, b) -> Double.compare(b.getValue().avgLatencyMs(), a.getValue().avgLatencyMs()))
             .limit(5).toList();
+        var topRoutes = stats.topRoutes(TOP_ROUTES_WINDOW_MINUTES, 5);
         var minutes = stats.minuteSnapshots();
         var recentErrors = stats.recentErrors();
         var jobStatuses = jobScheduler != null ? jobScheduler.getStatuses() : List.<JobScheduler.JobStatus>of();
@@ -335,9 +339,46 @@ public class OpsDashboard {
             }
         }
 
+        // Traffic: Top Routes (by request count) next to Slowest Routes (by avg latency).
+        // Rendered with or without the JFR profiler.
+        if (!routeStats.isEmpty() || !topRoutes.isEmpty()) {
+            sb.append("<div class=\"two-col\">\n");
+
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-blue\">Top Routes <span class=\"c-muted\" style=\"font-weight:normal\">— last ")
+              .append(topRoutes.isEmpty() ? TOP_ROUTES_WINDOW_MINUTES : topRoutes.getFirst().windowMinutes()).append(" min</span></div>");
+            if (topRoutes.isEmpty()) {
+                sb.append("<p class=\"c-muted\">No full minute yet</p>");
+            } else {
+                sb.append("<table><tr><th>Route</th><th class=\"num\">Req/Min</th><th class=\"num\">Share</th></tr>");
+                for (var r : topRoutes) {
+                    sb.append("<tr>");
+                    routeCell(sb, r.route());
+                    sb.append("<td class=\"num c-blue\">").append(formatRate(r.perMinute())).append("</td>");
+                    sb.append("<td class=\"num c-muted\">").append(String.format("%.0f%%", r.share() * 100)).append("</td></tr>");
+                }
+                sb.append("</table>");
+            }
+            sb.append("</div>\n");
+
+            sb.append("<div class=\"section\">");
+            sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
+            sb.append("<table><tr><th>Route</th><th class=\"num\">Avg</th><th class=\"num\">Calls</th></tr>");
+            for (var e : routeStats) {
+                sb.append("<tr>");
+                routeCell(sb, e.getKey());
+                sb.append("<td class=\"num c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
+                sb.append("<td class=\"num c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
+            }
+            sb.append("</table>");
+            sb.append("</div>\n");
+
+            sb.append("</div>\n"); // two-col
+        }
+
         // JVM profiling
         if (jvmSnap != null) {
-            // Hot Methods + Slowest Routes
+            // Hot Methods + Top Allocations
             sb.append("<div class=\"two-col\">\n");
 
             var profiling = (Map<String, Object>) jvmSnap.get("profiling");
@@ -357,34 +398,6 @@ public class OpsDashboard {
             }
             sb.append("</div>\n");
 
-            // Slowest routes
-            sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
-            sb.append("<table><tr><th>Route</th><th class=\"num\">Avg</th><th class=\"num\">Calls</th></tr>");
-            for (var e : routeStats) {
-                String[] parts = e.getKey().split(" ", 2);
-                String httpMethod = parts[0];
-                String path = parts.length > 1 ? parts[1] : e.getKey();
-                String methodColor = switch (httpMethod) {
-                    case "GET" -> "c-green";
-                    case "POST" -> "c-amber";
-                    case "PUT" -> "c-blue";
-                    case "DELETE" -> "c-red";
-                    default -> "c-muted";
-                };
-                sb.append("<tr><td class=\"route\"><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
-                  .append("</span>&nbsp;").append(esc(path)).append("</td>");
-                sb.append("<td class=\"num c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
-                sb.append("<td class=\"num c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
-            }
-            sb.append("</table>");
-            sb.append("</div>\n");
-
-            sb.append("</div>\n"); // two-col
-
-            // Allocations + GC Pauses
-            sb.append("<div class=\"two-col\">\n");
-
             var topAllocs = (List<Map<String, Object>>) profiling.get("topAllocations");
             sb.append("<div class=\"section\">");
             sb.append("<div class=\"section-head c-purple\">Top Allocations <span class=\"c-muted\" style=\"font-weight:normal\">— 5 min window</span></div>");
@@ -400,6 +413,11 @@ public class OpsDashboard {
                 sb.append("</table>");
             }
             sb.append("</div>\n");
+
+            sb.append("</div>\n"); // two-col
+
+            // Full-width row: GC pauses are the only child
+            sb.append("<div class=\"two-col\">\n");
 
             // GC pauses
             var gc = (Map<String, Object>) jvmSnap.get("gc");
@@ -427,31 +445,6 @@ public class OpsDashboard {
             sb.append("</div>\n");
 
             sb.append("</div>\n"); // two-col
-        }
-
-        // Slowest routes (standalone — when JFR is not active)
-        if (jvmSnap == null && !routeStats.isEmpty()) {
-            sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
-            sb.append("<table><tr><th>Route</th><th class=\"num\">Avg</th><th class=\"num\">Calls</th></tr>");
-            for (var e : routeStats) {
-                String[] parts = e.getKey().split(" ", 2);
-                String httpMethod = parts[0];
-                String path = parts.length > 1 ? parts[1] : e.getKey();
-                String methodColor = switch (httpMethod) {
-                    case "GET" -> "c-green";
-                    case "POST" -> "c-amber";
-                    case "PUT" -> "c-blue";
-                    case "DELETE" -> "c-red";
-                    default -> "c-muted";
-                };
-                sb.append("<tr><td class=\"route\"><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
-                  .append("</span>&nbsp;").append(esc(path)).append("</td>");
-                sb.append("<td class=\"num c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
-                sb.append("<td class=\"num c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
-            }
-            sb.append("</table>");
-            sb.append("</div>\n");
         }
 
         // Recent in-memory errors
@@ -635,6 +628,26 @@ public class OpsDashboard {
               .append(esc(str(e.get("message"), ""))).append("</div></td></tr>");
         }
         sb.append("</table>");
+    }
+
+    /** A route-key cell ({@code "GET /users/{id}"}): method colour-coded, path free to wrap. */
+    private static void routeCell(StringBuilder sb, String routeKey) {
+        if (Stats.UNMATCHED_ROUTE.equals(routeKey)) {
+            sb.append("<td class=\"route c-muted\">").append(esc(routeKey)).append("</td>");
+            return;
+        }
+        String[] parts = routeKey.split(" ", 2);
+        String httpMethod = parts[0];
+        String path = parts.length > 1 ? parts[1] : routeKey;
+        String methodColor = switch (httpMethod) {
+            case "GET" -> "c-green";
+            case "POST" -> "c-amber";
+            case "PUT" -> "c-blue";
+            case "DELETE" -> "c-red";
+            default -> "c-muted";
+        };
+        sb.append("<td class=\"route\"><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
+          .append("</span>&nbsp;").append(esc(path)).append("</td>");
     }
 
     private static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass) {

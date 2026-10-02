@@ -155,6 +155,17 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void statusTopRoutesUsePatternKeys() throws Exception {
+        get("/items/7");
+        get("/items/8");
+        app.stats().snapshot(); // rotate a minute so the windowed counts exist
+        var body = getWithToken("/ops/status").body();
+        int top = body.indexOf("\"topRoutes\":[");
+        assertTrue(top > 0, body);
+        assertTrue(body.indexOf("{\"route\":\"GET /items/{id}\",\"count\":", top) > 0, body);
+    }
+
+    @Test
     void opsDashboardRequiresAuth() throws Exception {
         var response = get("/ops/dashboard");
         assertEquals(401, response.statusCode());
@@ -566,6 +577,8 @@ class OpsIntegrationTest {
         assertTrue(body.contains("\"totalRequests\":"), body);
         // The metrics app rotated a minute at startup, so the rate block is present.
         assertTrue(body.contains("\"requestsPerMinute\":{\"lastMinute\":"), body);
+        assertTrue(body.contains("\"topRoutes\":["), body);
+        assertTrue(body.contains("\"topRoutesWindowMinutes\":"), body);
     }
 
     @Test

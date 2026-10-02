@@ -126,7 +126,9 @@ re-evaluates regressions from a clean baseline. Without Postgres the set is per-
     "statusCodes": { "200": 1523, "404": 12, "500": 3 },
     "totalRequests": 1538,
     "requestsPerMinute": { "lastMinute": 42, "avg": 25.6, "windowMinutes": 60 },
-    "slowestRoutes": [{ "route": "GET /search", "count": 45, "avgMs": 234.5 }]
+    "slowestRoutes": [{ "route": "GET /search", "count": 45, "avgMs": 234.5 }],
+    "topRoutes": [{ "route": "GET /posts/{id}", "count": 610, "perMinute": 122.0, "sharePct": 58.3 }],
+    "topRoutesWindowMinutes": 5
   },
   "jvm": {
     "heap": { "usedMB": 128, "maxMB": 512 },
@@ -161,6 +163,11 @@ Notes on the shape:
   `statusCodes`). `http.requestsPerMinute` is the current rate: `lastMinute` is the last
   full minute, `avg` the per-minute average over the retained window (`windowMinutes`, up
   to 60). It is absent until the first minute has rotated in.
+- `http.topRoutes` ranks the busiest routes over the last `topRoutesWindowMinutes` full
+  minutes (default 5), by request count: `perMinute` is the rate over that window and
+  `sharePct` the route's share of all requests in it. Keys are route patterns; requests
+  that matched no route (404 scanner noise) are folded into one `"(unmatched)"` entry.
+  Empty until the first minute has rotated in.
 - Two bulky blocks are **opt-in** via `?include=timeseries,profiling`:
   `timeseries.minutes` (60 per-minute snapshots: `ts`, `requests`, `errors`, `avgMs`) and
   `jvm.profiling` (JFR `hotMethods` + `topAllocations`). `jvm.cpu` and `jvm.gc` appear
@@ -182,7 +189,8 @@ Read the output in this order:
 1. **`app.uptime`** — if very short, the app recently restarted. Check logs for crash/OOM.
 2. **`http.statusCodes`** — look at 5xx count. Any 500s mean unhandled exceptions.
 3. **`errors.count`** — if > 0, switch to the error investigation runbook below.
-4. **`http.slowestRoutes`** — anything over 500ms avg deserves investigation.
+4. **`http.slowestRoutes`** — anything over 500ms avg deserves investigation. Cross-check
+   `http.topRoutes`: a slow route that is also a top route is where to look first.
 5. **`jvm.heap.usedMB` vs `maxMB`** — if usage is above 80% of max, memory pressure is likely. Check `jvm.gc.avgPauseMs` for GC impact.
 6. **`jobs.scheduled`** — any job with `lastStatus` != `"ok"` needs attention.
 7. **`cache`** — compute hit rate (hits / (hits + misses)). Below 50% means the cache isn't helping; review TTLs and key strategies.

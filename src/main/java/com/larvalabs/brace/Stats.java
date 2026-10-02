@@ -58,7 +58,7 @@ public class Stats {
      */
     public void recordRequest(String method, String path, int status, long latencyUs,
                               int queryCount, long queryUs) {
-        record(method + " " + Redactor.redactPath(path), status, latencyUs, queryCount, queryUs);
+        record(method + " " + Redactor.redactPath(path), false, status, latencyUs, queryCount, queryUs);
     }
 
     /**
@@ -69,10 +69,10 @@ public class Stats {
      */
     void recordRequestPattern(String method, String routePattern, int status, long latencyUs,
                               int queryCount, long queryUs) {
-        record(method + " " + routePattern, status, latencyUs, queryCount, queryUs);
+        record(method + " " + routePattern, true, status, latencyUs, queryCount, queryUs);
     }
 
-    private void record(String routeKey, int status, long latencyUs,
+    private void record(String routeKey, boolean matched, int status, long latencyUs,
                         int queryCount, long queryUs) {
         requestCount.increment();
         totalLatencyUs.add(latencyUs);
@@ -92,7 +92,10 @@ public class Stats {
             current = maxLatencyUs.get();
         }
 
-        routes.computeIfAbsent(routeKey, k -> new RouteStats()).record(latencyUs);
+        // get-then-compute keeps the hit path free of a capturing-lambda allocation.
+        var route = routes.get(routeKey);
+        if (route == null) route = routes.computeIfAbsent(routeKey, k -> new RouteStats(matched));
+        route.record(latencyUs);
     }
 
     public void recordError(String type, String message, String route,
@@ -182,11 +185,25 @@ public class Stats {
             if (snap != null) tValues.put(entry.getKey(), snap);
         }
 
+        // Per-route request counts for this minute. Keys are route patterns (bounded by the
+        // route table); unmatched raw-path keys fold into a single UNMATCHED_ROUTE entry.
+        var rCounts = new java.util.LinkedHashMap<String, Long>();
+        long unmatched = 0;
+        for (var entry : routes.entrySet()) {
+            var route = entry.getValue();
+            long n = route.minuteCount.sumThenReset();
+            if (n == 0) continue;
+            if (route.matched) rCounts.put(entry.getKey(), n);
+            else unmatched += n;
+        }
+        if (unmatched > 0) rCounts.put(UNMATCHED_ROUTE, unmatched);
+
         var snapshot = new MinuteSnapshot(
             Instant.now(), requests, errs, latencyUs, maxUs, queries, queryUs, heapMB,
             Collections.unmodifiableMap(cDeltas),
             Collections.unmodifiableMap(gValues),
-            Collections.unmodifiableMap(tValues)
+            Collections.unmodifiableMap(tValues),
+            Collections.unmodifiableMap(rCounts)
         );
 
         synchronized (ringLock) {
@@ -239,6 +256,35 @@ public class Stats {
         long sum = 0;
         for (var m : snapshots) sum += m.requests();
         return new RequestRate(snapshots.getLast().requests(), (double) sum / snapshots.size(), snapshots.size());
+    }
+
+    /** Route key under which requests that matched no route are counted in minute snapshots. */
+    public static final String UNMATCHED_ROUTE = "(unmatched)";
+
+    /**
+     * Busiest routes over the last {@code windowMinutes} full minutes (fewer if the ring
+     * holds fewer), by request count. Unmatched requests appear as one
+     * {@link #UNMATCHED_ROUTE} entry. Empty before the first rotation.
+     */
+    public List<RouteRate> topRoutes(int windowMinutes, int limit) {
+        var snapshots = minuteSnapshots();
+        int from = Math.max(0, snapshots.size() - windowMinutes);
+        int minutes = snapshots.size() - from;
+        var counts = new java.util.HashMap<String, Long>();
+        long total = 0;
+        for (var m : snapshots.subList(from, snapshots.size())) {
+            for (var e : m.routeCounts().entrySet()) {
+                counts.merge(e.getKey(), e.getValue(), Long::sum);
+                total += e.getValue();
+            }
+        }
+        long windowTotal = total;
+        return counts.entrySet().stream()
+            .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+            .limit(limit)
+            .map(e -> new RouteRate(e.getKey(), e.getValue(), (double) e.getValue() / minutes,
+                (double) e.getValue() / windowTotal, minutes))
+            .toList();
     }
 
     public List<ErrorRecord> recentErrors() {
@@ -310,7 +356,8 @@ public class Stats {
         long heapUsedMB,
         Map<String, Long> counterDeltas,
         Map<String, Long> gaugeValues,
-        Map<String, TimerSnapshot> timerValues
+        Map<String, TimerSnapshot> timerValues,
+        Map<String, Long> routeCounts
     ) {
         public double avgLatencyMs() {
             if (requests == 0) return 0.0;
@@ -322,6 +369,9 @@ public class Stats {
 
     /** Requests in the last full minute, and the per-minute average over {@code windowMinutes}. */
     public record RequestRate(long lastMinute, double avgPerMinute, int windowMinutes) {}
+
+    /** One route's traffic over a window: count, per-minute rate, and share (0..1) of all requests. */
+    public record RouteRate(String route, long count, double perMinute, double share, int windowMinutes) {}
 
     public static class TimerAccumulator {
         private final LongAdder count = new LongAdder();
@@ -350,10 +400,21 @@ public class Stats {
     public static class RouteStats {
         private final LongAdder count = new LongAdder();
         private final LongAdder totalUs = new LongAdder();
+        // Requests since the last minute rotation (reset on snapshot) — the windowed counts
+        // behind "top routes". Cumulative count above stays as-is.
+        private final LongAdder minuteCount = new LongAdder();
+        // False for raw-path keys (no route matched): folded into one "(unmatched)" bucket
+        // in the minute snapshot so 404 scanner paths never rank as routes.
+        private final boolean matched;
+
+        public RouteStats() { this(true); }
+
+        RouteStats(boolean matched) { this.matched = matched; }
 
         void record(long latencyUs) {
             count.increment();
             totalUs.add(latencyUs);
+            minuteCount.increment();
         }
 
         public long count() {
