@@ -133,6 +133,33 @@ class EventStreamTest {
         }
     }
 
+    /**
+     * A stream is recorded once, when it opens: the choke point records before it writes, so the
+     * minutes a client stays connected never become one enormous "request" in the latency figures.
+     */
+    @Test
+    void streamIsCountedOnceWhenItOpensAndItsLifetimeIsNotLatency() throws Exception {
+        var stats = testApp.app().stats();
+        long before = routeCount(stats, "GET /two");
+        try (var stream = open("/two", null)) {
+            assertEquals(List.of("event: first", "id: 1", "data: one"), stream.nextFrame());
+            assertEquals(before + 1, routeCount(stats, "GET /two"), "counted as soon as it opens");
+
+            Thread.sleep(500); // hold the stream open well past any plausible handler latency
+            release.countDown();
+            assertEquals(List.of("event: second", "id: 2", "data: two"), stream.nextFrame());
+            assertNull(stream.reader.readLine());
+        }
+        assertEquals(before + 1, routeCount(stats, "GET /two"), "and not again when it ends");
+        assertTrue(stats.routeStats().get("GET /two").avgLatencyMs() < 500,
+            "the stream's lifetime must not be recorded as latency");
+    }
+
+    private static long routeCount(Stats stats, String key) {
+        var route = stats.routeStats().get(key);
+        return route == null ? 0 : route.count();
+    }
+
     @Test
     void lastEventIdComesFromTheRequestHeader() throws Exception {
         try (var stream = open("/resume", "41")) {
