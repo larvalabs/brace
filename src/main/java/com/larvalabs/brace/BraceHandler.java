@@ -209,6 +209,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // The choke point keys stats on the matched ROUTE PATTERN, not the concrete URL (H1).
             exchange.match = match;
 
+            // L1: the router serves "/users/" from the "/users" route (no compiled pattern ends in
+            // a slash, so a match on such a path is always that fallback). From here on the request
+            // IS its canonical path, so before/after middleware patterns and req.path() checks in
+            // guards see the path the router matched. Without this, "/admin/" would reach the
+            // "/admin" handler while skipping a guard registered for exactly "/admin".
+            if (match != null && path.length() > 1 && path.endsWith("/")) {
+                path = Router.stripTrailingSlashes(path);
+            }
+
             // M2: the body is *supplied* here, not read. Buffering it before the before-middleware
             // loops put the cost ahead of the layer that exists to shed it — a rate limiter or auth
             // guard could not reject a request until up to maxUploadSize had already been read into

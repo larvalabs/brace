@@ -407,30 +407,53 @@ rendering, `JfrProfiler`, and the Flyway migration SQL itself.
 
 ## Low
 
-- [ ] **L1: Trailing-slash paths 404**
+- [x] **L1: Trailing-slash paths 404**
   - Files: `Route.java:32-54` (empty segments dropped), `Router.java:43-51`.
   - `/plain` compiles to `^/plain$`, so `GET /plain/` matches nothing. Confirmed: 404. Most frameworks
     either redirect to the canonical form or match both. Fix or document deliberately — a silent 404
     for a URL a user typed with a trailing slash is the failure mode either way.
+  - **Resolved as:** `Router.match` retries once against the slash-stripped path. Chose matching
+    over a 301 redirect deliberately: a redirect turns a POST into a GET and drops its body, so the
+    "canonicalize" answer is only correct for GET. `/` stays canonical, the method must still
+    match, and an unknown path still 404s.
+  - Note this also made an existing test wrong — `RouterTest.trailingSlashPatternNormalized`
+    asserted `assertNull(match("GET", "/about/"))` for a router that had `/about/` registered.
+    That pinned the bug, not a requirement: registering `/about/` and then 404ing `/about/` is
+    indefensible whichever way you canonicalize. Updated, with the reasoning in the test.
+  - **Follow-up added when rebasing onto 0.1.10:** matching alone opened an auth bypass.
+    Middleware `PathPattern`s match `req.path()`, so a guard registered for exactly `/admin` did
+    not run for `/admin/`, which the router now served from the `/admin` handler. `BraceHandler`
+    now serves a fallback-matched request *as* its canonical path (no compiled pattern ends in a
+    slash, so a match on a trailing-slash path is always the fallback): middleware, guards'
+    `req.path()` checks and the handler all see `/admin`. Covered by
+    `SmallCorrectnessFixesTest.trailingSlashCannotSkipAGuardRegisteredForTheExactPath`.
 
-- [ ] **L2: Dead weak-secret check in `Brace.validateSecret`**
+- [x] **L2: Dead weak-secret check in `Brace.validateSecret`**
   - Files: `Brace.java:218-222`.
   - `lower.contains("CHANGE-ME-to-a-random-string-at-least-32-chars")` tests an uppercase literal
     against an already-lowercased string; it can never match. Harmless today (the `change-me` clause
     above it covers the scaffold value) but it is a dead branch pretending to be a guard.
+  - **Resolved upstream:** the 2026-07 security review removed the same dead clause on main
+    (`b5dbe58`, its L3, shipped in 0.1.8), for the same reason: the `change-me` check already catches the
+    scaffold value. This branch's duplicate removal was dropped when it was rebased onto 0.1.10.
 
-- [ ] **L3: `View.of` silently drops a trailing odd key**
+- [x] **L3: `View.of` silently drops a trailing odd key**
   - Files: `View.java:48-52`, `:95-99`; contrast `Session.java:326-329`.
   - `for (i = 0; i < keyValues.length - 1; i += 2)` — `View.of("t", "a", 1, "b")` discards `"b"` with
     no error, so a typo'd call renders a template missing a variable. `Session.of` throws on an odd
     count. Make them consistent (throw).
+  - **Resolved as:** both `View.of` and `View.render` now build their params through one helper
+    that throws on an odd count, naming the dangling key in the message. Matches `Session.of`.
 
-- [ ] **L4: `Session.set`/`remove` mark the session modified unconditionally**
+- [x] **L4: `Session.set`/`remove` mark the session modified unconditionally**
   - Files: `Session.java:117-153`.
   - Removing an absent key, or setting a key to the value it already holds, flips `modified` — which
     costs a full AES-GCM re-mint, a `Set-Cookie`, and a forced `Cache-Control: private` on the
     response (`BraceHandler.attachSessionCookie`). A guard middleware doing an unconditional
     `session.remove("flash")` makes every response uncacheable. Compare before marking.
+  - **Resolved as:** `set` compares against the previous value, `remove` checks the key was
+    present, and `clear` checks the map was non-empty. Flash and CSRF paths are unaffected — they
+    only ever write real changes.
 
 - [ ] **L5: `Storage.uriEncodePath` uses form encoding, not the SigV4 unreserved set**
   - Files: `Storage.java:323-330`.
