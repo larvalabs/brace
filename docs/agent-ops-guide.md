@@ -124,6 +124,8 @@ re-evaluates regressions from a clean baseline. Without Postgres the set is per-
   "app": { "uptime": "2h 15m", "startedAt": "...", "javaVersion": "21" },
   "http": {
     "statusCodes": { "200": 1523, "404": 12, "500": 3 },
+    "totalRequests": 1538,
+    "requestsPerMinute": { "lastMinute": 42, "avg": 25.6, "windowMinutes": 60 },
     "slowestRoutes": [{ "route": "GET /search", "count": 45, "avgMs": 234.5 }]
   },
   "jvm": {
@@ -155,6 +157,10 @@ Notes on the shape:
   and `errors.recent` the 5 most recent summaries — no stack traces. Drill into one error
   with `GET /ops/errors/{id}` / `brace errors <id>`. `id` is present when a database backs
   the error store.
+- `http.totalRequests` is the lifetime count since process start (the sum of
+  `statusCodes`). `http.requestsPerMinute` is the current rate: `lastMinute` is the last
+  full minute, `avg` the per-minute average over the retained window (`windowMinutes`, up
+  to 60). It is absent until the first minute has rotated in.
 - Two bulky blocks are **opt-in** via `?include=timeseries,profiling`:
   `timeseries.minutes` (60 per-minute snapshots: `ts`, `requests`, `errors`, `avgMs`) and
   `jvm.profiling` (JFR `hotMethods` + `topAllocations`). `jvm.cpu` and `jvm.gc` appear

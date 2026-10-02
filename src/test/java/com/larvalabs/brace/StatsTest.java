@@ -228,4 +228,20 @@ class StatsTest {
         assertFalse(snapshots.isEmpty());
         assertTrue(snapshots.getFirst().heapUsedMB() > 0);
     }
+
+    @Test
+    void requestRateIsLastFullMinuteAndRingAverage() {
+        var stats = new Stats();
+        assertNull(stats.requestRate(), "no full minute before the first rotation");
+        for (int i = 0; i < 6; i++) stats.recordRequestPattern("GET", "/a", 200, 100, 0, 0);
+        stats.snapshot();
+        for (int i = 0; i < 2; i++) stats.recordRequestPattern("GET", "/a", 200, 100, 0, 0);
+        stats.snapshot();
+        stats.recordRequestPattern("GET", "/a", 200, 100, 0, 0); // current, unfinished minute
+
+        var rate = stats.requestRate();
+        assertEquals(2, rate.lastMinute());
+        assertEquals(4.0, rate.avgPerMinute(), 0.001);
+        assertEquals(2, rate.windowMinutes());
+    }
 }

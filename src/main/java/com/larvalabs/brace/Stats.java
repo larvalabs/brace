@@ -229,6 +229,18 @@ public class Stats {
         }
     }
 
+    /**
+     * Request rate from the minute ring: the last full minute and the average over every
+     * minute retained (up to 60). Null before the first rotation — there is no full minute yet.
+     */
+    public RequestRate requestRate() {
+        var snapshots = minuteSnapshots();
+        if (snapshots.isEmpty()) return null;
+        long sum = 0;
+        for (var m : snapshots) sum += m.requests();
+        return new RequestRate(snapshots.getLast().requests(), (double) sum / snapshots.size(), snapshots.size());
+    }
+
     public List<ErrorRecord> recentErrors() {
         synchronized (errorsLock) {
             return List.copyOf(errors);
@@ -307,6 +319,9 @@ public class Stats {
     }
 
     public record TimerSnapshot(long count, double avgMs, long maxMs) {}
+
+    /** Requests in the last full minute, and the per-minute average over {@code windowMinutes}. */
+    public record RequestRate(long lastMinute, double avgPerMinute, int windowMinutes) {}
 
     public static class TimerAccumulator {
         private final LongAdder count = new LongAdder();

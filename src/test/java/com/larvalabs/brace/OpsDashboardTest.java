@@ -85,4 +85,18 @@ class OpsDashboardTest {
             + "<span class=\"method\">.LedgerReconciliationService$PendingEntry[]</span></bdi>"));
         assertTrue(html.contains("title=\"byte[]\"><bdi dir=\"ltr\"><span class=\"method\">byte[]</span></bdi>"));
     }
+
+    @Test
+    void requestsCardShowsRateNotLifetimeTotal() {
+        var stats = new Stats();
+        for (int i = 0; i < 3; i++) stats.recordRequestPattern("GET", "/a", 200, 100, 0, 0);
+        assertTrue(render(stats, null).contains("<div class=\"label\">Req / Min</div><div class=\"value c-blue\">-</div><div class=\"detail\">first minute pending</div>"));
+
+        stats.snapshot();
+        for (int i = 0; i < 1500; i++) stats.recordRequestPattern("GET", "/a", 200, 100, 0, 0);
+        stats.snapshot();
+        var html = render(stats, null);
+        assertTrue(html.contains("<div class=\"label\">Req / Min</div><div class=\"value c-blue\">1,500</div><div class=\"detail\">avg 752 · 2m</div>"), html);
+        assertFalse(html.contains("<div class=\"label\">Requests</div>"));
+    }
 }

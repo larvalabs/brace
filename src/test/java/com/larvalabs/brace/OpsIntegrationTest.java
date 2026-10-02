@@ -561,6 +561,14 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void statusIncludesLifetimeTotalAndRequestRate() throws Exception {
+        var body = metricsGet("/ops/status").body();
+        assertTrue(body.contains("\"totalRequests\":"), body);
+        // The metrics app rotated a minute at startup, so the rate block is present.
+        assertTrue(body.contains("\"requestsPerMinute\":{\"lastMinute\":"), body);
+    }
+
+    @Test
     void dashboardIncludesCustomMetricSparklines() throws Exception {
         var response = metricsGet("/ops/dashboard");
         assertEquals(200, response.statusCode());

@@ -136,7 +136,15 @@ public class OpsDashboard {
 
         // Stat cards
         sb.append("<div class=\"stats-row\">");
-        statCard(sb, "Requests", String.valueOf(totalReqs), "", "c-blue");
+        // A rate, not the lifetime total (meaningless without the uptime; it stays in
+        // /ops/status): the last full minute, with the ring's average as the subtitle.
+        var rate = stats.requestRate();
+        if (rate == null) {
+            statCard(sb, "Req / Min", "-", "first minute pending", "c-blue");
+        } else {
+            statCard(sb, "Req / Min", String.format("%,d", rate.lastMinute()),
+                "avg " + formatRate(rate.avgPerMinute()) + " · " + rate.windowMinutes() + "m", "c-blue");
+        }
         statCard(sb, "Error Rate", errRate + "%", errCount + " total", Double.parseDouble(errRate) > 5 ? "c-red" : "c-green");
         statCard(sb, "Heap", heapUsed + "M", "/ " + heapMax + "M", "c-purple");
         if (jvmSnap != null) {
@@ -700,6 +708,11 @@ public class OpsDashboard {
         return "<span class=\"lt\" title=\"" + esc(full) + "\"><bdi dir=\"ltr\">"
             + (pkg.isEmpty() ? "" : "<span class=\"pkg\">" + esc(pkg) + "</span>")
             + "<span class=\"method\">" + esc(tail) + "</span></bdi></span>";
+    }
+
+    /** A per-minute rate: one decimal below 10 so low-traffic apps don't read as 0. */
+    private static String formatRate(double perMinute) {
+        return perMinute < 10 ? String.format("%.1f", perMinute) : String.format("%,.0f", perMinute);
     }
 
     private static String formatBytes(long bytes) {

@@ -265,7 +265,18 @@ public class OpsHandler {
 
         // HTTP stats
         var http = new LinkedHashMap<String, Object>();
-        http.put("statusCodes", stats.statusCodeCounts());
+        var statusCodes = stats.statusCodeCounts();
+        http.put("statusCodes", statusCodes);
+        http.put("totalRequests", statusCodes.values().stream().mapToLong(Long::longValue).sum());
+        // Rate from the minute ring; absent until the first full minute has rotated in.
+        var reqRate = stats.requestRate();
+        if (reqRate != null) {
+            var rpm = new LinkedHashMap<String, Object>();
+            rpm.put("lastMinute", reqRate.lastMinute());
+            rpm.put("avg", Math.round(reqRate.avgPerMinute() * 100.0) / 100.0);
+            rpm.put("windowMinutes", reqRate.windowMinutes());
+            http.put("requestsPerMinute", rpm);
+        }
         // Slowest routes (top 5 by avg latency)
         var routeList = new ArrayList<Map<String, Object>>();
         stats.routeStats().entrySet().stream()
