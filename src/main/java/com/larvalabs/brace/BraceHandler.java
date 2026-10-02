@@ -569,7 +569,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * 404 bucket, and constant for the same reason patterns are: the URL is client-supplied, so
      * one key per requested filename would be unbounded on the miss path.
      */
-    static final String STATIC_ROUTE_KEY = "(static)";
+    static final String STATIC_ROUTE_KEY = Stats.STATIC_ROUTE;
 
     /**
      * Per-request state the response choke point needs to finish a request (H2): when it

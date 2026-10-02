@@ -636,7 +636,8 @@ buckets; see "Fix: `/ops/routes` shows route patterns, and every response is cou
 - `totalRequests` is the lifetime total, the sum of `statusCodes`.
 - `requestsPerMinute` is absent until the first minute has rotated in.
 - `topRoutes` ranks routes by request count over the last 5 full minutes. Requests that
-  matched no route fold into a single `"(unmatched)"` entry.
+  matched no route fold into a single `"(unmatched)"` entry and static files into a single
+  `"(static)"` entry, whatever their method. Both count toward `sharePct`.
 - `?include=timeseries` minutes gain `p95Ms` next to `avgMs`.
 
 No action is required. `brace status` and `brace check` read only `statusCodes` and

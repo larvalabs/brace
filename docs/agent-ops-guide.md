@@ -173,7 +173,8 @@ Notes on the shape:
 - `http.topRoutes` ranks the busiest routes over the last `topRoutesWindowMinutes` full
   minutes (default 5), by request count: `perMinute` is the rate over that window and
   `sharePct` the route's share of all requests in it. Keys are route patterns; requests
-  that matched no route (404 scanner noise) are folded into one `"(unmatched)"` entry.
+  that matched no route (404 scanner noise) are folded into one `"(unmatched)"` entry and
+  static-file requests into one `"(static)"` entry. Both count toward `sharePct`.
   Empty until the first minute has rotated in.
 - Two bulky blocks are **opt-in** via `?include=timeseries,profiling` (CLI:
   `brace status --include profiling,timeseries`):

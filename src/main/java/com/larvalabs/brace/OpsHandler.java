@@ -291,7 +291,8 @@ public class OpsHandler {
             });
         http.put("slowestRoutes", routeList);
         // Busiest routes over the last few full minutes (windowed per-minute counts, not
-        // lifetime). Requests that matched no route are folded into one "(unmatched)" entry.
+        // lifetime). Requests that matched no route are folded into one "(unmatched)" entry,
+        // static files into one "(static)" entry.
         var topRoutes = stats.topRoutes(OpsDashboard.TOP_ROUTES_WINDOW_MINUTES, 5);
         var topList = new ArrayList<Map<String, Object>>();
         for (var r : topRoutes) {

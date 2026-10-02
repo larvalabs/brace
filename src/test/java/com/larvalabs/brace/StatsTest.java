@@ -266,6 +266,27 @@ class StatsTest {
         assertEquals(2, stats.routeStats().get("GET /users/{id}").count(), "cumulative count unaffected");
     }
 
+    /**
+     * The framework's own non-route buckets (BraceHandler records every response, so every method
+     * reaches them): each folds into one method-less row, and the raw-path fold joins the same
+     * unmatched row rather than a second one.
+     */
+    @Test
+    void minuteSnapshotsFoldTheNonRouteBucketsAcrossMethods() {
+        var stats = new Stats();
+        stats.recordRequestPattern("GET", Stats.UNMATCHED_ROUTE, 404, 100, 0, 0);
+        stats.recordRequestPattern("POST", Stats.UNMATCHED_ROUTE, 404, 100, 0, 0);
+        stats.recordRequest("GET", "/wp-login.php", 404, 100, 0, 0);
+        stats.recordRequestPattern("GET", Stats.STATIC_ROUTE, 200, 100, 0, 0);
+        stats.recordRequestPattern("HEAD", Stats.STATIC_ROUTE, 200, 100, 0, 0);
+        stats.recordRequestPattern("GET", "/users/{id}", 200, 100, 0, 0);
+
+        assertEquals(java.util.Map.of(Stats.UNMATCHED_ROUTE, 3L, Stats.STATIC_ROUTE, 2L, "GET /users/{id}", 1L),
+            stats.snapshot().routeCounts());
+        // The cumulative per-route table keeps the per-method keys.
+        assertEquals(1, stats.routeStats().get("HEAD " + Stats.STATIC_ROUTE).count());
+    }
+
     @Test
     void topRoutesRankByWindowedCount() {
         var stats = new Stats();

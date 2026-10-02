@@ -65,7 +65,7 @@ public class Stats {
      */
     public void recordRequest(String method, String path, int status, long latencyUs,
                               int queryCount, long queryUs) {
-        record(method + " " + Redactor.redactPath(path), false, status, latencyUs, queryCount, queryUs);
+        record(method + " " + Redactor.redactPath(path), UNMATCHED_ROUTE, status, latencyUs, queryCount, queryUs);
     }
 
     /**
@@ -73,16 +73,18 @@ public class Stats {
      * Patterns are code-site literals: no redaction needed, and the routes map stays
      * bounded by the number of registered routes instead of growing per distinct URL —
      * previously ID-bearing paths leaked one map entry per entity ever requested (H7).
-     * {@link #UNMATCHED_ROUTE} is the one non-route pattern: it keeps its per-method key here
-     * but folds into the single unmatched bucket in minute snapshots, like a raw path.
+     * {@link #UNMATCHED_ROUTE} and {@link #STATIC_ROUTE} are the two non-route patterns: they
+     * keep their per-method keys here but each folds into one method-less row in minute
+     * snapshots (a raw path folds into the unmatched one).
      */
     void recordRequestPattern(String method, String routePattern, int status, long latencyUs,
                               int queryCount, long queryUs) {
-        record(method + " " + routePattern, !UNMATCHED_ROUTE.equals(routePattern),
-            status, latencyUs, queryCount, queryUs);
+        String bucket = UNMATCHED_ROUTE.equals(routePattern) || STATIC_ROUTE.equals(routePattern)
+            ? routePattern : null;
+        record(method + " " + routePattern, bucket, status, latencyUs, queryCount, queryUs);
     }
 
-    private void record(String routeKey, boolean matched, int status, long latencyUs,
+    private void record(String routeKey, String bucket, int status, long latencyUs,
                         int queryCount, long queryUs) {
         requestCount.increment();
         totalLatencyUs.add(latencyUs);
@@ -105,7 +107,7 @@ public class Stats {
 
         // get-then-compute keeps the hit path free of a capturing-lambda allocation.
         var route = routes.get(routeKey);
-        if (route == null) route = routes.computeIfAbsent(routeKey, k -> new RouteStats(matched));
+        if (route == null) route = routes.computeIfAbsent(routeKey, k -> new RouteStats(bucket));
         route.record(latencyUs);
     }
 
@@ -198,18 +200,15 @@ public class Stats {
         }
 
         // Per-route request counts for this minute. Keys are route patterns (bounded by the
-        // route table); unmatched keys (any method's UNMATCHED_ROUTE, or a raw path) fold into
-        // a single UNMATCHED_ROUTE entry.
+        // route table); the non-route keys fold into one method-less row each: UNMATCHED_ROUTE
+        // (any method's, or a raw path) and STATIC_ROUTE.
         var rCounts = new java.util.LinkedHashMap<String, Long>();
-        long unmatched = 0;
         for (var entry : routes.entrySet()) {
             var route = entry.getValue();
             long n = route.minuteCount.sumThenReset();
             if (n == 0) continue;
-            if (route.matched) rCounts.put(entry.getKey(), n);
-            else unmatched += n;
+            rCounts.merge(route.bucket != null ? route.bucket : entry.getKey(), n, Long::sum);
         }
-        if (unmatched > 0) rCounts.put(UNMATCHED_ROUTE, unmatched);
 
         var snapshot = new MinuteSnapshot(
             Instant.now(), requests, errs, latencyUs, maxUs, queries, queryUs, heapMB,
@@ -275,10 +274,14 @@ public class Stats {
     /** Route key under which requests that matched no route are counted in minute snapshots. */
     public static final String UNMATCHED_ROUTE = "(unmatched)";
 
+    /** Route key under which files served from a {@code staticFiles} mapping are counted. */
+    public static final String STATIC_ROUTE = "(static)";
+
     /**
      * Busiest routes over the last {@code windowMinutes} full minutes (fewer if the ring
      * holds fewer), by request count. Unmatched requests appear as one
-     * {@link #UNMATCHED_ROUTE} entry. Empty before the first rotation.
+     * {@link #UNMATCHED_ROUTE} entry and static files as one {@link #STATIC_ROUTE} entry; both
+     * count toward every route's share. Empty before the first rotation.
      */
     public List<RouteRate> topRoutes(int windowMinutes, int limit) {
         var snapshots = minuteSnapshots();
@@ -496,13 +499,14 @@ public class Stats {
         // Requests since the last minute rotation (reset on snapshot) — the windowed counts
         // behind "top routes". Cumulative count above stays as-is.
         private final LongAdder minuteCount = new LongAdder();
-        // False for unmatched keys (raw paths, UNMATCHED_ROUTE): folded into one "(unmatched)"
-        // bucket in the minute snapshot so 404 scanner paths never rank as routes.
-        private final boolean matched;
+        // Null for a route pattern. For a non-route key, the row it folds into in the minute
+        // snapshot (UNMATCHED_ROUTE or STATIC_ROUTE), so 404 scanner paths and per-method
+        // duplicates never rank as routes.
+        private final String bucket;
 
-        public RouteStats() { this(true); }
+        public RouteStats() { this(null); }
 
-        RouteStats(boolean matched) { this.matched = matched; }
+        RouteStats(String bucket) { this.bucket = bucket; }
 
         void record(long latencyUs) {
             count.increment();

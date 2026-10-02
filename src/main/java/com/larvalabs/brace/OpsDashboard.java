@@ -676,7 +676,7 @@ public class OpsDashboard {
 
     /** A route-key cell ({@code "GET /users/{id}"}): method colour-coded; the path may break only after a {@code /}. */
     private static void routeCell(StringBuilder sb, String routeKey) {
-        if (Stats.UNMATCHED_ROUTE.equals(routeKey)) {
+        if (Stats.UNMATCHED_ROUTE.equals(routeKey) || Stats.STATIC_ROUTE.equals(routeKey)) {
             sb.append("<td class=\"route c-muted\">").append(esc(routeKey)).append("</td>");
             return;
         }
