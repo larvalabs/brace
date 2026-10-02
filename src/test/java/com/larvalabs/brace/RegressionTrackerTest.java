@@ -1,5 +1,6 @@
 package com.larvalabs.brace;
 
+import com.larvalabs.brace.testmodels.Post;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -56,6 +57,43 @@ class RegressionTrackerTest {
         assertTrue(t.acknowledge(id));
         assertTrue(t.list().get(0).acknowledged());
         assertFalse(t.acknowledge("nonexistent-id"), "unknown id returns false");
+    }
+
+    @Test
+    void seedCoversMoreKindsThanListLimitSoNoneReNotify() {
+        // seed() must read the uncapped since-filtered list: with the unfiltered one (capped at
+        // LIST_LIMIT) the oldest kinds go unseeded, and one that is resolved and recurs reaches
+        // onNew as a fresh insert and notifies again.
+        var dbFactory = new DatabaseFactory(
+            "jdbc:h2:mem:regressionseed" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+            List.of(Post.class));
+        var errorStore = new ErrorStore(dbFactory, 1000);
+        try {
+            var startedAt = Instant.now().minusSeconds(3600);
+            int total = ErrorStore.LIST_LIMIT + 1;
+            var db = new Database(dbFactory.openSession());
+            db.beginTransaction();
+            for (int i = 0; i < total; i++) {
+                var ts = java.sql.Timestamp.from(startedAt.plusSeconds(i));
+                db.sql("INSERT INTO ops_errors (error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "E" + i, "m", "s", "GET /r" + i, "req", ts, ts, 1);
+            }
+            db.commitTransaction();
+            db.close();
+
+            var n = new CapturingNotifier();
+            var t = new RegressionTracker(startedAt, 0, List.of(n));
+            t.seed(errorStore);
+            assertEquals(total, t.list().size(), "every kind since startup is seeded");
+
+            for (int i = 0; i < total; i++) {
+                t.onNew("E" + i, "GET /r" + i, "m", Instant.now());
+            }
+            assertEquals(0, n.received.size(), "seeded kinds never re-notify");
+        } finally {
+            errorStore.close();
+            dbFactory.close();
+        }
     }
 
     @Test

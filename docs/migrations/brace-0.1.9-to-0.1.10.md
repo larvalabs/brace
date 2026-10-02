@@ -109,4 +109,12 @@ includes `queriesBefore` and `requestHeaders` again, so it has exactly the field
 
 **Who needs to act.** No one.
 
+### Fix: regression tracking seeds every error kind since startup
+
+**What changed.** On startup the in-memory regression tracker now reads every error kind first
+seen since the process started, not just the 500 most recent, so a known kind that is resolved
+and then recurs no longer sends a second regression notification.
+
+**Who needs to act.** No one.
+
 <!-- end section: merge-restore -->
