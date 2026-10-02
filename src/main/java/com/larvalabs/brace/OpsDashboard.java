@@ -67,8 +67,8 @@ public class OpsDashboard {
             <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12px; padding: 16px; }
-            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 12px; }
-            .header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; }
+            .header { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 12px; }
+            .header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; white-space: nowrap; }
             .header .meta { color: #565f89; }
             .stats-row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
             .stat-card { flex: 1; border: 1px solid #30363d; padding: 8px; min-width: 120px; }
@@ -79,7 +79,6 @@ public class OpsDashboard {
             .section-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
             .two-col { display: flex; gap: 10px; margin-bottom: 14px; }
             .two-col > div { flex: 1; min-width: 0; }
-            td.route { overflow-wrap: anywhere; }
             @media (max-width: 800px) { .two-col { flex-direction: column; } }
             table { border-collapse: collapse; width: 100%; }
             th { text-align: left; color: #565f89; font-size: 9px; text-transform: uppercase; padding: 3px 0; }
@@ -603,7 +602,7 @@ public class OpsDashboard {
         statusCodes.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(e -> {
             String codeColor = e.getKey() < 300 ? "c-green" : e.getKey() < 400 ? "c-blue" : e.getKey() < 500 ? "c-amber" : "c-red";
             sb.append("<tr><td class=\"").append(codeColor).append("\">").append(e.getKey())
-              .append("</td><td class=\"num\">").append(e.getValue()).append("</td></tr>");
+              .append("</td><td class=\"num\">").append(String.format("%,d", e.getValue())).append("</td></tr>");
         });
         sb.append("</table>");
         sb.append("</div>\n");
@@ -666,7 +665,7 @@ public class OpsDashboard {
         sb.append("</table>");
     }
 
-    /** A route-key cell ({@code "GET /users/{id}"}): method colour-coded, path free to wrap. */
+    /** A route-key cell ({@code "GET /users/{id}"}): method colour-coded; the path may break only after a {@code /}. */
     private static void routeCell(StringBuilder sb, String routeKey) {
         if (Stats.UNMATCHED_ROUTE.equals(routeKey)) {
             sb.append("<td class=\"route c-muted\">").append(esc(routeKey)).append("</td>");
@@ -683,7 +682,7 @@ public class OpsDashboard {
             default -> "c-muted";
         };
         sb.append("<td class=\"route\"><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
-          .append("</span>&nbsp;").append(esc(path)).append("</td>");
+          .append("</span>&nbsp;").append(esc(path).replace("/", "/<wbr>")).append("</td>");
     }
 
     private static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass) {

@@ -114,7 +114,7 @@ class OpsDashboardTest {
             assertEquals(html.lastIndexOf("<div class=\"two-col\">", top), html.lastIndexOf("<div class=\"two-col\">", slow),
                 "both tables share one two-col row");
             assertTrue(html.contains("<th class=\"num\">Req/Min</th><th class=\"num\">Share</th>"));
-            assertTrue(html.contains("<td class=\"route\"><span class=\"c-green\">GET</span>&nbsp;/users/{id}</td>"
+            assertTrue(html.contains("<td class=\"route\"><span class=\"c-green\">GET</span>&nbsp;/<wbr>users/<wbr>{id}</td>"
                 + "<td class=\"num c-blue\">30</td><td class=\"num c-muted\">75%</td>"), html);
             assertTrue(html.contains("<td class=\"route c-muted\">(unmatched)</td><td class=\"num c-blue\">10</td>"));
             assertFalse(html.contains("wp-login.php</td><td class=\"num c-blue\">"), "scanner paths never rank");
@@ -137,5 +137,17 @@ class OpsDashboardTest {
         assertTrue(html.contains("<div class=\"bar lat\" title=\"10 ms avg, 10 ms p95, 50 ms max @ "), html);
         assertTrue(html.contains("<div class=\"lat-avg\" style=\"height:100%\"></div>"));
         assertTrue(html.contains("<div class=\"bar\" title=\"no requests @ "));
+    }
+
+    @Test
+    void routesBreakOnlyAfterSlashesAndHeaderAndCountsStayReadable() {
+        var stats = new Stats();
+        for (int i = 0; i < 30_376; i++) stats.recordRequestPattern("GET", "/orgs/{orgId}/deployments", 200, 100, 0, 0);
+        var html = render(stats, null);
+
+        assertTrue(html.contains("GET</span>&nbsp;/<wbr>orgs/<wbr>{orgId}/<wbr>deployments</td>"), "break opportunities only after /");
+        assertFalse(html.contains("overflow-wrap: anywhere"), "no mid-word breaks in route cells");
+        assertTrue(html.contains(".header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; white-space: nowrap; }"));
+        assertTrue(html.contains("<td class=\"c-green\">200</td><td class=\"num\">30,376</td>"), "status counts use separators");
     }
 }
