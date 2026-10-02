@@ -56,6 +56,10 @@ directly: see "`Stats.MinuteSnapshot` gained components" below.
 
 ### Per-route stats are keyed by route pattern again
 
+**Type: fix. Action required: none.** Per-route stats (`http.slowestRoutes`, Top Routes) are
+keyed by route pattern again (H7), so they stay bounded by the route table instead of
+growing one entry per distinct URL.
+
 The 0.1.7 fix that recorded matched requests under their route pattern
 (`GET /users/{id}`) instead of the concrete path (`GET /users/42`) had been lost in a
 merge, so `http.slowestRoutes` again listed one entry per distinct URL and the per-route
