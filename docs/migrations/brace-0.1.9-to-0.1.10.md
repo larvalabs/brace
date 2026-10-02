@@ -1,13 +1,78 @@
 # Migrating from Brace 0.1.9 → 0.1.10
 
-<!-- In progress. Each workstream fills in only its own section below. The intro, the
-breaking-change summary and the Index table are written at integration time, from the
-sections. -->
+This release adds streaming throughout: large uploads spill to disk, responses can stream
+(with `Range` support), handlers can serve Server-Sent Events with `Result.sse`, and the
+outbound `Http` client can read streamed responses and SSE. It also lands a correctness
+review, makes the ops dashboard and GC figures accurate, fixes the scaffolded Dockerfile, and
+restores several 0.1.7 performance fixes that a merge had silently dropped before 0.1.7 was
+tagged.
+
+Six changes **are breaking**. Check each one against your app before upgrading:
+
+- **Single-column `db.sqlQuery` / `db.hql` return real rows.** Read `row[0]` instead of
+  casting each element.
+- **`app.stop()` closes the `DatabaseFactory`.** Apps that share one factory between several
+  `Brace` instances (common in tests) add `.ownsDatabase(false)`.
+- **`View.of` / `View.render` throw on an odd number of arguments.**
+- **Out-of-range CIDR prefixes in `trustedProxies` throw at startup.**
+- **An `UploadedFile` is only valid during its request.** Copy or save it before handing it
+  to a background job.
+- **The scaffold's placeholder session secret is refused outside dev mode.** If your app was
+  created with `brace new` and deploys `application.conf.example`, set a real
+  `SESSION_SECRET` *before* upgrading, or the app won't start.
+
+Two fixes change numbers you may alert on: per-route stats are keyed by route pattern and now
+count every response (expect higher totals), and GC pause figures now count only
+stop-the-world time (expect lower ones).
 
 ## Index
 
 | Change | Type | Action required | Anchor |
 |---|---|---|---|
+| Single-column `db.sqlQuery` / `db.hql` return real rows | breaking | read `row[0]`; drop `List<Object>` casts | [§](#breaking-single-column-dbsqlquery--dbhql-return-real-rows) |
+| `app.stop()` closes the `DatabaseFactory` | breaking | shared factories: `.ownsDatabase(false)` | [§](#breaking-appstop-closes-the-databasefactory) |
+| `View.of` / `View.render` reject odd arguments | breaking | pair every key with a value | [§](#breaking-viewof--viewrender-reject-an-odd-number-of-arguments) |
+| Out-of-range CIDR prefixes throw | breaking | fix the `trustedProxies` config | [§](#breaking-out-of-range-cidr-prefixes-in-trustedproxies-throw) |
+| `UploadedFile` valid only during its request | breaking | copy or save before returning | [§](#breaking-an-uploadedfile-is-only-valid-during-its-request) |
+| Placeholder session secret refused outside dev | security fix (breaking if affected) | set a real `SESSION_SECRET` before upgrading | [§](#security-fix-the-scaffolds-placeholder-session-secret-is-refused-at-startup) |
+| Route stats keyed by pattern; every response counted | fix | ops tooling: expect patterns, `(unmatched)`, `(static)` | [§](#fix-opsroutes-shows-route-patterns-and-every-response-is-counted) |
+| GC pause figures count only stop-the-world time | fix | re-tune GC alerts or a raised `check.gc_pause_ms` | [§](#fix-gc-pause-figures-count-only-stop-the-world-time) |
+| `Storage.put` / `Storage.delete` threw on every call | fix | drop any `allowRestrictedHeaders=host` workaround | [§](#fix-storageput-and-storagedelete-threw-on-every-call) |
+| SMTP credentials percent-decoded | fix | encode a literal `%` / `+` as `%25` / `%2B` | [§](#fix-smtp-credentials-in-smtpurl-are-percent-decoded) |
+| Scaffolded `Dockerfile`: JRE 25, precompiled templates, `JAVA_OPTS` | fix | existing apps: update Dockerfile and pom by hand | [§](#fix-scaffolded-dockerfile-precompiled-templates-on-a-jre-java_opts-heap-cap) |
+| Scaffolded container config reads secrets from env | fix (security) | change `application.conf.example` keys to `${VAR}` | [§](#fix-scaffolded-container-config-reads-secrets-from-the-environment) |
+| Static files with percent-encoded names served | fix | none | [§](#fix-static-files-with-percent-encoded-names-are-served) |
+| HTML checkboxes bind to `boolean` fields | fix | none | [§](#fix-html-checkboxes-bind-to-boolean-form-fields) |
+| Repeated multipart fields keep every value | fix | none | [§](#fix-repeated-multipart-fields-keep-every-value) |
+| A trailing slash reaches the route | fix | none | [§](#fix-a-trailing-slash-reaches-the-route) |
+| htmx `Vary` header appended | fix | none | [§](#fix-the-htmx-vary-header-is-appended-not-overwritten) |
+| `daily(...)` jobs keep wall-clock time across DST | fix | none | [§](#fix-daily-jobs-keep-their-wall-clock-time-across-dst) |
+| Smaller correctness fixes | fix | none | [§](#fix-smaller-fixes-no-action-needed) |
+| Oversized multipart uploads return 413 | fix | none | [§](#fix-oversized-multipart-uploads-return-413-not-500) |
+| `brace ops --help` lists subcommands | fix | none | [§](#fix-brace-ops---help-lists-the-ops-subcommands) |
+| A failed `start()` no longer leaves the JVM running | fix | none | [§](#fix-a-failed-start-no-longer-leaves-the-jvm-running) |
+| Request headers no longer copied twice | fix | none | [§](#fix-request-headers-are-no-longer-copied-twice-per-request) |
+| Unfiltered error list capped at 500 rows | fix | pass `?since=` for a complete window | [§](#fix-an-unfiltered-error-list-is-capped-at-500-rows) |
+| Resolving an error returns the full record | fix | none | [§](#fix-resolving-an-error-returns-the-same-fields-as-fetching-it) |
+| Regression tracking seeds every error kind | fix | none | [§](#fix-regression-tracking-seeds-every-error-kind-since-startup) |
+| Bodyless requests allocate no body buffer | fix | none | [§](#fix-requests-without-a-body-no-longer-allocate-a-body-buffer) |
+| Session cookie decrypted at most once | fix | none | [§](#fix-the-session-cookie-is-decrypted-at-most-once-per-request) |
+| Template render failures return a clean 500 | fix | none | [§](#fix-a-template-that-fails-to-render-returns-a-clean-500) |
+| Startup warning: `perIp` without trusted proxies | behavior | none; configure `trustedProxies` to silence | [§](#behavior-startup-warning-when-ratelimiterperip-runs-without-trusted-proxies) |
+| Server-Sent Events: `Result.sse` | new-optional | none | [§](#new-optional-server-sent-events-with-resultsse) |
+| Streaming responses and `Range` | new-optional | none | [§](#new-optional-streaming-responses-and-range-support) |
+| Large uploads spill to disk | new-optional | budget temp disk; `uploadTempDir(...)` | [§](#new-optional-large-uploads-spill-to-disk) |
+| `Storage.put` streams | new-optional | none | [§](#new-optional-storageput-streams) |
+| `Http.stream()` / `fetchEvents` | new-optional | replace raw `java.net.http` SSE workarounds | [§](#new-optional-httpstream-and-fetchevents-for-streamed-responses) |
+| `TrustedProxies.cloudflare()` preset | new-optional | none | [§](#new-optional-trustedproxiescloudflare-preset-with-auto-refresh) |
+| Static `Metrics.counter/gauge/timer` | new-optional | use instead of threading `app.stats()` | [§](#new-optional-static-custom-metrics-with-metrics) |
+| `/ops/status` request-rate and Top Routes fields | new-optional | none | [§](#new-optional-opsstatus-request-rate-and-top-routes-fields) |
+| Dashboard: req/min, Top Routes, p95 latency | new-optional | none | [§](#new-optional-dashboard-request-rate-top-routes-and-p95-latency) |
+| `Stats` request-rate and Top Routes helpers | new-optional | none | [§](#new-optional-stats-request-rate-and-top-routes-helpers) |
+| `brace status --include profiling,timeseries` | new-optional | none | [§](#new-optional-brace-status---include-profilingtimeseries) |
+| Day intervals for jobs and timeouts | new-optional | none | [§](#new-optional-day-intervals-for-jobs-and-timeouts) |
+| `CacheBackend.getOrCompute` | new-optional | none | [§](#new-optional-cachebackendgetorcompute) |
+| java.time values in JSON responses | docs | none | [§](#docs-javatime-values-in-json-responses) |
 
 ---
 
