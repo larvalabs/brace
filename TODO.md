@@ -220,4 +220,4 @@ Surfaced 2026-06-04 by a full audit of single-server architecture assumptions �
 - [ ] Multi-database support testing (MySQL, MariaDB) — note: the half-wired `jdbc:mysql:` dialect branch was removed from `DatabaseFactory.detectDialect` 2026-06-04 (the bundled migrations are Postgres/H2 SQL, so it promised portability that didn't exist). Real MySQL support means dialect-specific migrations, not just restoring a dialect string.
 - [x] Simple async tasks (`Jobs.run(runnable)`, `Jobs.submit(callable)` — non-scheduled, non-durable, virtual thread per task)
 - [ ] Make `TestApp` work without `Mailer` dependency (currently always creates a `Mailer`, requiring `jakarta.mail` even for apps that don't use email)
-- [ ] SSE (Server-Sent Events) support
+- [x] *Done (0.1.10): `Result.sse(events -> ...)` with an `EventStream` emitter (events, ids, retry, comments, heartbeats, disconnect detection); the producer runs after the request transaction commits (branch `0.1.10/streaming-io`).* SSE (Server-Sent Events) support

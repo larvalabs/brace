@@ -127,6 +127,40 @@ Static files now stream too, advertise `Accept-Ranges: bytes`, and answer a sing
 An after-middleware that rewrites response bodies should pass through when `result.isStreaming()`;
 `body()` and `rawBytes()` are null for a streaming result.
 
+### New-optional: Server-Sent Events with `Result.sse`
+
+**What changed.** A handler can return a Server-Sent Events stream. The producer gets an
+`EventStream` and sends events as they happen; each one is flushed before the call returns.
+
+```java
+app.get("/ticks", req -> Result.sse(events -> {
+    for (int i = 0; events.isOpen(); i++) {
+        events.send("tick", "n=" + i, String.valueOf(i));   // event, data, id
+        Thread.sleep(1000);
+    }
+}));
+```
+
+Also `send(data)`, `sendJson(event, value)`, `comment(text)`, `retry(Duration)` and
+`heartbeat(Duration)`. The response is `text/event-stream` with `Cache-Control: no-cache` and
+`X-Accel-Buffering: no`.
+
+The rules that matter:
+
+- **The producer runs after the request transaction commits** and holds no database connection.
+  The handler's `db` is closed by then; open a short `dbFactory.withSession(...)` per unit of work.
+- **A disconnect ends the producer.** A send to a gone client throws `UncheckedIOException`. A
+  heartbeat comment every 15 seconds notices a client that left while the producer was waiting and
+  interrupts the producer thread, so `Thread.sleep` or `queue.take()` throws
+  `InterruptedException`. Both are the normal end of a stream and are not logged as failures.
+- **Reconnects** carry the last event id in the `Last-Event-ID` request header:
+  `req.header("Last-Event-ID")`.
+- The request is recorded in stats and the request log when the stream opens, with the handler's
+  duration, not the stream's lifetime.
+
+**Who must act.** Nobody. Apps that hand-rolled SSE with `Result.stream(out -> ...)` can switch to
+get heartbeats and disconnect handling.
+
 ### Fix: `Storage.put` and `Storage.delete` threw on every call
 
 **What changed.** Both set the `Host` header explicitly, which the JDK HttpClient refuses
