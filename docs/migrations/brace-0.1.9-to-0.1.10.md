@@ -119,7 +119,8 @@ Multi-column selects are unchanged. `db.sqlQueryLong(...)` already handled both 
 
 If you worked around the old shape by padding a single-column select with a dummy column
 (`SELECT name, 1 FROM users`) to get `Object[]` rows, that still works unchanged. You can drop
-the extra column whenever convenient.
+the extra column whenever convenient. Code that handled both shapes
+(`row instanceof Object[] a ? a[0] : row`) also keeps working.
 
 ### Breaking: `app.stop()` closes the `DatabaseFactory`
 
