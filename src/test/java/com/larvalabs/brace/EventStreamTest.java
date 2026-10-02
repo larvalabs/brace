@@ -97,6 +97,38 @@ class EventStreamTest {
             app.get("/db-query", (DbHandler) (req, db) ->
                 Result.text("rows=" + db.sqlQuery("SELECT 1").size()));
 
+            // Generated bodies, for the latency contrast with event streams: these are recorded
+            // after the write, so their generation time is latency.
+            app.get("/slow-writer", req -> Result.stream(out -> {
+                try {
+                    Thread.sleep(300);
+                    out.write("done".getBytes(StandardCharsets.UTF_8));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }, "text/plain"));
+            app.get("/failing-writer", req -> Result.stream(out -> {
+                try {
+                    out.write("partial\n".getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+                throw new IllegalStateException("generator exploded");
+            }, "text/plain"));
+            // Writes until the client goes away.
+            app.get("/endless-writer", req -> Result.stream(out -> {
+                try {
+                    while (true) {
+                        out.write("tick\n".getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                        Thread.sleep(20);
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }, "text/plain"));
+
             app.get("/fails", req -> Result.sse(events -> {
                 events.send("partial");
                 throw new IllegalStateException("producer exploded");
@@ -153,6 +185,54 @@ class EventStreamTest {
         assertEquals(before + 1, routeCount(stats, "GET /two"), "and not again when it ends");
         assertTrue(stats.routeStats().get("GET /two").avgLatencyMs() < 500,
             "the stream's lifetime must not be recorded as latency");
+    }
+
+    /**
+     * The other side of the rule above: every non-SSE response is recorded after it is written,
+     * so a generated body's generation time is latency, and it is still counted exactly once
+     * when the generator fails or the client leaves mid-body.
+     */
+    @Test
+    void generatedBodyIsCountedOnceAfterItIsWrittenWithItsGenerationTimeAsLatency() throws Exception {
+        var stats = testApp.app().stats();
+        var response = client.send(HttpRequest.newBuilder(URI.create(testApp.url("/slow-writer"))).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals("done", response.body());
+        awaitRouteCount(stats, "GET /slow-writer", 1);
+        assertTrue(stats.routeStats().get("GET /slow-writer").avgLatencyMs() >= 300,
+            "generation time must be recorded as latency, got "
+                + stats.routeStats().get("GET /slow-writer").avgLatencyMs() + "ms");
+    }
+
+    @Test
+    void failedGeneratorIsCountedOnce() throws Exception {
+        var stats = testApp.app().stats();
+        try (var stream = open("/failing-writer", null)) {
+            assertEquals("partial", stream.reader.readLine());
+            assertThrows(java.io.IOException.class, () -> {
+                while (stream.reader.readLine() != null) { /* drain */ }
+            });
+        }
+        awaitRouteCount(stats, "GET /failing-writer", 1);
+        Thread.sleep(200);
+        assertEquals(1, routeCount(stats, "GET /failing-writer"), "counted exactly once");
+    }
+
+    @Test
+    void generatedBodyCutOffByTheClientIsCountedOnce() throws Exception {
+        var stats = testApp.app().stats();
+        try (var stream = open("/endless-writer", null)) {
+            assertEquals("tick", stream.reader.readLine());
+            assertEquals(0, routeCount(stats, "GET /endless-writer"), "not recorded while still writing");
+        }
+        awaitRouteCount(stats, "GET /endless-writer", 1);
+        Thread.sleep(200);
+        assertEquals(1, routeCount(stats, "GET /endless-writer"), "counted exactly once");
+    }
+
+    private static void awaitRouteCount(Stats stats, String key, long expected) throws InterruptedException {
+        for (int i = 0; i < 100 && routeCount(stats, key) < expected; i++) Thread.sleep(50);
+        assertEquals(expected, routeCount(stats, key), key);
     }
 
     private static long routeCount(Stats stats, String key) {

@@ -462,10 +462,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
             //
-            // The choke point records before it writes, which is what an event stream needs:
-            // respond() runs it for as long as the client stays, and an hours-long "request" would
-            // swamp the latency figures. Its duration is the handler's, i.e. the time to open the
-            // stream, and it is counted once, when it opens.
+            // The choke point records an event stream when it opens and every other response
+            // once it is written; see send().
             respond(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
 
@@ -737,18 +735,30 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // response passes through. Recording per-site meant only three of the exits were
         // covered, so rate-limiter 429s, CSRF 403s, 413s, static files and unmatched 404s never
         // reached /ops/status or the request log at all — the exact signals an incident needs.
-        // It runs after the after-middleware chain, so the recorded status is the one sent, and
-        // before the write, so a streamed body (an event stream above all, which writeToWire runs
-        // for as long as the client stays) is counted once and does not inflate latency.
-        recordAndLog(exchange, result.status());
-        if (req != null && result instanceof StreamResult) {
-            // A streaming response outlives handle(): its bytes are still going out when the
-            // end-of-request finally runs. Take the upload cleanup with it, or a handler streaming
-            // an upload straight back would have the file deleted mid-response.
-            writeToWire(result, response, callback, req.takeUploadCleanup());
-            return;
+        // It runs after the after-middleware chain, so the recorded status is the one sent.
+        //
+        // When it runs depends on the body. An event stream is recorded BEFORE the write:
+        // writeToWire runs it for as long as the client stays, and an hours-long "request" would
+        // swamp the latency figures, so its duration is the time to open the stream. Everything
+        // else is recorded AFTER writeToWire returns, so a generated body's (WriterBody's)
+        // generation time counts as latency. The finally keeps that true when the write fails
+        // or the client disconnects, and Exchange.recorded makes the second call for an event
+        // stream a no-op, so each response is counted exactly once either way.
+        if (result instanceof StreamResult s && s.streamBody() instanceof StreamResult.EventsBody) {
+            recordAndLog(exchange, result.status());
         }
-        writeToWire(result, response, callback, null);
+        try {
+            if (req != null && result instanceof StreamResult) {
+                // A streaming response outlives handle(): its bytes are still going out when the
+                // end-of-request finally runs. Take the upload cleanup with it, or a handler
+                // streaming an upload straight back would have the file deleted mid-response.
+                writeToWire(result, response, callback, req.takeUploadCleanup());
+                return;
+            }
+            writeToWire(result, response, callback, null);
+        } finally {
+            recordAndLog(exchange, result.status());
+        }
     }
 
     /**
