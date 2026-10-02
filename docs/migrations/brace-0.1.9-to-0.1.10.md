@@ -100,6 +100,29 @@ normal concurrent cycle.
 { "collector": "G1Old", "durationMs": 6.0, "longestPauseMs": 4.0, "cycleMs": 120.0 }
 ```
 
+### New (optional): `brace status --include profiling,timeseries`
+
+**What changed.** `brace status` always fetched the bare `/ops/status`, so the opt-in
+blocks (JFR hot methods and top allocations, per-minute timeseries) were reachable only
+over HTTP. `--include` passes a comma-separated list through as `?include=...`. Unknown
+names are rejected, since the server would silently ignore them. Without the flag the
+request and output are unchanged.
+
+**Who needs to act.** Nobody. Scripts that called the endpoint directly to get profiling
+can switch to the CLI, which handles auth.
+
+**Before (0.1.9):**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$URL/ops/status?include=profiling"
+```
+
+**After (0.1.10):**
+
+```bash
+brace status --env prod --include profiling --json
+```
+
 <!-- end section: ops-jvm-cli -->
 
 ---

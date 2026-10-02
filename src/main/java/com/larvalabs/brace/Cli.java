@@ -180,7 +180,7 @@ public class Cli {
         System.out.println("  brace errors [--since 1h]   List unresolved errors (summaries; --full for detail)");
         System.out.println("  brace errors <id>           Show full detail for one error");
         System.out.println("  brace logs [-f] [--since]   Tail recent log lines (--limit <n> caps entries, server default 200)");
-        System.out.println("  brace status                Show app health snapshot");
+        System.out.println("  brace status                Show app health snapshot (--include profiling,timeseries adds JFR hot methods/allocations, per-minute stats)");
         System.out.println("  brace check                 Run all health checks");
         System.out.println("  brace cache                 Show cache stats");
         System.out.println("  brace cache clear           Clear the cache");

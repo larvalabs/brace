@@ -64,7 +64,7 @@ check.log_window_minutes=30
 
 | Command | Purpose | Exit code |
 |---|---|---|
-| `brace status [--env prod]` | Full system snapshot | 0 healthy / 1 errors exist / 2 unreachable |
+| `brace status [--include profiling,timeseries] [--env prod]` | Full system snapshot; `--include` adds the opt-in blocks (`jvm.profiling` hot methods + top allocations, `timeseries.minutes`) | 0 healthy / 1 errors exist / 2 unreachable |
 | `brace check [--env prod]` | Run all health checks, return structured verdict | 0 all pass / 1 issues / 2 unreachable |
 | `brace errors [--since 1h] [--full] [--env prod]` | List unresolved error summaries (`--full` for the per-row detail shape) | 0 none / 1 some / 2 unreachable |
 | `brace errors <id> [--env prod]` | Full detail for one error (stack trace, request context, headers, queries) | 0 / 1 not found / 2 unreachable |
@@ -162,7 +162,8 @@ Notes on the shape:
   and `errors.recent` the 5 most recent summaries — no stack traces. Drill into one error
   with `GET /ops/errors/{id}` / `brace errors <id>`. `id` is present when a database backs
   the error store.
-- Two bulky blocks are **opt-in** via `?include=timeseries,profiling`:
+- Two bulky blocks are **opt-in** via `?include=timeseries,profiling` (CLI:
+  `brace status --include profiling,timeseries`):
   `timeseries.minutes` (60 per-minute snapshots: `ts`, `requests`, `errors`, `avgMs`) and
   `jvm.profiling` (JFR `hotMethods` + `topAllocations`). `jvm.cpu` and `jvm.gc` appear
   only when the JFR profiler is attached (it always is when ops is enabled).
@@ -244,7 +245,7 @@ When `brace status` shows a route with high average latency:
    ```
    Look at `durationMs` and `queries` / `queryMs` fields in the structured log entries.
 3. **If `queryMs` dominates `durationMs`** — the database is the bottleneck. Look at the handler code for N+1 queries, missing indexes, or full table scans.
-4. **If `durationMs` is high but `queryMs` is low** — the handler is CPU-bound or waiting on an external service. Check `jvm.profiling.hotMethods` in status output (opt-in: `GET /ops/status?include=profiling`).
+4. **If `durationMs` is high but `queryMs` is low** — the handler is CPU-bound or waiting on an external service. Check `jvm.profiling.hotMethods` in status output (opt-in: `brace status --include profiling --json`).
 5. **Check for GC pauses** — `jvm.gc.avgPauseMs` above 50ms, a high `maxPauseMs`, or any `G1Full` in `recentPauses` can cause latency spikes across all routes. Ignore `cycleMs` here: concurrent cycles don't stop requests.
 6. **Check heap pressure** — if heap usage is near max, GC runs more frequently and takes longer.
 
