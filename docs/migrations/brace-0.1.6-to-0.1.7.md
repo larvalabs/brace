@@ -2612,3 +2612,14 @@ large limit (say `1000/min`) on a multi-box fleet, raise `rateLimitBatchDivisor`
 accept the documented overshoot. If you want zero rate-limiter DB load and per-instance limits are
 acceptable, set `sharedRateLimiting(false)`. Background and load analysis:
 [`docs/2026-06-07-rate-limiter-load.md`](../2026-06-07-rate-limiter-load.md).
+
+---
+
+## Correction (added in 0.1.10): the scaffolded Dockerfile
+
+"Deploying with Docker" above says newly scaffolded projects get a Dockerfile with the
+precompile setup in place. Because of a merge regression they did not: `brace new` in 0.1.7
+through 0.1.9 still wrote `FROM eclipse-temurin:21-jre` with a plain `java -jar app.jar`, which
+fails on the first rendered page. See
+[the 0.1.10 guide's Dockerfile entry](brace-0.1.9-to-0.1.10.md#fix-scaffolded-dockerfile-precompiled-templates-on-a-jre-java_opts-heap-cap)
+for the fixed Dockerfile and how to update an existing one.
