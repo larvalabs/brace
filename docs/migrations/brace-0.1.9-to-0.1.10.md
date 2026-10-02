@@ -14,7 +14,298 @@ sections. -->
 <!-- section: correctness -->
 ## Correctness fixes
 
-_No entries yet._
+Fixes from the 2026-07 correctness review
+([record](../reviews/2026-07-correctness-opus-5.md),
+[findings](../2026-07-24-correctness-review-todos.md)).
+
+Four of these are **breaking**, each only for code that worked around the old bug or shared a
+`DatabaseFactory`: single-column `sqlQuery`/`hql` rows, `stop()` closing the database factory,
+`View.of` rejecting an odd argument count, and stricter `trustedProxies` CIDR validation.
+
+### Breaking: single-column `db.sqlQuery` / `db.hql` return real rows
+
+**Type:** breaking (only for code that worked around the old shape).
+
+**What changed.** Both methods declare `List<Object[]>`, but for a select with one item they
+returned bare scalars, so `for (Object[] row : db.sqlQuery("SELECT name FROM users"))` threw
+`ClassCastException` inside your loop. Every element is now an `Object[]`, whatever the column
+count; read `row[0]`.
+
+**Who needs to act.** Code that cast the result to `List<Object>` (or `List<String>`) to get at
+the scalars. That code now sees `Object[]` elements, so `toString()` yields
+`[Ljava.lang.Object;@...` and a `String` cast throws. Grep for `sqlQuery(` and `hql(` calls with
+a single selected column.
+
+**Before (0.1.9), the workaround:**
+
+```java
+@SuppressWarnings("unchecked")
+var names = (List<Object>) (List<?>) db.sqlQuery("SELECT name FROM users");
+for (var n : names) use(n.toString());
+```
+
+**After (0.1.10):**
+
+```java
+for (var row : db.sqlQuery("SELECT name FROM users")) use(String.valueOf(row[0]));
+```
+
+Multi-column selects are unchanged. `db.sqlQueryLong(...)` already handled both shapes.
+
+### Breaking: `app.stop()` closes the `DatabaseFactory`
+
+**Type:** breaking (only when a factory is shared), plus a new optional builder method.
+
+**What changed.** `stop()` never closed the factory passed to `.database(...)`, so every stopped
+app left its whole connection pool (and a Hibernate `SessionFactory`) open until the process
+exited. It now closes it, along with the rate limiter's shared state that pointed at it. The
+new `.ownsDatabase(false)` opts out, for a factory that outlives the app.
+
+**Who needs to act.** Code that hands one `DatabaseFactory` to several `Brace` apps, or keeps
+using it after `stop()`: typically a test fixture that builds the factory once per class and
+starts an app per test. Without the opt-out, the next use fails with
+`IllegalStateException: EntityManagerFactory is closed`.
+
+**Before (0.1.9):**
+
+```java
+static DatabaseFactory factory = new DatabaseFactory(url, user, pass, entities);
+
+var app = Brace.app().database(factory);
+app.start();
+// ...
+app.stop();            // factory still open
+factory.openSession(); // fine
+```
+
+**After (0.1.10):**
+
+```java
+var app = Brace.app().database(factory).ownsDatabase(false); // you close the factory
+app.start();
+// ...
+app.stop();
+factory.openSession(); // still fine
+// ...and when you're done with it:
+factory.close();
+```
+
+`Brace.test()` apps that let Brace build the database need no change.
+
+### Breaking: `View.of` / `View.render` reject an odd number of arguments
+
+**Type:** breaking (only for calls that were already dropping a variable).
+
+**What changed.** The key/value varargs loop stopped one short, so a trailing key with no value
+was silently discarded and the template rendered without it. An odd count now throws
+`IllegalArgumentException` naming the dangling key, as `Session.of` always has.
+
+**Who needs to act.** Only code with an unpaired argument, which was rendering a page with a
+blank where that variable should be. The error surfaces as a 500 when the page renders, so load
+each page or run tests that render them.
+
+**Before (0.1.9), silently rendered without `user`:**
+
+```java
+return View.of("posts/index", "posts", posts, "user");
+```
+
+**After (0.1.10), throws; pass the value:**
+
+```java
+return View.of("posts/index", "posts", posts, "user", user);
+```
+
+### Breaking: out-of-range CIDR prefixes in `trustedProxies` throw
+
+**Type:** breaking (only for configurations that were already wrong).
+
+**What changed.** A negative prefix (`10.0.0.0/-1`) produced an all-zero mask, which trusts
+**every** address's forwarding headers, the opposite of what the setting is for. An over-wide
+prefix (`/33` for IPv4, `/129` for IPv6) was silently clamped. Both now throw
+`IllegalArgumentException` at startup, naming the valid range. `/0` still means every address.
+
+**Who needs to act.** If startup fails with `Invalid CIDR` / `Prefix length must be 0..32`, fix
+the entry.
+
+**Before (0.1.9), trusted every client:**
+
+```java
+app.trustedProxies("10.0.0.0/-1");
+```
+
+**After (0.1.10), throws at startup; write the range you meant:**
+
+```java
+app.trustedProxies("10.0.0.0/8");
+```
+
+### Fix: `/ops/routes` shows route patterns, and every response is counted
+
+**Type:** fix (changes ops output; no application code changes).
+
+**What changed.** Per-route stats in `/ops/routes` and `/ops/status` are keyed by route
+pattern, not the request URL. Previously `GET /users/1` and `GET /users/2` were separate rows,
+so the table grew by one entry per URL ever requested, for the life of the process, and
+per-route latency figures were meaningless because almost every row had a count of 1. They now
+aggregate under `GET /users/{id}`:
+
+```
+# Before (0.1.9)                    # After (0.1.10)
+GET /users/1     count=1            GET /users/{id}    count=48210
+GET /users/2     count=1            GET /posts/{slug}  count=9930
+GET /users/3     count=1            GET (unmatched)    count=412
+...one row per id, forever...       GET (static)       count=88301
+```
+
+Requests with no route land in two constant buckets: `(unmatched)` for 404s and `(static)`
+for files served from a `staticFiles` mapping. They are constants on purpose: the URL there is
+client-supplied, so a row per URL would be unbounded in whatever a client sends.
+
+Every response is now recorded. Before, only the handler path and the thrown-404/500 paths
+reached the stats and the request log, so these were invisible: rate-limiter 429s and other
+before-middleware short-circuits, auth-guard redirects, CSRF 403s, 413s, static-file serves and
+unmatched-route 404s. Static-file requests now also appear in the request log; raise
+`BRACE_LOG_LEVEL` (or serve assets from a CDN or proxy) if that is too noisy. A 500 still
+produces exactly one log line (`http.error`).
+
+**Who needs to act.** Only tooling that parses `/ops/status` or `/ops/routes`. Expect route
+patterns where you saw concrete URLs, the two literal keys `(unmatched)` and `(static)`, and
+higher request counts and status totals: that is traffic that was previously dropped, not new
+traffic. To find which concrete URLs 404, use `/ops/logs`; the request log still records the
+concrete (redacted) path.
+
+### Fix: static files with percent-encoded names are served
+
+**Type:** fix.
+
+**What changed.** 0.1.9 started decoding path parameters; static files were still looked up
+by the raw, encoded path, so `/assets/my%20file.css` searched for a file literally named
+`my%20file.css` and 404'd. The relative path is now percent-decoded per segment before the
+traversal checks and the file lookup, with the same path decoding as path parameters (`+` is a
+literal plus). A `?v=` fingerprint from `Assets` now also matches for such files, so they get
+the immutable cache headers instead of revalidate-always.
+
+**Who needs to act.** Nobody. If you renamed asset files to avoid spaces or other encoded
+characters, you no longer need to.
+
+### Fix: HTML checkboxes bind to `boolean` form fields
+
+**Type:** fix.
+
+**What changed.** `boolean` (and `Boolean`) form components used `Boolean.parseBoolean`, which
+is true only for the string `"true"`. A checked HTML checkbox submits `name=on`, so it bound
+`false`. Now `on`, `true`, `1`, `yes` and `checked` (case-insensitive) bind `true`; anything else,
+and an absent field, binds `false`.
+
+**Who needs to act.** Nobody has to. If you declared the component as `String` and compared it
+to `"on"` yourself, that keeps working, and you can switch to `boolean`:
+
+```java
+record Signup(String email, String agree) {}   // 0.1.9 workaround: "on".equals(form.value().agree())
+record Signup(String email, boolean agree) {}  // 0.1.10
+```
+
+### Fix: repeated multipart fields keep every value
+
+**Type:** fix.
+
+**What changed.** For a `multipart/form-data` submission, `req.formParams("tag")` returned only
+the last value of a repeated field (a checkbox group, a `<select multiple>`). It now returns all
+of them, as it already did for `application/x-www-form-urlencoded`. `req.formParam("tag")` is
+unchanged (last value wins).
+
+**Who needs to act.** Nobody.
+
+### Fix: a trailing slash reaches the route
+
+**Type:** fix.
+
+**What changed.** `GET /users/` used to 404 when the route was `/users`. It now matches the
+`/users` route, for every method; there is no redirect, because a 301 would turn a `POST` into a
+`GET` and drop its body. The request is treated as `/users` from routing on: before/after
+middleware patterns, `req.path()` and the handler all see the canonical path, so a guard on
+exactly `/admin` also covers `/admin/`. `/` is unaffected and an unknown path still 404s.
+
+**Who needs to act.** Only code that relied on the 404 to reject trailing slashes.
+
+### Fix: the htmx `Vary` header is appended, not overwritten
+
+**Type:** fix.
+
+**What changed.** On htmx requests Brace set `Vary: HX-Request`, replacing any `Vary` the
+handler had set (`Accept-Encoding`, `Accept-Language`), so a shared cache varied on the wrong
+dimension. `HX-Request` is now appended to the handler's value (once, and not at all when the
+value is `*`). An after-middleware that sets `Vary` still replaces the whole value, so append
+there too.
+
+**Who needs to act.** Nobody, unless you appended `HX-Request` to `Vary` yourself in the handler;
+that still works and is no longer necessary.
+
+### Fix: `daily(...)` jobs keep their wall-clock time across DST
+
+**Type:** fix.
+
+**What changed.** `daily("03:00", ...)` scheduled a fixed 24-hour period, so after a daylight
+saving change it ran an hour off until restart, and a run near midnight UTC could be deduplicated
+away and skipped for a day. It now reschedules from the wall clock after each run, and cluster
+deduplication uses the local calendar day. This also applies to the framework's own nightly
+prune jobs.
+
+**Who needs to act.** Run every instance in the same time zone (UTC is the usual choice). A
+local firing time already assumed that.
+
+### Fix: SMTP credentials in `smtpUrl` are percent-decoded
+
+**Type:** fix.
+
+**What changed.** A username or password embedded in the SMTP URL is now percent-decoded, as
+`DatabaseFactory` already does for database URLs. A password containing `@`, `/` or `:` has to
+be encoded to parse at all, and used to be sent with the literal `%40` and fail to authenticate.
+
+**Who needs to act.** Only if your SMTP user name or password contains a literal `%` or `+`
+that you did not encode: write them as `%25` and `%2B` (decoding follows `DatabaseFactory`, where
+`+` means a space). `smtp://user:p%40ss@host:587` now authenticates with `p@ss`.
+
+### New-optional: day intervals for jobs and timeouts
+
+**Type:** new-optional.
+
+**What changed.** Interval strings accept `d`, matching cache TTLs: `every("1d", ...)`,
+`jobTimeout("2d")`, `jobShutdownTimeout(...)` and `jobPollInterval(...)` used to throw
+`Unknown time unit: d` while `cache.set(k, v, "1d")` accepted the same string.
+
+**Who needs to act.** Nobody.
+
+### New-optional: `CacheBackend.getOrCompute`
+
+**Type:** new-optional (for custom `CacheBackend` implementations).
+
+**What changed.** `cache.getOrSet(...)` cast the backend to the built-in in-memory class, so a
+custom live-object `CacheBackend` threw `ClassCastException` on it. `getOrSet` now goes through a
+new SPI method, `CacheBackend.getOrCompute`, whose default is a plain get, compute, set. The
+built-in backend overrides it to keep its per-key single-flight.
+
+**Who needs to act.** Nobody. A custom backend can override `getOrCompute` if it can do better
+than the default.
+
+### Fix: smaller fixes, no action needed
+
+- **Unchanged session writes no longer re-issue the cookie.** `session.set(k, v)` with the value
+  it already had, `remove` of an absent key and `clear` of an empty session no longer mark the
+  session modified, so they no longer cost a re-encrypted `Set-Cookie` and `Cache-Control:
+  private` on every response.
+- **One failing WebSocket member no longer aborts a broadcast** to the rest of the room, and a
+  send that throws no longer leaks the slow-consumer byte budget.
+- **S3 keys containing `*` or `~` are signed correctly** (SigV4 encoding instead of form
+  encoding), instead of failing with `SignatureDoesNotMatch`.
+- **`Log.error(message, throwable)` redacts the exception message**, like the request error path
+  already did.
+- **HQL `?` numbering survives `LIKE'...'` with no space before the quote**, where a trailing `E`
+  of the keyword was mistaken for a Postgres `E'...'` string.
+- **`Http.fetch()` and friends document their status handling:** they return non-2xx responses
+  rather than throwing (`fetchBytes()` throws), and redirects are not followed. No behavior
+  change.
 
 <!-- end section: correctness -->
 

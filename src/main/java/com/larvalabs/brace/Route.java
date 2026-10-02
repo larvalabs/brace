@@ -74,6 +74,16 @@ public class Route {
         this.name = name;
     }
 
+    /**
+     * Match {@code path} (the RAW, still percent-encoded request path) against this route,
+     * returning the captured parameters or null.
+     *
+     * <p>Matching runs on the raw path and captured values are decoded <em>afterwards</em> (H3).
+     * The order is the whole safety argument: decoding first would turn a {@code %2F} into a real
+     * separator, so {@code /files/a%2F..%2Fb} would match a two-segment route and hand a handler
+     * an escaped path. Decoding after the capture keeps {@code %2F} inside the value it was
+     * written in, where it is just a character.
+     */
     public Map<String, String> match(String path) {
         var matcher = compiledPattern.matcher(path);
         if (!matcher.matches()) return null;
@@ -111,5 +121,25 @@ public class Route {
             }
         }
         return bytes.toString(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Percent-decode every segment of a {@code /}-separated path, preserving the separators.
+     * Each segment goes through {@link #decodeSegment}, so a {@code %2F} decodes to a literal
+     * {@code /} <em>within</em> its segment and callers must still reject {@code ..} on the
+     * decoded result before touching the filesystem.
+     */
+    static String decodePath(String path) {
+        if (path.indexOf('%') < 0) return path;
+        var out = new StringBuilder(path.length());
+        int start = 0;
+        while (true) {
+            int slash = path.indexOf('/', start);
+            if (slash < 0) {
+                return out.append(decodeSegment(path.substring(start))).toString();
+            }
+            out.append(decodeSegment(path.substring(start, slash))).append('/');
+            start = slash + 1;
+        }
     }
 }

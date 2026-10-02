@@ -3,7 +3,6 @@ package com.larvalabs.brace;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -350,13 +349,44 @@ public class Storage {
         }
     }
 
+    /**
+     * URI-encode an object key for both the request URL and the SigV4 canonical request (L5).
+     *
+     * <p>Not {@link java.net.URLEncoder}, which is {@code application/x-www-form-urlencoded} and diverges
+     * from SigV4's required set in both directions: it leaves {@code *} literal where SigV4 wants
+     * {@code %2A}, and encodes {@code ~} as {@code %7E} where SigV4 wants it literal. A key
+     * containing either character produced a canonical request that did not match what S3
+     * recomputed, i.e. {@code SignatureDoesNotMatch}. (The default {@link #safeKey} path — UUID
+     * plus an alphanumeric extension — never hits it, so this only reached callers passing their
+     * own keys.)
+     *
+     * <p>SigV4's unreserved set is exactly RFC 3986's: {@code A-Za-z0-9-._~}. Everything else is
+     * percent-encoded over its UTF-8 bytes, with {@code /} preserved as the separator.
+     */
     static String uriEncodePath(String key) {
         var sb = new StringBuilder();
         for (var segment : key.split("/", -1)) {
             if (!sb.isEmpty()) sb.append("/");
-            sb.append(URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20"));
+            sb.append(sigV4EncodeSegment(segment));
         }
         return sb.toString();
+    }
+
+    /** One key segment in SigV4 URI encoding: unreserved {@code A-Za-z0-9-._~} literal, else {@code %XX}. */
+    private static String sigV4EncodeSegment(String segment) {
+        var out = new StringBuilder(segment.length());
+        for (byte b : segment.getBytes(StandardCharsets.UTF_8)) {
+            char c = (char) (b & 0xFF);
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '.' || c == '_' || c == '~') {
+                out.append(c);
+            } else {
+                out.append('%')
+                   .append(Character.toUpperCase(Character.forDigit((b >> 4) & 0xF, 16)))
+                   .append(Character.toUpperCase(Character.forDigit(b & 0xF, 16)));
+            }
+        }
+        return out.toString();
     }
 
     static String sha256Hex(byte[] data) {

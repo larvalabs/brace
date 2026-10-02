@@ -127,7 +127,7 @@ public class FormBinder {
             if (type == long.class || type == Long.class) return Long.parseLong(raw);
             if (type == double.class || type == Double.class) return Double.parseDouble(raw);
             if (type == float.class || type == Float.class) return Float.parseFloat(raw);
-            if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(raw);
+            if (type == boolean.class || type == Boolean.class) return parseCheckbox(raw);
             if (type == java.math.BigDecimal.class) return new java.math.BigDecimal(raw);
             return raw;
         } catch (NumberFormatException e) {
@@ -138,6 +138,23 @@ public class FormBinder {
             if (type == float.class) return 0.0f;
             return null;
         }
+    }
+
+    /**
+     * Truthy values accepted for a {@code boolean} form field (M2). An HTML checkbox submits
+     * {@code name=on} when checked and nothing at all when unchecked, so
+     * {@code Boolean.parseBoolean} — true for the literal string "true" and nothing else — bound a
+     * CHECKED box to {@code false}, making the control silently inert. Absence still means false
+     * (handled in {@link #convert}'s empty branch), which is what an unchecked box relies on.
+     *
+     * <p>{@code "on"} is the HTML default; {@code "1"}/{@code "yes"}/{@code "checked"} cover the
+     * common hand-rolled and JSON-ish variants ({@code jsonForm} runs through the same converter,
+     * where a real JSON {@code true} arrives as {@code "true"}).
+     */
+    private static final Set<String> TRUTHY = Set.of("true", "on", "1", "yes", "checked");
+
+    private static boolean parseCheckbox(String raw) {
+        return TRUTHY.contains(raw.trim().toLowerCase());
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

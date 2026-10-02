@@ -163,8 +163,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     public boolean handle(org.eclipse.jetty.server.Request jettyRequest,
                           Response response,
                           Callback callback) throws Exception {
-        var startNanos = System.nanoTime();
-        Database db = null;
+        // Everything the response choke point needs to finish a request, gathered before the
+        // try so the catch paths see it too (H2). Neither getMethod nor getPath throws, so this
+        // is safe to build eagerly.
+        var exchange = new Exchange(System.nanoTime(), jettyRequest.getMethod(),
+            jettyRequest.getHttpURI().getPath());
         // Hoisted above the try so the catch paths (thrown 404, 500) can persist session
         // mutations too — see the response choke point (respond / respondToError) below.
         Session session = null;
@@ -178,8 +181,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // matched, which is before any response can be written.
         Request braceRequest = null;
         try {
-            String method = jettyRequest.getMethod();
-            String path = jettyRequest.getHttpURI().getPath();
+            String method = exchange.method;
+            String path = exchange.path;
 
             // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
             String rawQuery = jettyRequest.getHttpURI().getQuery();
@@ -203,6 +206,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
             // body from being fully parsed into memory before the 404.)
             RouteMatch match = router.match(method, path);
+            // The choke point keys stats on the matched ROUTE PATTERN, not the concrete URL (H1).
+            exchange.match = match;
+
+            // L1: the router serves "/users/" from the "/users" route (no compiled pattern ends in
+            // a slash, so a match on such a path is always that fallback). From here on the request
+            // IS its canonical path, so before/after middleware patterns and req.path() checks in
+            // guards see the path the router matched. Without this, "/admin/" would reach the
+            // "/admin" handler while skipping a guard registered for exactly "/admin".
+            if (match != null && path.length() > 1 && path.endsWith("/")) {
+                path = Router.stripTrailingSlashes(path);
+            }
 
             // M2: the body is *supplied* here, not read. Buffering it before the before-middleware
             // loops put the cost ahead of the layer that exists to shed it — a rate limiter or auth
@@ -230,7 +244,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             for (var before : beforeMiddleware) {
                 Result earlyResult = before.apply(braceRequest);
                 if (earlyResult != null) {
-                    respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                     return true;
                 }
             }
@@ -251,7 +265,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         // A short-circuiting guard may have mutated the session (e.g. a
                         // flash message before redirecting to login) — persisted by the
                         // write-back choke point.
-                        respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                        respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                         return true;
                     }
                 }
@@ -264,11 +278,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (match == null) {
                 Result staticResult = serveStaticFile(braceRequest);
                 if (staticResult != null) {
-                    respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    exchange.noMatchKey = STATIC_ROUTE_KEY;
+                    respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                     return true;
                 }
                 Result notFoundResult = noRouteFound(method, path);
-                respond(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
+                respond(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                 return true;
             }
 
@@ -322,7 +337,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     if (!Csrf.validateToken(csrfSession, submittedToken)) {
                         // Choke point persists guard mutations on the 403 too.
                         respond(braceRequest, Result.json(java.util.Map.of("error", "csrf_required"), 403),
-                            response, callback, session, csrfOnlySession, cookieSecure);
+                            response, callback, session, csrfOnlySession, cookieSecure, exchange);
                         return true;
                     }
                 }
@@ -371,7 +386,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Result result;
             try {
                 if (invoker.needsDatabase() && databaseFactory != null) {
-                    db = new Database(databaseFactory.openSession());
+                    var db = new Database(databaseFactory.openSession());
+                    exchange.db = db;
                     try {
                         if (invoker.needsReadOnlyDatabase()) {
                             result = invoker.invoke(braceRequest, db, session);
@@ -402,26 +418,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // discard the cookie (M6).
             //
             // One precedence nuance did change: the htmx Vary below used to be written *after* the
-            // middleware chain and therefore won; it is now written before, so an after-middleware
-            // that sets Vary overwrites it. Vary lives in the single-value header map and cannot be
-            // combined either way, so neither order is right for an app that sets its own Vary —
-            // such an app should append "HX-Request" itself.
+            // middleware chain and therefore won; it is now written before. It is appended to the
+            // handler's own Vary (M3 below), but an after-middleware that *sets* Vary still replaces
+            // the whole value, so such a middleware should append to result.header("Vary") instead.
 
-            // Add Vary header for htmx requests (caching correctness)
+            // Add Vary header for htmx requests (caching correctness). M3: APPEND — Vary is a
+            // list header, and overwriting it dropped whatever dimension the handler or an
+            // after-middleware declared (Accept-Encoding, Accept-Language), leaving a shared
+            // cache varying on the wrong axis and serving the wrong variant.
             if ("true".equals(braceRequest.header("HX-Request"))) {
-                result.header("Vary", "HX-Request");
+                result.header("Vary", appendVary(result.header("Vary")));
             }
 
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
-            respond(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure);
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
-            if (stats != null) {
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(method, path, result.status(), durationUs, qc, qu);
-                Log.request(method, path, result.status(), durationUs, qc, qu);
-            }
+            respond(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
 
         } catch (PayloadTooLargeException e) {
@@ -433,23 +444,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // regression notifier just by POSTing oversized bodies. Deliberately records no error:
             // an over-limit body is a client mistake, not an application fault.
             respondToError(braceRequest, Result.error(413, "Payload Too Large"),
-                response, callback, session, csrfOnlySession, cookieSecure);
+                response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
         } catch (NotFoundException e) {
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
-            respondToError(braceRequest, Result.notFound(), response, callback, session, csrfOnlySession, cookieSecure);
-            if (stats != null) {
-                String errorMethod = jettyRequest.getMethod();
-                String errorPath = jettyRequest.getHttpURI().getPath();
-                // db may be null (no route matched) or closed (query stats still readable)
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(errorMethod, errorPath, 404, durationUs, qc, qu);
-                Log.request(errorMethod, errorPath, 404, durationUs, qc, qu);
-            }
+            respondToError(braceRequest, Result.notFound(), response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
         } catch (Exception e) {
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
             String errorMethod = jettyRequest.getMethod();
             String errorPath = jettyRequest.getHttpURI().getPath();
             String errorQuery = jettyRequest.getHttpURI().getQuery();
@@ -461,13 +461,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // is stored in the error record and served over /ops/errors.
             String requestInfo = errorMethod + " " + redactedPath
                 + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
-            int qc = db != null ? db.queryCount() : 0;
-            long qu = db != null ? db.queryDurationUs() : 0;
+            int qc = exchange.db != null ? exchange.db.queryCount() : 0;
+            long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
             if (stats != null) {
-                stats.recordRequest(errorMethod, errorPath, 500, durationUs, qc, qu);
                 stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
                     routeInfo, stackTraceToString(e), requestInfo, "");
                 Log.error(errorMethod, errorPath, e);
+                // http.error already carries this request, with the exception and app frame.
+                // Suppress the choke point's http.request line so a 500 stays one log entry;
+                // the stats side still records (that is the whole point of H2).
+                exchange.logged = true;
             }
             if (errorStore != null) {
                 String errorType = e.getClass().getSimpleName();
@@ -488,14 +491,93 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.
             respondToError(braceRequest, Result.error(500, "Internal Server Error"),
-                response, callback, session, csrfOnlySession, cookieSecure);
+                response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
+        }
+    }
+
+    /**
+     * Stats key for a request: the matched route's PATTERN, or {@link #UNMATCHED_ROUTE_KEY} when
+     * nothing matched (H1).
+     *
+     * <p>The concrete URL must never become a stats key. {@code Stats.routes} is a cumulative map
+     * that is never reset, so keying it by path leaks one entry — plus two {@code LongAdder}s — per
+     * distinct URL ever requested, for the life of the process. With ids in the path that is
+     * unbounded in the app's own data; on the unmatched path it is unbounded in whatever an
+     * attacker types, since every {@code /<random>} 404 would mint a permanent key. Patterns are
+     * code-site literals, so the map stays bounded by the route table.
+     *
+     * <p>This is also why patterns skip the {@code Redactor.redactPath} pass that
+     * {@code Stats.recordRequest} applies to raw paths: a pattern carries no user data, and
+     * redacting it would rewrite {@code /reset/{token}} into a key that no longer matches what the
+     * route table shows.
+     */
+    private static String routeKey(RouteMatch match) {
+        return match != null ? match.route().pattern() : UNMATCHED_ROUTE_KEY;
+    }
+
+    /** Stats bucket for requests that matched no route — see {@link #routeKey}. */
+    static final String UNMATCHED_ROUTE_KEY = "(unmatched)";
+
+    /**
+     * Stats bucket for requests served from a {@code staticFiles} mapping (or the bundled htmx
+     * asset). Separate from {@link #UNMATCHED_ROUTE_KEY} so asset traffic doesn't inflate the
+     * 404 bucket, and constant for the same reason patterns are: the URL is client-supplied, so
+     * one key per requested filename would be unbounded on the miss path.
+     */
+    static final String STATIC_ROUTE_KEY = "(static)";
+
+    /**
+     * Per-request state the response choke point needs to finish a request (H2): when it
+     * started, what was asked for, which route answered, and how much database work it did.
+     * Built once per request in {@link #handle} before the try, so the catch paths share it.
+     */
+    private static final class Exchange {
+        final long startNanos;
+        final String method;
+        final String path;
+        RouteMatch match;
+        Database db;
+        /** Stats bucket when no route matched — {@link #STATIC_ROUTE_KEY} for a served file. */
+        String noMatchKey = UNMATCHED_ROUTE_KEY;
+        /** Set once the response is recorded, so a second choke-point pass cannot double-count. */
+        boolean recorded;
+        /** Set when this request was already logged another way (the 500 path's http.error). */
+        boolean logged;
+
+        Exchange(long startNanos, String method, String path) {
+            this.startNanos = startNanos;
+            this.method = method;
+            this.path = path;
+        }
+    }
+
+    /**
+     * Record one finished request into {@link Stats} and the structured log.
+     *
+     * <p>Stats are keyed by route pattern ({@link #routeKey}); the log deliberately keeps the
+     * CONCRETE (redacted) path. They serve different purposes: the routes table is a bounded
+     * per-route latency aggregate, while the log is an unbounded stream where the actual URL is
+     * the entire diagnostic value — knowing that {@code GET /users/{id}} 404'd is useless without
+     * knowing which id.
+     */
+    private void recordAndLog(Exchange exchange, int status) {
+        if (stats == null || exchange.recorded) return;
+        exchange.recorded = true;
+        long durationUs = (System.nanoTime() - exchange.startNanos) / 1000;
+        // db may be null (no route matched) or closed (query stats still readable)
+        int qc = exchange.db != null ? exchange.db.queryCount() : 0;
+        long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
+        String key = exchange.match != null ? routeKey(exchange.match) : exchange.noMatchKey;
+        stats.recordRequestPattern(exchange.method, key, status, durationUs, qc, qu);
+        if (!exchange.logged) {
+            Log.request(exchange.method, exchange.path, status, durationUs, qc, qu);
         }
     }
 
     /*
      * Response choke point. Every response leaving handle() goes through exactly one of
-     * respond() or respondToError(), and both end in send(). Between them they guarantee two
+     * respond() or respondToError(), and both end in send(). Between them they guarantee three
      * things on every exit path — early short-circuits, static files, 404s, CSRF 403s, 413s and
      * 500s included:
      *
@@ -504,6 +586,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      *     exactly the responses that most need them. It runs before the session cookie is
      *     attached, so a middleware returning a brand-new Result cannot discard the cookie (M6).
      *   - a session mutated by a guard or handler is persisted (see send()).
+     *   - the request is recorded in Stats and the request log (H2, see send()).
      *
      * The two entry points differ only in what a throwing after-middleware does.
      */
@@ -513,11 +596,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * to {@link #handle}'s catch blocks and becomes a 500 like any other application fault.
      */
     private void respond(Request req, Result result, Response response, Callback callback,
-                         Session session, Session csrfOnlySession, boolean cookieSecure) {
+                         Session session, Session csrfOnlySession, boolean cookieSecure,
+                         Exchange exchange) {
         for (var after : afterMiddleware) {
             result = after.apply(req, result);
         }
-        send(result, response, callback, session, csrfOnlySession, cookieSecure);
+        send(result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
     }
 
     /**
@@ -529,7 +613,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * case there is nothing to run the chain against.
      */
     private void respondToError(Request req, Result result, Response response, Callback callback,
-                                Session session, Session csrfOnlySession, boolean cookieSecure) {
+                                Session session, Session csrfOnlySession, boolean cookieSecure,
+                                Exchange exchange) {
         if (req != null) {
             for (var after : afterMiddleware) {
                 try {
@@ -539,7 +624,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
         }
-        send(result, response, callback, session, csrfOnlySession, cookieSecure);
+        send(result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
     }
 
     /**
@@ -550,9 +635,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * skip after-middleware.
      */
     private void send(Result result, Response response, Callback callback,
-                      Session session, Session csrfOnlySession, boolean cookieSecure) {
+                      Session session, Session csrfOnlySession, boolean cookieSecure,
+                      Exchange exchange) {
         attachSessionCookie(result, session, cookieSecure);
         attachSessionCookie(result, csrfOnlySession, cookieSecure);
+        // H2: recording lives here, not at the call sites, because this is the ONE place every
+        // response passes through. Recording per-site meant only three of the exits were
+        // covered, so rate-limiter 429s, CSRF 403s, 413s, static files and unmatched 404s never
+        // reached /ops/status or the request log at all — the exact signals an incident needs.
+        // It runs after the after-middleware chain, so the recorded status is the one sent.
+        recordAndLog(exchange, result.status());
         writeToWire(result, response, callback);
     }
 
@@ -669,6 +761,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return Result.error(404, body.toString());
     }
 
+    /**
+     * Add {@code HX-Request} to an existing {@code Vary} value (M3), or return it alone when there
+     * is none. Idempotent: a handler that already declared {@code HX-Request} isn't given a
+     * duplicate. Matching is case-insensitive on the token, since field names in a {@code Vary}
+     * list are case-insensitive.
+     */
+    private static String appendVary(String existing) {
+        if (existing == null || existing.isBlank()) {
+            return "HX-Request";
+        }
+        for (String token : existing.split(",")) {
+            if (token.trim().equalsIgnoreCase("HX-Request") || token.trim().equals("*")) {
+                return existing;
+            }
+        }
+        return existing + ", HX-Request";
+    }
+
     /** Length of the common leading character prefix of {@code a} and {@code b}. */
     private static int commonPrefixLength(String a, String b) {
         int max = Math.min(a.length(), b.length());
@@ -698,16 +808,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String prefix = mapping.urlPrefix();
             if (!requestPath.startsWith(prefix)) continue;
 
-            if (requestPath.contains("..")) {
-                return Result.notFound();
-            }
-
             String relativePath = requestPath.substring(prefix.length());
             if (relativePath.startsWith("/")) {
                 relativePath = relativePath.substring(1);
             }
 
-            if (relativePath.isEmpty()) {
+            // Decode BEFORE the traversal checks (H3). Serving from the raw path meant
+            // /assets/my%20file.css looked for a literal "my%20file.css" and 404'd; decoding
+            // after the ".." check would have been worse, letting %2e%2e slip past it.
+            // decodePath decodes per segment, so a %2F cannot invent a separator that wasn't
+            // in the request — and the checks below run on what actually reaches the disk.
+            relativePath = Route.decodePath(relativePath);
+
+            if (relativePath.isEmpty() || relativePath.contains("..")) {
                 return Result.notFound();
             }
 
@@ -755,7 +868,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             long length = attrs.size();
             String etag = "\"" + Long.toHexString(length) + "-" + Long.toHexString(mtime) + "\"";
             String version = request.queryParam("v");
-            boolean immutable = version != null && version.equals(Assets.currentVersion(requestPath));
+            // Decoded URL path: Assets resolves it back to a file, so it has to see the same
+            // name the lookup above did, or an encoded filename never matches its fingerprint.
+            String decodedUrlPath = prefix + (prefix.endsWith("/") ? "" : "/") + relativePath;
+            boolean immutable = version != null && version.equals(Assets.currentVersion(decodedUrlPath));
             String cacheControl = immutable
                 ? "public, max-age=31536000, immutable"
                 : "public, max-age=0, must-revalidate";
@@ -1015,7 +1131,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
         MultiPartFormData.Parts parts = parser.parse(jettyRequest).join();
 
-        var formParams = new LinkedHashMap<String, String>();
+        // M1: append pairs straight to the encoded body instead of collapsing them through a
+        // Map<String,String> first. A repeated field — a checkbox group, a <select multiple> —
+        // used to keep only its LAST value here, so the same submission yielded one value as
+        // multipart and all of them as x-www-form-urlencoded. The single-value view downstream
+        // (Request.parseSingleValues) still does last-wins, so formParam(name) is unchanged.
+        var formBody = new StringBuilder();
         var files = new LinkedHashMap<String, List<UploadedFile>>();
 
         try {
@@ -1041,19 +1162,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     var uploaded = new UploadedFile(fileName, partContentType, bytes);
                     files.computeIfAbsent(name, k -> new ArrayList<>()).add(uploaded);
                 } else {
-                    formParams.put(name, part.getContentAsString(StandardCharsets.UTF_8));
+                    if (!formBody.isEmpty()) formBody.append('&');
+                    formBody.append(java.net.URLEncoder.encode(name, StandardCharsets.UTF_8));
+                    formBody.append('=');
+                    formBody.append(java.net.URLEncoder.encode(
+                        part.getContentAsString(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
                 }
             }
         } finally {
             parts.close();
-        }
-
-        var formBody = new StringBuilder();
-        for (var entry : formParams.entrySet()) {
-            if (!formBody.isEmpty()) formBody.append('&');
-            formBody.append(java.net.URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8));
-            formBody.append('=');
-            formBody.append(java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
         }
 
         return new MultipartResult(formBody.toString(), files);

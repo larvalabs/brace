@@ -78,6 +78,10 @@ var app = Brace.app()
 
 Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
+`app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
+app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
+yourself.
+
 ## Routing
 
 Always register routes through the typed route methods — only `app.get(path, req -> ...)`
@@ -106,7 +110,7 @@ Use the `Read` variants for handlers that only query: GET routes are almost alwa
 `getRead` (or `getReadFull` if they need the session). They skip the per-request
 transaction entirely, which is both faster and signals intent.
 
-Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`.
+Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`. Values are percent-decoded.
 
 Grouping:
 
@@ -204,6 +208,10 @@ Pattern semantics: a trailing `/*` matches the bare prefix too — `/admin/*` co
 the prefix itself. Only a trailing wildcard is allowed; an interior wildcard
 (`/api/*/admin`) throws `IllegalArgumentException` at startup.
 
+A trailing-slash request (`/users/`) is routed to the `/users` route and is then treated as
+`/users` throughout: middleware patterns, `req.path()` and the handler all see the canonical
+path, so an exact-path guard on `/admin` also covers `/admin/`.
+
 After middleware can transform the response:
 
 ```java
@@ -215,9 +223,11 @@ app.after("/api/*", (req, result) -> result.header("X-Api-Version", "1"));
 
 ```java
 req.method()                  // "GET", "POST", etc.
-req.path()                    // "/posts/42"
+req.path()                    // "/posts/42" — RAW, still percent-encoded
 
-// Path parameters (from route pattern like /posts/{id})
+// Path parameters (from route pattern like /posts/{id}) — percent-decoded.
+// "/users/John%20Doe" gives "John Doe"; don't decode again. Note "+" is a literal
+// plus in a path (not a space, unlike a form body).
 req.pathParam("id")           // path param as String
 req.intPathParam("id")        // as int
 req.longPathParam("id")       // as long
@@ -368,10 +378,10 @@ db.exists(Post.class, "talkId = ? AND userId = ?", talkId, userId) // multi-fiel
 db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns count)
 
 // Raw queries
-db.hql("SELECT p FROM Post p WHERE ...", args)    // raw HQL, returns List<Object[]>
+db.hql("SELECT p FROM Post p WHERE ...", args)    // raw HQL, returns List<Object[]> (one-column selects too: read row[0])
 db.hql("SELECT AVG(r.score), COUNT(r) FROM Rating r WHERE r.talkId = ?", id) // aggregates in one round-trip — don't fetch rows and loop-sum in Java
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL execute
-db.sqlQuery("SELECT * FROM posts WHERE ...", args) // native SQL query, returns List<Object[]>
+db.sqlQuery("SELECT * FROM posts WHERE ...", args) // native SQL query, returns List<Object[]> (one-column: row[0])
 db.sqlQueryLong("SELECT count(*) FROM posts")      // native SQL returning Long
 db.jdbc(conn -> { /* raw JDBC */ })                // raw Connection access
 ```
@@ -468,7 +478,8 @@ public record PostForm(
 Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@In({"a","b"})`, `@Optional`.
 
 Component types that bind automatically: `String`, `int`/`long`/`double`/`float`/`boolean`
-(+ boxed), enums (bad value → "must be one of: …" field error), `LocalDate` (yyyy-MM-dd),
+(+ boxed; a `boolean` is true for `on`/`true`/`1`/`yes`/`checked`, so an HTML checkbox binds
+directly, and false when absent), enums (bad value → "must be one of: …" field error), `LocalDate` (yyyy-MM-dd),
 `Instant` (ISO-8601), `BigDecimal`. Unparseable input becomes a field error, never an
 exception — no hand-parsing `<input type="date">` into String components.
 
@@ -634,6 +645,9 @@ Recurring (in-memory, lost on restart):
 app.every("5m", "cleanup", (db, ctx) -> db.sql("DELETE FROM expired WHERE ts < NOW()"));
 app.daily("02:00", "digest", (db, ctx) -> sendDigest(db));
 ```
+
+Intervals take `s`, `m`, `h` or `d` (`"1d"`), the same units as cache TTLs. `daily` fires at the
+local wall-clock time across DST changes; run every instance in one time zone.
 
 Durable (database-backed, survives restarts):
 

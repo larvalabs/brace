@@ -58,12 +58,24 @@ final class WsRegistry {
         bus.publish(room, message);
     }
 
-    /** Deliver a message to members connected to THIS instance. Invoked by the {@link MessageBus}. */
+    /**
+     * Deliver a message to members connected to THIS instance. Invoked by the {@link MessageBus}.
+     *
+     * <p>M8: each send is isolated. The loop used to be unguarded, so anything thrown for one
+     * member — a session Jetty has already closed, say — aborted delivery to every remaining
+     * member, and one bad connection silently dropped the broadcast for the whole room. A failing
+     * member is logged and skipped; its own close/error callback handles cleanup.
+     */
     private void deliverLocal(String room, String message) {
         var members = rooms.get(room);
-        if (members != null) {
-            for (var ctx : members) {
+        if (members == null) {
+            return;
+        }
+        for (var ctx : members) {
+            try {
                 ctx.send(message);
+            } catch (RuntimeException e) {
+                Log.warn("ws-broadcast-send-failed room=" + room + " error=" + e);
             }
         }
     }

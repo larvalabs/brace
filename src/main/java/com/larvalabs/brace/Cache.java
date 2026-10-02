@@ -105,8 +105,11 @@ public class Cache {
     @SuppressWarnings("unchecked")
     public <T> T getOrSet(String key, String ttl, Supplier<T> supplier) {
         if (!serializes) {
-            var computed = ((InMemoryBackend) backend)
-                    .getOrCompute(key, parseTtl(ttl), () -> requireValue(key, supplier.get()));
+            // M9: through the SPI, not a cast to the built-in backend. getOrSet is the cache call
+            // the docs recommend most, and casting here meant any third-party non-serializing
+            // backend hit a ClassCastException on it.
+            var computed = backend.getOrCompute(
+                    key, parseTtl(ttl), () -> requireValue(key, supplier.get()));
             if (computed.hit()) hits.increment(); else misses.increment();
             return (T) computed.value();
         }
