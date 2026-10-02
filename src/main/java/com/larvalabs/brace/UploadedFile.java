@@ -24,8 +24,9 @@ import java.nio.file.Path;
  * {@code app.maxUploadSize(...)}, so an app that raises that cap into the gigabytes should stop
  * calling it.
  *
- * <p>A file-backed upload is only valid for the duration of its request: the framework releases the
- * temp file when the request finishes, whatever the outcome. Handing an {@code UploadedFile} to a
+ * <p>A parser-backed upload is only valid for the duration of its request: the framework releases
+ * its content (the temp file, or the in-memory chunks) when the request finishes, whatever the
+ * outcome. Handing an {@code UploadedFile} to a
  * background job and reading it later will fail — {@link #saveTo(Path)} it somewhere durable, or
  * push it to {@link Storage}, before the handler returns.
  */
@@ -99,15 +100,28 @@ public class UploadedFile {
         // returns null unless a subclass overrides it, and neither ChunksPart nor PathPart does —
         // they override this one. A null ByteBufferPool is supported (Content.Source.from(Path)
         // passes null itself); offset 0 / length -1 means "the whole part".
-        var source = part.newContentSource(null, 0, -1);
+        var source = isReleased() ? null : part.newContentSource(null, 0, -1);
         if (source == null) {
             // Only when the part has already been closed — i.e. the upload outlived its request.
-            throw new IllegalStateException(
-                "Uploaded file '" + filename + "' is no longer readable: its content was released "
-                    + "when the request finished. Save it (saveTo/transferTo/Storage.put) before "
-                    + "the handler returns.");
+            throw released();
         }
         return Content.Source.asInputStream(source);
+    }
+
+    /**
+     * Whether the end-of-request release has already run. A closed chunked part returns a null
+     * source on its own, but a closed spilled part nulls its path and then throws a bare
+     * NullPointerException from inside Jetty, so that shape is checked up front.
+     */
+    private boolean isReleased() {
+        return part instanceof MultiPart.PathPart pathPart && pathPart.getPath() == null;
+    }
+
+    private IllegalStateException released() {
+        return new IllegalStateException(
+            "Uploaded file '" + filename + "' is no longer readable: its content was released "
+                + "when the request finished. Save it (saveTo/transferTo/Storage.put) before "
+                + "the handler returns.");
     }
 
     /** Copies the content to {@code out} without materializing it. Returns the bytes written. */
@@ -135,6 +149,7 @@ public class UploadedFile {
             Files.write(path, bytes);
             return;
         }
+        if (isReleased()) throw released();
         // Part.writeTo moves a spilled file and streams a chunked one, and clears the part's
         // "temporary" flag so the end-of-request release does not delete what we just moved.
         part.writeTo(path);

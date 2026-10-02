@@ -32,6 +32,8 @@ class UploadSpillTest {
     /** Temp-dir contents observed from *inside* the handler, i.e. while the upload is live. */
     static final AtomicReference<Integer> filesDuringRequest = new AtomicReference<>();
     static final AtomicReference<Path> savedTo = new AtomicReference<>();
+    /** An upload smuggled out of its request, to check it is no longer readable afterwards. */
+    static final AtomicReference<UploadedFile> kept = new AtomicReference<>();
 
     static final int BIG = 64 * 1024;
 
@@ -80,6 +82,11 @@ class UploadSpillTest {
             }
         });
 
+        app.post("/keep", req -> {
+            kept.set(req.file("file"));
+            return Result.text("kept");
+        });
+
         app.post("/big-field", req -> Result.text("" + req.formParam("notes").length()));
 
         app.post("/boom", req -> {
@@ -114,6 +121,29 @@ class UploadSpillTest {
         assertEquals(1, filesDuringRequest.get(),
             "a part over the threshold should be backed by a temp file during the request");
         awaitNoFiles("temp file should be released when the request ends");
+    }
+
+    @Test
+    void uploadIsUnreadableOnceItsRequestEnds() throws Exception {
+        // Both storage shapes: the migration guide documents this as a breaking change for any
+        // upload kept past the handler, not just a spilled one.
+        for (int size : new int[] {64, BIG}) {
+            kept.set(null);
+            assertEquals(200, postFile("/keep", "f.bin", bytes(size)).statusCode());
+            var file = kept.get();
+            // The release runs in handle()'s finally, which can trail the response by a moment.
+            IllegalStateException released = null;
+            for (int i = 0; i < 100 && released == null; i++) {
+                try (var in = file.stream()) {
+                    Thread.sleep(20);
+                } catch (IllegalStateException e) {
+                    released = e;
+                }
+            }
+            assertNotNull(released, "size " + size + " should be unreadable after its request");
+            assertTrue(released.getMessage().contains("released when the request finished"),
+                released.getMessage());
+        }
     }
 
     @Test
