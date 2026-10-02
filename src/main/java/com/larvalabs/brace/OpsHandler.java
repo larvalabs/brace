@@ -454,6 +454,7 @@ public class OpsHandler {
                 m.put("requests", snap.requests());
                 m.put("errors", snap.errors());
                 m.put("avgMs", Math.round(snap.avgLatencyMs() * 100.0) / 100.0);
+                m.put("p95Ms", Math.round(snap.p95LatencyMs() * 100.0) / 100.0);
                 minutes.add(m);
             }
             timeseries.put("minutes", minutes);

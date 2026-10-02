@@ -93,6 +93,12 @@ public class OpsDashboard {
             .sparkline-sm { height: 25px; }
             .sparkline .bar-err { background: #f7768e; }
             .sparkline .bar-heap { background: #bb9af7; }
+            .sparkline .lat { position: relative; align-self: stretch; }
+            .sparkline .lat > div { position: absolute; left: 0; right: 0; bottom: 0; }
+            .lat-p95 { background: #3d59a1; }
+            .lat-avg { background: #7aa2f7; }
+            .lat-key-p95 { color: #3d59a1; }
+            .lat-key-avg { color: #7aa2f7; }
             .c-blue { color: #7aa2f7; }
             .c-green { color: #9ece6a; }
             .c-purple { color: #bb9af7; }
@@ -147,7 +153,7 @@ public class OpsDashboard {
             statCard(sb, "Req / Min", "-", "first minute pending", "c-blue");
         } else {
             statCard(sb, "Req / Min", String.format("%,d", rate.lastMinute()),
-                "avg " + formatRate(rate.avgPerMinute()) + " · " + rate.windowMinutes() + "m", "c-blue");
+                "avg " + formatMetric(rate.avgPerMinute()) + " · " + rate.windowMinutes() + "m", "c-blue");
         }
         statCard(sb, "Error Rate", errRate + "%", errCount + " total", Double.parseDouble(errRate) > 5 ? "c-red" : "c-green");
         statCard(sb, "Heap", heapUsed + "M", "/ " + heapMax + "M", "c-purple");
@@ -206,6 +212,36 @@ public class OpsDashboard {
                   .append(m.ts()).append("\"></div>");
             }
             sb.append("</div></div>\n");
+
+            // Latency sparkline: per-minute p95 (dim) with the average (bright) drawn over it
+            double maxLat = minutes.stream()
+                .mapToDouble(m -> Math.max(m.p95LatencyMs(), m.avgLatencyMs())).max().orElse(0);
+            if (maxLat > 0) {
+                var lastLat = minutes.getLast();
+                sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;\">")
+                  .append("Latency ms <span class=\"lat-key-avg\">■ avg</span> <span class=\"lat-key-p95\">■ p95</span>")
+                  .append("<span style=\"float:right\">last min avg ").append(formatMetric(lastLat.avgLatencyMs()))
+                  .append(" · p95 ").append(formatMetric(lastLat.p95LatencyMs())).append("</span></div>");
+                sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
+                sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                  .append("<span>").append(formatMetric(maxLat)).append("</span><span>0</span></div>");
+                sb.append("<div class=\"sparkline\" style=\"flex:1\">");
+                for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
+                for (var m : minutes) {
+                    if (m.requests() == 0) {
+                        sb.append("<div class=\"bar\" title=\"no requests @ ").append(m.ts()).append("\"></div>");
+                        continue;
+                    }
+                    sb.append("<div class=\"bar lat\" title=\"").append(formatMetric(m.avgLatencyMs())).append(" ms avg, ")
+                      .append(formatMetric(m.p95LatencyMs())).append(" ms p95, ")
+                      .append(formatMetric(m.maxLatencyUs() / 1000.0)).append(" ms max @ ").append(m.ts()).append("\">")
+                      .append("<div class=\"lat-p95\" style=\"height:")
+                      .append(String.format("%.0f", Math.max(2, m.p95LatencyMs() * 100.0 / maxLat))).append("%\"></div>")
+                      .append("<div class=\"lat-avg\" style=\"height:")
+                      .append(String.format("%.0f", Math.max(2, m.avgLatencyMs() * 100.0 / maxLat))).append("%\"></div></div>");
+                }
+                sb.append("</div></div>\n");
+            }
 
             // Error rate sparkline
             long maxErr = minutes.stream().mapToLong(Stats.MinuteSnapshot::errors).max().orElse(0);
@@ -354,7 +390,7 @@ public class OpsDashboard {
                 for (var r : topRoutes) {
                     sb.append("<tr>");
                     routeCell(sb, r.route());
-                    sb.append("<td class=\"num c-blue\">").append(formatRate(r.perMinute())).append("</td>");
+                    sb.append("<td class=\"num c-blue\">").append(formatMetric(r.perMinute())).append("</td>");
                     sb.append("<td class=\"num c-muted\">").append(String.format("%.0f%%", r.share() * 100)).append("</td></tr>");
                 }
                 sb.append("</table>");
@@ -723,9 +759,9 @@ public class OpsDashboard {
             + "<span class=\"method\">" + esc(tail) + "</span></bdi></span>";
     }
 
-    /** A per-minute rate: one decimal below 10 so low-traffic apps don't read as 0. */
-    private static String formatRate(double perMinute) {
-        return perMinute < 10 ? String.format("%.1f", perMinute) : String.format("%,.0f", perMinute);
+    /** A rate or a millisecond figure: one decimal below 10 so small values don't read as 0. */
+    private static String formatMetric(double v) {
+        return v < 10 ? String.format("%.1f", v) : String.format("%,.0f", v);
     }
 
     private static String formatBytes(long bytes) {

@@ -21,6 +21,7 @@ public class Stats {
     private final LongAdder totalQueryCount = new LongAdder();
     private final LongAdder totalQueryUs = new LongAdder();
     private final AtomicLong maxLatencyUs = new AtomicLong(0);
+    private final LatencyHistogram latencyHistogram = new LatencyHistogram();
 
     private final ConcurrentHashMap<Integer, LongAdder> statusCodes = new ConcurrentHashMap<>();
 
@@ -91,6 +92,7 @@ public class Stats {
             if (maxLatencyUs.compareAndSet(current, latencyUs)) break;
             current = maxLatencyUs.get();
         }
+        latencyHistogram.record(latencyUs);
 
         // get-then-compute keeps the hit path free of a capturing-lambda allocation.
         var route = routes.get(routeKey);
@@ -162,6 +164,7 @@ public class Stats {
         long queries = totalQueryCount.sumThenReset();
         long queryUs = totalQueryUs.sumThenReset();
         long maxUs = maxLatencyUs.getAndSet(0);
+        long p95Us = latencyHistogram.percentileAndReset(0.95, maxUs);
         long heapMB = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024 * 1024);
 
         // Capture counter deltas and reset
@@ -203,7 +206,8 @@ public class Stats {
             Collections.unmodifiableMap(cDeltas),
             Collections.unmodifiableMap(gValues),
             Collections.unmodifiableMap(tValues),
-            Collections.unmodifiableMap(rCounts)
+            Collections.unmodifiableMap(rCounts),
+            p95Us
         );
 
         synchronized (ringLock) {
@@ -357,11 +361,17 @@ public class Stats {
         Map<String, Long> counterDeltas,
         Map<String, Long> gaugeValues,
         Map<String, TimerSnapshot> timerValues,
-        Map<String, Long> routeCounts
+        Map<String, Long> routeCounts,
+        long p95LatencyUs
     ) {
         public double avgLatencyMs() {
             if (requests == 0) return 0.0;
             return (totalLatencyUs / (double) requests) / 1000.0;
+        }
+
+        /** 95th-percentile latency for the minute, from {@link LatencyHistogram} (within ~12.5%). */
+        public double p95LatencyMs() {
+            return p95LatencyUs / 1000.0;
         }
     }
 
@@ -394,6 +404,71 @@ public class Stats {
             long m = maxMs.getAndSet(0);
             if (c == 0) return null;
             return new TimerSnapshot(c, (double) t / c, m);
+        }
+    }
+
+    /**
+     * One minute of request latencies, for the per-minute p95. Fixed log-linear buckets: exact
+     * below 8µs, then 8 sub-buckets per power of two (bucket width at most 12.5% of its value),
+     * clamped at 2^32µs (~71 min). Recording is a shift/mask index plus one
+     * {@link LongAdder#increment} — lock-free and allocation-free on the request path. The
+     * minute rotation drains it with {@code sumThenReset}, like the other window counters.
+     */
+    static final class LatencyHistogram {
+        private static final int SUB_BITS = 3;
+        private static final int SUB_COUNT = 1 << SUB_BITS;
+        private static final int MAX_EXP = 31;
+        static final int BUCKETS = (MAX_EXP - SUB_BITS + 2) * SUB_COUNT;
+
+        private final LongAdder[] counts = new LongAdder[BUCKETS];
+
+        LatencyHistogram() {
+            for (int i = 0; i < BUCKETS; i++) counts[i] = new LongAdder();
+        }
+
+        void record(long latencyUs) {
+            counts[bucket(latencyUs)].increment();
+        }
+
+        static int bucket(long us) {
+            if (us < SUB_COUNT) return (int) Math.max(0, us);
+            int exp = 63 - Long.numberOfLeadingZeros(us);
+            if (exp > MAX_EXP) return BUCKETS - 1;
+            int sub = (int) (us >>> (exp - SUB_BITS)) & (SUB_COUNT - 1);
+            return (exp - SUB_BITS + 1) * SUB_COUNT + sub;
+        }
+
+        /** Exclusive upper bound of a bucket, in µs. */
+        static long upperBound(int bucket) {
+            if (bucket < SUB_COUNT) return bucket + 1;
+            int exp = bucket / SUB_COUNT + SUB_BITS - 1;
+            int sub = bucket % SUB_COUNT;
+            return (long) (SUB_COUNT + sub + 1) << (exp - SUB_BITS);
+        }
+
+        /**
+         * The {@code q}-quantile of the minute just ended, then resets. Reports the containing
+         * bucket's upper edge (a slight overestimate), capped at the minute's observed max.
+         * 0 when the minute had no requests.
+         */
+        long percentileAndReset(double q, long maxUs) {
+            long[] snap = new long[BUCKETS];
+            long total = 0;
+            for (int i = 0; i < BUCKETS; i++) {
+                snap[i] = counts[i].sumThenReset();
+                total += snap[i];
+            }
+            if (total == 0) return 0;
+            long rank = (long) Math.ceil(q * total);
+            long seen = 0;
+            for (int i = 0; i < BUCKETS; i++) {
+                seen += snap[i];
+                if (seen >= rank) {
+                    long edge = upperBound(i) - 1;
+                    return maxUs > 0 ? Math.min(edge, maxUs) : edge;
+                }
+            }
+            return maxUs;
         }
     }
 

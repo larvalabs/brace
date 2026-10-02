@@ -169,7 +169,7 @@ Notes on the shape:
   that matched no route (404 scanner noise) are folded into one `"(unmatched)"` entry.
   Empty until the first minute has rotated in.
 - Two bulky blocks are **opt-in** via `?include=timeseries,profiling`:
-  `timeseries.minutes` (60 per-minute snapshots: `ts`, `requests`, `errors`, `avgMs`) and
+  `timeseries.minutes` (60 per-minute snapshots: `ts`, `requests`, `errors`, `avgMs`, `p95Ms`) and
   `jvm.profiling` (JFR `hotMethods` + `topAllocations`). `jvm.cpu` and `jvm.gc` appear
   only when the JFR profiler is attached (it always is when ops is enabled).
 

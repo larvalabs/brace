@@ -289,4 +289,35 @@ class StatsTest {
         assertEquals(2, top.get(0).windowMinutes());
         assertEquals(1, stats.topRoutes(2, 1).size(), "limit applies");
     }
+
+    @Test
+    void latencyHistogramBucketsAreContiguousAndTight() {
+        int prev = -1;
+        for (long us = 0; us < 1_000_000; us++) {
+            int b = Stats.LatencyHistogram.bucket(us);
+            assertTrue(b == prev || b == prev + 1, "buckets are contiguous at " + us);
+            assertTrue(us < Stats.LatencyHistogram.upperBound(b), "value below its bucket's upper edge at " + us);
+            if (b > 0) assertTrue(us >= Stats.LatencyHistogram.upperBound(b - 1), "value above the previous edge at " + us);
+            prev = b;
+        }
+        assertEquals(Stats.LatencyHistogram.BUCKETS - 1, Stats.LatencyHistogram.bucket(Long.MAX_VALUE), "huge values clamp");
+        assertEquals(0, Stats.LatencyHistogram.bucket(-5), "negative durations clamp to 0");
+    }
+
+    @Test
+    void minuteSnapshotCarriesP95Latency() {
+        var stats = new Stats();
+        // 1..1000 ms: the true p95 is 950 ms.
+        for (int ms = 1; ms <= 1000; ms++) stats.recordRequestPattern("GET", "/a", 200, ms * 1000L, 0, 0);
+        var snap = stats.snapshot();
+        assertTrue(snap.p95LatencyMs() >= 950 && snap.p95LatencyMs() <= 950 * 1.125,
+            "p95 within one bucket (12.5%) above the true value: " + snap.p95LatencyMs());
+        assertTrue(snap.p95LatencyUs() <= snap.maxLatencyUs());
+
+        assertEquals(0, stats.snapshot().p95LatencyUs(), "histogram resets at rotation");
+
+        // One sample: p95 is capped at the observed max, not the bucket edge.
+        stats.recordRequestPattern("GET", "/a", 200, 1234, 0, 0);
+        assertEquals(1234, stats.snapshot().p95LatencyUs());
+    }
 }

@@ -120,4 +120,22 @@ class OpsDashboardTest {
             assertFalse(html.contains("wp-login.php</td><td class=\"num c-blue\">"), "scanner paths never rank");
         }
     }
+
+    @Test
+    void latencySparklineShowsAvgAndP95PerMinute() {
+        var stats = new Stats();
+        assertFalse(render(stats, null).contains("Latency ms"), "no sparkline before the first minute");
+
+        for (int i = 0; i < 99; i++) stats.recordRequestPattern("GET", "/a", 200, 10_000, 0, 0);
+        stats.recordRequestPattern("GET", "/a", 200, 50_000, 0, 0);
+        stats.snapshot();
+        stats.snapshot(); // an idle minute renders as an empty slot
+        var html = render(stats, null);
+
+        assertTrue(html.contains("Latency ms <span class=\"lat-key-avg\">■ avg</span> <span class=\"lat-key-p95\">■ p95</span>"));
+        // avg 10.4 ms, p95 10.2 ms (upper edge of the 10 ms bucket), max 50 ms
+        assertTrue(html.contains("<div class=\"bar lat\" title=\"10 ms avg, 10 ms p95, 50 ms max @ "), html);
+        assertTrue(html.contains("<div class=\"lat-avg\" style=\"height:100%\"></div>"));
+        assertTrue(html.contains("<div class=\"bar\" title=\"no requests @ "));
+    }
 }
