@@ -684,6 +684,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         for (var after : afterMiddleware) {
             result = after.apply(req, result);
         }
+        // M12: render a deferred View body now — after the handler's transaction committed and its
+        // connection was released (a slow render no longer holds one), and before send() puts the
+        // status and headers on the Jetty response. Left to the lazy rawBytes() read inside
+        // writeToWire, a template that throws fails after the handler's headers and cookies are
+        // already on the response, so the 500 carries them and the request is recorded as a 200.
+        // Thrown from here, it reaches handle()'s 500 path like any handler fault and is recorded
+        // once. After the middleware chain, so a Result it substitutes is rendered too; a no-op for
+        // plain Results. Streamed bodies and event streams stay lazy by design.
+        if (!result.isStreaming()) {
+            result.materialize();
+        }
         send(req, result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
     }
 

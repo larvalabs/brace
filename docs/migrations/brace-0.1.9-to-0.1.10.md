@@ -1069,4 +1069,14 @@ no session crypto at all. Flash messages still render on `.csrf(false)` routes.
 
 **Who needs to act.** No one.
 
+### Fix: a template that fails to render returns a clean 500
+
+**What changed.** A `View` is rendered again after the transaction commits and before the
+response status and headers are written. A template that throws now produces the normal 500,
+recorded once as a 500 in `/ops/status` and the request log. Before this fix, the 500 still
+carried the handler's headers and cookies and was recorded as a 200. The transaction still
+commits before the render, as in 0.1.7. Streamed responses and event streams are not affected.
+
+**Who needs to act.** No one.
+
 <!-- end section: merge-restore -->
