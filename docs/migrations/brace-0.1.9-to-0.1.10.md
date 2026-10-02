@@ -1049,4 +1049,14 @@ and then recurs no longer sends a second regression notification.
 
 **Who needs to act.** No one.
 
+### Fix: requests without a body no longer allocate a body buffer
+
+**What changed.** A request that declares no body (no `Content-Length` above 0 and no
+`Transfer-Encoding`, as with almost every `GET`) skips the body read and sees `req.body()` as
+`""`, as before. A request that does declare one gets a read buffer sized from its
+`Content-Length` (up to 64KB) instead of a flat 64KB. Chunked bodies, multipart uploads and the
+413 limit behave as before, and a `GET` that declares a body still has it read.
+
+**Who needs to act.** No one.
+
 <!-- end section: merge-restore -->

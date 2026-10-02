@@ -50,6 +50,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     private long uploadMemoryThreshold = DEFAULT_UPLOAD_MEMORY_THRESHOLD;
     private Path uploadTempDir = DEFAULT_UPLOAD_TEMP_DIR;
+    /**
+     * Plain (non-multipart) bodies actually read off the wire. Visible for tests: H2 asserts a
+     * request that declares no body never reaches the read or its buffer allocation.
+     */
+    final java.util.concurrent.atomic.LongAdder plainBodyReads = new java.util.concurrent.atomic.LongAdder();
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -1265,16 +1270,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /**
+     * Initial buffer size for the body read: the declared Content-Length when known (clamped to
+     * 64KB so a lying client can't make us pre-allocate megabytes), 8KB when unknown (chunked or
+     * malformed length). Before H2 this was a flat 64KB per request.
+     */
+    private static int bodyBufferSize(long declaredLength) {
+        if (declaredLength > 0) {
+            return (int) Math.min(declaredLength, 64 * 1024);
+        }
+        return 8192;
+    }
+
+    /**
      * Reads the request body up to {@code limit} bytes, returning the raw bytes.
      * Returns {@code null} if the body exceeds the limit (caller should send 413).
      * Reads incrementally via an InputStream so chunked/absent-length bodies are
      * bounded too — we never buffer more than {@code limit + 1} bytes.
      */
-    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit) throws java.io.IOException {
+    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit,
+                                          int initialCapacity) throws java.io.IOException {
         try (var in = Content.Source.asInputStream(jettyRequest)) {
-            // Read up to limit+1 bytes: if we get limit+1 the body is too large.
-            long cap = limit + 1;
-            var out = new java.io.ByteArrayOutputStream((int) Math.min(cap, 64 * 1024));
+            var out = new java.io.ByteArrayOutputStream(initialCapacity);
             byte[] buf = new byte[8192];
             long total = 0;
             int n;
@@ -1309,9 +1325,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // notifier: exactly the error-store flood the PayloadTooLargeException catch was added
             // to prevent, just reached by a different door.
             String contentLengthHeader = headers.get("Content-Length");
+            long declaredLength = -1; // -1: header absent or malformed
             if (contentLengthHeader != null) {
                 try {
-                    long declaredLength = Long.parseLong(contentLengthHeader.strip());
+                    declaredLength = Long.parseLong(contentLengthHeader.strip());
                     if (declaredLength > maxUploadSize) {
                         throw new PayloadTooLargeException();
                     }
@@ -1323,10 +1340,22 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 var parsed = parseMultipart(jettyRequest, requestContentType);
                 return new Request.BodyContent(parsed.formBody(), parsed.files(), parsed.cleanup());
             }
+            // H2: read only when the request declares a body — Content-Length > 0,
+            // Transfer-Encoding (chunked has no Content-Length), or a malformed Content-Length
+            // (read defensively; the bounded read caps it). Keyed on declared content, not the
+            // method, so a GET that carries a body is still read. Bodyless requests — every GET —
+            // used to allocate a 64KB buffer here.
+            boolean declaresBody = declaredLength > 0
+                || (contentLengthHeader != null && declaredLength == -1)
+                || headers.containsKey("Transfer-Encoding");
+            if (!declaresBody) {
+                return new Request.BodyContent("", Map.of());
+            }
+            plainBodyReads.increment();
             // Bounded incremental read: cap at maxUploadSize bytes regardless of Content-Length
             // (which clients can lie about or omit for chunked bodies). Read maxUploadSize+1
             // bytes: if we get more than maxUploadSize the body is too large.
-            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
+            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize, bodyBufferSize(declaredLength));
             if (bodyBytes == null) {
                 throw new PayloadTooLargeException();
             }
