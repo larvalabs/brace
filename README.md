@@ -182,6 +182,7 @@ Components included in the framework jar as of this release:
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
 - **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
+- **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
@@ -398,6 +399,43 @@ app.post("/upload-manual", req -> {
     return Result.json(Map.of("url", stored.url()));
 });
 ```
+
+Uploads and downloads stream. Multipart parts over `uploadMemoryThreshold` (default 1MB) spill to a
+temp file instead of the heap, `storage.put(key, file)` sends from that file without materializing
+it, and responses can stream back:
+
+```java
+app.maxUploadSize("500M")                     // accept large media...
+   .uploadMemoryThreshold("256K")             // ...without holding it in heap
+   .uploadTempDir(Path.of("/var/lib/uploads"));
+
+try (var in = file.stream()) { ... }          // repeatable, bounded memory
+file.saveTo(path);                            // a filesystem move for a spilled part
+
+Result.file(path)                             // stream out: Content-Length, Range, typed by extension
+Result.download(path, "report.csv")           // ...as an attachment
+Result.stream(inputStream, "image/png")       // ...from a stream (chunked)
+Result.stream(out -> writeCsv(out), "text/csv");  // ...generated as it is produced
+```
+
+Static files stream too, and answer `Range` requests — so seeking in a served video works rather
+than re-fetching from the start.
+
+## Server-Sent Events
+
+```java
+app.get("/ticks", req -> Result.sse(events -> {
+    for (int i = 0; events.isOpen(); i++) {
+        events.send("tick", "n=" + i, String.valueOf(i));   // event, data, id
+        Thread.sleep(1000);
+    }
+}));
+```
+
+Each event is flushed as it is sent. The producer runs after the request transaction commits, so a
+long-lived stream never holds a database connection: use `dbFactory.withSession(...)` inside it. A
+client that disconnects is detected on the next send or heartbeat (every 15s), which ends the
+producer. A reconnecting browser sends the last event id as the `Last-Event-ID` header.
 
 ## Custom Metrics
 

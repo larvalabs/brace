@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -273,7 +273,15 @@ req.files("photos")           // List<UploadedFile>
 req.storage()                 // Storage instance
 ```
 
-**UploadedFile:** `filename()`, `contentType()`, `bytes()`, `size()`, `saveTo(Path)`.
+**UploadedFile:** `filename()`, `contentType()`, `size()`, `stream()`, `transferTo(OutputStream)`,
+`saveTo(Path)`, `bytes()`.
+
+Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
+living in the heap for the request; below it they stay in memory. Either way the API is the same.
+`stream()` is repeatable and bounded-memory, `saveTo(Path)` is a filesystem move for a spilled part,
+and `bytes()` materializes the whole part in heap — fine for small uploads, wrong for large ones.
+Spill files are deleted when the request ends, so save or upload a file before the handler returns;
+`app.uploadTempDir(Path)` chooses where they land (owner-only, created if missing).
 
 **Body size cap:** `maxUploadSize` (builder, default 10MB) bounds **every** request body, not
 just file uploads — a non-multipart body (JSON, form post, raw bytes) over the limit is
@@ -295,6 +303,13 @@ Result.forbidden()                          // 403 — or forbidden("msg")
 Result.badRequest("invalid input")          // 400
 Result.created("/posts/42")                 // 201 with Location header
 Result.bytes(data, "image/png")             // binary response
+Result.file(path)                           // stream a file (Content-Length, Range, typed by extension)
+Result.file(path, "video/mp4")              // ...with an explicit content type
+Result.download(path, "report.csv")         // stream as an attachment
+Result.stream(inputStream, "image/png")     // stream of unknown length (chunked)
+Result.stream(inputStream, "image/png", n)  // ...of known length
+Result.stream(out -> {...}, "text/csv")     // generated content, written as it is produced
+Result.sse(events -> {...})                 // Server-Sent Events (see Server-Sent Events)
 Result.download(data, "text/csv", "f.csv")  // Content-Disposition attachment; filename is
                                             // sanitized + RFC 6266 encoded, so a user-supplied
                                             // name is safe to pass
@@ -822,6 +837,31 @@ Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 **Slow-consumer backpressure.** `send`/`broadcast` are non-blocking. A connection that stops reading would otherwise make its outgoing frames pile up in Jetty's queue without bound (a per-connection memory leak). Brace bounds each connection's queued-but-unflushed bytes and force-closes a connection that exceeds the cap (`TRY_AGAIN_LATER`); the bound is per connection, so one slow client never blocks healthy members of the same room. Tune with `app.wsMaxQueuedBytes(bytes)` (default 4 MB).
 
 **Origin checking.** Upgrades from a cross-host `Origin` are rejected with 403 — a WebSocket handshake is not subject to the same-origin policy, so without this an attacker page could open a socket that the browser authenticates with the victim's session cookie. A missing `Origin` is allowed (non-browser clients); hosts are compared without scheme or port, so TLS at a proxy is fine (the app's host is `X-Forwarded-Host` from a trusted proxy, else `Host` — a proxy that rewrites `Host` to `127.0.0.1` makes every browser socket fail with 403 and a logged warning; fix the proxy with `proxy_set_header Host $host;`). Declare deliberate cross-origin browser clients with `app.wsAllowedOrigins("https://studio.example.com")` — an entry with a scheme must match scheme, host and port exactly; a bare host (`"studio.example.com"`) matches any scheme or port; `"*"` disables the check.
+
+## Server-Sent Events
+
+```java
+app.get("/feed", req -> Result.sse(events -> {
+    String last = req.header("Last-Event-ID");           // EventSource resends it on reconnect
+    long after = last == null ? 0 : Long.parseLong(last);
+    while (events.isOpen()) {
+        long from = after;
+        var posts = dbFactory.withSession(db -> db.query(Post.class, "id > ? ORDER BY id", from));
+        for (var p : posts) {
+            events.sendJson("post", new PostView(p.id, p.title), String.valueOf(p.id));
+            after = p.id;
+        }
+        Thread.sleep(2000);
+    }
+}));
+```
+
+`EventStream`: `send(data)`, `send(event, data)`, `send(event, data, id)`, `sendJson(event, value[, id])`, `comment(text)`, `retry(Duration)`, `heartbeat(Duration)`, `isOpen()`. Each send writes one event and flushes it; multi-line `data` is split into `data:` lines. Headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`.
+
+- **The producer runs after the request transaction commits and holds no DB connection.** The handler's `db` is closed by then; use `dbFactory.withSession(...)` per unit of work inside the producer, never one session for the stream's lifetime.
+- **Disconnects:** a send to a gone client throws `UncheckedIOException` and `isOpen()` turns false. A heartbeat comment (default every 15s, `heartbeat(Duration.ZERO)` turns it off) detects a client that left while the producer waits, and then *interrupts* the producer, so `Thread.sleep`/`queue.take()` throw `InterruptedException`. Either exit is a normal end; don't catch-and-continue.
+- **Reconnects:** browsers resend the last `id` as the `Last-Event-ID` request header; read it with `req.header("Last-Event-ID")`.
+- Each open stream occupies one virtual thread for its lifetime. It is recorded in stats/logs when it opens, with the handler's duration.
 
 ## Rate Limiting
 
