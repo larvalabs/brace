@@ -42,8 +42,8 @@ Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check t
 
 - **Routing** — `app.get("/path", handler)` with four handler types: `Handler` (request only), `DbHandler` (+database), `SessionHandler` (+session), `FullHandler` (+both). Read-only routes (query-only, no transaction): `app.getRead("/path", (req, db) -> ...)`, `app.getReadFull(...)` (+session). Path params: `/posts/{id}`. Route groups: `app.group("/prefix", g -> ...)`.
 - **Request** — `req.queryParam(name)`, `req.pathParam(name)`, `req.formParam(name)`, `req.header(name)`, `req.body()`, `req.bodyAs(Class)`, `req.form(Class)`, `req.jsonForm(Class)`, `req.file(name)`, `req.ip()`, `req.isHtmx()`.
-- **Responses** — `Result.text()`, `.html()`, `.json()`, `.bytes()`, `.view()`, `.redirect()`, `.error()`, `.notFound()`, `.unauthorized()`, `.forbidden()`, `.badRequest()`, `.created()`, `.noContent()`, `.download()`. `Json.obj("k", v, ...)` for one-line ad-hoc JSON shapes. `Redirect.toLocal(path)` for user-derived redirect targets (rejects off-site URLs).
-- **HTTP client** — `Http.get(url).fetchJson(Class)`, `Http.post(url).bodyJson(obj).fetch()`, `.bearer(token)`, `.header()`, `.timeout()`, `.bodyForm()`, `.multipart()`. Use this, not raw `java.net.http`.
+- **Responses** — `Result.text()`, `.html()`, `.json()`, `.bytes()`, `.view()`, `.redirect()`, `.error()`, `.notFound()`, `.unauthorized()`, `.forbidden()`, `.badRequest()`, `.created()`, `.noContent()`, `.download()`, `.file(path)` (streamed, Range support), `.stream(in | out -> ..., contentType)`, `.sse(events -> ...)` (Server-Sent Events). `Json.obj("k", v, ...)` for one-line ad-hoc JSON shapes. Put java.time values in as objects (`Json` writes ISO-8601); never `.toString()` them. `Redirect.toLocal(path)` for user-derived redirect targets (rejects off-site URLs).
+- **HTTP client** — `Http.get(url).fetchJson(Class)`, `Http.post(url).bodyJson(obj).fetch()`, `.bearer(token)`, `.header()`, `.timeout()`, `.bodyForm()`, `.multipart()`, streamed responses via `.fetchEvents(ev -> ...)` (SSE) or `.stream()` with `.idleTimeout()`. Use this, not raw `java.net.http`.
 - **URLs** — `Url.to("/users/{id}", 42)` builds a path from a route pattern. Reverse routing: name a route at registration (`app.get("/users/{id}", ctrl::show).name(Routes.USER)`) and build links with `Url.to(Routes.USER, 42)` — works in templates too, so the pattern is written once. Keep names as constants in a `Routes` class. Query strings: `Url.to(Routes.LIST, Url.query("q", q, "tag", tag))` (encoded, nulls dropped) — never `+ "?q=" + q`. `req.urlWith("sort", "name")` = current URL with one param changed.
 - **Assets** — `Assets.url("/css/app.css")` returns a content-hashed URL for cache-busted static assets.
 - **Config** — Properties file with `%%mode.` prefixes and `${ENV_VAR}` substitution. `config.get(key)`, `.getInt()`, `.getBool()`.
@@ -59,8 +59,8 @@ Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check t
 - **Storage** — S3-compatible. `storage.put()`, `.delete()`, `.url()`, `.putGenerated()`.
 - **WebSocket** — `app.ws("/path", ctx -> handler)`. Rooms, broadcast, session access.
 - **Rate Limiting** — `RateLimiter.perIp(count, window)`, `.perKey(fn, count, window)`.
-- **Security** — `app.trustedProxies(cidrs)` for IP forwarding. `SecurityHeaders.defaults()` for nosniff, frame-options, etc.
-- **Metrics** — `app.stats()` returns `Stats`: `.counter(name)`, `.gauge(name, () -> longValue)`, `.timer(name, ms)`. Appear in ops dashboard.
+- **Security** — `app.trustedProxies(cidrs)` for IP forwarding (`TrustedProxies.cloudflare().autoRefresh()` behind Cloudflare). `SecurityHeaders.defaults()` for nosniff, frame-options, etc.
+- **Metrics** — static, callable anywhere: `Metrics.counter(name)`, `Metrics.gauge(name, () -> longValue)`, `Metrics.timer(name, ms)` (not `Stats.counter`). Appear in ops dashboard; `app.stats()` reads them in tests.
 - **Middleware** — `app.before(req -> ...)` returns null to continue or Result to short-circuit. `app.after((req, result) -> ...)`.
 - **htmx** — Bundled 2.0.10 at `/__brace/htmx.min.js`. `req.isHtmx()` for partial responses. `Vary: HX-Request` set automatically.
 - **Logging** — `Log.debug/info/error(msg)` (each takes optional `Map.of(...)` data), `Log.event("name", Map.of(...))`. Structured JSON to stdout.
@@ -87,7 +87,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | Command | Purpose |
 |---|---|
 | `brace check` | Run all health checks — the first move for production health |
-| `brace status [--env prod]` | App health snapshot — exits non-zero on degradation |
+| `brace status [--env prod] [--include profiling,timeseries]` | App health snapshot — exits non-zero on degradation; `--include profiling` adds hot methods + top allocations |
 | `brace errors [--since 1h]` | List unresolved error summaries — exits non-zero if any exist |
 | `brace errors <id>` | Full detail (stack trace, request context) for one error |
 | `brace logs [-f] [--since 10m]` | Tail recent structured log entries |
@@ -107,8 +107,8 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 
 **Debugging workflow:**
 1. **Errors?** → `errors.count` + `errors.recent` summaries in status; full detail (stack trace, request, queries before failure) via `brace errors <id>` / `GET /ops/errors/{id}`
-2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU (`?include=profiling`)
-3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations` (`?include=profiling`)
+2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU (`brace status --include profiling`)
+3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations` (`brace status --include profiling`)
 4. **Job failing?** → `jobs.scheduled` shows `lastStatus`, `lastError`, `failCount`
 5. **Cache miss rate?** → `cache.hits` vs `cache.misses`
 """.formatted(projectName);

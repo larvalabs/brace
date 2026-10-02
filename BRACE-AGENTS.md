@@ -76,7 +76,11 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+
+`app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
+app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
+yourself.
 
 ## Routing
 
@@ -106,7 +110,7 @@ Use the `Read` variants for handlers that only query: GET routes are almost alwa
 `getRead` (or `getReadFull` if they need the session). They skip the per-request
 transaction entirely, which is both faster and signals intent.
 
-Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`.
+Path parameters use `{name}` syntax: `app.get("/posts/{id}", ...)` then `req.pathParam("id")` or `req.intPathParam("id")`. Values are percent-decoded.
 
 Grouping:
 
@@ -204,6 +208,10 @@ Pattern semantics: a trailing `/*` matches the bare prefix too — `/admin/*` co
 the prefix itself. Only a trailing wildcard is allowed; an interior wildcard
 (`/api/*/admin`) throws `IllegalArgumentException` at startup.
 
+A trailing-slash request (`/users/`) is routed to the `/users` route and is then treated as
+`/users` throughout: middleware patterns, `req.path()` and the handler all see the canonical
+path, so an exact-path guard on `/admin` also covers `/admin/`.
+
 After middleware can transform the response:
 
 ```java
@@ -215,9 +223,11 @@ app.after("/api/*", (req, result) -> result.header("X-Api-Version", "1"));
 
 ```java
 req.method()                  // "GET", "POST", etc.
-req.path()                    // "/posts/42"
+req.path()                    // "/posts/42" — RAW, still percent-encoded
 
-// Path parameters (from route pattern like /posts/{id})
+// Path parameters (from route pattern like /posts/{id}) — percent-decoded.
+// "/users/John%20Doe" gives "John Doe"; don't decode again. Note "+" is a literal
+// plus in a path (not a space, unlike a form body).
 req.pathParam("id")           // path param as String
 req.intPathParam("id")        // as int
 req.longPathParam("id")       // as long
@@ -263,7 +273,15 @@ req.files("photos")           // List<UploadedFile>
 req.storage()                 // Storage instance
 ```
 
-**UploadedFile:** `filename()`, `contentType()`, `bytes()`, `size()`, `saveTo(Path)`.
+**UploadedFile:** `filename()`, `contentType()`, `size()`, `stream()`, `transferTo(OutputStream)`,
+`saveTo(Path)`, `bytes()`.
+
+Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
+living in the heap for the request; below it they stay in memory. Either way the API is the same.
+`stream()` is repeatable and bounded-memory, `saveTo(Path)` is a filesystem move for a spilled part,
+and `bytes()` materializes the whole part in heap — fine for small uploads, wrong for large ones.
+Spill files are deleted when the request ends, so save or upload a file before the handler returns;
+`app.uploadTempDir(Path)` chooses where they land (owner-only, created if missing).
 
 **Body size cap:** `maxUploadSize` (builder, default 10MB) bounds **every** request body, not
 just file uploads — a non-multipart body (JSON, form post, raw bytes) over the limit is
@@ -285,6 +303,13 @@ Result.forbidden()                          // 403 — or forbidden("msg")
 Result.badRequest("invalid input")          // 400
 Result.created("/posts/42")                 // 201 with Location header
 Result.bytes(data, "image/png")             // binary response
+Result.file(path)                           // stream a file (Content-Length, Range, typed by extension)
+Result.file(path, "video/mp4")              // ...with an explicit content type
+Result.download(path, "report.csv")         // stream as an attachment
+Result.stream(inputStream, "image/png")     // stream of unknown length (chunked)
+Result.stream(inputStream, "image/png", n)  // ...of known length
+Result.stream(out -> {...}, "text/csv")     // generated content, written as it is produced
+Result.sse(events -> {...})                 // Server-Sent Events (see Server-Sent Events)
 Result.download(data, "text/csv", "f.csv")  // Content-Disposition attachment; filename is
                                             // sanitized + RFC 6266 encoded, so a user-supplied
                                             // name is safe to pass
@@ -298,6 +323,10 @@ For one-off response shapes use `Json.obj(k1, v1, k2, v2, …)` — never a
 LinkedHashMap-and-put block (`Map.of` rejects nulls and scrambles key order). For named
 or reused shapes, prefer a 1-line local record: it self-documents the schema and
 serializes in declaration order.
+
+**Dates and times:** put `LocalDateTime`/`LocalDate`/`Instant` values straight into the
+returned record or `Json.obj(...)` — `Json` writes ISO-8601 (`"2025-06-15T09:00:00"`). Never
+`.toString()` them: `LocalDateTime.toString()` drops zero seconds (`"2025-06-15T09:00"`).
 
 **⚠️ JSON and JPA entities:** Never return a JPA entity from `Json.of()` — all public fields are serialized, leaking
 `passwordHash`, API keys, or any other sensitive column. Return a record or DTO instead:
@@ -368,10 +397,10 @@ db.exists(Post.class, "talkId = ? AND userId = ?", talkId, userId) // multi-fiel
 db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns count)
 
 // Raw queries
-db.hql("SELECT p FROM Post p WHERE ...", args)    // raw HQL, returns List<Object[]>
+db.hql("SELECT p FROM Post p WHERE ...", args)    // raw HQL, returns List<Object[]> (one-column selects too: read row[0])
 db.hql("SELECT AVG(r.score), COUNT(r) FROM Rating r WHERE r.talkId = ?", id) // aggregates in one round-trip — don't fetch rows and loop-sum in Java
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL execute
-db.sqlQuery("SELECT * FROM posts WHERE ...", args) // native SQL query, returns List<Object[]>
+db.sqlQuery("SELECT * FROM posts WHERE ...", args) // native SQL query, returns List<Object[]> (one-column: row[0])
 db.sqlQueryLong("SELECT count(*) FROM posts")      // native SQL returning Long
 db.jdbc(conn -> { /* raw JDBC */ })                // raw Connection access
 ```
@@ -468,7 +497,8 @@ public record PostForm(
 Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@In({"a","b"})`, `@Optional`.
 
 Component types that bind automatically: `String`, `int`/`long`/`double`/`float`/`boolean`
-(+ boxed), enums (bad value → "must be one of: …" field error), `LocalDate` (yyyy-MM-dd),
+(+ boxed; a `boolean` is true for `on`/`true`/`1`/`yes`/`checked`, so an HTML checkbox binds
+directly, and false when absent), enums (bad value → "must be one of: …" field error), `LocalDate` (yyyy-MM-dd),
 `Instant` (ISO-8601), `BigDecimal`. Unparseable input becomes a field error, never an
 exception — no hand-parsing `<input type="date">` into String components.
 
@@ -635,6 +665,9 @@ app.every("5m", "cleanup", (db, ctx) -> db.sql("DELETE FROM expired WHERE ts < N
 app.daily("02:00", "digest", (db, ctx) -> sendDigest(db));
 ```
 
+Intervals take `s`, `m`, `h` or `d` (`"1d"`), the same units as cache TTLs. `daily` fires at the
+local wall-clock time across DST changes; run every instance in one time zone.
+
 Durable (database-backed, survives restarts):
 
 ```java
@@ -742,6 +775,7 @@ S3-compatible object storage (works with S3, R2, MinIO):
 ```java
 var storage = Storage.s3(config);  // reads s3.* keys from Config
 String url = storage.put("uploads/photo.jpg", bytes, "image/jpeg");  // returns public URL
+storage.put("exports/ledger.csv", Path.of("/tmp/ledger.csv"), "text/csv");  // streamed from disk
 storage.delete("uploads/photo.jpg");
 storage.url("uploads/photo.jpg");                   // public URL (no network call)
 storage.keyFromUrl("https://cdn.example.com/...");  // extract key from URL
@@ -795,6 +829,53 @@ Http.post(uploadUrl).bearer(token).multipart()
 
 `Response`: `status()`, `body()`, `header(name)`, `ok()`, `as(Class)`.
 
+### Streaming responses
+
+`fetch*` buffers the whole body. To read it as it arrives (LLM APIs, long exports), use
+`fetchEvents` for Server-Sent Events or `stream()` for anything else. Both work on
+`multipart()` too.
+
+```java
+// SSE: each event reaches the consumer as soon as it arrives; returns when the stream ends
+var resp = Http.post("https://api.anthropic.com/v1/messages")
+    .header("x-api-key", key).bodyJson(request)
+    .idleTimeout(Duration.ofSeconds(60))   // max wait for headers/next bytes (default 30s)
+    .timeout(Duration.ofMinutes(10))       // optional deadline for the WHOLE stream (default none)
+    .fetchEvents(ev -> {
+        if (ev.type().equals("content_block_delta")) handle(ev.as(Delta.class));
+    });
+if (!resp.ok()) throw new RuntimeException(resp.status() + ": " + resp.body());  // error body; no events parsed
+
+// Raw stream: close it to release the connection
+try (var s = Http.get(exportUrl).stream()) {
+    if (!s.ok()) throw new RuntimeException(s.readString());
+    s.lines().forEach(line -> ...);        // or s.body() for an InputStream
+}
+
+// Status/headers first, then events; close() from the consumer stops early
+try (var s = Http.post(url).bodyJson(request).stream()) {
+    if (!s.ok()) throw new RuntimeException(s.readString());
+    s.events(ev -> { handle(ev); if (done) s.close(); });
+}
+```
+
+- `Http.Event`: `type()` (`"message"` when the server sent no `event:`), `data()` (multi-line
+  `data:` joined with `\n`), `id()`, `retry()`, `as(Class)`. Comments and keep-alives are skipped;
+  an event left unterminated when the stream ends is dropped (per the SSE spec).
+- `fetchEvents` returns a `Response` with the status and headers. On a non-2xx status it parses
+  no events and `body()` is the error body, so check `ok()` as with `fetch()`.
+- Stream timeouts differ from `fetch*`: `.idleTimeout()` (default 30s; `Duration.ZERO` or
+  `null` turns it off) bounds each wait for the headers or the next bytes, and only counts
+  time blocked in a read, so a slow consumer doesn't trip it. There is no total deadline
+  unless you call `.timeout()`, which then bounds the whole call. Either closes the
+  connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`).
+- LLM APIs: the idle timeout includes the wait for response headers, and a model that thinks
+  or runs a server tool can go quiet for a while. Set `.idleTimeout(...)` to the longest silence
+  the provider can produce (keep-alive pings and `:` comments reset it), and `.timeout(...)` as
+  the overall cap. Connecting is bounded separately at 10s.
+- Transport failures throw `RuntimeException("HTTP request failed: METHOD url (Cause: msg)")`,
+  so a refused connection (`ConnectException`) is visible in the message.
+
 ## WebSocket
 
 ```java
@@ -808,6 +889,31 @@ Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 **Slow-consumer backpressure.** `send`/`broadcast` are non-blocking. A connection that stops reading would otherwise make its outgoing frames pile up in Jetty's queue without bound (a per-connection memory leak). Brace bounds each connection's queued-but-unflushed bytes and force-closes a connection that exceeds the cap (`TRY_AGAIN_LATER`); the bound is per connection, so one slow client never blocks healthy members of the same room. Tune with `app.wsMaxQueuedBytes(bytes)` (default 4 MB).
 
 **Origin checking.** Upgrades from a cross-host `Origin` are rejected with 403 — a WebSocket handshake is not subject to the same-origin policy, so without this an attacker page could open a socket that the browser authenticates with the victim's session cookie. A missing `Origin` is allowed (non-browser clients); hosts are compared without scheme or port, so TLS at a proxy is fine (the app's host is `X-Forwarded-Host` from a trusted proxy, else `Host` — a proxy that rewrites `Host` to `127.0.0.1` makes every browser socket fail with 403 and a logged warning; fix the proxy with `proxy_set_header Host $host;`). Declare deliberate cross-origin browser clients with `app.wsAllowedOrigins("https://studio.example.com")` — an entry with a scheme must match scheme, host and port exactly; a bare host (`"studio.example.com"`) matches any scheme or port; `"*"` disables the check.
+
+## Server-Sent Events
+
+```java
+app.get("/feed", req -> Result.sse(events -> {
+    String last = req.header("Last-Event-ID");           // EventSource resends it on reconnect
+    long after = last == null ? 0 : Long.parseLong(last);
+    while (events.isOpen()) {
+        long from = after;
+        var posts = dbFactory.withSession(db -> db.query(Post.class, "id > ? ORDER BY id", from));
+        for (var p : posts) {
+            events.sendJson("post", new PostView(p.id, p.title), String.valueOf(p.id));
+            after = p.id;
+        }
+        Thread.sleep(2000);
+    }
+}));
+```
+
+`EventStream`: `send(data)`, `send(event, data)`, `send(event, data, id)`, `sendJson(event, value[, id])`, `comment(text)`, `retry(Duration)`, `heartbeat(Duration)`, `isOpen()`. Each send writes one event and flushes it; multi-line `data` is split into `data:` lines. Headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`.
+
+- **The producer runs after the request transaction commits and holds no DB connection.** The handler's `db` is closed by then; use `dbFactory.withSession(...)` per unit of work inside the producer, never one session for the stream's lifetime.
+- **Disconnects:** a send to a gone client throws `UncheckedIOException` and `isOpen()` turns false. A heartbeat comment (default every 15s, `heartbeat(Duration.ZERO)` turns it off) detects a client that left while the producer waits, and then *interrupts* the producer, so `Thread.sleep`/`queue.take()` throw `InterruptedException`. Either exit is a normal end; don't catch-and-continue.
+- **Reconnects:** browsers resend the last `id` as the `Last-Event-ID` request header; read it with `req.header("Last-Event-ID")`.
+- Each open stream occupies one virtual thread for its lifetime. It is recorded in stats/logs when it opens, with the handler's duration.
 
 ## Rate Limiting
 
@@ -834,6 +940,16 @@ app.trustedProxies("10.0.0.0/8", "172.16.0.0/12");  // CIDRs (here: RFC1918 priv
 ```
 
 Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
+
+For apps behind Cloudflare, `TrustedProxies.cloudflare()` is pre-loaded with Cloudflare's published egress ranges:
+
+```java
+app.trustedProxies(TrustedProxies.cloudflare().autoRefresh());
+// with nginx between Cloudflare and the app, also trust the local hop:
+app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefresh());
+```
+
+`.autoRefresh()` re-fetches cloudflare.com/ips-v4 + /ips-v6 on a background daemon thread that `app.stop()` ends (daily; the bundled list serves until the first fetch, and a failed fetch keeps the current list). `.plus(cidrs)` adds proxies of your own that survive refreshes. Without trusted proxies configured, `RateLimiter.perIp(...)` logs a startup warning: behind a proxy every request shares the proxy's IP, so a per-IP limit is effectively site-wide.
 
 ### Security Headers
 
@@ -868,14 +984,18 @@ in the brace repo).
 ## Custom Metrics
 
 ```java
-var stats = app.stats();                     // pass to controllers/services via constructors
-stats.counter("talks.created");              // increment by 1
-stats.counter("bytes.uploaded", file.size()); // increment by amount
-stats.gauge("queue.depth", () -> (long) queue.size()); // Supplier<Long>, sampled each minute
-stats.timer("api.external", durationMs);     // tracks count, avg, max
+Metrics.counter("talks.created");              // increment by 1
+Metrics.counter("bytes.uploaded", file.size()); // increment by amount
+Metrics.gauge("queue.depth", () -> (long) queue.size()); // Supplier<Long>, sampled each minute
+Metrics.timer("api.external", durationMs);     // tracks count, avg, max
 ```
 
-Metrics appear in `/ops/status` JSON and as sparklines in the dashboard.
+`Metrics` is static (like `Log`), so call it from any controller or service; no need to pass
+anything in. It records into the app's `Stats` (the most recently constructed app; calls made
+before `Brace.app()` are kept and adopted by it). `app.stats()` is that same instance, with the
+same `counter`/`gauge`/`timer` methods plus `counterTotal(name)` for test assertions. `Stats` has
+no static methods: `Stats.counter(...)` does not compile. Metrics appear in `/ops/status` JSON
+and as sparklines in the dashboard.
 
 ## Testing
 
@@ -967,7 +1087,10 @@ db.pass=${DB_PASS}
 ```
 
 Load: `Config.load(Path.of("application.conf"), System.getProperty("brace.mode"))`.
-Mode-prefixed keys override base keys. `brace dev` sets the mode to `dev` and
+Mode-prefixed keys override base keys. A key absent from the file falls back to the env var
+named after it (`db.pass` → `DB_PASS`), but a key present in the file always wins, so
+per-deployment values must be `${VAR}` references — the scaffold's `application.conf.example`
+(the Dockerfile's config) uses `${DATABASE_URL}`, `${DB_USER}`, `${DB_PASS}`, `${SESSION_SECRET}`. `brace dev` sets the mode to `dev` and
 `brace run` to `prod`; outside the CLI, pass `-Dbrace.mode=...` yourself.
 
 Methods: `get(key)`, `get(key, default)`, `getInt(key, default)`, `getBool(key, default)`.
@@ -1007,7 +1130,8 @@ if (req.isHtmx()) return View.of("posts/_list", "posts", posts);
 return View.of("posts/index", "posts", posts);
 ```
 
-`Vary: HX-Request` is set automatically so caches don't mix full pages with partials.
+`HX-Request` is added to `Vary` automatically (appended to any value the handler set) so caches
+don't mix full pages with partials.
 
 ## Common Patterns
 
@@ -1040,7 +1164,8 @@ use it instead of re-deriving the verbose version:
   cross-entity checks go in one static helper both handlers call (see §Forms & Validation).
 - **Response shapes:** a 1-line local record (`record TalkStats(long talkId, double avg) {}`)
   for named/reused shapes, `Json.obj("count", n, "avg", avg)` for one-offs — never a
-  LinkedHashMap-and-put block (see §Responses).
+  LinkedHashMap-and-put block (see §Responses). java.time values go in as objects, never
+  `.toString()`.
 - **Existence checks:** `db.existsBy` (single field) or `db.exists` (multi-field
   where-fragment, e.g. `db.exists(Rating.class, "talkId = ? AND userId = ?", t, u)`) —
   never `db.query(...).isEmpty()`.

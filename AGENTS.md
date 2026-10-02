@@ -34,6 +34,7 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `View` | Template result (renders JTE) |
 | `Json` | JSON result (Jackson) |
 | `Redirect` | 302/301 redirect |
+| `EventStream` | Server-Sent Events emitter handed to a `Result.sse(...)` producer (send, heartbeat, disconnect detection) |
 | `Database` | Thin wrapper over Hibernate StatelessSession |
 | `DatabaseFactory` | Creates SessionFactory, runs Flyway migrations |
 | `Session` | AES-256-GCM encrypted cookie session |
@@ -50,6 +51,7 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Jobs` | Static API for scheduling durable jobs |
 | `Mailer` | Email sending with dev-mode capture |
 | `Stats` | Lock-free request stats collection |
+| `Metrics` | Static facade for custom counters/gauges/timers over the app's `Stats` |
 | `OpsHandler` | /ops/status, /ops/routes, /ops/dashboard |
 | `Log` | Structured JSON logging to stdout |
 | `Config` | File + env var config with mode prefixes |

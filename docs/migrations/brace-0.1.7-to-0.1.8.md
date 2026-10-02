@@ -600,6 +600,14 @@ The interval must be positive; there is no disable value, since zero would spin 
 against the database. To restore 0.1.7's cadence exactly, use `"10s"` — note this also makes
 partial batches wait 10 seconds, which 0.1.7 did not.
 
+**Tests (note added in 0.1.10).** A test that enqueues a durable job inside a `Brace.test()` app
+and then asserts the job is still queued, or runs it by hand, now races the poller: the job
+starts as soon as the enqueuing transaction commits. Under 0.1.7 a short test class usually
+finished before the next 10-second poll, so these tests passed by timing. Either assert the
+eventual outcome (wait for the job's effect or its `completed` state), or test the job body
+directly by calling it without enqueueing. Check every job a test enqueues, not just the first:
+a second job in the same test fails only intermittently.
+
 ### New: after-commit hooks
 
 The mechanism behind the wake is public API: `db.afterCommit(Runnable)` runs an action after the

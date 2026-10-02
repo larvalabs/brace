@@ -59,8 +59,29 @@ class JfrProfilerTest {
         assertTrue((long) gc.get("totalCount") >= 0);
         assertTrue((long) gc.get("totalPauseMs") >= 0);
         assertTrue((double) gc.get("avgPauseMs") >= 0);
+        assertTrue((double) gc.get("maxPauseMs") >= 0);
+        assertTrue((long) gc.get("fullCount") >= 0);
         assertNotNull(gc.get("recentPauses"));
         assertInstanceOf(List.class, gc.get("recentPauses"));
+    }
+
+    @Test
+    void recordsRealGcEventsWithPauseAndCycleFields() throws Exception {
+        // Guards the JFR field names (sumOfPauses / longestPause): a wrong name throws in
+        // the event callback and the collection would never be recorded.
+        long before = profiler.gcCount();
+        System.gc();
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (profiler.gcCount() == before && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+        assertTrue(profiler.gcCount() > before, "System.gc() should produce a GC event");
+        var gc = (Map<String, Object>) profiler.snapshot(false).get("gc");
+        var latest = ((List<Map<String, Object>>) gc.get("recentPauses")).getFirst();
+        double pause = (double) latest.get("durationMs");
+        double cycle = (double) latest.get("cycleMs");
+        assertTrue(pause <= cycle, "stop-the-world time can't exceed the collection's span: " + latest);
+        assertTrue((double) latest.get("longestPauseMs") <= pause, latest.toString());
     }
 
     @Test

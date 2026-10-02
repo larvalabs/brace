@@ -265,7 +265,18 @@ public class OpsHandler {
 
         // HTTP stats
         var http = new LinkedHashMap<String, Object>();
-        http.put("statusCodes", stats.statusCodeCounts());
+        var statusCodes = stats.statusCodeCounts();
+        http.put("statusCodes", statusCodes);
+        http.put("totalRequests", statusCodes.values().stream().mapToLong(Long::longValue).sum());
+        // Rate from the minute ring; absent until the first full minute has rotated in.
+        var reqRate = stats.requestRate();
+        if (reqRate != null) {
+            var rpm = new LinkedHashMap<String, Object>();
+            rpm.put("lastMinute", reqRate.lastMinute());
+            rpm.put("avg", Math.round(reqRate.avgPerMinute() * 100.0) / 100.0);
+            rpm.put("windowMinutes", reqRate.windowMinutes());
+            http.put("requestsPerMinute", rpm);
+        }
         // Slowest routes (top 5 by avg latency)
         var routeList = new ArrayList<Map<String, Object>>();
         stats.routeStats().entrySet().stream()
@@ -279,6 +290,22 @@ public class OpsHandler {
                 routeList.add(r);
             });
         http.put("slowestRoutes", routeList);
+        // Busiest routes over the last few full minutes (windowed per-minute counts, not
+        // lifetime). Requests that matched no route are folded into one "(unmatched)" entry,
+        // static files into one "(static)" entry.
+        var topRoutes = stats.topRoutes(OpsDashboard.TOP_ROUTES_WINDOW_MINUTES, 5);
+        var topList = new ArrayList<Map<String, Object>>();
+        for (var r : topRoutes) {
+            var t = new LinkedHashMap<String, Object>();
+            t.put("route", r.route());
+            t.put("count", r.count());
+            t.put("perMinute", Math.round(r.perMinute() * 100.0) / 100.0);
+            t.put("sharePct", Math.round(r.share() * 1000.0) / 10.0);
+            topList.add(t);
+        }
+        http.put("topRoutes", topList);
+        http.put("topRoutesWindowMinutes", topRoutes.isEmpty()
+            ? OpsDashboard.TOP_ROUTES_WINDOW_MINUTES : topRoutes.getFirst().windowMinutes());
         data.put("http", http);
 
         // JVM (from JFR profiler or fallback to runtime). The profiling block (hot methods +
@@ -428,6 +455,7 @@ public class OpsHandler {
                 m.put("requests", snap.requests());
                 m.put("errors", snap.errors());
                 m.put("avgMs", Math.round(snap.avgLatencyMs() * 100.0) / 100.0);
+                m.put("p95Ms", Math.round(snap.p95LatencyMs() * 100.0) / 100.0);
                 minutes.add(m);
             }
             timeseries.put("minutes", minutes);

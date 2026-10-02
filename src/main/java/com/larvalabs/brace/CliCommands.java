@@ -204,14 +204,18 @@ public class CliCommands {
 
     // ---------- brace status ----------
 
+    /** The opt-in /ops/status blocks {@code brace status --include} accepts. */
+    static final List<String> STATUS_INCLUDES = List.of("profiling", "timeseries");
+
     public static int status(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
+        String url = cfg.url() + "/ops/status" + statusQuery(args);
 
         HttpResponse<String> response;
         try {
             response = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.url() + "/ops/status"))
+                    .uri(URI.create(url))
                     .header("Accept", "application/json")
                     .GET());
         } catch (Exception e) {
@@ -237,6 +241,30 @@ public class CliCommands {
     }
 
     /**
+     * {@code ?include=...} for {@code --include profiling,timeseries} (empty without the
+     * flag). Unknown names are rejected: the server ignores them, so a typo would silently
+     * return the default snapshot.
+     */
+    static String statusQuery(String[] args) {
+        if (!hasFlag(args, "--include")) return "";
+        String include = parseFlag(args, "--include");
+        if (include == null || include.isBlank() || include.startsWith("--")) {
+            throw new IllegalArgumentException("--include needs a value: " + String.join(",", STATUS_INCLUDES));
+        }
+        var parts = new ArrayList<String>();
+        for (var part : include.split(",")) {
+            String p = part.trim();
+            if (p.isEmpty()) continue;
+            if (!STATUS_INCLUDES.contains(p)) {
+                throw new IllegalArgumentException("Unknown --include value: " + p
+                    + " (expected " + String.join(", ", STATUS_INCLUDES) + ")");
+            }
+            parts.add(p);
+        }
+        return "?include=" + String.join(",", parts);
+    }
+
+    /**
      * Unresolved error count from a /ops/status payload. 0.1.7+ servers emit
      * {@code errors.count}; pre-0.1.7 servers never did (so `brace status` always reported
      * 0 errors and exited 0 — the bug this fixes), but they do emit {@code errors.recent},
@@ -249,7 +277,7 @@ public class CliCommands {
         return errors.path("recent").size();
     }
 
-    private static void renderStatus(JsonNode root) {
+    static void renderStatus(JsonNode root) {
         System.out.println();
         System.out.println("App");
         var app = root.path("app");
@@ -259,6 +287,20 @@ public class CliCommands {
         System.out.println("HTTP");
         var http = root.path("http");
         System.out.println("  status    " + http.path("statusCodes").toString());
+        // 0.1.10+ servers only; older ones omit these, so print nothing rather than zeros.
+        var rpm = http.path("requestsPerMinute");
+        if (!rpm.isMissingNode()) {
+            System.out.printf("  req/min   %d last minute, %.1f avg over %d min%n",
+                rpm.path("lastMinute").asLong(), rpm.path("avg").asDouble(), rpm.path("windowMinutes").asInt());
+        }
+        var top = http.path("topRoutes");
+        if (top.size() > 0) {
+            System.out.println("  busiest (last " + http.path("topRoutesWindowMinutes").asInt() + " min):");
+            for (var r : top) {
+                System.out.printf("    %s  %.1f/min (%.1f%%)%n",
+                    r.path("route").asText(), r.path("perMinute").asDouble(), r.path("sharePct").asDouble());
+            }
+        }
         var slow = http.path("slowestRoutes");
         if (slow.size() > 0) {
             System.out.println("  slowest:");
@@ -276,7 +318,46 @@ public class CliCommands {
             System.out.println("Heap      " + heap.path("usedMB").asLong() + "MB / "
                 + heap.path("maxMB").asLong() + "MB");
         }
+        // Opt-in blocks (--include): only printed when the server returned them.
+        var profiling = jvm.path("profiling");
+        if (!profiling.isMissingNode()) {
+            System.out.println();
+            System.out.println("Hot methods (samples, last " + profiling.path("windowSeconds").asInt() + "s)");
+            for (var m : first(profiling.path("hotMethods"), 10)) {
+                System.out.printf("  %8d  %s%n", m.path("samples").asLong(), m.path("method").asText());
+            }
+            System.out.println("Top allocations");
+            for (var a : first(profiling.path("topAllocations"), 10)) {
+                System.out.printf("  %8s  %s%n", formatBytes(a.path("bytes").asLong()), a.path("class").asText());
+            }
+        }
+        var minutes = root.path("timeseries").path("minutes");
+        if (minutes.size() > 0) {
+            System.out.println();
+            System.out.println("Last minutes (requests / errors / avg ms)");
+            for (int i = Math.max(0, minutes.size() - 10); i < minutes.size(); i++) {
+                var m = minutes.get(i);
+                System.out.printf("  %s  %6d  %4d  %8.1f%n", m.path("ts").asText(),
+                    m.path("requests").asLong(), m.path("errors").asLong(), m.path("avgMs").asDouble());
+            }
+        }
         System.out.println();
+    }
+
+    private static List<JsonNode> first(JsonNode array, int n) {
+        var out = new ArrayList<JsonNode>();
+        for (var e : array) {
+            if (out.size() == n) break;
+            out.add(e);
+        }
+        return out;
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes >= 1024L * 1024 * 1024) return String.format(Locale.ROOT, "%.1fGB", bytes / (1024.0 * 1024 * 1024));
+        if (bytes >= 1024L * 1024) return String.format(Locale.ROOT, "%.1fMB", bytes / (1024.0 * 1024));
+        if (bytes >= 1024) return String.format(Locale.ROOT, "%.1fKB", bytes / 1024.0);
+        return bytes + "B";
     }
 
     // ---------- brace cache ----------

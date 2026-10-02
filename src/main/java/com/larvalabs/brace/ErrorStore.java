@@ -277,6 +277,16 @@ public class ErrorStore {
         return true;
     }
 
+    /**
+     * Cap on rows returned by an <em>unfiltered</em> {@link #list}. The store itself is pruned
+     * to {@code maxErrors} (default 1000), but a list response carrying every heavy column
+     * unbounded is still a needlessly large payload — recent-first covers the browse use.
+     * A {@code since}-filtered list is NOT capped: the caller asked for a bounded window and
+     * gets it completely (the prune bounds the worst case), so the window never silently
+     * loses rows while {@code errors.count} says otherwise.
+     */
+    static final int LIST_LIMIT = 500;
+
     public List<Map<String, Object>> list(String status) {
         return list(status, null);
     }
@@ -290,14 +300,12 @@ public class ErrorStore {
             // preserves the prior Java semantics exactly: a NULL first_seen is never `>= ?`, so those
             // rows are excluded as before. `status` maps to a fixed clause (never user SQL).
             String where = "resolved".equals(status) ? "resolved_at IS NOT NULL" : "resolved_at IS NULL";
-            String sql = "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, "
-                + "last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE "
-                + where;
+            String sql = "SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE " + where;
             List<Object[]> rows;
             if (since != null) {
                 rows = db.sqlQuery(sql + " AND first_seen >= ? ORDER BY last_seen DESC", Timestamp.from(since));
             } else {
-                rows = db.sqlQuery(sql + " ORDER BY last_seen DESC");
+                rows = db.sqlQuery(sql + " ORDER BY last_seen DESC LIMIT ?", LIST_LIMIT);
             }
 
             var result = new ArrayList<Map<String, Object>>();
@@ -310,6 +318,7 @@ public class ErrorStore {
         }
     }
 
+    /** The full-detail column list — one definition for {@link #list}, {@link #find}, {@link #resolve} (mapped by {@link #mapRow}). */
     private static final String FULL_COLUMNS =
         "id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, "
         + "occurrence_count, resolved_at, queries_before, request_headers";
@@ -407,26 +416,11 @@ public class ErrorStore {
         try {
             var now = Timestamp.from(Instant.now());
             db.sql("UPDATE ops_errors SET resolved_at = ? WHERE id = ?", now, id);
+            // Re-fetch on the same session — shared FULL_COLUMNS + mapRow keep the row
+            // shape from drifting (this method once hand-built the map and had drifted).
+            var rows = db.sqlQuery("SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE id = ?", id);
             db.commitTransaction();
-
-            // Re-fetch the updated record
-            var rows = db.sqlQuery(
-                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE id = ?", id);
-
-            if (rows.isEmpty()) return null;
-            var row = rows.get(0);
-            var map = new LinkedHashMap<String, Object>();
-            map.put("id", ((Number) row[0]).longValue());
-            map.put("errorType", row[1]);
-            map.put("message", row[2]);
-            map.put("stackTrace", row[3]);
-            map.put("route", row[4]);
-            map.put("requestDetail", row[5]);
-            map.put("firstSeen", toInstant(row[6]));
-            map.put("lastSeen", toInstant(row[7]));
-            map.put("occurrenceCount", ((Number) row[8]).intValue());
-            map.put("resolvedAt", toInstant(row[9]));
-            return map;
+            return rows.isEmpty() ? null : mapRow(rows.get(0));
         } catch (Exception e) {
             db.rollbackTransaction();
             return null;

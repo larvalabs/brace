@@ -89,4 +89,15 @@ class TemplatePrecompilerTest {
         TemplatePrecompiler.precompile(Path.of(VIEWS), target);
         assertFalse(Files.exists(stale), "previous output is removed, not merged");
     }
+
+    @Test
+    void prodWithoutPrecompiledClassesOnAJreFailsAtStartupNamingTheFix() {
+        // A real JRE can't be simulated under the JDK running the tests (checked by hand in an
+        // eclipse-temurin JRE container); this pins the check and the message an operator sees.
+        assertDoesNotThrow(() -> TemplateEngine.requireCompiler(true, "views", Path.of("target/jte-classes")));
+        var e = assertThrows(IllegalStateException.class,
+            () -> TemplateEngine.requireCompiler(false, "views", Path.of("target/jte-classes")));
+        assertTrue(e.getMessage().contains("brace compile"), e.getMessage());
+        assertTrue(e.getMessage().contains("target/jte-classes"), e.getMessage());
+    }
 }

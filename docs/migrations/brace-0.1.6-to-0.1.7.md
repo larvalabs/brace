@@ -2612,3 +2612,30 @@ large limit (say `1000/min`) on a multi-box fleet, raise `rateLimitBatchDivisor`
 accept the documented overshoot. If you want zero rate-limiter DB load and per-instance limits are
 acceptable, set `sharedRateLimiting(false)`. Background and load analysis:
 [`docs/2026-06-07-rate-limiter-load.md`](../2026-06-07-rate-limiter-load.md).
+
+---
+
+## Corrections (added in 0.1.10)
+
+A merge made before 0.1.7 was tagged dropped several changes this guide describes as shipped.
+0.1.7 through 0.1.9 did not have them. All of them are restored in 0.1.10; see
+[the 0.1.10 guide](brace-0.1.9-to-0.1.10.md).
+
+- **The scaffolded Dockerfile.** "Deploying with Docker" above says newly scaffolded projects
+  get a Dockerfile with the precompile setup in place. They did not: `brace new` still wrote
+  `FROM eclipse-temurin:21-jre` with a plain `java -jar app.jar`, which fails on the first
+  rendered page.
+  [Fixed Dockerfile and how to update an existing one](brace-0.1.9-to-0.1.10.md#fix-scaffolded-dockerfile-precompiled-templates-on-a-jre-java_opts-heap-cap).
+- **Route stats keyed by route pattern** ("`/ops/status` route stats are keyed by route
+  pattern" above). Stats stayed keyed by the concrete path, so the per-route map still grew
+  with every distinct URL.
+  [Restored in 0.1.10](brace-0.1.9-to-0.1.10.md#fix-opsroutes-shows-route-patterns-and-every-response-is-counted).
+- **`.csrf(false)` routes skip session crypto, and the session is decrypted at most once**
+  ("CSRF token minting is lazy" above). Lazy token minting did ship; the decrypt savings did
+  not. Opted-out routes still decrypted the cookie, and mutating requests decrypted it twice.
+  [Restored in 0.1.10](brace-0.1.9-to-0.1.10.md#fix-the-session-cookie-is-decrypted-at-most-once-per-request).
+- **Template rendering after commit** ("template rendering now happens after the transaction
+  commits" above). Rendering did move after the commit, but lazily, while the response was
+  being written. A template that failed to render could send a 500 carrying the handler's
+  headers and cookies.
+  [Fixed in 0.1.10](brace-0.1.9-to-0.1.10.md#fix-a-template-that-fails-to-render-returns-a-clean-500).

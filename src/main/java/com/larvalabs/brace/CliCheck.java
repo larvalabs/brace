@@ -118,7 +118,7 @@ public class CliCheck {
         checks.add(checkHttp5xx(status));
         checks.add(checkSlowRoutes(status, thresholds));
         checks.add(checkHeap(status, thresholds));
-        checks.add(checkGcPressure(status, thresholds));
+        checks.add(checkGcPressure(status, thresholds, env));
         checks.add(checkJobs(status));
         checks.add(checkCache(status, thresholds));
         checks.add(checkRecentLogs(logs, thresholds, env));
@@ -224,11 +224,35 @@ public class CliCheck {
         return new Check("heap", "pass", msg);
     }
 
-    static Check checkGcPressure(JsonNode status, CheckThresholds thresholds) {
-        double avgPause = status.path("jvm").path("gc").path("avgPauseMs").asDouble(0);
-        String msg = "Avg pause " + (int) avgPause + "ms";
+    static Check checkGcPressure(JsonNode status, CheckThresholds thresholds, String env) {
+        var gc = status.path("jvm").path("gc");
+        // Stop-the-world time per collection. Pre-0.1.10 servers counted the whole span of
+        // concurrent cycles (G1Old, ZGC, Shenandoah) as pause time, inflating this figure.
+        double avgPause = gc.path("avgPauseMs").asDouble(0);
+        String msg = String.format(Locale.ROOT, "Avg pause %.1fms", avgPause);
+        // Allocation profiling shows what is filling the heap.
+        String followUp = "brace status --env " + env + " --include profiling --json";
         if (avgPause > thresholds.gcPauseMs()) {
-            return new Check("gc_pressure", "fail", msg);
+            return new Check("gc_pressure", "fail", msg, null, followUp);
+        }
+        // A G1 full collection means concurrent marking fell behind (often humongous
+        // allocations or an undersized heap). SerialOld/ParallelOld are those collectors'
+        // normal old-gen collections, judged by the pause threshold above.
+        var fullGcs = new ArrayList<Map<String, Object>>();
+        for (var p : gc.path("recentPauses")) {
+            if ("G1Full".equals(p.path("collector").asText())) {
+                var d = new LinkedHashMap<String, Object>();
+                d.put("ts", p.path("ts").asText());
+                d.put("cause", p.path("cause").asText());
+                d.put("pauseMs", p.path("durationMs").asDouble());
+                fullGcs.add(d);
+            }
+        }
+        if (!fullGcs.isEmpty()) {
+            return new Check("gc_pressure", "warn",
+                fullGcs.size() + " G1 full GC" + (fullGcs.size() == 1 ? "" : "s")
+                    + " in recent collections; " + msg.toLowerCase(),
+                fullGcs, followUp);
         }
         return new Check("gc_pressure", "pass", msg);
     }
