@@ -53,6 +53,18 @@ class RenderAfterCommitTest {
             return View.of("hello");
         });
 
+        // A broken render whose Result also carries handler-set headers and an app cookie. The render
+        // must run before any of them reach Jetty, so the 500 carries none of them.
+        app.post("/fail-render-with-headers", (DbHandler) (req, db) -> {
+            var p = new Post();
+            p.title = "broken-render-with-headers";
+            p.body = "x";
+            p.createdAt = Instant.now();
+            return View.of("brokenRender", "post", p)
+                .header("X-Handler", "leaked")
+                .cookie("app_cookie", "v", 60, true, false, "Lax");
+        });
+
         app.get("/count/{title}", (DbHandler) (req, db) ->
             Json.of(db.count(Post.class, "title = ?", req.pathParam("title"))));
 
@@ -99,5 +111,28 @@ class RenderAfterCommitTest {
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("Hello from JTE!"));
         assertEquals(1, count("committed-with-good-render"));
+    }
+
+    @Test
+    void renderFailureIsACleanErrorResponseCountedOnce() throws Exception {
+        // M12: the render runs explicitly before the status and headers are written. When it ran
+        // lazily inside the wire write (the state merge b8609b6 left), the failure came after the
+        // handler's headers and cookie were already on the Jetty response, so the 500 carried
+        // them, and the request was recorded as a 200 and then never as the 500 it became.
+        var stats = app.stats();
+        long ok = stats.statusCodeCounts().getOrDefault(200, 0L);
+        long failed = stats.statusCodeCounts().getOrDefault(500, 0L);
+
+        var response = post("/fail-render-with-headers");
+
+        assertEquals(500, response.statusCode());
+        assertTrue(response.headers().firstValue("X-Handler").isEmpty(),
+            "handler headers must not leak onto the 500: " + response.headers().map());
+        assertTrue(response.headers().allValues("Set-Cookie").stream().noneMatch(c -> c.startsWith("app_cookie=")),
+            "handler cookies must not leak onto the 500: " + response.headers().allValues("Set-Cookie"));
+        assertEquals("Internal Server Error", response.body());
+        assertEquals(1, stats.routeStats().get("POST /fail-render-with-headers").count(), "recorded once");
+        assertEquals(failed + 1, stats.statusCodeCounts().getOrDefault(500, 0L), "recorded as the 500 sent");
+        assertEquals(ok, stats.statusCodeCounts().getOrDefault(200, 0L), "never recorded as a 200");
     }
 }

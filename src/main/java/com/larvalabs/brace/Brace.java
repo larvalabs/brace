@@ -48,6 +48,7 @@ public class Brace {
     private boolean opsProfilerEnabled = true;
     private String instanceId;
     private OpsHandler opsHandler;
+    private BraceHandler handler; // set by start(); read by tests through handler()
     private Cache cache;
     private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
@@ -189,6 +190,11 @@ public class Brace {
 
     public Stats stats() {
         return stats;
+    }
+
+    /** The request handler, once {@link #start} has built it — for tests reading its counters. */
+    BraceHandler handler() {
+        return handler;
     }
 
 
@@ -1049,7 +1055,7 @@ public class Brace {
                 Log.debug("routes.unnamed", Map.of("unnamed", unnamed, "named", router.names().size()));
             }
         }
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
+        handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
 

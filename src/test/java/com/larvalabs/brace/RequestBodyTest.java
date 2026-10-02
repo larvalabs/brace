@@ -51,6 +51,10 @@ class RequestBodyTest {
         // Prefixed echo for the H2 gating tests: distinguishes "handler ran with empty
         // body" from "no response body".
         app.get("/echo", req -> Result.text("got:" + req.body()));
+        app.post("/upload", req -> {
+            var f = req.file("f");
+            return Result.text(f.filename() + ":" + new String(f.bytes(), StandardCharsets.UTF_8));
+        });
         app.start();
         port = app.actualPort();
 
@@ -288,6 +292,50 @@ class RequestBodyTest {
             + "Content-Length: 5\r\nConnection: close\r\n\r\nhello");
         assertEquals(200, Integer.parseInt(raw.substring(9, 12)));
         assertEquals("got:hello", responseBody(raw), "GET with declared body must read it");
+    }
+
+    @Test
+    void bodylessRequestsNeverReachTheBodyRead() throws Exception {
+        // The behavior tests above pass whether or not the read is skipped (an empty read
+        // yields "" too), which is how H2 was lost in merge b8609b6 unnoticed. Count reads.
+        var reads = app.handler().plainBodyReads;
+
+        long before = reads.sum();
+        sendRaw(port, "GET /echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        sendRaw(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\n"
+            + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+        assertEquals(before, reads.sum(), "a request declaring no body must not allocate a read buffer");
+
+        sendRaw(port, "GET /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\n"
+            + "Content-Length: 5\r\nConnection: close\r\n\r\nhello");
+        assertEquals(before + 1, reads.sum(), "a declared body is read exactly once");
+    }
+
+    @Test
+    void chunkedBodyWithoutContentLengthIsRead() throws Exception {
+        // Transfer-Encoding: chunked carries no Content-Length; it must still count as a body.
+        String raw = sendRaw(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\n"
+            + "Content-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            + "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+        assertEquals(200, Integer.parseInt(raw.substring(9, 12)));
+        assertEquals("hello world", responseBody(raw));
+    }
+
+    @Test
+    void chunkedMultipartUploadIsParsed() throws Exception {
+        // Multipart is parsed (and spilled) before the H2 gate; a chunked upload with no
+        // Content-Length must still reach the handler with its file.
+        String part = "--b0undary\r\n"
+            + "Content-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n"
+            + "Content-Type: text/plain\r\n\r\n"
+            + "file-bytes\r\n"
+            + "--b0undary--\r\n";
+        String raw = sendRaw(port, "POST /upload HTTP/1.1\r\nHost: localhost\r\n"
+            + "Content-Type: multipart/form-data; boundary=b0undary\r\n"
+            + "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            + Integer.toHexString(part.length()) + "\r\n" + part + "\r\n0\r\n\r\n");
+        assertEquals(200, Integer.parseInt(raw.substring(9, 12)), raw);
+        assertEquals("a.txt:file-bytes", responseBody(raw));
     }
 
 }

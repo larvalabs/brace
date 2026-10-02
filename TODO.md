@@ -29,13 +29,15 @@ Unmerged branches (open work that already has code; rebase onto `main` before me
 
 ## Bugs
 
-- [ ] **Fixes silently dropped by merge `b8609b6` (0.1.7 runtime-performance review).** Its conflict resolution reverted several fixes; an audit on 2026-10-02 found them. Each restore adds a test that fails if the fix is lost again (the originals were only covered by behavior tests that pass either way).
+- [x] **Fixes silently dropped by merge `b8609b6` (0.1.7 runtime-performance review).** Its conflict resolution reverted several fixes; an audit on 2026-10-02 found them. Each restore adds a test that fails if the fix is lost again (the originals were only covered by behavior tests that pass either way).
   - [x] M3 (`c19bdbf`): `Request` adopts the case-insensitive header map instead of copying. Restored on `0.1.10/merge-restore`.
   - [x] Token-efficiency R7 (`f9d9b51`): `ErrorStore.LIST_LIMIT` caps an unfiltered `list()`. Restored on `0.1.10/merge-restore`.
   - [x] `c941ccc`: `ErrorStore.resolve()` maps through `FULL_COLUMNS` + `mapRow`, matching `find()`. Restored on `0.1.10/merge-restore`.
   - [x] H7: restored on 0.1.10. Correctness H1/H2's response choke point records every response by route pattern; `0.1.10/ops-dashboard`'s per-site restore was folded into it at integration.
   - [x] Dockerfile M7: restored on 0.1.10 via `0.1.10/dx` (JRE 25 image with precompiled templates; see the Dockerfile item below).
-  - [ ] H2, H5, M12 (`BraceHandler`): pending on `0.1.10/merge-restore`, after the correctness and streaming-io branches land.
+  - [x] H2 (`d004de2`): bodyless requests skip the body read; the buffer is sized from `Content-Length`. Restored on `0.1.10/merge-restore-2`.
+  - [x] H5 (`99b2ab7`): the session cookie is decrypted at most once per request, lazily, so `.csrf(false)` routes that never touch the session do no crypto while flash still renders there. Restored on `0.1.10/merge-restore-2`.
+  - [x] M12 (`9512c46`): `View` renders explicitly after commit and before the status and headers are written, so a broken template is a clean 500 recorded once. Restored on `0.1.10/merge-restore-2`.
 
 - [x] **Durable jobs stranded in `running` forever after a process crash mid-execution** — *Fixed in 0.1.8: graceful release on shutdown plus per-worker heartbeat recovery (`brace_job_workers`, `scheduled_jobs.claimed_by`); see `JobPoller` and the 0.1.7→0.1.8 migration guide. Original report:* — `JobPoller.executeJob` claims a job by setting `started_at` and bumping `attempts` in one transaction (`JobPoller.java:122-124`), runs the job body and commits it (`JobPoller.java:135-138`), then marks `completed_at` in a *separate* transaction (`JobPoller.java:141-148`). If the process dies (or that final `markDb` commit fails) anywhere between the claim and a terminal update, the row is left with `started_at` set, `completed_at` NULL, and `failed_at` NULL. The poll query requires `started_at IS NULL` (`JobPoller.java:79`), so such a row is **never re-claimed** — even though `attempts < max_attempts` still holds. A single instance restart therefore strands *every* in-flight durable job permanently, regardless of its retry budget. `getDurableJobStats` counts these as `running` (`JobPoller.java:178`), so the ops dashboard shows a perpetually-climbing running count that never drains. No reaper, lease, or visibility-timeout exists to recover them.
 

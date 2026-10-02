@@ -1034,4 +1034,34 @@ and then recurs no longer sends a second regression notification.
 
 **Who needs to act.** No one.
 
+### Fix: requests without a body no longer allocate a body buffer
+
+**What changed.** A request that declares no body (no `Content-Length` above 0 and no
+`Transfer-Encoding`, as with almost every `GET`) skips the body read and sees `req.body()` as
+`""`, as before. A request that does declare one gets a read buffer sized from its
+`Content-Length` (up to 64KB) instead of a flat 64KB. Chunked bodies, multipart uploads and the
+413 limit behave as before, and a `GET` that declares a body still has it read.
+
+**Who needs to act.** No one.
+
+### Fix: the session cookie is decrypted at most once per request
+
+**What changed.** When the handler takes no `Session`, Brace decrypts the session cookie only
+when something needs it: the CSRF check on a mutating request, a rendered CSRF field, or a
+rendered flash message. All three share one decrypt. A mutating request used to decrypt it
+twice, and a `.csrf(false)` route that never touches the session (a bearer-token API) now does
+no session crypto at all. Flash messages still render on `.csrf(false)` routes.
+
+**Who needs to act.** No one.
+
+### Fix: a template that fails to render returns a clean 500
+
+**What changed.** A `View` is rendered again after the transaction commits and before the
+response status and headers are written. A template that throws now produces the normal 500,
+recorded once as a 500 in `/ops/status` and the request log. Before this fix, the 500 still
+carried the handler's headers and cookies and was recorded as a 200. The transaction still
+commits before the render, as in 0.1.7. Streamed responses and event streams are not affected.
+
+**Who needs to act.** No one.
+
 <!-- end section: merge-restore -->

@@ -50,6 +50,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     private long uploadMemoryThreshold = DEFAULT_UPLOAD_MEMORY_THRESHOLD;
     private Path uploadTempDir = DEFAULT_UPLOAD_TEMP_DIR;
+    /**
+     * Plain (non-multipart) bodies actually read off the wire. Visible for tests: H2 asserts a
+     * request that declares no body never reaches the read or its buffer allocation.
+     */
+    final java.util.concurrent.atomic.LongAdder plainBodyReads = new java.util.concurrent.atomic.LongAdder();
+    /**
+     * Session cookies resolved (decrypted, when the request carries one) by {@link #buildSession}.
+     * Visible for tests: H5 asserts at most one per request, and none on a route that never
+     * touches the session.
+     */
+    final java.util.concurrent.atomic.LongAdder sessionDecrypts = new java.util.concurrent.atomic.LongAdder();
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -200,7 +211,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // Hoisted above the try so the catch paths (thrown 404, 500) can persist session
         // mutations too — see the response choke point (respond / respondToError) below.
         Session session = null;
-        Session csrfOnlySession = null;
+        LazySession csrfOnlySession = null;
         // Hoisted with session/csrfOnlySession so the catch paths (thrown 404, 500) resolve the
         // same Secure attribute the try-path would have. Recomputed inside the try once headers
         // are parsed; the conservative default holds if we fail before that.
@@ -339,19 +350,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 session = buildSession(headers);
             }
 
+            // M5c: when the handler doesn't take a Session, a local csrfOnlySession holds the
+            // CSRF token and the flash it renders. H5: it is decrypted on first use, and the CSRF
+            // check, the token mint and the flash source below all share that one decrypt. A
+            // mutating request used to decrypt the cookie twice (check, then token setup), and
+            // every matched route decrypted it at least once — including .csrf(false) API routes
+            // that never look at the session. It must never shadow a real handler session: it
+            // exists only when session == null.
+            if (sessionSecret != null && session == null) {
+                csrfOnlySession = new LazySession(headers);
+            }
+
             // CSRF validation for routes that require it when sessions are enabled.
             // M5a: PATCH is mutating — added alongside POST/PUT/DELETE.
             if (sessionSecret != null && match.route().csrfRequired()) {
                 boolean isMutating = method.equals("POST") || method.equals("PUT")
                     || method.equals("DELETE") || method.equals("PATCH");
                 if (isMutating) {
-                    // Ensure a session object exists for CSRF check even if handler doesn't use sessions
-                    Session csrfSession = session;
-                    if (csrfSession == null) {
-                        String cookieHeader = headers.get("Cookie");
-                        String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                        csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
-                    }
+                    Session csrfSession = session != null ? session : csrfOnlySession.get();
                     // One body parser: _csrf extraction sees the same decoded, last-wins
                     // view of the form body as FormBinder (it used to be a third divergent
                     // pair parser — raw-key compare, first-match-wins, swallowed decode
@@ -372,18 +388,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
-            // Ensure a CSRF token exists in session and expose it to templates.
-            // M5c: when the handler doesn't take a Session, build a local csrfOnlySession to
-            // hold the token. The choke point persists it whenever it ends up modified —
-            // a freshly minted token (otherwise the rendered token is orphaned and every
-            // subsequent POST 403s) or a render-time flash consumption. It must never
-            // shadow a real handler session: it is built only when session == null.
+            // Expose the CSRF token to templates. The choke point persists the session holding it
+            // whenever it ends up modified — a freshly minted token (otherwise the rendered token
+            // is orphaned and every subsequent POST 403s) or a render-time flash consumption.
+            final Session handlerSession = session;
+            final LazySession lazySession = csrfOnlySession;
             if (sessionSecret != null) {
-                if (session == null) {
-                    String cookieHeader = headers.get("Cookie");
-                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    csrfOnlySession = Session.fromCookie(sessionCookie, sessionSecret);
-                }
                 // Lazy token mint (H5): ensureToken used to run eagerly here on every matched
                 // request, minting a token — and forcing a Set-Cookie below — even for responses
                 // that never render a form (JSON, redirects). The supplier mints and builds the
@@ -391,8 +401,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 // template, or a handler calling View.getCsrfField(). ensureToken is idempotent, and
                 // the consumption marks the session modified so the write-back choke point persists
                 // it (the M5c invariant — otherwise the rendered token is orphaned and POSTs 403).
-                final Session tokenSession = session != null ? session : csrfOnlySession;
                 View.setCsrfField(() -> {
+                    Session tokenSession = handlerSession != null ? handlerSession : lazySession.get();
                     Csrf.ensureToken(tokenSession);
                     return Csrf.hiddenField(tokenSession);
                 });
@@ -400,12 +410,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Flash is consumed lazily at View render time, whatever the handler's
             // signature — a redirect-after-POST landing on a DbHandler or plain-Handler
-            // page renders flash too. The source consumes only cookie-borne entries
-            // (an in-flight guard flash stays pending for the next request) and marks
-            // the session modified, which the write-back choke point picks up.
-            Session flashSession = session != null ? session : csrfOnlySession;
-            if (flashSession != null) {
+            // page renders flash too, and so does a .csrf(false) route (R1), which is why the
+            // csrfOnlySession exists on those routes at all. The source consumes only
+            // cookie-borne entries (an in-flight guard flash stays pending for the next
+            // request) and marks the session modified, which the write-back choke point picks up.
+            if (handlerSession != null || lazySession != null) {
                 View.setFlashSource(() -> {
+                    Session flashSession = handlerSession != null ? handlerSession : lazySession.get();
                     flashSession.consumeFlash();
                     return flashSession.flashData();
                 });
@@ -595,6 +606,31 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /**
+     * The M5c csrfOnlySession, decrypted from the cookie on first {@link #get} (H5). The CSRF
+     * check, the token mint and the flash source share the one instance, so a request decrypts
+     * the cookie at most once, and not at all when none of them runs. Request-scoped and used
+     * from the request thread only.
+     */
+    private final class LazySession {
+        private final Map<String, String> headers;
+        private Session session;
+
+        LazySession(Map<String, String> headers) {
+            this.headers = headers;
+        }
+
+        Session get() {
+            if (session == null) session = buildSession(headers);
+            return session;
+        }
+
+        /** The session if something resolved it, else null: an unread session has nothing to persist. */
+        Session peek() {
+            return session;
+        }
+    }
+
+    /**
      * Record one finished request into {@link Stats} and the structured log.
      *
      * <p>Stats are keyed by route pattern ({@link #routeKey}); the log deliberately keeps the
@@ -638,7 +674,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * to {@link #handle}'s catch blocks and becomes a 500 like any other application fault.
      */
     private void respond(Request req, Result result, Response response, Callback callback,
-                         Session session, Session csrfOnlySession, boolean cookieSecure,
+                         Session session, LazySession csrfOnlySession, boolean cookieSecure,
                          Exchange exchange) {
         // Narrow to the requested byte range before the after-middleware chain, so the 206 or 416
         // that actually goes out is the response security headers and the like are applied to.
@@ -647,6 +683,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         }
         for (var after : afterMiddleware) {
             result = after.apply(req, result);
+        }
+        // M12: render a deferred View body now — after the handler's transaction committed and its
+        // connection was released (a slow render no longer holds one), and before send() puts the
+        // status and headers on the Jetty response. Left to the lazy rawBytes() read inside
+        // writeToWire, a template that throws fails after the handler's headers and cookies are
+        // already on the response, so the 500 carries them and the request is recorded as a 200.
+        // Thrown from here, it reaches handle()'s 500 path like any handler fault and is recorded
+        // once. After the middleware chain, so a Result it substitutes is rendered too; a no-op for
+        // plain Results. Streamed bodies and event streams stay lazy by design.
+        if (!result.isStreaming()) {
+            result.materialize();
         }
         send(req, result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
     }
@@ -705,7 +752,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * case there is nothing to run the chain against.
      */
     private void respondToError(Request req, Result result, Response response, Callback callback,
-                                Session session, Session csrfOnlySession, boolean cookieSecure,
+                                Session session, LazySession csrfOnlySession, boolean cookieSecure,
                                 Exchange exchange) {
         if (req != null) {
             for (var after : afterMiddleware) {
@@ -722,15 +769,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     /**
      * Attach the session cookie(s) and write the response. {@code session} is the handler/guard
      * session; {@code csrfOnlySession} is the M5c local session (non-null only when the handler
-     * had no Session param) — never both non-null. Attachment is a no-op for unmodified sessions.
+     * had no Session param) — never both non-null. Attachment is a no-op for unmodified sessions,
+     * and for a csrfOnlySession nothing ever decrypted (H5).
      * Only {@link #respond} and {@link #respondToError} call this; nothing else may, or it would
      * skip after-middleware.
      */
     private void send(Request req, Result result, Response response, Callback callback,
-                      Session session, Session csrfOnlySession, boolean cookieSecure,
+                      Session session, LazySession csrfOnlySession, boolean cookieSecure,
                       Exchange exchange) {
         attachSessionCookie(result, session, cookieSecure);
-        attachSessionCookie(result, csrfOnlySession, cookieSecure);
+        attachSessionCookie(result, csrfOnlySession != null ? csrfOnlySession.peek() : null, cookieSecure);
         // H2: recording lives here, not at the call sites, because this is the ONE place every
         // response passes through. Recording per-site meant only three of the exits were
         // covered, so rate-limiter 429s, CSRF 403s, 413s, static files and unmatched 404s never
@@ -1196,6 +1244,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     private Session buildSession(Map<String, String> headers) {
         if (sessionSecret != null) {
+            sessionDecrypts.increment();
             String cookieHeader = headers.get("Cookie");
             String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
             return Session.fromCookie(sessionCookie, sessionSecret);
@@ -1265,16 +1314,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /**
+     * Initial buffer size for the body read: the declared Content-Length when known (clamped to
+     * 64KB so a lying client can't make us pre-allocate megabytes), 8KB when unknown (chunked or
+     * malformed length). Before H2 this was a flat 64KB per request.
+     */
+    private static int bodyBufferSize(long declaredLength) {
+        if (declaredLength > 0) {
+            return (int) Math.min(declaredLength, 64 * 1024);
+        }
+        return 8192;
+    }
+
+    /**
      * Reads the request body up to {@code limit} bytes, returning the raw bytes.
      * Returns {@code null} if the body exceeds the limit (caller should send 413).
      * Reads incrementally via an InputStream so chunked/absent-length bodies are
      * bounded too — we never buffer more than {@code limit + 1} bytes.
      */
-    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit) throws java.io.IOException {
+    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit,
+                                          int initialCapacity) throws java.io.IOException {
         try (var in = Content.Source.asInputStream(jettyRequest)) {
-            // Read up to limit+1 bytes: if we get limit+1 the body is too large.
-            long cap = limit + 1;
-            var out = new java.io.ByteArrayOutputStream((int) Math.min(cap, 64 * 1024));
+            var out = new java.io.ByteArrayOutputStream(initialCapacity);
             byte[] buf = new byte[8192];
             long total = 0;
             int n;
@@ -1309,9 +1369,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // notifier: exactly the error-store flood the PayloadTooLargeException catch was added
             // to prevent, just reached by a different door.
             String contentLengthHeader = headers.get("Content-Length");
+            long declaredLength = -1; // -1: header absent or malformed
             if (contentLengthHeader != null) {
                 try {
-                    long declaredLength = Long.parseLong(contentLengthHeader.strip());
+                    declaredLength = Long.parseLong(contentLengthHeader.strip());
                     if (declaredLength > maxUploadSize) {
                         throw new PayloadTooLargeException();
                     }
@@ -1323,10 +1384,22 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 var parsed = parseMultipart(jettyRequest, requestContentType);
                 return new Request.BodyContent(parsed.formBody(), parsed.files(), parsed.cleanup());
             }
+            // H2: read only when the request declares a body — Content-Length > 0,
+            // Transfer-Encoding (chunked has no Content-Length), or a malformed Content-Length
+            // (read defensively; the bounded read caps it). Keyed on declared content, not the
+            // method, so a GET that carries a body is still read. Bodyless requests — every GET —
+            // used to allocate a 64KB buffer here.
+            boolean declaresBody = declaredLength > 0
+                || (contentLengthHeader != null && declaredLength == -1)
+                || headers.containsKey("Transfer-Encoding");
+            if (!declaresBody) {
+                return new Request.BodyContent("", Map.of());
+            }
+            plainBodyReads.increment();
             // Bounded incremental read: cap at maxUploadSize bytes regardless of Content-Length
             // (which clients can lie about or omit for chunked bodies). Read maxUploadSize+1
             // bytes: if we get more than maxUploadSize the body is too large.
-            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
+            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize, bodyBufferSize(declaredLength));
             if (bodyBytes == null) {
                 throw new PayloadTooLargeException();
             }
