@@ -352,7 +352,10 @@ class JobOwnershipTest {
         assertEquals(Duration.ofHours(2), Brace.app().jobTimeout("2h").jobTimeout((String) null).jobTimeout());
         assertNull(Brace.app().jobTimeout("  ").jobTimeout());
         assertThrows(IllegalArgumentException.class, () -> Brace.app().jobTimeout("15"));
-        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobTimeout("15d"));
+        // Correctness review L8 added 'd' to the interval grammar (matching Cache.parseTtl), so a
+        // day-length timeout is valid; an unknown unit still throws.
+        assertEquals(Duration.ofDays(15), Brace.app().jobTimeout("15d").jobTimeout());
+        assertThrows(IllegalArgumentException.class, () -> Brace.app().jobTimeout("15y"));
     }
 
     // --- Graceful shutdown ------------------------------------------------------------------
