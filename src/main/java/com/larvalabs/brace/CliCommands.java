@@ -277,7 +277,7 @@ public class CliCommands {
         return errors.path("recent").size();
     }
 
-    private static void renderStatus(JsonNode root) {
+    static void renderStatus(JsonNode root) {
         System.out.println();
         System.out.println("App");
         var app = root.path("app");
@@ -287,6 +287,20 @@ public class CliCommands {
         System.out.println("HTTP");
         var http = root.path("http");
         System.out.println("  status    " + http.path("statusCodes").toString());
+        // 0.1.10+ servers only; older ones omit these, so print nothing rather than zeros.
+        var rpm = http.path("requestsPerMinute");
+        if (!rpm.isMissingNode()) {
+            System.out.printf("  req/min   %d last minute, %.1f avg over %d min%n",
+                rpm.path("lastMinute").asLong(), rpm.path("avg").asDouble(), rpm.path("windowMinutes").asInt());
+        }
+        var top = http.path("topRoutes");
+        if (top.size() > 0) {
+            System.out.println("  busiest (last " + http.path("topRoutesWindowMinutes").asInt() + " min):");
+            for (var r : top) {
+                System.out.printf("    %s  %.1f/min (%.1f%%)%n",
+                    r.path("route").asText(), r.path("perMinute").asDouble(), r.path("sharePct").asDouble());
+            }
+        }
         var slow = http.path("slowestRoutes");
         if (slow.size() > 0) {
             System.out.println("  slowest:");

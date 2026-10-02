@@ -640,8 +640,9 @@ buckets; see "Fix: `/ops/routes` shows route patterns, and every response is cou
   `"(static)"` entry, whatever their method. Both count toward `sharePct`.
 - `?include=timeseries` minutes gain `p95Ms` next to `avgMs`.
 
-No action is required. `brace status` and `brace check` read only `statusCodes` and
-`slowestRoutes`.
+No action is required. `brace check` reads only `statusCodes` and `slowestRoutes`.
+`brace status` also prints the request rate and the busiest routes when the server sends
+them (0.1.10+ servers); against older servers it prints what it did before.
 
 ### Dashboard changes
 
