@@ -145,8 +145,12 @@ public class OpsDashboard {
             statCard(sb, "CPU", String.format("JVM %.1f%%", jvmPct), String.format("host %.1f%%", hostPct),
                 worst > 80 ? "c-red" : worst > 50 ? "c-amber" : "c-green");
             statCard(sb, "Threads", String.valueOf(threads.get("active")), threads.get("daemon") + " daemon", "c-cyan");
+            // Stop-the-world time per collection, with whole-heap (full) collections counted.
             double avgGc = (double) gc.get("avgPauseMs");
-            statCard(sb, "GC Avg", String.format("%.0fms", avgGc), gc.get("totalCount") + " pauses", avgGc > 100 ? "c-red" : avgGc > 10 ? "c-amber" : "c-green");
+            long fullGcs = (long) gc.get("fullCount");
+            String gcDetail = gc.get("totalCount") + " GCs" + (fullGcs > 0 ? ", " + fullGcs + " full" : "");
+            statCard(sb, "GC Avg Pause", String.format(avgGc < 10 ? "%.1fms" : "%.0fms", avgGc), gcDetail,
+                avgGc > 100 ? "c-red" : avgGc > 10 ? "c-amber" : "c-green");
         } else {
             var threadBean = java.lang.management.ManagementFactory.getThreadMXBean();
             statCard(sb, "CPU", "-", "", "c-amber");
@@ -393,22 +397,27 @@ public class OpsDashboard {
             var gc = (Map<String, Object>) jvmSnap.get("gc");
             var pauses = (List<Map<String, Object>>) gc.get("recentPauses");
             sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-red\">Recent GC Pauses</div>");
+            sb.append("<div class=\"section-head c-red\">Recent GC Pauses <span class=\"c-muted\" style=\"font-weight:normal\">— pause = stopped, cycle = wall clock</span></div>");
             if (pauses.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No GC pauses recorded</p>");
             } else {
-                sb.append("<table><tr><th>Time</th><th>Collector</th><th>Cause</th><th style=\"text-align:right\">Duration</th></tr>");
+                sb.append("<table><tr><th>Time</th><th>Collector</th><th>Cause</th><th style=\"text-align:right\">Pause</th><th style=\"text-align:right\">Cycle</th></tr>");
                 for (var p : pauses) {
                     String ts = (String) p.get("ts");
                     String time = ts.length() > 19 ? ts.substring(11, 19) : ts;
-                    double durationMs = (double) p.get("durationMs");
-                    String durColor = durationMs > 100 ? "c-red" : durationMs > 10 ? "c-amber" : "c-green";
-                    String weight = durationMs > 100 ? "font-weight:bold" : "";
+                    double pauseMs = (double) p.get("durationMs");
+                    double cycleMs = (double) p.get("cycleMs");
+                    boolean full = Boolean.TRUE.equals(p.get("full"));
+                    String durColor = pauseMs > 100 ? "c-red" : pauseMs > 10 ? "c-amber" : "c-green";
+                    String weight = pauseMs > 100 ? "font-weight:bold" : "";
                     sb.append("<tr><td class=\"c-muted\">").append(esc(time))
-                      .append("</td><td>").append(esc((String) p.get("collector")))
+                      .append("</td><td").append(full ? " class=\"c-red\" style=\"font-weight:bold\"" : "").append(">")
+                      .append(esc((String) p.get("collector"))).append(full ? " (full)" : "")
                       .append("</td><td class=\"c-muted\">").append(esc((String) p.get("cause")))
                       .append("</td><td style=\"text-align:right;").append(weight).append("\" class=\"").append(durColor).append("\">")
-                      .append(String.format("%.0fms", durationMs)).append("</td></tr>");
+                      .append(String.format(pauseMs < 10 ? "%.1fms" : "%.0fms", pauseMs))
+                      .append("</td><td style=\"text-align:right\" class=\"c-muted\">")
+                      .append(String.format(cycleMs < 10 ? "%.1fms" : "%.0fms", cycleMs)).append("</td></tr>");
                 }
                 sb.append("</table>");
             }

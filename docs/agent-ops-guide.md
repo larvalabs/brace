@@ -44,6 +44,11 @@ applies threshold analysis. Only use the individual commands (`brace errors`,
 
 **Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, recent_logs.
 
+`gc_pressure` fails when `jvm.gc.avgPauseMs` (stop-the-world time per collection) exceeds
+`check.gc_pause_ms`, and warns when a `G1Full` collection appears among the recent ones,
+since that means G1's concurrent marking fell behind (often humongous allocations or an
+undersized heap). Its `followUp` fetches allocation profiling.
+
 **Thresholds** are configurable in `.brace`:
 
 ```
@@ -130,7 +135,9 @@ re-evaluates regressions from a clean baseline. Without Postgres the set is per-
     "heap": { "usedMB": 128, "maxMB": 512 },
     "cpu": { "jvmUser": 0.12 },
     "threads": { "active": 42 },
-    "gc": { "totalCount": 15, "avgPauseMs": 2.1, "recentPauses": [...] }
+    "gc": { "totalCount": 15, "fullCount": 0, "totalPauseMs": 31, "avgPauseMs": 2.1, "maxPauseMs": 9.4,
+            "recentPauses": [{ "ts": "...", "durationMs": 0.7, "longestPauseMs": 0.6, "cycleMs": 7.1,
+                               "collector": "G1Old", "cause": "G1 Evacuation Pause" }] }
   },
   "errors": {
     "count": 3,
@@ -159,6 +166,17 @@ Notes on the shape:
   `timeseries.minutes` (60 per-minute snapshots: `ts`, `requests`, `errors`, `avgMs`) and
   `jvm.profiling` (JFR `hotMethods` + `topAllocations`). `jvm.cpu` and `jvm.gc` appear
   only when the JFR profiler is attached (it always is when ops is enabled).
+- `jvm.gc` pause figures are **stop-the-world time** (JFR `sumOfPauses` / `longestPause`):
+  `totalPauseMs`, `avgPauseMs` (per collection), `maxPauseMs` (longest single pause in the
+  last 100 collections) and each `recentPauses[].durationMs` / `longestPauseMs`.
+  `recentPauses[].cycleMs` is the collection's wall-clock span; for concurrent collections
+  (`G1Old` marking cycles, ZGC, Shenandoah) it is much longer than the pause, because the
+  application keeps running. A large `cycleMs` with a small `durationMs` is normal.
+  `fullCount` and `recentPauses[].full: true` (present only when true) mark whole-heap
+  stop-the-world collections (`G1Full`, `SerialOld`, `ParallelOld`). A `G1Full` is the one
+  to act on; `SerialOld`/`ParallelOld` are how those collectors normally clear the old gen.
+  Before 0.1.10 the pause figures counted the whole span of concurrent cycles and were
+  overstated (often ~3x on G1).
 
 ## Runbooks
 
@@ -177,7 +195,7 @@ Read the output in this order:
 2. **`http.statusCodes`** — look at 5xx count. Any 500s mean unhandled exceptions.
 3. **`errors.count`** — if > 0, switch to the error investigation runbook below.
 4. **`http.slowestRoutes`** — anything over 500ms avg deserves investigation.
-5. **`jvm.heap.usedMB` vs `maxMB`** — if usage is above 80% of max, memory pressure is likely. Check `jvm.gc.avgPauseMs` for GC impact.
+5. **`jvm.heap.usedMB` vs `maxMB`** — if usage is above 80% of max, memory pressure is likely. Check `jvm.gc.avgPauseMs` and `maxPauseMs` for GC impact, and `recentPauses` for `G1Full` collections.
 6. **`jobs.scheduled`** — any job with `lastStatus` != `"ok"` needs attention.
 7. **`cache`** — compute hit rate (hits / (hits + misses)). Below 50% means the cache isn't helping; review TTLs and key strategies.
 
@@ -227,7 +245,7 @@ When `brace status` shows a route with high average latency:
    Look at `durationMs` and `queries` / `queryMs` fields in the structured log entries.
 3. **If `queryMs` dominates `durationMs`** — the database is the bottleneck. Look at the handler code for N+1 queries, missing indexes, or full table scans.
 4. **If `durationMs` is high but `queryMs` is low** — the handler is CPU-bound or waiting on an external service. Check `jvm.profiling.hotMethods` in status output (opt-in: `GET /ops/status?include=profiling`).
-5. **Check for GC pauses** — `jvm.gc.avgPauseMs` above 50ms can cause latency spikes across all routes.
+5. **Check for GC pauses** — `jvm.gc.avgPauseMs` above 50ms, a high `maxPauseMs`, or any `G1Full` in `recentPauses` can cause latency spikes across all routes. Ignore `cycleMs` here: concurrent cycles don't stop requests.
 6. **Check heap pressure** — if heap usage is near max, GC runs more frequently and takes longer.
 
 ### Post-deploy verification

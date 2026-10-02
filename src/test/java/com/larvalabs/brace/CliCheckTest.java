@@ -102,8 +102,43 @@ class CliCheckTest {
     @Test
     void gcPressureFailOverThreshold() {
         var status = json(Map.of("jvm", Map.of("gc", Map.of("avgPauseMs", 75.0))));
-        var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS);
+        var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS, "prod");
         assertEquals("fail", check.status());
+        assertEquals("brace status --env prod --include profiling --json", check.followUp());
+    }
+
+    @Test
+    void gcPressureWarnsOnG1FullCollections() {
+        var status = json(Map.of("jvm", Map.of("gc", Map.of(
+            "avgPauseMs", 4.0,
+            "recentPauses", List.of(
+                Map.of("ts", "2026-10-02T12:00:05Z", "collector", "G1Full", "cause", "G1 Compaction Pause",
+                       "durationMs", 420.0, "cycleMs", 420.0, "full", true),
+                Map.of("ts", "2026-10-02T12:00:00Z", "collector", "G1Old", "cause", "G1 Evacuation Pause",
+                       "durationMs", 6.0, "cycleMs", 120.0)
+            )
+        ))));
+        var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS, "prod");
+        assertEquals("warn", check.status());
+        assertTrue(check.message().startsWith("1 G1 full GC in recent collections"), check.message());
+        assertEquals(1, check.details().size());
+        assertEquals("G1 Compaction Pause", check.details().get(0).get("cause"));
+    }
+
+    @Test
+    void gcPressureIgnoresConcurrentCycleLengthAndRoutineOldGenCollections() {
+        // A 120ms G1Old concurrent cycle with 6ms of real pause, and a SerialOld collection
+        // (Serial's normal old-gen GC), must not trip the check while the average is low.
+        var status = json(Map.of("jvm", Map.of("gc", Map.of(
+            "avgPauseMs", 6.0,
+            "recentPauses", List.of(
+                Map.of("collector", "G1Old", "durationMs", 6.0, "cycleMs", 120.0),
+                Map.of("collector", "SerialOld", "durationMs", 30.0, "cycleMs", 30.0, "full", true)
+            )
+        ))));
+        var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS, "prod");
+        assertEquals("pass", check.status());
+        assertEquals("Avg pause 6.0ms", check.message());
     }
 
     @Test
@@ -111,7 +146,7 @@ class CliCheckTest {
         // H6: status from a profiler-less app no longer emits an all-zeros gc stub —
         // the gc key is simply absent, and the check must treat that as healthy.
         var status = json(Map.of("jvm", Map.of("heap", Map.of("usedMB", 100, "maxMB", 512))));
-        var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS);
+        var check = CliCheck.checkGcPressure(status, CheckThresholds.DEFAULTS, "prod");
         assertEquals("pass", check.status());
     }
 
