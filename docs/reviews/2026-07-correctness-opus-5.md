@@ -156,7 +156,7 @@ Three things changed shape rather than just merging:
 
 - Before the rebase: full `mvn test` green after every commit (1123 tests at branch tip).
 - After the rebase onto 0.1.10 (2026-10-02): every commit compiles; at the tip, `mvn test` is
-  green (1268 tests) and `mvn verify` is green (1268 unit + 37 Postgres ITs). This closes the
+  green (1269 tests) and `mvn verify` is green (unit suite + 37 Postgres ITs). This closes the
   merge-gate gap the original branch left open.
 - New tests: `RouteStatsKeyTest`, `ShortCircuitStatsTest`, `PathDecodingTest`,
   `CheckboxAndVaryTest`, `StopReleasesResourcesTest`, `RowShapeTest` (was
