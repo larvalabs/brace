@@ -52,7 +52,7 @@ public class ProjectGenerator {
 <project>
     <modelVersion>4.0.0</modelVersion>
     <groupId>app</groupId>
-    <artifactId>""" + name + """
+    <artifactId>""" + projectName + """
 </artifactId>
     <version>1.0-SNAPSHOT</version>
     <properties>
@@ -294,8 +294,8 @@ class HomeControllerTest {
             var sessionSecret = generateSessionSecret();
             Files.writeString(root.resolve("application.conf"),
                 "port=8080\n" +
-                "db.url=jdbc:postgresql://localhost:5432/" + name + "\n" +
-                "db.user=" + name + "\n" +
+                "db.url=jdbc:postgresql://localhost:5432/" + projectName + "\n" +
+                "db.user=" + projectName + "\n" +
                 "db.pass=\n" +
                 "session.secret=" + sessionSecret + "\n" +
                 "\n" +
@@ -315,7 +315,7 @@ class HomeControllerTest {
                 "# container's application.conf, so per-deployment values and secrets come from\n" +
                 "# environment variables via ${VAR}. Keep them that way: a literal value here wins\n" +
                 "# over an environment variable of the same name.\n" +
-                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/" + name + " \\\n" +
+                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/" + projectName + " \\\n" +
                 "#              -e SESSION_SECRET=\"$(openssl rand -base64 32)\" ...\n" +
                 "# SESSION_SECRET must stay the same across restarts and instances (changing it logs\n" +
                 "# everyone out); generate it once and store it with your other secrets.\n" +
@@ -418,7 +418,7 @@ h1 { margin-bottom: 1rem; }
                 "ENTRYPOINT [\"sh\", \"-c\", \"exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar\"]\n");
 
             // CLAUDE.md — capability index with pointers to full reference
-            ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));
+            ClaudeMdGenerator.write(projectName, root.resolve("CLAUDE.md"));
 
             // BRACE-AGENTS.md (full API reference) and BRACE-OPS.md (ops reference) —
             // the same bundled resources `brace agents-md` refreshes, loaded through

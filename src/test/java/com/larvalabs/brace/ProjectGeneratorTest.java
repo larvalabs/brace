@@ -324,6 +324,23 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void pathArgumentUsesDirectoryNameInGeneratedFiles(@TempDir Path tempDir) throws Exception {
+        // `brace new ~/code/myapp` passes a path; only its last component names the project.
+        var projDir = tempDir.resolve("nested").resolve("myapp");
+        ProjectGenerator.generate(projDir.toString());
+
+        var pom = Files.readString(projDir.resolve("pom.xml"));
+        assertTrue(pom.contains("<artifactId>myapp</artifactId>"), "artifactId must be the directory name");
+        var conf = Files.readString(projDir.resolve("application.conf"));
+        assertTrue(conf.contains("db.url=jdbc:postgresql://localhost:5432/myapp\n"), conf);
+        assertTrue(Files.readString(projDir.resolve("CLAUDE.md")).startsWith("# myapp\n"));
+        for (var file : new String[]{"pom.xml", "application.conf", "application.conf.example", "CLAUDE.md"}) {
+            assertFalse(Files.readString(projDir.resolve(file)).contains(tempDir.toString()),
+                file + " must not contain the parent path");
+        }
+    }
+
+    @Test
     void projectNameAllowsAlphanumericUnderscoreHyphen() {
         String[] validNames = {
             "my-project",
