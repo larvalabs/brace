@@ -1059,4 +1059,14 @@ and then recurs no longer sends a second regression notification.
 
 **Who needs to act.** No one.
 
+### Fix: the session cookie is decrypted at most once per request
+
+**What changed.** When the handler takes no `Session`, Brace decrypts the session cookie only
+when something needs it: the CSRF check on a mutating request, a rendered CSRF field, or a
+rendered flash message. All three share one decrypt. A mutating request used to decrypt it
+twice, and a `.csrf(false)` route that never touches the session (a bearer-token API) now does
+no session crypto at all. Flash messages still render on `.csrf(false)` routes.
+
+**Who needs to act.** No one.
+
 <!-- end section: merge-restore -->
