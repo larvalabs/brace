@@ -15,7 +15,7 @@ Unmerged branches (open work that already has code; rebase onto `main` before me
 - ~~`origin/claude/brace-streaming-uploads-7uwm7s`~~ — streaming uploads and responses (2026-07-26): landed on 0.1.10 via `0.1.10/streaming-io`; the old branch can be deleted.
 - ~~`origin/claude/rate-limiter-proxy-aware-am8rhb`~~ — landed on 0.1.10 via `0.1.10/proxies`: `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies.
 - `origin/claude/htmx-v4-upgrade-assessment-nkmydq` — htmx 4.0.0 GA assessment doc (1 commit): adopt later, as its own release.
-- `origin/begin-0.1.10-snapshot` — bumps `pom.xml` to `0.1.10-SNAPSHOT` (1 commit, on top of `main`).
+- ~~`origin/begin-0.1.10-snapshot`~~ — the `0.1.10-SNAPSHOT` bump is on `main` (cherry-picked as e3a9dee); the old branch can be deleted.
 
 ## Security Hardening — Phase 1 ✅ COMPLETE (409 tests passing)
 
