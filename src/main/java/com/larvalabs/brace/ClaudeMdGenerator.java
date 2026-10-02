@@ -87,7 +87,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | Command | Purpose |
 |---|---|
 | `brace check` | Run all health checks — the first move for production health |
-| `brace status [--env prod]` | App health snapshot — exits non-zero on degradation |
+| `brace status [--env prod] [--include profiling,timeseries]` | App health snapshot — exits non-zero on degradation; `--include profiling` adds hot methods + top allocations |
 | `brace errors [--since 1h]` | List unresolved error summaries — exits non-zero if any exist |
 | `brace errors <id>` | Full detail (stack trace, request context) for one error |
 | `brace logs [-f] [--since 10m]` | Tail recent structured log entries |
@@ -107,8 +107,8 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 
 **Debugging workflow:**
 1. **Errors?** → `errors.count` + `errors.recent` summaries in status; full detail (stack trace, request, queries before failure) via `brace errors <id>` / `GET /ops/errors/{id}`
-2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU (`?include=profiling`)
-3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations` (`?include=profiling`)
+2. **Slow?** → `http.slowestRoutes` for latency, `jvm.profiling.hotMethods` for CPU (`brace status --include profiling`)
+3. **Memory?** → `jvm.heap` for usage, `jvm.gc` for pauses, `jvm.profiling.topAllocations` (`brace status --include profiling`)
 4. **Job failing?** → `jobs.scheduled` shows `lastStatus`, `lastError`, `failCount`
 5. **Cache miss rate?** → `cache.hits` vs `cache.misses`
 """.formatted(projectName);
