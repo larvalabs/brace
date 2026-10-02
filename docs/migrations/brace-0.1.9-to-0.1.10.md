@@ -148,7 +148,9 @@ app.trustedProxies("10.0.0.0/8");
 pattern, not the request URL. Previously `GET /users/1` and `GET /users/2` were separate rows,
 so the table grew by one entry per URL ever requested, for the life of the process, and
 per-route latency figures were meaningless because almost every row had a count of 1. They now
-aggregate under `GET /users/{id}`:
+aggregate under `GET /users/{id}`. (The 0.1.7 guide already described this as shipped, but
+the fix was lost in a merge before 0.1.7 was tagged, so no release had it until now.)
+
 
 ```
 # Before (0.1.9)                    # After (0.1.10)
@@ -267,7 +269,7 @@ be encoded to parse at all, and used to be sent with the literal `%40` and fail 
 that you did not encode: write them as `%25` and `%2B` (decoding follows `DatabaseFactory`, where
 `+` means a space). `smtp://user:p%40ss@host:587` now authenticates with `p@ss`.
 
-### New-optional: day intervals for jobs and timeouts
+### New (optional): day intervals for jobs and timeouts
 
 **Type:** new-optional.
 
@@ -277,7 +279,7 @@ that you did not encode: write them as `%25` and `%2B` (decoding follows `Databa
 
 **Who needs to act.** Nobody.
 
-### New-optional: `CacheBackend.getOrCompute`
+### New (optional): `CacheBackend.getOrCompute`
 
 **Type:** new-optional (for custom `CacheBackend` implementations).
 
@@ -350,7 +352,7 @@ app.post("/import", req -> {
 });
 ```
 
-### New-optional: large uploads spill to disk
+### New (optional): large uploads spill to disk
 
 **What changed.** Multipart parts over `uploadMemoryThreshold` (default **1MB**) are written to a
 temp file instead of being held in the heap for the whole request. Smaller parts stay in memory.
@@ -379,7 +381,7 @@ app.maxUploadSize("500M")
 
 The directory is created owner-only (700). Files left by a hard kill are swept on the next startup.
 
-### New-optional: `Storage.put` streams
+### New (optional): `Storage.put` streams
 
 **What changed.** `storage.put(key, UploadedFile)` and `putGenerated(...)` hash and send the payload
 without reading it into the heap, so a spilled upload reaches S3 without a heap round trip. New
@@ -389,7 +391,7 @@ naming that limit.
 
 **Who must act.** Nobody.
 
-### New-optional: streaming responses and `Range` support
+### New (optional): streaming responses and `Range` support
 
 **What changed.** New `Result` factories stream the body instead of materializing it:
 
@@ -418,7 +420,7 @@ Static files now stream too, advertise `Accept-Ranges: bytes`, and answer a sing
 An after-middleware that rewrites response bodies should pass through when `result.isStreaming()`;
 `body()` and `rawBytes()` are null for a streaming result.
 
-### New-optional: Server-Sent Events with `Result.sse`
+### New (optional): Server-Sent Events with `Result.sse`
 
 **What changed.** A handler can return a Server-Sent Events stream. The producer gets an
 `EventStream` and sends events as they happen; each one is flushed before the call returns.
@@ -598,29 +600,11 @@ Details:
 ## Ops dashboard
 
 This section has no breaking changes. `/ops/status` only gains fields, the dashboard is
-framework-rendered, and `Stats.MinuteSnapshot` keeps its old constructor.
+framework-rendered, and `Stats.MinuteSnapshot` keeps its old constructor. Route stats keyed by
+pattern are covered under "Fix: `/ops/routes` shows route patterns, and every response is
+counted" in the correctness section.
 
-### Per-route stats are keyed by route pattern again
-
-**Type: fix. Action required: none.** Per-route stats (`http.slowestRoutes`, Top Routes) are
-keyed by route pattern again (H7), so they stay bounded by the route table instead of
-growing one entry per distinct URL.
-
-The 0.1.7 fix that recorded matched requests under their route pattern
-(`GET /users/{id}`) instead of the concrete path (`GET /users/42`) had been lost in a
-merge, so `http.slowestRoutes` again listed one entry per distinct URL and the per-route
-map grew with traffic. It is restored. If you had tooling matching concrete paths in
-`http.slowestRoutes`, match the pattern instead:
-
-```text
-before: { "route": "GET /users/42", ... }, { "route": "GET /users/43", ... }
-after:  { "route": "GET /users/{id}", "count": 2, ... }
-```
-
-Requests that matched no route are counted in the constant `(unmatched)` and `(static)`
-buckets; see "Fix: `/ops/routes` shows route patterns, and every response is counted" above.
-
-### New `/ops/status` fields (additive)
+### New (optional): `/ops/status` request-rate and Top Routes fields
 
 ```json
 "http": {
@@ -644,7 +628,7 @@ No action is required. `brace check` reads only `statusCodes` and `slowestRoutes
 `brace status` also prints the request rate and the busiest routes when the server sends
 them (0.1.10+ servers); against older servers it prints what it did before.
 
-### Dashboard changes
+### New (optional): dashboard request rate, Top Routes and p95 latency
 
 - The **Requests** card is now **Req / Min**: the last full minute, with the average over
   the retained minutes as the subtitle. The lifetime total moved to
@@ -656,7 +640,7 @@ them (0.1.10+ servers); against older servers it prints what it did before.
 - Long method and class names stay on one line, truncated from the left (package first)
   with a leading `…`. Hover for the full name. Value columns no longer wrap.
 
-### New `Stats` read-only data
+### New (optional): `Stats` request-rate and Top Routes helpers
 
 `MinuteSnapshot` gained two trailing components: `routeCounts` (`Map<String, Long>`, the
 per-route counts for that minute) and `p95LatencyUs` (with a `p95LatencyMs()` accessor).
