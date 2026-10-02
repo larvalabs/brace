@@ -1,7 +1,9 @@
 package com.larvalabs.brace;
 
 import org.junit.jupiter.api.Test;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.TreeMap;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RequestTest {
@@ -41,6 +43,28 @@ class RequestTest {
         assertEquals("application/json", req.header("CONTENT-TYPE"));
         assertTrue(req.hasHeader("content-type"));
         assertTrue(req.isJson());
+    }
+
+    @Test
+    void caseInsensitiveHeaderMapIsAdoptedNotCopied() {
+        // M3: BraceHandler hands Request a CASE_INSENSITIVE_ORDER TreeMap; Request must adopt
+        // that instance rather than copy it. A write to the source after construction is
+        // visible only if the instance was adopted — this caught the loss in merge b8609b6.
+        var source = new TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER);
+        source.put("Accept", "text/html");
+        var req = new Request("GET", "/", Map.of(), Map.of(), source, null);
+        source.put("X-Late", "seen");
+        assertEquals("seen", req.header("x-late"));
+    }
+
+    @Test
+    void otherHeaderMapsAreDefensivelyCopied() {
+        var source = new HashMap<String, String>();
+        source.put("Accept", "text/html");
+        var req = new Request("GET", "/", Map.of(), Map.of(), source, null);
+        source.put("X-Late", "seen");
+        assertNull(req.header("X-Late"));
+        assertEquals("text/html", req.header("accept"));
     }
 
     @Test

@@ -71,3 +71,24 @@ _No entries yet._
 _No entries yet._
 
 <!-- end section: dx -->
+
+---
+
+<!-- section: merge-restore -->
+## Fixes restored from the 0.1.7 performance review
+
+Merging the 0.1.7 runtime-performance review (merge `b8609b6`) silently dropped a few
+fixes while resolving conflicts. They are restored here, each with a test that fails if it
+is lost again.
+
+### Fix: request headers are no longer copied twice per request
+
+**What changed.** `Request` again adopts the case-insensitive header map Brace builds for
+each request instead of copying it into a second identical map. Header lookups behave
+exactly as before; a `Request` you construct yourself still gets a defensive copy unless
+you pass a `TreeMap` ordered by `String.CASE_INSENSITIVE_ORDER`, which the `Request` then
+shares (don't modify it afterwards).
+
+**Who needs to act.** No one.
+
+<!-- end section: merge-restore -->
