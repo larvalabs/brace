@@ -261,6 +261,43 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void dockerfileRunsPrecompiledTemplatesInProdOnAJre(@TempDir Path tempDir) throws Exception {
+        // This setup (213ac8c) was once lost in a merge and the scaffold silently went back to
+        // a JRE that couldn't render templates; these assertions keep it from reverting again.
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
+        assertTrue(dockerfile.contains("FROM eclipse-temurin:25-jre"),
+            "Dockerfile must use a JDK 25 JRE image, got:\n" + dockerfile);
+        // A JRE has no javac, so templates must arrive precompiled and prod mode must load them.
+        assertTrue(dockerfile.contains("COPY target/jte-classes/ target/jte-classes/"),
+            "Dockerfile must ship the precompiled templates, got:\n" + dockerfile);
+        // Exec form through sh -c: $JAVA_OPTS expands and exec makes java PID 1, so
+        // SIGTERM reaches the JVM and Brace's shutdown hook runs.
+        assertTrue(dockerfile.contains(
+                "ENTRYPOINT [\"sh\", \"-c\", \"exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar\"]"),
+            "entrypoint must exec java in prod mode with $JAVA_OPTS, got:\n" + dockerfile);
+        assertTrue(dockerfile.contains("ENV JAVA_OPTS=\"-XX:MaxRAMPercentage=50\""),
+            "Dockerfile must default to a heap cap relative to the container limit");
+        assertTrue(dockerfile.contains("-XX:+UseCompactObjectHeaders"),
+            "Dockerfile should point at compact object headers for JDK 25");
+        // App.java calls .ops("ops-authorized-keys"), which fails startup if the file is missing.
+        assertTrue(dockerfile.contains("COPY ops-authorized-keys ops-authorized-keys"),
+            "Dockerfile must ship the ops authorized-keys file the scaffold's main() loads");
+        assertFalse(dockerfile.contains("private.key"), "the ops private key must never be copied");
+
+        // mvn package is the Dockerfile's one build step, so it must write target/jte-classes,
+        // from views/ (relative, matching TemplateEngine's marker check in the container).
+        var pom = Files.readString(projDir.resolve("pom.xml"));
+        assertTrue(pom.contains("<artifactId>exec-maven-plugin</artifactId>"), pom);
+        assertTrue(pom.contains("<argument>com.larvalabs.brace.TemplatePrecompiler</argument>"
+                + "\n                                <argument>views</argument>"
+                + "\n                                <argument>target/jte-classes</argument>"),
+            "mvn package must precompile views/ into target/jte-classes");
+    }
+
+    @Test
     void projectNameAllowsAlphanumericUnderscoreHyphen() {
         String[] validNames = {
             "my-project",

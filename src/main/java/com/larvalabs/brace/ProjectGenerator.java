@@ -130,6 +130,32 @@ public class ProjectGenerator {
                     </execution>
                 </executions>
             </plugin>
+            <!-- mvn package also precompiles views/ into target/jte-classes, which the
+                 Dockerfile copies and prod mode loads: no compiler at runtime (a JRE
+                 image is enough), and the classes always match the jar being shipped.
+                 It runs Brace's own precompiler, so its JTE version is always Brace's. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>precompile-templates</id>
+                        <phase>package</phase>
+                        <goals><goal>exec</goal></goals>
+                        <configuration>
+                            <executable>${java.home}/bin/java</executable>
+                            <arguments>
+                                <argument>-cp</argument>
+                                <classpath/>
+                                <argument>com.larvalabs.brace.TemplatePrecompiler</argument>
+                                <argument>views</argument>
+                                <argument>target/jte-classes</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>
@@ -341,20 +367,41 @@ h1 { margin-bottom: 1rem; }
 """);
 
             // Dockerfile — target/app.jar is the shaded executable jar
-            // (fixed name via <finalName>app</finalName>); build it first
-            // with `mvn package`.
+            // (fixed name via <finalName>app</finalName>) and target/jte-classes the
+            // precompiled templates; `mvn package` builds both. Precompiled templates are
+            // what let the runtime image be a JRE (restores 213ac8c, lost in merge b8609b6).
             Files.writeString(root.resolve("Dockerfile"),
-                "# Build the jar first: mvn package\n" +
-                "FROM eclipse-temurin:21-jre\n" +
+                "# Build first: mvn package (writes target/app.jar and target/jte-classes)\n" +
+                "#\n" +
+                "# A JRE image is enough: templates are precompiled at build time, so the JDK's\n" +
+                "# compiler never runs in production.\n" +
+                "FROM eclipse-temurin:25-jre\n" +
                 "WORKDIR /app\n" +
                 "COPY target/app.jar app.jar\n" +
                 "COPY application.conf.example application.conf\n" +
+                "# Prod mode loads these instead of compiling templates at runtime.\n" +
+                "COPY target/jte-classes/ target/jte-classes/\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +
                 "COPY migrations/ migrations/\n" +
+                "# Public keys only; App.java's .ops(...) refuses to start without this file.\n" +
+                "COPY ops-authorized-keys ops-authorized-keys\n" +
                 "EXPOSE 8080\n" +
                 "# Pass secrets via env vars: docker run -e SESSION_SECRET=... -e DB_PASS=...\n" +
-                "CMD [\"java\", \"-jar\", \"app.jar\"]\n");
+                "\n" +
+                "# JVM flags; override at run time: docker run -e JAVA_OPTS=\"-Xmx1g\" ...\n" +
+                "#   -XX:MaxRAMPercentage=50  caps the heap at half the container's memory limit,\n" +
+                "#       leaving the rest for metaspace, thread stacks and direct buffers.\n" +
+                "#       Give the container a limit (docker run --memory=1g, compose mem_limit):\n" +
+                "#       without one the JVM sizes the heap from the HOST's RAM, so on a shared\n" +
+                "#       box use an explicit -Xmx instead.\n" +
+                "#   -XX:+UseCompactObjectHeaders  (JDK 25+) smaller object headers, usually\n" +
+                "#       10-20% less heap for entity-heavy apps. Worth adding once tried under load.\n" +
+                "ENV JAVA_OPTS=\"-XX:MaxRAMPercentage=50\"\n" +
+                "# sh -c expands $JAVA_OPTS; exec replaces the shell so java is PID 1 and gets\n" +
+                "# SIGTERM from `docker stop`, letting Brace's shutdown hook drain in-flight work.\n" +
+                "# brace.mode=prod (as `brace run` sets) is what loads target/jte-classes.\n" +
+                "ENTRYPOINT [\"sh\", \"-c\", \"exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar\"]\n");
 
             // CLAUDE.md — capability index with pointers to full reference
             ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));
