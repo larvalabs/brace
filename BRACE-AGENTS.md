@@ -299,6 +299,10 @@ LinkedHashMap-and-put block (`Map.of` rejects nulls and scrambles key order). Fo
 or reused shapes, prefer a 1-line local record: it self-documents the schema and
 serializes in declaration order.
 
+**Dates and times:** put `LocalDateTime`/`LocalDate`/`Instant` values straight into the
+returned record or `Json.obj(...)` — `Json` writes ISO-8601 (`"2025-06-15T09:00:00"`). Never
+`.toString()` them: `LocalDateTime.toString()` drops zero seconds (`"2025-06-15T09:00"`).
+
 **⚠️ JSON and JPA entities:** Never return a JPA entity from `Json.of()` — all public fields are serialized, leaking
 `passwordHash`, API keys, or any other sensitive column. Return a record or DTO instead:
 
@@ -1047,7 +1051,8 @@ use it instead of re-deriving the verbose version:
   cross-entity checks go in one static helper both handlers call (see §Forms & Validation).
 - **Response shapes:** a 1-line local record (`record TalkStats(long talkId, double avg) {}`)
   for named/reused shapes, `Json.obj("count", n, "avg", avg)` for one-offs — never a
-  LinkedHashMap-and-put block (see §Responses).
+  LinkedHashMap-and-put block (see §Responses). java.time values go in as objects, never
+  `.toString()`.
 - **Existence checks:** `db.existsBy` (single field) or `db.exists` (multi-field
   where-fragment, e.g. `db.exists(Rating.class, "talkId = ? AND userId = ?", t, u)`) —
   never `db.query(...).isEmpty()`.

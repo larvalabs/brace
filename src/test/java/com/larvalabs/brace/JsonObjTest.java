@@ -43,4 +43,18 @@ class JsonObjTest {
         assertEquals(200, result.status());
         assertEquals("{\"count\":5}", result.body());
     }
+
+    @Test
+    void javaTimeValuesSerializeAsFullIso8601() {
+        // The documented idiom: put java.time values in the object, never .toString() them.
+        // LocalDateTime.toString() drops ":00" seconds ("2025-06-15T09:00"); Json keeps them.
+        var at = java.time.LocalDateTime.of(2025, 6, 15, 9, 0);
+        var result = Json.of(Json.obj(
+            "at", at,
+            "day", at.toLocalDate(),
+            "instant", java.time.Instant.parse("2025-06-15T09:00:00Z")));
+        assertEquals("{\"at\":\"2025-06-15T09:00:00\",\"day\":\"2025-06-15\","
+            + "\"instant\":\"2025-06-15T09:00:00Z\"}", result.body());
+        assertEquals("2025-06-15T09:00", at.toString());
+    }
 }

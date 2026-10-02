@@ -247,4 +247,19 @@ var weather = new WeatherClient(http);
 void fetch() { ...; Metrics.counter("weather.calls"); }
 ```
 
+---
+
+### Docs: java.time values in JSON responses
+
+**What changed.** Documentation only; `Json` already behaved this way. `BRACE-AGENTS.md` and the
+`CLAUDE.md` that `brace new` writes now say: put `LocalDateTime`/`LocalDate`/`Instant` values
+into the returned record or `Json.obj(...)` and let `Json` serialize them as ISO-8601. Don't
+call `.toString()` on them: `LocalDateTime.toString()` drops zero seconds (`2025-06-15T09:00`
+instead of `2025-06-15T09:00:00`), which strict ISO-8601 consumers reject.
+
+**Who needs to act.** Nobody. `brace agents-md` picks up the `BRACE-AGENTS.md` change. Existing
+projects' `CLAUDE.md` is not regenerated; to give agents the hint there too, add this to its
+Responses line: "Put java.time values in as objects (`Json` writes ISO-8601); never
+`.toString()` them."
+
 <!-- end section: dx -->
