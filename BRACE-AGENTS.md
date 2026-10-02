@@ -805,8 +805,8 @@ Http.post(uploadUrl).bearer(token).multipart()
 // SSE: each event reaches the consumer as soon as it arrives; returns when the stream ends
 var resp = Http.post("https://api.anthropic.com/v1/messages")
     .header("x-api-key", key).bodyJson(request)
-    .timeout(Duration.ofMinutes(5))        // deadline for the WHOLE stream
-    .idleTimeout(Duration.ofSeconds(30))   // max wait for the next bytes
+    .idleTimeout(Duration.ofSeconds(60))   // max wait for headers/next bytes (default 30s)
+    .timeout(Duration.ofMinutes(10))       // optional deadline for the WHOLE stream (default none)
     .fetchEvents(ev -> {
         if (ev.type().equals("content_block_delta")) handle(ev.as(Delta.class));
     });
@@ -817,16 +817,24 @@ try (var s = Http.get(exportUrl).stream()) {
     if (!s.ok()) throw new RuntimeException(s.readString());
     s.lines().forEach(line -> ...);        // or s.body() for an InputStream
 }
+
+// Status/headers first, then events; close() from the consumer stops early
+try (var s = Http.post(url).bodyJson(request).stream()) {
+    if (!s.ok()) throw new RuntimeException(s.readString());
+    s.events(ev -> { handle(ev); if (done) s.close(); });
+}
 ```
 
 - `Http.Event`: `type()` (`"message"` when the server sent no `event:`), `data()` (multi-line
-  `data:` joined with `\n`), `id()`, `retry()`, `as(Class)`. Comments and keep-alives are skipped.
+  `data:` joined with `\n`), `id()`, `retry()`, `as(Class)`. Comments and keep-alives are skipped;
+  an event left unterminated when the stream ends is dropped (per the SSE spec).
 - `fetchEvents` returns a `Response` with the status and headers. On a non-2xx status it parses
   no events and `body()` is the error body, so check `ok()` as with `fetch()`.
-- For streams, `.timeout()` (default 30s) is the deadline for the whole call, not just the
-  wait for headers: raise it for long generations. `.idleTimeout()` is off by default and
-  only counts time blocked in a read, so a slow consumer doesn't trip it. Either one closes
-  the connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`).
+- Stream timeouts differ from `fetch*`: `.idleTimeout()` (default 30s; `Duration.ZERO` or
+  `null` turns it off) bounds each wait for the headers or the next bytes, and only counts
+  time blocked in a read, so a slow consumer doesn't trip it. There is no total deadline
+  unless you call `.timeout()`, which then bounds the whole call. Either closes the
+  connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`).
 
 ## WebSocket
 

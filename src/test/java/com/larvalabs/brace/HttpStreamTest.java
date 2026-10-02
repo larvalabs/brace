@@ -131,9 +131,8 @@ class HttpStreamTest {
             new Http.Event("message", "plain", null, null),
             new Http.Event("update", "line one\nline two\n two spaces", "7", null),
             new Http.Event("message", "", "7", Duration.ofMillis(2500)),
-            new Http.Event("message", "{\"n\":1}", "", Duration.ofMillis(2500)),
-            new Http.Event("message", "trailing without blank line", "", Duration.ofMillis(2500))
-        ), events);
+            new Http.Event("message", "{\"n\":1}", "", Duration.ofMillis(2500))
+        ), events);  // "trailing without blank line" was cut off mid-event, so it's dropped
         assertEquals(1, events.get(3).as(Map.class).get("n"));
     }
 
@@ -231,6 +230,31 @@ class HttpStreamTest {
     }
 
     @Test
+    void idleTimeoutCoversTheWaitForHeaders() {
+        long start = System.nanoTime();
+        var e = assertThrows(Http.StreamTimeoutException.class, () ->
+            Http.get(url("/sse/slow-headers")).idleTimeout(Duration.ofMillis(300)).fetchEvents(event -> { }));
+
+        assertTrue(e.idle());
+        assertEquals(Duration.ofMillis(300), e.limit());
+        assertTrue(elapsedMillis(start) < 2500, "idle timeout took " + elapsedMillis(start) + "ms");
+    }
+
+    @Test
+    void idleTimeoutCanBeTurnedOff() {
+        for (var off : java.util.Arrays.asList(Duration.ZERO, null)) {
+            // A 200ms idle timeout would fire first if ZERO/null didn't turn it off.
+            var e = assertThrows(Http.StreamTimeoutException.class, () ->
+                Http.get(url("/sse/stall"))
+                    .idleTimeout(Duration.ofMillis(200)).idleTimeout(off)
+                    .timeout(Duration.ofMillis(800))
+                    .fetchEvents(event -> { }));
+            assertFalse(e.idle(), "idle timeout still on after idleTimeout(" + off + ")");
+        }
+        assertThrows(IllegalArgumentException.class, () -> Http.get(url("/")).idleTimeout(Duration.ofMillis(-1)));
+    }
+
+    @Test
     void slowConsumerDoesNotTripTheIdleTimeout() {
         var events = new ArrayList<String>();
         Http.get(url("/sse/burst")).idleTimeout(Duration.ofMillis(100)).fetchEvents(event -> {
@@ -289,6 +313,31 @@ class HttpStreamTest {
     }
 
     @Test
+    void eventsFromAStreamResponseAfterCheckingHeaders() {
+        var events = new ArrayList<String>();
+        try (var response = Http.get(url("/sse/burst")).stream()) {
+            assertTrue(response.ok());
+            assertEquals("text/event-stream", response.header("Content-Type"));
+            response.events(event -> events.add(event.data()));
+        }
+        assertEquals(List.of("1", "2", "3"), events);
+    }
+
+    @Test
+    void closingTheResponseStopsEventsEarly() {
+        var events = new ArrayList<String>();
+        long start = System.nanoTime();
+        try (var response = Http.get(url("/sse/forever")).stream()) {
+            response.events(event -> {
+                events.add(event.data());
+                if (events.size() == 2) response.close();
+            });
+        }
+        assertEquals(List.of("tick 0", "tick 1"), events);
+        assertTrue(elapsedMillis(start) < 2000, "stopping took " + elapsedMillis(start) + "ms");
+    }
+
+    @Test
     void closingEarlyReturnsPromptly() {
         long start = System.nanoTime();
         try (var response = Http.get(url("/sse/stall")).timeout(Duration.ofSeconds(10)).stream()) {
@@ -303,10 +352,10 @@ class HttpStreamTest {
     void parserDispatchesOnlyEventsWithData() {
         var events = new ArrayList<Http.Event>();
         var parser = new Http.EventParser(events::add);
-        for (var line : List.of("event: ping", "", ":keepalive", "", "data", "", "data:", "data:", "")) {
+        for (var line : List.of("event: ping", "", ":keepalive", "", "data", "", "data:", "data:", "",
+                "data: never terminated")) {
             parser.line(line);
         }
-        parser.end();
         assertEquals(List.of(
             new Http.Event("message", "", null, null),
             new Http.Event("message", "\n", null, null)

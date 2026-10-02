@@ -37,7 +37,8 @@ public class Http {
     private final Map<String, String> headers = new LinkedHashMap<>();
     private HttpRequest.BodyPublisher bodyPublisher;
     private Duration timeout = Duration.ofSeconds(30);
-    private Duration idleTimeout;
+    private boolean timeoutSet;
+    private Duration idleTimeout = Duration.ofSeconds(30);
 
     private Http(String method, String url) {
         this.method = method;
@@ -61,21 +62,26 @@ public class Http {
     /**
      * For {@code fetch*} calls, how long to wait for the response headers (default 30s). For
      * {@link #stream()} and {@link #fetchEvents}, the deadline for the whole call, headers and
-     * body together: the connection is closed and {@link StreamTimeoutException} thrown when it
-     * passes.
+     * body together (default none): the connection is closed and {@link StreamTimeoutException}
+     * thrown when it passes.
      */
     public Http timeout(Duration timeout) {
         this.timeout = timeout;
+        this.timeoutSet = true;
         return this;
     }
 
     /**
      * For {@link #stream()} and {@link #fetchEvents}: close the connection and throw
-     * {@link StreamTimeoutException} when a read of the body waits this long with no bytes
-     * arriving. Off by default. Time the caller spends between reads doesn't count.
+     * {@link StreamTimeoutException} when the response headers, or the next bytes of the body,
+     * take this long to arrive (default 30s; {@code null} or {@link Duration#ZERO} turns it off).
+     * Time the caller spends between reads doesn't count. Ignored by {@code fetch*} calls.
      */
     public Http idleTimeout(Duration idleTimeout) {
-        this.idleTimeout = idleTimeout;
+        if (idleTimeout != null && idleTimeout.isNegative()) {
+            throw new IllegalArgumentException("idleTimeout must not be negative: " + idleTimeout);
+        }
+        this.idleTimeout = idleTimeout == null || idleTimeout.isZero() ? null : idleTimeout;
         return this;
     }
 
@@ -121,7 +127,12 @@ public class Http {
     // --- Execute ---
 
     private HttpRequest buildRequest() {
-        var builder = HttpRequest.newBuilder().uri(URI.create(url)).timeout(timeout);
+        return buildRequest(timeout);
+    }
+
+    private HttpRequest buildRequest(Duration headerTimeout) {
+        var builder = HttpRequest.newBuilder().uri(URI.create(url));
+        if (headerTimeout != null) builder.timeout(headerTimeout);
         for (var entry : headers.entrySet()) {
             builder.header(entry.getKey(), entry.getValue());
         }
@@ -169,21 +180,22 @@ public class Http {
     /**
      * Send the request and return as soon as the response headers arrive, with the body left
      * to read as it streams in. Close the result (try-with-resources) to release the
-     * connection. {@link #timeout} bounds the whole call and {@link #idleTimeout} each read;
-     * either closes the connection and throws {@link StreamTimeoutException}. A non-2xx status
-     * is returned, not thrown: check {@link StreamResponse#ok()}.
+     * connection. {@link #idleTimeout} (default 30s) bounds each wait for data and an explicit
+     * {@link #timeout} the whole call; either closes the connection and throws
+     * {@link StreamTimeoutException}. A non-2xx status is returned, not thrown: check
+     * {@link StreamResponse#ok()}.
      */
     public StreamResponse stream() {
         var watchdog = new Watchdog(this);
         try {
-            var raw = CLIENT.send(buildRequest(), HttpResponse.BodyHandlers.ofInputStream());
+            var raw = CLIENT.send(buildRequest(watchdog.headerTimeout()), HttpResponse.BodyHandlers.ofInputStream());
             return new StreamResponse(raw, watchdog.attach(raw.body()));
         } catch (HttpTimeoutException e) {
             watchdog.close();
             if (e instanceof HttpConnectTimeoutException) {
                 throw new RuntimeException("HTTP request failed: " + method + " " + url, e);
             }
-            throw new StreamTimeoutException(method, url, false, timeout);
+            throw watchdog.headerTimeoutException();
         } catch (InterruptedException e) {
             watchdog.close();
             Thread.currentThread().interrupt();
@@ -211,14 +223,8 @@ public class Http {
             if (!response.ok()) {
                 return new Response(response.status(), response.raw.headers(), response.readString());
             }
-            var parser = new EventParser(onEvent);
-            try (var reader = response.reader()) {
-                for (String line; (line = reader.readLine()) != null; ) parser.line(line);
-            }
-            parser.end();
+            response.events(onEvent);
             return new Response(response.status(), response.raw.headers(), "");
-        } catch (IOException e) {
-            throw new RuntimeException("HTTP stream failed: " + method + " " + url, e);
         }
     }
 
@@ -384,6 +390,7 @@ public class Http {
 
         private final HttpResponse<InputStream> raw;
         private final InputStream body;
+        private volatile boolean closed;
 
         StreamResponse(HttpResponse<InputStream> raw, InputStream body) {
             this.raw = raw;
@@ -412,12 +419,30 @@ public class Http {
             }
         }
 
+        /**
+         * Parse the body as Server-Sent Events, passing each to {@code onEvent} as it arrives,
+         * and return when the stream ends or this response is closed (from the consumer or
+         * another thread), which is how to stop early. Check {@link #ok()} first: an error body
+         * isn't an event stream. Call once.
+         */
+        public void events(Consumer<Event> onEvent) {
+            var parser = new EventParser(onEvent);
+            try {
+                var reader = reader();
+                for (String line; !closed && (line = reader.readLine()) != null; ) parser.line(line);
+            } catch (IOException e) {
+                if (closed) return;
+                throw new UncheckedIOException(e);
+            }
+        }
+
         BufferedReader reader() {
             return new BufferedReader(new InputStreamReader(body, StandardCharsets.UTF_8));
         }
 
         @Override
         public void close() {
+            closed = true;
             try {
                 body.close();
             } catch (IOException ignored) {
@@ -479,9 +504,9 @@ public class Http {
 
     /**
      * The text/event-stream format, per the WHATWG HTML spec ("Parsing an event stream"), fed
-     * one line at a time with the line ending already stripped. One deliberate difference: an
-     * event the server ends the stream on without a blank line is still dispatched, where a
-     * browser drops it. A truncated connection surfaces as an error before reaching here.
+     * one line at a time with the line ending already stripped. As the spec requires, an event
+     * still pending when the stream ends (no closing blank line) is dropped: the stream was
+     * most likely cut off mid-event, and half a payload is worse than none.
      */
     static final class EventParser {
 
@@ -525,8 +550,6 @@ public class Http {
             }
         }
 
-        void end() { dispatch(); }
-
         private void dispatch() {
             if (!data.isEmpty()) {
                 data.setLength(data.length() - 1);
@@ -543,7 +566,7 @@ public class Http {
      * the body stream from a shared timer thread, which unblocks a pending read, and the
      * wrapped stream turns that into a {@link StreamTimeoutException}.
      *
-     * <p>The deadline is one task scheduled when the call starts. The idle timeout is one task
+     * <p>The deadline, when set, is one task scheduled when the call starts. The idle timeout is one task
      * at a time that re-arms itself: it fires only when a read has been blocked for the whole
      * limit, so a caller that is slow to read never trips it.
      */
@@ -567,9 +590,24 @@ public class Http {
         Watchdog(Http http) {
             this.method = http.method;
             this.url = http.url;
-            this.timeout = http.timeout;
+            this.timeout = http.timeoutSet ? http.timeout : null;
             this.idleTimeout = http.idleTimeout;
-            this.deadline = TIMER.schedule(() -> fire(false), timeout.toNanos(), TimeUnit.NANOSECONDS);
+            this.deadline = timeout == null ? null
+                : TIMER.schedule(() -> fire(false), timeout.toNanos(), TimeUnit.NANOSECONDS);
+        }
+
+        /** The wait for response headers counts against the idle timeout too, when it's shorter. */
+        private boolean headerWaitIsIdle() {
+            return idleTimeout != null && (timeout == null || idleTimeout.compareTo(timeout) < 0);
+        }
+
+        Duration headerTimeout() {
+            return headerWaitIsIdle() ? idleTimeout : timeout;
+        }
+
+        StreamTimeoutException headerTimeoutException() {
+            var idle = headerWaitIsIdle();
+            return new StreamTimeoutException(method, url, idle, idle ? idleTimeout : timeout);
         }
 
         private static ScheduledThreadPoolExecutor timer() {
@@ -632,7 +670,7 @@ public class Http {
         }
 
         private void cancelTimers() {
-            deadline.cancel(false);
+            if (deadline != null) deadline.cancel(false);
             var idle = idleCheck;
             if (idle != null) idle.cancel(false);
         }
