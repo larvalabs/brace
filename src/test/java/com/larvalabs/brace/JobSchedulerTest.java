@@ -9,6 +9,34 @@ import static org.junit.jupiter.api.Assertions.*;
 class JobSchedulerTest {
 
     @Test
+    void stopDoesNotWaitForAPendingDailyRun() throws Exception {
+        // daily() is a one-shot delayed task; a ScheduledThreadPoolExecutor runs those after
+        // shutdown() by default, so stop() used to block its full 5s and leave a non-daemon
+        // worker alive until the next daily run.
+        var before = java.util.Set.copyOf(Thread.getAllStackTraces().keySet());
+        var scheduler = new JobScheduler();
+        String inTwoHours = java.time.LocalTime.now().plusHours(2).withSecond(0).withNano(0).toString();
+        scheduler.daily(inTwoHours, "nightly", (db, ctx) -> {});
+        scheduler.start(null);
+
+        long t0 = System.nanoTime();
+        scheduler.stop();
+        long stopMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+        assertTrue(stopMs < 2000, "stop() took " + stopMs + "ms");
+
+        long deadline = System.currentTimeMillis() + 1000;
+        java.util.List<Thread> leftover;
+        do {
+            leftover = Thread.getAllStackTraces().keySet().stream()
+                .filter(t -> !before.contains(t) && t.isAlive() && !t.isDaemon())
+                .toList();
+            if (leftover.isEmpty()) break;
+            Thread.sleep(20);
+        } while (System.currentTimeMillis() < deadline);
+        assertTrue(leftover.isEmpty(), "non-daemon threads left after stop(): " + leftover);
+    }
+
+    @Test
     void jobExecutesOnSchedule() throws Exception {
         var scheduler = new JobScheduler();
         var latch = new CountDownLatch(2);

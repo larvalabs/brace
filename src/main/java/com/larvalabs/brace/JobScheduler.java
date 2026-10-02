@@ -8,8 +8,8 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public class JobScheduler {
@@ -114,7 +114,12 @@ public class JobScheduler {
 
     public void start(DatabaseFactory dbFactory) {
         this.dbFactory = dbFactory;
-        this.scheduler = Executors.newScheduledThreadPool(1);
+        var executor = new ScheduledThreadPoolExecutor(1);
+        // daily() jobs are one-shot delayed tasks that re-arm themselves. By default a
+        // ScheduledThreadPoolExecutor still runs those after shutdown(), so stop() would wait for
+        // the next daily run (hours away) and the non-daemon worker would keep the JVM alive.
+        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        this.scheduler = executor;
 
         for (int i = 0; i < registeredJobs.size(); i++) {
             var rj = registeredJobs.get(i);
@@ -134,7 +139,9 @@ public class JobScheduler {
         if (scheduler != null) {
             scheduler.shutdown();
             try {
-                scheduler.awaitTermination(5, TimeUnit.SECONDS);
+                if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                    scheduler.shutdownNow();
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 scheduler.shutdownNow();
