@@ -5,7 +5,6 @@ import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Validates whether a client IP should be trusted as a proxy for forwarding headers.
@@ -79,7 +78,10 @@ public class TrustedProxies {
     private final List<String> staticCidrs = new ArrayList<>();
 
     private final boolean cloudflarePreset;
-    private final AtomicBoolean refreshStarted = new AtomicBoolean(false);
+    /** Set by {@link #autoRefresh()}; {@code Brace.start()} resumes refreshing when it is. */
+    private volatile boolean refreshRequested;
+    /** The running refresh thread, or null. Guarded by {@code this}. */
+    private Thread refreshThread;
 
     public TrustedProxies(String... cidrs) {
         this(List.of(cidrs));
@@ -133,11 +135,12 @@ public class TrustedProxies {
 
     /**
      * Keep the Cloudflare ranges synced with the live published list. Fetches
-     * cloudflare.com/ips-v4 and /ips-v6 on a background virtual thread — immediately, then
+     * cloudflare.com/ips-v4 and /ips-v6 on a background daemon thread — immediately, then
      * every 24 hours (hourly retry after a failure). The bundled list serves until the first
      * fetch succeeds, and any failed or partial fetch is discarded wholesale, so the trust set
      * never shrinks to empty on a network blip. CIDRs added via {@link #plus} are preserved
-     * across refreshes. Fluent; returns {@code this}. Idempotent.
+     * across refreshes. {@code Brace.stop()} ends the thread (a failed start too, since it
+     * stops), and a later {@code start()} resumes it. Fluent; returns {@code this}. Idempotent.
      *
      * @throws IllegalStateException if this instance was not built by {@link #cloudflare()}
      */
@@ -145,19 +148,53 @@ public class TrustedProxies {
         if (!cloudflarePreset) {
             throw new IllegalStateException("autoRefresh() is only available on TrustedProxies.cloudflare()");
         }
-        if (refreshStarted.compareAndSet(false, true)) {
-            Thread.ofVirtual().name("trusted-proxies-refresh").start(() -> {
-                while (true) {
-                    boolean ok = refreshNow();
-                    try {
-                        Thread.sleep(ok ? REFRESH_INTERVAL : RETRY_INTERVAL);
-                    } catch (InterruptedException e) {
-                        return;
-                    }
-                }
-            });
-        }
+        refreshRequested = true;
+        resumeRefresh();
         return this;
+    }
+
+    /** Start the refresh thread if {@link #autoRefresh()} asked for one and none is running. */
+    synchronized void resumeRefresh() {
+        if (!refreshRequested || refreshThread != null) return;
+        // Daemon, so it can never hold the JVM open; stopRefresh() ends it on Brace.stop().
+        refreshThread = Thread.ofPlatform().daemon().name("trusted-proxies-refresh").start(() -> {
+            var self = Thread.currentThread();
+            while (!self.isInterrupted()) {
+                boolean ok = refreshNow();
+                // refreshNow() swallows failures, including an interrupted fetch, so check
+                // again before parking for up to a day.
+                if (self.isInterrupted()) return;
+                try {
+                    Thread.sleep(ok ? REFRESH_INTERVAL : RETRY_INTERVAL);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        });
+    }
+
+    /**
+     * End the refresh thread and wait briefly for it to exit. Called by {@code Brace.stop()}.
+     * The current ranges stay in force; {@link #resumeRefresh()} picks refreshing back up.
+     */
+    void stopRefresh() {
+        Thread thread;
+        synchronized (this) {
+            thread = refreshThread;
+            refreshThread = null;
+        }
+        if (thread == null) return;
+        thread.interrupt();
+        try {
+            thread.join(FETCH_TIMEOUT.toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** The running refresh thread, or null. For tests. */
+    synchronized Thread refreshThread() {
+        return refreshThread;
     }
 
     /**

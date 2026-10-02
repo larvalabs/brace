@@ -499,9 +499,9 @@ app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefr
 ```
 
 - `cloudflare()` starts from the bundled list, so there's no network dependency at startup.
-- `.autoRefresh()` re-fetches `cloudflare.com/ips-v4` and `/ips-v6` on a background virtual
-  thread (daily, with an hourly retry after a failure). A failed or partial fetch is
-  discarded wholesale, so the trust set never shrinks on a network blip.
+- `.autoRefresh()` re-fetches `cloudflare.com/ips-v4` and `/ips-v6` on a background daemon
+  thread (daily, with an hourly retry after a failure) that `app.stop()` ends. A failed or
+  partial fetch is discarded wholesale, so the trust set never shrinks on a network blip.
 - `.plus(cidrs)` adds CIDRs/IPs that survive refreshes (local reverse proxy, LAN ranges).
 - A new `app.trustedProxies(TrustedProxies)` overload accepts the pre-built instance. The
   existing varargs/list overloads are unchanged.

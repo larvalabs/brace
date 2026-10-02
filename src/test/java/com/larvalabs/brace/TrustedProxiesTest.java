@@ -220,6 +220,39 @@ public class TrustedProxiesTest {
     }
 
     @Test
+    public void testAutoRefreshThreadIsDaemonAndEndsOnStop() throws Exception {
+        var proxies = TrustedProxies.cloudflare().autoRefresh();
+        var app = Brace.app().port(0).banner(false).trustedProxies(proxies);
+        app.get("/", req -> Result.text("ok"));
+        app.start();
+        Thread thread = proxies.refreshThread();
+        assertNotNull(thread, "autoRefresh() should be running while the app is");
+        assertTrue(thread.isDaemon(), "the refresh thread must never hold the JVM open");
+
+        app.stop();
+
+        assertNull(proxies.refreshThread());
+        thread.join(10_000);
+        assertFalse(thread.isAlive(), "stop() must end the refresh thread");
+    }
+
+    @Test
+    public void testAutoRefreshThreadEndsOnFailedStart(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        var proxies = TrustedProxies.cloudflare().autoRefresh();
+        Thread thread = proxies.refreshThread();
+        assertNotNull(thread);
+        // .ops(...) with a missing keys file makes start() throw; its cleanup runs stop().
+        var app = Brace.app().port(0).banner(false).trustedProxies(proxies)
+            .ops(dir.resolve("missing-authorized-keys").toString());
+        assertThrows(RuntimeException.class, app::start);
+
+        assertNull(proxies.refreshThread());
+        thread.join(10_000);
+        assertFalse(thread.isAlive(), "a failed start must end the refresh thread");
+    }
+
+    @Test
     public void testAutoRefreshOnlyOnCloudflarePreset() {
         assertThrows(IllegalStateException.class, () -> new TrustedProxies("10.0.0.0/8").autoRefresh());
     }

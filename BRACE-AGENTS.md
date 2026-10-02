@@ -942,7 +942,7 @@ app.trustedProxies(TrustedProxies.cloudflare().autoRefresh());
 app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefresh());
 ```
 
-`.autoRefresh()` re-fetches cloudflare.com/ips-v4 + /ips-v6 on a background virtual thread (daily; the bundled list serves until the first fetch, and a failed fetch keeps the current list). `.plus(cidrs)` adds proxies of your own that survive refreshes. Without trusted proxies configured, `RateLimiter.perIp(...)` logs a startup warning: behind a proxy every request shares the proxy's IP, so a per-IP limit is effectively site-wide.
+`.autoRefresh()` re-fetches cloudflare.com/ips-v4 + /ips-v6 on a background daemon thread that `app.stop()` ends (daily; the bundled list serves until the first fetch, and a failed fetch keeps the current list). `.plus(cidrs)` adds proxies of your own that survive refreshes. Without trusted proxies configured, `RateLimiter.perIp(...)` logs a startup warning: behind a proxy every request shares the proxy's IP, so a per-IP limit is effectively site-wide.
 
 ### Security Headers
 

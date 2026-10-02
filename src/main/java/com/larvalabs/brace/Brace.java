@@ -923,6 +923,10 @@ public class Brace {
     }
 
     private void startOrThrow() throws Exception {
+        // A previous stop() ended autoRefresh()'s fetcher; a restart picks it back up.
+        if (trustedProxies != null) {
+            trustedProxies.resumeRefresh();
+        }
         // Session-aware middleware without .sessions(secret) is a silent trap: every
         // request gets a fresh empty Session. For requireSession that is *provably* an
         // infinite redirect loop (the session can never carry the key), and the runtime
@@ -1369,6 +1373,10 @@ public class Brace {
         }
         jobPoller.stop();
         jobScheduler.stop();
+        if (trustedProxies != null) {
+            // TrustedProxies.cloudflare().autoRefresh()'s background fetcher.
+            trustedProxies.stopRefresh();
+        }
         if (cache != null) {
             cache.close();
         }
