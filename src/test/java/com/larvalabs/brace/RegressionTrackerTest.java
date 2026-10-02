@@ -69,7 +69,10 @@ class RegressionTrackerTest {
             List.of(Post.class));
         var errorStore = new ErrorStore(dbFactory, 1000);
         try {
-            var startedAt = Instant.now().minusSeconds(3600);
+            // Millisecond precision: the first row sits exactly at startedAt, and on Linux
+            // Instant.now() can carry nanoseconds the TIMESTAMP column drops, which would put
+            // that row just below seed()'s ">= startedAt" bound.
+            var startedAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS).minusSeconds(3600);
             int total = ErrorStore.LIST_LIMIT + 1;
             var db = new Database(dbFactory.openSession());
             db.beginTransaction();
