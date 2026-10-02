@@ -107,18 +107,31 @@ public class Cli {
     }
 
     private static int opsCommand(Path cwd, String[] args) throws Exception {
-        if (args.length < 1) {
-            CliOutput.printError("Usage: brace ops <keypair|dashboard>");
-            return 1;
+        // Bare `brace ops` is a help request, like bare `brace`. Help on a subcommand
+        // (`brace ops keypair --help`) prints it too, rather than generating a keypair.
+        var rest = Arrays.asList(args);
+        if (args.length == 0 || "help".equals(args[0]) || rest.contains("--help") || rest.contains("-h")) {
+            printOpsUsage();
+            return 0;
         }
         return switch (args[0]) {
             case "keypair"   -> requireSrc(cwd, () -> CliOps.keypair(cwd, sub(args)));
             case "dashboard" -> requireProject(cwd, () -> CliOps.dashboard(cwd, sub(args)));
             default -> {
-                CliOutput.printError("Unknown ops command: " + args[0]);
+                CliOutput.printError("Unknown ops command: " + args[0] + " — run 'brace ops --help'");
                 yield 1;
             }
         };
+    }
+
+    private static void printOpsUsage() {
+        System.out.println("Usage: brace ops <command>");
+        System.out.println();
+        System.out.println("Ops commands:");
+        System.out.println("  brace ops keypair [--label <l>] [--read-only]  Generate an Ed25519 keypair for ops auth and add it to ops-authorized-keys");
+        System.out.println("  brace ops dashboard                            Open the ops dashboard in a browser (login via token exchange)");
+        System.out.println();
+        System.out.println("Inspecting a running app: brace check, status, errors, logs, cache, resolve (see 'brace help').");
     }
 
     private static int initCommand(Path cwd, String[] args) throws Exception {

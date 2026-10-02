@@ -39,6 +39,12 @@ grep -q "Global commands" "$WORK/help.out" || fail "help output missing 'Global 
 grep -q "brace new" "$WORK/help.out" || fail "help output missing 'brace new'"
 pass "help prints usage"
 
+step "Running brace ops --help"
+"$BRACE_BIN" ops --help > "$WORK/ops-help.out" || fail "brace ops --help exited non-zero"
+grep -q "brace ops keypair" "$WORK/ops-help.out" || fail "ops help missing 'brace ops keypair'"
+grep -q "brace ops dashboard" "$WORK/ops-help.out" || fail "ops help missing 'brace ops dashboard'"
+pass "ops --help lists subcommands"
+
 step "Running brace new testapp"
 cd "$WORK"
 "$BRACE_BIN" new testapp > "$WORK/new.out" 2>&1 || fail "brace new failed"

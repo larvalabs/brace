@@ -123,6 +123,17 @@ curl -H "Authorization: Bearer $TOKEN" "$URL/ops/status?include=profiling"
 brace status --env prod --include profiling --json
 ```
 
+### Fix: `brace ops --help` lists the ops subcommands
+
+**What changed.** `brace ops --help` and `brace ops -h` printed "Unknown ops command:
+--help" and exited 1. They now list `keypair` and `dashboard` with one-line descriptions and
+exit 0, as do `brace ops help` and bare `brace ops` (which used to exit 1 with a one-line
+usage). `--help` after a subcommand (`brace ops keypair --help`) also prints the list;
+before, `keypair` ignored the flag and generated a keypair (or, when `ops-private.key`
+already existed, refused with an error).
+
+**Who needs to act.** Nobody.
+
 <!-- end section: ops-jvm-cli -->
 
 ---
