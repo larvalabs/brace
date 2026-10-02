@@ -795,6 +795,39 @@ Http.post(uploadUrl).bearer(token).multipart()
 
 `Response`: `status()`, `body()`, `header(name)`, `ok()`, `as(Class)`.
 
+### Streaming responses
+
+`fetch*` buffers the whole body. To read it as it arrives (LLM APIs, long exports), use
+`fetchEvents` for Server-Sent Events or `stream()` for anything else. Both work on
+`multipart()` too.
+
+```java
+// SSE: each event reaches the consumer as soon as it arrives; returns when the stream ends
+var resp = Http.post("https://api.anthropic.com/v1/messages")
+    .header("x-api-key", key).bodyJson(request)
+    .timeout(Duration.ofMinutes(5))        // deadline for the WHOLE stream
+    .idleTimeout(Duration.ofSeconds(30))   // max wait for the next bytes
+    .fetchEvents(ev -> {
+        if (ev.type().equals("content_block_delta")) handle(ev.as(Delta.class));
+    });
+if (!resp.ok()) throw new RuntimeException(resp.status() + ": " + resp.body());  // error body; no events parsed
+
+// Raw stream: close it to release the connection
+try (var s = Http.get(exportUrl).stream()) {
+    if (!s.ok()) throw new RuntimeException(s.readString());
+    s.lines().forEach(line -> ...);        // or s.body() for an InputStream
+}
+```
+
+- `Http.Event`: `type()` (`"message"` when the server sent no `event:`), `data()` (multi-line
+  `data:` joined with `\n`), `id()`, `retry()`, `as(Class)`. Comments and keep-alives are skipped.
+- `fetchEvents` returns a `Response` with the status and headers. On a non-2xx status it parses
+  no events and `body()` is the error body, so check `ok()` as with `fetch()`.
+- For streams, `.timeout()` (default 30s) is the deadline for the whole call, not just the
+  wait for headers: raise it for long generations. `.idleTimeout()` is off by default and
+  only counts time blocked in a read, so a slow consumer doesn't trip it. Either one closes
+  the connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`).
+
 ## WebSocket
 
 ```java

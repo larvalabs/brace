@@ -180,7 +180,7 @@ Components included in the framework jar as of this release:
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
-- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts
+- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
