@@ -101,4 +101,12 @@ detail at `/ops/errors/{id}` is unchanged.
 **Who needs to act.** Only tooling that pages through the full unfiltered list expecting more
 than 500 rows. Pass `?since=` for a complete window instead.
 
+### Fix: resolving an error returns the same fields as fetching it
+
+**What changed.** The JSON from `POST /ops/errors/{id}/resolve` (and `ErrorStore.resolve`)
+includes `queriesBefore` and `requestHeaders` again, so it has exactly the fields of
+`GET /ops/errors/{id}`.
+
+**Who needs to act.** No one.
+
 <!-- end section: merge-restore -->

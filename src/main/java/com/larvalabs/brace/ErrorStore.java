@@ -318,6 +318,7 @@ public class ErrorStore {
         }
     }
 
+    /** The full-detail column list — one definition for {@link #list}, {@link #find}, {@link #resolve} (mapped by {@link #mapRow}). */
     private static final String FULL_COLUMNS =
         "id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, "
         + "occurrence_count, resolved_at, queries_before, request_headers";
@@ -415,26 +416,11 @@ public class ErrorStore {
         try {
             var now = Timestamp.from(Instant.now());
             db.sql("UPDATE ops_errors SET resolved_at = ? WHERE id = ?", now, id);
+            // Re-fetch on the same session — shared FULL_COLUMNS + mapRow keep the row
+            // shape from drifting (this method once hand-built the map and had drifted).
+            var rows = db.sqlQuery("SELECT " + FULL_COLUMNS + " FROM ops_errors WHERE id = ?", id);
             db.commitTransaction();
-
-            // Re-fetch the updated record
-            var rows = db.sqlQuery(
-                "SELECT id, error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count, resolved_at, queries_before, request_headers FROM ops_errors WHERE id = ?", id);
-
-            if (rows.isEmpty()) return null;
-            var row = rows.get(0);
-            var map = new LinkedHashMap<String, Object>();
-            map.put("id", ((Number) row[0]).longValue());
-            map.put("errorType", row[1]);
-            map.put("message", row[2]);
-            map.put("stackTrace", row[3]);
-            map.put("route", row[4]);
-            map.put("requestDetail", row[5]);
-            map.put("firstSeen", toInstant(row[6]));
-            map.put("lastSeen", toInstant(row[7]));
-            map.put("occurrenceCount", ((Number) row[8]).intValue());
-            map.put("resolvedAt", toInstant(row[9]));
-            return map;
+            return rows.isEmpty() ? null : mapRow(rows.get(0));
         } catch (Exception e) {
             db.rollbackTransaction();
             return null;

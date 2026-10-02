@@ -217,6 +217,23 @@ class ErrorStoreTest {
     }
 
     @Test
+    void resolveReturnsSameShapeAsFind() {
+        // c941ccc: resolve() maps its re-fetch through the shared mapRow, so its result has
+        // exactly find()'s fields — a hand-built copy once drifted and omitted
+        // queriesBefore/requestHeaders. Compare key sets and values, not a few fields.
+        errorStore.record("RuntimeException", "error", "GET /test", "stack", "req",
+            "{\"count\":2}", "{\"Accept\":\"text/html\"}");
+        errorStore.flush();
+        long id = ((Number) errorStore.list(null).get(0).get("id")).longValue();
+
+        var resolved = errorStore.resolve(id);
+        var found = errorStore.find(id);
+        assertNotNull(resolved);
+        assertEquals(List.copyOf(found.keySet()), List.copyOf(resolved.keySet()));
+        assertEquals(found, resolved);
+    }
+
+    @Test
     void pruningRemovesOldestResolvedFirst() {
         var smallStore = new ErrorStore(dbFactory, 3);
 
