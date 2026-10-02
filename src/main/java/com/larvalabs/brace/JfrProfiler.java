@@ -90,7 +90,10 @@ public class JfrProfiler implements AutoCloseable {
             allocationByClass.get().computeIfAbsent(className, k -> new LongAdder()).add(weight);
         });
 
-        rs.startAsync();
+        // Not rs.startAsync(): its "JFR Event Stream" thread is non-daemon and kept the JVM alive
+        // when Brace.start() failed after this point. A daemon thread running the blocking
+        // start() dispatches the same events and never holds the process open; close() ends it.
+        Thread.ofPlatform().daemon().name("brace-jfr-stream").start(rs::start);
     }
 
     public Map<String, Object> snapshot() {

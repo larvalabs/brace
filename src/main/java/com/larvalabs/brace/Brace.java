@@ -817,6 +817,23 @@ public class Brace {
     // Server lifecycle
 
     public void start() throws Exception {
+        try {
+            startOrThrow();
+        } catch (Throwable t) {
+            // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
+            // failed start can't leave threads that keep the JVM alive with no server: main()
+            // would exit with a stack trace while the process stays up. stop() is idempotent
+            // and copes with components that never started.
+            try {
+                stop();
+            } catch (Throwable cleanup) {
+                t.addSuppressed(cleanup);
+            }
+            throw t;
+        }
+    }
+
+    private void startOrThrow() throws Exception {
         // Session-aware middleware without .sessions(secret) is a silent trap: every
         // request gets a fresh empty Session. For requireSession that is *provably* an
         // infinite redirect loop (the session can never carry the key), and the runtime

@@ -255,6 +255,15 @@ once, for example `openssl rand -base64 32`, and keep it identical across instan
 
 ---
 
+### Fix: a failed `start()` no longer leaves the JVM running
+
+When `app.start()` threw part-way (missing `ops-authorized-keys`, port already in use), the JFR
+profiler's non-daemon thread kept the process alive with no server, so containers stayed
+"running" and restart policies never fired. A failed `start()` now stops what it had started
+and the process exits. No action required.
+
+---
+
 ### New (optional): static custom metrics with `Metrics`
 
 **What changed.** `Metrics.counter(...)`, `Metrics.gauge(...)` and `Metrics.timer(...)` are
