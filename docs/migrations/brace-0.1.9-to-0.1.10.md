@@ -1,0 +1,73 @@
+# Migrating from Brace 0.1.9 → 0.1.10
+
+<!-- In progress. Each workstream fills in only its own section below. The intro, the
+breaking-change summary and the Index table are written at integration time, from the
+sections. -->
+
+## Index
+
+| Change | Type | Action required | Anchor |
+|---|---|---|---|
+
+---
+
+<!-- section: correctness -->
+## Correctness fixes
+
+_No entries yet._
+
+<!-- end section: correctness -->
+
+---
+
+<!-- section: streaming-io -->
+## Streaming uploads and responses
+
+_No entries yet._
+
+<!-- end section: streaming-io -->
+
+---
+
+<!-- section: proxies -->
+## Trusted proxies
+
+_No entries yet._
+
+<!-- end section: proxies -->
+
+---
+
+<!-- section: http-streaming -->
+## Streaming in the `Http` client
+
+_No entries yet._
+
+<!-- end section: http-streaming -->
+
+---
+
+<!-- section: ops-dashboard -->
+## Ops dashboard
+
+_No entries yet._
+
+<!-- end section: ops-dashboard -->
+
+---
+
+<!-- section: ops-jvm-cli -->
+## GC pause figures and CLI
+
+_No entries yet._
+
+<!-- end section: ops-jvm-cli -->
+
+---
+
+<!-- section: dx -->
+## New projects and custom metrics
+
+_No entries yet._
+
+<!-- end section: dx -->
