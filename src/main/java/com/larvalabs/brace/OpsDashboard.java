@@ -74,7 +74,8 @@ public class OpsDashboard {
             .section { border: 1px solid #30363d; padding: 10px; margin-bottom: 14px; }
             .section-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
             .two-col { display: flex; gap: 10px; margin-bottom: 14px; }
-            .two-col > div { flex: 1; }
+            .two-col > div { flex: 1; min-width: 0; }
+            td.route { overflow-wrap: anywhere; }
             @media (max-width: 800px) { .two-col { flex-direction: column; } }
             table { border-collapse: collapse; width: 100%; }
             th { text-align: left; color: #565f89; font-size: 9px; text-transform: uppercase; padding: 3px 0; }
@@ -95,8 +96,10 @@ public class OpsDashboard {
             .c-red { color: #f7768e; }
             .c-cyan { color: #7dcfff; }
             .c-muted { color: #565f89; }
-            .pkg-wrap { display: inline-flex; max-width: 30ch; overflow: hidden; justify-content: flex-end; vertical-align: bottom; }
-            .pkg { color: #565f89; white-space: nowrap; flex-shrink: 0; }
+            td.name { max-width: 0; width: 100%; }
+            .lt { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl; text-align: left; }
+            .lt > bdi { direction: ltr; unicode-bidi: isolate; }
+            .pkg { color: #565f89; }
             .method { color: #c9d1d9; font-weight: bold; }
             .ok-dot { color: #9ece6a; }
             .err-dot { color: #f7768e; }
@@ -339,7 +342,7 @@ public class OpsDashboard {
                 sb.append("<table><tr><th>Method</th><th class=\"num\">Samples</th></tr>");
                 for (var m : hotMethods) {
                     String method = (String) m.get("method");
-                    sb.append("<tr><td title=\"").append(esc(method)).append("\">").append(formatMethod(method))
+                    sb.append("<tr><td class=\"name\">").append(formatMethod(method))
                       .append("</td><td class=\"num c-amber\">").append(m.get("samples")).append("</td></tr>");
                 }
                 sb.append("</table>");
@@ -361,8 +364,8 @@ public class OpsDashboard {
                     case "DELETE" -> "c-red";
                     default -> "c-muted";
                 };
-                sb.append("<tr><td><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
-                  .append("</span> ").append(esc(path)).append("</td>");
+                sb.append("<tr><td class=\"route\"><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
+                  .append("</span>&nbsp;").append(esc(path)).append("</td>");
                 sb.append("<td class=\"num c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
                 sb.append("<td class=\"num c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
             }
@@ -383,7 +386,7 @@ public class OpsDashboard {
                 sb.append("<table><tr><th>Class</th><th class=\"num\">Size</th></tr>");
                 for (var a : topAllocs) {
                     String className = (String) a.get("class");
-                    sb.append("<tr><td title=\"").append(esc(className)).append("\">").append(formatClassName(className))
+                    sb.append("<tr><td class=\"name\">").append(formatClassName(className))
                       .append("</td><td class=\"num c-purple\">").append(formatBytes((long) a.get("bytes"))).append("</td></tr>");
                 }
                 sb.append("</table>");
@@ -434,8 +437,8 @@ public class OpsDashboard {
                     case "DELETE" -> "c-red";
                     default -> "c-muted";
                 };
-                sb.append("<tr><td><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
-                  .append("</span> ").append(esc(path)).append("</td>");
+                sb.append("<tr><td class=\"route\"><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
+                  .append("</span>&nbsp;").append(esc(path)).append("</td>");
                 sb.append("<td class=\"num c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
                 sb.append("<td class=\"num c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
             }
@@ -655,13 +658,9 @@ public class OpsDashboard {
 
     private static String formatMethod(String method) {
         int lastDot = method.lastIndexOf('.');
-        if (lastDot <= 0) return "<span class=\"method\">" + esc(method) + "</span>";
-        int secondLastDot = method.lastIndexOf('.', lastDot - 1);
-        if (secondLastDot <= 0) return "<span class=\"method\">" + esc(method) + "</span>";
-        String pkg = method.substring(0, secondLastDot);
-        String classMethod = method.substring(secondLastDot);
-        return "<span class=\"pkg-wrap\" title=\"" + esc(method) + "\"><span class=\"pkg\">" + esc(pkg)
-            + "</span></span><span class=\"method\">" + esc(classMethod) + "</span>";
+        int secondLastDot = lastDot > 0 ? method.lastIndexOf('.', lastDot - 1) : -1;
+        if (secondLastDot <= 0) return leftTruncated(method, "", method);
+        return leftTruncated(method, method.substring(0, secondLastDot), method.substring(secondLastDot));
     }
 
     private static String formatClassName(String className) {
@@ -677,26 +676,30 @@ public class OpsDashboard {
             case "[Z" -> "boolean[]";
             default -> null;
         };
-        if (friendly != null) {
-            return "<span class=\"method\">" + friendly + "</span>";
-        }
-        // JVM object array descriptor: [Ljava.lang.String; → String[]
+        if (friendly != null) return leftTruncated(friendly, "", friendly);
+        // JVM object array descriptor: [Ljava.lang.String; → java.lang.String[]
+        String suffix = "";
         if (className.startsWith("[L") && className.endsWith(";")) {
             className = className.substring(2, className.length() - 1);
-            String suffix = "[]";
-            int lastDot2 = className.lastIndexOf('.');
-            if (lastDot2 <= 0) return "<span class=\"method\">" + esc(className) + suffix + "</span>";
-            String pkg2 = className.substring(0, lastDot2);
-            String name2 = className.substring(lastDot2);
-            return "<span class=\"pkg-wrap\" title=\"" + esc(className) + "[]\"><span class=\"pkg\">" + esc(pkg2)
-                + "</span></span><span class=\"method\">" + esc(name2) + suffix + "</span>";
+            suffix = "[]";
         }
         int lastDot = className.lastIndexOf('.');
-        if (lastDot <= 0) return "<span class=\"method\">" + esc(className) + "</span>";
-        String pkg = className.substring(0, lastDot);
-        String name = className.substring(lastDot);
-        return "<span class=\"pkg-wrap\" title=\"" + esc(className) + "\"><span class=\"pkg\">" + esc(pkg)
-            + "</span></span><span class=\"method\">" + esc(name) + "</span>";
+        if (lastDot <= 0) return leftTruncated(className + suffix, "", className + suffix);
+        return leftTruncated(className + suffix, className.substring(0, lastDot), className.substring(lastDot) + suffix);
+    }
+
+    /**
+     * A one-line name for a {@code td.name} cell: the package is muted, the tail bold. When
+     * the cell is too narrow, the browser drops characters from the <em>left</em> (package
+     * first, then outer class qualifiers) behind a leading ellipsis — {@code direction: rtl}
+     * moves the overflow edge to the left, and the {@code <bdi dir="ltr">} isolate keeps the
+     * name itself laid out left-to-right so trailing neutrals ({@code []}, {@code .},
+     * {@code $}) are not reordered. The full name is in the tooltip.
+     */
+    private static String leftTruncated(String full, String pkg, String tail) {
+        return "<span class=\"lt\" title=\"" + esc(full) + "\"><bdi dir=\"ltr\">"
+            + (pkg.isEmpty() ? "" : "<span class=\"pkg\">" + esc(pkg) + "</span>")
+            + "<span class=\"method\">" + esc(tail) + "</span></bdi></span>";
     }
 
     private static String formatBytes(long bytes) {

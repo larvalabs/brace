@@ -63,4 +63,26 @@ class OpsDashboardTest {
         assertTrue(html.contains("<td class=\"num c-amber\">1234567</td>"));
         assertTrue(html.contains("<th class=\"num\">Size</th>"));
     }
+
+    @Test
+    void longNamesAreLeftTruncatedOnOneLine() {
+        var html = render(new Stats(), profiler);
+
+        // CSS: one line, clipped on the left with an ellipsis, the cell giving up width first.
+        assertTrue(html.contains("td.name { max-width: 0; width: 100%; }"));
+        assertTrue(html.contains(".lt { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl;"));
+        assertTrue(html.contains(".lt > bdi { direction: ltr; unicode-bidi: isolate; }"));
+        assertFalse(html.contains("pkg-wrap"), "the fixed 30ch package clip is gone");
+
+        // Method: package muted, Class$Inner.method bold, full name in the tooltip.
+        assertTrue(html.contains("<td class=\"name\"><span class=\"lt\" title=\"" + LONG_METHOD + "\">"
+            + "<bdi dir=\"ltr\"><span class=\"pkg\">com.example.billing.internal.reconciliation</span>"
+            + "<span class=\"method\">.LedgerReconciliationService$PendingBatchProcessor.reconcileOutstandingEntries</span></bdi></span></td>"), html);
+
+        // Object array descriptor: friendly name with [] inside the LTR isolate (no bidi reordering).
+        assertTrue(html.contains("title=\"com.example.billing.internal.reconciliation.LedgerReconciliationService$PendingEntry[]\">"
+            + "<bdi dir=\"ltr\"><span class=\"pkg\">com.example.billing.internal.reconciliation</span>"
+            + "<span class=\"method\">.LedgerReconciliationService$PendingEntry[]</span></bdi>"));
+        assertTrue(html.contains("title=\"byte[]\"><bdi dir=\"ltr\"><span class=\"method\">byte[]</span></bdi>"));
+    }
 }
