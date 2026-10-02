@@ -97,7 +97,7 @@ Brace is served from [JitPack](https://jitpack.io) — no authentication require
     <dependency>
         <groupId>com.github.larvalabs</groupId>
         <artifactId>brace</artifactId>
-        <version>v0.1.9</version>
+        <version>v0.1.10</version>
     </dependency>
 </dependencies>
 ```
@@ -109,11 +109,11 @@ repositories {
     maven { url = uri("https://jitpack.io") }
 }
 dependencies {
-    implementation("com.github.larvalabs:brace:v0.1.9")
+    implementation("com.github.larvalabs:brace:v0.1.10")
 }
 ```
 
-Replace `v0.1.9` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
+Replace `v0.1.10` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
 
 ## Quick Start
 
@@ -184,7 +184,7 @@ Components included in the framework jar as of this release:
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
 - **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
-- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
+- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
@@ -260,6 +260,7 @@ db.queryIn(Post.class, "id", List.of(1, 2, 3))   // batch lookup with IN clause
 db.count(Post.class, "published = ?", true)       // count with condition
 db.exists(Post.class, "author.id = ?", userId)    // existence check with HQL where
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL
+db.sqlQuery("SELECT name FROM users")             // native query: List<Object[]>, one column too (row[0])
 
 // Constrained helpers for common single-field queries
 db.findBy(Post.class, "slug", "hello-world")      // find one by field
@@ -298,6 +299,8 @@ if (form.hasErrors()) return Result.view("posts/new", "form", form);
 // JSON request bodies bind the same way; malformed JSON becomes a field error, not a 500
 var jsonForm = req.jsonForm(PostForm.class);
 ```
+
+A `boolean` component binds an HTML checkbox directly (`on` is true, absent is false).
 
 ## Sessions
 
@@ -340,6 +343,9 @@ Jobs.schedule(db, new SendReceipt(orderId), Duration.ofMinutes(5));
 Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
     JobOptions.maxAttempts(5).backoff(Duration.ofMinutes(10)));
 ```
+
+Intervals take `s`, `m`, `h` or `d` (`"1d"`), like cache TTLs. `daily` keeps its wall-clock time
+across DST changes.
 
 Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
 `0` to keep forever).
@@ -411,6 +417,7 @@ app.maxUploadSize("500M")                     // accept large media...
 
 try (var in = file.stream()) { ... }          // repeatable, bounded memory
 file.saveTo(path);                            // a filesystem move for a spilled part
+storage.put("exports/a.csv", path, "text/csv");  // upload a file on disk, streamed
 
 Result.file(path)                             // stream out: Content-Length, Range, typed by extension
 Result.download(path, "report.csv")           // ...as an attachment
@@ -420,6 +427,9 @@ Result.stream(out -> writeCsv(out), "text/csv");  // ...generated as it is produ
 
 Static files stream too, and answer `Range` requests — so seeking in a served video works rather
 than re-fetching from the start.
+
+An `UploadedFile` is released when its request ends, so save or upload it before the handler
+returns; don't hand it to a background thread.
 
 ## Server-Sent Events
 
@@ -581,7 +591,7 @@ app.getRead("/posts", (req, db) -> {
 </div>
 ```
 
-Brace automatically sets `Vary: HX-Request` so caches don't mix full pages with partials.
+Brace automatically adds `HX-Request` to the `Vary` header (appending to any value the handler set) so caches don't mix full pages with partials.
 
 ## Testing
 

@@ -775,6 +775,7 @@ S3-compatible object storage (works with S3, R2, MinIO):
 ```java
 var storage = Storage.s3(config);  // reads s3.* keys from Config
 String url = storage.put("uploads/photo.jpg", bytes, "image/jpeg");  // returns public URL
+storage.put("exports/ledger.csv", Path.of("/tmp/ledger.csv"), "text/csv");  // streamed from disk
 storage.delete("uploads/photo.jpg");
 storage.url("uploads/photo.jpg");                   // public URL (no network call)
 storage.keyFromUrl("https://cdn.example.com/...");  // extract key from URL
@@ -1129,7 +1130,8 @@ if (req.isHtmx()) return View.of("posts/_list", "posts", posts);
 return View.of("posts/index", "posts", posts);
 ```
 
-`Vary: HX-Request` is set automatically so caches don't mix full pages with partials.
+`HX-Request` is added to `Vary` automatically (appended to any value the handler set) so caches
+don't mix full pages with partials.
 
 ## Common Patterns
 
