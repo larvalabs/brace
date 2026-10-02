@@ -20,7 +20,12 @@ Mailer's SMTP timeouts but did not touch M10 (credentials are still not percent-
 Nothing on `main` touched `Stats`, `BraceHandler`, `Route`, `FormBinder`, or `Url`, so H1, H2,
 H3 and every Medium and Low below stand as written. Remaining: **3 High, 12 Medium, 12 Low.**
 
-Branch: `claude/correctness-review-ey31yz`. One commit per finding,
+**Rebased onto 0.1.10 (2026-10-02)** after 0.1.8, 0.1.9 and the 2026-07 security review landed.
+By then `main` had fixed M6, M12, L2, L6, L12 and the path-parameter half of H3 by other
+routes; those entries are marked "Resolved upstream" and `main`'s versions were kept. Status:
+**all 28 resolved, 22 on this branch.**
+
+Branch: `claude/correctness-review-ey31yz`, landed as `0.1.10/correctness`. One commit per finding,
 `fix(correctness): <ID> <summary>`, each commit ticks its checkbox here and passes
 `mvn test`. User-visible changes get migration-guide entries per AGENTS.md.
 
