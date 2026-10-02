@@ -868,6 +868,12 @@ try (var s = Http.post(url).bodyJson(request).stream()) {
   time blocked in a read, so a slow consumer doesn't trip it. There is no total deadline
   unless you call `.timeout()`, which then bounds the whole call. Either closes the
   connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`).
+- LLM APIs: the idle timeout includes the wait for response headers, and a model that thinks
+  or runs a server tool can go quiet for a while. Set `.idleTimeout(...)` to the longest silence
+  the provider can produce (keep-alive pings and `:` comments reset it), and `.timeout(...)` as
+  the overall cap. Connecting is bounded separately at 10s.
+- Transport failures throw `RuntimeException("HTTP request failed: METHOD url (Cause: msg)")`,
+  so a refused connection (`ConnectException`) is visible in the message.
 
 ## WebSocket
 

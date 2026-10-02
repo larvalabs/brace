@@ -63,6 +63,7 @@ stop-the-world time (expect lower ones).
 | Streaming responses and `Range` | new-optional | none | [§](#new-optional-streaming-responses-and-range-support) |
 | Large uploads spill to disk | new-optional | budget temp disk; `uploadTempDir(...)` | [§](#new-optional-large-uploads-spill-to-disk) |
 | `Storage.put` streams | new-optional | none | [§](#new-optional-storageput-streams) |
+| `Http` transport failures name their cause | fix | only exact-`equals` message matching | [§](#fix-http-transport-failures-name-their-cause) |
 | `Http.stream()` / `fetchEvents` | new-optional | replace raw `java.net.http` SSE workarounds | [§](#new-optional-httpstream-and-fetchevents-for-streamed-responses) |
 | `TrustedProxies.cloudflare()` preset | new-optional | none | [§](#new-optional-trustedproxiescloudflare-preset-with-auto-refresh) |
 | Static `Metrics.counter/gauge/timer` | new-optional | use instead of threading `app.stats()` | [§](#new-optional-static-custom-metrics-with-metrics) |
@@ -661,6 +662,18 @@ Details:
   `UncheckedIOException` with `idle()` and `limit()`. The timeouts run on one shared daemon
   thread, not a thread per call.
 - Both work on `multipart()` requests.
+
+### Fix: `Http` transport failures name their cause
+
+**What changed.** When a request fails before any response (connection refused, unknown host,
+TLS error), the exception message now ends with the cause:
+`HTTP request failed: GET https://api.example.com/x (ConnectException)` instead of stopping at
+the URL. The cause is still attached as before. `fetchBytes()` on a non-2xx status throws
+`HTTP request failed: ... (status 404)` directly instead of wrapping that in a second
+exception.
+
+**Who needs to act.** Only code that compares the whole message with `equals`. Matching with
+`startsWith("HTTP request failed")` or `contains(...)` keeps working.
 
 <!-- end section: http-streaming -->
 

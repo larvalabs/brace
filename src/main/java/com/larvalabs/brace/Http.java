@@ -168,7 +168,7 @@ public class Http {
             Thread.currentThread().interrupt();
             throw new RuntimeException("HTTP request interrupted: " + method + " " + url, e);
         } catch (Exception e) {
-            throw new RuntimeException("HTTP request failed: " + method + " " + url, e);
+            throw failed(e);
         }
     }
 
@@ -194,24 +194,36 @@ public class Http {
      * has nowhere to put an error body, so failing loudly is the useful behavior. (L7)
      */
     public byte[] fetchBytes() {
+        HttpResponse<byte[]> httpResponse;
         try {
-            var httpResponse = CLIENT.send(buildRequest(), HttpResponse.BodyHandlers.ofByteArray());
-            if (httpResponse.statusCode() < 200 || httpResponse.statusCode() >= 300) {
-                throw new RuntimeException("HTTP request failed: " + method + " " + url + " (status " + httpResponse.statusCode() + ")");
-            }
-            return httpResponse.body();
+            httpResponse = CLIENT.send(buildRequest(), HttpResponse.BodyHandlers.ofByteArray());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("HTTP request interrupted: " + method + " " + url, e);
         } catch (Exception e) {
-            throw new RuntimeException("HTTP request failed: " + method + " " + url, e);
+            throw failed(e);
         }
+        if (httpResponse.statusCode() < 200 || httpResponse.statusCode() >= 300) {
+            throw new RuntimeException("HTTP request failed: " + method + " " + url + " (status " + httpResponse.statusCode() + ")");
+        }
+        return httpResponse.body();
+    }
+
+    /**
+     * The transport failure, with its cause named in the message ({@code ConnectException},
+     * {@code UnresolvedAddressException}, ...) so callers matching on the text can tell a refused
+     * connection from a bad host without unwrapping.
+     */
+    private RuntimeException failed(Exception e) {
+        String detail = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage());
+        return new RuntimeException("HTTP request failed: " + method + " " + url + " (" + detail + ")", e);
     }
 
     /**
      * Send the request and return as soon as the response headers arrive, with the body left
      * to read as it streams in. Close the result (try-with-resources) to release the
-     * connection. {@link #idleTimeout} (default 30s) bounds each wait for data and an explicit
+     * connection. {@link #idleTimeout} (default 30s) bounds each wait for data, including the
+     * wait for the response headers, and an explicit
      * {@link #timeout} the whole call; either closes the connection and throws
      * {@link StreamTimeoutException}. A non-2xx status is returned, not thrown: check
      * {@link StreamResponse#ok()}.
@@ -224,7 +236,7 @@ public class Http {
         } catch (HttpTimeoutException e) {
             watchdog.close();
             if (e instanceof HttpConnectTimeoutException) {
-                throw new RuntimeException("HTTP request failed: " + method + " " + url, e);
+                throw failed(e);
             }
             throw watchdog.headerTimeoutException();
         } catch (InterruptedException e) {
@@ -235,7 +247,7 @@ public class Http {
             throw e;
         } catch (Exception e) {
             watchdog.close();
-            throw new RuntimeException("HTTP request failed: " + method + " " + url, e);
+            throw failed(e);
         }
     }
 
@@ -511,7 +523,8 @@ public class Http {
         private final boolean idle;
         private final Duration limit;
 
-        StreamTimeoutException(String method, String url, boolean idle, Duration limit) {
+        /** Public so test doubles of an HTTP transport can throw it. */
+        public StreamTimeoutException(String method, String url, boolean idle, Duration limit) {
             this(message(method, url, idle, limit), idle, limit);
         }
 
