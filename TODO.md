@@ -13,7 +13,7 @@ Active plans:
 Unmerged branches (open work that already has code; rebase onto `main` before merging):
 - `origin/claude/correctness-review-ey31yz` — correctness review (2026-07-26): landed on `0.1.10/correctness`, rebased onto 0.1.10 with the fixes `main` already had (M6, M12, L2, L6, L12, H3's path-param half) dropped in favour of `main`'s; see [the review record](docs/reviews/2026-07-correctness-opus-5.md).
 - `origin/claude/brace-streaming-uploads-7uwm7s` — streaming uploads and responses (2026-07-26). *Landed: rebased onto the 0.1.10 line as `0.1.10/streaming-io` (2026-10-02); the old branch can be deleted once that merges.*
-- `origin/claude/rate-limiter-proxy-aware-am8rhb` — `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies (1 commit, 61 behind).
+- ~~`origin/claude/rate-limiter-proxy-aware-am8rhb`~~ — landed on `0.1.10/proxies`: `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies.
 - `origin/claude/htmx-v4-upgrade-assessment-nkmydq` — htmx 4.0.0 GA assessment doc (1 commit): adopt later, as its own release.
 - `origin/begin-0.1.10-snapshot` — bumps `pom.xml` to `0.1.10-SNAPSHOT` (1 commit, on top of `main`).
 
