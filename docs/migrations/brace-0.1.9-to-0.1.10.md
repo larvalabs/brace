@@ -165,4 +165,47 @@ Keep the `exec` in the entrypoint. Without it `sh` stays PID 1, does not forward
 the container is killed after the stop timeout without a clean shutdown. Prod mode also applies
 `%prod.` config keys, so check for any your container wasn't using before.
 
+---
+
+### Fix: scaffolded container config reads secrets from the environment
+
+**What changed.** The scaffolded `Dockerfile` copies `application.conf.example` into the image as
+`application.conf`. That file used to hold a placeholder `session.secret` and literal database
+settings. `Config` only falls back to an environment variable when a key is *absent* from the
+file, so `docker run -e SESSION_SECRET=... -e DB_PASS=...` (as the Dockerfile suggested) was
+ignored: every container signed sessions with the public placeholder, and only logged a "weak
+secret" warning. `brace new` now writes the example with `${VAR}` references, so the container
+takes them from the environment and fails to start when `SESSION_SECRET` is unset.
+
+The local `application.conf` (gitignored, with a generated secret) is unchanged.
+
+**Who needs to act.** Projects scaffolded before 0.1.10 whose Docker image copies
+`application.conf.example`: your containers are running on the placeholder secret unless you
+edited the file. Change the per-deployment keys to `${VAR}` references, set the variables in
+your deploy platform, and redeploy. Changing the secret logs everyone out once.
+
+**Before (0.1.9 `application.conf.example`):**
+
+```properties
+port=8080
+db.url=jdbc:postgresql://localhost:5432/myapp
+db.user=myapp
+db.pass=
+session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars
+```
+
+**After (0.1.10):**
+
+```properties
+port=8080
+db.url=${DATABASE_URL}
+db.user=${DB_USER}
+db.pass=${DB_PASS}
+session.secret=${SESSION_SECRET}
+```
+
+`DATABASE_URL` may be a JDBC URL or a PaaS-style `postgresql://user:pass@host:5432/db`
+(credentials embedded in it are used when `DB_USER`/`DB_PASS` are unset). Generate the secret
+once, for example `openssl rand -base64 32`, and keep it identical across instances and restarts.
+
 <!-- end section: dx -->

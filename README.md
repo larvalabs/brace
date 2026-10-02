@@ -582,13 +582,19 @@ port=8080
 db.url=jdbc:postgresql://localhost:5432/myapp
 db.user=myapp
 db.pass=${DB_PASS}
-session.secret=change-me
+session.secret=${SESSION_SECRET}
 
 %dev.port=9000
 %dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1
 %dev.db.user=
 %dev.db.pass=
 ```
+
+`${VAR}` reads an environment variable. A key that isn't in the file falls back to the
+environment variable named after it (`db.pass` → `DB_PASS`), but a key that is in the file
+always wins, so values that differ per deployment should be `${VAR}` references. `brace new`
+writes a gitignored `application.conf` with a generated `session.secret` for local use, and a
+committed `application.conf.example`, all `${VAR}`, that the scaffolded `Dockerfile` ships.
 
 ## Tech Stack
 

@@ -967,7 +967,10 @@ db.pass=${DB_PASS}
 ```
 
 Load: `Config.load(Path.of("application.conf"), System.getProperty("brace.mode"))`.
-Mode-prefixed keys override base keys. `brace dev` sets the mode to `dev` and
+Mode-prefixed keys override base keys. A key absent from the file falls back to the env var
+named after it (`db.pass` → `DB_PASS`), but a key present in the file always wins, so
+per-deployment values must be `${VAR}` references — the scaffold's `application.conf.example`
+(the Dockerfile's config) uses `${DATABASE_URL}`, `${DB_USER}`, `${DB_PASS}`, `${SESSION_SECRET}`. `brace dev` sets the mode to `dev` and
 `brace run` to `prod`; outside the CLI, pass `-Dbrace.mode=...` yourself.
 
 Methods: `get(key)`, `get(key, default)`, `getInt(key, default)`, `getBool(key, default)`.

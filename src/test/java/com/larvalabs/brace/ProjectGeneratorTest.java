@@ -88,10 +88,36 @@ class ProjectGeneratorTest {
         assertTrue(Files.exists(examplePath), "application.conf.example should be created");
 
         var content = Files.readString(examplePath);
-        assertTrue(content.contains("CHANGE-ME-to-a-random-string-at-least-32-chars"),
-            "application.conf.example should contain the placeholder");
-        assertTrue(content.contains("SESSION_SECRET"),
-            "application.conf.example should document env var usage");
+        // The Dockerfile ships this file as the container's config. A literal key beats the
+        // env var of the same name, so the secrets must be ${VAR} references, not placeholders.
+        assertTrue(content.contains("\nsession.secret=${SESSION_SECRET}\n"),
+            "session.secret must come from the environment, got:\n" + content);
+        assertTrue(content.contains("\ndb.url=${DATABASE_URL}\n"),
+            "db.url must come from the environment, got:\n" + content);
+        assertTrue(content.contains("\ndb.pass=${DB_PASS}\n"),
+            "db.pass must come from the environment, got:\n" + content);
+        assertFalse(content.toLowerCase().contains("change-me"),
+            "no placeholder secret: it would boot with only a warning");
+    }
+
+    @Test
+    void containerConfigFailsClosedWithoutSessionSecret(@TempDir Path tempDir) throws Exception {
+        Assumptions.assumeTrue(System.getenv("SESSION_SECRET") == null,
+            "SESSION_SECRET is set in this environment");
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        // What the container sees: the Dockerfile copies the example to application.conf and
+        // runs in prod mode.
+        var config = Config.load(projDir.resolve("application.conf.example"), "prod");
+        assertNull(config.get("session.secret"));
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> Brace.app().sessions(config.get("session.secret")));
+        assertTrue(e.getMessage().contains("session secret"), e.getMessage());
+
+        var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
+        assertTrue(dockerfile.contains("COPY application.conf.example application.conf"),
+            "this test models the Dockerfile's config; update it if that changes");
     }
 
     @Test

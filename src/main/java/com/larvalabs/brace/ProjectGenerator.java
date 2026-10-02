@@ -304,16 +304,29 @@ class HomeControllerTest {
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");
 
-            // application.conf.example with placeholder for documentation
+            // application.conf.example — committed, and the Dockerfile ships it as the
+            // container's application.conf, so it holds no values that differ per deployment.
+            // They come from env vars via ${VAR}: a literal in the file would beat the env var
+            // (Config only falls back to the environment for absent keys), and a placeholder
+            // secret would boot with a warning instead of failing — an unset SESSION_SECRET
+            // fails startup instead.
             Files.writeString(root.resolve("application.conf.example"),
-                "# Copy this file to application.conf and set real values, especially session.secret.\n" +
-                "# Never commit application.conf with real secrets; use env vars in production:\n" +
-                "#   SESSION_SECRET=<random-string> java -jar app.jar\n" +
+                "# Committed template for application.conf. The Dockerfile ships it as the\n" +
+                "# container's application.conf, so per-deployment values and secrets come from\n" +
+                "# environment variables via ${VAR}. Keep them that way: a literal value here wins\n" +
+                "# over an environment variable of the same name.\n" +
+                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/" + name + " \\\n" +
+                "#              -e SESSION_SECRET=\"$(openssl rand -base64 32)\" ...\n" +
+                "# SESSION_SECRET must stay the same across restarts and instances (changing it logs\n" +
+                "# everyone out); generate it once and store it with your other secrets.\n" +
+                "# Locally, `brace new` already wrote application.conf (gitignored) with a generated\n" +
+                "# session.secret. On a fresh clone, copy this file to application.conf and either\n" +
+                "# set the variables or replace the ${VAR}s with local values.\n" +
                 "port=8080\n" +
-                "db.url=jdbc:postgresql://localhost:5432/" + name + "\n" +
-                "db.user=" + name + "\n" +
-                "db.pass=\n" +
-                "session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars\n" +
+                "db.url=${DATABASE_URL}\n" +
+                "db.user=${DB_USER}\n" +
+                "db.pass=${DB_PASS}\n" +
+                "session.secret=${SESSION_SECRET}\n" +
                 "\n" +
                 "%dev.port=9000\n" +
                 "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
@@ -387,7 +400,8 @@ h1 { margin-bottom: 1rem; }
                 "# Public keys only; App.java's .ops(...) refuses to start without this file.\n" +
                 "COPY ops-authorized-keys ops-authorized-keys\n" +
                 "EXPOSE 8080\n" +
-                "# Pass secrets via env vars: docker run -e SESSION_SECRET=... -e DB_PASS=...\n" +
+                "# Config comes from env vars (see application.conf.example):\n" +
+                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/db -e SESSION_SECRET=...\n" +
                 "\n" +
                 "# JVM flags; override at run time: docker run -e JAVA_OPTS=\"-Xmx1g\" ...\n" +
                 "#   -XX:MaxRAMPercentage=50  caps the heap at half the container's memory limit,\n" +
