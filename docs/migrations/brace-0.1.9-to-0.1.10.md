@@ -173,6 +173,45 @@ the container is killed after the stop timeout without a clean shutdown. Prod mo
 
 ---
 
+### Security fix: the scaffold's placeholder session secret is refused at startup
+
+**Action required: set a real session secret before upgrading** if your app might be running on
+the placeholder. Otherwise the upgraded app will not start.
+
+**What changed.** `brace new` used to write
+`session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars` into
+`application.conf.example`, and the scaffolded `Dockerfile` copied that file into the image as
+`application.conf`. A key in the file beats an environment variable of the same name, so
+`docker run -e SESSION_SECRET=...` was ignored and those containers sign session cookies with a
+public string: anyone can forge a session, including a logged-in one. Brace only logged a
+"weak secret" warning. `.sessions(...)` now throws `IllegalArgumentException` for that exact
+value unless `brace.mode` is `dev`. That includes runs with no `brace.mode` at all, which is how
+the old scaffolded Dockerfile launched the app. In dev mode it is still only a warning.
+
+**Who needs to act.** Check the secret your production app actually uses: the
+`session.secret` line in the `application.conf` that ends up on the server or in the image, and
+the `SESSION_SECRET` variable. If it is the placeholder:
+
+1. Generate a secret once: `openssl rand -base64 32`. Store it with your other secrets and use
+   the same value on every instance.
+2. Set it as `SESSION_SECRET` in your deploy platform.
+3. Make the deployed config read it: `session.secret=${SESSION_SECRET}` (see the next entry for
+   the full env-based `application.conf.example`).
+4. Deploy that before (or together with) the Brace upgrade. Everyone is logged out once, since
+   existing cookies were signed with the old secret.
+
+**Before (0.1.9):** the placeholder logs a warning and the app runs.
+
+**After (0.1.10):** outside dev mode, startup fails with:
+
+```
+java.lang.IllegalArgumentException: session secret is the placeholder that older `brace new`
+scaffolds shipped in application.conf.example (CHANGE-ME-to-a-random-string-at-least-32-chars).
+It is public, so anyone can forge session cookies. ...
+```
+
+---
+
 ### Fix: scaffolded container config reads secrets from the environment
 
 **What changed.** The scaffolded `Dockerfile` copies `application.conf.example` into the image as

@@ -139,15 +139,6 @@ class ProjectGeneratorTest {
     }
 
     @Test
-    void placeholderTriggersWeakSecretWarning() {
-        var app = Brace.app();
-        var oldPlaceholder = "CHANGE-ME-to-a-random-string-at-least-32-chars";
-
-        // Should not throw, but logs a warning
-        assertDoesNotThrow(() -> app.sessions(oldPlaceholder));
-    }
-
-    @Test
     void changeHyphenVariantsAreWeak() {
         var app1 = Brace.app();
         var app2 = Brace.app();

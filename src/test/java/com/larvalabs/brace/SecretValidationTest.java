@@ -64,12 +64,47 @@ class SecretValidationTest {
             Brace.app().sessions(SessionOptions.of("a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6")));
     }
 
+    private static final String SHIPPED_PLACEHOLDER = "CHANGE-ME-to-a-random-string-at-least-32-chars";
+
     @Test
-    void oldPlaceholderIsWeak() {
-        // The old placeholder from brace new scaffolds should warn
-        var app = Brace.app();
-        assertDoesNotThrow(() ->
-            app.sessions("CHANGE-ME-to-a-random-string-at-least-32-chars"));
+    void shippedPlaceholderIsRefusedInProd() {
+        withMode("prod", () -> {
+            var ex = assertThrows(IllegalArgumentException.class,
+                () -> Brace.app().sessions(SHIPPED_PLACEHOLDER));
+            assertTrue(ex.getMessage().contains("SESSION_SECRET"), ex.getMessage());
+            assertThrows(IllegalArgumentException.class,
+                () -> Brace.app().sessions(SessionOptions.of(SHIPPED_PLACEHOLDER)));
+        });
+    }
+
+    @Test
+    void shippedPlaceholderIsRefusedWithNoMode() {
+        // Old scaffolds' Dockerfiles ran plain `java -jar app.jar`, with no brace.mode.
+        withMode(null, () -> assertThrows(IllegalArgumentException.class,
+            () -> Brace.app().sessions(SHIPPED_PLACEHOLDER)));
+    }
+
+    @Test
+    void shippedPlaceholderOnlyWarnsInDev() {
+        withMode("dev", () -> assertDoesNotThrow(() -> Brace.app().sessions(SHIPPED_PLACEHOLDER)));
+    }
+
+    @Test
+    void placeholderRefusalCoversEveryShippedVariant() {
+        // Each placeholder ProjectGenerator ever wrote for session.secret (see the constant's doc).
+        assertEquals(java.util.Set.of(SHIPPED_PLACEHOLDER), Brace.SHIPPED_PLACEHOLDER_SECRETS);
+    }
+
+    private static void withMode(String mode, Runnable body) {
+        String previous = System.getProperty("brace.mode");
+        try {
+            if (mode == null) System.clearProperty("brace.mode");
+            else System.setProperty("brace.mode", mode);
+            body.run();
+        } finally {
+            if (previous == null) System.clearProperty("brace.mode");
+            else System.setProperty("brace.mode", previous);
+        }
     }
 
     @Test

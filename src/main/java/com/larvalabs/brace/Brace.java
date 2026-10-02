@@ -226,6 +226,14 @@ public class Brace {
         return OpsToken.generateSecret();
     }
 
+    /**
+     * Every secret placeholder `brace new` has written into a generated config, from git history
+     * of ProjectGenerator (and its earlier io.brace path). The scaffold's other placeholder,
+     * {@code ops.secret=CHANGE-ME-ops-secret}, is under 32 characters and already rejected.
+     */
+    static final java.util.Set<String> SHIPPED_PLACEHOLDER_SECRETS =
+        java.util.Set.of("CHANGE-ME-to-a-random-string-at-least-32-chars");
+
     private void validateSecret(String secret, String type) {
         if (secret == null || secret.isEmpty()) {
             throw new IllegalArgumentException(type + " secret cannot be null or empty");
@@ -233,6 +241,19 @@ public class Brace {
         if (secret.length() < 32) {
             throw new IllegalArgumentException(
                 type + " secret must be at least 32 characters (current: " + secret.length() + ")");
+        }
+        // A placeholder a Brace scaffold actually shipped is public: anyone can forge session
+        // cookies with it. Old scaffolds' Dockerfiles copied it into the image and launched with
+        // no brace.mode at all, so refuse everywhere except dev, not only under prod.
+        if (SHIPPED_PLACEHOLDER_SECRETS.contains(secret)
+                && !"dev".equals(System.getProperty("brace.mode"))) {
+            throw new IllegalArgumentException(type + " secret is the placeholder that older `brace new` "
+                + "scaffolds shipped in application.conf.example (" + secret + "). It is public, so anyone "
+                + "can forge session cookies. Generate a real one (e.g. `openssl rand -base64 32`), set it "
+                + "as the SESSION_SECRET environment variable, and have application.conf read it with "
+                + "session.secret=${SESSION_SECRET}; a literal value in the file wins over the env var. "
+                + "Changing the secret logs existing users out once. In dev mode (-Dbrace.mode=dev) this "
+                + "is only a warning.");
         }
         // Warn about obvious placeholder values (including old scaffolds)
         String lower = secret.toLowerCase();
