@@ -753,7 +753,253 @@ already existed, refused with an error).
 <!-- section: dx -->
 ## New projects and custom metrics
 
-_No entries yet._
+### Fix: scaffolded `Dockerfile` (precompiled templates on a JRE, `JAVA_OPTS`, heap cap)
+
+**What changed.** 0.1.7 changed the scaffolded `Dockerfile` to precompile templates and run
+in prod mode on `eclipse-temurin:25-jre`, but a merge dropped that change before release, so
+0.1.7 through 0.1.9 still scaffolded `FROM eclipse-temurin:21-jre` with `java -jar app.jar`.
+That image fails on the first rendered page, because JTE then compiles templates with
+`javac` and a JRE doesn't include it. `brace new` now writes a `Dockerfile` that:
+
+- runs on `eclipse-temurin:25-jre`, copies `target/jte-classes/`, and runs with
+  `-Dbrace.mode=prod`, so templates load precompiled and no compiler is needed;
+- runs `exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar` through `sh -c`, so JVM flags can
+  be set per deployment and `java` is PID 1 (it gets `docker stop`'s SIGTERM and Brace's
+  shutdown hook runs);
+- defaults `JAVA_OPTS` to `-XX:MaxRAMPercentage=50`. Without a heap flag the JVM sizes its heap
+  from the host's RAM when the container has no memory limit;
+- copies `ops-authorized-keys`, which the scaffold's `main()` fails to start without.
+
+The scaffolded `pom.xml` also precompiles `views/` into `target/jte-classes` during
+`mvn package`, so the Dockerfile's single build step always ships classes that match the jar.
+`brace compile` writes the same directory.
+
+Forgetting the precompile step now fails at startup with a message naming `brace compile`: in
+prod mode on a JRE with no matching precompiled classes, `app.templates(...)` throws
+`IllegalStateException` instead of failing inside JTE's compiler. On a JDK, prod mode still
+compiles all templates at startup as before.
+
+**Who needs to act.** Existing projects keep the `Dockerfile` and `pom.xml` they were generated
+with; nothing regenerates them. If your Dockerfile still says `eclipse-temurin:21-jre` or
+`CMD ["java", "-jar", "app.jar"]`, update it by hand:
+
+1. Precompile, copy the classes and run in prod mode as described in
+   [Deploying with Docker](brace-0.1.6-to-0.1.7.md#deploying-with-docker-or-any-non-cli-launch)
+   in the 0.1.6 → 0.1.7 guide. Precompile as part of `mvn package` (below) rather than as a
+   separate manual step: stale `target/jte-classes` from an earlier build would be served as-is.
+2. Replace the `CMD` with the `JAVA_OPTS` entrypoint, and copy `ops-authorized-keys` if
+   `main()` calls `.ops(...)` (never copy `ops-private.key`).
+
+**Before (0.1.9 scaffold):**
+
+```dockerfile
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY target/app.jar app.jar
+COPY application.conf.example application.conf
+COPY views/ views/
+COPY public/ public/
+COPY migrations/ migrations/
+EXPOSE 8080
+CMD ["java", "-jar", "app.jar"]
+```
+
+**After (0.1.10 scaffold):**
+
+```dockerfile
+# Build first: mvn package (writes target/app.jar and target/jte-classes)
+FROM eclipse-temurin:25-jre
+WORKDIR /app
+COPY target/app.jar app.jar
+COPY application.conf.example application.conf
+COPY target/jte-classes/ target/jte-classes/
+COPY views/ views/
+COPY public/ public/
+COPY migrations/ migrations/
+COPY ops-authorized-keys ops-authorized-keys
+EXPOSE 8080
+# Heap cap as a share of the container's memory limit. Run with a limit (docker run
+# --memory=1g); without one, use an explicit -Xmx. On JDK 25 consider adding
+# -XX:+UseCompactObjectHeaders (usually 10-20% less heap for entity-heavy apps).
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=50"
+ENTRYPOINT ["sh", "-c", "exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar"]
+```
+
+**Add to `pom.xml`**, inside `<plugins>` after `maven-shade-plugin`:
+
+```xml
+<plugin>
+    <groupId>org.codehaus.mojo</groupId>
+    <artifactId>exec-maven-plugin</artifactId>
+    <version>3.5.0</version>
+    <executions>
+        <execution>
+            <id>precompile-templates</id>
+            <phase>package</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+                <executable>${java.home}/bin/java</executable>
+                <arguments>
+                    <argument>-cp</argument>
+                    <classpath/>
+                    <argument>com.larvalabs.brace.TemplatePrecompiler</argument>
+                    <argument>views</argument>
+                    <argument>target/jte-classes</argument>
+                </arguments>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+Keep the `exec` in the entrypoint. Without it `sh` stays PID 1, does not forward SIGTERM, and
+the container is killed after the stop timeout without a clean shutdown. Prod mode also applies
+`%prod.` config keys, so check for any your container wasn't using before.
+
+---
+
+### Security fix: the scaffold's placeholder session secret is refused at startup
+
+**Action required: set a real session secret before upgrading** if your app might be running on
+the placeholder. Otherwise the upgraded app will not start.
+
+**What changed.** `brace new` used to write
+`session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars` into
+`application.conf.example`, and the scaffolded `Dockerfile` copied that file into the image as
+`application.conf`. A key in the file beats an environment variable of the same name, so
+`docker run -e SESSION_SECRET=...` was ignored and those containers sign session cookies with a
+public string: anyone can forge a session, including a logged-in one. Brace only logged a
+"weak secret" warning. `.sessions(...)` now throws `IllegalArgumentException` for that exact
+value unless `brace.mode` is `dev`. That includes runs with no `brace.mode` at all, which is how
+the old scaffolded Dockerfile launched the app. In dev mode it is still only a warning.
+
+**Who needs to act.** Check the secret your production app actually uses: the
+`session.secret` line in the `application.conf` that ends up on the server or in the image, and
+the `SESSION_SECRET` variable. If it is the placeholder:
+
+1. Generate a secret once: `openssl rand -base64 32`. Store it with your other secrets and use
+   the same value on every instance.
+2. Set it as `SESSION_SECRET` in your deploy platform.
+3. Make the deployed config read it: `session.secret=${SESSION_SECRET}` (see the next entry for
+   the full env-based `application.conf.example`).
+4. Deploy that before (or together with) the Brace upgrade. Everyone is logged out once, since
+   existing cookies were signed with the old secret.
+
+**Before (0.1.9):** the placeholder logs a warning and the app runs.
+
+**After (0.1.10):** outside dev mode, startup fails with:
+
+```
+java.lang.IllegalArgumentException: session secret is the placeholder that older `brace new`
+scaffolds shipped in application.conf.example (CHANGE-ME-to-a-random-string-at-least-32-chars).
+It is public, so anyone can forge session cookies. ...
+```
+
+---
+
+### Fix: scaffolded container config reads secrets from the environment
+
+**What changed.** The scaffolded `Dockerfile` copies `application.conf.example` into the image as
+`application.conf`. That file used to hold a placeholder `session.secret` and literal database
+settings. `Config` only falls back to an environment variable when a key is *absent* from the
+file, so `docker run -e SESSION_SECRET=... -e DB_PASS=...` (as the Dockerfile suggested) was
+ignored: every container signed sessions with the public placeholder, and only logged a "weak
+secret" warning. `brace new` now writes the example with `${VAR}` references, so the container
+takes them from the environment and fails to start when `SESSION_SECRET` is unset.
+
+The local `application.conf` (gitignored, with a generated secret) is unchanged.
+
+**Who needs to act.** Projects scaffolded before 0.1.10 whose Docker image copies
+`application.conf.example`: your containers are running on the placeholder secret unless you
+edited the file. Change the per-deployment keys to `${VAR}` references, set the variables in
+your deploy platform, and redeploy. Changing the secret logs everyone out once.
+
+**Before (0.1.9 `application.conf.example`):**
+
+```properties
+port=8080
+db.url=jdbc:postgresql://localhost:5432/myapp
+db.user=myapp
+db.pass=
+session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars
+```
+
+**After (0.1.10):**
+
+```properties
+port=8080
+db.url=${DATABASE_URL}
+db.user=${DB_USER}
+db.pass=${DB_PASS}
+session.secret=${SESSION_SECRET}
+```
+
+`DATABASE_URL` may be a JDBC URL or a PaaS-style `postgresql://user:pass@host:5432/db`
+(credentials embedded in it are used when `DB_USER`/`DB_PASS` are unset). Generate the secret
+once, for example `openssl rand -base64 32`, and keep it identical across instances and restarts.
+
+---
+
+### Fix: a failed `start()` no longer leaves the JVM running
+
+When `app.start()` threw part-way (missing `ops-authorized-keys`, port already in use), the JFR
+profiler's non-daemon thread kept the process alive with no server, so containers stayed
+"running" and restart policies never fired. A failed `start()` now stops what it had started
+and the process exits. No action required.
+
+---
+
+### New (optional): static custom metrics with `Metrics`
+
+**What changed.** `Metrics.counter(...)`, `Metrics.gauge(...)` and `Metrics.timer(...)` are
+static, like `Log`, so a service can record a metric without being handed the app's `Stats`.
+They record into the same `Stats` that `app.stats()` returns: the most recently constructed
+app's. Metrics recorded before `Brace.app()` runs (for example a gauge registered in a service
+constructor earlier in `main()`) are kept and adopted by the first app.
+
+**Who needs to act.** Nobody. `app.stats()` and its `counter`/`gauge`/`timer` methods are
+unchanged. If you thread `app.stats()` into services only to record metrics, you can drop that
+plumbing. Keep using `app.stats()` in tests that read values (`counterTotal(name)`) or that run
+several apps in one JVM.
+
+There is no static `Stats.counter(...)`; older docs showed it, but it never compiled.
+
+**Before (0.1.9):**
+
+```java
+// main()
+var weather = new WeatherClient(http).withStats(app.stats());
+
+// WeatherClient
+private Stats stats;
+public WeatherClient withStats(Stats stats) { this.stats = stats; return this; }
+void fetch() { ...; if (stats != null) stats.counter("weather.calls"); }
+```
+
+**After (0.1.10):**
+
+```java
+// main()
+var weather = new WeatherClient(http);
+
+// WeatherClient
+void fetch() { ...; Metrics.counter("weather.calls"); }
+```
+
+---
+
+### Docs: java.time values in JSON responses
+
+**What changed.** Documentation only; `Json` already behaved this way. `BRACE-AGENTS.md` and the
+`CLAUDE.md` that `brace new` writes now say: put `LocalDateTime`/`LocalDate`/`Instant` values
+into the returned record or `Json.obj(...)` and let `Json` serialize them as ISO-8601. Don't
+call `.toString()` on them: `LocalDateTime.toString()` drops zero seconds (`2025-06-15T09:00`
+instead of `2025-06-15T09:00:00`), which strict ISO-8601 consumers reject.
+
+**Who needs to act.** Nobody. `brace agents-md` picks up the `BRACE-AGENTS.md` change. Existing
+projects' `CLAUDE.md` is not regenerated; to give agents the hint there too, add this to its
+Responses line: "Put java.time values in as objects (`Json` writes ISO-8601); never
+`.toString()` them."
 
 <!-- end section: dx -->
 

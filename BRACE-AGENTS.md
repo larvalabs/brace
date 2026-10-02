@@ -324,6 +324,10 @@ LinkedHashMap-and-put block (`Map.of` rejects nulls and scrambles key order). Fo
 or reused shapes, prefer a 1-line local record: it self-documents the schema and
 serializes in declaration order.
 
+**Dates and times:** put `LocalDateTime`/`LocalDate`/`Instant` values straight into the
+returned record or `Json.obj(...)` — `Json` writes ISO-8601 (`"2025-06-15T09:00:00"`). Never
+`.toString()` them: `LocalDateTime.toString()` drops zero seconds (`"2025-06-15T09:00"`).
+
 **⚠️ JSON and JPA entities:** Never return a JPA entity from `Json.of()` — all public fields are serialized, leaking
 `passwordHash`, API keys, or any other sensitive column. Return a record or DTO instead:
 
@@ -973,14 +977,18 @@ in the brace repo).
 ## Custom Metrics
 
 ```java
-var stats = app.stats();                     // pass to controllers/services via constructors
-stats.counter("talks.created");              // increment by 1
-stats.counter("bytes.uploaded", file.size()); // increment by amount
-stats.gauge("queue.depth", () -> (long) queue.size()); // Supplier<Long>, sampled each minute
-stats.timer("api.external", durationMs);     // tracks count, avg, max
+Metrics.counter("talks.created");              // increment by 1
+Metrics.counter("bytes.uploaded", file.size()); // increment by amount
+Metrics.gauge("queue.depth", () -> (long) queue.size()); // Supplier<Long>, sampled each minute
+Metrics.timer("api.external", durationMs);     // tracks count, avg, max
 ```
 
-Metrics appear in `/ops/status` JSON and as sparklines in the dashboard.
+`Metrics` is static (like `Log`), so call it from any controller or service; no need to pass
+anything in. It records into the app's `Stats` (the most recently constructed app; calls made
+before `Brace.app()` are kept and adopted by it). `app.stats()` is that same instance, with the
+same `counter`/`gauge`/`timer` methods plus `counterTotal(name)` for test assertions. `Stats` has
+no static methods: `Stats.counter(...)` does not compile. Metrics appear in `/ops/status` JSON
+and as sparklines in the dashboard.
 
 ## Testing
 
@@ -1072,7 +1080,10 @@ db.pass=${DB_PASS}
 ```
 
 Load: `Config.load(Path.of("application.conf"), System.getProperty("brace.mode"))`.
-Mode-prefixed keys override base keys. `brace dev` sets the mode to `dev` and
+Mode-prefixed keys override base keys. A key absent from the file falls back to the env var
+named after it (`db.pass` → `DB_PASS`), but a key present in the file always wins, so
+per-deployment values must be `${VAR}` references — the scaffold's `application.conf.example`
+(the Dockerfile's config) uses `${DATABASE_URL}`, `${DB_USER}`, `${DB_PASS}`, `${SESSION_SECRET}`. `brace dev` sets the mode to `dev` and
 `brace run` to `prod`; outside the CLI, pass `-Dbrace.mode=...` yourself.
 
 Methods: `get(key)`, `get(key, default)`, `getInt(key, default)`, `getBool(key, default)`.
@@ -1145,7 +1156,8 @@ use it instead of re-deriving the verbose version:
   cross-entity checks go in one static helper both handlers call (see §Forms & Validation).
 - **Response shapes:** a 1-line local record (`record TalkStats(long talkId, double avg) {}`)
   for named/reused shapes, `Json.obj("count", n, "avg", avg)` for one-offs — never a
-  LinkedHashMap-and-put block (see §Responses).
+  LinkedHashMap-and-put block (see §Responses). java.time values go in as objects, never
+  `.toString()`.
 - **Existence checks:** `db.existsBy` (single field) or `db.exists` (multi-field
   where-fragment, e.g. `db.exists(Rating.class, "talkId = ? AND userId = ?", t, u)`) —
   never `db.query(...).isEmpty()`.

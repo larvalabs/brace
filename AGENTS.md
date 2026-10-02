@@ -51,6 +51,7 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Jobs` | Static API for scheduling durable jobs |
 | `Mailer` | Email sending with dev-mode capture |
 | `Stats` | Lock-free request stats collection |
+| `Metrics` | Static facade for custom counters/gauges/timers over the app's `Stats` |
 | `OpsHandler` | /ops/status, /ops/routes, /ops/dashboard |
 | `Log` | Structured JSON logging to stdout |
 | `Config` | File + env var config with mode prefixes |
