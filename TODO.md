@@ -11,9 +11,9 @@ Active plans:
 - [`docs/2026-06-05-pg-testcontainers.md`](docs/2026-06-05-pg-testcontainers.md) — Postgres testcontainer test tier: a second, smaller suite on real Postgres alongside the fast H2 suite, so concurrency behaviors H2 can't reproduce (SKIP LOCKED, lock waits, READ COMMITTED races) get tested on the real path and the postgres-native Tier 2 unblocks. Includes researched tricks: singleton container + `withReuse`, tmpfs/fsync-off speed knobs, truncation (not rollback) isolation, two-connection concurrency pattern, Flyway-through-Brace, failsafe `*IT` tiering. Phase 0 pilot → harness → migrate DB tests → cash in simplifications. **Status: shipped as the `mvn verify` `*IT` tier (plan doc still says draft).**
 
 Unmerged branches (open work that already has code; rebase onto `main` before merging):
-- `origin/claude/correctness-review-ey31yz` — correctness review (2026-07-26): landed on `0.1.10/correctness`, rebased onto 0.1.10 with the fixes `main` already had (M6, M12, L2, L6, L12, H3's path-param half) dropped in favour of `main`'s; see [the review record](docs/reviews/2026-07-correctness-opus-5.md).
-- `origin/claude/brace-streaming-uploads-7uwm7s` — streaming uploads and responses (2026-07-26). *Landed: rebased onto the 0.1.10 line as `0.1.10/streaming-io` (2026-10-02); the old branch can be deleted once that merges.*
-- ~~`origin/claude/rate-limiter-proxy-aware-am8rhb`~~ — landed on `0.1.10/proxies`: `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies.
+- ~~`origin/claude/correctness-review-ey31yz`~~ — correctness review (2026-07-26): landed on 0.1.10 via `0.1.10/correctness`, rebased onto 0.1.10 with the fixes `main` already had (M6, M12, L2, L6, L12, H3's path-param half) dropped in favour of `main`'s; see [the review record](docs/reviews/2026-07-correctness-opus-5.md).
+- ~~`origin/claude/brace-streaming-uploads-7uwm7s`~~ — streaming uploads and responses (2026-07-26): landed on 0.1.10 via `0.1.10/streaming-io`; the old branch can be deleted.
+- ~~`origin/claude/rate-limiter-proxy-aware-am8rhb`~~ — landed on 0.1.10 via `0.1.10/proxies`: `TrustedProxies.cloudflare()` preset + a warning on `perIp` without trusted proxies.
 - `origin/claude/htmx-v4-upgrade-assessment-nkmydq` — htmx 4.0.0 GA assessment doc (1 commit): adopt later, as its own release.
 - `origin/begin-0.1.10-snapshot` — bumps `pom.xml` to `0.1.10-SNAPSHOT` (1 commit, on top of `main`).
 
@@ -33,7 +33,7 @@ Unmerged branches (open work that already has code; rebase onto `main` before me
   - [x] M3 (`c19bdbf`): `Request` adopts the case-insensitive header map instead of copying. Restored on `0.1.10/merge-restore`.
   - [x] Token-efficiency R7 (`f9d9b51`): `ErrorStore.LIST_LIMIT` caps an unfiltered `list()`. Restored on `0.1.10/merge-restore`.
   - [x] `c941ccc`: `ErrorStore.resolve()` maps through `FULL_COLUMNS` + `mapRow`, matching `find()`. Restored on `0.1.10/merge-restore`.
-  - [x] H7: restored on `0.1.10/ops-dashboard`.
+  - [x] H7: restored on 0.1.10. Correctness H1/H2's response choke point records every response by route pattern; `0.1.10/ops-dashboard`'s per-site restore was folded into it at integration.
   - [ ] Dockerfile M7: follow-up on `0.1.10/dx`.
   - [ ] H2, H5, M12 (`BraceHandler`): pending on `0.1.10/merge-restore`, after the correctness and streaming-io branches land.
 
