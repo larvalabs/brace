@@ -79,6 +79,7 @@ public class OpsDashboard {
             table { border-collapse: collapse; width: 100%; }
             th { text-align: left; color: #565f89; font-size: 9px; text-transform: uppercase; padding: 3px 0; }
             td { padding: 3px 0; }
+            th.num, td.num { text-align: right; white-space: nowrap; padding-left: 10px; }
             .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 45px; }
             .sparkline .bar { flex: 1; min-width: 4px; }
             .sparkline .bar-lo { background: #238636; }
@@ -335,11 +336,11 @@ public class OpsDashboard {
             if (hotMethods.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No samples yet</p>");
             } else {
-                sb.append("<table><tr><th>Method</th><th style=\"text-align:right\">Samples</th></tr>");
+                sb.append("<table><tr><th>Method</th><th class=\"num\">Samples</th></tr>");
                 for (var m : hotMethods) {
                     String method = (String) m.get("method");
                     sb.append("<tr><td title=\"").append(esc(method)).append("\">").append(formatMethod(method))
-                      .append("</td><td style=\"text-align:right\" class=\"c-amber\">").append(m.get("samples")).append("</td></tr>");
+                      .append("</td><td class=\"num c-amber\">").append(m.get("samples")).append("</td></tr>");
                 }
                 sb.append("</table>");
             }
@@ -348,7 +349,7 @@ public class OpsDashboard {
             // Slowest routes
             sb.append("<div class=\"section\">");
             sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
-            sb.append("<table><tr><th>Route</th><th style=\"text-align:right\">Avg</th><th style=\"text-align:right\">Calls</th></tr>");
+            sb.append("<table><tr><th>Route</th><th class=\"num\">Avg</th><th class=\"num\">Calls</th></tr>");
             for (var e : routeStats) {
                 String[] parts = e.getKey().split(" ", 2);
                 String httpMethod = parts[0];
@@ -362,8 +363,8 @@ public class OpsDashboard {
                 };
                 sb.append("<tr><td><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
                   .append("</span> ").append(esc(path)).append("</td>");
-                sb.append("<td style=\"text-align:right\" class=\"c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
-                sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
+                sb.append("<td class=\"num c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
+                sb.append("<td class=\"num c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
             }
             sb.append("</table>");
             sb.append("</div>\n");
@@ -379,11 +380,11 @@ public class OpsDashboard {
             if (topAllocs.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No allocation data yet</p>");
             } else {
-                sb.append("<table><tr><th>Class</th><th style=\"text-align:right\">Size</th></tr>");
+                sb.append("<table><tr><th>Class</th><th class=\"num\">Size</th></tr>");
                 for (var a : topAllocs) {
                     String className = (String) a.get("class");
                     sb.append("<tr><td title=\"").append(esc(className)).append("\">").append(formatClassName(className))
-                      .append("</td><td style=\"text-align:right\" class=\"c-purple\">").append(formatBytes((long) a.get("bytes"))).append("</td></tr>");
+                      .append("</td><td class=\"num c-purple\">").append(formatBytes((long) a.get("bytes"))).append("</td></tr>");
                 }
                 sb.append("</table>");
             }
@@ -397,7 +398,7 @@ public class OpsDashboard {
             if (pauses.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No GC pauses recorded</p>");
             } else {
-                sb.append("<table><tr><th>Time</th><th>Collector</th><th>Cause</th><th style=\"text-align:right\">Duration</th></tr>");
+                sb.append("<table><tr><th>Time</th><th>Collector</th><th>Cause</th><th class=\"num\">Duration</th></tr>");
                 for (var p : pauses) {
                     String ts = (String) p.get("ts");
                     String time = ts.length() > 19 ? ts.substring(11, 19) : ts;
@@ -407,7 +408,7 @@ public class OpsDashboard {
                     sb.append("<tr><td class=\"c-muted\">").append(esc(time))
                       .append("</td><td>").append(esc((String) p.get("collector")))
                       .append("</td><td class=\"c-muted\">").append(esc((String) p.get("cause")))
-                      .append("</td><td style=\"text-align:right;").append(weight).append("\" class=\"").append(durColor).append("\">")
+                      .append("</td><td style=\"").append(weight).append("\" class=\"num ").append(durColor).append("\">")
                       .append(String.format("%.0fms", durationMs)).append("</td></tr>");
                 }
                 sb.append("</table>");
@@ -421,7 +422,7 @@ public class OpsDashboard {
         if (jvmSnap == null && !routeStats.isEmpty()) {
             sb.append("<div class=\"section\">");
             sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
-            sb.append("<table><tr><th>Route</th><th style=\"text-align:right\">Avg</th><th style=\"text-align:right\">Calls</th></tr>");
+            sb.append("<table><tr><th>Route</th><th class=\"num\">Avg</th><th class=\"num\">Calls</th></tr>");
             for (var e : routeStats) {
                 String[] parts = e.getKey().split(" ", 2);
                 String httpMethod = parts[0];
@@ -435,8 +436,8 @@ public class OpsDashboard {
                 };
                 sb.append("<tr><td><span class=\"").append(methodColor).append("\">").append(esc(httpMethod))
                   .append("</span> ").append(esc(path)).append("</td>");
-                sb.append("<td style=\"text-align:right\" class=\"c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
-                sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
+                sb.append("<td class=\"num c-amber\">").append(String.format("%.0fms", e.getValue().avgLatencyMs())).append("</td>");
+                sb.append("<td class=\"num c-muted\">").append(String.format("%,d", e.getValue().count())).append("</td></tr>");
             }
             sb.append("</table>");
             sb.append("</div>\n");
@@ -446,11 +447,11 @@ public class OpsDashboard {
         if (!recentErrors.isEmpty()) {
             sb.append("<div class=\"section\">");
             sb.append("<div class=\"section-head c-red\">Recent Errors <span class=\"c-muted\" style=\"font-weight:normal\">— in-memory, ").append(recentErrors.size()).append(" tracked</span></div>");
-            sb.append("<table><tr><th>Type</th><th>Route</th><th style=\"text-align:right\">Count</th><th style=\"text-align:right\">Last Seen</th></tr>");
+            sb.append("<table><tr><th>Type</th><th>Route</th><th class=\"num\">Count</th><th class=\"num\">Last Seen</th></tr>");
             for (var e : recentErrors) {
                 sb.append("<tr><td class=\"c-red\">").append(esc(e.type)).append("</td><td>")
-                  .append(esc(e.route != null ? e.route : "-")).append("</td><td style=\"text-align:right\">")
-                  .append(e.count).append("</td><td style=\"text-align:right\" class=\"c-muted\">")
+                  .append(esc(e.route != null ? e.route : "-")).append("</td><td class=\"num\">")
+                  .append(e.count).append("</td><td class=\"num c-muted\">")
                   .append(esc(e.lastSeen != null ? e.lastSeen.toString().substring(11, 19) : "-")).append("</td></tr>");
             }
             sb.append("</table>");
@@ -484,7 +485,7 @@ public class OpsDashboard {
             if (hasJobs) {
                 sb.append("<div class=\"section\">");
                 sb.append("<div class=\"section-head c-cyan\">Scheduled Jobs</div>");
-                sb.append("<table><tr><th>Name</th><th>Schedule</th><th>Status</th><th style=\"text-align:right\">Last Run</th></tr>");
+                sb.append("<table><tr><th>Name</th><th>Schedule</th><th>Status</th><th class=\"num\">Last Run</th></tr>");
                 for (var j : jobStatuses) {
                     String statusDot = "ok".equals(j.lastStatus()) ? "ok-dot" : "error".equals(j.lastStatus()) ? "err-dot" : "c-muted";
                     String statusLabel = j.lastStatus() != null ? j.lastStatus() : "pending";
@@ -495,7 +496,7 @@ public class OpsDashboard {
                     }
                     sb.append("<tr><td>").append(esc(j.name())).append("</td><td class=\"c-muted\">").append(esc(j.schedule())).append("</td>");
                     sb.append("<td><span class=\"").append(statusDot).append("\">● </span>").append(esc(statusLabel)).append("</td>");
-                    sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(esc(lastRun)).append("</td></tr>");
+                    sb.append("<td class=\"num c-muted\">").append(esc(lastRun)).append("</td></tr>");
                     if (j.lastMessage() != null && !j.lastMessage().isEmpty()) {
                         sb.append("<tr><td colspan=\"4\" class=\"c-muted\" style=\"padding-left:16px;font-style:italic\">↳ ")
                           .append(esc(j.lastMessage())).append("</td></tr>");
@@ -539,17 +540,17 @@ public class OpsDashboard {
         if (!rateLimiterStats.isEmpty()) {
             sb.append("<div class=\"section\">");
             sb.append("<div class=\"section-head c-blue\">Rate Limiters</div>");
-            sb.append("<table><tr><th>Limiter</th><th style=\"text-align:right\">Allowed</th><th style=\"text-align:right\">Blocked</th><th style=\"text-align:right\">Active</th><th style=\"text-align:right\">Limit</th></tr>");
+            sb.append("<table><tr><th>Limiter</th><th class=\"num\">Allowed</th><th class=\"num\">Blocked</th><th class=\"num\">Active</th><th class=\"num\">Limit</th></tr>");
             for (var rl : rateLimiterStats) {
                 long allowed = ((Number) rl.get("allowed")).longValue();
                 long blocked = ((Number) rl.get("blocked")).longValue();
                 String blockPct = (allowed + blocked) > 0 ? String.format("%.1f%%", (blocked * 100.0) / (allowed + blocked)) : "0.0%";
                 sb.append("<tr><td>").append(esc((String) rl.get("label"))).append("</td>");
-                sb.append("<td style=\"text-align:right\" class=\"c-green\">").append(allowed).append("</td>");
-                sb.append("<td style=\"text-align:right\" class=\"").append(blocked > 0 ? "c-red" : "c-muted").append("\">")
+                sb.append("<td class=\"num c-green\">").append(allowed).append("</td>");
+                sb.append("<td class=\"num ").append(blocked > 0 ? "c-red" : "c-muted").append("\">")
                   .append(blocked).append(" (").append(blockPct).append(")</td>");
-                sb.append("<td style=\"text-align:right\">").append(rl.get("activeWindows")).append("</td>");
-                sb.append("<td style=\"text-align:right\" class=\"c-muted\">").append(rl.get("maxRequests")).append("/").append(rl.get("windowSeconds")).append("s</td></tr>");
+                sb.append("<td class=\"num\">").append(rl.get("activeWindows")).append("</td>");
+                sb.append("<td class=\"num c-muted\">").append(rl.get("maxRequests")).append("/").append(rl.get("windowSeconds")).append("s</td></tr>");
             }
             sb.append("</table>");
             sb.append("</div>\n");
@@ -558,11 +559,11 @@ public class OpsDashboard {
         // Status codes
         sb.append("<div class=\"section\">");
         sb.append("<div class=\"section-head c-muted\">Status Codes</div>");
-        sb.append("<table><tr><th>Code</th><th style=\"text-align:right\">Count</th></tr>");
+        sb.append("<table><tr><th>Code</th><th class=\"num\">Count</th></tr>");
         statusCodes.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(e -> {
             String codeColor = e.getKey() < 300 ? "c-green" : e.getKey() < 400 ? "c-blue" : e.getKey() < 500 ? "c-amber" : "c-red";
             sb.append("<tr><td class=\"").append(codeColor).append("\">").append(e.getKey())
-              .append("</td><td style=\"text-align:right\">").append(e.getValue()).append("</td></tr>");
+              .append("</td><td class=\"num\">").append(e.getValue()).append("</td></tr>");
         });
         sb.append("</table>");
         sb.append("</div>\n");
@@ -596,14 +597,14 @@ public class OpsDashboard {
             sb.append("<p class=\"").append(resolved ? "c-muted" : "c-green").append("\">None</p>");
             return;
         }
-        sb.append("<table><tr><th>Type</th><th>Route</th><th style=\"text-align:right\">Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>");
+        sb.append("<table><tr><th>Type</th><th>Route</th><th class=\"num\">Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>");
         for (var e : errors) {
             long id = ((Number) e.get("id")).longValue();
             sb.append("<tr>");
             sb.append("<td class=\"c-red\" style=\"cursor:pointer\" onclick=\"toggleTrace(this)\">")
               .append(esc(str(e.get("errorType")))).append("</td>");
             sb.append("<td>").append(esc(str(e.get("route"), "-"))).append("</td>");
-            sb.append("<td style=\"text-align:right\">").append(e.get("occurrenceCount")).append("</td>");
+            sb.append("<td class=\"num\">").append(e.get("occurrenceCount")).append("</td>");
             sb.append("<td class=\"c-muted\">").append(esc(str(e.get("firstSeen"), "-"))).append("</td>");
             sb.append("<td class=\"c-muted\">").append(esc(str(e.get("lastSeen"), "-"))).append("</td>");
             if (!resolved && canControl) {
