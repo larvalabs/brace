@@ -33,6 +33,7 @@ class OpsIntegrationTest {
 
         app.get("/hello", req -> Result.text("Hello!")).name("hello");
         app.get("/error", req -> { throw new RuntimeException("test error"); });
+        app.get("/items/{id}", req -> Result.text("item " + req.pathParam("id")));
 
         app.start();
         port = app.actualPort();
@@ -138,6 +139,19 @@ class OpsIntegrationTest {
         get("/hello");
         var response = getWithToken("/ops/status");
         assertTrue(response.body().contains("\"statusCodes\""));
+    }
+
+    @Test
+    void matchedRequestsAreRecordedUnderRoutePattern() throws Exception {
+        // H7: distinct IDs must collapse into the route pattern, not leak one stats entry
+        // per concrete URL.
+        get("/items/101");
+        get("/items/202");
+        var routes = app.stats().routeStats();
+        assertTrue(routes.containsKey("GET /items/{id}"), "pattern key expected: " + routes.keySet());
+        assertTrue(routes.get("GET /items/{id}").count() >= 2);
+        assertTrue(routes.keySet().stream().noneMatch(k -> k.contains("/items/101")),
+            "concrete paths must not become route keys: " + routes.keySet());
     }
 
     @Test

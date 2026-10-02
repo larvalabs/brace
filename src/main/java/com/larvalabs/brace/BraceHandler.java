@@ -177,6 +177,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // need it to run after-middleware over their responses (M1). Null until the route is
         // matched, which is before any response can be written.
         Request braceRequest = null;
+        // Declared outside the try so the catch blocks can attribute stats to the matched
+        // route's pattern (H7) instead of the concrete request path.
+        RouteMatch match = null;
         try {
             String method = jettyRequest.getMethod();
             String path = jettyRequest.getHttpURI().getPath();
@@ -202,7 +205,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Match route first. Static files and 404s must not pay request-body or
             // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
             // body from being fully parsed into memory before the 404.)
-            RouteMatch match = router.match(method, path);
+            match = router.match(method, path);
 
             // M2: the body is *supplied* here, not read. Buffering it before the before-middleware
             // loops put the cost ahead of the layer that exists to shed it — a rate limiter or auth
@@ -419,7 +422,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (stats != null) {
                 int qc = db != null ? db.queryCount() : 0;
                 long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(method, path, result.status(), durationUs, qc, qu);
+                // H7: stats key by route pattern (bounded by the route table), not the
+                // concrete path. The log line keeps the real (redacted) path.
+                stats.recordRequestPattern(method, match.route().pattern(), result.status(), durationUs, qc, qu);
                 Log.request(method, path, result.status(), durationUs, qc, qu);
             }
             return true;
@@ -444,7 +449,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 // db may be null (no route matched) or closed (query stats still readable)
                 int qc = db != null ? db.queryCount() : 0;
                 long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(errorMethod, errorPath, 404, durationUs, qc, qu);
+                // NotFoundException is thrown by handlers, so a route matched — attribute
+                // the 404 to its pattern (H7). Raw-path fallback kept for safety.
+                if (match != null) {
+                    stats.recordRequestPattern(errorMethod, match.route().pattern(), 404, durationUs, qc, qu);
+                } else {
+                    stats.recordRequest(errorMethod, errorPath, 404, durationUs, qc, qu);
+                }
                 Log.request(errorMethod, errorPath, 404, durationUs, qc, qu);
             }
             return true;
@@ -464,7 +475,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             int qc = db != null ? db.queryCount() : 0;
             long qu = db != null ? db.queryDurationUs() : 0;
             if (stats != null) {
-                stats.recordRequest(errorMethod, errorPath, 500, durationUs, qc, qu);
+                // H7: pattern-keyed when a route matched; middleware/static failures
+                // (match == null) fall back to the redacting raw-path key.
+                if (match != null) {
+                    stats.recordRequestPattern(errorMethod, match.route().pattern(), 500, durationUs, qc, qu);
+                } else {
+                    stats.recordRequest(errorMethod, errorPath, 500, durationUs, qc, qu);
+                }
                 stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
                     routeInfo, stackTraceToString(e), requestInfo, "");
                 Log.error(errorMethod, errorPath, e);
