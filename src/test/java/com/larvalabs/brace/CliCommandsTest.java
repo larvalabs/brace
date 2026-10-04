@@ -191,6 +191,89 @@ class CliCommandsTest {
         assertTrue(root.path("errors").path("count").asLong(0) >= 1, bout.toString());
     }
 
+    @Test
+    void statusIncludeFlagRequestsOptInBlocks() throws Exception {
+        var plain = lastLineJson(() -> CliCommands.status(projectDir, new String[]{"--json"}));
+        assertTrue(plain.path("jvm").path("profiling").isMissingNode(), plain.toString());
+        assertTrue(plain.path("timeseries").isMissingNode(), plain.toString());
+
+        var full = lastLineJson(() ->
+            CliCommands.status(projectDir, new String[]{"--include", "profiling,timeseries", "--json"}));
+        assertTrue(full.path("jvm").path("profiling").has("hotMethods"), full.toString());
+        assertTrue(full.path("timeseries").has("minutes"), full.toString());
+    }
+
+    @Test
+    void statusQueryParsesIncludeList() {
+        assertEquals("", CliCommands.statusQuery(new String[]{"--json"}));
+        assertEquals("?include=profiling", CliCommands.statusQuery(new String[]{"--include", "profiling"}));
+        assertEquals("?include=profiling,timeseries",
+            CliCommands.statusQuery(new String[]{"--env", "prod", "--include", " profiling , timeseries"}));
+    }
+
+    @Test
+    void statusQueryRejectsUnknownOrMissingInclude() {
+        var unknown = assertThrows(IllegalArgumentException.class,
+            () -> CliCommands.statusQuery(new String[]{"--include", "profilng"}));
+        assertTrue(unknown.getMessage().contains("profilng"), unknown.getMessage());
+        assertThrows(IllegalArgumentException.class,
+            () -> CliCommands.statusQuery(new String[]{"--include"}));
+        assertThrows(IllegalArgumentException.class,
+            () -> CliCommands.statusQuery(new String[]{"--include", "--json"}));
+    }
+
+    @Test
+    void statusOutputShowsRequestRateAndBusiestRoutes() throws Exception {
+        var root = Json.mapper().readTree("""
+            {"http": {"statusCodes": {"200": 900},
+              "requestsPerMinute": {"lastMinute": 120, "avg": 98.5, "windowMinutes": 15},
+              "topRoutes": [{"route": "GET /users/{id}", "count": 400, "perMinute": 80.0, "sharePct": 66.7},
+                            {"route": "(unmatched)", "count": 20, "perMinute": 4.0, "sharePct": 3.3}],
+              "topRoutesWindowMinutes": 5}}""");
+        String out = renderedStatus(root);
+        assertTrue(out.contains("req/min   120 last minute, 98.5 avg over 15 min"), out);
+        assertTrue(out.contains("busiest (last 5 min):"), out);
+        assertTrue(out.contains("GET /users/{id}  80.0/min (66.7%)"), out);
+        assertTrue(out.contains("(unmatched)  4.0/min (3.3%)"), out);
+    }
+
+    @Test
+    void statusOutputOmitsRateAndBusiestRoutesForOlderServers() throws Exception {
+        String out = renderedStatus(Json.mapper().readTree("{\"http\": {\"statusCodes\": {\"200\": 1}}}"));
+        assertFalse(out.contains("req/min"), out);
+        assertFalse(out.contains("busiest"), out);
+    }
+
+    private static String renderedStatus(com.fasterxml.jackson.databind.JsonNode root) {
+        var bout = new ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new PrintStream(bout));
+        try {
+            CliCommands.renderStatus(root);
+        } finally {
+            System.setOut(prev);
+        }
+        return bout.toString();
+    }
+
+    /** Runs a command and parses its last stdout line (the app's own log lines come first). */
+    private static com.fasterxml.jackson.databind.JsonNode lastLineJson(CliCall cmd) throws Exception {
+        var bout = new ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new PrintStream(bout));
+        try {
+            int code = cmd.call();
+            assertNotEquals(2, code, bout.toString());
+        } finally {
+            System.setOut(prev);
+        }
+        var lines = bout.toString().trim().split("\n");
+        return Json.mapper().readTree(lines[lines.length - 1]);
+    }
+
+    @FunctionalInterface
+    private interface CliCall { int call() throws Exception; }
+
     // --- Task 15: cache ---
 
     @Test

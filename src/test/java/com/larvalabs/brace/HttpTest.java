@@ -148,6 +148,26 @@ class HttpTest {
     }
 
     @Test
+    void transportFailureNamesItsCause() throws Exception {
+        int closedPort;
+        try (var socket = new java.net.ServerSocket(0)) {
+            closedPort = socket.getLocalPort();
+        }
+        String url = "http://127.0.0.1:" + closedPort + "/x";
+        var fetch = assertThrows(RuntimeException.class, () -> Http.get(url).fetch());
+        assertTrue(fetch.getMessage().contains("ConnectException"), fetch.getMessage());
+        var stream = assertThrows(RuntimeException.class, () -> Http.get(url).stream());
+        assertTrue(stream.getMessage().contains("ConnectException"), stream.getMessage());
+    }
+
+    @Test
+    void nonOkFetchBytesIsNotDoubleWrapped() {
+        var e = assertThrows(RuntimeException.class, () -> Http.get(url("/no-such-route")).fetchBytes());
+        assertTrue(e.getMessage().endsWith("(status 404)"), e.getMessage());
+        assertNull(e.getCause(), "status failure should not wrap another exception");
+    }
+
+    @Test
     void putRequest() {
         var resp = Http.put(url("/echo-body"))
             .bodyString("put-data")

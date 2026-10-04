@@ -21,6 +21,7 @@ public class Stats {
     private final LongAdder totalQueryCount = new LongAdder();
     private final LongAdder totalQueryUs = new LongAdder();
     private final AtomicLong maxLatencyUs = new AtomicLong(0);
+    private final LatencyHistogram latencyHistogram = new LatencyHistogram();
 
     private final ConcurrentHashMap<Integer, LongAdder> statusCodes = new ConcurrentHashMap<>();
 
@@ -53,12 +54,18 @@ public class Stats {
     /**
      * Records a request against a raw URL path. The path is redacted (secrets must never
      * reach /ops/status) but remains concrete — {@code /users/1} and {@code /users/2} are
-     * distinct keys — so this is only for requests with no matched route. Matched requests
-     * go through {@link #recordRequestPattern} which is bounded by the route table (H7).
+     * distinct keys, so every distinct URL mints a permanent entry in the never-reset
+     * {@code routes} map.
+     *
+     * <p><strong>The framework does not use this.</strong> {@code BraceHandler} routes every
+     * request — matched or not — through {@link #recordRequestPattern}, which is bounded by the
+     * route table (H7, re-broken and re-fixed as correctness H1). It stays public for apps that
+     * want to record their own synthetic entries and can vouch for the key's cardinality; if the
+     * path is at all user-influenced, use {@link #recordRequestPattern} with a constant instead.
      */
     public void recordRequest(String method, String path, int status, long latencyUs,
                               int queryCount, long queryUs) {
-        record(method + " " + Redactor.redactPath(path), status, latencyUs, queryCount, queryUs);
+        record(method + " " + Redactor.redactPath(path), UNMATCHED_ROUTE, status, latencyUs, queryCount, queryUs);
     }
 
     /**
@@ -66,13 +73,18 @@ public class Stats {
      * Patterns are code-site literals: no redaction needed, and the routes map stays
      * bounded by the number of registered routes instead of growing per distinct URL —
      * previously ID-bearing paths leaked one map entry per entity ever requested (H7).
+     * {@link #UNMATCHED_ROUTE} and {@link #STATIC_ROUTE} are the two non-route patterns: they
+     * keep their per-method keys here but each folds into one method-less row in minute
+     * snapshots (a raw path folds into the unmatched one).
      */
     void recordRequestPattern(String method, String routePattern, int status, long latencyUs,
                               int queryCount, long queryUs) {
-        record(method + " " + routePattern, status, latencyUs, queryCount, queryUs);
+        String bucket = UNMATCHED_ROUTE.equals(routePattern) || STATIC_ROUTE.equals(routePattern)
+            ? routePattern : null;
+        record(method + " " + routePattern, bucket, status, latencyUs, queryCount, queryUs);
     }
 
-    private void record(String routeKey, int status, long latencyUs,
+    private void record(String routeKey, String bucket, int status, long latencyUs,
                         int queryCount, long queryUs) {
         requestCount.increment();
         totalLatencyUs.add(latencyUs);
@@ -91,8 +103,12 @@ public class Stats {
             if (maxLatencyUs.compareAndSet(current, latencyUs)) break;
             current = maxLatencyUs.get();
         }
+        latencyHistogram.record(latencyUs);
 
-        routes.computeIfAbsent(routeKey, k -> new RouteStats()).record(latencyUs);
+        // get-then-compute keeps the hit path free of a capturing-lambda allocation.
+        var route = routes.get(routeKey);
+        if (route == null) route = routes.computeIfAbsent(routeKey, k -> new RouteStats(bucket));
+        route.record(latencyUs);
     }
 
     public void recordError(String type, String message, String route,
@@ -159,6 +175,7 @@ public class Stats {
         long queries = totalQueryCount.sumThenReset();
         long queryUs = totalQueryUs.sumThenReset();
         long maxUs = maxLatencyUs.getAndSet(0);
+        long p95Us = latencyHistogram.percentileAndReset(0.95, maxUs);
         long heapMB = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024 * 1024);
 
         // Capture counter deltas and reset
@@ -182,11 +199,24 @@ public class Stats {
             if (snap != null) tValues.put(entry.getKey(), snap);
         }
 
+        // Per-route request counts for this minute. Keys are route patterns (bounded by the
+        // route table); the non-route keys fold into one method-less row each: UNMATCHED_ROUTE
+        // (any method's, or a raw path) and STATIC_ROUTE.
+        var rCounts = new java.util.LinkedHashMap<String, Long>();
+        for (var entry : routes.entrySet()) {
+            var route = entry.getValue();
+            long n = route.minuteCount.sumThenReset();
+            if (n == 0) continue;
+            rCounts.merge(route.bucket != null ? route.bucket : entry.getKey(), n, Long::sum);
+        }
+
         var snapshot = new MinuteSnapshot(
             Instant.now(), requests, errs, latencyUs, maxUs, queries, queryUs, heapMB,
             Collections.unmodifiableMap(cDeltas),
             Collections.unmodifiableMap(gValues),
-            Collections.unmodifiableMap(tValues)
+            Collections.unmodifiableMap(tValues),
+            Collections.unmodifiableMap(rCounts),
+            p95Us
         );
 
         synchronized (ringLock) {
@@ -227,6 +257,51 @@ public class Stats {
             }
             return Collections.unmodifiableList(list);
         }
+    }
+
+    /**
+     * Request rate from the minute ring: the last full minute and the average over every
+     * minute retained (up to 60). Null before the first rotation — there is no full minute yet.
+     */
+    public RequestRate requestRate() {
+        var snapshots = minuteSnapshots();
+        if (snapshots.isEmpty()) return null;
+        long sum = 0;
+        for (var m : snapshots) sum += m.requests();
+        return new RequestRate(snapshots.getLast().requests(), (double) sum / snapshots.size(), snapshots.size());
+    }
+
+    /** Route key under which requests that matched no route are counted in minute snapshots. */
+    public static final String UNMATCHED_ROUTE = "(unmatched)";
+
+    /** Route key under which files served from a {@code staticFiles} mapping are counted. */
+    public static final String STATIC_ROUTE = "(static)";
+
+    /**
+     * Busiest routes over the last {@code windowMinutes} full minutes (fewer if the ring
+     * holds fewer), by request count. Unmatched requests appear as one
+     * {@link #UNMATCHED_ROUTE} entry and static files as one {@link #STATIC_ROUTE} entry; both
+     * count toward every route's share. Empty before the first rotation.
+     */
+    public List<RouteRate> topRoutes(int windowMinutes, int limit) {
+        var snapshots = minuteSnapshots();
+        int from = Math.max(0, snapshots.size() - windowMinutes);
+        int minutes = snapshots.size() - from;
+        var counts = new java.util.HashMap<String, Long>();
+        long total = 0;
+        for (var m : snapshots.subList(from, snapshots.size())) {
+            for (var e : m.routeCounts().entrySet()) {
+                counts.merge(e.getKey(), e.getValue(), Long::sum);
+                total += e.getValue();
+            }
+        }
+        long windowTotal = total;
+        return counts.entrySet().stream()
+            .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+            .limit(limit)
+            .map(e -> new RouteRate(e.getKey(), e.getValue(), (double) e.getValue() / minutes,
+                (double) e.getValue() / windowTotal, minutes))
+            .toList();
     }
 
     public List<ErrorRecord> recentErrors() {
@@ -298,15 +373,36 @@ public class Stats {
         long heapUsedMB,
         Map<String, Long> counterDeltas,
         Map<String, Long> gaugeValues,
-        Map<String, TimerSnapshot> timerValues
+        Map<String, TimerSnapshot> timerValues,
+        Map<String, Long> routeCounts,
+        long p95LatencyUs
     ) {
+        /** The pre-0.1.10 shape: no per-route counts, p95 unknown (0). Kept for source compatibility. */
+        public MinuteSnapshot(Instant ts, long requests, long errors, long totalLatencyUs, long maxLatencyUs,
+                              long queries, long queryUs, long heapUsedMB, Map<String, Long> counterDeltas,
+                              Map<String, Long> gaugeValues, Map<String, TimerSnapshot> timerValues) {
+            this(ts, requests, errors, totalLatencyUs, maxLatencyUs, queries, queryUs, heapUsedMB,
+                counterDeltas, gaugeValues, timerValues, Map.of(), 0);
+        }
+
         public double avgLatencyMs() {
             if (requests == 0) return 0.0;
             return (totalLatencyUs / (double) requests) / 1000.0;
         }
+
+        /** 95th-percentile latency for the minute, from {@link LatencyHistogram} (within ~12.5%). */
+        public double p95LatencyMs() {
+            return p95LatencyUs / 1000.0;
+        }
     }
 
     public record TimerSnapshot(long count, double avgMs, long maxMs) {}
+
+    /** Requests in the last full minute, and the per-minute average over {@code windowMinutes}. */
+    public record RequestRate(long lastMinute, double avgPerMinute, int windowMinutes) {}
+
+    /** One route's traffic over a window: count, per-minute rate, and share (0..1) of all requests. */
+    public record RouteRate(String route, long count, double perMinute, double share, int windowMinutes) {}
 
     public static class TimerAccumulator {
         private final LongAdder count = new LongAdder();
@@ -332,13 +428,90 @@ public class Stats {
         }
     }
 
+    /**
+     * One minute of request latencies, for the per-minute p95. Fixed log-linear buckets: exact
+     * below 8µs, then 8 sub-buckets per power of two (bucket width at most 12.5% of its value),
+     * clamped at 2^32µs (~71 min). Recording is a shift/mask index plus one
+     * {@link LongAdder#increment} — lock-free and allocation-free on the request path. The
+     * minute rotation drains it with {@code sumThenReset}, like the other window counters.
+     */
+    static final class LatencyHistogram {
+        private static final int SUB_BITS = 3;
+        private static final int SUB_COUNT = 1 << SUB_BITS;
+        private static final int MAX_EXP = 31;
+        static final int BUCKETS = (MAX_EXP - SUB_BITS + 2) * SUB_COUNT;
+
+        private final LongAdder[] counts = new LongAdder[BUCKETS];
+
+        LatencyHistogram() {
+            for (int i = 0; i < BUCKETS; i++) counts[i] = new LongAdder();
+        }
+
+        void record(long latencyUs) {
+            counts[bucket(latencyUs)].increment();
+        }
+
+        static int bucket(long us) {
+            if (us < SUB_COUNT) return (int) Math.max(0, us);
+            int exp = 63 - Long.numberOfLeadingZeros(us);
+            if (exp > MAX_EXP) return BUCKETS - 1;
+            int sub = (int) (us >>> (exp - SUB_BITS)) & (SUB_COUNT - 1);
+            return (exp - SUB_BITS + 1) * SUB_COUNT + sub;
+        }
+
+        /** Exclusive upper bound of a bucket, in µs. */
+        static long upperBound(int bucket) {
+            if (bucket < SUB_COUNT) return bucket + 1;
+            int exp = bucket / SUB_COUNT + SUB_BITS - 1;
+            int sub = bucket % SUB_COUNT;
+            return (long) (SUB_COUNT + sub + 1) << (exp - SUB_BITS);
+        }
+
+        /**
+         * The {@code q}-quantile of the minute just ended, then resets. Reports the containing
+         * bucket's upper edge (a slight overestimate), capped at the minute's observed max.
+         * 0 when the minute had no requests.
+         */
+        long percentileAndReset(double q, long maxUs) {
+            long[] snap = new long[BUCKETS];
+            long total = 0;
+            for (int i = 0; i < BUCKETS; i++) {
+                snap[i] = counts[i].sumThenReset();
+                total += snap[i];
+            }
+            if (total == 0) return 0;
+            long rank = (long) Math.ceil(q * total);
+            long seen = 0;
+            for (int i = 0; i < BUCKETS; i++) {
+                seen += snap[i];
+                if (seen >= rank) {
+                    long edge = upperBound(i) - 1;
+                    return maxUs > 0 ? Math.min(edge, maxUs) : edge;
+                }
+            }
+            return maxUs;
+        }
+    }
+
     public static class RouteStats {
         private final LongAdder count = new LongAdder();
         private final LongAdder totalUs = new LongAdder();
+        // Requests since the last minute rotation (reset on snapshot) — the windowed counts
+        // behind "top routes". Cumulative count above stays as-is.
+        private final LongAdder minuteCount = new LongAdder();
+        // Null for a route pattern. For a non-route key, the row it folds into in the minute
+        // snapshot (UNMATCHED_ROUTE or STATIC_ROUTE), so 404 scanner paths and per-method
+        // duplicates never rank as routes.
+        private final String bucket;
+
+        public RouteStats() { this(null); }
+
+        RouteStats(String bucket) { this.bucket = bucket; }
 
         void record(long latencyUs) {
             count.increment();
             totalUs.add(latencyUs);
+            minuteCount.increment();
         }
 
         public long count() {

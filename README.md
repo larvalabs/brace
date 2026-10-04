@@ -34,7 +34,7 @@ Brace covers HTTP and routing, database and migrations, typed templates, encrypt
 
 Brace exposes a structured diagnostics API designed so agents can detect, diagnose and fix problems themselves.
 
-`GET /ops/status` returns a compact snapshot: request stats, slow routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
+`GET /ops/status` returns a compact snapshot: request rate and stats, slowest and busiest routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
 
 Ops endpoints use Ed25519 keypair authentication with short-lived tokens, so agents authenticate without a shared secret.
 
@@ -97,7 +97,7 @@ Brace is served from [JitPack](https://jitpack.io) — no authentication require
     <dependency>
         <groupId>com.github.larvalabs</groupId>
         <artifactId>brace</artifactId>
-        <version>v0.1.9</version>
+        <version>v0.1.10</version>
     </dependency>
 </dependencies>
 ```
@@ -109,11 +109,11 @@ repositories {
     maven { url = uri("https://jitpack.io") }
 }
 dependencies {
-    implementation("com.github.larvalabs:brace:v0.1.9")
+    implementation("com.github.larvalabs:brace:v0.1.10")
 }
 ```
 
-Replace `v0.1.9` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
+Replace `v0.1.10` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
 
 ## Quick Start
 
@@ -175,15 +175,16 @@ Components included in the framework jar as of this release:
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs
-- **Security** — Trusted proxy configuration (CIDR-based), secure cookie defaults, secret validation, security headers middleware, bcrypt password hashing
+- **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware, bcrypt password hashing
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
-- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts
+- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
+- **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
-- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, built in S3 support
+- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
@@ -259,6 +260,7 @@ db.queryIn(Post.class, "id", List.of(1, 2, 3))   // batch lookup with IN clause
 db.count(Post.class, "published = ?", true)       // count with condition
 db.exists(Post.class, "author.id = ?", userId)    // existence check with HQL where
 db.sql("UPDATE posts SET views = views + 1 WHERE id = ?", id) // native SQL
+db.sqlQuery("SELECT name FROM users")             // native query: List<Object[]>, one column too (row[0])
 
 // Constrained helpers for common single-field queries
 db.findBy(Post.class, "slug", "hello-world")      // find one by field
@@ -297,6 +299,8 @@ if (form.hasErrors()) return Result.view("posts/new", "form", form);
 // JSON request bodies bind the same way; malformed JSON becomes a field error, not a 500
 var jsonForm = req.jsonForm(PostForm.class);
 ```
+
+A `boolean` component binds an HTML checkbox directly (`on` is true, absent is false).
 
 ## Sessions
 
@@ -339,6 +343,9 @@ Jobs.schedule(db, new SendReceipt(orderId), Duration.ofMinutes(5));
 Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
     JobOptions.maxAttempts(5).backoff(Duration.ofMinutes(10)));
 ```
+
+Intervals take `s`, `m`, `h` or `d` (`"1d"`), like cache TTLs. `daily` keeps its wall-clock time
+across DST changes.
 
 Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
 `0` to keep forever).
@@ -399,23 +406,66 @@ app.post("/upload-manual", req -> {
 });
 ```
 
+Uploads and downloads stream. Multipart parts over `uploadMemoryThreshold` (default 1MB) spill to a
+temp file instead of the heap, `storage.put(key, file)` sends from that file without materializing
+it, and responses can stream back:
+
+```java
+app.maxUploadSize("500M")                     // accept large media...
+   .uploadMemoryThreshold("256K")             // ...without holding it in heap
+   .uploadTempDir(Path.of("/var/lib/uploads"));
+
+try (var in = file.stream()) { ... }          // repeatable, bounded memory
+file.saveTo(path);                            // a filesystem move for a spilled part
+storage.put("exports/a.csv", path, "text/csv");  // upload a file on disk, streamed
+
+Result.file(path)                             // stream out: Content-Length, Range, typed by extension
+Result.download(path, "report.csv")           // ...as an attachment
+Result.stream(inputStream, "image/png")       // ...from a stream (chunked)
+Result.stream(out -> writeCsv(out), "text/csv");  // ...generated as it is produced
+```
+
+Static files stream too, and answer `Range` requests — so seeking in a served video works rather
+than re-fetching from the start.
+
+An `UploadedFile` is released when its request ends, so save or upload it before the handler
+returns; don't hand it to a background thread.
+
+## Server-Sent Events
+
+```java
+app.get("/ticks", req -> Result.sse(events -> {
+    for (int i = 0; events.isOpen(); i++) {
+        events.send("tick", "n=" + i, String.valueOf(i));   // event, data, id
+        Thread.sleep(1000);
+    }
+}));
+```
+
+Each event is flushed as it is sent. The producer runs after the request transaction commits, so a
+long-lived stream never holds a database connection: use `dbFactory.withSession(...)` inside it. A
+client that disconnects is detected on the next send or heartbeat (every 15s), which ends the
+producer. A reconnecting browser sends the last event id as the `Last-Event-ID` header.
+
 ## Custom Metrics
 
 Counters, gauges, and timers, with no external metrics server. Metrics render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
 
 ```java
-var stats = app.stats();  // pass to controllers and services through their constructors
-
 // Counter — tracks rate (events per minute)
-stats.counter("talks.created");
-stats.counter("bytes.uploaded", file.size());
+Metrics.counter("talks.created");
+Metrics.counter("bytes.uploaded", file.size());
 
 // Gauge — samples a value each minute
-stats.gauge("queue.depth", () -> (long) queue.size());
+Metrics.gauge("queue.depth", () -> (long) queue.size());
 
 // Timer — tracks count, avg, and max duration
-stats.timer("api.external", durationMs);
+Metrics.timer("api.external", durationMs);
 ```
+
+`Metrics` is static, like `Log`: call it from any controller or service. It records into the
+running app's `Stats`; `app.stats()` returns the same instance with the same `counter`/`gauge`/`timer`
+methods, for tests or several apps in one JVM.
 
 ## Cache
 
@@ -541,7 +591,7 @@ app.getRead("/posts", (req, db) -> {
 </div>
 ```
 
-Brace automatically sets `Vary: HX-Request` so caches don't mix full pages with partials.
+Brace automatically adds `HX-Request` to the `Vary` header (appending to any value the handler set) so caches don't mix full pages with partials.
 
 ## Testing
 
@@ -582,13 +632,19 @@ port=8080
 db.url=jdbc:postgresql://localhost:5432/myapp
 db.user=myapp
 db.pass=${DB_PASS}
-session.secret=change-me
+session.secret=${SESSION_SECRET}
 
 %dev.port=9000
 %dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1
 %dev.db.user=
 %dev.db.pass=
 ```
+
+`${VAR}` reads an environment variable. A key that isn't in the file falls back to the
+environment variable named after it (`db.pass` → `DB_PASS`), but a key that is in the file
+always wins, so values that differ per deployment should be `${VAR}` references. `brace new`
+writes a gitignored `application.conf` with a generated `session.secret` for local use, and a
+committed `application.conf.example`, all `${VAR}`, that the scaffolded `Dockerfile` ships.
 
 ## Tech Stack
 

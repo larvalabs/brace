@@ -71,7 +71,8 @@ class ErrorStoreTest {
         errorStore.record("E0", "m2", "GET /r0", "s2", "req");
         errorStore.flush();
 
-        var errors = errorStore.list(null);
+        // since-filtered: an unfiltered list is capped at LIST_LIMIT, below MAX_PENDING_KINDS.
+        var errors = errorStore.list(null, java.time.Instant.EPOCH);
         assertEquals(ErrorStore.MAX_PENDING_KINDS, errors.size(), "overflow kind must not appear");
         for (var e : errors) {
             assertNotEquals("Overflow", e.get("errorType"));
@@ -216,6 +217,23 @@ class ErrorStoreTest {
     }
 
     @Test
+    void resolveReturnsSameShapeAsFind() {
+        // c941ccc: resolve() maps its re-fetch through the shared mapRow, so its result has
+        // exactly find()'s fields — a hand-built copy once drifted and omitted
+        // queriesBefore/requestHeaders. Compare key sets and values, not a few fields.
+        errorStore.record("RuntimeException", "error", "GET /test", "stack", "req",
+            "{\"count\":2}", "{\"Accept\":\"text/html\"}");
+        errorStore.flush();
+        long id = ((Number) errorStore.list(null).get(0).get("id")).longValue();
+
+        var resolved = errorStore.resolve(id);
+        var found = errorStore.find(id);
+        assertNotNull(resolved);
+        assertEquals(List.copyOf(found.keySet()), List.copyOf(resolved.keySet()));
+        assertEquals(found, resolved);
+    }
+
+    @Test
     void pruningRemovesOldestResolvedFirst() {
         var smallStore = new ErrorStore(dbFactory, 3);
 
@@ -286,6 +304,31 @@ class ErrorStoreTest {
         var recent = store.list(null, cutoff);
         assertEquals(1, recent.size());
         assertEquals("NewError", recent.get(0).get("errorType"));
+    }
+
+    @Test
+    void unfilteredListIsCappedAtListLimitNewestFirst() {
+        // Token-efficiency R7: an unfiltered list carries every heavy column, so it is capped at
+        // LIST_LIMIT, newest first. A since-filtered list is a window the caller chose and is
+        // returned in full. Seeded via SQL since record() coalesces per flush.
+        var base = java.time.Instant.parse("2026-01-01T00:00:00Z");
+        int total = ErrorStore.LIST_LIMIT + 1;
+        var db = new Database(dbFactory.openSession());
+        db.beginTransaction();
+        for (int i = 0; i < total; i++) {
+            var ts = java.sql.Timestamp.from(base.plusSeconds(i));
+            db.sql("INSERT INTO ops_errors (error_type, message, stack_trace, route, request_detail, first_seen, last_seen, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "E" + i, "m", "s", "GET /r" + i, "req", ts, ts, 1);
+        }
+        db.commitTransaction();
+        db.close();
+
+        var capped = errorStore.list(null);
+        assertEquals(ErrorStore.LIST_LIMIT, capped.size());
+        assertEquals("E" + (total - 1), capped.get(0).get("errorType"), "newest first");
+        assertTrue(capped.stream().noneMatch(e -> "E0".equals(e.get("errorType"))), "oldest row is the one cut");
+
+        assertEquals(total, errorStore.list(null, base).size(), "since-filtered list is not capped");
     }
 
     // --- Integration tests for ops endpoints ---

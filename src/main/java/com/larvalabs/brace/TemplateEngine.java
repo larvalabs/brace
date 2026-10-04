@@ -36,9 +36,27 @@ public class TemplateEngine {
                 // launch): compile everything now, at startup, so no request pays the
                 // first-render compile cost. Throws on a broken template — in prod a
                 // deploy-time failure beats a 500 on first hit.
+                requireCompiler(javax.tools.ToolProvider.getSystemJavaCompiler() != null,
+                        templatePath, precompiledDir);
                 this.engine.precompileAll();
             }
         }
+    }
+
+    /**
+     * On a JRE (no javac) the eager compile can't run, and JTE's own failure doesn't say why
+     * or what to do. Fail at startup with the fix instead: the usual cause is a container
+     * image built without the precompile step.
+     */
+    static void requireCompiler(boolean compilerAvailable, String templatePath, Path precompiledDir) {
+        if (compilerAvailable) return;
+        throw new IllegalStateException("No precompiled templates for '" + templatePath + "' in "
+            + precompiledDir + ", and this Java runtime has no compiler to build them (a JRE). "
+            + "Run `brace compile` (or `mvn package` in a project scaffolded by `brace new`) before "
+            + "building the image, and copy target/jte-classes to target/jte-classes under the "
+            + "image's working directory. "
+            + "Alternatively run on a JDK image, or point -Dbrace.templates.precompiled at your "
+            + "precompiled output.");
     }
 
     private static Path precompiledDir() {

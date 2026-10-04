@@ -3,10 +3,8 @@ package com.larvalabs.brace;
 import jdk.jfr.consumer.RecordingStream;
 import java.lang.management.ManagementFactory;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -18,10 +16,7 @@ public class JfrProfiler implements AutoCloseable {
     private volatile long heapCommitted;
 
     // GC tracking
-    private final LongAdder gcCount = new LongAdder();
-    private final LongAdder totalGcPauseNanos = new LongAdder();
-    private final GcPause[] recentPauses = new GcPause[100];
-    private final AtomicInteger pauseIndex = new AtomicInteger(0);
+    private final GcStats gcStats = new GcStats();
 
     // Profiling (rolling window)
     private final AtomicReference<ConcurrentHashMap<String, LongAdder>> methodSamples = new AtomicReference<>(new ConcurrentHashMap<>());
@@ -48,22 +43,17 @@ public class JfrProfiler implements AutoCloseable {
             peakThreads = event.getLong("peakCount");
         });
 
-        // GC events
+        // GC events — the duration spans the whole collection, which for concurrent
+        // cycles (G1Old, ZGC, Shenandoah) is mostly not a pause; see GcStats.
         rs.enable("jdk.GarbageCollection");
-        rs.onEvent("jdk.GarbageCollection", event -> {
-            gcCount.increment();
-            long durationNanos = event.getDuration().toNanos();
-            totalGcPauseNanos.add(durationNanos);
-            var pause = new GcPause(
-                event.getStartTime(),
-                durationNanos / 1_000_000.0,
-                event.getString("name"),
-                event.getString("cause")
-            );
-            // Safe without synchronization: RecordingStream callbacks are single-threaded
-            int idx = pauseIndex.getAndUpdate(i -> (i + 1) % recentPauses.length);
-            recentPauses[idx] = pause;
-        });
+        rs.onEvent("jdk.GarbageCollection", event -> gcStats.record(
+            event.getStartTime(),
+            event.getString("name"),
+            event.getString("cause"),
+            event.getDuration().toNanos(),
+            event.getDuration("sumOfPauses").toNanos(),
+            event.getDuration("longestPause").toNanos()
+        ));
 
         // Heap summary after GC
         rs.enable("jdk.GCHeapSummary");
@@ -90,7 +80,10 @@ public class JfrProfiler implements AutoCloseable {
             allocationByClass.get().computeIfAbsent(className, k -> new LongAdder()).add(weight);
         });
 
-        rs.startAsync();
+        // Not rs.startAsync(): its "JFR Event Stream" thread is non-daemon and kept the JVM alive
+        // when Brace.start() failed after this point. A daemon thread running the blocking
+        // start() dispatches the same events and never holds the process open; close() ends it.
+        Thread.ofPlatform().daemon().name("brace-jfr-stream").start(rs::start);
     }
 
     public Map<String, Object> snapshot() {
@@ -129,28 +122,7 @@ public class JfrProfiler implements AutoCloseable {
         data.put("threads", threads);
 
         // GC
-        var gc = new LinkedHashMap<String, Object>();
-        long count = gcCount.sum();
-        long totalMs = totalGcPauseNanos.sum() / 1_000_000;
-        gc.put("totalCount", count);
-        gc.put("totalPauseMs", totalMs);
-        gc.put("avgPauseMs", count > 0 ? round((double) totalMs / count) : 0.0);
-        var pauses = new ArrayList<Map<String, Object>>();
-        var allPauses = new ArrayList<GcPause>();
-        for (var p : recentPauses) {
-            if (p != null) allPauses.add(p);
-        }
-        allPauses.sort((a, b) -> b.ts().compareTo(a.ts()));
-        for (var p : allPauses.stream().limit(20).toList()) {
-            var pm = new LinkedHashMap<String, Object>();
-            pm.put("ts", p.ts().toString());
-            pm.put("durationMs", round(p.durationMs()));
-            pm.put("collector", p.collector());
-            pm.put("cause", p.cause());
-            pauses.add(pm);
-        }
-        gc.put("recentPauses", pauses);
-        data.put("gc", gc);
+        data.put("gc", gcStats.snapshot());
 
         // Profiling
         if (includeProfiling) {
@@ -183,16 +155,13 @@ public class JfrProfiler implements AutoCloseable {
         allocationByClass.set(new ConcurrentHashMap<>());
     }
 
-    public long gcCount() { return gcCount.sum(); }
-    public long totalGcPauseMs() { return totalGcPauseNanos.sum() / 1_000_000; }
+    public long gcCount() { return gcStats.count(); }
 
-    public long maxRecentGcPauseMs() {
-        long max = 0;
-        for (var p : recentPauses) {
-            if (p != null) max = Math.max(max, (long) Math.ceil(p.durationMs()));
-        }
-        return max;
-    }
+    /** Total stop-the-world GC time (sum of pauses, not collection wall-clock time). */
+    public long totalGcPauseMs() { return gcStats.totalPauseMs(); }
+
+    /** Longest single stop-the-world GC pause among the last 100 collections. */
+    public long maxRecentGcPauseMs() { return (long) Math.ceil(gcStats.maxRecentPauseMs()); }
 
     @Override
     public void close() {
@@ -224,10 +193,4 @@ public class JfrProfiler implements AutoCloseable {
                 return m;
             }).toList();
     }
-
-    private static double round(double v) {
-        return Math.round(v * 100.0) / 100.0;
-    }
-
-    public record GcPause(Instant ts, double durationMs, String collector, String cause) {}
 }

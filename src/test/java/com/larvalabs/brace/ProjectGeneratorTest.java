@@ -88,10 +88,36 @@ class ProjectGeneratorTest {
         assertTrue(Files.exists(examplePath), "application.conf.example should be created");
 
         var content = Files.readString(examplePath);
-        assertTrue(content.contains("CHANGE-ME-to-a-random-string-at-least-32-chars"),
-            "application.conf.example should contain the placeholder");
-        assertTrue(content.contains("SESSION_SECRET"),
-            "application.conf.example should document env var usage");
+        // The Dockerfile ships this file as the container's config. A literal key beats the
+        // env var of the same name, so the secrets must be ${VAR} references, not placeholders.
+        assertTrue(content.contains("\nsession.secret=${SESSION_SECRET}\n"),
+            "session.secret must come from the environment, got:\n" + content);
+        assertTrue(content.contains("\ndb.url=${DATABASE_URL}\n"),
+            "db.url must come from the environment, got:\n" + content);
+        assertTrue(content.contains("\ndb.pass=${DB_PASS}\n"),
+            "db.pass must come from the environment, got:\n" + content);
+        assertFalse(content.toLowerCase().contains("change-me"),
+            "no placeholder secret: it would boot with only a warning");
+    }
+
+    @Test
+    void containerConfigFailsClosedWithoutSessionSecret(@TempDir Path tempDir) throws Exception {
+        Assumptions.assumeTrue(System.getenv("SESSION_SECRET") == null,
+            "SESSION_SECRET is set in this environment");
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        // What the container sees: the Dockerfile copies the example to application.conf and
+        // runs in prod mode.
+        var config = Config.load(projDir.resolve("application.conf.example"), "prod");
+        assertNull(config.get("session.secret"));
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> Brace.app().sessions(config.get("session.secret")));
+        assertTrue(e.getMessage().contains("session secret"), e.getMessage());
+
+        var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
+        assertTrue(dockerfile.contains("COPY application.conf.example application.conf"),
+            "this test models the Dockerfile's config; update it if that changes");
     }
 
     @Test
@@ -110,15 +136,6 @@ class ProjectGeneratorTest {
             }
         }
         assertTrue(found, "application.conf must be in .gitignore");
-    }
-
-    @Test
-    void placeholderTriggersWeakSecretWarning() {
-        var app = Brace.app();
-        var oldPlaceholder = "CHANGE-ME-to-a-random-string-at-least-32-chars";
-
-        // Should not throw, but logs a warning
-        assertDoesNotThrow(() -> app.sessions(oldPlaceholder));
     }
 
     @Test
@@ -258,6 +275,62 @@ class ProjectGeneratorTest {
         var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
         assertTrue(dockerfile.contains("COPY target/app.jar app.jar"),
             "Dockerfile must copy the shaded jar by its fixed name");
+    }
+
+    @Test
+    void dockerfileRunsPrecompiledTemplatesInProdOnAJre(@TempDir Path tempDir) throws Exception {
+        // This setup (213ac8c) was once lost in a merge and the scaffold silently went back to
+        // a JRE that couldn't render templates; these assertions keep it from reverting again.
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
+        assertTrue(dockerfile.contains("FROM eclipse-temurin:25-jre"),
+            "Dockerfile must use a JDK 25 JRE image, got:\n" + dockerfile);
+        // A JRE has no javac, so templates must arrive precompiled and prod mode must load them.
+        assertTrue(dockerfile.contains("COPY target/jte-classes/ target/jte-classes/"),
+            "Dockerfile must ship the precompiled templates, got:\n" + dockerfile);
+        assertTrue(dockerfile.contains("`brace compile`"),
+            "Dockerfile must say how to produce target/jte-classes");
+        // Exec form through sh -c: $JAVA_OPTS expands and exec makes java PID 1, so
+        // SIGTERM reaches the JVM and Brace's shutdown hook runs.
+        assertTrue(dockerfile.contains(
+                "ENTRYPOINT [\"sh\", \"-c\", \"exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar\"]"),
+            "entrypoint must exec java in prod mode with $JAVA_OPTS, got:\n" + dockerfile);
+        assertTrue(dockerfile.contains("ENV JAVA_OPTS=\"-XX:MaxRAMPercentage=50\""),
+            "Dockerfile must default to a heap cap relative to the container limit");
+        assertTrue(dockerfile.contains("-XX:+UseCompactObjectHeaders"),
+            "Dockerfile should point at compact object headers for JDK 25");
+        // App.java calls .ops("ops-authorized-keys"), which fails startup if the file is missing.
+        assertTrue(dockerfile.contains("COPY ops-authorized-keys ops-authorized-keys"),
+            "Dockerfile must ship the ops authorized-keys file the scaffold's main() loads");
+        assertFalse(dockerfile.contains("private.key"), "the ops private key must never be copied");
+
+        // mvn package is the Dockerfile's one build step, so it must write target/jte-classes,
+        // from views/ (relative, matching TemplateEngine's marker check in the container).
+        var pom = Files.readString(projDir.resolve("pom.xml"));
+        assertTrue(pom.contains("<artifactId>exec-maven-plugin</artifactId>"), pom);
+        assertTrue(pom.contains("<argument>com.larvalabs.brace.TemplatePrecompiler</argument>"
+                + "\n                                <argument>views</argument>"
+                + "\n                                <argument>target/jte-classes</argument>"),
+            "mvn package must precompile views/ into target/jte-classes");
+    }
+
+    @Test
+    void pathArgumentUsesDirectoryNameInGeneratedFiles(@TempDir Path tempDir) throws Exception {
+        // `brace new ~/code/myapp` passes a path; only its last component names the project.
+        var projDir = tempDir.resolve("nested").resolve("myapp");
+        ProjectGenerator.generate(projDir.toString());
+
+        var pom = Files.readString(projDir.resolve("pom.xml"));
+        assertTrue(pom.contains("<artifactId>myapp</artifactId>"), "artifactId must be the directory name");
+        var conf = Files.readString(projDir.resolve("application.conf"));
+        assertTrue(conf.contains("db.url=jdbc:postgresql://localhost:5432/myapp\n"), conf);
+        assertTrue(Files.readString(projDir.resolve("CLAUDE.md")).startsWith("# myapp\n"));
+        for (var file : new String[]{"pom.xml", "application.conf", "application.conf.example", "CLAUDE.md"}) {
+            assertFalse(Files.readString(projDir.resolve(file)).contains(tempDir.toString()),
+                file + " must not contain the parent path");
+        }
     }
 
     @Test

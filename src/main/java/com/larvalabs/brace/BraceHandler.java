@@ -43,8 +43,44 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
     private final boolean devMode;
+    /**
+     * Multipart parts above this spill to a temp file instead of the heap. Mutable for the same
+     * reason {@code devMode} is a property read: eight telescoping public constructors is already
+     * one too many to widen. {@link Brace} sets both before the server starts.
+     */
+    private long uploadMemoryThreshold = DEFAULT_UPLOAD_MEMORY_THRESHOLD;
+    private Path uploadTempDir = DEFAULT_UPLOAD_TEMP_DIR;
+    /**
+     * Plain (non-multipart) bodies actually read off the wire. Visible for tests: H2 asserts a
+     * request that declares no body never reaches the read or its buffer allocation.
+     */
+    final java.util.concurrent.atomic.LongAdder plainBodyReads = new java.util.concurrent.atomic.LongAdder();
+    /**
+     * Session cookies resolved (decrypted, when the request carries one) by {@link #buildSession}.
+     * Visible for tests: H5 asserts at most one per request, and none on a route that never
+     * touches the session.
+     */
+    final java.util.concurrent.atomic.LongAdder sessionDecrypts = new java.util.concurrent.atomic.LongAdder();
 
     static final long DEFAULT_MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
+
+    /**
+     * Default spill threshold. Chosen well below {@link #DEFAULT_MAX_UPLOAD_SIZE} so the default
+     * configuration cannot pin 10 MB of heap per in-flight upload, and well above the size of the
+     * uploads most apps actually take (avatars, CSVs, attachments), which stay in memory and never
+     * touch the disk.
+     */
+    static final long DEFAULT_UPLOAD_MEMORY_THRESHOLD = 1024 * 1024; // 1MB
+
+    static final Path DEFAULT_UPLOAD_TEMP_DIR =
+        Path.of(System.getProperty("java.io.tmpdir"), "brace-uploads");
+
+    /** Set by {@link Brace} before start; see {@link #uploadMemoryThreshold}. */
+    void setUploadSpill(Path tempDir, long memoryThreshold) {
+        this.uploadTempDir = tempDir;
+        this.uploadMemoryThreshold = memoryThreshold;
+        prepareUploadTempDir(tempDir);
+    }
 
     record StaticFileMapping(String urlPrefix, String directory) {}
 
@@ -142,6 +178,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.maxUploadSize = maxUploadSize;
         this.storage = storage;
         this.trustedProxies = trustedProxies;
+        // Eagerly, not lazily on first upload: the directory's permissions have to be right before
+        // any request can arrive, and a lazy guard would race two concurrent first-uploads into
+        // letting Jetty create the directory itself under the ambient umask.
+        prepareUploadTempDir(uploadTempDir);
         byte[] htmxBytes = null;
         try {
             var stream = BraceHandler.class.getResourceAsStream("/brace/htmx.min.js");
@@ -163,12 +203,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     public boolean handle(org.eclipse.jetty.server.Request jettyRequest,
                           Response response,
                           Callback callback) throws Exception {
-        var startNanos = System.nanoTime();
-        Database db = null;
+        // Everything the response choke point needs to finish a request, gathered before the
+        // try so the catch paths see it too (H2). Neither getMethod nor getPath throws, so this
+        // is safe to build eagerly.
+        var exchange = new Exchange(System.nanoTime(), jettyRequest.getMethod(),
+            jettyRequest.getHttpURI().getPath());
         // Hoisted above the try so the catch paths (thrown 404, 500) can persist session
         // mutations too — see the response choke point (respond / respondToError) below.
         Session session = null;
-        Session csrfOnlySession = null;
+        LazySession csrfOnlySession = null;
         // Hoisted with session/csrfOnlySession so the catch paths (thrown 404, 500) resolve the
         // same Secure attribute the try-path would have. Recomputed inside the try once headers
         // are parsed; the conservative default holds if we fail before that.
@@ -178,8 +221,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // matched, which is before any response can be written.
         Request braceRequest = null;
         try {
-            String method = jettyRequest.getMethod();
-            String path = jettyRequest.getHttpURI().getPath();
+            String method = exchange.method;
+            String path = exchange.path;
 
             // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
             String rawQuery = jettyRequest.getHttpURI().getQuery();
@@ -203,6 +246,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
             // body from being fully parsed into memory before the 404.)
             RouteMatch match = router.match(method, path);
+            // The choke point keys stats on the matched ROUTE PATTERN, not the concrete URL (H1).
+            exchange.match = match;
+
+            // L1: the router serves "/users/" from the "/users" route (no compiled pattern ends in
+            // a slash, so a match on such a path is always that fallback). From here on the request
+            // IS its canonical path, so before/after middleware patterns and req.path() checks in
+            // guards see the path the router matched. Without this, "/admin/" would reach the
+            // "/admin" handler while skipping a guard registered for exactly "/admin".
+            if (match != null && path.length() > 1 && path.endsWith("/")) {
+                path = Router.stripTrailingSlashes(path);
+            }
 
             // M2: the body is *supplied* here, not read. Buffering it before the before-middleware
             // loops put the cost ahead of the layer that exists to shed it — a rate limiter or auth
@@ -230,7 +284,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             for (var before : beforeMiddleware) {
                 Result earlyResult = before.apply(braceRequest);
                 if (earlyResult != null) {
-                    respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                     return true;
                 }
             }
@@ -251,7 +305,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                         // A short-circuiting guard may have mutated the session (e.g. a
                         // flash message before redirecting to login) — persisted by the
                         // write-back choke point.
-                        respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure);
+                        respond(braceRequest, earlyResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                         return true;
                     }
                 }
@@ -264,11 +318,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (match == null) {
                 Result staticResult = serveStaticFile(braceRequest);
                 if (staticResult != null) {
-                    respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure);
+                    exchange.noMatchKey = STATIC_ROUTE_KEY;
+                    respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                     return true;
                 }
                 Result notFoundResult = noRouteFound(method, path);
-                respond(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure);
+                respond(braceRequest, notFoundResult, response, callback, session, csrfOnlySession, cookieSecure, exchange);
                 return true;
             }
 
@@ -295,19 +350,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 session = buildSession(headers);
             }
 
+            // M5c: when the handler doesn't take a Session, a local csrfOnlySession holds the
+            // CSRF token and the flash it renders. H5: it is decrypted on first use, and the CSRF
+            // check, the token mint and the flash source below all share that one decrypt. A
+            // mutating request used to decrypt the cookie twice (check, then token setup), and
+            // every matched route decrypted it at least once — including .csrf(false) API routes
+            // that never look at the session. It must never shadow a real handler session: it
+            // exists only when session == null.
+            if (sessionSecret != null && session == null) {
+                csrfOnlySession = new LazySession(headers);
+            }
+
             // CSRF validation for routes that require it when sessions are enabled.
             // M5a: PATCH is mutating — added alongside POST/PUT/DELETE.
             if (sessionSecret != null && match.route().csrfRequired()) {
                 boolean isMutating = method.equals("POST") || method.equals("PUT")
                     || method.equals("DELETE") || method.equals("PATCH");
                 if (isMutating) {
-                    // Ensure a session object exists for CSRF check even if handler doesn't use sessions
-                    Session csrfSession = session;
-                    if (csrfSession == null) {
-                        String cookieHeader = headers.get("Cookie");
-                        String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                        csrfSession = Session.fromCookie(sessionCookie, sessionSecret);
-                    }
+                    Session csrfSession = session != null ? session : csrfOnlySession.get();
                     // One body parser: _csrf extraction sees the same decoded, last-wins
                     // view of the form body as FormBinder (it used to be a third divergent
                     // pair parser — raw-key compare, first-match-wins, swallowed decode
@@ -322,24 +382,18 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     if (!Csrf.validateToken(csrfSession, submittedToken)) {
                         // Choke point persists guard mutations on the 403 too.
                         respond(braceRequest, Result.json(java.util.Map.of("error", "csrf_required"), 403),
-                            response, callback, session, csrfOnlySession, cookieSecure);
+                            response, callback, session, csrfOnlySession, cookieSecure, exchange);
                         return true;
                     }
                 }
             }
 
-            // Ensure a CSRF token exists in session and expose it to templates.
-            // M5c: when the handler doesn't take a Session, build a local csrfOnlySession to
-            // hold the token. The choke point persists it whenever it ends up modified —
-            // a freshly minted token (otherwise the rendered token is orphaned and every
-            // subsequent POST 403s) or a render-time flash consumption. It must never
-            // shadow a real handler session: it is built only when session == null.
+            // Expose the CSRF token to templates. The choke point persists the session holding it
+            // whenever it ends up modified — a freshly minted token (otherwise the rendered token
+            // is orphaned and every subsequent POST 403s) or a render-time flash consumption.
+            final Session handlerSession = session;
+            final LazySession lazySession = csrfOnlySession;
             if (sessionSecret != null) {
-                if (session == null) {
-                    String cookieHeader = headers.get("Cookie");
-                    String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-                    csrfOnlySession = Session.fromCookie(sessionCookie, sessionSecret);
-                }
                 // Lazy token mint (H5): ensureToken used to run eagerly here on every matched
                 // request, minting a token — and forcing a Set-Cookie below — even for responses
                 // that never render a form (JSON, redirects). The supplier mints and builds the
@@ -347,8 +401,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 // template, or a handler calling View.getCsrfField(). ensureToken is idempotent, and
                 // the consumption marks the session modified so the write-back choke point persists
                 // it (the M5c invariant — otherwise the rendered token is orphaned and POSTs 403).
-                final Session tokenSession = session != null ? session : csrfOnlySession;
                 View.setCsrfField(() -> {
+                    Session tokenSession = handlerSession != null ? handlerSession : lazySession.get();
                     Csrf.ensureToken(tokenSession);
                     return Csrf.hiddenField(tokenSession);
                 });
@@ -356,12 +410,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Flash is consumed lazily at View render time, whatever the handler's
             // signature — a redirect-after-POST landing on a DbHandler or plain-Handler
-            // page renders flash too. The source consumes only cookie-borne entries
-            // (an in-flight guard flash stays pending for the next request) and marks
-            // the session modified, which the write-back choke point picks up.
-            Session flashSession = session != null ? session : csrfOnlySession;
-            if (flashSession != null) {
+            // page renders flash too, and so does a .csrf(false) route (R1), which is why the
+            // csrfOnlySession exists on those routes at all. The source consumes only
+            // cookie-borne entries (an in-flight guard flash stays pending for the next
+            // request) and marks the session modified, which the write-back choke point picks up.
+            if (handlerSession != null || lazySession != null) {
                 View.setFlashSource(() -> {
+                    Session flashSession = handlerSession != null ? handlerSession : lazySession.get();
                     flashSession.consumeFlash();
                     return flashSession.flashData();
                 });
@@ -371,7 +426,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Result result;
             try {
                 if (invoker.needsDatabase() && databaseFactory != null) {
-                    db = new Database(databaseFactory.openSession());
+                    var db = new Database(databaseFactory.openSession());
+                    exchange.db = db;
                     try {
                         if (invoker.needsReadOnlyDatabase()) {
                             result = invoker.invoke(braceRequest, db, session);
@@ -402,26 +458,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // discard the cookie (M6).
             //
             // One precedence nuance did change: the htmx Vary below used to be written *after* the
-            // middleware chain and therefore won; it is now written before, so an after-middleware
-            // that sets Vary overwrites it. Vary lives in the single-value header map and cannot be
-            // combined either way, so neither order is right for an app that sets its own Vary —
-            // such an app should append "HX-Request" itself.
+            // middleware chain and therefore won; it is now written before. It is appended to the
+            // handler's own Vary (M3 below), but an after-middleware that *sets* Vary still replaces
+            // the whole value, so such a middleware should append to result.header("Vary") instead.
 
-            // Add Vary header for htmx requests (caching correctness)
+            // Add Vary header for htmx requests (caching correctness). M3: APPEND — Vary is a
+            // list header, and overwriting it dropped whatever dimension the handler or an
+            // after-middleware declared (Accept-Encoding, Accept-Language), leaving a shared
+            // cache varying on the wrong axis and serving the wrong variant.
             if ("true".equals(braceRequest.header("HX-Request"))) {
-                result.header("Vary", "HX-Request");
+                result.header("Vary", appendVary(result.header("Vary")));
             }
 
             // Session cookies (handler session + M5c CSRF-only session) are attached to the
             // surviving Result by the write-back choke point.
-            respond(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure);
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
-            if (stats != null) {
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(method, path, result.status(), durationUs, qc, qu);
-                Log.request(method, path, result.status(), durationUs, qc, qu);
-            }
+            //
+            // The choke point records an event stream when it opens and every other response
+            // once it is written; see send().
+            respond(braceRequest, result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
 
         } catch (PayloadTooLargeException e) {
@@ -433,23 +487,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // regression notifier just by POSTing oversized bodies. Deliberately records no error:
             // an over-limit body is a client mistake, not an application fault.
             respondToError(braceRequest, Result.error(413, "Payload Too Large"),
-                response, callback, session, csrfOnlySession, cookieSecure);
+                response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
         } catch (NotFoundException e) {
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
-            respondToError(braceRequest, Result.notFound(), response, callback, session, csrfOnlySession, cookieSecure);
-            if (stats != null) {
-                String errorMethod = jettyRequest.getMethod();
-                String errorPath = jettyRequest.getHttpURI().getPath();
-                // db may be null (no route matched) or closed (query stats still readable)
-                int qc = db != null ? db.queryCount() : 0;
-                long qu = db != null ? db.queryDurationUs() : 0;
-                stats.recordRequest(errorMethod, errorPath, 404, durationUs, qc, qu);
-                Log.request(errorMethod, errorPath, 404, durationUs, qc, qu);
-            }
+            respondToError(braceRequest, Result.notFound(), response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
         } catch (Exception e) {
-            var durationUs = (System.nanoTime() - startNanos) / 1000;
             String errorMethod = jettyRequest.getMethod();
             String errorPath = jettyRequest.getHttpURI().getPath();
             String errorQuery = jettyRequest.getHttpURI().getQuery();
@@ -461,13 +504,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // is stored in the error record and served over /ops/errors.
             String requestInfo = errorMethod + " " + redactedPath
                 + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
-            int qc = db != null ? db.queryCount() : 0;
-            long qu = db != null ? db.queryDurationUs() : 0;
+            int qc = exchange.db != null ? exchange.db.queryCount() : 0;
+            long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
             if (stats != null) {
-                stats.recordRequest(errorMethod, errorPath, 500, durationUs, qc, qu);
                 stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
                     routeInfo, stackTraceToString(e), requestInfo, "");
                 Log.error(errorMethod, errorPath, e);
+                // http.error already carries this request, with the exception and app frame.
+                // Suppress the choke point's http.request line so a 500 stays one log entry;
+                // the stats side still records (that is the whole point of H2).
+                exchange.logged = true;
             }
             if (errorStore != null) {
                 String errorType = e.getClass().getSimpleName();
@@ -488,14 +534,128 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.
             respondToError(braceRequest, Result.error(500, "Internal Server Error"),
-                response, callback, session, csrfOnlySession, cookieSecure);
+                response, callback, session, csrfOnlySession, cookieSecure, exchange);
             return true;
+        } finally {
+            // Every exit from handle() releases the temp files this request's uploads spilled to —
+            // including the ones that never reached a handler (413, CSRF 403, thrown 404/500) and
+            // the ones that threw halfway through. A missed path here is not a leak of one file,
+            // it is an unbounded disk fill that any client can drive.
+            //
+            // A streaming response is the one case this must NOT do: its bytes are still being
+            // written when handle() returns, so send() takes ownership of the cleanup and the
+            // call below finds nothing left to release.
+            if (braceRequest != null) braceRequest.releaseUploads();
+        }
+    }
+
+    /**
+     * Stats key for a request: the matched route's PATTERN, or {@link #UNMATCHED_ROUTE_KEY} when
+     * nothing matched (H1).
+     *
+     * <p>The concrete URL must never become a stats key. {@code Stats.routes} is a cumulative map
+     * that is never reset, so keying it by path leaks one entry — plus two {@code LongAdder}s — per
+     * distinct URL ever requested, for the life of the process. With ids in the path that is
+     * unbounded in the app's own data; on the unmatched path it is unbounded in whatever an
+     * attacker types, since every {@code /<random>} 404 would mint a permanent key. Patterns are
+     * code-site literals, so the map stays bounded by the route table.
+     *
+     * <p>This is also why patterns skip the {@code Redactor.redactPath} pass that
+     * {@code Stats.recordRequest} applies to raw paths: a pattern carries no user data, and
+     * redacting it would rewrite {@code /reset/{token}} into a key that no longer matches what the
+     * route table shows.
+     */
+    private static String routeKey(RouteMatch match) {
+        return match != null ? match.route().pattern() : UNMATCHED_ROUTE_KEY;
+    }
+
+    /** Stats bucket for requests that matched no route — see {@link #routeKey}. */
+    static final String UNMATCHED_ROUTE_KEY = Stats.UNMATCHED_ROUTE;
+
+    /**
+     * Stats bucket for requests served from a {@code staticFiles} mapping (or the bundled htmx
+     * asset). Separate from {@link #UNMATCHED_ROUTE_KEY} so asset traffic doesn't inflate the
+     * 404 bucket, and constant for the same reason patterns are: the URL is client-supplied, so
+     * one key per requested filename would be unbounded on the miss path.
+     */
+    static final String STATIC_ROUTE_KEY = Stats.STATIC_ROUTE;
+
+    /**
+     * Per-request state the response choke point needs to finish a request (H2): when it
+     * started, what was asked for, which route answered, and how much database work it did.
+     * Built once per request in {@link #handle} before the try, so the catch paths share it.
+     */
+    private static final class Exchange {
+        final long startNanos;
+        final String method;
+        final String path;
+        RouteMatch match;
+        Database db;
+        /** Stats bucket when no route matched — {@link #STATIC_ROUTE_KEY} for a served file. */
+        String noMatchKey = UNMATCHED_ROUTE_KEY;
+        /** Set once the response is recorded, so a second choke-point pass cannot double-count. */
+        boolean recorded;
+        /** Set when this request was already logged another way (the 500 path's http.error). */
+        boolean logged;
+
+        Exchange(long startNanos, String method, String path) {
+            this.startNanos = startNanos;
+            this.method = method;
+            this.path = path;
+        }
+    }
+
+    /**
+     * The M5c csrfOnlySession, decrypted from the cookie on first {@link #get} (H5). The CSRF
+     * check, the token mint and the flash source share the one instance, so a request decrypts
+     * the cookie at most once, and not at all when none of them runs. Request-scoped and used
+     * from the request thread only.
+     */
+    private final class LazySession {
+        private final Map<String, String> headers;
+        private Session session;
+
+        LazySession(Map<String, String> headers) {
+            this.headers = headers;
+        }
+
+        Session get() {
+            if (session == null) session = buildSession(headers);
+            return session;
+        }
+
+        /** The session if something resolved it, else null: an unread session has nothing to persist. */
+        Session peek() {
+            return session;
+        }
+    }
+
+    /**
+     * Record one finished request into {@link Stats} and the structured log.
+     *
+     * <p>Stats are keyed by route pattern ({@link #routeKey}); the log deliberately keeps the
+     * CONCRETE (redacted) path. They serve different purposes: the routes table is a bounded
+     * per-route latency aggregate, while the log is an unbounded stream where the actual URL is
+     * the entire diagnostic value — knowing that {@code GET /users/{id}} 404'd is useless without
+     * knowing which id.
+     */
+    private void recordAndLog(Exchange exchange, int status) {
+        if (stats == null || exchange.recorded) return;
+        exchange.recorded = true;
+        long durationUs = (System.nanoTime() - exchange.startNanos) / 1000;
+        // db may be null (no route matched) or closed (query stats still readable)
+        int qc = exchange.db != null ? exchange.db.queryCount() : 0;
+        long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
+        String key = exchange.match != null ? routeKey(exchange.match) : exchange.noMatchKey;
+        stats.recordRequestPattern(exchange.method, key, status, durationUs, qc, qu);
+        if (!exchange.logged) {
+            Log.request(exchange.method, exchange.path, status, durationUs, qc, qu);
         }
     }
 
     /*
      * Response choke point. Every response leaving handle() goes through exactly one of
-     * respond() or respondToError(), and both end in send(). Between them they guarantee two
+     * respond() or respondToError(), and both end in send(). Between them they guarantee three
      * things on every exit path — early short-circuits, static files, 404s, CSRF 403s, 413s and
      * 500s included:
      *
@@ -504,6 +664,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      *     exactly the responses that most need them. It runs before the session cookie is
      *     attached, so a middleware returning a brand-new Result cannot discard the cookie (M6).
      *   - a session mutated by a guard or handler is persisted (see send()).
+     *   - the request is recorded in Stats and the request log (H2, see send()).
      *
      * The two entry points differ only in what a throwing after-middleware does.
      */
@@ -513,11 +674,73 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * to {@link #handle}'s catch blocks and becomes a 500 like any other application fault.
      */
     private void respond(Request req, Result result, Response response, Callback callback,
-                         Session session, Session csrfOnlySession, boolean cookieSecure) {
+                         Session session, LazySession csrfOnlySession, boolean cookieSecure,
+                         Exchange exchange) {
+        // Narrow to the requested byte range before the after-middleware chain, so the 206 or 416
+        // that actually goes out is the response security headers and the like are applied to.
+        if (result instanceof StreamResult streamResult) {
+            result = applyRange(req, streamResult);
+        }
         for (var after : afterMiddleware) {
             result = after.apply(req, result);
         }
-        send(result, response, callback, session, csrfOnlySession, cookieSecure);
+        // M12: render a deferred View body now — after the handler's transaction committed and its
+        // connection was released (a slow render no longer holds one), and before send() puts the
+        // status and headers on the Jetty response. Left to the lazy rawBytes() read inside
+        // writeToWire, a template that throws fails after the handler's headers and cookies are
+        // already on the response, so the 500 carries them and the request is recorded as a 200.
+        // Thrown from here, it reaches handle()'s 500 path like any handler fault and is recorded
+        // once. After the middleware chain, so a Result it substitutes is rendered too; a no-op for
+        // plain Results. Streamed bodies and event streams stay lazy by design.
+        if (!result.isStreaming()) {
+            result.materialize();
+        }
+        send(req, result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
+    }
+
+    /**
+     * Narrows a streaming response to the client's requested byte range, or leaves it whole.
+     *
+     * <p>Only file-backed streams can be ranged — seeking is the whole mechanism, and a one-shot
+     * InputStream or a generated writer cannot be seeked. Those keep serving 200s regardless of
+     * what the client asks for, which is why {@code Accept-Ranges} is only set by
+     * {@link Result#file}.
+     */
+    private Result applyRange(Request req, StreamResult result) {
+        if (result.status() != 200) return result;
+        if (!(result.streamBody() instanceof StreamResult.FileBody file)) return result;
+        String header = req.header("Range");
+        if (header == null) return result;
+        // If-Range: only honour the range when the client's copy still matches, otherwise it would
+        // splice new bytes into a stale download.
+        String ifRange = req.header("If-Range");
+        if (ifRange != null) {
+            String etag = result.header("ETag");
+            if (etag == null || !stripWeakPrefix(ifRange.strip()).equals(stripWeakPrefix(etag))) {
+                return result;
+            }
+        }
+
+        long total = file.length() >= 0 ? file.length() : result.totalLength();
+        ByteRange range = ByteRange.parse(header, total);
+        if (range == ByteRange.UNSUPPORTED) return result;
+        if (range == ByteRange.UNSATISFIABLE) {
+            return Result.error(416, "Range Not Satisfiable")
+                .header("Content-Range", "bytes */" + total)
+                .header("Accept-Ranges", "bytes");
+        }
+
+        var ranged = new StreamResult(206, result.contentType(),
+            new StreamResult.FileBody(file.path(), file.offset() + range.first(), range.length()),
+            range.length());
+        // Carry the original's headers (ETag, Cache-Control, nosniff, ...), minus the full-body
+        // Content-Length, which the constructor has already replaced with the range's length.
+        result.headers().forEach((name, value) -> {
+            if (!name.equalsIgnoreCase("Content-Length")) ranged.header(name, value);
+        });
+        result.setCookies().forEach(cookie -> ranged.header("Set-Cookie", cookie));
+        return ranged.header("Content-Range",
+            "bytes " + range.first() + "-" + range.last() + "/" + total);
     }
 
     /**
@@ -529,7 +752,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * case there is nothing to run the chain against.
      */
     private void respondToError(Request req, Result result, Response response, Callback callback,
-                                Session session, Session csrfOnlySession, boolean cookieSecure) {
+                                Session session, LazySession csrfOnlySession, boolean cookieSecure,
+                                Exchange exchange) {
         if (req != null) {
             for (var after : afterMiddleware) {
                 try {
@@ -539,21 +763,50 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
         }
-        send(result, response, callback, session, csrfOnlySession, cookieSecure);
+        send(req, result, response, callback, session, csrfOnlySession, cookieSecure, exchange);
     }
 
     /**
      * Attach the session cookie(s) and write the response. {@code session} is the handler/guard
      * session; {@code csrfOnlySession} is the M5c local session (non-null only when the handler
-     * had no Session param) — never both non-null. Attachment is a no-op for unmodified sessions.
+     * had no Session param) — never both non-null. Attachment is a no-op for unmodified sessions,
+     * and for a csrfOnlySession nothing ever decrypted (H5).
      * Only {@link #respond} and {@link #respondToError} call this; nothing else may, or it would
      * skip after-middleware.
      */
-    private void send(Result result, Response response, Callback callback,
-                      Session session, Session csrfOnlySession, boolean cookieSecure) {
+    private void send(Request req, Result result, Response response, Callback callback,
+                      Session session, LazySession csrfOnlySession, boolean cookieSecure,
+                      Exchange exchange) {
         attachSessionCookie(result, session, cookieSecure);
-        attachSessionCookie(result, csrfOnlySession, cookieSecure);
-        writeToWire(result, response, callback);
+        attachSessionCookie(result, csrfOnlySession != null ? csrfOnlySession.peek() : null, cookieSecure);
+        // H2: recording lives here, not at the call sites, because this is the ONE place every
+        // response passes through. Recording per-site meant only three of the exits were
+        // covered, so rate-limiter 429s, CSRF 403s, 413s, static files and unmatched 404s never
+        // reached /ops/status or the request log at all — the exact signals an incident needs.
+        // It runs after the after-middleware chain, so the recorded status is the one sent.
+        //
+        // When it runs depends on the body. An event stream is recorded BEFORE the write:
+        // writeToWire runs it for as long as the client stays, and an hours-long "request" would
+        // swamp the latency figures, so its duration is the time to open the stream. Everything
+        // else is recorded AFTER writeToWire returns, so a generated body's (WriterBody's)
+        // generation time counts as latency. The finally keeps that true when the write fails
+        // or the client disconnects, and Exchange.recorded makes the second call for an event
+        // stream a no-op, so each response is counted exactly once either way.
+        if (result instanceof StreamResult s && s.streamBody() instanceof StreamResult.EventsBody) {
+            recordAndLog(exchange, result.status());
+        }
+        try {
+            if (req != null && result instanceof StreamResult) {
+                // A streaming response outlives handle(): its bytes are still going out when the
+                // end-of-request finally runs. Take the upload cleanup with it, or a handler
+                // streaming an upload straight back would have the file deleted mid-response.
+                writeToWire(result, response, callback, req.takeUploadCleanup());
+                return;
+            }
+            writeToWire(result, response, callback, null);
+        } finally {
+            recordAndLog(exchange, result.status());
+        }
     }
 
     /**
@@ -607,8 +860,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return h.startsWith("127.") && TrustedProxies.isIpLiteral(h);
     }
 
-    /** Serialize a finished {@link Result} onto the Jetty response. No middleware, no cookies. */
-    private void writeToWire(Result result, Response response, Callback callback) {
+    /**
+     * Serialize a finished {@link Result} onto the Jetty response. No middleware, no cookies.
+     *
+     * @param onWritten released when the response is done with the request's resources — for a
+     *                  streaming response that is when the last byte is on the wire, not when this
+     *                  method returns. Null when there is nothing to release.
+     */
+    private void writeToWire(Result result, Response response, Callback callback,
+                             java.io.Closeable onWritten) {
         response.setStatus(result.status());
         response.getHeaders().put("Content-Type", result.contentType());
         for (var entry : result.headers().entrySet()) {
@@ -618,6 +878,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         for (var setCookie : result.setCookies()) {
             response.getHeaders().add("Set-Cookie", setCookie);
         }
+        if (result instanceof StreamResult streamResult) {
+            writeStream(streamResult, response, callback, onWritten);
+            return;
+        }
         byte[] bytes;
         if (result.rawBytes() != null) {
             bytes = result.rawBytes();
@@ -626,7 +890,104 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         } else {
             bytes = new byte[0];
         }
+        closeQuietly(onWritten);
         response.write(true, ByteBuffer.wrap(bytes), callback);
+    }
+
+    /**
+     * Pumps a {@link StreamResult} to the client with a bounded buffer.
+     *
+     * <p>File and stream bodies go through {@code Content.copy}, which is asynchronous and applies
+     * backpressure — it reads the next chunk only once the previous one has been flushed, so a slow
+     * client throttles the read instead of filling memory. A writer body is generated inline on the
+     * request thread (a virtual thread, where blocking on the socket is the right thing to do).
+     *
+     * <p>Whatever the shape, once the first chunk is written the status line is gone: a failure
+     * after that point can only be signalled by failing the callback, which aborts the connection.
+     * A truncated transfer is a visible error to the client; a short 200 would not be.
+     */
+    private void writeStream(StreamResult result, Response response, Callback callback,
+                             java.io.Closeable onWritten) {
+        Callback wrapped = Callback.from(
+            () -> closeQuietly(onWritten),
+            t -> {
+                closeQuietly(onWritten);
+                Log.event("response.stream.failed", Map.of(
+                    "status", result.status(),
+                    "error", String.valueOf(t)));
+            });
+        // Callback.from(Runnable, Consumer) builds a callback whose completion does NOT propagate,
+        // so chain the real one explicitly: release our resources first, then complete the request.
+        Callback completing = new Callback() {
+            @Override
+            public void succeeded() {
+                wrapped.succeeded();
+                callback.succeeded();
+            }
+
+            @Override
+            public void failed(Throwable t) {
+                wrapped.failed(t);
+                callback.failed(t);
+            }
+        };
+
+        switch (result.streamBody()) {
+            case StreamResult.FileBody file -> {
+                Content.Source source;
+                try {
+                    source = Content.Source.from(file.path(), file.offset(), file.length());
+                } catch (Throwable t) {
+                    completing.failed(t);
+                    return;
+                }
+                Content.copy(source, response, completing);
+            }
+            case StreamResult.StreamBody stream ->
+                Content.copy(Content.Source.from(stream.stream()), response, completing);
+            case StreamResult.WriterBody writer -> {
+                // Deliberately NOT try-with-resources. Closing this stream writes the terminal
+                // chunk, which completes the response *successfully* — so an automatic close on
+                // the exception path would turn a generator that died halfway into a clean 200
+                // carrying a silently truncated body. The close happens only when the writer
+                // returned normally; a failure aborts instead.
+                var out = Content.Sink.asOutputStream(response);
+                try {
+                    writer.writer().accept(out);
+                    out.close();
+                } catch (Throwable t) {
+                    completing.failed(t);
+                    return;
+                }
+                completing.succeeded();
+            }
+            case StreamResult.EventsBody events -> {
+                var stream = new EventStream(Content.Sink.asOutputStream(response));
+                // Server stop or idle timeout: Jetty fails the request without a write of ours
+                // failing, so wake the producer from here rather than at its next send.
+                response.getRequest().addFailureListener(stream::disconnect);
+                Throwable failure = stream.run(events.producer());
+                if (failure == null) {
+                    completing.succeeded();
+                } else if (stream.disconnected()) {
+                    // The client leaving is how an event stream normally ends, not a failed
+                    // response, so skip the response.stream.failed event.
+                    closeQuietly(onWritten);
+                    callback.failed(failure);
+                } else {
+                    completing.failed(failure);
+                }
+            }
+        }
+    }
+
+    private static void closeQuietly(java.io.Closeable closeable) {
+        if (closeable == null) return;
+        try {
+            closeable.close();
+        } catch (Throwable t) {
+            Log.warn("failed to release request resources after response: " + t);
+        }
     }
 
     /**
@@ -669,6 +1030,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return Result.error(404, body.toString());
     }
 
+    /**
+     * Add {@code HX-Request} to an existing {@code Vary} value (M3), or return it alone when there
+     * is none. Idempotent: a handler that already declared {@code HX-Request} isn't given a
+     * duplicate. Matching is case-insensitive on the token, since field names in a {@code Vary}
+     * list are case-insensitive.
+     */
+    private static String appendVary(String existing) {
+        if (existing == null || existing.isBlank()) {
+            return "HX-Request";
+        }
+        for (String token : existing.split(",")) {
+            if (token.trim().equalsIgnoreCase("HX-Request") || token.trim().equals("*")) {
+                return existing;
+            }
+        }
+        return existing + ", HX-Request";
+    }
+
     /** Length of the common leading character prefix of {@code a} and {@code b}. */
     private static int commonPrefixLength(String a, String b) {
         int max = Math.min(a.length(), b.length());
@@ -698,16 +1077,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String prefix = mapping.urlPrefix();
             if (!requestPath.startsWith(prefix)) continue;
 
-            if (requestPath.contains("..")) {
-                return Result.notFound();
-            }
-
             String relativePath = requestPath.substring(prefix.length());
             if (relativePath.startsWith("/")) {
                 relativePath = relativePath.substring(1);
             }
 
-            if (relativePath.isEmpty()) {
+            // Decode BEFORE the traversal checks (H3). Serving from the raw path meant
+            // /assets/my%20file.css looked for a literal "my%20file.css" and 404'd; decoding
+            // after the ".." check would have been worse, letting %2e%2e slip past it.
+            // decodePath decodes per segment, so a %2F cannot invent a separator that wasn't
+            // in the request — and the checks below run on what actually reaches the disk.
+            relativePath = Route.decodePath(relativePath);
+
+            if (relativePath.isEmpty() || relativePath.contains("..")) {
                 return Result.notFound();
             }
 
@@ -755,7 +1137,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             long length = attrs.size();
             String etag = "\"" + Long.toHexString(length) + "-" + Long.toHexString(mtime) + "\"";
             String version = request.queryParam("v");
-            boolean immutable = version != null && version.equals(Assets.currentVersion(requestPath));
+            // Decoded URL path: Assets resolves it back to a file, so it has to see the same
+            // name the lookup above did, or an encoded filename never matches its fingerprint.
+            String decodedUrlPath = prefix + (prefix.endsWith("/") ? "" : "/") + relativePath;
+            boolean immutable = version != null && version.equals(Assets.currentVersion(decodedUrlPath));
             String cacheControl = immutable
                 ? "public, max-age=31536000, immutable"
                 : "public, max-age=0, must-revalidate";
@@ -767,9 +1152,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             try {
-                byte[] fileBytes = Files.readAllBytes(realFile);
                 String contentType = contentTypeForPath(filePath.toString());
-                Result result = Result.bytes(fileBytes, contentType)
+                // Streamed, not read whole: this used to be Files.readAllBytes, so serving a large
+                // asset cost its full size in heap for every concurrent request. Range support
+                // rides along with the streaming result, which is what makes seeking in a served
+                // video work rather than re-fetching from byte zero.
+                Result result = Result.file(realFile, contentType)
                     .header("X-Content-Type-Options", "nosniff")
                     .header("ETag", etag)
                     .header("Cache-Control", cacheControl);
@@ -856,6 +1244,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     private Session buildSession(Map<String, String> headers) {
         if (sessionSecret != null) {
+            sessionDecrypts.increment();
             String cookieHeader = headers.get("Cookie");
             String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
             return Session.fromCookie(sessionCookie, sessionSecret);
@@ -925,16 +1314,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /**
+     * Initial buffer size for the body read: the declared Content-Length when known (clamped to
+     * 64KB so a lying client can't make us pre-allocate megabytes), 8KB when unknown (chunked or
+     * malformed length). Before H2 this was a flat 64KB per request.
+     */
+    private static int bodyBufferSize(long declaredLength) {
+        if (declaredLength > 0) {
+            return (int) Math.min(declaredLength, 64 * 1024);
+        }
+        return 8192;
+    }
+
+    /**
      * Reads the request body up to {@code limit} bytes, returning the raw bytes.
      * Returns {@code null} if the body exceeds the limit (caller should send 413).
      * Reads incrementally via an InputStream so chunked/absent-length bodies are
      * bounded too — we never buffer more than {@code limit + 1} bytes.
      */
-    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit) throws java.io.IOException {
+    private static byte[] readBoundedBody(org.eclipse.jetty.server.Request jettyRequest, long limit,
+                                          int initialCapacity) throws java.io.IOException {
         try (var in = Content.Source.asInputStream(jettyRequest)) {
-            // Read up to limit+1 bytes: if we get limit+1 the body is too large.
-            long cap = limit + 1;
-            var out = new java.io.ByteArrayOutputStream((int) Math.min(cap, 64 * 1024));
+            var out = new java.io.ByteArrayOutputStream(initialCapacity);
             byte[] buf = new byte[8192];
             long total = 0;
             int n;
@@ -960,15 +1360,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                                                 Map<String, String> headers) {
         try {
             String requestContentType = headers.getOrDefault("Content-Type", "");
-            if (requestContentType.contains("multipart/form-data")) {
-                var parsed = parseMultipart(jettyRequest, requestContentType);
-                return new Request.BodyContent(parsed.formBody(), parsed.files());
-            }
-            // Fast-reject on Content-Length before reading any bytes.
+            // Fast-reject on Content-Length before reading any bytes. Hoisted above the multipart
+            // branch (it used to sit below it, covering only plain bodies), because an oversized
+            // multipart body reached Jetty's own maxLength check instead — and that throws an
+            // IllegalStateException, which fell through to the generic 500 handler. So the
+            // documented "413 for anything over maxUploadSize" was in fact a 500 for multipart,
+            // and every oversized upload recorded a framework error and fed the regression
+            // notifier: exactly the error-store flood the PayloadTooLargeException catch was added
+            // to prevent, just reached by a different door.
             String contentLengthHeader = headers.get("Content-Length");
+            long declaredLength = -1; // -1: header absent or malformed
             if (contentLengthHeader != null) {
                 try {
-                    long declaredLength = Long.parseLong(contentLengthHeader.strip());
+                    declaredLength = Long.parseLong(contentLengthHeader.strip());
                     if (declaredLength > maxUploadSize) {
                         throw new PayloadTooLargeException();
                     }
@@ -976,10 +1380,26 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     // malformed Content-Length — fall through and let the read cap it
                 }
             }
+            if (requestContentType.contains("multipart/form-data")) {
+                var parsed = parseMultipart(jettyRequest, requestContentType);
+                return new Request.BodyContent(parsed.formBody(), parsed.files(), parsed.cleanup());
+            }
+            // H2: read only when the request declares a body — Content-Length > 0,
+            // Transfer-Encoding (chunked has no Content-Length), or a malformed Content-Length
+            // (read defensively; the bounded read caps it). Keyed on declared content, not the
+            // method, so a GET that carries a body is still read. Bodyless requests — every GET —
+            // used to allocate a 64KB buffer here.
+            boolean declaresBody = declaredLength > 0
+                || (contentLengthHeader != null && declaredLength == -1)
+                || headers.containsKey("Transfer-Encoding");
+            if (!declaresBody) {
+                return new Request.BodyContent("", Map.of());
+            }
+            plainBodyReads.increment();
             // Bounded incremental read: cap at maxUploadSize bytes regardless of Content-Length
             // (which clients can lie about or omit for chunked bodies). Read maxUploadSize+1
             // bytes: if we get more than maxUploadSize the body is too large.
-            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize);
+            byte[] bodyBytes = readBoundedBody(jettyRequest, maxUploadSize, bodyBufferSize(declaredLength));
             if (bodyBytes == null) {
                 throw new PayloadTooLargeException();
             }
@@ -987,11 +1407,40 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         } catch (PayloadTooLargeException e) {
             throw e;
         } catch (Exception e) {
+            if (isSizeViolation(e)) throw new PayloadTooLargeException();
             throw new RuntimeException("Failed to read request body", e);
         }
     }
 
-    private record MultipartResult(String formBody, Map<String, List<UploadedFile>> files) {}
+    /**
+     * Whether an exception from multipart parsing is Jetty reporting a size cap, which is a 413
+     * rather than a 500.
+     *
+     * <p>The Content-Length fast-reject above catches the ordinary case — browsers always send a
+     * length for multipart — so this is the backstop for a chunked body that declares no length and
+     * only reveals its size as it arrives. Jetty signals all three of its caps with a plain
+     * {@link IllegalStateException} ({@code MultiPartFormData.Parser}), so the message is the only
+     * discriminator available; blanket-mapping every IllegalStateException here would swallow
+     * genuine framework faults as client errors.
+     *
+     * <p>Matching on a message is fragile across a Jetty upgrade, but it fails in the safe
+     * direction — a changed message reverts to today's 500 rather than mis-classifying something —
+     * and {@code UploadSpillTest} pins the behavior so the upgrade fails loudly instead of quietly.
+     */
+    private static boolean isSizeViolation(Throwable e) {
+        for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause()) {
+            if (t instanceof IllegalStateException && t.getMessage() != null
+                    && (t.getMessage().startsWith("max length exceeded")
+                        || t.getMessage().startsWith("max file size exceeded")
+                        || t.getMessage().startsWith("max memory file size exceeded"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private record MultipartResult(String formBody, Map<String, List<UploadedFile>> files,
+                                   java.io.Closeable cleanup) {}
 
     private MultipartResult parseMultipart(org.eclipse.jetty.server.Request jettyRequest, String contentType) throws Exception {
         String boundary = null;
@@ -1006,56 +1455,134 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         if (boundary == null) {
-            return new MultipartResult("", Map.of());
+            return new MultipartResult("", Map.of(), null);
         }
 
         var parser = new MultiPartFormData.Parser(boundary);
         parser.setMaxLength(maxUploadSize);
-        parser.setMaxMemoryFileSize(-1);
+        // Parts above the threshold spill to a temp file instead of living in the heap for the
+        // duration of the request. This used to be setMaxMemoryFileSize(-1) — "unlimited memory
+        // file size" — which meant a maxUploadSize-sized heap allocation per in-flight upload, on
+        // virtual threads with nothing bounding in-flight concurrency.
+        parser.setFilesDirectory(uploadTempDir);
+        parser.setMaxMemoryFileSize(uploadMemoryThreshold);
+        // Without this, Jetty treats the threshold as a hard *limit* for parts that have no
+        // filename — an ordinary form field over the threshold fails the request with "max memory
+        // file size exceeded" rather than spilling. Large text fields are legitimate, so let them
+        // spill too. Brace still classifies file-vs-field by getFileName(), not by storage.
+        parser.setUseFilesForPartsWithoutFileName(true);
 
         MultiPartFormData.Parts parts = parser.parse(jettyRequest).join();
 
-        var formParams = new LinkedHashMap<String, String>();
+        // M1: append pairs straight to the encoded body instead of collapsing them through a
+        // Map<String,String> first. A repeated field — a checkbox group, a <select multiple> —
+        // used to keep only its LAST value here, so the same submission yielded one value as
+        // multipart and all of them as x-www-form-urlencoded. The single-value view downstream
+        // (Request.parseSingleValues) still does last-wins, so formParam(name) is unchanged.
+        var formBody = new StringBuilder();
         var files = new LinkedHashMap<String, List<UploadedFile>>();
 
+        // NOTE: parts are deliberately NOT closed here. Closing a part deletes the temp file
+        // behind it, and the UploadedFiles built below are handed to the handler — closing at the
+        // end of parsing would hand out uploads whose bytes had already been deleted. The Parts
+        // handle is returned as the request's cleanup token and closed by handle()'s finally.
+        boolean ok = false;
         try {
             for (var part : parts) {
                 String name = part.getName();
                 String fileName = part.getFileName();
 
                 if (fileName != null) {
-                    byte[] bytes;
-                    var source = part.getContentSource();
-                    if (source != null) {
-                        var buf = Content.Source.asByteBuffer(source);
-                        bytes = new byte[buf.remaining()];
-                        buf.get(bytes);
-                    } else {
-                        bytes = part.getContentAsString(StandardCharsets.ISO_8859_1).getBytes(StandardCharsets.ISO_8859_1);
-                    }
                     String partContentType = "application/octet-stream";
                     HttpField ctField = part.getHeaders().getField("Content-Type");
                     if (ctField != null) {
                         partContentType = ctField.getValue();
                     }
-                    var uploaded = new UploadedFile(fileName, partContentType, bytes);
+                    long size = part.getLength();
+                    if (size < 0) {
+                        // Length is only unknown for sources that can't report one; fall back to
+                        // draining once so size() stays truthful rather than negative.
+                        try (var in = Content.Source.asInputStream(part.newContentSource())) {
+                            size = in.transferTo(java.io.OutputStream.nullOutputStream());
+                        }
+                    }
+                    var uploaded = new UploadedFile(part, fileName, partContentType, size);
                     files.computeIfAbsent(name, k -> new ArrayList<>()).add(uploaded);
                 } else {
-                    formParams.put(name, part.getContentAsString(StandardCharsets.UTF_8));
+                    if (!formBody.isEmpty()) formBody.append('&');
+                    formBody.append(java.net.URLEncoder.encode(name, StandardCharsets.UTF_8));
+                    formBody.append('=');
+                    formBody.append(java.net.URLEncoder.encode(
+                        part.getContentAsString(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
                 }
             }
+            ok = true;
         } finally {
-            parts.close();
+            // Only on the failure path: nothing downstream will ever get the cleanup handle, so
+            // release here rather than leaking every temp file this request spilled.
+            if (!ok) parts.close();
         }
 
-        var formBody = new StringBuilder();
-        for (var entry : formParams.entrySet()) {
-            if (!formBody.isEmpty()) formBody.append('&');
-            formBody.append(java.net.URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8));
-            formBody.append('=');
-            formBody.append(java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
-        }
+        return new MultipartResult(formBody.toString(), files, parts);
+    }
 
-        return new MultipartResult(formBody.toString(), files);
+    /**
+     * Creates the upload spill directory with owner-only permissions, and sweeps orphans left by a
+     * previous process.
+     *
+     * <p>Jetty creates the individual temp files with {@code Files.createTempFile}, which is
+     * owner-only on POSIX, but it creates the <em>directory</em> with a plain
+     * {@code createDirectories} under the ambient umask. Uploaded content is untrusted and may be
+     * sensitive, so the directory is created here instead, with 700.
+     *
+     * <p>The sweep exists because a hard kill (SIGKILL, OOM, container eviction) skips every
+     * cleanup path there is. Files older than {@link #UPLOAD_ORPHAN_AGE_MS} are from a dead
+     * process by definition — a live request cannot outlive {@code maxUploadSize} bytes by hours.
+     */
+    static void prepareUploadTempDir(Path dir) {
+        try {
+            if (!Files.exists(dir)) {
+                try {
+                    var ownerOnly = java.nio.file.attribute.PosixFilePermissions.fromString("rwx------");
+                    Files.createDirectories(dir,
+                        java.nio.file.attribute.PosixFilePermissions.asFileAttribute(ownerOnly));
+                } catch (UnsupportedOperationException e) {
+                    Files.createDirectories(dir); // non-POSIX filesystem
+                }
+            }
+            sweepOrphanedUploads(dir);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to prepare upload temp directory: " + dir, e);
+        }
+    }
+
+    /** Age past which a spilled upload can only belong to a process that is no longer running. */
+    static final long UPLOAD_ORPHAN_AGE_MS = 6 * 60 * 60 * 1000L;
+
+    static void sweepOrphanedUploads(Path dir) {
+        long cutoff = System.currentTimeMillis() - UPLOAD_ORPHAN_AGE_MS;
+        int swept = 0;
+        // Depth 1 and no symlink following: this walks a directory of untrusted-content temp files,
+        // and a symlink planted in it must not turn the sweep into an arbitrary-delete primitive.
+        try (var entries = Files.newDirectoryStream(dir)) {
+            for (var entry : entries) {
+                try {
+                    var attrs = Files.readAttributes(entry, BasicFileAttributes.class,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                    if (!attrs.isRegularFile()) continue;
+                    if (attrs.lastModifiedTime().toMillis() > cutoff) continue;
+                    Files.deleteIfExists(entry);
+                    swept++;
+                } catch (Exception ignored) {
+                    // Racing with another instance sharing the directory, or a permissions issue.
+                }
+            }
+        } catch (Exception e) {
+            Log.warn("upload temp sweep failed for " + dir + ": " + e);
+            return;
+        }
+        if (swept > 0) {
+            Log.event("brace.uploads.sweep", Map.of("directory", dir.toString(), "deleted", swept));
+        }
     }
 }

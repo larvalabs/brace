@@ -352,12 +352,11 @@ public class Database {
 
     // --- Raw queries ---
 
-    @SuppressWarnings("unchecked")
     public List<Object[]> hql(String hql, Object... params) {
         long start = System.nanoTime();
         Query<?> query = session.createQuery(convertPositionalParams(hql));
         bindParams(query, params);
-        List<Object[]> result = (List<Object[]>) query.getResultList();
+        List<Object[]> result = asRows(query.getResultList());
         queryDurationUs += (System.nanoTime() - start) / 1000;
         queryCount++;
         return result;
@@ -372,15 +371,14 @@ public class Database {
         queryCount++;
     }
 
-    @SuppressWarnings("unchecked")
     public List<Object[]> sqlQuery(String sql, Object... params) {
         long start = System.nanoTime();
         var query = session.createNativeQuery(convertPositionalParams(sql));
         bindParams(query, params);
-        var results = query.getResultList();
+        List<Object[]> results = asRows(query.getResultList());
         queryDurationUs += (System.nanoTime() - start) / 1000;
         queryCount++;
-        return (List<Object[]>) (List<?>) results;
+        return results;
     }
 
     @SuppressWarnings("unchecked")
@@ -579,7 +577,12 @@ public class Database {
             char c = hql.charAt(i);
 
             // ── E-string: E'...' or e'...' — backslash escapes active ──────────────────────
-            if ((c == 'E' || c == 'e') && i + 1 < n && hql.charAt(i + 1) == '\'') {
+            // L11: the E must START a token. Without that check the trailing 'E' of any identifier
+            // or keyword immediately followed by a quote — "... LIKE'%x%'" — opened backslash-escape
+            // mode, where a literal backslash before the closing quote swallows the terminator and
+            // every following '?' is mis-numbered.
+            if ((c == 'E' || c == 'e') && i + 1 < n && hql.charAt(i + 1) == '\''
+                    && !isIdentifierChar(i > 0 ? hql.charAt(i - 1) : ' ')) {
                 sb.append(c);               // emit the E/e prefix
                 i++;
                 sb.append('\'');            // emit the opening quote
@@ -711,6 +714,33 @@ public class Database {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * Normalize a result list to {@code List<Object[]>} — one array per row (M7).
+     *
+     * <p>Hibernate returns a list of <em>scalars</em>, not arrays, when the select has a single
+     * item, so {@code hql}/{@code sqlQuery} used to reach their declared type through an unchecked
+     * cast that was simply false for that shape. The failure landed as a
+     * {@code ClassCastException} inside the CALLER's {@code for (Object[] row : ...)} loop, with a
+     * stack trace pointing nowhere near the query. Wrapping here makes the declared type true for
+     * every query, so a one-column select behaves like any other:
+     * {@code row[0]} is the value.
+     *
+     * <p>{@code sqlQueryLong} already normalized both shapes; this brings the list accessors in
+     * line with it.
+     */
+    private static List<Object[]> asRows(List<?> results) {
+        var rows = new java.util.ArrayList<Object[]>(results.size());
+        for (Object row : results) {
+            rows.add(row instanceof Object[] array ? array : new Object[]{row});
+        }
+        return rows;
+    }
+
+    /** True for a character that can appear inside a SQL identifier or keyword (see L11). */
+    private static boolean isIdentifierChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
     }
 
     private void bindParams(Query<?> query, Object[] params) {

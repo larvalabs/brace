@@ -248,11 +248,13 @@ public class TestApp {
         db.beginTransaction();
         try {
             db.sql("SET REFERENTIAL_INTEGRITY FALSE");
-            @SuppressWarnings("unchecked")
-            var tables = (java.util.List<Object>) (java.util.List<?>) db.sqlQuery(
+            // One column per row, read as row[0] (M7). This used to cast the result to
+            // List<Object> and call toString() on each element, which worked only because
+            // sqlQuery's declared List<Object[]> was a lie for single-column selects.
+            var tables = db.sqlQuery(
                 "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'PUBLIC'");
             for (var row : tables) {
-                String tableName = row.toString();
+                String tableName = String.valueOf(row[0]);
                 if (!tableName.toLowerCase().startsWith("flyway_")) {
                     db.sql("TRUNCATE TABLE " + tableName);
                 }

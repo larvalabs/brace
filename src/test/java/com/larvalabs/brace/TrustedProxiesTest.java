@@ -156,4 +156,104 @@ public class TrustedProxiesTest {
         assertFalse(trusted.isTrusted("localhost"));
         assertFalse(trusted.isTrusted("evil.example.org"));
     }
+
+    // --- Cloudflare preset ---
+
+    @Test
+    public void testCloudflarePresetTrustsPublishedRanges() {
+        var trusted = TrustedProxies.cloudflare();
+        // One address from several bundled ranges, v4 and v6
+        assertTrue(trusted.isTrusted("173.245.48.1"));   // 173.245.48.0/20
+        assertTrue(trusted.isTrusted("104.16.0.1"));     // 104.16.0.0/13
+        assertTrue(trusted.isTrusted("172.64.0.1"));     // 172.64.0.0/13
+        assertTrue(trusted.isTrusted("2400:cb00::1"));   // 2400:cb00::/32
+        assertTrue(trusted.isTrusted("2606:4700::1"));   // 2606:4700::/32
+        // Not Cloudflare
+        assertFalse(trusted.isTrusted("8.8.8.8"));
+        assertFalse(trusted.isTrusted("192.168.1.1"));
+        assertFalse(trusted.isTrusted("2001:db8::1"));
+    }
+
+    @Test
+    public void testPlusAddsExtraProxies() {
+        var trusted = TrustedProxies.cloudflare().plus("127.0.0.1", "::1");
+        assertTrue(trusted.isTrusted("127.0.0.1"));
+        assertTrue(trusted.isTrusted("::1"));
+        assertTrue(trusted.isTrusted("173.245.48.1")); // Cloudflare ranges still present
+        assertFalse(trusted.isTrusted("127.0.0.2"));   // single IP, not a range
+    }
+
+    @Test
+    public void testPlusOnPlainInstance() {
+        var trusted = new TrustedProxies("10.0.0.0/8").plus("127.0.0.1");
+        assertTrue(trusted.isTrusted("10.1.2.3"));
+        assertTrue(trusted.isTrusted("127.0.0.1"));
+    }
+
+    @Test
+    public void testPlusRejectsInvalidCidrWithoutMutating() {
+        var trusted = TrustedProxies.cloudflare();
+        assertThrows(IllegalArgumentException.class, () -> trusted.plus("not-a-cidr/99"));
+        assertTrue(trusted.isTrusted("173.245.48.1")); // unchanged
+    }
+
+    @Test
+    public void testRefreshReplacesProviderRangesButKeepsExtras() {
+        var trusted = TrustedProxies.cloudflare().plus("127.0.0.1");
+        trusted.applyProviderCidrs(java.util.List.of("198.51.100.0/24", "2001:db8::/32"));
+        assertTrue(trusted.isTrusted("198.51.100.5"));  // new provider range
+        assertTrue(trusted.isTrusted("2001:db8::1"));
+        assertTrue(trusted.isTrusted("127.0.0.1"));     // plus() survives refresh
+        assertFalse(trusted.isTrusted("173.245.48.1")); // old provider range replaced
+    }
+
+    @Test
+    public void testRefreshRejectedWholesaleOnBadEntry() {
+        var trusted = TrustedProxies.cloudflare();
+        assertThrows(IllegalArgumentException.class,
+            () -> trusted.applyProviderCidrs(java.util.List.of("198.51.100.0/24", "not-a-cidr/99")));
+        assertThrows(IllegalArgumentException.class,
+            () -> trusted.applyProviderCidrs(java.util.List.of()));
+        // Failed refresh leaves the bundled list fully in place
+        assertTrue(trusted.isTrusted("173.245.48.1"));
+        assertFalse(trusted.isTrusted("198.51.100.5"));
+    }
+
+    @Test
+    public void testAutoRefreshThreadIsDaemonAndEndsOnStop() throws Exception {
+        var proxies = TrustedProxies.cloudflare().autoRefresh();
+        var app = Brace.app().port(0).banner(false).trustedProxies(proxies);
+        app.get("/", req -> Result.text("ok"));
+        app.start();
+        Thread thread = proxies.refreshThread();
+        assertNotNull(thread, "autoRefresh() should be running while the app is");
+        assertTrue(thread.isDaemon(), "the refresh thread must never hold the JVM open");
+
+        app.stop();
+
+        assertNull(proxies.refreshThread());
+        thread.join(10_000);
+        assertFalse(thread.isAlive(), "stop() must end the refresh thread");
+    }
+
+    @Test
+    public void testAutoRefreshThreadEndsOnFailedStart(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        var proxies = TrustedProxies.cloudflare().autoRefresh();
+        Thread thread = proxies.refreshThread();
+        assertNotNull(thread);
+        // .ops(...) with a missing keys file makes start() throw; its cleanup runs stop().
+        var app = Brace.app().port(0).banner(false).trustedProxies(proxies)
+            .ops(dir.resolve("missing-authorized-keys").toString());
+        assertThrows(RuntimeException.class, app::start);
+
+        assertNull(proxies.refreshThread());
+        thread.join(10_000);
+        assertFalse(thread.isAlive(), "a failed start must end the refresh thread");
+    }
+
+    @Test
+    public void testAutoRefreshOnlyOnCloudflarePreset() {
+        assertThrows(IllegalStateException.class, () -> new TrustedProxies("10.0.0.0/8").autoRefresh());
+    }
 }

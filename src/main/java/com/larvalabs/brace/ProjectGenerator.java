@@ -52,7 +52,7 @@ public class ProjectGenerator {
 <project>
     <modelVersion>4.0.0</modelVersion>
     <groupId>app</groupId>
-    <artifactId>""" + name + """
+    <artifactId>""" + projectName + """
 </artifactId>
     <version>1.0-SNAPSHOT</version>
     <properties>
@@ -127,6 +127,32 @@ public class ProjectGenerator {
                     <execution>
                         <phase>package</phase>
                         <goals><goal>shade</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- mvn package also precompiles views/ into target/jte-classes, which the
+                 Dockerfile copies and prod mode loads: no compiler at runtime (a JRE
+                 image is enough), and the classes always match the jar being shipped.
+                 It runs Brace's own precompiler, so its JTE version is always Brace's. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>precompile-templates</id>
+                        <phase>package</phase>
+                        <goals><goal>exec</goal></goals>
+                        <configuration>
+                            <executable>${java.home}/bin/java</executable>
+                            <arguments>
+                                <argument>-cp</argument>
+                                <classpath/>
+                                <argument>com.larvalabs.brace.TemplatePrecompiler</argument>
+                                <argument>views</argument>
+                                <argument>target/jte-classes</argument>
+                            </arguments>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
@@ -268,8 +294,8 @@ class HomeControllerTest {
             var sessionSecret = generateSessionSecret();
             Files.writeString(root.resolve("application.conf"),
                 "port=8080\n" +
-                "db.url=jdbc:postgresql://localhost:5432/" + name + "\n" +
-                "db.user=" + name + "\n" +
+                "db.url=jdbc:postgresql://localhost:5432/" + projectName + "\n" +
+                "db.user=" + projectName + "\n" +
                 "db.pass=\n" +
                 "session.secret=" + sessionSecret + "\n" +
                 "\n" +
@@ -278,16 +304,29 @@ class HomeControllerTest {
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");
 
-            // application.conf.example with placeholder for documentation
+            // application.conf.example — committed, and the Dockerfile ships it as the
+            // container's application.conf, so it holds no values that differ per deployment.
+            // They come from env vars via ${VAR}: a literal in the file would beat the env var
+            // (Config only falls back to the environment for absent keys), and a placeholder
+            // secret would boot with a warning instead of failing — an unset SESSION_SECRET
+            // fails startup instead.
             Files.writeString(root.resolve("application.conf.example"),
-                "# Copy this file to application.conf and set real values, especially session.secret.\n" +
-                "# Never commit application.conf with real secrets; use env vars in production:\n" +
-                "#   SESSION_SECRET=<random-string> java -jar app.jar\n" +
+                "# Committed template for application.conf. The Dockerfile ships it as the\n" +
+                "# container's application.conf, so per-deployment values and secrets come from\n" +
+                "# environment variables via ${VAR}. Keep them that way: a literal value here wins\n" +
+                "# over an environment variable of the same name.\n" +
+                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/" + projectName + " \\\n" +
+                "#              -e SESSION_SECRET=\"$(openssl rand -base64 32)\" ...\n" +
+                "# SESSION_SECRET must stay the same across restarts and instances (changing it logs\n" +
+                "# everyone out); generate it once and store it with your other secrets.\n" +
+                "# Locally, `brace new` already wrote application.conf (gitignored) with a generated\n" +
+                "# session.secret. On a fresh clone, copy this file to application.conf and either\n" +
+                "# set the variables or replace the ${VAR}s with local values.\n" +
                 "port=8080\n" +
-                "db.url=jdbc:postgresql://localhost:5432/" + name + "\n" +
-                "db.user=" + name + "\n" +
-                "db.pass=\n" +
-                "session.secret=CHANGE-ME-to-a-random-string-at-least-32-chars\n" +
+                "db.url=${DATABASE_URL}\n" +
+                "db.user=${DB_USER}\n" +
+                "db.pass=${DB_PASS}\n" +
+                "session.secret=${SESSION_SECRET}\n" +
                 "\n" +
                 "%dev.port=9000\n" +
                 "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
@@ -341,23 +380,47 @@ h1 { margin-bottom: 1rem; }
 """);
 
             // Dockerfile — target/app.jar is the shaded executable jar
-            // (fixed name via <finalName>app</finalName>); build it first
-            // with `mvn package`.
+            // (fixed name via <finalName>app</finalName>) and target/jte-classes the
+            // precompiled templates; `mvn package` builds both. Precompiled templates are
+            // what let the runtime image be a JRE (restores 213ac8c, lost in merge b8609b6).
             Files.writeString(root.resolve("Dockerfile"),
-                "# Build the jar first: mvn package\n" +
-                "FROM eclipse-temurin:21-jre\n" +
+                "# Build first: mvn package (writes target/app.jar and target/jte-classes)\n" +
+                "#\n" +
+                "# A JRE image is enough: templates are precompiled at build time, so the JDK's\n" +
+                "# compiler never runs in production.\n" +
+                "FROM eclipse-temurin:25-jre\n" +
                 "WORKDIR /app\n" +
                 "COPY target/app.jar app.jar\n" +
                 "COPY application.conf.example application.conf\n" +
+                "# Precompiled templates, which prod mode loads instead of compiling at runtime.\n" +
+                "# mvn package writes them (so does `brace compile`); run one of them before\n" +
+                "# `docker build` after any template change. Without them the build or startup fails.\n" +
+                "COPY target/jte-classes/ target/jte-classes/\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +
                 "COPY migrations/ migrations/\n" +
+                "# Public keys only; App.java's .ops(...) refuses to start without this file.\n" +
+                "COPY ops-authorized-keys ops-authorized-keys\n" +
                 "EXPOSE 8080\n" +
-                "# Pass secrets via env vars: docker run -e SESSION_SECRET=... -e DB_PASS=...\n" +
-                "CMD [\"java\", \"-jar\", \"app.jar\"]\n");
+                "# Config comes from env vars (see application.conf.example):\n" +
+                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/db -e SESSION_SECRET=...\n" +
+                "\n" +
+                "# JVM flags; override at run time: docker run -e JAVA_OPTS=\"-Xmx1g\" ...\n" +
+                "#   -XX:MaxRAMPercentage=50  caps the heap at half the container's memory limit,\n" +
+                "#       leaving the rest for metaspace, thread stacks and direct buffers.\n" +
+                "#       Give the container a limit (docker run --memory=1g, compose mem_limit):\n" +
+                "#       without one the JVM sizes the heap from the HOST's RAM, so on a shared\n" +
+                "#       box use an explicit -Xmx instead.\n" +
+                "#   -XX:+UseCompactObjectHeaders  (JDK 25+) smaller object headers, usually\n" +
+                "#       10-20% less heap for entity-heavy apps. Worth adding once tried under load.\n" +
+                "ENV JAVA_OPTS=\"-XX:MaxRAMPercentage=50\"\n" +
+                "# sh -c expands $JAVA_OPTS; exec replaces the shell so java is PID 1 and gets\n" +
+                "# SIGTERM from `docker stop`, letting Brace's shutdown hook drain in-flight work.\n" +
+                "# brace.mode=prod (as `brace run` sets) is what loads target/jte-classes.\n" +
+                "ENTRYPOINT [\"sh\", \"-c\", \"exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar\"]\n");
 
             // CLAUDE.md — capability index with pointers to full reference
-            ClaudeMdGenerator.write(name, root.resolve("CLAUDE.md"));
+            ClaudeMdGenerator.write(projectName, root.resolve("CLAUDE.md"));
 
             // BRACE-AGENTS.md (full API reference) and BRACE-OPS.md (ops reference) —
             // the same bundled resources `brace agents-md` refreshes, loaded through

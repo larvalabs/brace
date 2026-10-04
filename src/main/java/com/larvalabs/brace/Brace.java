@@ -29,6 +29,7 @@ public class Brace {
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
+    private boolean ownsDatabaseFactory = true; // M4: stop() closes the pool unless told otherwise
     private String sessionSecret;
     private String opsSecret;
     private String deployMarker;
@@ -40,12 +41,14 @@ public class Brace {
     private final JobScheduler jobScheduler = new JobScheduler();
     private final JobPoller jobPoller = new JobPoller();
     private String opsKeysPath;
-    private Stats stats = new Stats();
+    // Also the target of the static Metrics.counter/gauge/timer calls (last-constructed app wins).
+    private Stats stats = Metrics.register();
     private JfrProfiler profiler;
     private ErrorStore errorStore;
     private boolean opsProfilerEnabled = true;
     private String instanceId;
     private OpsHandler opsHandler;
+    private BraceHandler handler; // set by start(); read by tests through handler()
     private Cache cache;
     private Storage storage;
     private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
@@ -57,6 +60,8 @@ public class Brace {
     private boolean sharedRateLimiting = true; // M17: count rate limits fleet-wide via the DB on Postgres
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
+    private long uploadMemoryThreshold = BraceHandler.DEFAULT_UPLOAD_MEMORY_THRESHOLD;
+    private java.nio.file.Path uploadTempDir = BraceHandler.DEFAULT_UPLOAD_TEMP_DIR;
     private int jobRetentionDays = 7;
     private java.time.Duration jobTimeout; // null = no per-attempt limit (the default)
     private java.time.Duration jobShutdownTimeout = JobPoller.DEFAULT_SHUTDOWN_TIMEOUT;
@@ -120,6 +125,15 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Use a pre-built {@link TrustedProxies} — e.g.
+     * {@code app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1").autoRefresh())}.
+     */
+    public Brace trustedProxies(TrustedProxies proxies) {
+        this.trustedProxies = proxies;
+        return this;
+    }
+
     public Brace port(int port) {
         this.port = port;
         return this;
@@ -136,6 +150,25 @@ public class Brace {
 
     public Brace database(DatabaseFactory factory) {
         this.databaseFactory = factory;
+        return this;
+    }
+
+    /**
+     * Whether {@link #stop()} closes the {@link DatabaseFactory} — its HikariCP pool and Hibernate
+     * {@code SessionFactory}. Default {@code true}.
+     *
+     * <p>The factory is constructed by the app and handed in via {@link #database}, so ownership is
+     * a genuine question rather than an obvious default. Closing is the right default because the
+     * overwhelmingly common shape is one factory per app: leaving it open means a "graceful"
+     * shutdown never drains the pool (Hikari runs with {@code minimumIdle == maximumPoolSize}, so
+     * that is {@code poolSize} live connections the database only sees vanish at process exit).
+     *
+     * <p>Pass {@code false} when the factory outlives this {@code Brace} — several apps sharing one
+     * pool in a single JVM, or a test fixture that reuses a factory across cases. Then closing it
+     * is the caller's job.
+     */
+    public Brace ownsDatabase(boolean owns) {
+        this.ownsDatabaseFactory = owns;
         return this;
     }
 
@@ -157,6 +190,11 @@ public class Brace {
 
     public Stats stats() {
         return stats;
+    }
+
+    /** The request handler, once {@link #start} has built it — for tests reading its counters. */
+    BraceHandler handler() {
+        return handler;
     }
 
 
@@ -225,6 +263,14 @@ public class Brace {
         return OpsToken.generateSecret();
     }
 
+    /**
+     * Every secret placeholder `brace new` has written into a generated config, from git history
+     * of ProjectGenerator (and its earlier io.brace path). The scaffold's other placeholder,
+     * {@code ops.secret=CHANGE-ME-ops-secret}, is under 32 characters and already rejected.
+     */
+    static final java.util.Set<String> SHIPPED_PLACEHOLDER_SECRETS =
+        java.util.Set.of("CHANGE-ME-to-a-random-string-at-least-32-chars");
+
     private void validateSecret(String secret, String type) {
         if (secret == null || secret.isEmpty()) {
             throw new IllegalArgumentException(type + " secret cannot be null or empty");
@@ -232,6 +278,19 @@ public class Brace {
         if (secret.length() < 32) {
             throw new IllegalArgumentException(
                 type + " secret must be at least 32 characters (current: " + secret.length() + ")");
+        }
+        // A placeholder a Brace scaffold actually shipped is public: anyone can forge session
+        // cookies with it. Old scaffolds' Dockerfiles copied it into the image and launched with
+        // no brace.mode at all, so refuse everywhere except dev, not only under prod.
+        if (SHIPPED_PLACEHOLDER_SECRETS.contains(secret)
+                && !"dev".equals(System.getProperty("brace.mode"))) {
+            throw new IllegalArgumentException(type + " secret is the placeholder that older `brace new` "
+                + "scaffolds shipped in application.conf.example (" + secret + "). It is public, so anyone "
+                + "can forge session cookies. Generate a real one (e.g. `openssl rand -base64 32`), set it "
+                + "as the SESSION_SECRET environment variable, and have application.conf read it with "
+                + "session.secret=${SESSION_SECRET}; a literal value in the file wins over the env var. "
+                + "Changing the secret logs existing users out once. In dev mode (-Dbrace.mode=dev) this "
+                + "is only a warning.");
         }
         // Warn about obvious placeholder values (including old scaffolds)
         String lower = secret.toLowerCase();
@@ -357,6 +416,47 @@ public class Brace {
 
     public Brace maxUploadSize(long bytes) {
         this.maxUploadSize = bytes;
+        return this;
+    }
+
+    /**
+     * Size above which an uploaded part is spilled to a temp file instead of being held in the
+     * heap for the duration of the request. Default 1 MB.
+     *
+     * <p>This is a memory/disk trade, not a limit: a part over the threshold is still accepted (up
+     * to {@link #maxUploadSize(String)}), it just stops costing heap. Raise it if your uploads are
+     * reliably small and you would rather never touch the disk; lower it if you run a large
+     * {@code maxUploadSize} and want the heap floor as low as possible.
+     *
+     * <pre>{@code
+     * app.maxUploadSize("500M")            // accept large media
+     *    .uploadMemoryThreshold("256K");   // ...without ever holding it in heap
+     * }</pre>
+     */
+    public Brace uploadMemoryThreshold(String size) {
+        return uploadMemoryThreshold(parseSize(size));
+    }
+
+    public Brace uploadMemoryThreshold(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException(
+                "uploadMemoryThreshold must not be negative (a negative value disables spilling "
+                    + "entirely, which is the unbounded-heap behavior this setting exists to fix)");
+        }
+        this.uploadMemoryThreshold = bytes;
+        return this;
+    }
+
+    /**
+     * Directory for upload spill files. Default {@code ${java.io.tmpdir}/brace-uploads}.
+     *
+     * <p>Created with owner-only permissions if it does not exist. Point it at a volume with room
+     * for {@code maxUploadSize × peak concurrent uploads}, and prefer one on the same filesystem as
+     * wherever {@link UploadedFile#saveTo(java.nio.file.Path)} writes — a same-filesystem save is a
+     * rename rather than a copy.
+     */
+    public Brace uploadTempDir(java.nio.file.Path dir) {
+        this.uploadTempDir = dir;
         return this;
     }
 
@@ -794,7 +894,45 @@ public class Brace {
 
     // Server lifecycle
 
+    /**
+     * True when an IP-keyed rate limiter is registered but no trusted proxies are configured —
+     * the condition the start()-time warning fires on. Static and package-private for tests.
+     */
+    static boolean perIpLimiterWithoutTrustedProxies(List<Middleware.BoundBefore> beforeMiddleware,
+                                                    TrustedProxies trustedProxies) {
+        if (trustedProxies != null) {
+            return false;
+        }
+        for (var bound : beforeMiddleware) {
+            if (bound.handler() instanceof RateLimiter.PerIpCheck) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void start() throws Exception {
+        try {
+            startOrThrow();
+        } catch (Throwable t) {
+            // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
+            // failed start can't leave threads that keep the JVM alive with no server: main()
+            // would exit with a stack trace while the process stays up. stop() is idempotent
+            // and copes with components that never started.
+            try {
+                stop();
+            } catch (Throwable cleanup) {
+                t.addSuppressed(cleanup);
+            }
+            throw t;
+        }
+    }
+
+    private void startOrThrow() throws Exception {
+        // A previous stop() ended autoRefresh()'s fetcher; a restart picks it back up.
+        if (trustedProxies != null) {
+            trustedProxies.resumeRefresh();
+        }
         // Session-aware middleware without .sessions(secret) is a silent trap: every
         // request gets a fresh empty Session. For requireSession that is *provably* an
         // infinite redirect loop (the session can never carry the key), and the runtime
@@ -823,6 +961,19 @@ public class Brace {
             Log.warn("Session cookies are configured with .secure(false), so they carry no Secure "
                 + "attribute and will travel in cleartext on any http:// request to this domain. "
                 + "Drop the explicit .secure(false) once the app is served over HTTPS.");
+        }
+
+        // Per-IP rate limiting without trusted proxies is a quieter trap: behind a reverse
+        // proxy or CDN, req.ip() is the proxy's address, so every client shares one bucket and
+        // the per-IP limit is effectively site-wide. Direct-exposure apps are legitimate, so
+        // this can't be fatal — warn loudly instead.
+        if (perIpLimiterWithoutTrustedProxies(beforeMiddleware, trustedProxies)) {
+            Log.warn("RateLimiter.perIp(...) is registered but no trusted proxies are configured. "
+                + "If this app runs behind a reverse proxy or CDN (nginx, Cloudflare, ...), req.ip() "
+                + "returns the proxy's address, so all clients share one rate-limit bucket and the "
+                + "per-IP limit is effectively site-wide. Configure app.trustedProxies(...) — e.g. "
+                + "TrustedProxies.cloudflare() behind Cloudflare, or \"127.0.0.1\" behind a local "
+                + "reverse proxy. Ignore this warning if clients connect to this app directly.");
         }
 
         // Create ErrorStore if database is available
@@ -904,7 +1055,8 @@ public class Brace {
                 Log.debug("routes.unnamed", Map.of("unnamed", unnamed, "named", router.names().size()));
             }
         }
-        var handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
+        handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
+        handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
 
         if (!wsRoutes.isEmpty()) {
@@ -1227,6 +1379,10 @@ public class Brace {
         }
         jobPoller.stop();
         jobScheduler.stop();
+        if (trustedProxies != null) {
+            // TrustedProxies.cloudflare().autoRefresh()'s background fetcher.
+            trustedProxies.stopRefresh();
+        }
         if (cache != null) {
             cache.close();
         }
@@ -1243,6 +1399,20 @@ public class Brace {
         }
         if (wsRegistry != null) {
             wsRegistry.close();
+        }
+        // M5: the rate limiter's shared-counter backend and its registry are process-global
+        // statics installed by start(). Left in place they point at THIS app's (now closed)
+        // DatabaseFactory, so a second app in the same JVM counts against a dead pool, and
+        // /ops keeps reporting limiters that no longer serve anything. Release before the
+        // factory closes below.
+        RateLimiter.disableSharedBackend();
+        RateLimiter.forgetLimiters();
+        // M4: close the connection pool. Hikari runs with minimumIdle == maximumPoolSize, so
+        // every un-closed factory holds poolSize live connections plus a Hibernate
+        // SessionFactory — a large steady leak across a test suite, and in production a
+        // "graceful" shutdown that never actually drains.
+        if (ownsDatabaseFactory && databaseFactory != null) {
+            databaseFactory.close();
         }
         // Drain any structured log lines still queued in the async writer (H1) so a stop()
         // immediately followed by assertions (tests) or process exit loses nothing.

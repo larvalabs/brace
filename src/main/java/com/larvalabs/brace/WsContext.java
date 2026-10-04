@@ -57,12 +57,22 @@ public class WsContext {
             return;
         }
         queuedBytes.addAndGet(size);
-        jettySession.sendText(message, Callback.from(
-            () -> queuedBytes.addAndGet(-size),
-            failure -> {
-                queuedBytes.addAndGet(-size);
-                closed.set(true); // broken connection — stop sending; Jetty fires onClose/onError → cleanup
-            }));
+        try {
+            jettySession.sendText(message, Callback.from(
+                () -> queuedBytes.addAndGet(-size),
+                failure -> {
+                    queuedBytes.addAndGet(-size);
+                    closed.set(true); // broken connection — stop sending; Jetty fires onClose/onError → cleanup
+                }));
+        } catch (RuntimeException e) {
+            // M8: a synchronous throw (e.g. sending on a session Jetty already closed) never
+            // reaches the callback, so without this the reservation above is never released. The
+            // connection would then carry a permanent phantom backlog and eventually be
+            // force-closed as a "slow consumer" it never was.
+            queuedBytes.addAndGet(-size);
+            closed.set(true);
+            throw e;
+        }
     }
 
     /**

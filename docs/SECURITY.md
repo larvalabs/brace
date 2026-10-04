@@ -241,6 +241,28 @@ app.trustedProxies("10.0.0.5", "10.0.0.6");
 app.trustedProxies("10.0.0.0/8");
 ```
 
+**Behind Cloudflare**, use the built-in preset instead of pasting CIDRs. It ships with
+Cloudflare's published egress ranges (cloudflare.com/ips); `.autoRefresh()` keeps them synced
+by re-fetching the published lists on a background virtual thread (daily, hourly retry after a
+failure — the bundled list serves until the first fetch succeeds, and a failed or partial fetch
+is discarded wholesale so the trust set never shrinks on a network blip). `.plus(...)` trusts
+additional hops of your own — those survive refreshes:
+
+```java
+app.trustedProxies(TrustedProxies.cloudflare().autoRefresh());
+
+// with nginx between Cloudflare and the app, also trust the local hop:
+app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefresh());
+```
+
+Trusting Cloudflare's ranges is only sound when the origin is reachable exclusively through
+Cloudflare (firewall the origin, or use Authenticated Origin Pulls at your TLS terminator).
+A client that connects to the origin directly is an untrusted peer whose forwarding headers
+are ignored — the safe failure mode — but hiding the origin is what keeps attackers from
+bypassing Cloudflare entirely. Note that Cloudflare's egress IPs are shared across all
+Cloudflare customers; the rightmost-untrusted algorithm below stays spoof-safe regardless,
+because Cloudflare itself appends the true connecting address to `X-Forwarded-For`.
+
 ### Behavior
 
 - **Without configuration:** `req.ip()` uses socket remote address only (ignores headers)
@@ -433,12 +455,41 @@ guard can shed a request before its bytes are buffered. A guard that returns a r
 over the `413`; middleware that reads `req.body()` itself (a webhook signature check) still
 triggers the read at that point.
 
+An oversized upload is a **client** error: it returns `413` and deliberately records no
+framework error. Before 0.1.10 the `Content-Length` fast-reject ran only for non-multipart
+bodies, so an oversized *multipart* upload reached Jetty's own cap and surfaced as a `500`
+— which meant any unauthenticated client could flood the error store and the regression
+notifier just by POSTing large files.
+
+### Upload Spill Files
+
+Multipart parts over `uploadMemoryThreshold` (default 1MB) are written to a temp file
+rather than held in the heap, which bounds the memory an upload can consume but introduces
+a file on disk holding untrusted content:
+
+- The spill directory (`app.uploadTempDir(Path)`, default `${java.io.tmpdir}/brace-uploads`)
+  is created **owner-only (700)** rather than under the ambient umask, and the files inside
+  it are created owner-only by the JDK.
+- Spill files are deleted when the request ends — on **every** exit path, including 413s,
+  CSRF 403s, thrown 404s and 500s. A missed path would not be a leaked file but an
+  unbounded disk fill drivable by any client.
+- A hard kill (SIGKILL, OOM, container eviction) skips cleanup, so startup sweeps files
+  older than six hours. The sweep does not follow symlinks, so a symlink planted in the
+  directory cannot turn it into an arbitrary-delete primitive.
+- An `UploadedFile` is only valid for the duration of its request. Save it, or push it to
+  `Storage`, before the handler returns.
+
+**Budget disk accordingly:** the worst case is concurrent uploads × `maxUploadSize`. This
+trades a heap-exhaustion failure mode for a disk one, which degrades far more gracefully
+(writes fail, the app keeps serving) but is still a resource an attacker can consume.
+
 ### Security Considerations
 
 1. **Validate file types:** Check `file.contentType()` and extension
 2. **Scan for malware:** Use external virus scanning for untrusted uploads
 3. **Store safely:** Don't use user-provided filenames directly
-4. **Limit concurrency:** High upload concurrency can exhaust memory
+4. **Limit concurrency:** upload concurrency now consumes disk rather than heap — cap it
+   at the proxy if untrusted clients can reach an upload endpoint
 
 ### Safe Storage Pattern
 
@@ -574,6 +625,11 @@ trusted proxies configured, Brace uses **rightmost-untrusted** semantics on `X-F
 See the [Trusted Proxies](#trusted-proxies) section for configuration. Configuring trusted proxies
 correctly is a prerequisite for effective IP-based rate limiting — without it an attacker can
 bypass per-IP limits by forging `X-Forwarded-For`.
+
+Because this misconfiguration is silent (behind a proxy or CDN every request shares the proxy's
+address, so a per-IP limit quietly becomes site-wide), `Brace.start()` logs a warning when a
+`RateLimiter.perIp` middleware is registered without `app.trustedProxies(...)`. Ignore the
+warning only if clients genuinely connect to the app directly.
 
 ### Database failure posture
 
