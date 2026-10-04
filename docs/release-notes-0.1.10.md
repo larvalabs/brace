@@ -8,8 +8,8 @@
 Brace 0.1.10 adds streaming throughout, from uploads to responses to the outbound HTTP client,
 and Server-Sent Events. It also lands a correctness review, makes the ops dashboard and GC
 figures accurate, and restores several 0.1.7 performance fixes that a merge had silently dropped
-before 0.1.7 shipped. Two production apps were upgraded against it before release: larva2 from
-0.1.9 (529 tests) and geezer2 from 0.1.7 across three guides (638 tests), both green.
+before 0.1.7 shipped. Two production apps were upgraded against it before release, one from
+0.1.9 and one from 0.1.7 across three guides, and both test suites passed.
 
 ## Streaming
 

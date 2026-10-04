@@ -6,8 +6,7 @@
 ---
 
 Brace 0.1.9 adds query strings and encoding to `Url.to`, and a pagination helper. Both were
-checked by migrating a production app (larva2's catalog) and comparing 84 of its responses
-before and after.
+checked by migrating a production app and comparing 84 of its responses before and after.
 
 ## Routing
 
