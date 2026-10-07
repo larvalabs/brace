@@ -370,7 +370,11 @@ public class Cache {
             // Vary on HX-Request: a handler may return a partial for htmx and a full page otherwise
             // (the Vary: HX-Request the framework sets), so the two must not share a cache entry.
             var prefix = request.isHtmx() ? "page:hx:" : "page:";
-            return prefix + request.method() + ":" + request.path() + queryKey(request);
+            // A HEAD reaches a GET route's handler and its response differs only in the body the
+            // framework drops on the way out, so it shares the GET's entry rather than storing a
+            // second copy of the page.
+            var method = request.method().equals("HEAD") ? "GET" : request.method();
+            return prefix + method + ":" + request.path() + queryKey(request);
         }
 
         /**

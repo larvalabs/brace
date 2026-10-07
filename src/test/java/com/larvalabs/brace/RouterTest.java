@@ -175,4 +175,33 @@ class RouterTest {
         assertEquals("50%zz", router.match("GET", "/tags/50%zz").pathParams().get("name"));
         assertEquals("abc", router.match("GET", "/tags/abc").pathParams().get("name"));
     }
+
+    @Test
+    void headFallsBackToGetRoute() {
+        router.add("GET", "/", this::dummyHandler);
+        router.add("GET", "/posts/{id}", this::dummyHandler);
+
+        assertEquals("GET", router.match("HEAD", "/").route().method());
+        var match = router.match("HEAD", "/posts/42/");
+        assertEquals("/posts/{id}", match.route().pattern());
+        assertEquals("42", match.pathParams().get("id"));
+    }
+
+    @Test
+    void headDoesNotFallBackToNonGetRoutes() {
+        router.add("POST", "/submit", this::dummyHandler);
+        assertNull(router.match("HEAD", "/submit"));
+    }
+
+    @Test
+    void explicitHeadRouteBeatsGetFallback() {
+        router.add("GET", "/posts/{id}", this::dummyHandler);
+        router.add("HEAD", "/posts/{id}", this::dummyHandler);
+        router.add("GET", "/feed", this::dummyHandler);
+        router.add("HEAD", "/feed", this::dummyHandler);
+
+        assertEquals("HEAD", router.match("HEAD", "/posts/1").route().method());
+        // The HEAD route's trailing-slash form also wins over the GET route's exact form.
+        assertEquals("HEAD", router.match("HEAD", "/feed/").route().method());
+    }
 }
