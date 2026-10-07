@@ -41,8 +41,9 @@ public class RouteConfig {
 
     /**
      * Include or exclude this route from page-view analytics ({@code app.analytics()}).
-     * Views are counted by default; turn it off for pages whose URL carries a secret
-     * ({@code /reset/{token}}, {@code /invite/{code}}) or that you don't want counted.
+     * Views are counted by default; turn it off for pages whose URL carries a secret the
+     * automatic redaction misses (a short {@code /invite/{code}}; a parameter named like a secret,
+     * such as {@code {token}}, is already stored as its placeholder) or that you don't want counted.
      */
     public RouteConfig analytics(boolean counted) {
         route.setAnalytics(counted ? Analytics.Track.PATH : Analytics.Track.OFF);

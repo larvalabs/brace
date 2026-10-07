@@ -33,7 +33,7 @@ var app = Brace.app()
     .analytics(Analytics.options().timezone("America/New_York"));
 
 // Optional, per route:
-app.get("/reset/{token}", ctrl::reset).analytics(false);     // don't record URLs that carry a secret
+app.get("/invite/{code}", ctrl::invite).analytics(false);    // don't record URLs that carry a secret
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();  // count as /u/{username}
 ```
 
@@ -43,9 +43,10 @@ Things to check when you turn it on:
 - **Behind a reverse proxy, configure `trustedProxies(...)`.** Visitors are told apart by IP and
   user agent; without trusted proxies every visitor has the proxy's IP. The app logs a warning
   when it sees `X-Forwarded-For` from an untrusted peer.
-- **Routes with secrets in the URL** (`/reset/{token}`, `/invite/{code}`) should use
-  `.analytics(false)`. Paths are redacted with the same rules as error records, which catch
-  long random tokens but not every short code.
+- **Routes with secrets in the URL.** Parameters named like a secret (`{token}`, `{apiKey}`, ...)
+  are stored as their placeholder, and long random-looking segments are redacted, using the same
+  rules as error records. A short code under an ordinary name (`/invite/{code}`) is not caught:
+  mark those routes `.analytics(false)`.
 - **Numbers will be higher than a JavaScript tracker's** for the same site: ad blockers no longer
   hide anyone, and filtering bots by headers is less exact than requiring JavaScript. The page
   shows how many requests each filter rejected.

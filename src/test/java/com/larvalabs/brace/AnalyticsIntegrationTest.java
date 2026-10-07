@@ -42,6 +42,7 @@ class AnalyticsIntegrationTest {
         app.get("/posts/{slug}", req -> Result.html("<h1>" + req.pathParam("slug") + "</h1>"));
         app.get("/u/{name}", req -> Result.html("<h1>profile</h1>")).analyticsByRoute();
         app.get("/reset/{token}", req -> Result.html("<h1>reset</h1>")).analytics(false);
+        app.get("/verify/{token}", req -> Result.html("<h1>verify</h1>"));
         app.get("/admin/users", req -> Result.html("<h1>admin</h1>"));
         app.get("/api/posts", req -> Json.of(List.of("a", "b")));
         app.start();
@@ -123,17 +124,18 @@ class AnalyticsIntegrationTest {
         visit("/admin/users", browser(AnalyticsTest.CHROME_MAC));
         // Never candidates.
         visit("/reset/abc123", browser(AnalyticsTest.CHROME_MAC));
+        visit("/verify/s3cr3t", browser(AnalyticsTest.CHROME_MAC));
         visit("/api/posts", browser(AnalyticsTest.CHROME_MAC));
         visit("/nope", browser(AnalyticsTest.CHROME_MAC));
         opsGet("/ops/status");
 
-        flushWhenBuffered(5);
+        flushWhenBuffered(6);
 
         var res = opsGet("/ops/analytics/data?range=today");
         assertEquals(200, res.statusCode(), res.body());
         JsonNode r = Json.mapper().readTree(res.body());
         assertEquals(2, r.path("visitors").asLong());
-        assertEquals(5, r.path("pageviews").asLong());
+        assertEquals(6, r.path("pageviews").asLong());
         assertEquals(LocalDate.now(java.time.ZoneOffset.UTC).toString(), r.path("to").asText());
         assertTrue(r.path("previousVisitors").isNull(),
             "no stored data reaches back to yesterday, so there is nothing honest to compare with");
@@ -142,6 +144,8 @@ class AnalyticsIntegrationTest {
         assertEquals(2, row(pages, "/posts/hello-world").path("visitors").asLong());
         assertEquals(2, row(pages, "/u/{name}").path("pageviews").asLong(), "analyticsByRoute groups by pattern");
         assertNull(row(pages, "/reset/abc123"));
+        assertNotNull(row(pages, "/verify/{token}"), "counted under its placeholder");
+        assertFalse(res.body().contains("s3cr3t"), "the token value is never stored");
         assertNull(row(pages, "/api/posts"));
         assertNull(row(pages, "/admin/users"));
 
@@ -179,7 +183,7 @@ class AnalyticsIntegrationTest {
     void opsStatusAndDashboardShowToday() throws Exception {
         JsonNode status = Json.mapper().readTree(opsGet("/ops/status").body());
         assertEquals(2, status.path("analytics").path("todayVisitors").asLong());
-        assertEquals(5, status.path("analytics").path("todayPageviews").asLong());
+        assertEquals(6, status.path("analytics").path("todayPageviews").asLong());
 
         var dash = opsGet("/ops/dashboard").body();
         assertTrue(dash.contains("Visitors Today"));

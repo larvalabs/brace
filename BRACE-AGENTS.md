@@ -997,7 +997,7 @@ app.analytics(Analytics.options()
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
     .rawRetention("35d"));                       // raw rows only; daily summaries are kept
 
-app.get("/reset/{token}", ctrl::reset).analytics(false);       // URL carries a secret: don't record it
+app.get("/invite/{code}", ctrl::invite).analytics(false);      // URL carries a secret the name doesn't reveal
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}
 ```
 
@@ -1006,7 +1006,10 @@ app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/
   rejected and tallied; boosted (`HX-Boosted`) navigations count. `/ops/*`, static files, JSON
   and errors are never candidates.
 - **Paths:** the concrete path (`/posts/hello-world`), decoded and redacted, without query
-  string. Opt a route out with `.analytics(false)` when its URL carries a token.
+  string. A parameter whose name is sensitive by the error-redaction rule (`Redactor.isSensitive`:
+  token, secret, password, apikey, credential, ...) keeps its placeholder, so `/reset/abc123` is
+  stored as `/reset/{token}`. Long random-looking segments become `[redacted]`. Use
+  `.analytics(false)` for other secret-bearing URLs (`/invite/{code}`, magic links).
 - **Visitors:** a hash of a daily random salt + host + IP + UA; counted once per day, so a
   multi-day range sums daily visitors. Behind a proxy, configure `trustedProxies(...)` or every
   visitor looks like the proxy (a warning is logged when that's detected).

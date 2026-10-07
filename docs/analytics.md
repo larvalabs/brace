@@ -162,17 +162,29 @@ Exit code: 0 on success, 1 when the app doesn't have analytics enabled, 2 when i
 ## Per-route options
 
 ```java
-app.get("/reset/{token}", ctrl::reset).analytics(false);     // never recorded
+app.get("/invite/{code}", ctrl::invite).analytics(false);    // never recorded
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();  // recorded as /u/{username}
 ```
 
 By default each page is recorded under its **concrete path**, decoded and without the query string:
 `/posts/hello-world`, `/tags/red hat`. That's what you want to see for articles and products.
 
-- **`.analytics(false)`** for routes whose URL carries a secret or a personal identifier:
-  password resets, invites, magic links, unsubscribe links. Path segments that look like long
-  random tokens are redacted to `[redacted]` automatically (the same rule as error records), but
-  short codes and numeric IDs are not.
+Two kinds of redaction happen automatically, using the same rules as error records:
+
+- **By parameter name.** A route parameter whose name contains token, secret, password, passwd,
+  pwd, apikey, credential, privatekey, accesskey, sessionid, bearer, csrf, cookie or
+  authorization (case and `-`/`_` ignored) keeps its placeholder. `/reset/{token}` visited as
+  `/reset/abc123` is stored as `/reset/{token}`: the visits are counted and grouped, and the value
+  is never written.
+- **By value.** A segment that looks like a long random token (16+ characters mixing letters and
+  digits, or a JWT) is stored as `[redacted]`, whatever the parameter is called.
+
+Neither catches a short code under an ordinary name, like `/invite/{code}` visited as
+`/invite/7KQ2`. For those:
+
+- **`.analytics(false)`** for routes whose URL carries a secret or a personal identifier that the
+  rules above miss: invite codes, magic links, unsubscribe links. Renaming the parameter to
+  something like `{inviteToken}` works too.
 - **`.analyticsByRoute()`** for routes with many URLs that are only interesting together, like
   user profiles or search pages. All their views are recorded under the route pattern.
 

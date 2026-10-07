@@ -61,6 +61,8 @@ public class Route {
     public Object handler() { return handler; }
     public Invoker invoker() { return invoker; }
     public boolean isStatic() { return paramNames.isEmpty(); }
+    /** Path parameter names in pattern order, e.g. {@code [id]} for {@code /users/{id}}. */
+    List<String> paramNames() { return paramNames; }
     /** Normalized literal path for static routes, {@code null} for parameterized ones. */
     String staticPath() { return staticPath; }
     public boolean csrfRequired() { return csrfRequired; }

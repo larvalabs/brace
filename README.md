@@ -481,7 +481,7 @@ app.analytics(Analytics.options()
     .timezone("America/New_York")
     .exclude("/admin/*"));
 
-app.get("/reset/{token}", ctrl::reset).analytics(false);    // don't record URLs that carry a secret
+app.get("/invite/{code}", ctrl::invite).analytics(false);   // don't record URLs that carry a secret
 app.get("/u/{username}", ctrl::profile).analyticsByRoute(); // count as one page, /u/{username}
 ```
 

@@ -764,10 +764,12 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
 - **Daily summaries hold no visitor IDs.** `brace_analytics_daily` stores only per-day counts per
   page, source, device, browser, OS and country, and is kept indefinitely. The paths in it are
   the same redacted paths as the raw rows, so the advice below applies to it too.
-- **Paths can carry secrets.** Concrete paths are stored and shown on the dashboard. Long
-  random-looking segments are redacted with the same rule as error records (see below), but short
-  codes and IDs are not. Mark routes like `/reset/{token}`, `/invite/{code}` and magic links with
-  `.analytics(false)`.
+- **Paths can carry secrets.** Concrete paths are stored and shown on the dashboard, after two
+  redaction passes that reuse the error-store rules (see below): a route parameter with a
+  sensitive *name* (`Redactor.isSensitive`, e.g. `{token}`, `{apiKey}`) is stored as its
+  placeholder, and a segment with a secret-shaped *value* becomes `[redacted]`. A short code under
+  an ordinary name (`/invite/{code}`) passes both; mark such routes `.analytics(false)` or rename
+  the parameter.
 - **Bounded growth.** Only matched routes returning HTML are counted, so a scanner requesting
   random URLs produces 404s, not rows. The in-memory buffer is capped at 20,000 views; beyond that
   views are dropped and tallied. Every stored string is length-capped, and every value the page

@@ -183,6 +183,19 @@ class AnalyticsTest {
     }
 
     @Test
+    void sensitiveRouteParametersKeepTheirPlaceholder() {
+        var reset = new Route("GET", "/reset/{token}", (Handler) r -> null, null);
+        assertEquals("/reset/{token}", Analytics.storedPath(reset, "/reset/abc123"));
+        var mixed = new Route("GET", "/teams/{team}/invites/{inviteToken}/accept", (Handler) r -> null, null);
+        assertEquals("/teams/larva/invites/{inviteToken}/accept",
+            Analytics.storedPath(mixed, "/teams/larva/invites/x7/accept"), "only the sensitive segment is masked");
+        var apiKey = new Route("GET", "/feeds/{api_key}", (Handler) r -> null, null);
+        assertEquals("/feeds/{api_key}", Analytics.storedPath(apiKey, "/feeds/k1"));
+        var post = new Route("GET", "/posts/{slug}", (Handler) r -> null, null);
+        assertEquals("/posts/hello world", Analytics.storedPath(post, "/posts/hello%20world"), "ordinary names are kept");
+    }
+
+    @Test
     void countryAndHostNormalization() {
         assertEquals("US", Analytics.countryCode("us"));
         assertNull(Analytics.countryCode("XX"));

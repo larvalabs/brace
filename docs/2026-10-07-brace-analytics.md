@@ -261,9 +261,10 @@ The main point of this design is a smaller attack surface than the Plausible set
   no invite flow, no separate admin app.
 - **No new process or database.** Same JVM, same Postgres.
 - **Little worth stealing.** No IPs, no user agents, no full referrer URLs, no query strings.
-  Paths are redacted; routes that carry secrets in the path (`/reset/{token}`) should use
-  `.analytics(false)`. A later improvement could warn at startup when a counted route's pattern
-  has a parameter named like `token`/`key`/`secret`.
+  Paths go through the error store's redaction: a parameter with a sensitive name
+  (`/reset/{token}`) is stored as its placeholder, and secret-shaped values become `[redacted]`.
+  Secret-bearing routes with ordinary parameter names (`/invite/{code}`) should use
+  `.analytics(false)`.
 - **Bounded.** Only matched routes returning HTML count, so a scanner spraying random URLs
   produces 404s, not rows. The flush buffer is bounded (drop and count when full). Rendered
   values are escaped like the ops dashboard.

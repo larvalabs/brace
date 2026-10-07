@@ -304,7 +304,7 @@ public final class Analytics {
         warnIfProxied(req);
         String ua = req.header("User-Agent");
         String host = normalizeHost(req.host());
-        String path = route.analytics() == Track.ROUTE ? route.pattern() : storedPath(req.path());
+        String path = route.analytics() == Track.ROUTE ? route.pattern() : storedPath(route, req.path());
         String country = null;
         if (options.countryHeader != null && req.fromTrustedProxy()) {
             country = countryCode(req.header(options.countryHeader));
@@ -335,6 +335,35 @@ public final class Analytics {
 
     private LocalDate today() {
         return LocalDate.now(options.zone);
+    }
+
+    /**
+     * The path to record for a view of {@code route}. A parameter whose <em>name</em> marks it as
+     * sensitive ({@link Redactor#isSensitive}: token, secret, password, apikey, ...) keeps its
+     * placeholder, so {@code /reset/abc123} is stored as {@code /reset/{token}}: those views are
+     * still counted, grouped together, and the value is never written. Other segments go through
+     * {@link #storedPath(String)}, which also redacts values that look like secrets.
+     */
+    static String storedPath(Route route, String rawPath) {
+        if (route.paramNames().stream().noneMatch(Redactor::isSensitive)) return storedPath(rawPath);
+        var pattern = segments(route.pattern());
+        var actual = segments(rawPath);
+        // The route matched this path, so the segment counts agree; if they somehow don't,
+        // the pattern alone is the safe thing to store.
+        if (pattern.size() != actual.size()) return route.pattern();
+        var sb = new StringBuilder();
+        for (int i = 0; i < pattern.size(); i++) {
+            String p = pattern.get(i);
+            boolean sensitive = p.startsWith("{") && p.endsWith("}") && Redactor.isSensitive(p.substring(1, p.length() - 1));
+            sb.append('/').append(sensitive ? p : actual.get(i));
+        }
+        return storedPath(sb.isEmpty() ? "/" : sb.toString());
+    }
+
+    private static List<String> segments(String path) {
+        var out = new ArrayList<String>();
+        for (String s : path.split("/")) if (!s.isEmpty()) out.add(s);
+        return out;
     }
 
     /** Decoded, redacted, control-free path, capped to the column width. */
