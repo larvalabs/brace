@@ -3,6 +3,7 @@ package com.larvalabs.brace;
 import org.eclipse.jetty.http.DateGenerator;
 import org.eclipse.jetty.http.DateParser;
 import org.eclipse.jetty.http.HttpField;
+import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.http.MultiPart;
 import org.eclipse.jetty.http.MultiPartFormData;
 import org.eclipse.jetty.io.Content;
@@ -890,6 +891,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             response.getHeaders().add("Set-Cookie", setCookie);
         }
         if (result instanceof StreamResult streamResult) {
+            if (HttpMethod.HEAD.is(response.getRequest().getMethod())) {
+                // HEAD sends no body, so don't produce one. Jetty would discard the bytes anyway,
+                // but an event stream's producer would run until the client left — which a HEAD
+                // client has already done — and a file or generator would be read in full for
+                // nothing. The headers above already carry Content-Length whenever it is known.
+                closeQuietly(onWritten);
+                response.write(true, ByteBuffer.allocate(0), callback);
+                return;
+            }
             writeStream(streamResult, response, callback, onWritten);
             return;
         }

@@ -84,6 +84,20 @@ public class Router {
     }
 
     public RouteMatch match(String method, String path) {
+        var found = matchMethod(method, path);
+        if (found != null) return found;
+        // HEAD is GET without the body (RFC 9110 §9.3.2). Uptime monitors and link checkers send
+        // it, and every GET route used to 404 to them because routes are keyed on exact method.
+        // Fall back to the GET route only after a HEAD-registered one had its chance (trailing-
+        // slash form included), so an explicit HEAD route always wins. The request keeps its
+        // HEAD method; BraceHandler drops the body on the way out.
+        if (method.equals("HEAD")) {
+            return matchMethod("GET", path);
+        }
+        return null;
+    }
+
+    private RouteMatch matchMethod(String method, String path) {
         var found = matchExact(method, path);
         if (found != null) return found;
         // L1: a trailing slash is not a different resource. "/users/" compiled to nothing that
