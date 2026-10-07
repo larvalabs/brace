@@ -135,6 +135,8 @@ class AnalyticsIntegrationTest {
         assertEquals(2, r.path("visitors").asLong());
         assertEquals(5, r.path("pageviews").asLong());
         assertEquals(LocalDate.now(java.time.ZoneOffset.UTC).toString(), r.path("to").asText());
+        assertTrue(r.path("previousVisitors").isNull(),
+            "no stored data reaches back to yesterday, so there is nothing honest to compare with");
 
         var pages = r.path("pages");
         assertEquals(2, row(pages, "/posts/hello-world").path("visitors").asLong());
@@ -167,6 +169,7 @@ class AnalyticsIntegrationTest {
         assertTrue(res.body().contains("Top pages"));
         assertTrue(res.body().contains("/posts/hello-world"));
         assertTrue(res.body().contains("/u/{name}"));
+        assertTrue(res.body().contains("no comparison yet"));
 
         assertEquals(400, opsGet("/ops/analytics?range=1y").statusCode());
     }
@@ -228,12 +231,12 @@ class AnalyticsIntegrationTest {
     @Test
     @Order(7)
     void expiredSaltsAndOldRowsAreDeleted() throws Exception {
-        LocalDate old = LocalDate.now(java.time.ZoneOffset.UTC).minusDays(40);
+        LocalDate old = LocalDate.now(java.time.ZoneOffset.UTC).minusDays(Analytics.DEFAULT_RETENTION_DAYS + 10);
         dbFactory.withSession(db -> {
             db.sql("INSERT INTO brace_analytics_salts (view_date, salt) VALUES (?, ?)", old, "00".repeat(32));
             db.sql("INSERT INTO brace_analytics_pageviews (ts, view_date, view_hour, visitor, path, device, browser, os) "
                 + "VALUES (?, ?, 0, 1, '/old', 'desktop', 'Chrome', 'macOS')",
-                java.time.OffsetDateTime.now().minusDays(40), old);
+                java.time.OffsetDateTime.now().minusDays(Analytics.DEFAULT_RETENTION_DAYS + 10), old);
         });
         visit("/", browser(AnalyticsTest.FIREFOX_WIN));
         flushWhenBuffered(1);

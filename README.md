@@ -28,7 +28,7 @@ The repo includes a TechEmpower-style [benchmark suite](benchmark/) and JMH micr
 
 ### Included Components
 
-Brace covers HTTP and routing, database and migrations, typed templates, encrypted sessions, forms and validation, CSRF, caching, recurring and durable jobs, email, object storage, an outbound HTTP client, WebSocket, rate limiting, htmx, custom metrics, and ops tooling. The components share configuration, error handling, and the test harness, and the set is expanding with each release. See [What's Included](#whats-included) for details.
+Brace covers HTTP and routing, database and migrations, typed templates, encrypted sessions, forms and validation, CSRF, caching, recurring and durable jobs, email, object storage, an outbound HTTP client, WebSocket, rate limiting, htmx, custom metrics, privacy-friendly analytics, and ops tooling. The components share configuration, error handling, and the test harness, and the set is expanding with each release. See [What's Included](#whats-included) for details.
 
 ### Agent Observability
 
@@ -485,8 +485,16 @@ app.get("/reset/{token}", ctrl::reset).analytics(false);    // don't record URLs
 app.get("/u/{username}", ctrl::profile).analyticsByRoute(); // count as one page, /u/{username}
 ```
 
-Bots, prefetches, background fetches and htmx partial swaps are filtered out, and the dashboard
-shows how many requests each filter rejected. Requires a database and `app.ops(...)`.
+The page shows visitors, pageviews, views per visit and "visitors now" (distinct visitors who loaded
+a page in the last 5 minutes), with Today / 7 day / 30 day charts, top pages, sources, devices,
+browsers, operating systems and, behind a proxy that sends one, countries. Bots, prefetches,
+background fetches and htmx partial swaps are filtered out, and the page shows how many requests
+each filter rejected. Requires a database and `app.ops(...)`; behind a reverse proxy, also
+`trustedProxies(...)` so visitors aren't all seen at the proxy's IP.
+
+`brace ops dashboard --analytics` opens the page; `brace analytics --range 7d` prints the same
+report in the terminal. See [docs/analytics.md](docs/analytics.md) for what each number means, the
+filters, privacy, and accuracy compared with a JavaScript tracker.
 
 ## Cache
 

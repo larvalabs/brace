@@ -96,7 +96,7 @@ aren't in a project directory.
 | `GET /ops/regressions` | New error kinds since startup (the `/ops/errors` shape + an `acknowledged` flag). The on-call wake signal — empty means no new error types this process lifetime. |
 | `GET /ops/dashboard` | HTML dashboard (browser) |
 | `GET /ops/analytics[?range=today\|7d\|30d]` | HTML analytics page (browser), when the app calls `app.analytics()` |
-| `GET /ops/analytics/data[?range=today\|7d\|30d]` | Analytics report as JSON: `visitors`, `pageviews`, `previousVisitors`/`previousPageviews` (the period before), `live` (last 5 min), `series` (per hour for today, per day otherwise), `pages`, `sources` (`key: null` = direct), `devices`, `browsers`, `os`, `countries`, `notCounted` (per filter reason). 404 when analytics is off |
+| `GET /ops/analytics/data[?range=today\|7d\|30d]` | Analytics report as JSON: `visitors`, `pageviews`, `previousVisitors`/`previousPageviews` (the period before; `null` when stored data doesn't reach back that far), `live` (last 5 min), `series` (per hour for today, per day otherwise), `pages`, `sources` (`key: null` = direct), `devices`, `browsers`, `os`, `countries`, `notCounted` (per filter reason). 404 when analytics is off |
 | `POST /ops/analytics/ignore` | Form `on=1` (or `0`): set (or clear) the cookie that keeps the caller's browser out of the counts |
 | `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) — **control scope** |
 | `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true, "scope": "instance"|"fleet"}` with `Accept: application/json`; `fleet` when a shared backend is configured) — **control scope** |
@@ -552,7 +552,8 @@ sticky sessions. Full contract: `docs/scaling.md` in the brace repo. Essentials:
 - **Automatic on Postgres** (no code change): sessions, CSRF, durable jobs, recurring
   scheduler (once-per-interval cluster-wide), WebSocket broadcast (`LISTEN`/`NOTIFY`),
   rate limiter (shared counter — enforced cluster-wide, not per instance), ops console
-  login (shared secret), regression detection (shared table), instance-tagged metrics feed.
+  login (shared secret), regression detection (shared table), instance-tagged metrics feed,
+  analytics (shared visitor salt; every analytics number is fleet-wide).
 - **Opt-in:** the shared cache backend (`CacheBackend.postgres(dbFactory)`) — per-process
   by default even on Postgres, since it trades latency for consistency.
 - **Per-instance by design:** `/ops/dashboard`, `/ops/status`, `/ops/logs`, JFR/heap
@@ -577,6 +578,37 @@ are no longer silently summed or limited to a single instance. The authoritative
 picture is an external metrics/log aggregator over that feed and the stdout JSON logs
 (which go to every instance's stdout).
 
+## Analytics
+
+Apps that call `app.analytics()` count page views server-side (no script, no cookies, no IPs
+stored). Full guide: `docs/analytics.md` in the brace repo. What an agent needs to read the numbers:
+
+| Field | Meaning |
+|---|---|
+| `pageviews` | Counted page views: `GET`s to app routes answered with 2xx HTML (or a 304 to an HTML request), after the filters below. |
+| `visitors` | Distinct visitor hashes. The hash uses a salt that changes daily, so a person is a new visitor each day and a multi-day range is the sum of daily visitors, not distinct people. |
+| `live` | Distinct visitors who loaded a counted page in the **last 5 minutes**, across all instances. Not "tabs open": a reader on one page for 6 minutes drops out. Lags up to ~10s (flush interval); `/ops/status` and the dashboard card may reuse a value for 15s. |
+| `previousVisitors` / `previousPageviews` | The period before (yesterday up to this hour for `today`). `null` when stored data doesn't reach back to its start (recently enabled, or retention shorter than twice the range). |
+| `notCounted` | Candidates rejected per reason: `bot`, `htmx` (partial swap), `background` (`Sec-Fetch-Mode` not `navigate`), `prefetch`, `excluded` (config or the don't-count cookie), `dropped` (buffer full: database slow/down). |
+
+### Runbook: traffic check
+
+```bash
+brace analytics --range today --env prod --json | jq '{visitors, pageviews, live, notCounted}'
+brace analytics --range 7d --env prod            # top pages and sources, human-readable
+```
+
+- **`visitors` near 1 while `pageviews` is high:** the app is behind a proxy missing from
+  `trustedProxies(...)`, so every visitor shares the proxy's IP. The log says "Analytics sees
+  X-Forwarded-For from a peer that is not a trusted proxy".
+- **`pageviews` zero but the site is up:** compare `notCounted`. All traffic as `bot` or
+  `background` means non-browser clients; check that pages return `text/html` and that routes
+  aren't excluded or marked `.analytics(false)`.
+- **`dropped` > 0:** the analytics flush is failing; look for `analytics flush failed` in the logs
+  and check database health (`brace check`).
+- **A sudden traffic spike:** `sources` names where it came from (`key: null` is direct).
+- `brace analytics` exits 1 when the app doesn't have analytics enabled.
+
 ## Storage and retention
 
 | Data | Where it lives | Capacity | Eviction | Survives restart? |
@@ -584,7 +616,7 @@ picture is an external metrics/log aggregator over that feed and the stdout JSON
 | Errors (`/ops/errors`) | `ops_errors` table (Postgres/H2) | 1000 rows (hardcoded in `Brace.start()`) | When count > 1000: deletes resolved rows first (oldest), then oldest unresolved | Yes |
 | Logs (`/ops/logs`) | `LogTap` in-memory ring (`ConcurrentLinkedDeque`) | 1000 entries (configurable via `LogTap.setCapacity`) | Oldest entry dropped when full | No |
 | Stats (`/ops/status`) | `Stats` in-memory counters / ring buffers | Per-route + timeseries window | Rolling | No |
-| Analytics page views (`/ops/analytics`) | `brace_analytics_pageviews` (one row per counted view, no IP/UA) + `brace_analytics_rejects` (filter tallies) | Raw retention, default 35 days (`Analytics.options().rawRetention(...)`) | Daily `analytics-prune` job deletes older days | Yes |
+| Analytics page views (`/ops/analytics`) | `brace_analytics_pageviews` (one row per counted view, no IP/UA) + `brace_analytics_rejects` (filter tallies) | Raw retention, default 60 days (`Analytics.options().rawRetention(...)`) | Daily `analytics-prune` job deletes older days | Yes |
 | Analytics visitor salt | `brace_analytics_salts` (one random salt per day, shared by the fleet) | Today's only | Deleted 5 minutes after its day ends | Yes, until deleted |
 
 Errors are **deduplicated on `error_type + route`** for unresolved rows — repeated

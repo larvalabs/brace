@@ -211,7 +211,9 @@ public class OpsDashboard {
             statCard(sb, "Sent", String.valueOf(mailer.sentCount()), mailDetail, "c-cyan");
         }
         if (analyticsEnabled) {
-            sb.append("<a class=\"stat-card stat-link\" href=\"/ops/analytics\"><div class=\"label\">Visitors Today</div>")
+            sb.append("<a class=\"stat-card stat-link\" href=\"/ops/analytics\" title=\"Visitors since midnight; ")
+              .append("'now' is distinct visitors who loaded a page in the last ").append(Analytics.LIVE_WINDOW.toMinutes())
+              .append(" minutes\"><div class=\"label\">Visitors Today</div>")
               .append("<div class=\"value c-cyan\">").append(today == null ? "-" : String.format("%,d", today.visitors()))
               .append("</div><div class=\"detail\">")
               .append(today == null ? "unavailable" : String.format("%,d now · %,d views", today.live(), today.pageviews()))

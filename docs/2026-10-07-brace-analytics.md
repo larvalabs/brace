@@ -64,7 +64,7 @@ request ─▶ route ─▶ handler ─▶ response sent ─▶ recordAndLog
                                                   bounded in-memory buffer
                                                         │ every 10s (everyLocal job)
                                                         ▼
-                                           brace_analytics_pageviews  (raw, ~35 days)
+                                           brace_analytics_pageviews  (raw, 60 days)
                                                         │ phase 2: nightly rollup
                                                         ▼
                                            brace_analytics_daily      (aggregates, kept)
@@ -164,7 +164,7 @@ Phase 2 adds `brace_analytics_daily (view_date, dim, dim_value, visitors, pagevi
 migration, filled by a nightly rollup, for ranges longer than the raw window.
 
 Sizing: a raw row is roughly 120–150 bytes with its index share. 50k pageviews/day is about
-7 MB/day, so ~250 MB at the default 35-day raw retention. The daily table is a few hundred rows
+7 MB/day, so ~420 MB at the default 60-day raw retention. The daily table is a few hundred rows
 per day once each dimension is capped (top 500 paths, top 200 sources; the rest fold into
 `(other)`), so keeping it forever costs almost nothing.
 
@@ -192,7 +192,7 @@ app.analytics(Analytics.options()
     .exclude("/admin/*", "/account/*")            // exact or trailing /* prefix, never counted
     .excludeIps("203.0.113.0/24")                 // the office
     .countryHeader("CF-IPCountry")                // trusted only from trustedProxies peers
-    .rawRetention("35d")
+    .rawRetention("60d")
     .strictNavigation(false));
 
 // Per route: opt out, or group by pattern instead of concrete path
@@ -294,5 +294,7 @@ Things the server can't see:
 1. **Who looks at it?** If non-engineers need it, Ed25519 keys are awkward. A read-only key
    minted with `brace ops keypair --read-only` plus `brace ops dashboard --analytics` may be
    enough.
-2. **Raw retention default:** 35 days covers the 30-day view with margin. Longer means filters
-   work further back, at ~7 MB/day per 50k pageviews.
+2. **Raw retention default:** 60 days, so the 30-day view can compare against the 30 days
+   before it. (An earlier draft used 35, which silently truncated that comparison.) The
+   comparison is null whenever stored data doesn't cover the whole earlier period. Longer
+   retention costs ~7 MB/day per 50k pageviews.

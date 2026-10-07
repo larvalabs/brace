@@ -988,14 +988,14 @@ from requests the app already serves, so there's no tracking script, no cookie, 
 agent stored. Needs a database and ops (`start()` throws without either).
 
 ```java
-app.analytics();                                   // defaults: UTC days, 35 days of raw views
+app.analytics();                                   // defaults: UTC days, 60 days of raw views
 
 app.analytics(Analytics.options()
     .timezone("America/New_York")                 // day boundaries + daily visitor-salt rotation
     .exclude("/admin/*")                          // exact path or trailing /* prefix
     .excludeIps("203.0.113.0/24")                 // never counted
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
-    .rawRetention("35d"));
+    .rawRetention("60d"));                       // 60d minimum for the 30-day comparison
 
 app.get("/reset/{token}", ctrl::reset).analytics(false);       // URL carries a secret: don't record it
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}
@@ -1007,14 +1007,19 @@ app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/
   and errors are never candidates.
 - **Paths:** the concrete path (`/posts/hello-world`), decoded and redacted, without query
   string. Opt a route out with `.analytics(false)` when its URL carries a token.
-- **Visitors:** a hash of a daily random salt + host + IP + UA; counted once per day. Behind a
-  proxy, configure `trustedProxies(...)` or every visitor looks like the proxy (a warning is
-  logged when that's detected).
+- **Visitors:** a hash of a daily random salt + host + IP + UA; counted once per day, so a
+  multi-day range sums daily visitors. Behind a proxy, configure `trustedProxies(...)` or every
+  visitor looks like the proxy (a warning is logged when that's detected).
+- **Visitors now (`live`):** distinct visitors who loaded a counted page in the last 5 minutes,
+  fleet-wide, lagging up to ~10s. People reading one page for longer drop out.
+- **Comparisons** (`previousVisitors`/`previousPageviews`) are `null` until stored data covers
+  the whole earlier period; keep `rawRetention` ≥ 60d for the 30-day comparison.
 - **Viewing:** `/ops/analytics` (linked from the ops dashboard header; `brace ops dashboard
   --analytics` opens it), `GET /ops/analytics/data?range=today|7d|30d` (JSON), `brace analytics
   [--range 7d]`, and an `analytics` block in `/ops/status`. All need a `read` ops token.
 - Tables: `brace_analytics_pageviews`, `brace_analytics_rejects`, `brace_analytics_salts`
-  (framework migration V18).
+  (framework migration V18). Full guide: `docs/analytics.md` in the brace repo; JSON shape and
+  troubleshooting runbook in `BRACE-OPS.md`.
 
 ## Custom Metrics
 

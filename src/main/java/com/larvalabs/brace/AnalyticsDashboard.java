@@ -110,7 +110,8 @@ final class AnalyticsDashboard {
         sb.append("<div class=\"header\"><span class=\"brand\"><span class=\"title\">┌ BRACE</span>")
           .append("<span class=\"switch\"><a href=\"/ops/dashboard\">ops</a>")
           .append("<a href=\"/ops/analytics\" aria-current=\"page\">analytics</a></span></span>")
-          .append("<span class=\"meta\"><span class=\"live\">● ").append(fmt(r.live()))
+          .append("<span class=\"meta\"><span class=\"live\" title=\"Distinct visitors who loaded a page in the last ")
+          .append(Analytics.LIVE_WINDOW.toMinutes()).append(" minutes, across all instances\">● ").append(fmt(r.live()))
           .append(" visitor").append(r.live() == 1 ? "" : "s").append(" now</span><span>")
           .append(esc(r.timezone())).append("</span></span></div>\n");
 
@@ -129,15 +130,16 @@ final class AnalyticsDashboard {
 
         // Tiles
         long notCounted = r.notCounted().values().stream().mapToLong(Long::longValue).sum();
-        String compare = today ? "vs yesterday so far" : "vs previous " + (r.series().size()) + " days";
+        String compare = today ? "yesterday so far" : "the previous " + r.series().size() + " days";
         sb.append("<div class=\"tiles\">");
         metricTile(sb, r, "visitors", "Visitors", fmt(r.visitors()), delta(r.visitors(), r.previousVisitors(), compare), metric);
         metricTile(sb, r, "pageviews", "Pageviews", fmt(r.pageviews()), delta(r.pageviews(), r.previousPageviews(), compare), metric);
         double ppv = r.visitors() == 0 ? 0 : (double) r.pageviews() / r.visitors();
-        double prevPpv = r.previousVisitors() == 0 ? 0 : (double) r.previousPageviews() / r.previousVisitors();
+        Double prevPpv = r.previousVisitors() == null || r.previousVisitors() == 0 ? null
+            : (double) r.previousPageviews() / r.previousVisitors();
         sb.append("<div class=\"tile\"><span class=\"label\">Views per visit</span><span class=\"value\">")
           .append(String.format(Locale.US, "%.2f", ppv)).append("</span><span class=\"detail\">")
-          .append(r.previousVisitors() == 0 ? "&nbsp;" : delta(ppv, prevPpv, compare)).append("</span></div>");
+          .append(delta(ppv, prevPpv, compare)).append("</span></div>");
         sb.append("<div class=\"tile\"><span class=\"label\">Not counted</span><span class=\"value\">")
           .append(fmt(notCounted)).append("</span><span class=\"detail\">bots, prefetches, htmx partials</span></div>");
         sb.append("</div>\n");
@@ -261,12 +263,21 @@ final class AnalyticsDashboard {
         sb.append("</table></section>");
     }
 
-    private static String delta(double current, double previous, String compare) {
-        if (previous <= 0) return "no earlier data";
+    /** {@code previous} is null when stored data doesn't cover the whole earlier period. */
+    private static String delta(double current, Number previous, String compare) {
+        if (previous == null) {
+            return "<span title=\"Stored page views don't reach back to the start of " + esc(compare)
+                + " yet\">no comparison yet</span>";
+        }
+        if (previous.doubleValue() <= 0) return "up from 0 " + (compare.startsWith("the ") ? "in " : "") + esc(compare);
+        return deltaPct(current, previous.doubleValue(), compare);
+    }
+
+    private static String deltaPct(double current, double previous, String compare) {
         double pct = (current - previous) / previous * 100;
         String cls = pct >= 0 ? "up" : "down";
         return "<span class=\"" + cls + "\">" + (pct >= 0 ? "↑ " : "↓ ")
-            + String.format(Locale.US, "%.0f%%", Math.abs(pct)) + "</span> " + esc(compare);
+            + String.format(Locale.US, "%.0f%%", Math.abs(pct)) + "</span> vs " + esc(compare);
     }
 
     static long niceMax(long v) {

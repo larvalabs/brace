@@ -59,13 +59,16 @@ public final class Analytics {
      */
     public enum Track { PATH, ROUTE, OFF }
 
+    /** Covers the 30-day view plus the 30 days before it, which the comparison needs. */
+    static final int DEFAULT_RETENTION_DAYS = 60;
+
     /** Configuration for {@code app.analytics(...)}. */
     public static final class Options {
         private ZoneId zone = ZoneOffset.UTC;
         private final List<Middleware.PathPattern> excludes = new ArrayList<>();
         private TrustedProxies excludeIps;
         private String countryHeader;
-        private Duration rawRetention = Duration.ofDays(35);
+        private Duration rawRetention = Duration.ofDays(DEFAULT_RETENTION_DAYS);
         private boolean strictNavigation;
         private int bufferLimit = 20_000;
 
@@ -98,7 +101,11 @@ public final class Analytics {
             return this;
         }
 
-        /** How long raw page views are kept, e.g. {@code "35d"} (the default). Minimum 1 day. */
+        /**
+         * How long raw page views are kept, e.g. {@code "90d"}. Default {@code "60d"}: the 30-day view
+         * compares against the 30 days before it, so anything under 60 days drops that comparison.
+         * Minimum 1 day.
+         */
         public Options rawRetention(String duration) {
             this.rawRetention = Duration.ofMillis(Math.max(JobScheduler.parseInterval(duration),
                 Duration.ofDays(1).toMillis()));
@@ -148,7 +155,7 @@ public final class Analytics {
     public record Summary(long visitors, long pageviews, long live) {}
 
     public record Report(String range, String timezone, LocalDate from, LocalDate to,
-                         long visitors, long pageviews, long previousVisitors, long previousPageviews,
+                         long visitors, long pageviews, Long previousVisitors, Long previousPageviews,
                          long live, List<Point> series, List<Row> pages, List<Row> sources,
                          List<Row> devices, List<Row> browsers, List<Row> os, List<Row> countries,
                          Map<String, Long> notCounted) {}
@@ -563,11 +570,17 @@ public final class Analytics {
         return databaseFactory.withSession(db -> {
             long[] cur = totals(db, from, to, 23);
             // "Today" compares with yesterday up to the same hour; the others with the period before.
-            long[] prev = days == 1
-                ? totals(db, from.minusDays(1), from.minusDays(1), now.getHour())
-                : totals(db, from.minusDays(days), from.minusDays(1), 23);
+            // Only when stored data reaches back to the start of that period: a previous period cut
+            // short by retention, or by analytics having been on for less time, would read as a
+            // dramatic rise. Null then, rather than a misleading number.
+            LocalDate prevFrom = days == 1 ? from.minusDays(1) : from.minusDays(days);
+            LocalDate earliest = earliestDay(db);
+            long[] prev = earliest == null || earliest.isAfter(prevFrom) ? null
+                : days == 1 ? totals(db, prevFrom, prevFrom, now.getHour())
+                : totals(db, prevFrom, from.minusDays(1), 23);
             List<Point> series = days == 1 ? hourly(db, to, now.getHour()) : daily(db, from, to);
-            return new Report(range, options.zone.getId(), from, to, cur[0], cur[1], prev[0], prev[1],
+            return new Report(range, options.zone.getId(), from, to, cur[0], cur[1],
+                prev == null ? null : prev[0], prev == null ? null : prev[1],
                 live(db), series,
                 breakdown(db, "path", from, to, TOP_LIMIT),
                 breakdown(db, "source", from, to, TOP_LIMIT),
@@ -577,6 +590,12 @@ public final class Analytics {
                 options.countryHeader == null ? List.of() : breakdown(db, "country", from, to, BREAKDOWN_LIMIT),
                 notCounted(db, from, to));
         });
+    }
+
+    private static LocalDate earliestDay(Database db) {
+        var rows = db.sqlQuery("SELECT MIN(view_date) FROM brace_analytics_pageviews");
+        Object v = rows.isEmpty() ? null : rows.getFirst()[0];
+        return v == null ? null : toLocalDate(v);
     }
 
     private static long[] totals(Database db, LocalDate from, LocalDate to, int lastHour) {
