@@ -16,6 +16,7 @@ public class OpsHandler {
     private final Cache cache;
     private final JfrProfiler profiler;
     private RegressionTracker regressionTracker;
+    private Analytics analytics;
     private volatile String instanceId = "unknown";
 
     private static final String OPS_COOKIE_NAME = "__brace_ops_session";
@@ -220,7 +221,10 @@ public class OpsHandler {
         // caller's ceiling; shorter TTL limits the damage window of a stolen cookie further.
         String sessionToken = OpsToken.create(tokenSecret, SESSION_TTL_SECONDS, claims.scope(), claims.kid());
 
-        var result = Redirect.to("/ops/dashboard");
+        // ?next=analytics lands on the analytics page instead (brace ops dashboard --analytics).
+        // An allowlist, not a path: an open redirect here would bounce a fresh ops session anywhere.
+        boolean toAnalytics = analytics != null && "analytics".equals(req.queryParam("next"));
+        var result = Redirect.to(toAnalytics ? "/ops/analytics" : "/ops/dashboard");
         // Scoped to /ops (L1/L2): the ops session token is an operator credential and has no
         // business being attached to every application request, where any handler can read it
         // via req.cookie(...) and any request logging can capture it. Every endpoint that
@@ -462,6 +466,21 @@ public class OpsHandler {
             data.put("timeseries", timeseries);
         }
 
+        // Analytics: today's headline numbers, when app.analytics() is on. A database hiccup here
+        // must not take the whole status snapshot down with it.
+        if (analytics != null) {
+            var a = new LinkedHashMap<String, Object>();
+            try {
+                var today = analytics.summary();
+                a.put("todayVisitors", today.visitors());
+                a.put("todayPageviews", today.pageviews());
+                a.put("live", today.live());
+            } catch (RuntimeException e) {
+                a.put("error", "unavailable");
+            }
+            data.put("analytics", a);
+        }
+
         return Json.of(data);
     }
 
@@ -472,7 +491,16 @@ public class OpsHandler {
         // own scope and key id — never above it (H1: this token is embedded in the page
         // HTML, so a CONTROL default would hand every read-only caller a control token).
         String dashboardToken = OpsToken.create(tokenSecret, 7200, claims.scope(), claims.kid());
-        return Result.html(OpsDashboard.html(dashboardToken, claims.scope(), stats, jobScheduler, mailer, errorStore, cache, profiler));
+        Analytics.Summary today = null;
+        if (analytics != null) {
+            try {
+                today = analytics.summary();
+            } catch (RuntimeException e) {
+                // The ops dashboard must render even when the analytics query fails.
+            }
+        }
+        return Result.html(OpsDashboard.html(dashboardToken, claims.scope(), stats, jobScheduler, mailer,
+            errorStore, cache, profiler, analytics != null, today));
     }
 
     public Result routes(Request req) {
@@ -691,6 +719,44 @@ public class OpsHandler {
         m.put("resolvedAt", null);
         m.put("queriesBefore", r.queriesBefore);
         return m;
+    }
+
+    public void setAnalytics(Analytics analytics) {
+        this.analytics = analytics;
+    }
+
+    /** GET /ops/analytics?range=today|7d|30d&metric=visitors|pageviews — the analytics page. */
+    public Result analytics(Request req) {
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
+        String range = req.queryParam("range", "30d");
+        if (!Analytics.RANGES.contains(range)) return Result.badRequest("range must be one of " + Analytics.RANGES);
+        String metric = "pageviews".equals(req.queryParam("metric")) ? "pageviews" : "visitors";
+        boolean ignored = req.cookie(Analytics.IGNORE_COOKIE) != null;
+        return Result.html(AnalyticsDashboard.html(analytics.report(range), metric, ignored));
+    }
+
+    /** GET /ops/analytics/data?range=today|7d|30d — the same report as JSON (the CLI reads this). */
+    public Result analyticsData(Request req) {
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
+        String range = req.queryParam("range", "7d");
+        if (!Analytics.RANGES.contains(range)) return Result.badRequest("range must be one of " + Analytics.RANGES);
+        return Json.of(analytics.report(range));
+    }
+
+    /**
+     * POST /ops/analytics/ignore — set (or clear, with {@code on=0}) the cookie that keeps this
+     * browser's visits out of the counts. The ops cookie is scoped to /ops, so public pages can't
+     * recognise an operator from it; this separate marker is scoped to / for that reason.
+     */
+    public Result analyticsIgnore(Request req) {
+        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
+        boolean on = !"0".equals(req.formParam("on"));
+        String range = req.formParam("range");
+        String back = "/ops/analytics" + (range != null && Analytics.RANGES.contains(range) ? "?range=" + range : "");
+        var result = Redirect.to(back);
+        boolean secure = !BraceHandler.isLoopbackHost(req.host());
+        result.cookie(Analytics.IGNORE_COOKIE, on ? "1" : "0", on ? 365 * 24 * 3600 : 0, true, secure, "Lax", "/");
+        return result;
     }
 
     public void setRegressionTracker(RegressionTracker tracker) {

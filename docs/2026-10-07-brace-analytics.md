@@ -1,6 +1,8 @@
 # Brace Analytics: server-side visitor counts
 
-Status: **proposal / design exploration**, not implemented. Mockup: `docs/analytics-mockup.html`.
+Status: **phase 1 implemented** (0.1.11). Decisions taken: concrete paths by default, no public
+share link. Mockup: `docs/analytics-mockup.html`. Code: `Analytics`, `UserAgents`,
+`AnalyticsDashboard`, framework migration V18.
 
 ## Why
 
@@ -34,7 +36,7 @@ business event" on the ops dashboard.
 |---|---|
 | Unique visitors (daily-salted hash, no cookie) | **Keep**, same technique |
 | Pageviews, views per visit | **Keep** |
-| Top pages | **Keep** (concrete path; per-route option to group by pattern) |
+| Top pages | **Keep** (concrete path; per-route `.analyticsByRoute()` to group by pattern) |
 | Sources (referrer, `utm_source`, `?ref=`) | **Keep** |
 | Devices, browsers, OS | **Keep** (hand-rolled UA + client-hints classifier, no dependency) |
 | Countries | **Keep if a proxy supplies it** (`CF-IPCountry` etc.); no GeoIP database |
@@ -55,7 +57,7 @@ there:
 request ─▶ route ─▶ handler ─▶ response sent ─▶ recordAndLog
                                                   ├─ Stats.recordRequestPattern   (ops, existing)
                                                   ├─ Log.request                  (existing)
-                                                  └─ Analytics.observe(...)        (new)
+                                                  └─ Analytics.observe(...)        (new, BraceHandler.send)
                                                         │ classify: is this a pageview?
                                                         │ hash visitor, parse UA/referrer
                                                         ▼
@@ -63,7 +65,7 @@ request ─▶ route ─▶ handler ─▶ response sent ─▶ recordAndLog
                                                         │ every 10s (everyLocal job)
                                                         ▼
                                            brace_analytics_pageviews  (raw, ~35 days)
-                                                        │ nightly rollup (cluster-deduped)
+                                                        │ phase 2: nightly rollup
                                                         ▼
                                            brace_analytics_daily      (aggregates, kept)
 ```
@@ -73,13 +75,16 @@ The per-pageview cost is a handful of header checks, one SHA-256 over ~100 bytes
 enqueue. Non-pageview requests (assets, JSON, htmx partials, bots) exit after the first few
 checks.
 
-`Exchange` needs one more field, the response `Content-Type`, so the classifier can tell an HTML
-page from a JSON response on the same route.
+The hook sits in `send()`, which has the final `Result`, so the classifier reads the response
+`Content-Type` directly. The IP and user agent stay in the in-memory buffer until the flush
+hashes them; they are never written.
 
 ### What counts as a pageview
 
-All of these must hold. Each rejected request increments a per-reason counter, so the dashboard
-can show what was filtered and the numbers can be trusted.
+Requests that were never candidates (non-GET, no matched route, `/ops/*`, non-HTML, non-2xx) are
+ignored silently. Candidates that fail a filter increment a per-reason counter (`bot`, `htmx`,
+`background`, `prefetch`, `excluded`, plus `dropped` for a full buffer), so the dashboard can
+show what was filtered and the numbers can be trusted.
 
 | Rule | Why |
 |---|---|
@@ -106,9 +111,10 @@ visitor = first 8 bytes of SHA-256( dailySalt ‖ host ‖ clientIp ‖ userAgen
 
 - `dailySalt` is 32 random bytes per calendar day (in the configured timezone), stored in
   `brace_analytics_salts` so every instance in a fleet uses the same one. The first instance to
-  need a day's salt inserts it; the others read it. Salts older than today are deleted by the
-  same job that rotates them, so after midnight nobody can recompute yesterday's hashes, even
-  with a list of candidate IPs.
+  need a day's salt inserts it (`ON CONFLICT DO NOTHING` on Postgres); the others read it. Each
+  flush deletes salts whose day ended more than 5 minutes ago (the grace covers views buffered
+  just before midnight), so after that nobody can recompute yesterday's hashes, even with a list
+  of candidate IPs.
 - `clientIp` comes from `req.ip()`, which honours `trustedProxies(...)`. **If the app sits behind
   a proxy without trusted proxies configured, every visitor hashes to the proxy's address and the
   site shows one visitor.** Analytics logs a startup warning when it sees forwarding headers from
@@ -124,54 +130,56 @@ Consequences, stated on the dashboard so nobody misreads them:
 
 ### What is stored
 
-New base-tier migration (runs on H2 and Postgres), `V18__brace_analytics.sql`:
+New base-tier migration (runs on H2 and Postgres), `V18__brace_analytics.sql`. Columns are
+`view_date`/`view_hour` rather than `day`/`hour`, which are reserved words in H2:
 
 ```sql
-CREATE TABLE IF NOT EXISTS brace_analytics_pageviews (
-    ts        TIMESTAMP    NOT NULL,
-    day       DATE         NOT NULL,   -- calendar day in the configured timezone
+CREATE TABLE brace_analytics_pageviews (
+    ts        TIMESTAMP WITH TIME ZONE NOT NULL,
+    view_date DATE         NOT NULL,   -- calendar day in the configured timezone
+    view_hour SMALLINT     NOT NULL,   -- hour of that day, for the "today" chart
     visitor   BIGINT       NOT NULL,   -- salted hash, unlinkable once the salt is gone
-    path      VARCHAR(512) NOT NULL,   -- redacted, no query string
-    source    VARCHAR(255),            -- referrer host or utm_source; NULL = direct
-    device    VARCHAR(8),              -- desktop | mobile | tablet
+    path      VARCHAR(512) NOT NULL,   -- decoded, redacted, no query string
+    source    VARCHAR(255),            -- referrer host, utm_source or ref; NULL = direct
+    device    VARCHAR(16),             -- desktop | mobile | tablet
     browser   VARCHAR(32),
     os        VARCHAR(32),
-    country   CHAR(2)                  -- only when a country header is configured
+    country   VARCHAR(2)               -- only when a country header is configured
 );
-CREATE INDEX IF NOT EXISTS idx_brace_analytics_pv_ts ON brace_analytics_pageviews (ts);
+CREATE INDEX idx_brace_analytics_pageviews_day ON brace_analytics_pageviews (view_date);
 
-CREATE TABLE IF NOT EXISTS brace_analytics_daily (
-    day       DATE         NOT NULL,
-    dim       VARCHAR(16)  NOT NULL,   -- total | path | source | device | browser | os | country
-    dim_value VARCHAR(512) NOT NULL,   -- '' for total
-    visitors  BIGINT       NOT NULL,
-    pageviews BIGINT       NOT NULL,
-    PRIMARY KEY (day, dim, dim_value)
+-- Filter tallies. Each instance adds to its own rows; readers sum across instance_id.
+CREATE TABLE brace_analytics_rejects (
+    view_date DATE, reason VARCHAR(32), instance_id VARCHAR(128), n BIGINT,
+    PRIMARY KEY (view_date, reason, instance_id)
 );
 
-CREATE TABLE IF NOT EXISTS brace_analytics_salts (
-    day  DATE PRIMARY KEY,
-    salt VARBINARY(32) NOT NULL
+CREATE TABLE brace_analytics_salts (
+    view_date DATE PRIMARY KEY,
+    salt      VARCHAR(64) NOT NULL     -- hex
 );
 ```
+
+Phase 2 adds `brace_analytics_daily (view_date, dim, dim_value, visitors, pageviews)` in a new
+migration, filled by a nightly rollup, for ranges longer than the raw window.
 
 Sizing: a raw row is roughly 120–150 bytes with its index share. 50k pageviews/day is about
 7 MB/day, so ~250 MB at the default 35-day raw retention. The daily table is a few hundred rows
 per day once each dimension is capped (top 500 paths, top 200 sources; the rest fold into
 `(other)`), so keeping it forever costs almost nothing.
 
-Queries for ranges inside the raw window read the raw table (that also gives "today by hour" and
-the live count). Longer ranges read `brace_analytics_daily`. The rollup is idempotent (delete the
-day's rows, re-insert), so a missed night just rolls up later.
+Phase 1 reads everything from the raw table (Today, 7 days, 30 days, the live count). In phase 2,
+longer ranges read `brace_analytics_daily`; the rollup will be idempotent (delete the day's rows,
+re-insert), so a missed night just rolls up later.
 
 Two things the raw table gives us that pure counters wouldn't: exact per-page visitor counts, and
 phase-2 filtering (click a source, see its pages) with a plain `WHERE`.
 
 ### Multi-server
 
-Each instance buffers and flushes its own rows. Raw inserts don't conflict, so there is nothing to
-coordinate except the salt (shared table, insert-if-absent) and the nightly rollup and prune
-(`jobScheduler.daily(...)` is already cluster-deduped). The live count is a query over the last
+Each instance buffers and flushes its own rows every 10 seconds. Raw inserts don't conflict, so
+there is nothing to coordinate except the salt (shared table, insert-if-absent) and the nightly
+prune (`jobScheduler.daily(...)` is already cluster-deduped). The live count is a query over the last
 5 minutes of raw rows, so it is fleet-wide automatically, lagging by at most one flush interval.
 
 ## API
@@ -181,16 +189,16 @@ app.analytics();                                   // defaults
 
 app.analytics(Analytics.options()
     .timezone("America/New_York")                 // day boundaries + salt rotation; default UTC
-    .exclude("/admin/**", "/account/**")          // never counted
+    .exclude("/admin/*", "/account/*")            // exact or trailing /* prefix, never counted
     .excludeIps("203.0.113.0/24")                 // the office
     .countryHeader("CF-IPCountry")                // trusted only from trustedProxies peers
     .rawRetention("35d")
     .strictNavigation(false));
 
-// Per route: group by pattern instead of concrete path, or opt out
-app.get("/invite/{token}", ctrl::invite).analytics(Analytics.OFF);
-app.get("/posts/{slug}",   ctrl::show);                      // default: /posts/hello-world
-app.get("/u/{username}",   ctrl::profile).analytics(Analytics.BY_ROUTE);  // counted as /u/{username}
+// Per route: opt out, or group by pattern instead of concrete path
+app.get("/invite/{token}", ctrl::invite).analytics(false);
+app.get("/posts/{slug}",   ctrl::show);                        // default: /posts/hello-world
+app.get("/u/{username}",   ctrl::profile).analyticsByRoute();  // counted as /u/{username}
 ```
 
 Preconditions, checked at `start()`: a database is configured (analytics fails fast without one)
@@ -220,7 +228,8 @@ New surface:
 | `GET /ops/analytics/data?range=7d` | JSON: totals, series, top pages, sources, devices, browsers, countries, filtered counts | read |
 | `GET /ops/status` | New `analytics` block: today's visitors, pageviews, live | read |
 | `brace analytics [--range 7d] [--env prod]` | Summary table, JSON when piped | read |
-| `brace ops dashboard --analytics` | Opens `/ops/analytics` via the existing login exchange | read |
+| `brace ops dashboard --analytics` | Opens `/ops/analytics` via the existing login exchange (`?next=analytics`, an allowlist, not a path) | read |
+| `POST /ops/analytics/ignore` | Sets or clears the "don't count me" cookie | read |
 
 On `/ops/dashboard` the change is small: a **Visitors today** stat card in the top row and an
 `ops · analytics` switch in the header. The mockup shows both.
@@ -245,8 +254,8 @@ The main point of this design is a smaller attack surface than the Plausible set
 - **No new process or database.** Same JVM, same Postgres.
 - **Little worth stealing.** No IPs, no user agents, no full referrer URLs, no query strings.
   Paths are redacted; routes that carry secrets in the path (`/reset/{token}`) should use
-  `Analytics.OFF`. The docs and the startup log will say so, and we can warn when a route's
-  pattern contains a parameter named like `token`/`key`/`secret`.
+  `.analytics(false)`. A later improvement could warn at startup when a counted route's pattern
+  has a parameter named like `token`/`key`/`secret`.
 - **Bounded.** Only matched routes returning HTML count, so a scanner spraying random URLs
   produces 404s, not rows. The flush buffer is bounded (drop and count when full). Rendered
   values are escaped like the ops dashboard.
@@ -268,22 +277,22 @@ Things the server can't see:
 
 ## Phasing
 
-1. **Collect and show.** Classifier, hashing, buffer + flush, raw table, `/ops/analytics` with
-   Today / 7d / 30d, top pages, sources, devices, browsers, live count, filtered counts, CLI,
-   `/ops/status` block. Estimated 1,200–1,500 lines plus tests.
-2. **History and filters.** Nightly rollup + 12 months, click-to-filter, countries via header,
-   the "don't count me" toggle.
+1. **Collect and show (done).** Classifier, hashing, buffer + flush, raw table, `/ops/analytics`
+   with Today / 7d / 30d, top pages, sources, devices, browsers, OS, live count, filtered counts,
+   countries via header, the "don't count me" toggle, CLI, `/ops/status` block and dashboard card.
+2. **History and filters.** Nightly rollup + 12 months, click-to-filter.
 3. **Maybe.** Weekly email digest through `Mailer`, CSV export, a read-only public share link.
+
+## Decisions
+
+1. **Concrete paths by default.** Routes opt into pattern grouping with `.analyticsByRoute()` or
+   out entirely with `.analytics(false)`.
+2. **No public share link.** Viewing stays behind ops auth.
 
 ## Open questions
 
-1. **Concrete path or route pattern by default?** The proposal counts concrete paths
-   (`/posts/hello-world`) because that is what a person wants to see, and offers `BY_ROUTE` per
-   route. The opposite default is safer for apps with IDs in URLs.
-2. **Public share link?** Useful for showing traffic to someone without ops keys, but it is
-   exactly the kind of endpoint that got the Plausible box hit. Proposed default: off, and not in
-   phase 1.
-3. **Who looks at it?** If non-engineers need it, Ed25519 keys are awkward. A read-only analytics
-   key minted with `brace ops keypair --read-only` plus the browser exchange may be enough.
-4. **Raw retention default:** 35 days covers the 30-day view with margin. Longer means filters
+1. **Who looks at it?** If non-engineers need it, Ed25519 keys are awkward. A read-only key
+   minted with `brace ops keypair --read-only` plus `brace ops dashboard --analytics` may be
+   enough.
+2. **Raw retention default:** 35 days covers the 30-day view with margin. Longer means filters
    work further back, at ~7 MB/day per 50k pageviews.

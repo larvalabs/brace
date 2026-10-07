@@ -187,6 +187,7 @@ Components included in the framework jar as of this release:
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
+- **Analytics** — Opt-in server-side page-view counts (visitors, top pages, sources, devices) with no tracking script, no cookies and no stored IPs, viewed at `/ops/analytics`
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
 - **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding, `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
 - **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
@@ -466,6 +467,26 @@ Metrics.timer("api.external", durationMs);
 `Metrics` is static, like `Log`: call it from any controller or service. It records into the
 running app's `Stats`; `app.stats()` returns the same instance with the same `counter`/`gauge`/`timer`
 methods, for tests or several apps in one JVM.
+
+## Analytics
+
+Visitor and page-view counts computed on the server from the requests the app already handles.
+There is no script on the page to block, no cookie, and no IP address or user agent is stored.
+Visitors are counted with a hash that uses a daily salt, so a visitor can't be traced across
+days. The numbers are viewed at `/ops/analytics` behind the same key auth as the rest of ops, or
+with `brace analytics`.
+
+```java
+app.analytics(Analytics.options()
+    .timezone("America/New_York")
+    .exclude("/admin/*"));
+
+app.get("/reset/{token}", ctrl::reset).analytics(false);    // don't record URLs that carry a secret
+app.get("/u/{username}", ctrl::profile).analyticsByRoute(); // count as one page, /u/{username}
+```
+
+Bots, prefetches, background fetches and htmx partial swaps are filtered out, and the dashboard
+shows how many requests each filter rejected. Requires a database and `app.ops(...)`.
 
 ## Cache
 

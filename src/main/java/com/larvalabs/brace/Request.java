@@ -448,6 +448,20 @@ public class Request {
         return null;
     }
 
+    /**
+     * The host the client addressed, without port: {@code X-Forwarded-Host} when a trusted proxy
+     * sent it, else {@code Host}. Null if neither is present.
+     */
+    String host() {
+        String h = ProxyHeaders.effectiveHost(this::header, remoteAddr, trustedProxies);
+        return h == null ? null : stripPort(h.strip());
+    }
+
+    /** True when the immediate peer is a configured trusted proxy, so its headers can be believed. */
+    boolean fromTrustedProxy() {
+        return trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr);
+    }
+
     public String ip() {
         // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {

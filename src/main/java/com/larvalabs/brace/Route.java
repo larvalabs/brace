@@ -17,6 +17,7 @@ public class Route {
     private final String staticPath;
     private boolean csrfRequired;
     private String name;
+    private Analytics.Track analytics = Analytics.Track.PATH;
 
     public Route(String method, String pattern, Object handler, Invoker invoker) {
         this(method, pattern, handler, invoker, true);
@@ -65,6 +66,13 @@ public class Route {
     public boolean csrfRequired() { return csrfRequired; }
     /** Route name for reverse routing ({@code Url.to(name, ...)}), or {@code null} if unnamed. */
     public String name() { return name; }
+
+    /** How {@link Analytics} records views of this route; {@code PATH} unless configured. */
+    public Analytics.Track analytics() { return analytics; }
+
+    void setAnalytics(Analytics.Track track) {
+        this.analytics = track;
+    }
 
     void setCsrfRequired(boolean required) {
         this.csrfRequired = required;

@@ -88,6 +88,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.beforeSessionMiddleware = middleware;
     }
 
+    /** Page-view analytics, or null when the app didn't enable it. Set by {@link Brace} before start. */
+    private Analytics analytics;
+
+    void setAnalytics(Analytics analytics) {
+        this.analytics = analytics;
+    }
+
     public BraceHandler(Router router,
                         List<Middleware.BoundBefore> beforeMiddleware,
                         List<Middleware.BoundAfter> afterMiddleware) {
@@ -806,6 +813,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             writeToWire(result, response, callback, null);
         } finally {
             recordAndLog(exchange, result.status());
+            // After the write, like the stats: analytics adds nothing to the response's latency.
+            if (analytics != null && req != null) {
+                analytics.observe(req, exchange.match != null ? exchange.match.route() : null, result);
+            }
         }
     }
 
