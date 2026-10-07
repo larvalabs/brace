@@ -127,6 +127,14 @@ class AnalyticsIntegrationTest {
         visit("/verify/s3cr3t", browser(AnalyticsTest.CHROME_MAC));
         visit("/api/posts", browser(AnalyticsTest.CHROME_MAC));
         visit("/nope", browser(AnalyticsTest.CHROME_MAC));
+        // HEAD now reaches GET routes (a 200 with the GET's headers), but it is never a page view:
+        // uptime monitors and link checkers send it.
+        var head = HttpRequest.newBuilder(URI.create(url("/posts/hello-world")))
+            .method("HEAD", HttpRequest.BodyPublishers.noBody());
+        for (int i = 0; i < browser(AnalyticsTest.CHROME_MAC).length; i += 2) {
+            head.header(browser(AnalyticsTest.CHROME_MAC)[i], browser(AnalyticsTest.CHROME_MAC)[i + 1]);
+        }
+        assertEquals(200, client.send(head.build(), HttpResponse.BodyHandlers.discarding()).statusCode());
         opsGet("/ops/status");
 
         flushWhenBuffered(6);
