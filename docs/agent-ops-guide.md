@@ -75,7 +75,7 @@ check.log_window_minutes=30
 | `brace init` | Scaffold `.brace`/`.brace.local` and run ops readiness checks | 0 ok / 1 issues |
 | `brace ops keypair [--label <l>] [--read-only]` | Generate an Ed25519 keypair and wire it up (see Setup) | 0 / 1 |
 | `brace ops dashboard [--analytics]` | Open the ops dashboard (or, with `--analytics`, the analytics page) in a browser (login handled via token exchange) | 0 / 1 |
-| `brace analytics [--range today\|7d\|30d] [--env prod]` | Visitors, pageviews, top pages, sources, devices, browsers and what was filtered (apps with `app.analytics()`; default range 7d) | 0 / 1 not enabled / 2 unreachable |
+| `brace analytics [--range today\|7d\|30d\|12mo] [--env prod]` | Visitors, pageviews, top pages, sources, devices, browsers and what was filtered (apps with `app.analytics()`; default range 7d) | 0 / 1 not enabled / 2 unreachable |
 
 All commands auto-detect output: human-readable table when stdout is a TTY, JSON when
 piped. Force with `--json` or `--pretty`.
@@ -95,8 +95,8 @@ aren't in a project directory.
 | `GET /ops/routes` | All registered routes |
 | `GET /ops/regressions` | New error kinds since startup (the `/ops/errors` shape + an `acknowledged` flag). The on-call wake signal — empty means no new error types this process lifetime. |
 | `GET /ops/dashboard` | HTML dashboard (browser) |
-| `GET /ops/analytics[?range=today\|7d\|30d]` | HTML analytics page (browser), when the app calls `app.analytics()` |
-| `GET /ops/analytics/data[?range=today\|7d\|30d]` | Analytics report as JSON: `visitors`, `pageviews`, `previousVisitors`/`previousPageviews` (the period before; `null` when stored data doesn't reach back that far), `live` (last 5 min), `series` (per hour for today, per day otherwise), `pages`, `sources` (`key: null` = direct), `devices`, `browsers`, `os`, `countries`, `notCounted` (per filter reason). 404 when analytics is off |
+| `GET /ops/analytics[?range=today\|7d\|30d\|12mo]` | HTML analytics page (browser), when the app calls `app.analytics()` |
+| `GET /ops/analytics/data[?range=today\|7d\|30d\|12mo]` | Analytics report as JSON: `visitors`, `pageviews`, `previousVisitors`/`previousPageviews` (the period before; `null` when stored data doesn't reach back that far), `live` (last 5 min), `series` (per hour for `today`, per month for `12mo`, per day otherwise), `pages`, `sources` (`key: null` = direct), `devices`, `browsers`, `os`, `countries`, `notCounted` (per filter reason). 404 when analytics is off |
 | `POST /ops/analytics/ignore` | Form `on=1` (or `0`): set (or clear) the cookie that keeps the caller's browser out of the counts |
 | `POST /ops/errors/{id}/resolve` | Mark error resolved (returns the resolved record with `Accept: application/json`) — **control scope** |
 | `POST /ops/cache/clear` | Clear cache (returns `{"cleared": true, "scope": "instance"|"fleet"}` with `Accept: application/json`; `fleet` when a shared backend is configured) — **control scope** |
@@ -616,7 +616,8 @@ brace analytics --range 7d --env prod            # top pages and sources, human-
 | Errors (`/ops/errors`) | `ops_errors` table (Postgres/H2) | 1000 rows (hardcoded in `Brace.start()`) | When count > 1000: deletes resolved rows first (oldest), then oldest unresolved | Yes |
 | Logs (`/ops/logs`) | `LogTap` in-memory ring (`ConcurrentLinkedDeque`) | 1000 entries (configurable via `LogTap.setCapacity`) | Oldest entry dropped when full | No |
 | Stats (`/ops/status`) | `Stats` in-memory counters / ring buffers | Per-route + timeseries window | Rolling | No |
-| Analytics page views (`/ops/analytics`) | `brace_analytics_pageviews` (one row per counted view, no IP/UA) + `brace_analytics_rejects` (filter tallies) | Raw retention, default 60 days (`Analytics.options().rawRetention(...)`) | Daily `analytics-prune` job deletes older days | Yes |
+| Analytics page views (`/ops/analytics`) | `brace_analytics_pageviews` (one row per counted view, no IP/UA) + `brace_analytics_rejects` (filter tallies) | Raw retention, default 35 days (`Analytics.options().rawRetention(...)`) | Nightly `analytics-rollup` job deletes older days, never one not yet summarized | Yes |
+| Analytics history | `brace_analytics_daily` (per-day totals, top 500 pages / 200 sources, other breakdowns, filter tallies) | Indefinite, a few MB a year | None | Yes |
 | Analytics visitor salt | `brace_analytics_salts` (one random salt per day, shared by the fleet) | Today's only | Deleted 5 minutes after its day ends | Yes, until deleted |
 
 Errors are **deduplicated on `error_type + route`** for unresolved rows — repeated

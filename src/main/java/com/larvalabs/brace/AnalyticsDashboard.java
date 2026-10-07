@@ -16,6 +16,8 @@ final class AnalyticsDashboard {
 
     private static final DateTimeFormatter SHORT = DateTimeFormatter.ofPattern("MMM d", Locale.US);
     private static final DateTimeFormatter LONG = DateTimeFormatter.ofPattern("EEE MMM d", Locale.US);
+    private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("MMM", Locale.US);
+    private static final DateTimeFormatter MONTH_YEAR = DateTimeFormatter.ofPattern("MMM yyyy", Locale.US);
 
     private static final Map<String, String[]> REASONS = Map.of(
         "bot", new String[] {"Bots and crawlers", "user agent looked automated"},
@@ -28,7 +30,9 @@ final class AnalyticsDashboard {
     static String html(Analytics.Report r, String metric, boolean ignored) {
         var sb = new StringBuilder(16_384);
         boolean today = "today".equals(r.range());
-        String unit = today ? "hour" : "day";
+        boolean months = "12mo".equals(r.range());
+        String unit = today ? "hour" : months ? "month" : "day";
+        String span = today ? "today so far" : months ? "last 12 months" : "last " + r.series().size() + " days";
         sb.append("""
             <!DOCTYPE html>
             <html lang="en">
@@ -117,7 +121,8 @@ final class AnalyticsDashboard {
 
         // Range + dates
         sb.append("<div class=\"controls\"><nav class=\"ranges\" aria-label=\"Date range\">");
-        for (var range : List.of(new String[] {"today", "Today"}, new String[] {"7d", "7 days"}, new String[] {"30d", "30 days"})) {
+        for (var range : List.of(new String[] {"today", "Today"}, new String[] {"7d", "7 days"}, new String[] {"30d", "30 days"},
+                new String[] {"12mo", "12 months"})) {
             sb.append("<a href=\"/ops/analytics?range=").append(range[0]);
             if ("pageviews".equals(metric)) sb.append("&amp;metric=pageviews");
             sb.append('"');
@@ -125,12 +130,14 @@ final class AnalyticsDashboard {
             sb.append('>').append(range[1]).append("</a>");
         }
         sb.append("</nav><span class=\"note\">")
-          .append(today ? esc(r.to().format(LONG)) : esc(r.from().format(SHORT) + " – " + r.to().format(SHORT)))
+          .append(today ? esc(r.to().format(LONG))
+              : months ? esc(r.from().format(MONTH_YEAR) + " – " + r.to().format(MONTH_YEAR))
+              : esc(r.from().format(SHORT) + " – " + r.to().format(SHORT)))
           .append("</span></div>\n");
 
         // Tiles
         long notCounted = r.notCounted().values().stream().mapToLong(Long::longValue).sum();
-        String compare = today ? "yesterday so far" : "the previous " + r.series().size() + " days";
+        String compare = today ? "yesterday so far" : months ? "the previous 12 months" : "the previous " + r.series().size() + " days";
         sb.append("<div class=\"tiles\">");
         metricTile(sb, r, "visitors", "Visitors", fmt(r.visitors()), delta(r.visitors(), r.previousVisitors(), compare), metric);
         metricTile(sb, r, "pageviews", "Pageviews", fmt(r.pageviews()), delta(r.pageviews(), r.previousPageviews(), compare), metric);
@@ -148,7 +155,7 @@ final class AnalyticsDashboard {
         boolean pv = "pageviews".equals(metric);
         sb.append("<section class=\"section\"><div class=\"section-head\"><span class=\"h\">")
           .append(pv ? "Pageviews" : "Visitors").append(" / ").append(unit).append("</span><span class=\"sub\">")
-          .append(today ? "today so far" : "last " + r.series().size() + " days").append("</span></div>");
+          .append(span).append("</span></div>");
         chart(sb, r.series(), pv, today);
         sb.append("</section>\n");
 
@@ -223,7 +230,7 @@ final class AnalyticsDashboard {
               .append(" views\"></div>");
         }
         sb.append("</div><div class=\"xaxis\">");
-        int every = series.size() <= 8 ? 1 : today ? 4 : 5;
+        int every = series.size() <= 12 ? 1 : today ? 4 : 5;
         for (int i = 0; i < series.size(); i++) {
             boolean show = i % every == 0;
             sb.append("<span>").append(show ? esc(tickLabel(series.get(i).bucket(), today)) : "").append("</span>");
@@ -297,13 +304,16 @@ final class AnalyticsDashboard {
         return fmt(v);
     }
 
+    /** Buckets are an hour ({@code "14"}), a day ({@code "2026-10-07"}) or a month ({@code "2026-10"}). */
     private static String bucketLabel(String bucket, boolean hourly) {
         if (hourly) return bucket + ":00";
+        if (bucket.length() == 7) return java.time.YearMonth.parse(bucket).format(MONTH_YEAR);
         return java.time.LocalDate.parse(bucket).format(LONG);
     }
 
     private static String tickLabel(String bucket, boolean hourly) {
         if (hourly) return bucket;
+        if (bucket.length() == 7) return java.time.YearMonth.parse(bucket).format(MONTH);
         return java.time.LocalDate.parse(bucket).format(SHORT);
     }
 

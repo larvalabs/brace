@@ -486,11 +486,14 @@ app.get("/u/{username}", ctrl::profile).analyticsByRoute(); // count as one page
 ```
 
 The page shows visitors, pageviews, views per visit and "visitors now" (distinct visitors who loaded
-a page in the last 5 minutes), with Today / 7 day / 30 day charts, top pages, sources, devices,
+a page in the last 5 minutes), with Today / 7 day / 30 day / 12 month charts, top pages, sources, devices,
 browsers, operating systems and, behind a proxy that sends one, countries. Bots, prefetches,
 background fetches and htmx partial swaps are filtered out, and the page shows how many requests
 each filter rejected. Requires a database and `app.ops(...)`; behind a reverse proxy, also
 `trustedProxies(...)` so visitors aren't all seen at the proxy's IP.
+
+Each completed day is summarized into a small table that is kept indefinitely, so history
+survives after the raw page-view rows are deleted (35 days by default).
 
 `brace ops dashboard --analytics` opens the page; `brace analytics --range 7d` prints the same
 report in the terminal. See [docs/analytics.md](docs/analytics.md) for what each number means, the

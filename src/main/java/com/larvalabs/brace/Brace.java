@@ -1195,11 +1195,15 @@ public class Brace {
             });
         }
 
-        // Analytics retention: raw page views and filter tallies past rawRetention. Daily, once
-        // cluster-wide, like the other prunes.
+        // Analytics: summarize completed days into brace_analytics_daily, then drop raw rows past
+        // rawRetention (never a day that isn't summarized). Daily, once cluster-wide.
         if (analytics != null) {
             final Analytics a = analytics;
-            jobScheduler.daily("03:29", "analytics-prune", (db, ctx) -> a.prune(db));
+            jobScheduler.daily("03:29", "analytics-rollup", (db, ctx) -> {
+                int days = a.rollup(db);
+                a.prune(db);
+                ctx.message("Summarized " + days + " day" + (days == 1 ? "" : "s"));
+            });
         }
 
         jobScheduler.start(databaseFactory);

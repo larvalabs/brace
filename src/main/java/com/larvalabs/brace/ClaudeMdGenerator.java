@@ -93,7 +93,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | `brace errors <id>` | Full detail (stack trace, request context) for one error |
 | `brace logs [-f] [--since 10m]` | Tail recent structured log entries |
 | `brace cache` / `brace cache clear` | Cache stats; clear cache |
-| `brace analytics [--range today\\|7d\\|30d]` | Visitors, pageviews, top pages, sources (apps with `app.analytics()`) |
+| `brace analytics [--range today\\|7d\\|30d\\|12mo]` | Visitors, pageviews, top pages, sources (apps with `app.analytics()`) |
 | `brace resolve <id>` | Mark an error as resolved |
 
 | Endpoint | Returns |
@@ -106,7 +106,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | `GET /ops/regressions` | New error kinds since startup |
 | `GET /ops/routes` | All registered routes |
 | `GET /ops/dashboard` | HTML dashboard |
-| `GET /ops/analytics` / `GET /ops/analytics/data` | Analytics page / its report as JSON (`?range=today\\|7d\\|30d`), when enabled |
+| `GET /ops/analytics` / `GET /ops/analytics/data` | Analytics page / its report as JSON (`?range=today\\|7d\\|30d\\|12mo`), when enabled |
 
 **Debugging workflow:**
 1. **Errors?** → `errors.count` + `errors.recent` summaries in status; full detail (stack trace, request, queries before failure) via `brace errors <id>` / `GET /ops/errors/{id}`

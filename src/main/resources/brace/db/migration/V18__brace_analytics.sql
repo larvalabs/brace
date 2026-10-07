@@ -34,6 +34,20 @@ CREATE TABLE IF NOT EXISTS brace_analytics_rejects (
     PRIMARY KEY (view_date, reason, instance_id)
 );
 
+-- One row per day per breakdown value, written by the nightly rollup for each completed day and
+-- kept indefinitely (raw rows above are pruned). dim is total | path | source | device | browser |
+-- os | country | notcounted. dim_value is '' for total and for direct traffic (a NULL source);
+-- for notcounted it is the filter reason and pageviews holds the count. Each breakdown keeps the
+-- day's top values only (see Analytics.ROLLUP_CAPS); the total row is exact.
+CREATE TABLE IF NOT EXISTS brace_analytics_daily (
+    view_date DATE         NOT NULL,
+    dim       VARCHAR(16)  NOT NULL,
+    dim_value VARCHAR(512) NOT NULL,
+    visitors  BIGINT       NOT NULL,
+    pageviews BIGINT       NOT NULL,
+    PRIMARY KEY (view_date, dim, dim_value)
+);
+
 -- The day's random salt for visitor hashing, shared by every instance. Hex-encoded (portable
 -- across H2 and Postgres). Rows are deleted a few minutes after their day ends.
 CREATE TABLE IF NOT EXISTS brace_analytics_salts (

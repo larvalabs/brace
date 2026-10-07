@@ -198,7 +198,7 @@ public class Cli {
         System.out.println("  brace check                 Run all health checks");
         System.out.println("  brace cache                 Show cache stats");
         System.out.println("  brace cache clear           Clear the cache");
-        System.out.println("  brace analytics             Visitors, pageviews, top pages and sources (--range today|7d|30d, default 7d)");
+        System.out.println("  brace analytics             Visitors, pageviews, top pages and sources (--range today|7d|30d|12mo, default 7d)");
         System.out.println("  brace resolve <id>          Mark an error as resolved");
         System.out.println();
         System.out.println("All project commands accept --env <name>, --json, --pretty.");

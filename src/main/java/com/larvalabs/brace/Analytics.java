@@ -59,8 +59,12 @@ public final class Analytics {
      */
     public enum Track { PATH, ROUTE, OFF }
 
-    /** Covers the 30-day view plus the 30 days before it, which the comparison needs. */
-    static final int DEFAULT_RETENTION_DAYS = 60;
+    /**
+     * Raw rows are only read for today, yesterday's hour-by-hour comparison and days the rollup
+     * hasn't reached; everything older comes from {@code brace_analytics_daily}. 35 days keeps a
+     * month of per-view detail for investigating something recent.
+     */
+    static final int DEFAULT_RETENTION_DAYS = 35;
 
     /** Configuration for {@code app.analytics(...)}. */
     public static final class Options {
@@ -102,9 +106,9 @@ public final class Analytics {
         }
 
         /**
-         * How long raw page views are kept, e.g. {@code "90d"}. Default {@code "60d"}: the 30-day view
-         * compares against the 30 days before it, so anything under 60 days drops that comparison.
-         * Minimum 1 day.
+         * How long raw page views are kept, e.g. {@code "90d"}. Default {@code "35d"}. Reports don't
+         * depend on it: completed days are summarized into {@code brace_analytics_daily}, which is
+         * kept indefinitely. Minimum 1 day.
          */
         public Options rawRetention(String duration) {
             this.rawRetention = Duration.ofMillis(Math.max(JobScheduler.parseInterval(duration),
@@ -531,16 +535,95 @@ public final class Analytics {
         }
     }
 
-    /** Delete raw views and tallies past the retention window. Runs daily, once per fleet. */
+    // ---------------------------------------------------------------- daily rollup
+
+    /**
+     * Rows kept per breakdown per day in {@code brace_analytics_daily}. Long ranges read only the
+     * top of each day, so a page that never makes a day's top 500 is missing from a 12-month list;
+     * the totals row is always exact.
+     */
+    static final Map<String, Integer> ROLLUP_CAPS = Map.of(
+        "path", 500, "source", 200, "device", 10, "browser", 50, "os", 50, "country", 250);
+
+    /**
+     * Summarize every completed day (before today, in the analytics timezone) that isn't in
+     * {@code brace_analytics_daily} yet, oldest first. Each day is replaced whole, so a rerun is
+     * harmless, and a missed night is caught up by the next run. Returns the number of days written.
+     * Runs daily, once per fleet, before {@link #prune}.
+     */
+    int rollup(Database db) {
+        LocalDate yesterday = today().minusDays(1);
+        LocalDate through = rolledThrough(db);
+        LocalDate start = through != null ? through.plusDays(1) : earliestRaw(db);
+        if (start == null) return 0;
+        int days = 0;
+        for (LocalDate d = start; !d.isAfter(yesterday); d = d.plusDays(1)) {
+            rollupDay(db, d);
+            days++;
+        }
+        return days;
+    }
+
+    private static void rollupDay(Database db, LocalDate day) {
+        db.sql("DELETE FROM brace_analytics_daily WHERE view_date = ?", day);
+        var rows = new ArrayList<Object[]>();
+        Object[] t = db.sqlQuery("SELECT COUNT(DISTINCT visitor), COUNT(*) FROM brace_analytics_pageviews "
+            + "WHERE view_date = ?", day).getFirst();
+        // Written even for a day with no views: the totals row marks the day as summarized.
+        rows.add(new Object[] {"total", "", num(t[0]), num(t[1])});
+        for (var dim : List.of("path", "source", "device", "browser", "os", "country")) {
+            for (var r : rawBreakdown(db, dim, day, day, ROLLUP_CAPS.get(dim))) {
+                rows.add(new Object[] {dim, r.key() == null ? "" : r.key(), r.visitors(), r.pageviews()});
+            }
+        }
+        for (Object[] r : db.sqlQuery("SELECT reason, SUM(n) FROM brace_analytics_rejects WHERE view_date = ? "
+                + "GROUP BY reason", day)) {
+            rows.add(new Object[] {"notcounted", String.valueOf(r[0]), 0L, num(r[1])});
+        }
+        db.jdbc((Connection conn) -> {
+            try (PreparedStatement ps = conn.prepareStatement("INSERT INTO brace_analytics_daily "
+                    + "(view_date, dim, dim_value, visitors, pageviews) VALUES (?, ?, ?, ?, ?)")) {
+                for (Object[] r : rows) {
+                    ps.setObject(1, day);
+                    ps.setString(2, (String) r[0]);
+                    ps.setString(3, (String) r[1]);
+                    ps.setLong(4, (Long) r[2]);
+                    ps.setLong(5, (Long) r[3]);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        });
+    }
+
+    /** The last summarized day, or null before the first rollup. */
+    private static LocalDate rolledThrough(Database db) {
+        return firstDate(db.sqlQuery("SELECT MAX(view_date) FROM brace_analytics_daily WHERE dim = 'total'"));
+    }
+
+    private static LocalDate earliestRaw(Database db) {
+        LocalDate views = firstDate(db.sqlQuery("SELECT MIN(view_date) FROM brace_analytics_pageviews"));
+        LocalDate rejected = firstDate(db.sqlQuery("SELECT MIN(view_date) FROM brace_analytics_rejects"));
+        return min(views, rejected);
+    }
+
+    /**
+     * Delete raw views and tallies past the retention window. Runs daily, once per fleet, after
+     * {@link #rollup}. Never deletes a day that hasn't been summarized, so a failed rollup costs a
+     * day of history only if it keeps failing past the retention window.
+     */
     void prune(Database db) {
+        LocalDate through = rolledThrough(db);
+        if (through == null) return;
         LocalDate cutoff = today().minusDays(options.rawRetention.toDays());
+        if (cutoff.isAfter(through.plusDays(1))) cutoff = through.plusDays(1);
         db.sql("DELETE FROM brace_analytics_pageviews WHERE view_date < ?", cutoff);
         db.sql("DELETE FROM brace_analytics_rejects WHERE view_date < ?", cutoff);
     }
 
     // ---------------------------------------------------------------- reading
 
-    static final List<String> RANGES = List.of("today", "7d", "30d");
+    static final List<String> RANGES = List.of("today", "7d", "30d", "12mo");
 
     /** Today's visitors, pageviews and live count. Cached briefly: the ops dashboard polls every 5s. */
     Summary summary() {
@@ -548,7 +631,7 @@ public final class Analytics {
         if (cached != null && System.currentTimeMillis() - cachedSummaryAt < SUMMARY_TTL_MS) return cached;
         LocalDate today = today();
         var s = databaseFactory.withSession(db -> {
-            var t = totals(db, today, today, 23);
+            var t = rawTotals(db, today, today, 23);
             return new Summary(t[0], t[1], live(db));
         });
         cachedSummary = s;
@@ -556,52 +639,86 @@ public final class Analytics {
         return s;
     }
 
-    /** Everything the dashboard and {@code brace analytics} show for one range. */
+    /**
+     * Everything the dashboard and {@code brace analytics} show for one range. Days already in
+     * {@code brace_analytics_daily} are read from it; later days (always today, plus any day the
+     * nightly rollup hasn't reached) from the raw rows. Visitors add up across the two because a
+     * visitor id never spans days.
+     */
     Report report(String range) {
         if (!RANGES.contains(range)) throw new IllegalArgumentException("Unknown range: " + range);
         ZonedDateTime now = ZonedDateTime.now(options.zone);
         LocalDate to = now.toLocalDate();
-        int days = switch (range) {
-            case "7d" -> 7;
-            case "30d" -> 30;
-            default -> 1;
+        LocalDate from = switch (range) {
+            case "7d" -> to.minusDays(6);
+            case "30d" -> to.minusDays(29);
+            case "12mo" -> to.withDayOfMonth(1).minusMonths(11);
+            default -> to;
         };
-        LocalDate from = to.minusDays(days - 1);
+        boolean today = range.equals("today");
         return databaseFactory.withSession(db -> {
-            long[] cur = totals(db, from, to, 23);
-            // "Today" compares with yesterday up to the same hour; the others with the period before.
-            // Only when stored data reaches back to the start of that period: a previous period cut
-            // short by retention, or by analytics having been on for less time, would read as a
-            // dramatic rise. Null then, rather than a misleading number.
-            LocalDate prevFrom = days == 1 ? from.minusDays(1) : from.minusDays(days);
-            LocalDate earliest = earliestDay(db);
+            LocalDate through = rolledThrough(db);
+            long[] cur = today ? rawTotals(db, to, to, 23) : totals(db, through, from, to);
+            // "Today" compares with yesterday up to the same hour (from raw rows, which keep the
+            // hour); the others with the period of the same length before. Only when stored data
+            // reaches back to the start of that period: a period cut short by retention, or by
+            // analytics having been on for less time, would read as a dramatic rise.
+            LocalDate prevFrom = switch (range) {
+                case "today" -> to.minusDays(1);
+                case "12mo" -> from.minusMonths(12);
+                default -> from.minusDays(java.time.temporal.ChronoUnit.DAYS.between(from, to) + 1);
+            };
+            LocalDate earliest = today ? firstDate(db.sqlQuery("SELECT MIN(view_date) FROM brace_analytics_pageviews"))
+                : min(earliestRaw(db), firstDate(db.sqlQuery("SELECT MIN(view_date) FROM brace_analytics_daily")));
             long[] prev = earliest == null || earliest.isAfter(prevFrom) ? null
-                : days == 1 ? totals(db, prevFrom, prevFrom, now.getHour())
-                : totals(db, prevFrom, from.minusDays(1), 23);
-            List<Point> series = days == 1 ? hourly(db, to, now.getHour()) : daily(db, from, to);
+                : today ? rawTotals(db, prevFrom, prevFrom, now.getHour())
+                : totals(db, through, prevFrom, from.minusDays(1));
+            List<Point> series = today ? hourly(db, to, now.getHour())
+                : range.equals("12mo") ? monthly(daily(db, through, from, to))
+                : daily(db, through, from, to);
             return new Report(range, options.zone.getId(), from, to, cur[0], cur[1],
                 prev == null ? null : prev[0], prev == null ? null : prev[1],
                 live(db), series,
-                breakdown(db, "path", from, to, TOP_LIMIT),
-                breakdown(db, "source", from, to, TOP_LIMIT),
-                breakdown(db, "device", from, to, BREAKDOWN_LIMIT),
-                breakdown(db, "browser", from, to, BREAKDOWN_LIMIT),
-                breakdown(db, "os", from, to, BREAKDOWN_LIMIT),
-                options.countryHeader == null ? List.of() : breakdown(db, "country", from, to, BREAKDOWN_LIMIT),
-                notCounted(db, from, to));
+                breakdown(db, through, "path", from, to, TOP_LIMIT),
+                breakdown(db, through, "source", from, to, TOP_LIMIT),
+                breakdown(db, through, "device", from, to, BREAKDOWN_LIMIT),
+                breakdown(db, through, "browser", from, to, BREAKDOWN_LIMIT),
+                breakdown(db, through, "os", from, to, BREAKDOWN_LIMIT),
+                options.countryHeader == null ? List.of() : breakdown(db, through, "country", from, to, BREAKDOWN_LIMIT),
+                notCounted(db, through, from, to));
         });
     }
 
-    private static LocalDate earliestDay(Database db) {
-        var rows = db.sqlQuery("SELECT MIN(view_date) FROM brace_analytics_pageviews");
-        Object v = rows.isEmpty() ? null : rows.getFirst()[0];
-        return v == null ? null : toLocalDate(v);
+    /**
+     * The part of [from, to] covered by the rollup ({@code [0]}) and the part read raw ({@code [1]});
+     * each is {@code {start, end}} or null when empty.
+     */
+    private static LocalDate[][] split(LocalDate through, LocalDate from, LocalDate to) {
+        if (through == null || through.isBefore(from)) return new LocalDate[][] {null, {from, to}};
+        if (!through.isBefore(to)) return new LocalDate[][] {{from, to}, null};
+        return new LocalDate[][] {{from, through}, {through.plusDays(1), to}};
     }
 
-    private static long[] totals(Database db, LocalDate from, LocalDate to, int lastHour) {
-        var rows = db.sqlQuery("SELECT COUNT(DISTINCT visitor), COUNT(*) FROM brace_analytics_pageviews "
-            + "WHERE view_date >= ? AND view_date <= ? AND view_hour <= ?", from, to, lastHour);
-        Object[] r = rows.getFirst();
+    private static long[] totals(Database db, LocalDate through, LocalDate from, LocalDate to) {
+        var parts = split(through, from, to);
+        long[] out = new long[2];
+        if (parts[0] != null) {
+            Object[] r = db.sqlQuery("SELECT SUM(visitors), SUM(pageviews) FROM brace_analytics_daily "
+                + "WHERE dim = 'total' AND view_date >= ? AND view_date <= ?", parts[0][0], parts[0][1]).getFirst();
+            out[0] += num(r[0]);
+            out[1] += num(r[1]);
+        }
+        if (parts[1] != null) {
+            long[] raw = rawTotals(db, parts[1][0], parts[1][1], 23);
+            out[0] += raw[0];
+            out[1] += raw[1];
+        }
+        return out;
+    }
+
+    private static long[] rawTotals(Database db, LocalDate from, LocalDate to, int lastHour) {
+        Object[] r = db.sqlQuery("SELECT COUNT(DISTINCT visitor), COUNT(*) FROM brace_analytics_pageviews "
+            + "WHERE view_date >= ? AND view_date <= ? AND view_hour <= ?", from, to, lastHour).getFirst();
         return new long[] {num(r[0]), num(r[1])};
     }
 
@@ -628,11 +745,20 @@ public final class Analytics {
         return out;
     }
 
-    private static List<Point> daily(Database db, LocalDate from, LocalDate to) {
+    private static List<Point> daily(Database db, LocalDate through, LocalDate from, LocalDate to) {
+        var parts = split(through, from, to);
         var byDay = new LinkedHashMap<LocalDate, long[]>();
-        for (Object[] r : db.sqlQuery("SELECT view_date, COUNT(DISTINCT visitor), COUNT(*) FROM brace_analytics_pageviews "
-                + "WHERE view_date >= ? AND view_date <= ? GROUP BY view_date", from, to)) {
-            byDay.put(toLocalDate(r[0]), new long[] {num(r[1]), num(r[2])});
+        if (parts[0] != null) {
+            for (Object[] r : db.sqlQuery("SELECT view_date, visitors, pageviews FROM brace_analytics_daily "
+                    + "WHERE dim = 'total' AND view_date >= ? AND view_date <= ?", parts[0][0], parts[0][1])) {
+                byDay.put(toLocalDate(r[0]), new long[] {num(r[1]), num(r[2])});
+            }
+        }
+        if (parts[1] != null) {
+            for (Object[] r : db.sqlQuery("SELECT view_date, COUNT(DISTINCT visitor), COUNT(*) FROM brace_analytics_pageviews "
+                    + "WHERE view_date >= ? AND view_date <= ? GROUP BY view_date", parts[1][0], parts[1][1])) {
+                byDay.put(toLocalDate(r[0]), new long[] {num(r[1]), num(r[2])});
+            }
         }
         var out = new ArrayList<Point>();
         for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
@@ -642,25 +768,99 @@ public final class Analytics {
         return out;
     }
 
-    private static List<Row> breakdown(Database db, String column, LocalDate from, LocalDate to, int limit) {
-        // column is one of a fixed set of identifiers chosen above, never request input.
+    /** Daily points summed into calendar months ({@code bucket} {@code "2026-10"}). */
+    static List<Point> monthly(List<Point> days) {
+        var byMonth = new LinkedHashMap<String, long[]>();
+        for (var p : days) {
+            long[] v = byMonth.computeIfAbsent(p.bucket().substring(0, 7), k -> new long[2]);
+            v[0] += p.visitors();
+            v[1] += p.pageviews();
+        }
+        var out = new ArrayList<Point>();
+        byMonth.forEach((month, v) -> out.add(new Point(month, v[0], v[1])));
+        return out;
+    }
+
+    /**
+     * Top {@code limit} values of one breakdown over the range, merging the rollup and raw parts.
+     * Each part is read deeper than {@code limit} so a value that ranks moderately in both still
+     * surfaces after the merge.
+     */
+    private static List<Row> breakdown(Database db, LocalDate through, String dim, LocalDate from, LocalDate to, int limit) {
+        var parts = split(through, from, to);
+        var merged = new LinkedHashMap<String, long[]>();
+        int depth = limit * 5;
+        if (parts[0] != null) {
+            for (Object[] r : db.sqlQuery("SELECT dim_value, SUM(visitors) AS v, SUM(pageviews) AS n "
+                    + "FROM brace_analytics_daily WHERE dim = ? AND view_date >= ? AND view_date <= ? "
+                    + "GROUP BY dim_value ORDER BY v DESC, n DESC LIMIT ?", dim, parts[0][0], parts[0][1], depth)) {
+                String key = String.valueOf(r[0]);
+                add(merged, key.isEmpty() ? null : key, num(r[1]), num(r[2]));
+            }
+        }
+        if (parts[1] != null) {
+            for (var r : rawBreakdown(db, dim, parts[1][0], parts[1][1], depth)) {
+                add(merged, r.key(), r.visitors(), r.pageviews());
+            }
+        }
+        return merged.entrySet().stream()
+            .map(e -> new Row(e.getKey(), e.getValue()[0], e.getValue()[1]))
+            .sorted((a, b) -> a.visitors() != b.visitors() ? Long.compare(b.visitors(), a.visitors())
+                : Long.compare(b.pageviews(), a.pageviews()))
+            .limit(limit)
+            .toList();
+    }
+
+    private static void add(Map<String, long[]> merged, String key, long visitors, long pageviews) {
+        // HashMap-style null key: LinkedHashMap allows it, and null means "direct" for sources.
+        long[] v = merged.computeIfAbsent(key, k -> new long[2]);
+        v[0] += visitors;
+        v[1] += pageviews;
+    }
+
+    private static List<Row> rawBreakdown(Database db, String column, LocalDate from, LocalDate to, int limit) {
+        // column is one of a fixed set of identifiers, never request input. A null source means
+        // direct traffic and is a row of its own; for the other columns null means "unknown"
+        // (no country header) and is left out.
         var out = new ArrayList<Row>();
+        String notNull = column.equals("source") ? "" : " AND " + column + " IS NOT NULL";
         for (Object[] r : db.sqlQuery("SELECT " + column + ", COUNT(DISTINCT visitor) AS v, COUNT(*) AS n "
-                + "FROM brace_analytics_pageviews WHERE view_date >= ? AND view_date <= ? "
-                + "GROUP BY " + column + " ORDER BY v DESC, n DESC LIMIT ?", from, to, limit)) {
+                + "FROM brace_analytics_pageviews WHERE view_date >= ? AND view_date <= ?" + notNull
+                + " GROUP BY " + column + " ORDER BY v DESC, n DESC LIMIT ?", from, to, limit)) {
             out.add(new Row(r[0] == null ? null : String.valueOf(r[0]), num(r[1]), num(r[2])));
         }
         return out;
     }
 
-    private static Map<String, Long> notCounted(Database db, LocalDate from, LocalDate to) {
+    private static Map<String, Long> notCounted(Database db, LocalDate through, LocalDate from, LocalDate to) {
+        var parts = split(through, from, to);
         var out = new LinkedHashMap<String, Long>();
         for (String reason : REJECT_REASONS) out.put(reason, 0L);
-        for (Object[] r : db.sqlQuery("SELECT reason, SUM(n) FROM brace_analytics_rejects "
-                + "WHERE view_date >= ? AND view_date <= ? GROUP BY reason", from, to)) {
-            out.put(String.valueOf(r[0]), num(r[1]));
+        if (parts[0] != null) {
+            for (Object[] r : db.sqlQuery("SELECT dim_value, SUM(pageviews) FROM brace_analytics_daily "
+                    + "WHERE dim = 'notcounted' AND view_date >= ? AND view_date <= ? GROUP BY dim_value",
+                    parts[0][0], parts[0][1])) {
+                out.merge(String.valueOf(r[0]), num(r[1]), Long::sum);
+            }
+        }
+        if (parts[1] != null) {
+            for (Object[] r : db.sqlQuery("SELECT reason, SUM(n) FROM brace_analytics_rejects "
+                    + "WHERE view_date >= ? AND view_date <= ? GROUP BY reason", parts[1][0], parts[1][1])) {
+                out.merge(String.valueOf(r[0]), num(r[1]), Long::sum);
+            }
         }
         return out;
+    }
+
+    private static LocalDate firstDate(List<Object[]> rows) {
+        Object v = rows.isEmpty() ? null : rows.getFirst()[0];
+        return v == null ? null : toLocalDate(v);
+    }
+
+    private static LocalDate min(LocalDate a, LocalDate b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return a.isBefore(b) ? a : b;
     }
 
     private static long num(Object o) {

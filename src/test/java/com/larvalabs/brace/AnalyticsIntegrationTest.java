@@ -240,7 +240,7 @@ class AnalyticsIntegrationTest {
         });
         visit("/", browser(AnalyticsTest.FIREFOX_WIN));
         flushWhenBuffered(1);
-        dbFactory.withSession(db -> { app.analyticsCollector().prune(db); });
+        dbFactory.withSession(db -> { app.analyticsCollector().rollup(db); app.analyticsCollector().prune(db); });
         long salts = dbFactory.withSession(db -> { return db.sqlQueryLong("SELECT COUNT(*) FROM brace_analytics_salts"); });
         assertEquals(1, salts, "only today's salt survives");
         long oldRows = dbFactory.withSession(db -> { return db.sqlQueryLong(

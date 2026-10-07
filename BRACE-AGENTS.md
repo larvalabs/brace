@@ -988,14 +988,14 @@ from requests the app already serves, so there's no tracking script, no cookie, 
 agent stored. Needs a database and ops (`start()` throws without either).
 
 ```java
-app.analytics();                                   // defaults: UTC days, 60 days of raw views
+app.analytics();                                   // defaults: UTC days, 35 days of raw views
 
 app.analytics(Analytics.options()
     .timezone("America/New_York")                 // day boundaries + daily visitor-salt rotation
     .exclude("/admin/*")                          // exact path or trailing /* prefix
     .excludeIps("203.0.113.0/24")                 // never counted
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
-    .rawRetention("60d"));                       // 60d minimum for the 30-day comparison
+    .rawRetention("35d"));                       // raw rows only; daily summaries are kept
 
 app.get("/reset/{token}", ctrl::reset).analytics(false);       // URL carries a secret: don't record it
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}
@@ -1013,12 +1013,17 @@ app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/
 - **Visitors now (`live`):** distinct visitors who loaded a counted page in the last 5 minutes,
   fleet-wide, lagging up to ~10s. People reading one page for longer drop out.
 - **Comparisons** (`previousVisitors`/`previousPageviews`) are `null` until stored data covers
-  the whole earlier period; keep `rawRetention` ≥ 60d for the 30-day comparison.
+  the whole earlier period (the first weeks after enabling).
+- **History:** a nightly job (`analytics-rollup`, 03:29, once per fleet) summarizes each
+  completed day into `brace_analytics_daily`, kept indefinitely; reports read summarized days
+  from it and the rest (always today) from raw rows. Raw rows past `rawRetention` are deleted,
+  but never a day that hasn't been summarized. Long ranges list each day's top 500 pages and top
+  200 sources; totals are exact.
 - **Viewing:** `/ops/analytics` (linked from the ops dashboard header; `brace ops dashboard
-  --analytics` opens it), `GET /ops/analytics/data?range=today|7d|30d` (JSON), `brace analytics
+  --analytics` opens it), `GET /ops/analytics/data?range=today|7d|30d|12mo` (JSON), `brace analytics
   [--range 7d]`, and an `analytics` block in `/ops/status`. All need a `read` ops token.
-- Tables: `brace_analytics_pageviews`, `brace_analytics_rejects`, `brace_analytics_salts`
-  (framework migration V18). Full guide: `docs/analytics.md` in the brace repo; JSON shape and
+- Tables: `brace_analytics_pageviews`, `brace_analytics_rejects`, `brace_analytics_daily`,
+  `brace_analytics_salts` (framework migration V18). Full guide: `docs/analytics.md` in the brace repo; JSON shape and
   troubleshooting runbook in `BRACE-OPS.md`.
 
 ## Custom Metrics

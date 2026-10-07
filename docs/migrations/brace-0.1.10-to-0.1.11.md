@@ -49,18 +49,20 @@ Things to check when you turn it on:
 - **Numbers will be higher than a JavaScript tracker's** for the same site: ad blockers no longer
   hide anyone, and filtering bots by headers is less exact than requiring JavaScript. The page
   shows how many requests each filter rejected.
-- **Comparisons appear after a while.** "vs the previous 30 days" needs 60 days of stored data,
-  so for the first weeks the page says "no comparison yet". Raw views are kept 60 days by
-  default (`rawRetention`).
+- **Comparisons appear after a while.** "vs the previous 30 days" needs 60 days of data, so for
+  the first weeks the page says "no comparison yet".
+- **History is kept as daily summaries.** A nightly job (`analytics-rollup`) summarizes each
+  completed day into `brace_analytics_daily`, kept indefinitely, and then deletes raw page views
+  older than `rawRetention` (35 days by default). The page and CLI have a 12-month range.
 
 The full guide, with what each number means, is `docs/analytics.md` in the brace repo.
 
-New CLI and endpoints (all need a `read` ops token): `brace analytics [--range today|7d|30d]`,
+New CLI and endpoints (all need a `read` ops token): `brace analytics [--range today|7d|30d|12mo]`,
 `brace ops dashboard --analytics`, `GET /ops/analytics`, `GET /ops/analytics/data`,
 `POST /ops/analytics/ignore`, and an `analytics` block in `/ops/status` when enabled.
 
 ## Schema: framework migration V18
 
-`V18__brace_analytics.sql` creates `brace_analytics_pageviews`, `brace_analytics_rejects` and
-`brace_analytics_salts` on both H2 and Postgres. The tables are created whether or not the app
+`V18__brace_analytics.sql` creates `brace_analytics_pageviews`, `brace_analytics_rejects`,
+`brace_analytics_daily` and `brace_analytics_salts` on both H2 and Postgres. The tables are created whether or not the app
 enables analytics, and stay empty unless it does. Nothing to do.

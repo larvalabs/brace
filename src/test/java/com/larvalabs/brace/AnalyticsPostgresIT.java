@@ -36,6 +36,7 @@ class AnalyticsPostgresIT extends PostgresTestBase {
         truncate("brace_analytics_pageviews");
         truncate("brace_analytics_rejects");
         truncate("brace_analytics_salts");
+        truncate("brace_analytics_daily");
     }
 
     private static Request view(String path, String ua) {
@@ -84,5 +85,30 @@ class AnalyticsPostgresIT extends PostgresTestBase {
         assertEquals(1, s.live());
         dbFactory.withSession(db -> { a.prune(db); });
         assertEquals(1, a.report("7d").pageviews(), "today's rows are inside the retention window");
+    }
+
+    @Test
+    void rollupAndTwelveMonthReport() {
+        var a = new Analytics(Analytics.options(), dbFactory);
+        var old = java.time.LocalDate.now(java.time.ZoneOffset.UTC).minusDays(90);
+        dbFactory.withSession(db -> {
+            for (long v = 1; v <= 3; v++) {
+                db.sql("INSERT INTO brace_analytics_pageviews (ts, view_date, view_hour, visitor, path, source, device, browser, os) "
+                    + "VALUES (?, ?, 0, ?, '/old', NULL, 'desktop', 'Chrome', 'macOS')",
+                    java.time.OffsetDateTime.of(old.atStartOfDay(), java.time.ZoneOffset.UTC), old, v);
+            }
+            db.sql("INSERT INTO brace_analytics_rejects (view_date, reason, instance_id, n) VALUES (?, 'bot', 'i', 4)", old);
+        });
+        int days = dbFactory.withSession(db -> { return a.rollup(db); });
+        assertEquals(90, days, "every completed day from the first raw one through yesterday");
+        dbFactory.withSession(db -> { a.prune(db); });
+
+        var year = a.report("12mo");
+        assertEquals(3, year.visitors());
+        assertEquals(3, year.pageviews());
+        assertEquals("/old", year.pages().getFirst().key());
+        assertNull(year.sources().getFirst().key());
+        assertEquals(4L, year.notCounted().get("bot"));
+        assertEquals(12, year.series().size());
     }
 }

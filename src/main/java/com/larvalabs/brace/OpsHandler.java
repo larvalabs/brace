@@ -725,7 +725,7 @@ public class OpsHandler {
         this.analytics = analytics;
     }
 
-    /** GET /ops/analytics?range=today|7d|30d&metric=visitors|pageviews — the analytics page. */
+    /** GET /ops/analytics?range=today|7d|30d|12mo&metric=visitors|pageviews — the analytics page. */
     public Result analytics(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         String range = req.queryParam("range", "30d");
@@ -735,7 +735,7 @@ public class OpsHandler {
         return Result.html(AnalyticsDashboard.html(analytics.report(range), metric, ignored));
     }
 
-    /** GET /ops/analytics/data?range=today|7d|30d — the same report as JSON (the CLI reads this). */
+    /** GET /ops/analytics/data?range=today|7d|30d|12mo — the same report as JSON (the CLI reads this). */
     public Result analyticsData(Request req) {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         String range = req.queryParam("range", "7d");

@@ -1,6 +1,6 @@
 # Brace Analytics: server-side visitor counts
 
-Status: **phase 1 implemented** (0.1.11). Decisions taken: concrete paths by default, no public
+Status: **phase 1 and the daily rollup implemented** (0.1.11). Decisions taken: concrete paths by default, no public
 share link. Mockup: `docs/analytics-mockup.html`. Code: `Analytics`, `UserAgents`,
 `AnalyticsDashboard`, framework migration V18.
 
@@ -41,7 +41,7 @@ business event" on the ops dashboard.
 | Devices, browsers, OS | **Keep** (hand-rolled UA + client-hints classifier, no dependency) |
 | Countries | **Keep if a proxy supplies it** (`CF-IPCountry` etc.); no GeoIP database |
 | Realtime "visitors now" | **Keep** (cheap: distinct visitors in the last 5 min) |
-| Click-to-filter (e.g. pages for one source) | Phase 2 |
+| Click-to-filter (e.g. pages for one source) | Later |
 | Bounce rate, visit duration | Drop (needs a JS ping to be meaningful) |
 | Entry/exit pages, goals, funnels, events, props | Drop |
 | Public share links, embeds | Open question (default off) |
@@ -64,8 +64,8 @@ request ─▶ route ─▶ handler ─▶ response sent ─▶ recordAndLog
                                                   bounded in-memory buffer
                                                         │ every 10s (everyLocal job)
                                                         ▼
-                                           brace_analytics_pageviews  (raw, 60 days)
-                                                        │ phase 2: nightly rollup
+                                           brace_analytics_pageviews  (raw, 35 days)
+                                                        │ nightly rollup (analytics-rollup)
                                                         ▼
                                            brace_analytics_daily      (aggregates, kept)
 ```
@@ -160,17 +160,25 @@ CREATE TABLE brace_analytics_salts (
 );
 ```
 
-Phase 2 adds `brace_analytics_daily (view_date, dim, dim_value, visitors, pageviews)` in a new
-migration, filled by a nightly rollup, for ranges longer than the raw window.
+```sql
+-- Per-day summaries, kept indefinitely. dim: total | path | source | device | browser | os |
+-- country | notcounted. dim_value '' = total, or direct traffic for source.
+CREATE TABLE brace_analytics_daily (
+    view_date DATE, dim VARCHAR(16), dim_value VARCHAR(512), visitors BIGINT, pageviews BIGINT,
+    PRIMARY KEY (view_date, dim, dim_value)
+);
+```
 
 Sizing: a raw row is roughly 120–150 bytes with its index share. 50k pageviews/day is about
-7 MB/day, so ~420 MB at the default 60-day raw retention. The daily table is a few hundred rows
-per day once each dimension is capped (top 500 paths, top 200 sources; the rest fold into
-`(other)`), so keeping it forever costs almost nothing.
+7 MB/day, so ~250 MB at the default 35-day raw retention. The daily table is a few hundred rows
+per day once each dimension is capped (top 500 paths, top 200 sources), so keeping it forever
+costs almost nothing. There is no `(other)` row: a distinct-visitor count for "everything else"
+can't be derived by subtraction, and the lists only show the top 10.
 
-Phase 1 reads everything from the raw table (Today, 7 days, 30 days, the live count). In phase 2,
-longer ranges read `brace_analytics_daily`; the rollup will be idempotent (delete the day's rows,
-re-insert), so a missed night just rolls up later.
+Reports split each range: days already summarized are read from `brace_analytics_daily`, later
+days (always today) from raw rows. Daily visitor IDs make the two additive. The rollup replaces a
+day whole, catches up every completed day not yet summarized, and runs before the prune, which
+never deletes an unsummarized day.
 
 Two things the raw table gives us that pure counters wouldn't: exact per-page visitor counts, and
 phase-2 filtering (click a source, see its pages) with a plain `WHERE`.
@@ -278,9 +286,10 @@ Things the server can't see:
 ## Phasing
 
 1. **Collect and show (done).** Classifier, hashing, buffer + flush, raw table, `/ops/analytics`
-   with Today / 7d / 30d, top pages, sources, devices, browsers, OS, live count, filtered counts,
+   with Today / 7d / 30d / 12 months, top pages, sources, devices, browsers, OS, live count, filtered counts,
    countries via header, the "don't count me" toggle, CLI, `/ops/status` block and dashboard card.
-2. **History and filters.** Nightly rollup + 12 months, click-to-filter.
+   Nightly rollup into `brace_analytics_daily` and the 12-month view (done).
+2. **Filters.** Click-to-filter (pages for one source, and so on), within raw retention.
 3. **Maybe.** Weekly email digest through `Mailer`, CSV export, a read-only public share link.
 
 ## Decisions
@@ -294,7 +303,6 @@ Things the server can't see:
 1. **Who looks at it?** If non-engineers need it, Ed25519 keys are awkward. A read-only key
    minted with `brace ops keypair --read-only` plus `brace ops dashboard --analytics` may be
    enough.
-2. **Raw retention default:** 60 days, so the 30-day view can compare against the 30 days
-   before it. (An earlier draft used 35, which silently truncated that comparison.) The
-   comparison is null whenever stored data doesn't cover the whole earlier period. Longer
+2. **Raw retention default:** 35 days. Reports no longer depend on it (summarized days come from
+   the rollup); it bounds how far back per-view detail, and future filtering, reaches. Longer
    retention costs ~7 MB/day per 50k pageviews.

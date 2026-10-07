@@ -761,6 +761,9 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
   its day ends, after which a stored hash can't be matched to an IP, even by brute force over the
   IPv4 space. During the day, someone who can read the database and already has a candidate IP
   and user agent can test them against stored hashes. Treat database read access accordingly.
+- **Daily summaries hold no visitor IDs.** `brace_analytics_daily` stores only per-day counts per
+  page, source, device, browser, OS and country, and is kept indefinitely. The paths in it are
+  the same redacted paths as the raw rows, so the advice below applies to it too.
 - **Paths can carry secrets.** Concrete paths are stored and shown on the dashboard. Long
   random-looking segments are redacted with the same rule as error records (see below), but short
   codes and IDs are not. Mark routes like `/reset/{token}`, `/invite/{code}` and magic links with

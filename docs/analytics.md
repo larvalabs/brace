@@ -21,6 +21,7 @@ Design rationale and what's planned next: [`2026-10-07-brace-analytics.md`](2026
 - [Privacy: what is and isn't stored](#privacy-what-is-and-isnt-stored)
 - [Running more than one instance](#running-more-than-one-instance)
 - [Accuracy compared with a JavaScript tracker](#accuracy-compared-with-a-javascript-tracker)
+- [History: daily summaries](#history-daily-summaries)
 - [Storage and retention](#storage-and-retention)
 - [Troubleshooting](#troubleshooting)
 
@@ -44,7 +45,7 @@ app.analytics(Analytics.options()
     .exclude("/admin/*", "/account")    // exact path, or a trailing /* prefix
     .excludeIps("203.0.113.0/24")       // your office, an uptime monitor
     .countryHeader("CF-IPCountry")      // two-letter country from your proxy (see below)
-    .rawRetention("60d")                // how long individual page views are kept
+    .rawRetention("35d")                // how long individual page views are kept
     .strictNavigation(false));          // see "What counts as a page view"
 ```
 
@@ -54,7 +55,7 @@ app.analytics(Analytics.options()
 | `exclude(patterns...)` | none | Paths never counted. `"/admin"` matches exactly; `"/admin/*"` matches `/admin` and everything under it. |
 | `excludeIps(cidrs...)` | none | Client IPs or CIDR ranges never counted. Matched against `req.ip()`, so it needs trusted proxies behind a proxy. |
 | `countryHeader(name)` | off | Read a two-letter country code from this request header, e.g. `CF-IPCountry` on Cloudflare. Only believed when the request came through a configured trusted proxy. Adds a Countries panel. |
-| `rawRetention(duration)` | `60d` | How long raw page views and filter tallies are kept (minimum `1d`). The 30-day view compares against the 30 days before it, so below `60d` that comparison is dropped. |
+| `rawRetention(duration)` | `35d` | How long raw page views and filter tallies are kept (minimum `1d`). Reports don't depend on it: every completed day is summarized first and the summaries are kept indefinitely (see [History](#history-daily-summaries)). |
 | `strictNavigation(bool)` | `false` | Require the `Sec-Fetch-Mode: navigate` header on every counted view. See below. |
 
 **Behind a reverse proxy or CDN, configure `trustedProxies(...)`.** Visitors are told apart by IP
@@ -115,7 +116,7 @@ key that can view analytics but can't change anything).
 
 **In a browser:** `brace ops dashboard --analytics` signs you in and opens `/ops/analytics`. From the
 ops dashboard, use the `ops · analytics` switch in the header or the "Visitors today" card. The page
-has Today / 7 days / 30 days ranges; click the Visitors or Pageviews tile to switch the chart.
+has Today / 7 days / 30 days / 12 months ranges (12 months is per calendar month, including the current one); click the Visitors or Pageviews tile to switch the chart.
 
 The "Don't count this browser's visits" button at the bottom sets a cookie (`__brace_analytics_ignore`,
 one year, `Path=/`) so your own browsing stops showing up. It is the only cookie analytics ever
@@ -127,11 +128,12 @@ sets, and only for people who can open the ops page.
 brace analytics                      # last 7 days
 brace analytics --range today --env prod
 brace analytics --range 30d --json   # the full report as JSON
+brace analytics --range 12mo         # the last 12 calendar months
 ```
 
 Exit code: 0 on success, 1 when the app doesn't have analytics enabled, 2 when it's unreachable.
 
-**Over HTTP:** `GET /ops/analytics/data?range=today|7d|30d` (default `7d`) returns:
+**Over HTTP:** `GET /ops/analytics/data?range=today|7d|30d|12mo` (default `7d`) returns:
 
 ```json
 {
@@ -149,7 +151,8 @@ Exit code: 0 on success, 1 when the app doesn't have analytics enabled, 2 when i
 }
 ```
 
-`series` is per hour for `today` (`"bucket": "00"` … the current hour) and per day otherwise. In
+`series` is per hour for `today` (`"bucket": "00"` … the current hour), per month for `12mo`
+(`"bucket": "2026-10"`), and per day otherwise. In
 `sources`, `"key": null` means direct traffic or no referrer. `countries` is empty unless
 `countryHeader(...)` is set. `pages` and `sources` list the top 10; the breakdowns the top 8.
 
@@ -218,15 +221,38 @@ Some page views never reach the server, so they aren't counted:
   the app and is counted. Brace's own page cache runs inside the app, so its hits are counted.
 - Back/forward navigations restored from the browser's back-forward cache.
 
+## History: daily summaries
+
+Every night at 03:29 (server time, once per fleet), the `analytics-rollup` job summarizes each
+completed day, in your analytics timezone, into `brace_analytics_daily`: that day's visitors and
+pageviews in total and per page, source, device, browser, OS and country, plus the filter
+tallies. Summaries are kept indefinitely; at a few hundred small rows a day that's a few MB a
+year. Then raw page views older than `rawRetention` are deleted.
+
+- **Reports read summaries where they exist.** Summarized days come from `brace_analytics_daily`
+  and the rest (always today, and any day the job hasn't reached) from raw rows, so numbers are
+  the same before and after a day is summarized. Visitors add up across the two because a visitor
+  ID never spans days.
+- **Nothing is lost if the job misses a night.** Each run summarizes every completed day not yet
+  summarized, and raw rows are never deleted for a day that hasn't been summarized.
+- **Long-range lists are slightly approximate.** Each day keeps its top 500 pages and top 200
+  sources. A page that is never in a single day's top 500 won't appear in the 12-month list,
+  which only shows the top 10 anyway. Totals and the chart are exact.
+- **What a summary can't answer:** anything needing individual views, such as "today, hour by
+  hour" (today is never summarized) or, in a future version, filtering one breakdown by another.
+  Those work within `rawRetention`.
+
 ## Storage and retention
 
 | Table | Holds | Kept |
 |---|---|---|
-| `brace_analytics_pageviews` | One row per counted view (~120–150 bytes with index) | `rawRetention`, default 60 days; deleted by the daily `analytics-prune` job |
+| `brace_analytics_pageviews` | One row per counted view (~120–150 bytes with index) | `rawRetention`, default 35 days, once the day is summarized; deleted by the nightly `analytics-rollup` job |
 | `brace_analytics_rejects` | Filter tallies per day, reason and instance | Same as above |
+| `brace_analytics_daily` | Per-day totals and top values per breakdown, plus filter tallies | Indefinitely |
 | `brace_analytics_salts` | One random salt per day | Until 5 minutes after its day ends |
 
-Rough sizing: 50,000 page views a day is about 7 MB a day, about 420 MB at 60 days. The tables are
+Rough sizing: 50,000 page views a day is about 7 MB a day of raw rows, about 250 MB at 35 days,
+plus a few MB a year of summaries. The tables are
 created by framework migration V18 whether or not analytics is enabled, and stay empty unless it is.
 
 ## Troubleshooting

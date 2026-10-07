@@ -401,11 +401,11 @@ public class CliCommands {
         return 0;
     }
 
-    /** {@code brace analytics [--range today|7d|30d]}: the {@code /ops/analytics/data} report. */
+    /** {@code brace analytics [--range today|7d|30d|12mo]}: the {@code /ops/analytics/data} report. */
     public static int analytics(Path projectDir, String[] args) throws Exception {
         String range = hasFlag(args, "--range") ? parseFlag(args, "--range") : "7d";
-        if (!List.of("today", "7d", "30d").contains(range)) {
-            CliOutput.printError("--range must be today, 7d or 30d");
+        if (!List.of("today", "7d", "30d", "12mo").contains(range)) {
+            CliOutput.printError("--range must be today, 7d, 30d or 12mo");
             return 1;
         }
         var cfg = CliConfig.load(projectDir, args);
