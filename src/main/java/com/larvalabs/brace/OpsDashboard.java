@@ -169,12 +169,18 @@ public class OpsDashboard {
         sb.append("<div class=\"stats-row\">");
         // A rate, not the lifetime total (meaningless without the uptime; it stays in
         // /ops/status): the last full minute, with the ring's average as the subtitle.
+        // Per second on a busy app, per minute on a quiet one (RateUnit); the card, the sparkline
+        // and Top Routes all use the same unit.
         var rate = stats.requestRate();
+        var unit = rate == null ? RateUnit.MINUTE : RateUnit.forAvgPerMinute(rate.avgPerMinute());
         if (rate == null) {
             statCard(sb, "Req / Min", "-", "first minute pending", "c-blue");
         } else {
-            statCard(sb, "Req / Min", String.format("%,d", rate.lastMinute()),
-                "avg " + formatMetric(rate.avgPerMinute()) + " · " + rate.windowMinutes() + "m", "c-blue");
+            String value = unit == RateUnit.MINUTE ? String.format("%,d", rate.lastMinute())
+                : RateUnit.format(unit.fromPerMinute(rate.lastMinute()));
+            statCard(sb, "Req / " + unit.label, value,
+                "avg " + RateUnit.format(unit.fromPerMinute(rate.avgPerMinute())) + " · " + rate.windowMinutes() + "m",
+                "c-blue", String.format("%,d requests in the last full minute", rate.lastMinute()));
         }
         statCard(sb, "Error Rate", errRate + "%", errCount + " total", Double.parseDouble(errRate) > 5 ? "c-red" : "c-green");
         statCard(sb, "Heap", heapUsed + "M", "/ " + heapMax + "M", "c-purple");
@@ -226,14 +232,16 @@ public class OpsDashboard {
         if (!minutes.isEmpty()) {
             int emptySlots = SPARKLINE_SLOTS - minutes.size();
 
-            // Req/min sparkline
+            // Request rate sparkline: one bar per minute, the axis in the card's unit
             sb.append("<div class=\"section\">");
             long maxReq = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::requests).max().orElse(1));
             sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;\">")
-              .append("Requests / Minute <span style=\"float:right\">last ").append(minutes.size()).append(" / 60 min</span></div>");
+              .append(unit == RateUnit.SECOND ? "Requests / Second" : "Requests / Minute")
+              .append(" <span style=\"float:right\">last ").append(minutes.size()).append(" / 60 min</span></div>");
             sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
             sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
-              .append("<span>").append(maxReq).append("</span><span>0</span></div>");
+              .append("<span>").append(unit == RateUnit.MINUTE ? String.valueOf(maxReq) : RateUnit.format(unit.fromPerMinute(maxReq)))
+              .append("</span><span>0</span></div>");
             sb.append("<div class=\"sparkline\" style=\"flex:1\">");
             for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
             for (var m : minutes) {
@@ -241,7 +249,9 @@ public class OpsDashboard {
                 String barClass = pct > 75 ? "bar-hi" : pct > 40 ? "bar-md" : "bar-lo";
                 sb.append("<div class=\"bar ").append(barClass).append("\" style=\"height:")
                   .append(String.format("%.0f", Math.max(2, pct)))
-                  .append("%\" title=\"").append(m.requests()).append(" reqs, ")
+                  .append("%\" title=\"").append(m.requests()).append(" reqs")
+                  .append(unit == RateUnit.SECOND ? " (" + RateUnit.format(unit.fromPerMinute(m.requests())) + "/s)" : "")
+                  .append(", ")
                   .append(String.format("%.1f", m.avgLatencyMs())).append(" ms avg @ ")
                   .append(m.ts()).append("\"></div>");
             }
@@ -420,11 +430,12 @@ public class OpsDashboard {
             if (topRoutes.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No full minute yet</p>");
             } else {
-                sb.append("<table><tr><th>Route</th><th class=\"num\">Req/Min</th><th class=\"num\">Share</th></tr>");
+                sb.append("<table><tr><th>Route</th><th class=\"num\">Req/").append(unit.label)
+                  .append("</th><th class=\"num\">Share</th></tr>");
                 for (var r : topRoutes) {
                     sb.append("<tr>");
                     routeCell(sb, r.route());
-                    sb.append("<td class=\"num c-blue\">").append(formatMetric(r.perMinute())).append("</td>");
+                    sb.append("<td class=\"num c-blue\">").append(RateUnit.format(unit.fromPerMinute(r.perMinute()))).append("</td>");
                     sb.append("<td class=\"num c-muted\">").append(String.format("%.0f%%", r.share() * 100)).append("</td></tr>");
                 }
                 sb.append("</table>");
@@ -726,7 +737,13 @@ public class OpsDashboard {
     }
 
     private static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass) {
-        sb.append("<div class=\"stat-card\"><div class=\"label\">").append(esc(label))
+        statCard(sb, label, value, detail, colorClass, null);
+    }
+
+    private static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass, String title) {
+        sb.append("<div class=\"stat-card\"");
+        if (title != null) sb.append(" title=\"").append(esc(title)).append('"');
+        sb.append("><div class=\"label\">").append(esc(label))
           .append("</div><div class=\"value ").append(colorClass).append("\">").append(esc(value))
           .append("</div><div class=\"detail\">").append(esc(detail)).append("</div></div>");
     }

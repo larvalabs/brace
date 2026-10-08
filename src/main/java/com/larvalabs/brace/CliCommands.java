@@ -288,17 +288,28 @@ public class CliCommands {
         var http = root.path("http");
         System.out.println("  status    " + http.path("statusCodes").toString());
         // 0.1.10+ servers only; older ones omit these, so print nothing rather than zeros.
+        // The JSON is per minute; show per second on a busy app, as the dashboard does (RateUnit).
         var rpm = http.path("requestsPerMinute");
+        var unit = rpm.isMissingNode() ? RateUnit.MINUTE : RateUnit.forAvgPerMinute(rpm.path("avg").asDouble());
         if (!rpm.isMissingNode()) {
-            System.out.printf("  req/min   %d last minute, %.1f avg over %d min%n",
-                rpm.path("lastMinute").asLong(), rpm.path("avg").asDouble(), rpm.path("windowMinutes").asInt());
+            long last = rpm.path("lastMinute").asLong();
+            if (unit == RateUnit.SECOND) {
+                System.out.printf("  req/s     %s last minute (%,d requests), %s avg over %d min%n",
+                    RateUnit.format(unit.fromPerMinute(last)), last,
+                    RateUnit.format(unit.fromPerMinute(rpm.path("avg").asDouble())), rpm.path("windowMinutes").asInt());
+            } else {
+                System.out.printf("  req/min   %d last minute, %.1f avg over %d min%n",
+                    last, rpm.path("avg").asDouble(), rpm.path("windowMinutes").asInt());
+            }
         }
         var top = http.path("topRoutes");
         if (top.size() > 0) {
             System.out.println("  busiest (last " + http.path("topRoutesWindowMinutes").asInt() + " min):");
             for (var r : top) {
-                System.out.printf("    %s  %.1f/min (%.1f%%)%n",
-                    r.path("route").asText(), r.path("perMinute").asDouble(), r.path("sharePct").asDouble());
+                String perUnit = unit == RateUnit.MINUTE ? String.format("%.1f", r.path("perMinute").asDouble())
+                    : RateUnit.format(unit.fromPerMinute(r.path("perMinute").asDouble()));
+                System.out.printf("    %s  %s%s (%.1f%%)%n",
+                    r.path("route").asText(), perUnit, unit.suffix, r.path("sharePct").asDouble());
             }
         }
         var slow = http.path("slowestRoutes");

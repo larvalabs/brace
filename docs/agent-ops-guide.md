@@ -174,7 +174,9 @@ Notes on the shape:
 - `http.totalRequests` is the lifetime count since process start (the sum of
   `statusCodes`). `http.requestsPerMinute` is the current rate: `lastMinute` is the last
   full minute, `avg` the per-minute average over the retained window (`windowMinutes`, up
-  to 60). It is absent until the first minute has rotated in.
+  to 60). It is absent until the first minute has rotated in. The JSON is always per minute;
+  the dashboard and `brace status` show rates per second instead when `avg` is at least 60
+  (one request a second).
 - `http.topRoutes` ranks the busiest routes over the last `topRoutesWindowMinutes` full
   minutes (default 5), by request count: `perMinute` is the rate over that window and
   `sharePct` the route's share of all requests in it. Keys are route patterns; requests

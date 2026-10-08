@@ -10,6 +10,7 @@ now reach `GET` routes instead of returning 404.
 | Server-side page-view analytics | new, opt-in | none; add `.analytics()` to use it | [§](#new-server-side-page-view-analytics) |
 | Framework migration V18 | schema | none (applied automatically) | [§](#schema-framework-migration-v18) |
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
+| Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 
 ## New: server-side page-view analytics
 
@@ -98,3 +99,11 @@ Now a `HEAD` request with no `HEAD` route of its own runs the matching `GET` rou
   `HEAD` checks never show up as visitors.
 
 No code changes are needed.
+
+## Display: request rates per second on busy apps
+
+The ops dashboard and `brace status` show request rates per second once the app averages at
+least one request a second over the last hour, and per minute below that. The request card,
+the request sparkline and Top Routes switch together. Hover the card for the last minute's
+raw count. The `/ops/status` JSON is unchanged (`requestsPerMinute`, `perMinute`), so scripts
+and agents reading it need no change.

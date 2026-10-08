@@ -226,15 +226,29 @@ class CliCommandsTest {
     void statusOutputShowsRequestRateAndBusiestRoutes() throws Exception {
         var root = Json.mapper().readTree("""
             {"http": {"statusCodes": {"200": 900},
-              "requestsPerMinute": {"lastMinute": 120, "avg": 98.5, "windowMinutes": 15},
-              "topRoutes": [{"route": "GET /users/{id}", "count": 400, "perMinute": 80.0, "sharePct": 66.7},
+              "requestsPerMinute": {"lastMinute": 42, "avg": 38.5, "windowMinutes": 15},
+              "topRoutes": [{"route": "GET /users/{id}", "count": 150, "perMinute": 30.0, "sharePct": 66.7},
                             {"route": "(unmatched)", "count": 20, "perMinute": 4.0, "sharePct": 3.3}],
               "topRoutesWindowMinutes": 5}}""");
         String out = renderedStatus(root);
-        assertTrue(out.contains("req/min   120 last minute, 98.5 avg over 15 min"), out);
+        assertTrue(out.contains("req/min   42 last minute, 38.5 avg over 15 min"), out);
         assertTrue(out.contains("busiest (last 5 min):"), out);
-        assertTrue(out.contains("GET /users/{id}  80.0/min (66.7%)"), out);
+        assertTrue(out.contains("GET /users/{id}  30.0/min (66.7%)"), out);
         assertTrue(out.contains("(unmatched)  4.0/min (3.3%)"), out);
+    }
+
+    @Test
+    void statusOutputShowsRequestsPerSecondOnABusyApp() throws Exception {
+        var root = Json.mapper().readTree("""
+            {"http": {"statusCodes": {"200": 900},
+              "requestsPerMinute": {"lastMinute": 744, "avg": 606.0, "windowMinutes": 60},
+              "topRoutes": [{"route": "GET /catalog/list", "count": 3000, "perMinute": 600.0, "sharePct": 80.6},
+                            {"route": "(unmatched)", "count": 2, "perMinute": 0.4, "sharePct": 0.1}],
+              "topRoutesWindowMinutes": 5}}""");
+        String out = renderedStatus(root);
+        assertTrue(out.contains("req/s     12 last minute (744 requests), 10 avg over 60 min"), out);
+        assertTrue(out.contains("GET /catalog/list  10/s (80.6%)"), out);
+        assertTrue(out.contains("(unmatched)  <0.01/s (0.1%)"), out);
     }
 
     @Test
