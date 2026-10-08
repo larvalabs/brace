@@ -1,2 +1,7 @@
 jdk:
   - openjdk21
+# Build the version being requested ($VERSION: the tag, or the commit hash for a hash build), not
+# the pom's, so BraceVersion (the ops header, /ops/status, brace agents-md) reports what's running.
+# Release-candidate tags don't bump the pom; publish.yml does the same for the GitHub Release.
+before_install:
+  - ./mvnw -B -q versions:set -DnewVersion="${VERSION#v}" -DgenerateBackupPoms=false

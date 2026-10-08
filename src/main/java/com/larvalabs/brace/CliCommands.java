@@ -282,6 +282,8 @@ public class CliCommands {
         System.out.println("App");
         var app = root.path("app");
         System.out.println("  uptime    " + app.path("uptime").asText("-"));
+        // 0.1.11+ servers only; older ones omit it.
+        if (app.has("braceVersion")) System.out.println("  brace     " + app.path("braceVersion").asText());
         System.out.println("  java      " + app.path("javaVersion").asText("-"));
         System.out.println();
         System.out.println("HTTP");

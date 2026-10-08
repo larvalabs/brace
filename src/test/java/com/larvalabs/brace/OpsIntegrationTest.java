@@ -122,6 +122,7 @@ class OpsIntegrationTest {
         assertTrue(response.body().contains("\"http\""));
         assertTrue(response.body().contains("\"jvm\""));
         assertTrue(response.body().contains("\"javaVersion\""));
+        assertTrue(response.body().contains("\"braceVersion\":\"" + BraceVersion.get() + "\""), response.body());
     }
 
     @Test

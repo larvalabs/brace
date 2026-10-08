@@ -264,6 +264,7 @@ public class OpsHandler {
         app.put("instanceId", instanceId);   // which box served this snapshot (P3, fleet visibility)
         app.put("uptime", formatDuration(Duration.between(stats.startedAt(), Instant.now())));
         app.put("startedAt", stats.startedAt().toString());
+        app.put("braceVersion", BraceVersion.get());
         app.put("javaVersion", System.getProperty("java.version"));
         data.put("app", app);
 

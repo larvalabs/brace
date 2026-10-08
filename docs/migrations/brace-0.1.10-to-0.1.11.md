@@ -11,6 +11,7 @@ now reach `GET` routes instead of returning 404.
 | Framework migration V18 | schema | none (applied automatically) | [§](#schema-framework-migration-v18) |
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
+| Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
 
 ## New: server-side page-view analytics
 
@@ -111,3 +112,10 @@ least one request a second over the last hour, and per minute below that. The re
 the request sparkline and Top Routes switch together. Hover the card for the last minute's
 raw count. The `/ops/status` JSON is unchanged (`requestsPerMinute`, `perMinute`), so scripts
 and agents reading it need no change.
+
+## Display: Brace version on the ops dashboard
+
+The ops dashboard header shows the running Brace version next to the Java version, `/ops/status`
+has it as `app.braceVersion`, and `brace status` prints it. A build from a JitPack tag reports
+that tag's version, release candidates included (before, an rc build reported the previous
+release's version).
