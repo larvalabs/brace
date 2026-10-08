@@ -20,7 +20,11 @@ class AnalyticsTest {
         + "Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0";
     static final String ANDROID_TABLET = "Mozilla/5.0 (Linux; Android 14; SM-X710) AppleWebKit/537.36 "
         + "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
-    static final String GOOGLEBOT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+    static final String SAFARI_OLD = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+        + "(KHTML, like Gecko) Version/15.6 Safari/605.1.15";
+    static final String CHROME_IOS = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 "
+        + "(KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1";
+    static final String GOOGLEBOT ="Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 
     private static final Route PAGE = new Route("GET", "/posts/{slug}", (Handler) r -> null, null);
     private static final Analytics.Options DEFAULTS = Analytics.options();
@@ -57,7 +61,40 @@ class AnalyticsTest {
 
     @Test
     void olderBrowserWithoutFetchMetadataStillCounts() {
-        assertEquals(Analytics.Verdict.COUNT, classify(get("/posts/hello", browser("Sec-Fetch-Mode", null))));
+        assertEquals(Analytics.Verdict.COUNT,
+            classify(get("/posts/hello", browser("User-Agent", SAFARI_OLD, "Sec-Fetch-Mode", null))));
+        assertEquals(Analytics.Verdict.COUNT,
+            classify(get("/posts/hello", browser("User-Agent", CHROME_IOS, "Sec-Fetch-Mode", null))));
+    }
+
+    @Test
+    void modernChromiumOrFirefoxWithoutFetchMetadataIsABot() {
+        for (String ua : new String[] {CHROME_MAC, EDGE_WIN, FIREFOX_WIN, ANDROID_TABLET}) {
+            assertEquals(Analytics.Verdict.BOT, classify(get("/posts/hello", browser("User-Agent", ua, "Sec-Fetch-Mode", null))), ua);
+            assertEquals(Analytics.Verdict.COUNT, classify(get("/posts/hello", browser("User-Agent", ua))), ua);
+        }
+        // A boosted htmx navigation arrives as a fetch and skips the fetch-metadata checks.
+        assertEquals(Analytics.Verdict.COUNT,
+            classify(get("/posts/a", browser("HX-Request", "true", "HX-Boosted", "true", "Sec-Fetch-Mode", null))));
+    }
+
+    @Test
+    void fetchMetadataBrowsersByVersion() {
+        assertTrue(UserAgents.sendsFetchMetadata(CHROME_MAC));
+        assertTrue(UserAgents.sendsFetchMetadata(EDGE_WIN));
+        assertTrue(UserAgents.sendsFetchMetadata(FIREFOX_WIN));
+        assertTrue(UserAgents.sendsFetchMetadata(ANDROID_TABLET));
+        assertTrue(UserAgents.sendsFetchMetadata("Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36"));
+        assertFalse(UserAgents.sendsFetchMetadata("Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"));
+        assertFalse(UserAgents.sendsFetchMetadata("Mozilla/5.0 (Windows NT 10.0; rv:89.0) Gecko/20100101 Firefox/89.0"));
+        // EdgeHTML: claims Chrome/70.
+        assertFalse(UserAgents.sendsFetchMetadata("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.19041"));
+        assertFalse(UserAgents.sendsFetchMetadata(SAFARI_IPHONE));
+        assertFalse(UserAgents.sendsFetchMetadata(SAFARI_OLD));
+        assertFalse(UserAgents.sendsFetchMetadata(CHROME_IOS));
+        assertFalse(UserAgents.sendsFetchMetadata("Mozilla/5.0 Chrome/"));
+        assertFalse(UserAgents.sendsFetchMetadata(null));
     }
 
     @Test
@@ -117,8 +154,9 @@ class AnalyticsTest {
     void strictNavigationRequiresFetchMetadata() {
         var strict = Analytics.options().strictNavigation(true);
         var html = Result.html("x");
+        // Even a browser that predates fetch metadata.
         assertEquals(Analytics.Verdict.BOT,
-            Analytics.classify(get("/posts/a", browser("Sec-Fetch-Mode", null)), PAGE, html, strict));
+            Analytics.classify(get("/posts/a", browser("User-Agent", SAFARI_OLD, "Sec-Fetch-Mode", null)), PAGE, html, strict));
         assertEquals(Analytics.Verdict.COUNT, Analytics.classify(get("/posts/a", browser()), PAGE, html, strict));
     }
 

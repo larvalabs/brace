@@ -98,8 +98,12 @@ show what was filtered and the numbers can be trusted.
 | User-Agent missing, or matches the bot list (`bot`, `crawl`, `spider`, `curl`, `python`, `headless`, `lighthouse`, uptime monitors, link-preview fetchers …) → skip | The bulk of non-human traffic |
 | Client IP in `excludeIps(...)`, or the request carries the "don't count me" cookie | Keep our own visits out |
 
-A `strictNavigation()` option requires `Sec-Fetch-Mode: navigate` outright. That removes nearly
-all scripted traffic at the cost of very old browsers.
+A request without `Sec-Fetch-Mode` whose user agent claims a browser that always sends it
+(Chromium 76+, Firefox 90+) is a bot dressed as a browser, and is rejected as `bot`. Older Safari
+and the iOS browsers (WebKit) are let through without it. A `strictNavigation()` option requires
+`Sec-Fetch-Mode: navigate` from every user agent. That removes nearly all scripted traffic at the
+cost of very old browsers. (Added after a scraper on a production site sent ~300k counted views
+a day with rotating IPs and Chrome/Edge user agents but no fetch metadata.)
 
 ### Visitors without cookies
 

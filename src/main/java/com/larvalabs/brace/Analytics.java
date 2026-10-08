@@ -117,8 +117,10 @@ public final class Analytics {
         }
 
         /**
-         * Require {@code Sec-Fetch-Mode: navigate} on every counted view. Removes nearly all scripted
-         * traffic, at the cost of browsers too old to send fetch metadata (pre-2023 Safari).
+         * Require {@code Sec-Fetch-Mode: navigate} on every counted view. Without it the header is
+         * already required from UAs claiming a browser that always sends it (modern Chrome, Edge,
+         * Firefox); strict extends that to every UA, at the cost of browsers too old to send fetch
+         * metadata (pre-2023 Safari).
          */
         public Options strictNavigation(boolean strict) {
             this.strictNavigation = strict;
@@ -274,13 +276,17 @@ public final class Analytics {
                 || "true".equals(req.header("HX-History-Restore-Request"));
             if (!htmxNavigation) return Verdict.HTMX;
         }
+        String ua = req.header("User-Agent");
         if (!htmxNavigation) {
             String mode = req.header("Sec-Fetch-Mode");
             if (mode != null && !mode.equals("navigate")) return Verdict.BACKGROUND;
-            if (mode == null && options.strictNavigation) return Verdict.BOT;
+            // A missing header is allowed for browsers that predate it, but not from a UA claiming
+            // to be one that always sends it. Browsers send it only over HTTPS (and localhost),
+            // which Brace assumes in production, as the session cookie's Secure default does.
+            if (mode == null && (options.strictNavigation || UserAgents.sendsFetchMetadata(ua))) return Verdict.BOT;
         }
 
-        if (UserAgents.isBot(req.header("User-Agent"))) return Verdict.BOT;
+        if (UserAgents.isBot(ua)) return Verdict.BOT;
         return Verdict.COUNT;
     }
 

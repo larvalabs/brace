@@ -102,12 +102,21 @@ shown under "Not counted":
 | `prefetch` | `Sec-Purpose` or `Purpose` says `prefetch`: the browser is fetching ahead of a click that may never happen. |
 | `htmx` | `HX-Request: true` without `HX-Boosted` or `HX-History-Restore-Request`: a partial swap, not a page load. Boosted link clicks and history restores **are** counted. |
 | `background` | `Sec-Fetch-Mode` is present and isn't `navigate`: a `fetch()`/XHR, an iframe or similar. (Boosted htmx requests are exempt.) |
-| `bot` | The user agent is missing, doesn't start with `Mozilla/`, or names a crawler, script, monitor or link-preview fetcher. With `strictNavigation(true)`, also any request without `Sec-Fetch-Mode`. |
+| `bot` | The user agent is missing, doesn't start with `Mozilla/`, or names a crawler, script, monitor or link-preview fetcher. Also a request without `Sec-Fetch-Mode` whose user agent claims Chrome 76+, Edge, Firefox 90+ or another browser that always sends it, and with `strictNavigation(true)` any request without it. |
 | `dropped` | Not a filter: the in-memory buffer (20,000 views) was full because the database was slow or down. Shown only when non-zero. |
 
 Every browser released since spring 2023 sends `Sec-Fetch-Mode`, and most scripts and crawlers
-don't. `strictNavigation(true)` uses that to reject almost all non-browser traffic, at the cost of
-not counting visitors on older browsers (Safari before 16.4).
+don't. Scrapers often send a real browser's user agent, so a request that claims Chromium 76+
+(Chrome, Edge, Opera, Brave, Samsung Internet, Android WebView) or Firefox 90+ but has no
+`Sec-Fetch-Mode` is always rejected as a bot. Those browsers have sent the header on every
+navigation since 2019 and 2021. Browsers on iOS (all WebKit) and older Safari aren't held to this,
+since they may not send it. `strictNavigation(true)` requires the header from everyone, which
+rejects almost all non-browser traffic at the cost of not counting visitors on older browsers
+(Safari before 16.4).
+
+Browsers send `Sec-Fetch-*` headers only over HTTPS and to localhost. Brace assumes production is
+served over HTTPS (as it does for the session cookie's `Secure` attribute). A site served to
+browsers over plain HTTP would see its Chrome, Edge and Firefox visitors counted as bots.
 
 ## Viewing it
 

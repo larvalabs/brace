@@ -52,6 +52,10 @@ Things to check when you turn it on:
 - **Numbers will be higher than a JavaScript tracker's** for the same site: ad blockers no longer
   hide anyone, and filtering bots by headers is less exact than requiring JavaScript. The page
   shows how many requests each filter rejected.
+- **Serve the site over HTTPS.** A request claiming a modern Chrome, Edge or Firefox user agent
+  without the `Sec-Fetch-Mode` header those browsers always send is counted as a bot, which
+  catches scrapers wearing a browser's user agent. Browsers only send that header over HTTPS (and
+  to localhost), so on a site served over plain HTTP those visitors wouldn't be counted.
 - **Comparisons appear after a while.** "vs the previous 30 days" needs 60 days of data, so for
   the first weeks the page says "no comparison yet".
 - **History is kept as daily summaries.** A nightly job (`analytics-rollup`) summarizes each
