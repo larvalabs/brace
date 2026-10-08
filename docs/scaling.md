@@ -53,6 +53,7 @@ database each is trivially correct (one instance).
 | **Rate limiter** (`RateLimiter.perIp`/`perKey`) | Counts through one shared atomic counter, so a limit is enforced once across the fleet (not N× too loose). Keys longer than 64 chars are hashed (SHA-256 hex) to prevent unbounded row growth. On DB failure the limiter falls back to per-instance counting (brief over-admission is possible; see the caveats below). See the load note below. |
 | **Ops console login** | Stateless HMAC login token + a shared ops secret, so the browser login handshake works on any instance and the session cookie validates fleet-wide. |
 | **Regression detection** (`/ops/regressions`) | A shared table (keyed by `type`+`route`+`deploy`) gives one fleet-wide set: notify **exactly once**, consistent list/acknowledge, a stable id, deploy-anchored baseline. |
+| **Analytics** (`app.analytics()`) | Each instance writes its own page-view rows; the day's visitor salt is one shared row, so a browser that hits two instances is still one visitor. Filter tallies are per-instance rows summed on read. Every analytics number, including "visitors now", is fleet-wide (lagging up to one 10s flush). |
 | **Metrics feed** (`ops_timeseries`) | Each instance writes its own **instance-tagged** rows; an external dashboard sums across instances or filters to one. |
 | **Storage** (S3/R2), **assets** (content-hash fingerprints), **config secrets** | External, immutable, or content-derived — identical on every box. |
 

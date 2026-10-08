@@ -15,6 +15,7 @@ This document describes Brace's security features and best practices for buildin
 - [File Uploads](#file-uploads)
 - [Rate Limiting](#rate-limiting)
 - [Ops Endpoints](#ops-endpoints)
+- [Analytics](#analytics)
 - [Secrets Management](#secrets-management)
 
 ---
@@ -741,6 +742,45 @@ location /ops/ {
 ```
 
 ---
+
+## Analytics
+
+`app.analytics()` counts page views on the server. Its security properties, and what to check
+when you turn it on (full guide: [analytics.md](analytics.md)):
+
+- **No new public endpoint.** Data comes only from requests the app already served; there is no
+  ingest URL for anyone to post fake events to. The viewing endpoints (`/ops/analytics`,
+  `/ops/analytics/data`, `POST /ops/analytics/ignore`) are ordinary ops endpoints: `read` scope,
+  `Cache-Control: no-store`, the same two credential channels as above.
+- **What's stored.** Per view: time, day/hour, a 64-bit visitor hash, the path, the referring
+  host (or `utm_source`/`ref`), device/browser/OS family and an optional country code. No IP, no
+  user agent, no query string, no full referrer URL. The IP and user agent stay in memory for up
+  to ~10 seconds until the next flush hashes them.
+- **Visitor hash.** SHA-256 over a random per-day salt, the host, the IP and the user agent,
+  truncated to 64 bits. The salt lives in `brace_analytics_salts` and is deleted 5 minutes after
+  its day ends, after which a stored hash can't be matched to an IP, even by brute force over the
+  IPv4 space. During the day, someone who can read the database and already has a candidate IP
+  and user agent can test them against stored hashes. Treat database read access accordingly.
+- **Daily summaries hold no visitor IDs.** `brace_analytics_daily` stores only per-day counts per
+  page, source, device, browser, OS and country, and is kept indefinitely. The paths in it are
+  the same redacted paths as the raw rows, so the advice below applies to it too.
+- **Paths can carry secrets.** Concrete paths are stored and shown on the dashboard, after two
+  redaction passes that reuse the error-store rules (see below): a route parameter with a
+  sensitive *name* (`Redactor.isSensitive`, e.g. `{token}`, `{apiKey}`) is stored as its
+  placeholder, and a segment with a secret-shaped *value* becomes `[redacted]`. A short code under
+  an ordinary name (`/invite/{code}`) passes both; mark such routes `.analytics(false)` or rename
+  the parameter.
+- **Bounded growth.** Only matched routes returning HTML are counted, so a scanner requesting
+  random URLs produces 404s, not rows. The in-memory buffer is capped at 20,000 views; beyond that
+  views are dropped and tallied. Every stored string is length-capped, and every value the page
+  renders is HTML-escaped.
+- **The "don't count" cookie.** `POST /ops/analytics/ignore` sets `__brace_analytics_ignore=1`
+  (HttpOnly, `SameSite=Lax`, `Path=/`, `Secure` except on localhost). It carries no credential;
+  it only marks the browser's visits as excluded. The endpoint is CSRF-exempt like the other ops
+  POSTs: it requires the `SameSite=Strict` ops cookie or a bearer token, and its only effect is a
+  cookie on the caller's own browser.
+- **`next=analytics` on the login exchange** is a fixed allowlist entry, not a URL, so it can't be
+  used as an open redirect.
 
 ## Error Store Redaction
 

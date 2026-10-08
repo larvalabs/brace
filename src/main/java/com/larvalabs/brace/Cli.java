@@ -89,6 +89,7 @@ public class Cli {
             case "status"  -> requireProject(cwd, () -> CliCommands.status(cwd, args));
             case "check"   -> requireProject(cwd, () -> CliCheck.run(cwd, args));
             case "cache"   -> cacheCommand(cwd, args);
+            case "analytics" -> requireProject(cwd, () -> CliCommands.analytics(cwd, args));
             case "resolve" -> requireProject(cwd, () -> CliCommands.resolve(cwd, args));
             default -> {
                 // A typo must not look like success (it used to print usage and exit 0).
@@ -129,9 +130,9 @@ public class Cli {
         System.out.println();
         System.out.println("Ops commands:");
         System.out.println("  brace ops keypair [--label <l>] [--read-only]  Generate an Ed25519 keypair for ops auth and add it to ops-authorized-keys");
-        System.out.println("  brace ops dashboard                            Open the ops dashboard in a browser (login via token exchange)");
+        System.out.println("  brace ops dashboard [--analytics]              Open the ops dashboard (or the analytics page) in a browser (login via token exchange)");
         System.out.println();
-        System.out.println("Inspecting a running app: brace check, status, errors, logs, cache, resolve (see 'brace help').");
+        System.out.println("Inspecting a running app: brace check, status, errors, logs, cache, analytics, resolve (see 'brace help').");
     }
 
     private static int initCommand(Path cwd, String[] args) throws Exception {
@@ -189,7 +190,7 @@ public class Cli {
         System.out.println("Project commands (run inside a project):");
         System.out.println("  brace init                  Scaffold .brace + .brace.local and run readiness checks");
         System.out.println("  brace ops keypair           Generate an Ed25519 keypair for ops auth");
-        System.out.println("  brace ops dashboard         Open the ops dashboard in a browser");
+        System.out.println("  brace ops dashboard         Open the ops dashboard in a browser (--analytics for the analytics page)");
         System.out.println("  brace errors [--since 1h]   List unresolved errors (summaries; --full for detail)");
         System.out.println("  brace errors <id>           Show full detail for one error");
         System.out.println("  brace logs [-f] [--since]   Tail recent log lines (--limit <n> caps entries, server default 200)");
@@ -197,6 +198,7 @@ public class Cli {
         System.out.println("  brace check                 Run all health checks");
         System.out.println("  brace cache                 Show cache stats");
         System.out.println("  brace cache clear           Clear the cache");
+        System.out.println("  brace analytics             Visitors, pageviews, top pages and sources (--range today|7d|30d|12mo, default 7d)");
         System.out.println("  brace resolve <id>          Mark an error as resolved");
         System.out.println();
         System.out.println("All project commands accept --env <name>, --json, --pretty.");

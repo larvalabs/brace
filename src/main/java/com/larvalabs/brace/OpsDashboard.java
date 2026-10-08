@@ -20,6 +20,16 @@ public class OpsDashboard {
      */
     public static String html(String token, OpsScope scope, Stats stats, JobScheduler jobScheduler,
                               Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler) {
+        return html(token, scope, stats, jobScheduler, mailer, errorStore, cache, profiler, false, null);
+    }
+
+    /**
+     * As above, plus the analytics header switch and "Visitors today" card when analytics is on.
+     * {@code today} may be null with analytics on (its query failed); the card then shows a dash.
+     */
+    public static String html(String token, OpsScope scope, Stats stats, JobScheduler jobScheduler,
+                              Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler,
+                              boolean analyticsEnabled, Analytics.Summary today) {
         boolean canControl = scope != null && scope.grants(OpsScope.CONTROL);
         var sb = new StringBuilder();
         var now = Instant.now();
@@ -70,6 +80,13 @@ public class OpsDashboard {
             .header { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 12px; }
             .header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; white-space: nowrap; }
             .header .meta { color: #565f89; }
+            .header .brand { display: flex; align-items: center; gap: 12px; }
+            .switch { display: inline-flex; border: 1px solid #30363d; }
+            .switch a { padding: 1px 10px; color: #565f89; text-decoration: none; }
+            .switch a[aria-current="page"] { color: #e6edf3; background: rgba(122,162,247,.14); }
+            .switch a:hover { color: #c9d1d9; }
+            a.stat-link { color: inherit; text-decoration: none; }
+            a.stat-link:hover { border-color: #7aa2f7; }
             .stats-row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
             .stat-card { flex: 1; border: 1px solid #30363d; padding: 8px; min-width: 120px; }
             .stat-card .label { color: #565f89; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -136,7 +153,12 @@ public class OpsDashboard {
 
         // Header
         sb.append("<div class=\"header\">");
-        sb.append("<span class=\"title\">┌ BRACE</span>");
+        sb.append("<span class=\"brand\"><span class=\"title\">┌ BRACE</span>");
+        if (analyticsEnabled) {
+            sb.append("<span class=\"switch\"><a href=\"/ops/dashboard\" aria-current=\"page\">ops</a>")
+              .append("<a href=\"/ops/analytics\">analytics</a></span>");
+        }
+        sb.append("</span>");
         sb.append("<span class=\"meta\">↑ ").append(esc(uptime))
           .append(" │ Java ").append(esc(System.getProperty("java.version")))
           .append(" │ started ").append(esc(stats.startedAt().toString().substring(0, 16).replace("T", " ")))
@@ -187,6 +209,15 @@ public class OpsDashboard {
         if (mailer != null) {
             String mailDetail = mailer.failCount() > 0 ? mailer.failCount() + " failed" : "since start";
             statCard(sb, "Sent", String.valueOf(mailer.sentCount()), mailDetail, "c-cyan");
+        }
+        if (analyticsEnabled) {
+            sb.append("<a class=\"stat-card stat-link\" href=\"/ops/analytics\" title=\"Visitors since midnight; ")
+              .append("'now' is distinct visitors who loaded a page in the last ").append(Analytics.LIVE_WINDOW.toMinutes())
+              .append(" minutes\"><div class=\"label\">Visitors Today</div>")
+              .append("<div class=\"value c-cyan\">").append(today == null ? "-" : String.format("%,d", today.visitors()))
+              .append("</div><div class=\"detail\">")
+              .append(today == null ? "unavailable" : String.format("%,d now · %,d views", today.live(), today.pageviews()))
+              .append(" →</div></a>");
         }
         sb.append("</div>\n");
 

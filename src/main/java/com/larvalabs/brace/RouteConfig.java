@@ -38,4 +38,24 @@ public class RouteConfig {
         route.setCsrfRequired(required);
         return app;
     }
+
+    /**
+     * Include or exclude this route from page-view analytics ({@code app.analytics()}).
+     * Views are counted by default; turn it off for pages whose URL carries a secret the
+     * automatic redaction misses (a short {@code /invite/{code}}; a parameter named like a secret,
+     * such as {@code {token}}, is already stored as its placeholder) or that you don't want counted.
+     */
+    public RouteConfig analytics(boolean counted) {
+        route.setAnalytics(counted ? Analytics.Track.PATH : Analytics.Track.OFF);
+        return this;
+    }
+
+    /**
+     * Count this route's views under its pattern ({@code /u/{username}}) instead of each
+     * concrete path, for routes with many distinct URLs that are only interesting together.
+     */
+    public RouteConfig analyticsByRoute() {
+        route.setAnalytics(Analytics.Track.ROUTE);
+        return this;
+    }
 }

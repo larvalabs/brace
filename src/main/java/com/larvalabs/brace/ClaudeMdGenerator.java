@@ -61,6 +61,7 @@ Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check t
 - **Rate Limiting** — `RateLimiter.perIp(count, window)`, `.perKey(fn, count, window)`.
 - **Security** — `app.trustedProxies(cidrs)` for IP forwarding (`TrustedProxies.cloudflare().autoRefresh()` behind Cloudflare). `SecurityHeaders.defaults()` for nosniff, frame-options, etc.
 - **Metrics** — static, callable anywhere: `Metrics.counter(name)`, `Metrics.gauge(name, () -> longValue)`, `Metrics.timer(name, ms)` (not `Stats.counter`). Appear in ops dashboard; `app.stats()` reads them in tests.
+- **Analytics** — `app.analytics()` (needs a database + ops) counts visitors and page views server-side, no script or cookies. Params named like secrets (`{token}`) are stored as placeholders; `.analytics(false)` for other secret-bearing URLs (`/invite/{code}`); `.analyticsByRoute()` to group by pattern. View at `/ops/analytics` or `brace analytics`.
 - **Middleware** — `app.before(req -> ...)` returns null to continue or Result to short-circuit. `app.after((req, result) -> ...)`.
 - **htmx** — Bundled 2.0.10 at `/__brace/htmx.min.js`. `req.isHtmx()` for partial responses. `Vary: HX-Request` set automatically.
 - **Logging** — `Log.debug/info/error(msg)` (each takes optional `Map.of(...)` data), `Log.event("name", Map.of(...))`. Structured JSON to stdout.
@@ -92,6 +93,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | `brace errors <id>` | Full detail (stack trace, request context) for one error |
 | `brace logs [-f] [--since 10m]` | Tail recent structured log entries |
 | `brace cache` / `brace cache clear` | Cache stats; clear cache |
+| `brace analytics [--range today\\|7d\\|30d\\|12mo]` | Visitors, pageviews, top pages, sources (apps with `app.analytics()`) |
 | `brace resolve <id>` | Mark an error as resolved |
 
 | Endpoint | Returns |
@@ -104,6 +106,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | `GET /ops/regressions` | New error kinds since startup |
 | `GET /ops/routes` | All registered routes |
 | `GET /ops/dashboard` | HTML dashboard |
+| `GET /ops/analytics` / `GET /ops/analytics/data` | Analytics page / its report as JSON (`?range=today\\|7d\\|30d\\|12mo`), when enabled |
 
 **Debugging workflow:**
 1. **Errors?** → `errors.count` + `errors.recent` summaries in status; full detail (stack trace, request, queries before failure) via `brace errors <id>` / `GET /ops/errors/{id}`

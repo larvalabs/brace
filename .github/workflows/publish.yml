@@ -65,11 +65,20 @@ jobs:
           else
             NOTES_ARGS=(--generate-notes)
           fi
+          # A tag with a suffix (v0.1.11-rc.1) is a preview: publish it as a
+          # prerelease so it never becomes "latest". install.sh and
+          # `brace self-update` resolve the latest release, so a preview marked
+          # latest would be handed to everyone. Projects opt in by pinning it.
+          PRERELEASE_ARGS=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            PRERELEASE_ARGS=(--prerelease)
+          fi
           # target/brace-*.jar already matches both the main and -sources jars;
           # listing target/brace-*-sources.jar explicitly attaches it twice and
           # GitHub's upload endpoint returns 404 on the duplicate name.
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
+            "${PRERELEASE_ARGS[@]}" \
             "${NOTES_ARGS[@]}" \
             target/brace-*.jar \
             target/brace-*.zip

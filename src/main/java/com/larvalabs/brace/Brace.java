@@ -45,6 +45,8 @@ public class Brace {
     private Stats stats = Metrics.register();
     private JfrProfiler profiler;
     private ErrorStore errorStore;
+    private Analytics.Options analyticsOptions;
+    private Analytics analytics;
     private boolean opsProfilerEnabled = true;
     private String instanceId;
     private OpsHandler opsHandler;
@@ -318,6 +320,22 @@ public class Brace {
 
     public Brace ops(String keysPath) {
         this.opsKeysPath = keysPath;
+        return this;
+    }
+
+    /**
+     * Turns on server-side page-view analytics with default options: visitors, pageviews, top
+     * pages, sources and devices, counted from the requests the app already serves. No cookies,
+     * no client script, no IPs stored. Viewed at {@code /ops/analytics} (and {@code brace analytics}),
+     * so it requires {@link #ops(String)} and a database. See {@code docs/2026-10-07-brace-analytics.md}.
+     */
+    public Brace analytics() {
+        return analytics(Analytics.options());
+    }
+
+    /** Turns on page-view analytics with the given options, e.g. {@code Analytics.options().timezone("America/New_York")}. */
+    public Brace analytics(Analytics.Options options) {
+        this.analyticsOptions = options;
         return this;
     }
 
@@ -976,6 +994,20 @@ public class Brace {
                 + "reverse proxy. Ignore this warning if clients connect to this app directly.");
         }
 
+        // Analytics has nowhere to write without a database and nowhere to be read without ops;
+        // either gap would silently collect nothing (or collect data nobody can see), so fail here.
+        if (analyticsOptions != null) {
+            if (databaseFactory == null) {
+                throw new IllegalStateException("analytics() needs a database to store page views — "
+                    + "call .database(...) before start(), or remove .analytics().");
+            }
+            if (opsKeysPath == null) {
+                throw new IllegalStateException("analytics() is viewed at /ops/analytics, which needs ops "
+                    + "enabled — call .ops(\"ops-authorized-keys\") before start(), or remove .analytics().");
+            }
+            analytics = new Analytics(analyticsOptions, databaseFactory);
+        }
+
         // Create ErrorStore if database is available
         if (databaseFactory != null) {
             int maxErrors = 1000;
@@ -994,6 +1026,7 @@ public class Brace {
             var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
+            opsHandler.setAnalytics(analytics);
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on
@@ -1024,6 +1057,13 @@ public class Brace {
             router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats));
             router.add("GET", "/ops/regressions", noStore(opsHandler::regressions));
             router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression)).setCsrfRequired(false);
+            if (analytics != null) {
+                router.add("GET", "/ops/analytics", noStore(opsHandler::analytics));
+                router.add("GET", "/ops/analytics/data", noStore(opsHandler::analyticsData));
+                // Cookie-authenticated, but the ops cookie is SameSite=Strict, so a cross-site form
+                // can't carry it; and the only effect is a cookie on the caller's own browser.
+                router.add("POST", "/ops/analytics/ignore", noStore(opsHandler::analyticsIgnore)).setCsrfRequired(false);
+            }
         }
 
         var threadPool = new QueuedThreadPool();
@@ -1058,6 +1098,7 @@ public class Brace {
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
+        handler.setAnalytics(analytics);
 
         if (!wsRoutes.isEmpty()) {
             // Room fan-out: shared across the fleet on Postgres (LISTEN/NOTIFY), local otherwise.
@@ -1117,6 +1158,10 @@ public class Brace {
         if (opsHandler != null) {
             opsHandler.setInstanceId(instanceId);
         }
+        if (analytics != null) {
+            analytics.setInstanceId(instanceId);
+            analytics.start();
+        }
 
         // Capture uncaught exceptions from any thread (e.g., background libraries)
         // so they appear in /ops/status errors.recent and in structured logs.
@@ -1147,6 +1192,17 @@ public class Brace {
                 var cutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(retentionDays));
                 int deleted = JobPoller.purgeFinishedJobs(db, cutoff);
                 ctx.message("Deleted " + deleted + " finished jobs older than " + retentionDays + " days");
+            });
+        }
+
+        // Analytics: summarize completed days into brace_analytics_daily, then drop raw rows past
+        // rawRetention (never a day that isn't summarized). Daily, once cluster-wide.
+        if (analytics != null) {
+            final Analytics a = analytics;
+            jobScheduler.daily("03:29", "analytics-rollup", (db, ctx) -> {
+                int days = a.rollup(db);
+                a.prune(db);
+                ctx.message("Summarized " + days + " day" + (days == 1 ? "" : "s"));
             });
         }
 
@@ -1386,6 +1442,10 @@ public class Brace {
         if (cache != null) {
             cache.close();
         }
+        if (analytics != null) {
+            // Writes out the page views still buffered (up to one flush interval's worth).
+            analytics.close();
+        }
         if (errorStore != null) {
             // Stops the flusher and writes out the buffered window, so a stop() right after a
             // 500 (tests, clean shutdown) doesn't lose the last <2s of error data.
@@ -1430,6 +1490,11 @@ public class Brace {
         } catch (Exception e) {
             System.err.println("Brace shutdown error: " + e);
         }
+    }
+
+    /** The analytics collector, or null when not enabled. For tests that flush it deterministically. */
+    Analytics analyticsCollector() {
+        return analytics;
     }
 
     /** The error store, for tests that need to flush the H9 buffer deterministically. */

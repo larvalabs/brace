@@ -72,6 +72,7 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `ErrorStore` | Persists exception data to the `ops_errors` table |
 | `OpsAudit` | Logs authenticated ops-endpoint access as `ops.access` events |
 | `OpsKeys` | Ed25519 keygen, signing, verification, authorized-keys parsing |
+| `Analytics` | Opt-in server-side page-view analytics (`app.analytics()`), viewed at `/ops/analytics` |
 | `TestApp` | In-process test harness |
 
 ### Handler Interfaces

@@ -23,6 +23,7 @@ file is indistinguishable from a *lost* one. Keep the in-progress guide (ending 
 | 0.1.7 → 0.1.8 | ✅ `brace-0.1.7-to-0.1.8.md` |
 | 0.1.8 → 0.1.9 | ✅ `brace-0.1.8-to-0.1.9.md` |
 | 0.1.9 → 0.1.10 | ✅ `brace-0.1.9-to-0.1.10.md` |
+| 0.1.10 → 0.1.11 | 🚧 `brace-0.1.10-to-0.1.11.md` (in progress, unreleased) |
 
 ## Backfill complete
 

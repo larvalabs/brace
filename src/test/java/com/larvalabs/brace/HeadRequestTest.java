@@ -171,8 +171,9 @@ class HeadRequestTest {
     @Test
     void statsRecordHeadSeparately() throws Exception {
         send("HEAD", "/users/7");
-        var routes = app.stats().routeStats();
-        assertNotNull(routes.get("HEAD /users/{id}"), "HEAD keyed under its own method: " + routes.keySet());
+        // Stats are recorded after the response is written, so the client can have it first.
+        TestWait.until(() -> app.stats().routeStats().get("HEAD /users/{id}") != null,
+            () -> "HEAD keyed under its own method: " + app.stats().routeStats().keySet());
     }
 
     // --- raw HTTP/1.1 client ---

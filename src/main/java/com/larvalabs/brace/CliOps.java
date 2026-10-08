@@ -173,7 +173,8 @@ public class CliOps {
                 CliOutput.printError("Server returned a malformed login token; refusing to open it.");
                 return 1;
             }
-            String dashboardUrl = cfg.url() + "/ops/auth/exchange?token=" + loginToken;
+            String dashboardUrl = cfg.url() + "/ops/auth/exchange?token=" + loginToken
+                + (CliCommands.hasFlag(args, "--analytics") ? "&next=analytics" : "");
             if (!dashboardUrl.startsWith("http://") && !dashboardUrl.startsWith("https://")) {
                 CliOutput.printError("Refusing to open a non-http(s) dashboard URL: " + dashboardUrl);
                 return 1;

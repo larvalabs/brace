@@ -309,6 +309,13 @@ public class CliCommands {
                     + r.path("avgMs").asDouble() + "ms (" + r.path("count").asInt() + ")");
             }
         }
+        // Present only when the app enabled analytics.
+        var analytics = root.path("analytics");
+        if (analytics.has("todayVisitors")) {
+            System.out.println();
+            System.out.printf("Visitors  %,d today, %,d pageviews, %,d now%n", analytics.path("todayVisitors").asLong(),
+                analytics.path("todayPageviews").asLong(), analytics.path("live").asLong());
+        }
         System.out.println();
         System.out.println("Errors    " + errorCount(root));
         System.out.println();
@@ -392,6 +399,82 @@ public class CliCommands {
             }
         }
         return 0;
+    }
+
+    /** {@code brace analytics [--range today|7d|30d|12mo]}: the {@code /ops/analytics/data} report. */
+    public static int analytics(Path projectDir, String[] args) throws Exception {
+        String range = hasFlag(args, "--range") ? parseFlag(args, "--range") : "7d";
+        if (!List.of("today", "7d", "30d", "12mo").contains(range)) {
+            CliOutput.printError("--range must be today, 7d, 30d or 12mo");
+            return 1;
+        }
+        var cfg = CliConfig.load(projectDir, args);
+        HttpResponse<String> response;
+        try {
+            response = CliAuth.sendAuthenticated(cfg, projectDir,
+                HttpRequest.newBuilder()
+                    .uri(URI.create(cfg.url() + "/ops/analytics/data?range=" + range))
+                    .header("Accept", "application/json")
+                    .GET());
+        } catch (Exception e) {
+            CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+            return 2;
+        }
+        if (response.statusCode() == 404) {
+            CliOutput.printError("Analytics is not enabled on this app — add .analytics() to its Brace setup");
+            return 1;
+        }
+        if (response.statusCode() != 200) {
+            CliOutput.printError("HTTP " + response.statusCode());
+            return 2;
+        }
+        JsonNode root = Json.mapper().readTree(response.body());
+        var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
+        if (mode == CliOutput.Mode.JSON) {
+            System.out.println(CliOutput.json(root));
+        } else {
+            System.out.print(renderAnalytics(root));
+        }
+        return 0;
+    }
+
+    static String renderAnalytics(JsonNode r) {
+        var sb = new StringBuilder();
+        sb.append(r.path("from").asText()).append(" – ").append(r.path("to").asText())
+          .append("  (").append(r.path("timezone").asText()).append(")\n\n");
+        long v = r.path("visitors").asLong(), pv = r.path("pageviews").asLong();
+        sb.append(String.format("Visitors %,d   Pageviews %,d   Views/visit %.2f   Now %,d%n%n",
+            v, pv, v == 0 ? 0.0 : (double) pv / v, r.path("live").asLong()));
+        analyticsTable(sb, "Top pages", "PAGE", r.path("pages"), true);
+        analyticsTable(sb, "Sources", "SOURCE", r.path("sources"), true);
+        analyticsTable(sb, "Devices", "DEVICE", r.path("devices"), false);
+        analyticsTable(sb, "Browsers", "BROWSER", r.path("browsers"), false);
+        if (r.path("countries").size() > 0) analyticsTable(sb, "Countries", "COUNTRY", r.path("countries"), false);
+        var parts = new ArrayList<String>();
+        long total = 0;
+        for (var it = r.path("notCounted").fields(); it.hasNext(); ) {
+            var e = it.next();
+            total += e.getValue().asLong();
+            if (e.getValue().asLong() > 0) parts.add(e.getKey() + " " + String.format("%,d", e.getValue().asLong()));
+        }
+        sb.append(String.format("Not counted: %,d", total));
+        if (!parts.isEmpty()) sb.append(" (").append(String.join(", ", parts)).append(')');
+        sb.append('\n');
+        return sb.toString();
+    }
+
+    private static void analyticsTable(StringBuilder sb, String title, String keyHeader, JsonNode rows, boolean views) {
+        if (rows.size() == 0) return;
+        var out = new ArrayList<List<String>>();
+        for (var row : rows) {
+            String key = row.path("key").isNull() ? "(direct)" : row.path("key").asText();
+            out.add(views
+                ? List.of(key, String.format("%,d", row.path("visitors").asLong()), String.format("%,d", row.path("pageviews").asLong()))
+                : List.of(key, String.format("%,d", row.path("visitors").asLong())));
+        }
+        sb.append(title).append('\n');
+        sb.append(CliOutput.table(views ? List.of(keyHeader, "VISITORS", "VIEWS") : List.of(keyHeader, "VISITORS"), out));
+        sb.append('\n');
     }
 
     public static int cacheClear(Path projectDir, String[] args) throws Exception {
