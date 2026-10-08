@@ -126,6 +126,12 @@ key that can view analytics but can't change anything).
 **In a browser:** `brace ops dashboard --analytics` signs you in and opens `/ops/analytics`. From the
 ops dashboard, use the `ops · analytics` switch in the header or the "Visitors today" card. The page
 has Today / 7 days / 30 days / 12 months ranges (12 months is per calendar month, including the current one); click the Visitors or Pageviews tile to switch the chart.
+The page refreshes itself every 10 seconds.
+
+When a report is slow to compute, because a busy site has many raw page views today, the page and
+`/ops/analytics/data` reuse it for ten times as long as it took, up to a minute: a report that
+took 2 seconds is reused for 20. However many pages are open, the database spends at most about a
+tenth of its time on them. A report that takes under 100ms is never reused.
 
 The "Don't count this browser's visits" button at the bottom sets a cookie (`__brace_analytics_ignore`,
 one year, `Path=/`) so your own browsing stops showing up. It is the only cookie analytics ever

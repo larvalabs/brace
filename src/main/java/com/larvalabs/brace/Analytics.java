@@ -48,6 +48,10 @@ public final class Analytics {
     static final Duration SALT_GRACE = Duration.ofMinutes(5);
     static final long FLUSH_INTERVAL_MS = 10_000;
     private static final long SUMMARY_TTL_MS = 15_000;
+    /** {@link #cachedReport}: a report is reused for this many times as long as it took to compute. */
+    static final int REPORT_HOLD_FACTOR = 10;
+    static final Duration REPORT_MIN_HOLD = Duration.ofMillis(100);
+    static final Duration REPORT_MAX_HOLD = Duration.ofMinutes(1);
 
     public static Options options() {
         return new Options();
@@ -179,11 +183,17 @@ public final class Analytics {
         new java.util.concurrent.atomic.AtomicBoolean();
     private volatile Summary cachedSummary;
     private volatile long cachedSummaryAt;
+    private record HeldReport(Report report, long expiresAt) {}
+    private final Map<String, HeldReport> reports = new ConcurrentHashMap<>();
+    private final Map<String, Object> reportLocks = new ConcurrentHashMap<>();
+    // Tests drive this to make a report look slow or fast to compute.
+    java.util.function.LongSupplier nanoClock = System::nanoTime;
     private Thread flusher;
 
     Analytics(Options options, DatabaseFactory databaseFactory) {
         this.options = options;
         this.databaseFactory = databaseFactory;
+        for (String range : RANGES) reportLocks.put(range, new Object());
     }
 
     void setInstanceId(String instanceId) {
@@ -672,6 +682,33 @@ public final class Analytics {
         cachedSummary = s;
         cachedSummaryAt = System.currentTimeMillis();
         return s;
+    }
+
+    /**
+     * {@link #report} for the ops page and its JSON endpoint. A report that was slow to compute is
+     * reused for {@link #REPORT_HOLD_FACTOR} times as long (at most {@link #REPORT_MAX_HOLD}), so open
+     * pages refreshing every 10s, several viewers and the CLI together keep the database busy only a
+     * small fraction of the time however large today's raw rows grow. Concurrent requests for one
+     * range share a computation. A report faster than {@link #REPORT_MIN_HOLD} isn't held, so a quiet
+     * site always sees fresh numbers.
+     */
+    Report cachedReport(String range) {
+        Object lock = reportLocks.get(range);
+        if (lock == null) throw new IllegalArgumentException("Unknown range: " + range);
+        var hit = reports.get(range);
+        if (hit != null && nanoClock.getAsLong() - hit.expiresAt() < 0) return hit.report();
+        synchronized (lock) {
+            hit = reports.get(range);
+            if (hit != null && nanoClock.getAsLong() - hit.expiresAt() < 0) return hit.report();
+            long start = nanoClock.getAsLong();
+            var report = report(range);
+            long end = nanoClock.getAsLong();
+            long hold = end - start < REPORT_MIN_HOLD.toNanos() ? 0
+                : Math.min((end - start) * REPORT_HOLD_FACTOR, REPORT_MAX_HOLD.toNanos());
+            if (hold > 0) reports.put(range, new HeldReport(report, end + hold));
+            else reports.remove(range);
+            return report;
+        }
     }
 
     /**

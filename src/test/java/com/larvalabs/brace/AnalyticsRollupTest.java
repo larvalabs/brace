@@ -7,6 +7,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -153,5 +154,32 @@ class AnalyticsRollupTest {
             new Analytics.Point("2026-10-02", 1, 1));
         assertEquals(List.of(new Analytics.Point("2026-09", 2, 3), new Analytics.Point("2026-10", 5, 6)),
             Analytics.monthly(days));
+    }
+
+    @Test
+    void slowReportIsHeldForTenTimesItsComputeTime() {
+        // Every clock read moves time forward 500ms, so a report "takes" 500ms and is held 5s.
+        var now = new AtomicLong();
+        analytics.nanoClock = () -> now.addAndGet(500_000_000L);
+        view(TODAY, 1, "/", null);
+        assertEquals(1, analytics.cachedReport("today").pageviews());
+
+        view(TODAY, 2, "/", null);
+        assertEquals(1, analytics.cachedReport("today").pageviews(), "held");
+        assertEquals(2, analytics.report("today").pageviews(), "report() itself is never cached");
+        assertEquals(2, analytics.cachedReport("7d").pageviews(), "each range is held separately");
+
+        now.addAndGet(5_000_000_000L);
+        assertEquals(2, analytics.cachedReport("today").pageviews(), "recomputed once the hold ends");
+    }
+
+    @Test
+    void fastReportIsNotHeld() {
+        analytics.nanoClock = () -> 0L;
+        view(TODAY, 1, "/", null);
+        assertEquals(1, analytics.cachedReport("today").pageviews());
+        view(TODAY, 2, "/", null);
+        assertEquals(2, analytics.cachedReport("today").pageviews());
+        assertThrows(IllegalArgumentException.class, () -> analytics.cachedReport("1y"));
     }
 }

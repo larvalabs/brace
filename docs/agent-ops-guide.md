@@ -587,7 +587,7 @@ stored). Full guide: `docs/analytics.md` in the brace repo. What an agent needs 
 |---|---|
 | `pageviews` | Counted page views: `GET`s to app routes answered with 2xx HTML (or a 304 to an HTML request), after the filters below. |
 | `visitors` | Distinct visitor hashes. The hash uses a salt that changes daily, so a person is a new visitor each day and a multi-day range is the sum of daily visitors, not distinct people. |
-| `live` | Distinct visitors who loaded a counted page in the **last 5 minutes**, across all instances. Not "tabs open": a reader on one page for 6 minutes drops out. Lags up to ~10s (flush interval); `/ops/status` and the dashboard card may reuse a value for 15s. |
+| `live` | Distinct visitors who loaded a counted page in the **last 5 minutes**, across all instances. Not "tabs open": a reader on one page for 6 minutes drops out. Lags up to ~10s (flush interval); `/ops/status` and the dashboard card may reuse a value for 15s. On a busy site, the whole report may be up to a minute old: a slow report is reused for 10× its compute time. |
 | `previousVisitors` / `previousPageviews` | The period before (yesterday up to this hour for `today`). `null` when stored data doesn't reach back to its start (recently enabled, or retention shorter than twice the range). |
 | `notCounted` | Candidates rejected per reason: `bot`, `htmx` (partial swap), `background` (`Sec-Fetch-Mode` not `navigate`), `prefetch`, `excluded` (config or the don't-count cookie), `dropped` (buffer full: database slow/down). |
 
