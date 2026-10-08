@@ -1002,8 +1002,9 @@ app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/
 ```
 
 - **What counts:** a `GET` to an app route answered with 2xx `text/html` (or a 304 to an HTML
-  request). Bots, `Sec-Fetch-Mode` other than `navigate`, prefetches and htmx partial swaps are
-  rejected and tallied; boosted (`HX-Boosted`) navigations count. `/ops/*`, static files, JSON
+  request). Bots (including a Chrome/Edge/Firefox user agent with no `Sec-Fetch-Mode`, which a
+  real one always sends over HTTPS), `Sec-Fetch-Mode` other than `navigate`, prefetches and htmx
+  partial swaps are rejected and tallied; boosted (`HX-Boosted`) navigations count. `/ops/*`, static files, JSON
   and errors are never candidates.
 - **Paths:** the concrete path (`/posts/hello-world`), decoded and redacted, without query
   string. A parameter whose name is sensitive by the error-redaction rule (`Redactor.isSensitive`:

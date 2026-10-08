@@ -732,7 +732,7 @@ public class OpsHandler {
         if (!Analytics.RANGES.contains(range)) return Result.badRequest("range must be one of " + Analytics.RANGES);
         String metric = "pageviews".equals(req.queryParam("metric")) ? "pageviews" : "visitors";
         boolean ignored = req.cookie(Analytics.IGNORE_COOKIE) != null;
-        return Result.html(AnalyticsDashboard.html(analytics.report(range), metric, ignored));
+        return Result.html(AnalyticsDashboard.html(analytics.cachedReport(range), metric, ignored));
     }
 
     /** GET /ops/analytics/data?range=today|7d|30d|12mo — the same report as JSON (the CLI reads this). */
@@ -740,7 +740,7 @@ public class OpsHandler {
         if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         String range = req.queryParam("range", "7d");
         if (!Analytics.RANGES.contains(range)) return Result.badRequest("range must be one of " + Analytics.RANGES);
-        return Json.of(analytics.report(range));
+        return Json.of(analytics.cachedReport(range));
     }
 
     /**

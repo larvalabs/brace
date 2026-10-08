@@ -34,6 +34,27 @@ final class UserAgents {
         return BOT.matcher(ua.toLowerCase(Locale.ROOT)).find();
     }
 
+    /**
+     * Does this UA claim a browser that sends {@code Sec-Fetch-Mode} on every HTTPS request?
+     * Chromium 76+ (Chrome, Edge, Opera, Brave, Samsung Internet, Android WebView) and Firefox 90+
+     * do, so such a UA without the header is a script wearing a browser's name. iOS browsers are
+     * all WebKit and say {@code CriOS}/{@code FxiOS}/{@code EdgiOS} instead, so like Safari (which
+     * only sends it from 16.4) they aren't covered. Old EdgeHTML claims {@code Chrome/70}.
+     */
+    static boolean sendsFetchMetadata(String ua) {
+        if (ua == null) return false;
+        return majorVersion(ua, "Chrome/") >= 76 || majorVersion(ua, "Firefox/") >= 90;
+    }
+
+    private static int majorVersion(String ua, String token) {
+        int i = ua.indexOf(token);
+        if (i < 0) return -1;
+        int start = i + token.length();
+        int end = start;
+        while (end < ua.length() && end - start < 6 && Character.isDigit(ua.charAt(end))) end++;
+        return end == start ? -1 : Integer.parseInt(ua, start, end, 10);
+    }
+
     /** {@code desktop}, {@code mobile} or {@code tablet}. */
     static String device(String ua, String chMobile) {
         if (ua == null) ua = "";
