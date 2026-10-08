@@ -93,11 +93,42 @@ class OpsDashboardTest {
         assertTrue(render(stats, null).contains("<div class=\"label\">Req / Min</div><div class=\"value c-blue\">-</div><div class=\"detail\">first minute pending</div>"));
 
         stats.snapshot();
-        for (int i = 0; i < 1500; i++) stats.recordRequestPattern("GET", "/a", 200, 100, 0, 0);
+        for (int i = 0; i < 90; i++) stats.recordRequestPattern("GET", "/a", 200, 100, 0, 0);
         stats.snapshot();
         var html = render(stats, null);
-        assertTrue(html.contains("<div class=\"label\">Req / Min</div><div class=\"value c-blue\">1,500</div><div class=\"detail\">avg 752 · 2m</div>"), html);
+        assertTrue(html.contains("<div class=\"label\">Req / Min</div><div class=\"value c-blue\">90</div><div class=\"detail\">avg 47 · 2m</div>"), html);
         assertFalse(html.contains("<div class=\"label\">Requests</div>"));
+    }
+
+    @Test
+    void busyAppShowsRatesPerSecond() {
+        var stats = new Stats();
+        for (int i = 0; i < 30; i++) stats.recordRequestPattern("GET", "/users/{id}", 200, 100, 0, 0);
+        stats.snapshot();
+        for (int i = 0; i < 1500; i++) stats.recordRequestPattern("GET", "/users/{id}", 200, 100, 0, 0);
+        for (int i = 0; i < 3; i++) stats.recordRequestPattern("GET", "/rare", 200, 100, 0, 0);
+        stats.snapshot();
+        // Average 766.5/min, over one a second: the card, the sparkline and Top Routes all switch.
+        var html = render(stats, null);
+        assertTrue(html.contains("<div class=\"stat-card\" title=\"1,503 requests in the last full minute\">"
+            + "<div class=\"label\">Req / Sec</div><div class=\"value c-blue\">25</div><div class=\"detail\">avg 13 · 2m</div>"), html);
+        assertTrue(html.contains("Requests / Second <span"), html);
+        assertTrue(html.contains("<span>25</span><span>0</span>"), "axis in requests a second");
+        assertTrue(html.contains("title=\"1503 reqs (25/s), "), html);
+        assertTrue(html.contains("<th class=\"num\">Req/Sec</th>"), html);
+        assertTrue(html.contains("{id}</td><td class=\"num c-blue\">13</td>"), html);
+        assertTrue(html.contains("rare</td><td class=\"num c-blue\">0.03</td>"), "a small rate isn't shown as 0");
+    }
+
+    @Test
+    void rateFormatting() {
+        assertEquals(RateUnit.SECOND, RateUnit.forAvgPerMinute(60));
+        assertEquals(RateUnit.MINUTE, RateUnit.forAvgPerMinute(59.9));
+        assertEquals("0", RateUnit.format(0));
+        assertEquals("<0.01", RateUnit.format(0.004));
+        assertEquals("0.05", RateUnit.format(0.05));
+        assertEquals("2.5", RateUnit.format(2.5));
+        assertEquals("1,234", RateUnit.format(1234.4));
     }
 
     @Test
