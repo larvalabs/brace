@@ -160,6 +160,7 @@ public class OpsDashboard {
         }
         sb.append("</span>");
         sb.append("<span class=\"meta\">↑ ").append(esc(uptime))
+          .append(" │ Brace ").append(esc(BraceVersion.get()))
           .append(" │ Java ").append(esc(System.getProperty("java.version")))
           .append(" │ started ").append(esc(stats.startedAt().toString().substring(0, 16).replace("T", " ")))
           .append(" │ 5s refresh</span>");

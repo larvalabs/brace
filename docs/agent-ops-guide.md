@@ -130,7 +130,7 @@ re-evaluates regressions from a clean baseline. Without Postgres the set is per-
 
 ```json
 {
-  "app": { "uptime": "2h 15m", "startedAt": "...", "javaVersion": "21" },
+  "app": { "uptime": "2h 15m", "startedAt": "...", "braceVersion": "0.1.11", "javaVersion": "21" },
   "http": {
     "statusCodes": { "200": 1523, "404": 12, "500": 3 },
     "totalRequests": 1538,

@@ -238,6 +238,13 @@ class CliCommandsTest {
     }
 
     @Test
+    void statusOutputShowsBraceVersion() throws Exception {
+        String out = renderedStatus(Json.mapper().readTree(
+            "{\"app\": {\"braceVersion\": \"0.1.11-rc.5\", \"javaVersion\": \"25.0.4\"}, \"http\": {}}"));
+        assertTrue(out.contains("  brace     0.1.11-rc.5\n  java      25.0.4"), out);
+    }
+
+    @Test
     void statusOutputShowsRequestsPerSecondOnABusyApp() throws Exception {
         var root = Json.mapper().readTree("""
             {"http": {"statusCodes": {"200": 900},
@@ -254,6 +261,7 @@ class CliCommandsTest {
     @Test
     void statusOutputOmitsRateAndBusiestRoutesForOlderServers() throws Exception {
         String out = renderedStatus(Json.mapper().readTree("{\"http\": {\"statusCodes\": {\"200\": 1}}}"));
+        assertFalse(out.contains("brace     "), out);
         assertFalse(out.contains("req/min"), out);
         assertFalse(out.contains("busiest"), out);
     }

@@ -101,6 +101,12 @@ class OpsDashboardTest {
     }
 
     @Test
+    void headerShowsBraceAndJavaVersions() {
+        var html = render(new Stats(), null);
+        assertTrue(html.contains(" │ Brace " + BraceVersion.get() + " │ Java " + System.getProperty("java.version") + " │ "), html);
+    }
+
+    @Test
     void busyAppShowsRatesPerSecond() {
         var stats = new Stats();
         for (int i = 0; i < 30; i++) stats.recordRequestPattern("GET", "/users/{id}", 200, 100, 0, 0);
