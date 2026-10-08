@@ -7,12 +7,16 @@ import java.util.Map;
 
 /**
  * Renders {@code /ops/analytics}: a sibling of {@link OpsDashboard} with the same look. Plain
- * server-rendered HTML (range and metric are links, tooltips are {@code title} attributes), so it
- * needs no script and no token in the page; it is read with the ops session cookie.
+ * server-rendered HTML (range and metric are links, tooltips are {@code title} attributes) read
+ * with the ops session cookie, so there is no token in the page. Like the ops dashboard, htmx
+ * re-fetches the page and swaps its content in, every {@link #REFRESH_SECONDS} seconds.
  */
 final class AnalyticsDashboard {
 
     private AnalyticsDashboard() {}
+
+    /** Matches the flush interval: polling faster would re-run the report on unchanged data. */
+    static final long REFRESH_SECONDS = Analytics.FLUSH_INTERVAL_MS / 1000;
 
     private static final DateTimeFormatter SHORT = DateTimeFormatter.ofPattern("MMM d", Locale.US);
     private static final DateTimeFormatter LONG = DateTimeFormatter.ofPattern("EEE MMM d", Locale.US);
@@ -105,10 +109,16 @@ final class AnalyticsDashboard {
             .foot button.on { color: #9ece6a; border-color: #9ece6a; }
             .foot button:hover { color: #c9d1d9; }
             </style>
+            <script src="/__brace/htmx.min.js"></script>
             </head>
             <body>
-            <div class="wrap">
             """);
+
+        // Content: htmx re-fetches this same view (range and metric kept) and swaps this div.
+        String self = "/ops/analytics?range=" + esc(r.range()) + ("pageviews".equals(metric) ? "&amp;metric=pageviews" : "");
+        sb.append("<div id=\"analytics-content\" class=\"wrap\" hx-get=\"").append(self)
+          .append("\" hx-select=\"#analytics-content\" hx-target=\"this\" hx-swap=\"outerHTML\" hx-trigger=\"every ")
+          .append(REFRESH_SECONDS).append("s\">\n");
 
         // Header
         sb.append("<div class=\"header\"><span class=\"brand\"><span class=\"title\">┌ BRACE</span>")
@@ -117,7 +127,8 @@ final class AnalyticsDashboard {
           .append("<span class=\"meta\"><span class=\"live\" title=\"Distinct visitors who loaded a page in the last ")
           .append(Analytics.LIVE_WINDOW.toMinutes()).append(" minutes, across all instances\">● ").append(fmt(r.live()))
           .append(" visitor").append(r.live() == 1 ? "" : "s").append(" now</span><span>")
-          .append(esc(r.timezone())).append("</span></span></div>\n");
+          .append(esc(r.timezone())).append("</span><span>").append(REFRESH_SECONDS)
+          .append("s refresh</span></span></div>\n");
 
         // Range + dates
         sb.append("<div class=\"controls\"><nav class=\"ranges\" aria-label=\"Date range\">");

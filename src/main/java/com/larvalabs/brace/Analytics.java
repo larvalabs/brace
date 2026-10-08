@@ -46,7 +46,7 @@ public final class Analytics {
     static final Duration LIVE_WINDOW = Duration.ofMinutes(5);
     /** How long a day's salt outlives its day, so events buffered just before midnight hash with it. */
     static final Duration SALT_GRACE = Duration.ofMinutes(5);
-    private static final long FLUSH_INTERVAL_MS = 10_000;
+    static final long FLUSH_INTERVAL_MS = 10_000;
     private static final long SUMMARY_TTL_MS = 15_000;
 
     public static Options options() {

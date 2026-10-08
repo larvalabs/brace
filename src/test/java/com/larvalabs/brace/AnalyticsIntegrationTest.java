@@ -182,6 +182,11 @@ class AnalyticsIntegrationTest {
         assertTrue(res.body().contains("/posts/hello-world"));
         assertTrue(res.body().contains("/u/{name}"));
         assertTrue(res.body().contains("no comparison yet"));
+        // Polls itself like the ops dashboard, keeping the range and metric being viewed.
+        assertTrue(res.body().contains("hx-get=\"/ops/analytics?range=today\""));
+        assertTrue(res.body().contains("hx-trigger=\"every 10s\""));
+        assertTrue(opsGet("/ops/analytics?range=7d&metric=pageviews").body()
+            .contains("hx-get=\"/ops/analytics?range=7d&amp;metric=pageviews\""));
 
         assertEquals(400, opsGet("/ops/analytics?range=1y").statusCode());
     }
