@@ -28,18 +28,57 @@ public class Csrf {
         return session.get(TOKEN_KEY);
     }
 
+    /**
+     * The session's token in masked form, different on every call: {@code base64url(mask ||
+     * token XOR mask)} with a fresh random mask. {@link #validateToken} accepts it in place of
+     * the raw token. Null when the session has no token yet.
+     *
+     * <p>Use this rather than {@link #getToken} wherever the token is written into a page (a
+     * {@code <meta>} tag for fetch or htmx headers). Brace gzips responses by default, and a
+     * secret that is byte-identical on every page can be recovered from compressed response
+     * sizes when the same page also reflects attacker-chosen text (BREACH). A masked token
+     * never repeats, so there is nothing for compression to match against.
+     */
+    public static String maskedToken(Session session) {
+        var token = getToken(session);
+        if (token == null) return null;
+        byte[] raw = token.getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[raw.length * 2];
+        byte[] mask = new byte[raw.length];
+        RANDOM.nextBytes(mask);
+        for (int i = 0; i < raw.length; i++) {
+            out[i] = mask[i];
+            out[raw.length + i] = (byte) (raw[i] ^ mask[i]);
+        }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(out);
+    }
+
+    /** Accepts the session's token either as is or masked by {@link #maskedToken}. */
     public static boolean validateToken(Session session, String submittedToken) {
         var expected = session.get(TOKEN_KEY);
         if (expected == null || submittedToken == null) return false;
         // Explicit UTF-8 (L4): getBytes() with no charset is platform-dependent. Tokens are
         // base64url so the bytes match under every realistic default today, but a
         // charset-dependent comparison inside a CSRF check is a latent correctness bug.
-        return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
-                                     submittedToken.getBytes(StandardCharsets.UTF_8));
+        byte[] want = expected.getBytes(StandardCharsets.UTF_8);
+        if (MessageDigest.isEqual(want, submittedToken.getBytes(StandardCharsets.UTF_8))) return true;
+        byte[] masked;
+        try {
+            masked = Base64.getUrlDecoder().decode(submittedToken);
+        } catch (IllegalArgumentException notBase64) {
+            return false;
+        }
+        if (masked.length != want.length * 2) return false;
+        byte[] unmasked = new byte[want.length];
+        for (int i = 0; i < want.length; i++) {
+            unmasked[i] = (byte) (masked[want.length + i] ^ masked[i]);
+        }
+        return MessageDigest.isEqual(want, unmasked);
     }
 
     /**
-     * The hidden form field carrying the CSRF token.
+     * The hidden form field carrying the CSRF token, {@linkplain #maskedToken masked} so the
+     * value differs on every render.
      *
      * <p>The value is HTML-escaped (L6). The token itself is framework-generated base64url, so
      * this is not currently exploitable — but the field is injected into templates as raw HTML,
@@ -47,8 +86,7 @@ public class Csrf {
      * value there. Escaping costs nothing and removes the question.
      */
     public static String hiddenField(Session session) {
-        var token = getToken(session);
-        return "<input type=\"hidden\" name=\"_csrf\" value=\"" + escape(token) + "\">";
+        return "<input type=\"hidden\" name=\"_csrf\" value=\"" + escape(maskedToken(session)) + "\">";
     }
 
     /** Minimal HTML-attribute escaping for the token value. */
