@@ -1,13 +1,16 @@
 # Migrating from Brace 0.1.10 → 0.1.11
 
-This release has no breaking changes. It adds opt-in server-side analytics, and `HEAD` requests
-now reach `GET` routes instead of returning 404.
+This release has no breaking changes to the API. It adds opt-in server-side analytics, gzips
+responses by default, masks the CSRF token rendered into pages, and `HEAD` requests now reach
+`GET` routes instead of returning 404.
 
 ## Index
 
 | Change | Type | Action required | Anchor |
 |---|---|---|---|
 | Server-side page-view analytics | new, opt-in | none; add `.analytics()` to use it | [§](#new-server-side-page-view-analytics) |
+| Gzip response compression | new, on by default | none; `.compression(false)` to opt out | [§](#new-gzip-response-compression-on-by-default) |
+| CSRF token masked in pages | security | tests that compare `${csrfField}` to `Csrf.getToken` | [§](#security-csrf-token-masked-per-render) |
 | Framework migration V18 | schema | none (applied automatically) | [§](#schema-framework-migration-v18) |
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
@@ -69,6 +72,76 @@ The full guide, with what each number means, is `docs/analytics.md` in the brace
 New CLI and endpoints (all need a `read` ops token): `brace analytics [--range today|7d|30d|12mo]`,
 `brace ops dashboard --analytics`, `GET /ops/analytics`, `GET /ops/analytics/data`,
 `POST /ops/analytics/ignore`, and an `analytics` block in `/ops/status` when enabled.
+
+## New: gzip response compression, on by default
+
+Brace now gzips responses for clients that send `Accept-Encoding: gzip`. Before, it left that to
+the reverse proxy, but common setups don't compress by default (Dokploy's Traefik has no
+compress middleware unless you add one), so the hop between the app and the CDN carried full-size
+HTML. A 91 KB list page is about 5 KB gzipped, and that hop is what the server's egress bill
+counts.
+
+Nothing to change. To opt out:
+
+```java
+var app = Brace.app()
+    .compression(false);   // e.g. a proxy between you and the app already compresses
+```
+
+What gets compressed: text responses (HTML, JSON, CSS, JS, SVG, ...) of 1 KB or more, on GET,
+POST, PUT, PATCH and DELETE. What doesn't:
+
+- **Event streams** (`Result.sse`). They keep arriving an event at a time.
+- **Range requests.** A 206 is served from the file's uncompressed bytes, as before.
+- **Already-compressed types:** images other than SVG, audio, video, zip/gzip/brotli/zstd
+  archives, and web fonts.
+- **Bodies under 1 KB**, and every response to a client that didn't ask for gzip.
+- **Request bodies.** A request with `Content-Encoding: gzip` is not inflated, so
+  `maxUploadSize` still bounds what a handler reads.
+
+Things you may notice:
+
+- **`Vary: Accept-Encoding`** on compressible responses, merged with `Vary: HX-Request` on htmx
+  responses. Tests that assert an exact `Vary` value, or no `Vary` at all, need updating (or
+  `.compression(false)` on that test app). `TestApp`'s client sends no `Accept-Encoding`, so
+  response bodies in tests are unchanged.
+- **ETags on compressed responses end in `--gzip`** (`"1a2b-c3d4--gzip"`). A browser sending
+  that back in `If-None-Match` still gets a 304.
+- **No `Content-Length` on compressed responses.** They are sent chunked, so a large compressible
+  download (a CSV `Result.file` or `Result.download`) no longer shows the browser a total size.
+  There is no per-route opt-out yet; `.compression(false)` is app-wide.
+- **`Result.stream` writers still stream**: each write is flushed through the compressor, so
+  NDJSON and progress output arrive as written.
+
+Behind Cloudflare or another CDN, the CDN still decides what the browser receives. This changes
+the CDN-to-origin hop, so expect origin egress to drop and nothing visible to change for users.
+
+## Security: CSRF token masked per render
+
+`${csrfField}` used to render the session's CSRF token as is, identical on every page. With
+responses now compressed, a secret repeated on every page next to attacker-controlled text is
+the setup for BREACH, which reads secrets out of compressed response sizes. The field now
+carries a masked token, `base64url(mask || token XOR mask)` with a fresh random mask per render,
+so the value differs every time. Any masked value validates, and so does the raw token, so forms,
+`X-CSRF-Token` headers built from `Csrf.getToken(session)`, and `TestApp`'s `*WithCsrf` helpers
+all work unchanged.
+
+What to check:
+
+- **A test that asserts the hidden field contains `Csrf.getToken(session)`** now fails: the
+  field's value is masked. Assert that the rendered value is accepted by a POST instead.
+- **A `<meta>` tag (or anything else) that writes the token into a page** should use the new
+  `Csrf.maskedToken(session)`:
+
+  ```html
+  <!-- before -->
+  <meta name="csrf-token" content="${Csrf.getToken(session)}">
+  <!-- after -->
+  <meta name="csrf-token" content="${Csrf.maskedToken(session)}">
+  ```
+
+Other secrets you render into pages that also echo request input (API keys on a settings page,
+for example) are not covered. See "Response Compression" in `docs/SECURITY.md`.
 
 ## Schema: framework migration V18
 

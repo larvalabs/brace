@@ -71,8 +71,15 @@ to cover ingest and egress symmetrically.
 - **Not zero-disk.** Spilling to disk is the point: it converts an unbounded heap cost into a
   bounded, observable, cheap one. Apps that want zero-copy straight to S3 use presigned URLs
   (Phase 4).
-- **Not HTTP/2, TLS, or compression.** Brace serves HTTP/1.1 and expects a reverse proxy
+- **Not HTTP/2 or TLS.** Brace serves HTTP/1.1 and expects a reverse proxy
   (`docs/SECURITY.md`). Chunked transfer encoding is the only wire-level change here.
+  *Compression was a non-goal here too, left to the proxy. 0.1.11 reversed that: common proxy
+  setups (Dokploy's Traefik, for one) don't compress by default, so the app-to-CDN hop went
+  uncompressed. Brace now gzips by default (`CompressionHandler`, `app.compression(false)` to opt
+  out) in a way that keeps this plan's guarantees: event streams are never compressed, streamed
+  bodies are sync-flushed per write so they still arrive as produced, range requests are passed
+  through uncompressed, and request bodies are never inflated, so `maxUploadSize` still bounds
+  what a handler reads.*
 - **Not streaming *from* the request database session.** See "The transaction boundary" below —
   this is a deliberate, load-bearing restriction, not an oversight.
 - **Not S3 multipart upload (>5 GB objects) in v1.** Deferred to Phase 8.

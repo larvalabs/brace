@@ -11,6 +11,7 @@ This document describes Brace's security features and best practices for buildin
 - [Trusted Proxies](#trusted-proxies)
 - [Cookie Security](#cookie-security)
 - [Static Files](#static-files)
+- [Response Compression](#response-compression)
 - [WebSockets](#websockets)
 - [File Uploads](#file-uploads)
 - [Rate Limiting](#rate-limiting)
@@ -124,6 +125,12 @@ Brace automatically validates CSRF tokens on mutating requests (POST, PUT, DELET
    - Form parameter: `_csrf`
    - Header: `X-CSRF-Token`
 3. Validation happens automatically before your handler runs
+4. The token written into pages is **masked per render**: `${csrfField}` carries
+   `base64url(mask || token XOR mask)` with a fresh random mask, so the value differs on every
+   page. Validation accepts the masked form and the raw token alike. This keeps a compressed
+   page from leaking the token through its size (see [Response Compression](#response-compression)).
+   If you put the token in a page yourself (a `<meta>` tag for fetch or htmx headers), use
+   `Csrf.maskedToken(session)` rather than `Csrf.getToken(session)`.
 
 ### Exemptions
 
@@ -462,6 +469,9 @@ bodies, so an oversized *multipart* upload reached Jetty's own cap and surfaced 
 — which meant any unauthenticated client could flood the error store and the regression
 notifier just by POSTing large files.
 
+`maxUploadSize` counts the bytes as received: a gzip-encoded request body is not inflated
+(see [Response Compression](#response-compression)), so it can't expand past the cap.
+
 ### Upload Spill Files
 
 Multipart parts over `uploadMemoryThreshold` (default 1MB) are written to a temp file
@@ -538,6 +548,46 @@ Static responses carry `X-Content-Type-Options: nosniff`, and — since 0.1.8 �
 after-middleware, so `app.after(SecurityHeaders.defaults())` reaches them too. That matters
 most when a static directory holds user-supplied content: those are exactly the responses
 that need `X-Frame-Options` and a CSP.
+
+---
+
+## Response Compression
+
+Since 0.1.11 Brace gzips responses by default (`app.compression(false)` turns it off). The rules
+are in `CompressionHandler`; the security-relevant ones:
+
+- **Request bodies are never inflated.** A request with `Content-Encoding: gzip` reaches the
+  handler as the compressed bytes. Inflating would let a few KB on the wire expand past
+  `maxUploadSize` (a gzip bomb), since the cap is checked against what the handler reads.
+- **Only clients that send `Accept-Encoding: gzip` get gzip**, and every compressible response
+  carries `Vary: Accept-Encoding` (merged with `Vary: HX-Request` on htmx responses), so a
+  shared cache never hands compressed bytes to a client that didn't ask for them.
+
+### BREACH
+
+Compression makes a response's length depend on how much of it repeats. If a page reflects
+text the attacker chooses (a search term, a URL parameter) *and* contains a secret that is the
+same on every load, an attacker who can make the victim's browser send many requests and can see
+the encrypted response sizes on the network can recover the secret a character at a time. That
+is BREACH. It needs all of: HTTPS traffic the attacker can observe, a page that reflects their
+input, and a secret that is byte-identical across responses.
+
+What Brace does about it:
+
+- **The CSRF token is masked per render**, so it is never the same twice and compression has
+  nothing to match it against. This covers `${csrfField}` and `Csrf.maskedToken(session)`. A
+  page that prints `Csrf.getToken(session)` directly is not covered.
+- **Session cookies are not in the body**, so compression doesn't reach them.
+
+What it doesn't cover, and what to do:
+
+- **Other secrets you render into HTML** (an API key shown on a settings page, a personal
+  access token, an invite link). Don't put long-lived secrets in pages that also echo request
+  input. Show them once, or mask them the same way.
+- **Apps where BREACH matters more than bandwidth** can turn compression off with
+  `app.compression(false)`. A CDN in front of the app (Cloudflare, for example) re-compresses
+  toward the browser regardless, so what an attacker on the browser's network sees is decided
+  there; Brace's compression only changes the CDN-to-origin hop.
 
 ---
 

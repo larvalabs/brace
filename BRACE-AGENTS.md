@@ -76,7 +76,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -587,9 +587,12 @@ Flash messages (display once, on the next request): `session.flash("notice", "Po
 
 CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Content-Type does **not** affect enforcement — `application/json` requests are validated the same as form submissions.
 
-- **Forms:** include `${csrfField}` inside the `<form>` (an auto-provided hidden input).
-- **AJAX/fetch:** send the token in the `X-CSRF-Token` header (from the session or a meta
-  tag) with `credentials: 'include'` so cookies are sent.
+- **Forms:** include `${csrfField}` inside the `<form>` (an auto-provided hidden input). Its
+  value is masked and changes on every render; that is expected, and any rendered value validates.
+- **AJAX/fetch:** send the token in the `X-CSRF-Token` header with `credentials: 'include'` so
+  cookies are sent. To put it in a `<meta>` tag, render `Csrf.maskedToken(session)`, not
+  `Csrf.getToken(session)`: a raw token repeated on every page can leak through compressed
+  response sizes (BREACH; see "Response Compression" in `docs/SECURITY.md`). Both forms validate.
 - **Bearer-token APIs (no cookies):** opt out per route with
   `app.post("/api/data", handler).csrf(false)`.
 
@@ -964,6 +967,21 @@ app.after(SecurityHeaders.builder()
     .contentSecurityPolicy("default-src 'self'; script-src 'self' 'unsafe-inline'")
     .build());
 ```
+
+### Response Compression
+
+Responses are gzipped by default for clients that send `Accept-Encoding: gzip`: text bodies
+(HTML, JSON, CSS, JS, SVG, ...) of 1 KB or more, on GET, POST, PUT, PATCH and DELETE.
+`app.compression(false)` turns it off. Left alone: event streams (`Result.sse`), range requests
+(206s stay uncompressed), already-compressed types (images other than SVG, audio, video, archives,
+web fonts) and bodies under 1 KB. A `Result.stream` writer's output still reaches the client as
+it is written. Request bodies are never inflated, so `maxUploadSize` can't be bypassed with a
+gzip bomb. A compressed response's `ETag` gets a `--gzip` suffix, and conditional requests
+with it still get 304. Compressed responses are chunked and have no `Content-Length`.
+
+Behind a CDN this mostly saves the CDN-to-origin hop (and your egress bill); the CDN compresses
+toward browsers on its own. Don't render long-lived secrets into pages that also echo request
+input. The CSRF token is masked for this reason (see CSRF above and `docs/SECURITY.md`).
 
 ### Session Secret Validation
 

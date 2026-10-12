@@ -169,12 +169,12 @@ public class App {
 
 Components included in the framework jar as of this release:
 
-- **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting
+- **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting, gzip response compression on by default (`.compression(false)` to opt out)
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
-- **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs
+- **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs; tokens rendered into pages are masked per render (BREACH)
 - **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware, bcrypt password hashing
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
@@ -703,6 +703,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for security documentation covering:
 - Cookie security options
 - Rate limiting
 - File upload security
+- Response compression and BREACH
 - Ops endpoint hardening
 
 ## Periodic Model Reviews

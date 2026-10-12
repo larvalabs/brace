@@ -884,6 +884,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         response.setStatus(result.status());
         response.getHeaders().put("Content-Type", result.contentType());
         for (var entry : result.headers().entrySet()) {
+            // Vary is a list, and compression has already put Accept-Encoding on the response by
+            // the time we get here. Replacing it with the Result's Vary (HX-Request on every htmx
+            // response) would let a shared cache hand gzipped bytes to a client that can't read them.
+            if (entry.getKey().equalsIgnoreCase("Vary")) {
+                response.getHeaders().put("Vary", mergeVary(response.getHeaders().get("Vary"), entry.getValue()));
+                continue;
+            }
             response.getHeaders().put(entry.getKey(), entry.getValue());
         }
         // Set-Cookie may repeat — append each value so multiple cookies survive to the wire.
@@ -1049,6 +1056,24 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             body.append(method).append(' ').append(picks.get(i));
         }
         return Result.error(404, body.toString());
+    }
+
+    /**
+     * Union of two {@code Vary} values, keeping {@code existing}'s tokens first and skipping
+     * duplicates case-insensitively. {@code *} on either side wins outright.
+     */
+    static String mergeVary(String existing, String added) {
+        if (existing == null || existing.isBlank()) return added;
+        if (added == null || added.isBlank()) return existing;
+        var tokens = new java.util.LinkedHashMap<String, String>();
+        for (String value : new String[]{existing, added}) {
+            for (String token : value.split(",")) {
+                String t = token.trim();
+                if (t.equals("*")) return "*";
+                if (!t.isEmpty()) tokens.putIfAbsent(t.toLowerCase(java.util.Locale.ROOT), t);
+            }
+        }
+        return String.join(", ", tokens.values());
     }
 
     /**

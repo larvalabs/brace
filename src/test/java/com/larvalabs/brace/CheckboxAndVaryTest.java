@@ -22,6 +22,9 @@ class CheckboxAndVaryTest {
     @BeforeAll
     static void setup() throws Exception {
         app = Brace.test().start(a -> {
+            // These pin BraceHandler's own Vary appending exactly. Compression adds
+            // Accept-Encoding to every Vary on top; CompressionTest covers that merge.
+            a.compression(false);
             a.post("/signup", req -> {
                 var form = req.form(Signup.class);
                 return Result.text(form.value().agree() + "/" + form.value().newsletter());

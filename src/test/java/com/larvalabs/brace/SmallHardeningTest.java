@@ -39,16 +39,65 @@ class SmallHardeningTest {
         String field = Csrf.hiddenField(session);
         assertFalse(field.contains("<script>"), field);
         assertFalse(field.contains("\"><"), field);
-        assertTrue(field.contains("&lt;script&gt;"), field);
+        // Masking base64url-encodes whatever is in the session, so markup can't survive it; the
+        // escaping stays as a second line of defense.
+        String value = field.substring(field.indexOf("value=\"") + 7, field.lastIndexOf('"'));
+        assertTrue(Csrf.validateToken(session, value));
     }
 
     @Test
-    void hiddenFieldIsUnchangedForARealToken() {
+    void hiddenFieldCarriesAMaskedTokenThatValidates() {
         var session = new Session();
         Csrf.ensureToken(session);
-        String token = Csrf.getToken(session);
-        assertEquals("<input type=\"hidden\" name=\"_csrf\" value=\"" + token + "\">",
-            Csrf.hiddenField(session));
+        String field = Csrf.hiddenField(session);
+        assertTrue(field.startsWith("<input type=\"hidden\" name=\"_csrf\" value=\""), field);
+        String value = field.substring(field.indexOf("value=\"") + 7, field.lastIndexOf('"'));
+        assertTrue(Csrf.validateToken(session, value));
+    }
+
+    // --- BREACH: the token rendered into pages is masked per render ---
+
+    @Test
+    void maskedTokensNeverRepeatAndNeverContainTheRawToken() {
+        var session = new Session();
+        Csrf.ensureToken(session);
+        String raw = Csrf.getToken(session);
+        String a = Csrf.maskedToken(session);
+        String b = Csrf.maskedToken(session);
+        assertNotEquals(a, b);
+        assertFalse(a.contains(raw));
+        assertTrue(Csrf.validateToken(session, a));
+        assertTrue(Csrf.validateToken(session, b));
+    }
+
+    @Test
+    void theRawTokenStillValidates() {
+        // X-CSRF-Token headers built from Csrf.getToken keep working.
+        var session = new Session();
+        Csrf.ensureToken(session);
+        assertTrue(Csrf.validateToken(session, Csrf.getToken(session)));
+    }
+
+    @Test
+    void aMaskedTokenFromAnotherSessionIsRejected() {
+        var mine = new Session();
+        Csrf.ensureToken(mine);
+        var theirs = new Session();
+        Csrf.ensureToken(theirs);
+        assertFalse(Csrf.validateToken(mine, Csrf.maskedToken(theirs)));
+    }
+
+    @Test
+    void aTamperedOrMalformedMaskedTokenIsRejected() {
+        var session = new Session();
+        Csrf.ensureToken(session);
+        String masked = Csrf.maskedToken(session);
+        char c = masked.charAt(10);
+        String tampered = masked.substring(0, 10) + (c == 'A' ? 'B' : 'A') + masked.substring(11);
+        assertFalse(Csrf.validateToken(session, tampered));
+        assertFalse(Csrf.validateToken(session, "not base64 !!"));
+        assertFalse(Csrf.validateToken(session, masked.substring(0, 40)));
+        assertNull(Csrf.maskedToken(new Session()));
     }
 
     // --- L5: storage keys cannot traverse ---

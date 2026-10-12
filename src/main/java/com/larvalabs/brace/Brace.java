@@ -48,6 +48,7 @@ public class Brace {
     private Analytics.Options analyticsOptions;
     private Analytics analytics;
     private boolean opsProfilerEnabled = true;
+    private boolean compression = true;
     private String instanceId;
     private OpsHandler opsHandler;
     private BraceHandler handler; // set by start(); read by tests through handler()
@@ -349,6 +350,27 @@ public class Brace {
      */
     public Brace opsProfiler(boolean enabled) {
         this.opsProfilerEnabled = enabled;
+        return this;
+    }
+
+    /**
+     * Enables or disables gzip response compression. Default {@code true}: HTML, JSON, CSS, JS and
+     * other text responses of 1 KB or more are gzipped for clients that send
+     * {@code Accept-Encoding: gzip}. Event streams, range requests, and already-compressed types
+     * (images, video, archives, web fonts) are left alone, and request bodies are never inflated.
+     * See {@link CompressionHandler} for the exact rules.
+     *
+     * <p>Turn it off when a proxy directly in front of the app already compresses, or to rule
+     * compression out while debugging. A CDN doesn't count: most compress only toward the
+     * browser, so the CDN-to-origin hop still pays full size.
+     *
+     * <p>Compressing pages that reflect attacker-chosen input next to a secret makes BREACH-style
+     * length attacks possible. Brace's own secret in pages, the CSRF token in {@code csrfField},
+     * is masked per render for this reason; see "Response Compression" in
+     * {@code docs/SECURITY.md} for what that does and doesn't cover.
+     */
+    public Brace compression(boolean enabled) {
+        this.compression = enabled;
         return this;
     }
 
@@ -1099,6 +1121,7 @@ public class Brace {
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
         handler.setAnalytics(analytics);
+        org.eclipse.jetty.server.Handler httpHandler = compression ? new CompressionHandler(handler) : handler;
 
         if (!wsRoutes.isEmpty()) {
             // Room fan-out: shared across the fleet on Postgres (LISTEN/NOTIFY), local otherwise.
@@ -1144,10 +1167,12 @@ public class Brace {
                     });
                 }
             });
-            wsUpgradeHandler.setHandler(handler);
+            // Compression sits inside the upgrade handler: a WebSocket handshake never reaches it,
+            // and the socket's frames are not HTTP responses.
+            wsUpgradeHandler.setHandler(httpHandler);
             server.setHandler(wsUpgradeHandler);
         } else {
-            server.setHandler(handler);
+            server.setHandler(httpHandler);
         }
 
         server.start();
