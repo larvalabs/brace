@@ -51,13 +51,20 @@ class HtmxTest {
     @Test
     void varyHeaderSetForHtmxRequests() throws Exception {
         var response = get("/htmx-check", "HX-Request", "true");
-        assertEquals("HX-Request", response.headers().firstValue("Vary").orElse(""));
+        // Accept-Encoding is there too, from compression.
+        assertTrue(varyHas(response, "HX-Request"), response.headers().firstValue("Vary").orElse(""));
     }
 
     @Test
     void varyHeaderNotSetForNormalRequests() throws Exception {
         var response = get("/htmx-check");
-        assertTrue(response.headers().firstValue("Vary").isEmpty());
+        assertFalse(varyHas(response, "HX-Request"), response.headers().firstValue("Vary").orElse(""));
+    }
+
+    private static boolean varyHas(java.net.http.HttpResponse<?> response, String token) {
+        return response.headers().allValues("Vary").stream()
+            .flatMap(v -> java.util.Arrays.stream(v.split(",")))
+            .anyMatch(t -> t.trim().equalsIgnoreCase(token));
     }
 
     @Test
