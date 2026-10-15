@@ -871,7 +871,9 @@ try (var s = Http.post(url).bodyJson(request).stream()) {
   `null` turns it off) bounds each wait for the headers or the next bytes, and only counts
   time blocked in a read, so a slow consumer doesn't trip it. There is no total deadline
   unless you call `.timeout()`, which then bounds the whole call. Either closes the
-  connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`).
+  connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`). Both count time
+  the machine spends asleep, so a laptop that sleeps through a call gives up within a second
+  of waking instead of holding a dead connection.
 - LLM APIs: the idle timeout includes the wait for response headers, and a model that thinks
   or runs a server tool can go quiet for a while. Set `.idleTimeout(...)` to the longest silence
   the provider can produce (keep-alive pings and `:` comments reset it), and `.timeout(...)` as
