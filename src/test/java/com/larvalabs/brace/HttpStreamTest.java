@@ -17,6 +17,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -276,6 +277,41 @@ class HttpStreamTest {
             assertTrue(e.idle());
             assertTrue(elapsedMillis(start) < 3000, "idle timeout took " + elapsedMillis(start) + "ms");
         }
+    }
+
+    // System.nanoTime stops while a Mac sleeps, so only the wall clock sees that time pass.
+    // Moving the call's wall clock an hour ahead stands in for a laptop that slept through it.
+
+    @Test
+    void deadlineCountsTimeTheMachineSpentAsleep() {
+        var asleep = new AtomicLong();
+        var http = Http.get(url("/sse/stall")).timeout(Duration.ofMinutes(10)).idleTimeout(Duration.ZERO);
+        http.wallClock = () -> System.currentTimeMillis() + asleep.get();
+        long start = System.nanoTime();
+        var e = assertThrows(Http.StreamTimeoutException.class, () ->
+            http.fetchEvents(event -> asleep.set(Duration.ofHours(1).toMillis())));
+
+        assertFalse(e.idle());
+        assertEquals(Duration.ofMinutes(10), e.limit());
+        assertTrue(elapsedMillis(start) < 3000, "deadline took " + elapsedMillis(start) + "ms");
+    }
+
+    @Test
+    void idleTimeoutCountsTimeTheMachineSpentAsleep() {
+        var asleep = new AtomicLong();
+        var http = Http.get(url("/sse/stall")).idleTimeout(Duration.ofMinutes(5));
+        http.wallClock = () -> System.currentTimeMillis() + asleep.get();
+        long start = System.nanoTime();
+        var e = assertThrows(Http.StreamTimeoutException.class, () ->
+            http.fetchEvents(event -> Thread.ofVirtual().start(() -> {
+                // Once the next read is blocked, so the hour passes while it waits.
+                sleep(200);
+                asleep.set(Duration.ofHours(1).toMillis());
+            })));
+
+        assertTrue(e.idle());
+        assertEquals(Duration.ofMinutes(5), e.limit());
+        assertTrue(elapsedMillis(start) < 3000, "idle timeout took " + elapsedMillis(start) + "ms");
     }
 
     @Test

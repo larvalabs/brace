@@ -24,6 +24,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.stream.Stream;
 
 public class Http {
@@ -43,6 +44,8 @@ public class Http {
     private Duration timeout = Duration.ofSeconds(30);
     private boolean timeoutSet;
     private Duration idleTimeout = Duration.ofSeconds(30);
+    /** The wall clock the stream timeouts also go by. Tests move it to stand in for the machine sleeping. */
+    LongSupplier wallClock = System::currentTimeMillis;
 
     private Http(String method, String url) {
         this.method = method;
@@ -67,7 +70,7 @@ public class Http {
      * For {@code fetch*} calls, how long to wait for the response headers (default 30s). For
      * {@link #stream()} and {@link #fetchEvents}, the deadline for the whole call, headers and
      * body together (default none): the connection is closed and {@link StreamTimeoutException}
-     * thrown when it passes.
+     * thrown when it passes. Time the machine spends asleep counts.
      */
     public Http timeout(Duration timeout) {
         this.timeout = timeout;
@@ -79,7 +82,8 @@ public class Http {
      * For {@link #stream()} and {@link #fetchEvents}: close the connection and throw
      * {@link StreamTimeoutException} when the response headers, or the next bytes of the body,
      * take this long to arrive (default 30s; {@code null} or {@link Duration#ZERO} turns it off).
-     * Time the caller spends between reads doesn't count. Ignored by {@code fetch*} calls.
+     * Time the caller spends between reads doesn't count; time the machine spends asleep does.
+     * Ignored by {@code fetch*} calls.
      */
     public Http idleTimeout(Duration idleTimeout) {
         if (idleTimeout != null && idleTimeout.isNegative()) {
@@ -612,34 +616,44 @@ public class Http {
      * the body stream from a shared timer thread, which unblocks a pending read, and the
      * wrapped stream turns that into a {@link StreamTimeoutException}.
      *
-     * <p>The deadline, when set, is one task scheduled when the call starts. The idle timeout is one task
-     * at a time that re-arms itself: it fires only when a read has been blocked for the whole
-     * limit, so a caller that is slow to read never trips it.
+     * <p>One task at a time checks the limits and re-arms itself, at least once a second. It
+     * measures time on both {@code System.nanoTime} and the wall clock and goes by whichever has
+     * moved further: on macOS {@code nanoTime}, and so the timer's own scheduling, stops while
+     * the machine sleeps, so a laptop that slept through a call would otherwise hold it open
+     * far past its deadline, on a connection that is usually dead by then. A limit that passed
+     * during sleep fires within a second of waking. The idle timeout only counts time a read
+     * has been blocked, so a caller that is slow to read never trips it.
      */
     private static final class Watchdog {
 
         private static final ScheduledThreadPoolExecutor TIMER = timer();
         private static final long NOT_READING = Long.MIN_VALUE;
+        private static final long MAX_CHECK_INTERVAL = TimeUnit.SECONDS.toNanos(1);
 
         private final String method;
         private final String url;
         private final Duration timeout;
         private final Duration idleTimeout;
-        private final ScheduledFuture<?> deadline;
-        private volatile ScheduledFuture<?> idleCheck;
+        private final LongSupplier wallClock;
+        private final long startNanos;
+        private final long startMillis;
+        private volatile ScheduledFuture<?> pending;
         private volatile long readingSince = NOT_READING;
+        private volatile long readingSinceMillis;
         private volatile boolean fired;
         private volatile boolean firedIdle;
-        private boolean done;
-        private InputStream stream;
+        private volatile boolean done;
+        private volatile InputStream stream;
 
         Watchdog(Http http) {
             this.method = http.method;
             this.url = http.url;
             this.timeout = http.timeoutSet ? http.timeout : null;
             this.idleTimeout = http.idleTimeout;
-            this.deadline = timeout == null ? null
-                : TIMER.schedule(() -> fire(false), timeout.toNanos(), TimeUnit.NANOSECONDS);
+            this.wallClock = http.wallClock;
+            this.startNanos = System.nanoTime();
+            this.startMillis = wallClock.getAsLong();
+            if (timeout != null) tick();
         }
 
         /** The wait for response headers counts against the idle timeout too, when it's shorter. */
@@ -662,7 +676,7 @@ public class Http {
                 t.setDaemon(true);
                 return t;
             });
-            // Most deadlines are cancelled long before they're due; don't keep them queued.
+            // Most checks are cancelled long before they're due; don't keep them queued.
             timer.setRemoveOnCancelPolicy(true);
             return timer;
         }
@@ -673,22 +687,39 @@ public class Http {
                 throw timeoutException();
             }
             stream = raw;
-            if (idleTimeout != null) {
-                idleCheck = TIMER.schedule(this::checkIdle, idleTimeout.toNanos(), TimeUnit.NANOSECONDS);
-            }
+            // With a deadline the checks are already running.
+            if (idleTimeout != null && timeout == null) tick();
             return new WatchedInputStream(raw, this);
         }
 
-        private void checkIdle() {
+        private void tick() {
             if (done || fired) return;
-            long since = readingSince;
-            long limit = idleTimeout.toNanos();
-            long waited = since == NOT_READING ? 0 : System.nanoTime() - since;
-            if (waited >= limit) {
-                fire(true);
-            } else {
-                idleCheck = TIMER.schedule(this::checkIdle, limit - waited, TimeUnit.NANOSECONDS);
+            long nanos = System.nanoTime();
+            long millis = wallClock.getAsLong();
+            long next = MAX_CHECK_INTERVAL;
+            if (timeout != null) {
+                long left = timeout.toNanos() - elapsed(startNanos, startMillis, nanos, millis);
+                if (left <= 0) {
+                    fire(false);
+                    return;
+                }
+                next = Math.min(next, left);
             }
+            long since = readingSince; // before readingSinceMillis; see beginRead
+            if (idleTimeout != null && since != NOT_READING) {
+                long left = idleTimeout.toNanos() - elapsed(since, readingSinceMillis, nanos, millis);
+                if (left <= 0) {
+                    fire(true);
+                    return;
+                }
+                next = Math.min(next, left);
+            }
+            pending = TIMER.schedule(this::tick, next, TimeUnit.NANOSECONDS);
+        }
+
+        /** Time since a moment taken on both clocks, by whichever clock has moved further. */
+        private static long elapsed(long fromNanos, long fromMillis, long nanos, long millis) {
+            return Math.max(nanos - fromNanos, TimeUnit.MILLISECONDS.toNanos(millis - fromMillis));
         }
 
         private synchronized void fire(boolean idle) {
@@ -696,11 +727,14 @@ public class Http {
             firedIdle = idle;
             fired = true;
             if (stream != null) closeQuietly(stream);
-            cancelTimers();
+            cancelTimer();
         }
 
         void beginRead() {
             check();
+            // The wall clock first: a tick that sees this read's readingSince then sees this
+            // read's readingSinceMillis or a later one, never an earlier read's.
+            readingSinceMillis = wallClock.getAsLong();
             readingSince = System.nanoTime();
         }
 
@@ -712,13 +746,12 @@ public class Http {
 
         synchronized void close() {
             done = true;
-            cancelTimers();
+            cancelTimer();
         }
 
-        private void cancelTimers() {
-            if (deadline != null) deadline.cancel(false);
-            var idle = idleCheck;
-            if (idle != null) idle.cancel(false);
+        private void cancelTimer() {
+            var p = pending;
+            if (p != null) p.cancel(false);
         }
 
         private StreamTimeoutException timeoutException() {
