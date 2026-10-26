@@ -125,6 +125,38 @@ class RequestTest {
         assertThrows(IllegalArgumentException.class, () -> req.bodyAs(User.class));
     }
 
+    public record UserWrapper(User user) {}
+
+    public record UserList(java.util.List<User> users) {}
+
+    @Test
+    void entitiesNestedInArraysAndRecordsAreRefused() {
+        // The top-level check alone let these through: Jackson bound each nested entity field
+        // by field, client-chosen id and passwordHash included.
+        String user = "{\"email\":\"e@x\",\"id\":1,\"passwordHash\":\"p\"}";
+        var array = jsonRequest("[" + user + "]");
+        var ex = assertThrows(IllegalArgumentException.class, () -> array.bodyAs(User[].class));
+        assertTrue(ex.getMessage().contains("User"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("jsonForm"), ex.getMessage());
+
+        var wrapped = jsonRequest("{\"user\":" + user + "}");
+        assertThrows(IllegalArgumentException.class, () -> wrapped.json(UserWrapper.class));
+        assertThrows(IllegalArgumentException.class, () -> wrapped.requireJson(UserWrapper.class));
+
+        var listed = jsonRequest("{\"users\":[" + user + "]}");
+        assertThrows(IllegalArgumentException.class, () -> listed.bodyAs(UserList.class));
+    }
+
+    @Test
+    void entityDeserializationOutsideRequestBindingIsUnaffected() throws Exception {
+        // The shared mapper also reads cached values and Http responses, where an entity is
+        // legitimate: the guard only applies to reads that bodyAs marks.
+        var user = Json.mapper().readValue("{\"email\":\"e@x\",\"id\":7}", User.class);
+        assertEquals(7L, user.id);
+        var users = Json.mapper().readValue("[{\"id\":8}]", User[].class);
+        assertEquals(8L, users[0].id);
+    }
+
     public record AccountForm(String email) {}
 
     public static class AccountDto {

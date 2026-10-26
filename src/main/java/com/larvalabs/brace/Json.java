@@ -11,6 +11,7 @@ public class Json extends Result {
 
     private static final ObjectMapper MAPPER = new ObjectMapper()
         .registerModule(new JavaTimeModule())
+        .registerModule(new EntityBindingGuard())
         .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     private static final ConcurrentHashMap.KeySetView<Class<?>, Boolean> warnedClasses =

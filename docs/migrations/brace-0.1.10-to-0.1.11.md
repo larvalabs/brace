@@ -266,7 +266,9 @@ Binding request JSON straight into an entity let a client set any public field. 
 `{"email":"e@x","role":"admin","id":1,"passwordHash":"p"}` set all four, and a following
 `db.update(user)` wrote them, overwriting row 1. `req.json`, `req.bodyAs` and `req.requireJson`
 now throw `IllegalArgumentException` when the target class is annotated
-`@jakarta.persistence.Entity`, in every mode. Records, DTOs and `Map` bind as before.
+`@jakarta.persistence.Entity`, or when an entity appears anywhere inside it (an array element
+such as `User[]`, a record or DTO component, a list field), in every mode. Records, DTOs and
+`Map` without entities inside bind as before.
 
 Before:
 

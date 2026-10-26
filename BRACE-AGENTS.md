@@ -540,7 +540,8 @@ annotations plus `validate(Errors)`, and turns a malformed or non-object body in
 `"_body"` error instead of an exception (a raw `req.bodyAs` parse failure surfaces as a 500).
 
 **Never bind a request body into an `@Entity`.** `req.bodyAs`/`req.json`/`req.requireJson`
-throw `IllegalArgumentException` for an `@Entity` class: the client would control every public
+throw `IllegalArgumentException` for an `@Entity` class, or a type with one inside it (an array,
+a record component): the client would control every public
 field (`id`, `role`, `passwordHash`). Bind a record with `req.jsonForm(MyForm.class)` and copy
 the allowed fields with the entity's `apply(form)`, as above.
 
