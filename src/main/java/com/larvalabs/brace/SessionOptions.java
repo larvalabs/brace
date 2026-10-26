@@ -228,8 +228,26 @@ public class SessionOptions {
      * Build the Set-Cookie header value with the {@code Secure} attribute already resolved for
      * this response (see {@link #resolveSecure}).
      */
+    /** Cookie name without the {@code __Host-} prefix: plain-HTTP localhost, or a custom path or domain. */
+    static final String COOKIE_NAME = "brace_session";
+
+    /** The prefixed name used whenever the browser allows it (M10). */
+    static final String HOST_COOKIE_NAME = "__Host-brace_session";
+
+    /**
+     * The session cookie's name for a response with this {@code Secure} resolution (M10).
+     * {@code __Host-brace_session} whenever the browser allows the prefix — {@code Secure},
+     * {@code Path=/}, no {@code Domain} — which is every production deployment by default. A
+     * {@code __Host-} cookie can only be set by this exact host over HTTPS, so a sibling subdomain
+     * can't plant ("toss") a session or CSRF token of its choosing. Requests read only the name
+     * they would write, so a tossed {@code brace_session} is ignored where the prefix applies.
+     */
+    String cookieName(boolean secureResolved) {
+        return secureResolved && "/".equals(path) && domain == null ? HOST_COOKIE_NAME : COOKIE_NAME;
+    }
+
     String buildSetCookie(String cookieValue, boolean secureResolved) {
-        var sb = new StringBuilder("brace_session=");
+        var sb = new StringBuilder(cookieName(secureResolved)).append('=');
         sb.append(cookieValue);
 
         if (path != null) {

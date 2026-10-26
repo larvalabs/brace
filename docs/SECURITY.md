@@ -121,9 +121,32 @@ altered without the secret.
 - **Reserved key.** `_exp` is server-managed: `session.set("_exp", …)` is silently
   ignored, and `_exp` is stripped from the decrypted data so it never appears via
   `get`/`has`.
-- **Back-compat (0.1.7):** cookies minted by ≤0.1.6 have no `_exp` and are **accepted**
-  this release (re-minted with `_exp` on the next write). A future release will reject
-  expiry-less cookies — see the 0.1.6→0.1.7 migration guide.
+- **Absolute lifetime (`_abs`).** `_exp` moves forward with every write, so on its own a
+  session that is used (or replayed) continuously never expires. `_abs` is stamped once, when
+  the session is first issued, and carried unchanged: 30 days by default, or `maxAge` if that
+  is longer (`SessionOptions.absoluteMaxAge(Duration)`). `session.regenerate()` restarts it.
+- **No `_exp`, no session.** Cookies minted by 0.1.6 or earlier carry no `_exp`; accepted
+  through 0.1.10, rejected since 0.1.11.
+
+### Rotation and revocation
+
+- **`session.regenerate()`** at login and logout drops the CSRF token minted before the
+  privilege change (one seen on a shared computer, or planted by a tossed cookie, is useless
+  afterwards) and restarts the absolute lifetime.
+- **Server-side revocation.** A sealed cookie is valid until it expires, wherever it is copied
+  to. `app.sessionValidator(session -> boolean)` runs once per request that reads a non-empty
+  session, and on WebSocket upgrades; returning false makes the request anonymous and clears
+  the client's cookie. Compare a version stored in the session at login with the user's
+  current one to implement "log out everywhere", password-change logout and immediate
+  demotion. Cache the lookup.
+- **Secret rotation.** `SessionOptions.previousSecrets(...)` opens cookies sealed with earlier
+  secrets and re-seals them with the current one, so rotating logs nobody out. The ops token
+  secret is derived from the session secret, so ops clients re-authenticate after a rotation.
+- **Cookie name.** Wherever the browser allows it (`Secure`, `Path=/`, no `Domain` — every
+  default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
+  set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant
+  a session or CSRF token of its choosing, and a request reads only the name it would be given,
+  so a tossed `brace_session` is ignored. Plain-HTTP localhost keeps `brace_session`.
 
 ### Example: Storing User Session Data
 

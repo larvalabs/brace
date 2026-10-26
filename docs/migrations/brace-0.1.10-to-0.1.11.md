@@ -32,6 +32,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Every route needs an access requirement or `.publicRoute()`; `requireSession` removed | security, **breaking** | add `defaultAccess(...)`, mark public routes | [§](#breaking-every-route-needs-an-access-requirement) |
 | WebSocket upgrades run `before()` and access requirements; `app.ws(...)` returns a `RouteConfig` | security, **breaking** | split builder chains that continue after `.ws(...)` | [§](#breaking-websocket-upgrades-are-guarded) |
 | `.csrf(false)` on a cookie-session route fails `start()`; cross-site mutating requests refused; `${csrfMeta}` + `csrf-htmx.js` | security, **breaking** | remove the opt-out or give `.csrf(false, "reason")` | [§](#breaking-csrf-opt-outs-are-checked-and-cross-site-requests-refused) |
+| Session cookie is `__Host-brace_session` in production; cookies without `_exp` rejected; absolute lifetime; `regenerate()`, `sessionValidator`, `previousSecrets` | security, **breaking** | users are logged out once on deploy; call `session.regenerate()` at login/logout | [§](#breaking-session-cookie-hardening) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -571,4 +572,43 @@ receives cross-site browser POSTs (a payment provider's return URL, a SAML endpo
 `@param gg.jte.Content csrfMeta = null`) and `<script src="/__brace/csrf-htmx.js"></script>`
 after htmx, and every non-GET htmx request carries the token. Replace any per-element
 `hx-headers` CSRF wiring with it.
+
+## Breaking: session cookie hardening
+
+**Everyone is logged out once.** In production the session cookie is now named
+`__Host-brace_session` (it was `brace_session`). A `__Host-` cookie can only be set by the exact
+host over HTTPS, so a sibling subdomain can no longer plant a session or CSRF token. Requests
+read only the name they would be given, so existing `brace_session` cookies are ignored after
+the deploy and users sign in again. Plain-HTTP localhost keeps `brace_session`, so local
+development and `Brace.test()` are unaffected. A custom `SessionOptions.path(...)` or
+`.domain(...)` also keeps the old name, because the prefix requires `Path=/` and no `Domain`.
+Code that reads the cookie by name (`req.cookie("brace_session")`, a proxy rule) needs the new
+name.
+
+**Cookies without `_exp` are rejected.** Cookies minted by 0.1.6 or earlier carry no `_exp`;
+they were accepted through 0.1.10 and are now an empty session.
+
+**Absolute lifetime.** `_exp` slides forward on every write, so a continuously used session
+never expired. Sessions now also end 30 days after sign-in (or after `maxAge`, if longer),
+however active. Set it with `SessionOptions.absoluteMaxAge(Duration)`.
+
+New, and recommended:
+
+```java
+// login: drop the pre-login CSRF token and restart the absolute lifetime
+session.regenerate();
+session.set("userId", user.id);
+session.set("sessionVersion", user.sessionVersion);
+
+// logout
+session.clear();
+session.regenerate();
+
+// revoke server-side: false makes the request anonymous and clears the cookie
+app.sessionValidator(s -> !s.has("userId")
+    || currentSessionVersion(s.get("userId")).equals(s.get("sessionVersion")));
+
+// rotate the secret without logging anyone out
+app.sessions(SessionOptions.of(newSecret).previousSecrets(oldSecret));
+```
 

@@ -626,6 +626,40 @@ client's `Max-Age`. The horizon is `SessionOptions.maxAge()` when set, otherwise
 `_exp` is a reserved, server-managed key — `session.set("_exp", …)` is silently ignored.
 (Details: the 0.1.6→0.1.7 migration guide's session-expiry section.)
 
+Sessions also carry an **absolute lifetime** (`_abs`) that, unlike `_exp`, never slides: 30
+days from sign-in by default, or `maxAge` if longer; `SessionOptions.absoluteMaxAge(Duration)`
+to set it. In production the cookie is named `__Host-brace_session` (a sibling subdomain can't
+set it); on plain-HTTP localhost it is `brace_session`.
+
+**Login and logout:** call `session.regenerate()` at both — it drops the CSRF token minted
+before the privilege change and restarts the absolute lifetime:
+
+```java
+// login
+session.regenerate();
+session.set("userId", user.id);
+session.set("sessionVersion", user.sessionVersion);
+// logout
+session.clear();
+session.regenerate();
+```
+
+**Revocation:** the cookie is self-contained, so logout only clears the client's copy. To
+revoke sessions server-side (log out everywhere, password change, demotion), store a version at
+login and check it with `app.sessionValidator(session -> …)`, which runs once per request that
+reads a non-empty session; `false` makes the request anonymous and clears the cookie. Cache the
+per-user value — don't query on every request:
+
+```java
+app.sessionValidator(s -> !s.has("userId") || Objects.equals(s.get("sessionVersion"),
+    cache.getOrSet("session-version:" + s.get("userId"), "5m",
+        () -> dbFactory.withSession(db -> { return db.find(User.class, s.getLong("userId")).sessionVersion; }))));
+```
+
+**Rotating the secret:** `SessionOptions.of(newSecret).previousSecrets(oldSecret)` keeps old
+cookies working and re-seals them with the new secret; drop the old one after the absolute
+lifetime.
+
 ```java
 session.set("userId", user.id);        // store int
 session.set("role", "admin");          // store string

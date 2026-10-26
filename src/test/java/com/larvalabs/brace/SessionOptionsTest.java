@@ -90,7 +90,18 @@ public class SessionOptionsTest {
     public void testBuildSetCookieBasic() {
         var opts = SessionOptions.of("secret");
         var cookie = opts.buildSetCookie("cookievalue123");
-        assertEquals("brace_session=cookievalue123; Path=/; HttpOnly; Secure; SameSite=Lax", cookie);
+        // M10: Secure + Path=/ + no Domain, so the cookie gets the __Host- prefix.
+        assertEquals("__Host-brace_session=cookievalue123; Path=/; HttpOnly; Secure; SameSite=Lax", cookie);
+    }
+
+    @Test
+    public void hostPrefixOnlyWhereTheBrowserAllowsIt() {
+        assertEquals("__Host-brace_session", SessionOptions.of("secret").cookieName(true));
+        assertEquals("brace_session", SessionOptions.of("secret").cookieName(false), "not Secure: no prefix");
+        assertEquals("brace_session", SessionOptions.of("secret").domain("example.com").cookieName(true),
+            "a Domain attribute rules the prefix out");
+        assertEquals("brace_session", SessionOptions.of("secret").path("/app").cookieName(true),
+            "so does a path other than /");
     }
 
     @Test

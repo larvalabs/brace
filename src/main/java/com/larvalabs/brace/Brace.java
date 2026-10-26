@@ -197,6 +197,16 @@ public class Brace {
         return sessionSecret;
     }
 
+    /**
+     * The session cookie name for a request to this app over plain-HTTP localhost, which is how
+     * {@link TestApp} talks to it: {@code brace_session} unless the app forces {@code Secure}, in
+     * which case the {@code __Host-} name (M10).
+     */
+    String loopbackSessionCookieName() {
+        if (sessionOptions == null) return SessionOptions.COOKIE_NAME;
+        return sessionOptions.cookieName(sessionOptions.resolveSecure(true, false));
+    }
+
     SessionOptions sessionOptions() {
         return sessionOptions;
     }
@@ -1217,9 +1227,11 @@ public class Brace {
                         // Extract session from upgrade request cookie
                         Session braceSession = null;
                         if (sessionSecret != null) {
+                            // M10: the name this request would be given (__Host- when Secure).
+                            String cookieName = handler.sessionCookieName(handler.resolveCookieSecure(headers, remoteAddr));
                             var cookies = org.eclipse.jetty.server.Request.getCookies(upgradeRequest);
                             for (var cookie : cookies) {
-                                if ("brace_session".equals(cookie.getName())) {
+                                if (cookieName.equals(cookie.getName())) {
                                     braceSession = handler.decodeSession(cookie.getValue());
                                     break;
                                 }

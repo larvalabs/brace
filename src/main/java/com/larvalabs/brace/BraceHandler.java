@@ -262,6 +262,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // exit path agrees. See SessionOptions.resolveSecure for the rule.
             cookieSecure = resolveCookieSecure(
                 headers, org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest));
+            // M10: the session cookie's name follows the same resolution (__Host- when Secure).
+            final String sessionCookieName = sessionCookieName(cookieSecure);
 
             // Match route first. Static files and 404s must not pay request-body or
             // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
@@ -321,7 +323,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (match != null) {
                 for (var access : match.route().access()) {
                     if (access.usesSession() && session == null) {
-                        session = buildSession(headers);
+                        session = buildSession(headers, sessionCookieName);
                     }
                     Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
                     if (rejected != null) {
@@ -340,7 +342,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 for (var before : beforeSessionMiddleware) {
                     if (!before.matches(path)) continue;
                     if (session == null) {
-                        session = buildSession(headers);
+                        session = buildSession(headers, sessionCookieName);
                     }
                     Result earlyResult = before.handler().handle(braceRequest, session);
                     if (earlyResult != null) {
@@ -400,7 +402,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Build session if needed — reusing the instance a session-aware before
             // middleware already built (identity invariant; see above).
             if (session == null && invoker.needsSession()) {
-                session = buildSession(headers);
+                session = buildSession(headers, sessionCookieName);
             }
 
             // M5c: when the handler doesn't take a Session, a local csrfOnlySession holds the
@@ -411,7 +413,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // that never look at the session. It must never shadow a real handler session: it
             // exists only when session == null.
             if (sessionSecret != null && session == null) {
-                csrfOnlySession = new LazySession(headers);
+                csrfOnlySession = new LazySession(headers, sessionCookieName);
             }
 
             // CSRF validation for routes that require it when sessions are enabled.
@@ -666,14 +668,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     private final class LazySession {
         private final Map<String, String> headers;
+        private final String cookieName;
         private Session session;
 
-        LazySession(Map<String, String> headers) {
+        LazySession(Map<String, String> headers, String cookieName) {
             this.headers = headers;
+            this.cookieName = cookieName;
         }
 
         Session get() {
-            if (session == null) session = buildSession(headers);
+            if (session == null) session = buildSession(headers, cookieName);
             return session;
         }
 
@@ -881,7 +885,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * — nginx's default — otherwise makes every production request look like local development.
      * That signal can only add {@code Secure}, never remove it, so a forged Origin gains nothing.
      */
-    private boolean resolveCookieSecure(Map<String, String> headers, String remoteAddr) {
+    boolean resolveCookieSecure(Map<String, String> headers, String remoteAddr) {
         if (sessionOptions == null) return false; // legacy fallback cookie: unchanged behavior
         boolean forwardedHttps = false;
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
@@ -1381,13 +1385,18 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * a pending flash message before the page that should show it ever renders. Flash is
      * consumed lazily at View render time (or by an explicit {@code session.flash(key)} read).
      */
-    private Session buildSession(Map<String, String> headers) {
+    private Session buildSession(Map<String, String> headers, String cookieName) {
         if (sessionSecret != null) {
             sessionDecrypts.increment();
             String cookieHeader = headers.get("Cookie");
-            return decodeSession(parseCookieValue(cookieHeader, "brace_session"));
+            return decodeSession(parseCookieValue(cookieHeader, cookieName));
         }
         return new Session();
+    }
+
+    /** The session cookie name for a request whose Secure attribute resolved to {@code secure} (M10). */
+    String sessionCookieName(boolean secure) {
+        return sessionOptions != null ? sessionOptions.cookieName(secure) : SessionOptions.COOKIE_NAME;
     }
 
     /** Server-side session check (M10), or null. Set by {@link Brace} before start. */

@@ -434,7 +434,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     before/after.
   - **Tier: small.**
 
-- [ ] **M10: Sessions can't be revoked or rotated, and login doesn't rotate the CSRF token**, `Session.java:300-314`, `Csrf.java` (`ensureToken`), `SessionOptions.java:195`, `BraceHandler.parseCookieValue`
+- [x] **M10: Sessions can't be revoked or rotated, and login doesn't rotate the CSRF token**, `Session.java:300-314`, `Csrf.java` (`ensureToken`), `SessionOptions.java:195`, `BraceHandler.parseCookieValue`
   - **What's fine.** AES-256-GCM with random nonces, HttpOnly, SameSite=Lax, `Secure`
     resolved per request, and 256-bit CSRF tokens.
   - **Gaps.**
