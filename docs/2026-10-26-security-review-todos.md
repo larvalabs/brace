@@ -92,23 +92,20 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Attack.** An agent adds `app.getDb("/reports/export", reports::export)` to an app guarded
     by `requireSession("/app/*", …)`. The export is public, no test fails, and `/ops/routes`
     looks the same.
-  - **Fix.**
-    - Every route gets an access mode. Either it is covered by a guard, or it is explicitly
-      `.publicRoute()`.
-    - `app.defaultAccess(Guard)` applies a guard to every route that doesn't opt out.
-    - `group(prefix, guard, cfg)` binds the guard to the routes it registers.
-    - `start()` prints an "unguarded routes" table, and `/ops/routes` adds an `access` column.
-    - Enforced immediately: `start()` (and `Brace.test()`) fails on any route that is neither
-      covered nor marked public, and `brace check` reports the same.
-    - Register `/ops/*` through one authorizing wrapper (`opsRoute(READ, handler)`) instead of
-      per-method `authorize` calls.
-  - **Tests.**
-    - A route outside every guard pattern produces a startup warning or failure naming it.
-    - `.publicRoute()` silences it.
-    - A group-bound guard covers the group's routes and not sibling routes.
-    - Removing `authorize` from an ops handler body doesn't open the endpoint (the wrapper
-      covers it).
-  - **Tier: frontier.** It is a new core API, and the default changes over two releases.
+  - **Fix.** The route access model, specified in the fix plan's
+    [H1 design](2026-10-26-security-review-fix-plan.md#h1-design-the-route-access-model).
+    In short:
+    - Access requirements (`Access`) attach to route objects through `defaultAccess(...)`,
+      `group(prefix, access, cfg)` and `.access(...)`. They stack; `.publicRoute()` removes only
+      the default.
+    - They are resolved once at `start()`, which (with `Brace.test()`) fails on any route that
+      has neither a requirement nor `.publicRoute()`. `brace check` reports the same.
+    - `requireSession(pattern, …)` is removed; plain `before(...)` no longer counts as auth.
+    - `/ops/*` routes use `Access.ops(...)`, replacing the 17 per-method `authorize` calls.
+    - The startup banner and `/ops/routes` show each route's access.
+  - **Tests.** Listed in the design section: startup check, stacking, contradictions,
+    equivalent paths, rejections per client type, lifecycle order, ops and the M2 interaction.
+  - **Tier: frontier.** A new core API that every app and the framework's own tests change for.
 
 - [ ] **H2: WebSocket upgrades bypass all before-middleware, including `requireSession`**, `Brace.java:1140-1162`
   - **What's wrong.** The upgrade mapping runs in `WebSocketUpgradeHandler`, outside
@@ -120,16 +117,16 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Attack.** A socket under a guarded prefix that subscribes to a client-named room, or that
     assumes `ctx.session()` is authenticated, serves other users' pushes to unauthenticated
     clients.
-  - **Fix.**
-    - Build a `Request` from the upgrade request and run the path-matching `before` and
-      `beforeSession` chains.
-    - A guard that returns a Result rejects the handshake with that status (302 becomes 401;
-      a browser WebSocket can't follow redirects).
-    - Once H1 lands, WebSocket routes take part in the same access model (`app.ws(...)` needs a
-      guard or `.publicRoute()`).
+  - **Fix.** WebSocket routes join the H1 access model (see the fix plan's
+    [H1 design](2026-10-26-security-review-fix-plan.md#websockets-h2)):
+    - `app.ws(...)` takes `.access(...)`/`.publicRoute()` and inherits `defaultAccess`.
+    - The upgrade builds a `Request` and runs plain `before()`, then the route's requirements,
+      then the Origin check.
+    - A rejection declines the handshake (a session requirement answers 401, since a browser
+      WebSocket can't follow a redirect).
     - Document that `ctx.join(room)` is an authorization decision.
   - **Tests.**
-    - An unauthenticated upgrade under `requireSession` is rejected.
+    - An unauthenticated upgrade to a route under `Access.session` is rejected.
     - An authenticated one connects.
     - A `before` rate limiter applies to upgrades.
     - Origin check behavior is unchanged.
@@ -282,9 +279,9 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     3. htmx requests get no token automatically (doc note only, `BRACE-AGENTS.md:592-594`),
        so every non-form `hx-post` 403s until someone wires it up.
   - **Fix.**
-    - `start()` rejects a mutating route with `.csrf(false)` whose invoker needs the session,
-      or that a `beforeSession`/`requireSession` pattern covers. Opt out with
-      `.csrf(false, "reason")`, which also documents why.
+    - `start()` rejects a mutating route with `.csrf(false)` that uses the cookie session: its
+      handler takes a `Session`, or any of its resolved H1 access requirements reads the
+      session. Opt out with `.csrf(false, "reason")`, which also documents why.
     - Add a cross-site request check as a second layer that runs even without sessions:
       reject mutating requests whose `Sec-Fetch-Site` is `cross-site`, or whose `Origin` host
       doesn't match the effective host. Skip it for `.csrf(false)` routes.
@@ -292,8 +289,8 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
       `/__brace/csrf-htmx.js` (`htmx:configRequest` adds `X-CSRF-Token`), and put both in the
       scaffold layout.
   - **Tests.**
-    - Startup fails for `.csrf(false)` + `SessionHandler`, and also for a `Handler` under
-      `requireSession`.
+    - Startup fails for `.csrf(false)` + `SessionHandler`, and also for a plain `Handler`
+      covered by `Access.session`.
     - A cross-site `Sec-Fetch-Site`/`Origin` POST gets 403 with sessions off.
     - A same-origin POST passes.
     - An htmx POST from the scaffold layout succeeds end to end.

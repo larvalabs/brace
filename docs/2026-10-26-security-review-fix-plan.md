@@ -89,23 +89,17 @@ the order matters.
 
 | Order | ID | What | Size | Depends on |
 |---|---|---|---|---|
-| 1 | **H1** | Route access model: `.publicRoute()`, `defaultAccess(...)`, group-bound guards, an unguarded-routes report, an ops route wrapper | L | — |
-| 2 | **H2** | Run before and session guards on WebSocket upgrades; WS routes join the access model | M | H1 (coverage computation) |
-| 3 | **M2** | `.csrf(false)` + cookie-session startup check; cross-site request check without sessions; htmx CSRF wiring | M | H1 (coverage), M3 (`csrfToken`) |
+| 1 | **H1** | Route access model (see [H1 design](#h1-design-the-route-access-model)): `Access`, `defaultAccess`, group and route requirements, `.publicRoute()`, startup check, `/ops` via `Access.ops` | L | — |
+| 2 | **H2** | WebSocket routes join the access model; requirements run on upgrade | M | H1 |
+| 3 | **M2** | `.csrf(false)` + cookie-session startup check; cross-site request check without sessions; htmx CSRF wiring | M | H1 (resolved requirements), M3 (`csrfToken`) |
 | 4 | **M10** | `session.regenerate()`, session validator hook, previous secrets, `__Host-` cookie, absolute lifetime, reject cookies without `_exp` | L | M3 (token handling); may share helpers with M2 |
 | 5 | **M1** | Don't page-cache renders that consumed the CSRF field or flash | S | M3 |
 
 **Design notes:**
 
-- **H1: compute coverage once.** At `start()`, build a `route → [guards]` map by matching every
-  route pattern against every `before`/`beforeSession` pattern. A route pattern `/a/{id}` is
-  covered by `/a/*`. H1's report, H2's WebSocket check and M2's startup check all read this one
-  map, so build it as its own small class (`RouteAccess`) in the first H1 commit.
-- **H1: pick the public-route name now.** `.publicRoute()` reads poorly; `.allowAnonymous()` is
-  an alternative. Decide before the API ships (decision D1), because agents will copy it.
-- **H2: guard results on a socket.** A browser WebSocket client can't follow a redirect, so a
-  guard result of `302 /login` becomes a `401` handshake rejection. Any other status passes
-  through as is.
+- **H1 and H2:** the full design (API, resolution rules, lifecycle position, rejections,
+  WebSockets, `/ops`, tests and commit breakdown) is in
+  [H1 design: the route access model](#h1-design-the-route-access-model) below.
 - **M2: cross-site check.**
   - Prefer `Sec-Fetch-Site` when it is present: reject `cross-site`, allow `same-origin`,
     `same-site` and `none`.
@@ -118,6 +112,8 @@ the order matters.
 
 **Exit criteria:**
 
+- Every route in the framework's own `/ops` table and in `sample/` resolves to an access
+  requirement or `public`; `start()` fails on an unmarked route.
 - The repro probes are now tests:
   - a guarded WebSocket rejects unauthenticated upgrades;
   - `.csrf(false)` on a `SessionHandler` fails startup;
@@ -245,6 +241,207 @@ change from the earlier phases:
 5. Re-run the review's probes and tools (SpotBugs + find-sec-bugs, Semgrep, OSV) against the
    branch tip, and attach the deltas to the record.
 
+## H1 design: the route access model
+
+Agreed 2026-10-26. This replaces path-pattern auth guards. H2, M2 and the `/ops` rework build on
+it, and the scaffold (Phase 5) and docs adopt it.
+
+### The rule
+
+Every route carries a list of **access requirements**, attached to the route object itself, not
+to a path string. `start()` refuses to run if any route has no requirement and isn't explicitly
+public. This applies to HTTP routes, WebSocket routes and the framework's own `/ops` routes.
+
+### API
+
+```java
+// 1. App-wide default: applies to every route that doesn't opt out
+app.defaultAccess(Access.session("userId", "/login"));
+
+// 2. Group: applies to every route the group registers, on top of the default
+app.group("/admin", Access.check((req, s) -> "admin".equals(s.get("role")) ? null : Result.forbidden()),
+    admin -> {
+        admin.getDb("/users", adminCtl::users);
+        admin.postDb("/users/{id}/ban", adminCtl::ban);
+    });
+
+// 3. Single route, on top of default and group
+app.postDb("/billing/refund", billing::refund).access(Access.check(Billing::canRefund));
+
+// Opting out of the default: explicit and greppable
+app.get("/", home::index).publicRoute();
+app.post("/login", auth::login).publicRoute();
+
+// WebSockets use the same config
+app.ws("/live", Live::new);                 // gets the default
+app.ws("/status", Status::new).publicRoute();
+```
+
+`Access` is a guard: it returns `null` to allow the request, or a `Result` to reject it. It also
+declares whether it reads the session. It is a small sealed type in a new `Access.java`:
+
+| Factory | Behavior | Uses session |
+|---|---|---|
+| `Access.session(key, loginUrl)` | Allow if the session has `key`, else reject (see "Rejections") | yes |
+| `Access.check((req, session) -> Result)` | Custom logic; `null` allows | yes |
+| `Access.checkRequest(req -> Result)` | Custom logic without a session (e.g. a bearer-token check). A separate name rather than an overload of `check`, so method references never need a cast, following the `getDb`/`getSession` precedent. | no |
+| `Access.none()` | Only valid in `defaultAccess(...)`: an explicit statement that the app has no login. It is logged at startup in the access table. | no |
+| `Access.ops(OpsScope)` | Internal; used for the framework's `/ops` routes | no |
+
+### Resolution rules
+
+1. **Requirements stack (AND).** A route's effective list is, in order: the default, then its
+   groups from outer to inner, then its own `.access(...)` calls. A group or route can add
+   requirements but can never remove the default. The only way to remove it is
+   `.publicRoute()`.
+2. **`.publicRoute()` removes only the default.** It is a startup error to combine it with
+   `.access(...)`, or to use it inside a group that has a requirement. A public page goes
+   outside the restricted group.
+3. **Resolved once, at `start()`.** The effective list is computed and stored on `Route`, so
+   requests do no pattern matching for access. Trailing-slash variants, encoded paths and the
+   HEAD→GET fallback all resolve to the same `Route` object, so they get the same requirements.
+   This removes the class of bugs where a guard's path pattern and a route's path disagree.
+4. **The startup check.** After resolution, `start()` (and so `Brace.test()`) throws
+   `IllegalStateException` listing every route whose list is empty and that isn't public:
+
+   ```
+   IllegalStateException: 2 routes have no access requirement and are not marked public:
+     GET  /reports/export     (controllers.ReportsController::export)
+     WS   /live
+   Add app.defaultAccess(...), put them in a group with access, or mark them .publicRoute().
+   ```
+
+   It also throws when a session-reading requirement exists but `.sessions(...)` isn't
+   configured. That replaces today's `requireSession` misconfiguration check.
+5. **Plain middleware is not access.** `before(...)` and the session-aware
+   `before(pattern, (req, session) -> …)` stay for rate limiting, maintenance mode, flash and
+   last-seen touches, but they never count toward the check. That way a global rate limiter
+   can't accidentally "cover" every route.
+6. **`requireSession(pattern, …)` is removed.** Its job moves to `defaultAccess` and groups.
+   The migration guide shows the rewrite.
+
+### Where it runs in a request
+
+```
+match route
+  → plain before()                       rate limiters can still shed load first
+  → access requirements, in list order   one lazily-decrypted Session, shared
+  → session-aware before()
+  → body read → CSRF check → handler     handler gets the same Session instance
+```
+
+Requirements run before the body is read, so the guarantee that unauthenticated bodies aren't
+buffered (2026-07 M2) still holds. The session instance a requirement sees is the one the
+handler receives, which preserves today's identity invariant. An unmatched path runs no
+requirements and stays a 404. Static files and the bundled htmx asset aren't routes and stay
+public, which is why M7 adds an untrusted mode for upload directories.
+
+### Rejections
+
+A requirement's `Result` is sent through the normal response choke point, so after-middleware,
+security headers and session write-back all apply. `Access.session` picks the response from the
+request:
+
+| Request | Response |
+|---|---|
+| Browser page (non-htmx, non-JSON) | `302` to `loginUrl` |
+| htmx (`HX-Request: true`) | `401` with `HX-Redirect: <loginUrl>`, so htmx navigates instead of swapping the login page into a fragment |
+| JSON (`Accept` or `Content-Type` is JSON) | `401` |
+| WebSocket upgrade | `401` handshake rejection; a browser socket can't follow a redirect |
+
+Confirm the htmx case against the bundled htmx 2.0.10 in a browser test; it depends on htmx
+honoring `HX-Redirect` on a 4xx.
+
+### WebSockets (H2)
+
+`app.ws(...)` returns a config with `.access(...)` and `.publicRoute()`. The upgrade mapping in
+`Brace.java` builds a `Request` from the upgrade request and runs, in order:
+
+1. plain `before()`;
+2. the route's resolved access requirements;
+3. the Origin check.
+
+Any rejection declines the handshake with the rejection's status. The session handed to the
+socket is the one the requirements used. `ctx.join(room)` is still an authorization decision
+inside the handler; the docs say so.
+
+### `/ops`
+
+The framework registers every `/ops/*` route with `Access.ops(READ)` or `Access.ops(CONTROL)`,
+and `/ops/auth*` routes as public. The app's `defaultAccess` does not apply under `/ops`, which
+has its own credentials.
+
+`Access.ops` authenticates, audits (`OpsAudit`) and attaches the verified claims to the request,
+through a package-private field read by `OpsHandler`. The 17 per-method `authorize(...)` calls
+and `authorizedClaims(...)` lookups go away. `loginToken` and `dashboard` read the attached
+claims instead.
+
+### Interaction with M2 (CSRF)
+
+A route "uses the cookie session" if its handler type takes a `Session`, or if any of its
+resolved requirements is session-reading. M2's startup check reads this from the same resolved
+data: `.csrf(false)` on such a route is an error unless it gives a reason
+(`.csrf(false, "reason")`).
+
+### Visibility
+
+- **Startup banner:** each route line shows its access, e.g. `public`, `session:userId`,
+  `group:/admin + session:userId`, `ops:READ`. With `Access.none()` as the default, the banner
+  says so in a single warning line.
+- **`/ops/routes`:** gets an `access` field per route.
+- **`brace check`:** reports the same violations as `start()`, so CI catches them without
+  booting the app.
+
+### Commit breakdown (all under H1, except where noted)
+
+1. `Access` type, `Route` access list, `RouteConfig.access(...)`/`.publicRoute()`,
+   `defaultAccess`, and the group overload with nested-group inheritance. `BraceHandler` runs
+   requirements at the position shown above. Add the startup check, remove `requireSession`,
+   and migrate the framework's own tests.
+2. `/ops` routes via `Access.ops`, with per-method `authorize` removed.
+3. Visibility: banner, `/ops/routes` and `brace check`.
+4. **H2:** WebSocket routes in the model, with requirements run on upgrade.
+5. Docs: rewrite the `BRACE-AGENTS.md` middleware/auth section around `defaultAccess`; add an
+   "Authorization" section to `SECURITY.md` (covering route access here and object access in
+   H4); sweep `README.md`; update `sample/`; add a migration-guide entry with the
+   `requireSession` → `defaultAccess` rewrite.
+
+**Framework test suite.** Hundreds of existing tests register routes without access. Give
+`Brace` a package-private hook, used only by `com.larvalabs.brace` tests, that defaults to
+`Access.none()`, so the public API gets no bypass. `RouteAccessTest` runs with the check fully
+on.
+
+### Tests
+
+- **Startup check:**
+  - a route with no requirement fails `start()` and names the route and its handler;
+  - `.publicRoute()` clears it;
+  - `defaultAccess` covers every route;
+  - `Access.none()` passes and is logged.
+- **Stacking:**
+  - default + group + route are all enforced, in order;
+  - nested groups inherit from the outer group;
+  - a group requirement doesn't leak to sibling routes outside the group.
+- **Contradictions:** `.publicRoute()` combined with `.access(...)`, or used inside a guarded
+  group, fails startup.
+- **Equivalent paths:** trailing-slash, percent-encoded and HEAD requests to a guarded GET route
+  are all rejected.
+- **Rejections:**
+  - a page request redirects;
+  - htmx gets `401` + `HX-Redirect`;
+  - JSON gets `401`;
+  - a WebSocket handshake is declined;
+  - security headers are present on each.
+- **Lifecycle order:**
+  - a rate limiter in `before()` runs before access;
+  - a rejected request's body is never read;
+  - the handler receives the same `Session` instance the requirement saw.
+- **Ops:**
+  - every `/ops` route resolves to `ops:*` or public;
+  - a handler body with no auth code is still protected;
+  - audit records still appear.
+- **M2:** `.csrf(false)` on a route covered by `Access.session` fails startup.
+
 ## Breaking changes and rollout
 
 **Decision (2026-10-26):** Brace's only users are its maintainers' own apps, so every change is
@@ -254,7 +451,7 @@ migration-guide entry with a before/after, because the guide is how our own apps
 
 | ID | Change in 0.1.11 | What an app has to do |
 |---|---|---|
-| H1 | `start()` **fails** on any route that has no access requirement and isn't marked public | Add `defaultAccess(...)` and mark the public routes |
+| H1 | `start()` **fails** on any route that has no access requirement and isn't marked public; `requireSession` is removed | Replace `requireSession(pattern, …)` with `defaultAccess(...)` or a group requirement, and mark the public routes `.publicRoute()` |
 | H2 | Route access requirements apply to WebSocket upgrades | Nothing, unless a socket was meant to be anonymous: mark it public |
 | M2 | Startup **fails** on `.csrf(false)` for a route that uses the cookie session, unless `.csrf(false, "reason")` | Remove the opt-out or give a reason |
 | M2 | Cross-site check on mutating requests, even without sessions | Nothing for same-origin apps |
@@ -271,7 +468,7 @@ migration-guide entry with a before/after, because the guide is how our own apps
 
 | # | Decision | Status |
 |---|---|---|
-| D1 | H1: hard fail at `start()`, or a warning? Name of the public marker? | **Decided:** hard fail in 0.1.11, no escape hatch. Name still open: `.publicRoute()` (recommended) or `.allowAnonymous()`. |
+| D1 | H1: hard fail at `start()`, or a warning? Name of the public marker? | **Decided:** hard fail in 0.1.11, no warn-only mode; the marker is `.publicRoute()`. An app with no login at all states it with `defaultAccess(Access.none())`. Full design in [H1 design](#h1-design-the-route-access-model). |
 | D2 | H5: should `Http` default to public-only? | **Decided:** yes, in 0.1.11. Internal calls use `.trusted()`. |
 | D3 | M2: fail startup on `.csrf(false)` + cookie session, and turn on the cross-site check by default? | **Decided:** yes to both, in 0.1.11. |
 | D4 | M9: throw on `@Entity` binding immediately? | **Decided:** yes, in 0.1.11. |
