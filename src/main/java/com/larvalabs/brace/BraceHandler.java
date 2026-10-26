@@ -480,6 +480,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             try {
                 if (invoker.needsDatabase() && databaseFactory != null) {
                     var db = new Database(databaseFactory.openSession());
+                    db.checkQueriesAgainst(braceRequest, strictQueryChecks);
                     exchange.db = db;
                     try {
                         if (invoker.needsReadOnlyDatabase()) {
@@ -1421,6 +1422,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     /** Server-side session check (M10), or null. Set by {@link Brace} before start. */
     private SessionValidator sessionValidator;
+
+    // H3: whether request data found in a query string throws (dev mode, Brace.test()) or logs.
+    private volatile boolean strictQueryChecks;
+
+    void setStrictQueryChecks(boolean strict) {
+        this.strictQueryChecks = strict;
+    }
 
     void setSessionValidator(SessionValidator validator) {
         this.sessionValidator = validator;

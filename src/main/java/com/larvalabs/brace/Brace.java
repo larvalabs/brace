@@ -25,6 +25,8 @@ public class Brace {
     /** Package-private accessor used by tests that need to inspect/mutate route metadata. */
     List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
+    // Started by Brace.test(): request data in a query string throws instead of logging (H3).
+    private boolean testHarness;
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
     private SessionValidator sessionValidator;
     // H1 access model: the requirement every route gets unless it is marked .publicRoute().
@@ -1178,6 +1180,7 @@ public class Brace {
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
         handler.setAnalytics(analytics);
         handler.setSessionValidator(sessionValidator);
+        handler.setStrictQueryChecks(testHarness || "dev".equals(System.getProperty("brace.mode")));
         org.eclipse.jetty.server.Handler httpHandler = compression ? new CompressionHandler(handler) : handler;
 
         if (!wsRoutes.isEmpty()) {
@@ -1916,6 +1919,7 @@ public class Brace {
                 .port(0)
                 .banner(false)
                 .mailer(mailer);
+            app.testHarness = true;
 
             if (secret != null) {
                 // No .secure(false) needed: the harness talks to http://localhost, and the H2
