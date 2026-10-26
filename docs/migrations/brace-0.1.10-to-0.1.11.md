@@ -24,6 +24,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | `UploadedFile.safeFilename()`, `saveTo(dir, name)`, `Result.fileUnder` | new, security | switch uploads saved via `dir.resolve(file.filename())` | [§](#new-confined-upload-saving-and-file-serving) |
 | No `Server` header; plain-text errors for requests Jetty rejects | security | update monitors that match on `Server` or Jetty's HTML error text | [§](#security-no-server-header-plain-text-errors-for-rejected-requests) |
 | Stack traces in `/ops` are redacted like messages | security | none | [§](#security-stack-traces-are-redacted-like-messages) |
+| Static dotfiles return 404; dev warning for GETs that write | security | serve a deliberate dotfile from a route instead | [§](#security-static-dotfiles-return-404-dev-warning-for-gets-that-write) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -385,3 +386,16 @@ the message and every `Caused by:` message. The stack traces served by `/ops/sta
 lines. Frame (`at …`) lines are unchanged.
 
 No code change.
+
+## Security: static dotfiles return 404; dev warning for GETs that write
+
+A `staticFiles` mapping no longer serves any path with a segment starting with `.`: `.env`,
+`.git/config`, `.htaccess` and `assets/.hidden/x` are 404. The one exception is a leading
+`.well-known/`, so `/.well-known/security.txt` and ACME challenges still work. If you
+deliberately served a dotfile, rename it or serve it from a route.
+
+In dev mode (`brace.mode=dev`), Brace logs a warning once per route pattern when a GET or HEAD
+request's transaction writes (`db.insert`, `update`, `delete`, `deleteBy`, `sql(...)`). Session
+cookies are `SameSite=Lax` and CSRF checks cover mutating methods only, so a state-changing GET
+can be triggered from another site. Move such handlers to POST, PUT or DELETE. Writes through
+raw `db.jdbc(...)` are not detected. Nothing changes in prod.

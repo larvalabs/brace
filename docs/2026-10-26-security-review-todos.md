@@ -676,7 +676,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Add `Html.escape(String)` and an `html(gg.jte.Content)` overload.
   - **Tier: small.**
 
-- [ ] **L11: Mutating GETs aren't discouraged, and static mappings serve dotfiles**, `BraceHandler.java:436-447, 1105-1200`
+- [x] **L11: Mutating GETs aren't discouraged, and static mappings serve dotfiles**, `BraceHandler.java:436-447, 1105-1200`
   - **What's wrong.**
     - GET (and HEAD, via its fallback to the GET route) `DbHandler` routes run in a read-write
       transaction. With `SameSite=Lax`, a top-level cross-site GET carries the cookie, so a

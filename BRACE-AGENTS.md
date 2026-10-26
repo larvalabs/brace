@@ -623,6 +623,12 @@ CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests whe
 
 **Important:** Only disable CSRF for endpoints that do NOT use cookie-based authentication. Cookie-authenticated JSON endpoints still need CSRF protection.
 
+**GET and HEAD handlers must not change state.** CSRF checks cover POST/PUT/PATCH/DELETE only,
+and session cookies are `SameSite=Lax`, so a cross-site link or redirect can trigger a GET with
+the user's session. In dev mode Brace logs a warning, once per route, when a GET or HEAD
+transaction writes (`insert`/`update`/`delete`/`deleteBy`/`sql`; raw `jdbc(...)` is not
+detected).
+
 ## Cache
 
 TTL with tag-based invalidation:
@@ -821,6 +827,10 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 **StoredFile** record: `key()`, `url()`.
 
 ## Asset Fingerprinting
+
+`staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
+serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
+leading `.well-known/`.
 
 Cache-bust static assets by appending a content-hash query parameter — in a JTE template
 (or any code that produces URLs): `${Assets.url("/assets/app.css")}` →

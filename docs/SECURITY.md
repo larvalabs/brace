@@ -537,6 +537,11 @@ symlinks (`toRealPath`) before comparing, so a symlink under the served tree can
 file outside it — a lexical `normalize()` + `startsWith` check does not catch that, because
 the traversal happens in the filesystem rather than in the path string.
 
+Dotfiles and dot-directories (`.env`, `.git/config`, `.htaccess`, `assets/.hidden/x`) are never
+served (404), whatever the mapping; the only exception is a leading `.well-known/`, so ACME
+challenges and `security.txt` keep working. The check runs on the decoded path, so `%2eenv`
+is refused too.
+
 Symlinks that stay inside the served directory keep working. To serve a directory that
 lives elsewhere, register it as its own mapping rather than linking it into the web root:
 
