@@ -21,6 +21,7 @@ class PageCacheSessionDerivedTest {
     static final AtomicInteger formRenders = new AtomicInteger();
     static final AtomicInteger plainRenders = new AtomicInteger();
     static final AtomicInteger noFormRenders = new AtomicInteger();
+    static final AtomicInteger wrappedRenders = new AtomicInteger();
     static Cache plainCache;
 
     @BeforeAll
@@ -38,6 +39,11 @@ class PageCacheSessionDerivedTest {
                     return View.of("cachedForm");
                 }));
                 app.post("/cached-form", req -> Result.text("saved"));
+                // The View's output returned inside another Result, not as the View itself.
+                app.get("/cached-wrapped", Brace.cache().wrap("5m", req -> {
+                    wrappedRenders.incrementAndGet();
+                    return Result.json(Map.of("html", View.of("cachedForm").body()));
+                }));
                 // Same app (sessions on, so every render is handed CSRF tokens), but the
                 // template renders none and there is no flash: still cacheable.
                 app.get("/cached-noform", Brace.cache().wrap("5m", req -> {
@@ -98,6 +104,16 @@ class PageCacheSessionDerivedTest {
         sessionApp.get("/cached-form");
         sessionApp.get("/cached-form");
         assertEquals(2, formRenders.get() - before, "a render carrying a CSRF token must not be served from cache");
+    }
+
+    @Test
+    void viewOutputWrappedInAnotherResultIsNotStored() {
+        int before = wrappedRenders.get();
+        String first = sessionApp.get("/cached-wrapped").body();
+        sessionApp.evictSessionCookie();
+        String second = sessionApp.get("/cached-wrapped").body();
+        assertEquals(2, wrappedRenders.get() - before, "a wrapped render carrying a CSRF token must not be cached");
+        assertNotEquals(first, second);
     }
 
     @Test

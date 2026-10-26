@@ -18,6 +18,9 @@ public class View extends Result {
     // consumes the session's cookie-borne flash when — and only when — a View actually renders, so
     // flash survives requests that render nothing (redirects, JSON, polling).
     private static final ThreadLocal<Supplier<Map<String, String>>> currentFlash = new ThreadLocal<>();
+    // M1: the Views created while the page cache runs a handler. The cache checks the final response
+    // against all of them, since a handler can return a View's output inside another Result.
+    private static final ThreadLocal<List<View>> created = new ThreadLocal<>();
 
     static void setCsrfSession(Supplier<Session> sessionSupplier) { currentCsrfSession.set(sessionSupplier); }
     static void clearCsrfSession() { currentCsrfSession.remove(); }
@@ -104,7 +107,26 @@ public class View extends Result {
             params.put("flash", flash);
             carriesFlash = flash != null && !flash.isEmpty();
         }
-        return new View(template, params, csrfValues, carriesFlash);
+        var view = new View(template, params, csrfValues, carriesFlash);
+        List<View> recording = created.get();
+        if (recording != null) recording.add(view);
+        return view;
+    }
+
+    /** Runs {@code body}, adding every View it creates to {@code into} (M1, the page cache). */
+    static <T> T recordingViews(List<View> into, Supplier<T> body) {
+        List<View> outer = created.get();
+        created.set(into);
+        try {
+            return body.get();
+        } finally {
+            if (outer == null) {
+                created.remove();
+            } else {
+                outer.addAll(into); // a cached handler inside another one: the outer sees them too
+                created.set(outer);
+            }
+        }
     }
 
     /**
@@ -161,19 +183,22 @@ public class View extends Result {
     }
 
     /**
-     * Whether this render carries values taken from the visitor's session (M1): the CSRF field/token
-     * or pending flash. Such a response is per-visitor and must never be stored in a shared cache.
+     * Whether a response built while {@code views} were created carries values taken from the
+     * visitor's session (M1): pending flash, or a CSRF token in {@code output}. Such a response is
+     * per-visitor and must never be stored in a shared cache. {@code output} is the final response
+     * (body and headers), not each View's own render, so a View's body wrapped in
+     * {@code Result.html(...)} or a JSON field is caught too.
      */
-    boolean sessionDerived() {
-        if (carriesFlash) return true;
-        if (csrfValues.isEmpty()) return false;
-        // Every render on a CSRF-active route is handed tokens, but only one whose output contains
-        // them is per-visitor; a page with no form renders none and stays cacheable. The masked
-        // tokens are random per render and base64url (unchanged by HTML or JS escaping), so a
-        // substring match has no false positives and catches them in any context.
-        String out = body();
-        for (String value : csrfValues) {
-            if (out != null && out.contains(value)) return true;
+    static boolean sessionDerived(List<View> views, String output) {
+        for (View view : views) {
+            if (view.carriesFlash) return true;
+            // Every render on a CSRF-active route is handed tokens, but only a response that
+            // contains them is per-visitor; a page with no form shows none and stays cacheable.
+            // The masked tokens are random per render and base64url (unchanged by HTML, JS or JSON
+            // escaping), so a substring match has no false positives and catches them anywhere.
+            for (String value : view.csrfValues) {
+                if (output.contains(value)) return true;
+            }
         }
         return false;
     }

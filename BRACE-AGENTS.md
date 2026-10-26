@@ -742,8 +742,9 @@ or the cache will serve the same entry for every value. Undeclared params never 
 entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
 
 **A cached page is shared by every visitor**, so it must not contain per-visitor content. A
-render whose output includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`) or a
-pending flash message is served but not stored (dev mode logs it once per path); pages without
+response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose
+handler rendered a View carrying a pending flash message, is served but not stored — also when
+the handler returns a View's output inside another result (`Result.json(Map.of("html", view.body()))`) (dev mode logs it once per path); pages without
 forms or flash cache normally. Anything else per-user (a name in the header) is on you: don't
 wrap such pages.
 

@@ -5,6 +5,7 @@ import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -218,6 +219,13 @@ public class Cache {
         Result toResult() {
             return Result.raw(status, contentType, body, headers);
         }
+
+        /** Body and header values as one string, for View.sessionDerived's token search (M1). */
+        String textForTokenScan() {
+            var text = new StringBuilder(new String(body, StandardCharsets.UTF_8));
+            for (String value : headers.values()) text.append('\n').append(value);
+            return text.toString();
+        }
     }
 
     // Internal
@@ -379,14 +387,15 @@ public class Cache {
             var key = pageKey(request);
             var cached = cache.get(key, RenderedResponse.class);
             if (cached != null) return cached.toResult();
-            var result = handler.apply(request);
-            if (result instanceof View view && view.sessionDerived()) {
-                // M1: this render carries one visitor's CSRF token and/or pending flash. Storing it
+            var views = new ArrayList<View>();
+            var result = View.recordingViews(views, () -> handler.apply(request));
+            var rendered = RenderedResponse.from(result);
+            if (!views.isEmpty() && View.sessionDerived(views, rendered.textForTokenScan())) {
+                // M1: this response carries one visitor's CSRF token and/or pending flash. Storing it
                 // would replay them to every other visitor, so serve it uncached.
                 warnSessionDerived(request.path());
-                return RenderedResponse.from(result).toResult();
+                return rendered.toResult();
             }
-            var rendered = RenderedResponse.from(result);
             cache.setInternal(key, rendered, ttl, tags);
             // Replay the snapshot (not the original Result) so a miss and a hit return the same
             // materialized shape — downstream code sees identical bytes either way.

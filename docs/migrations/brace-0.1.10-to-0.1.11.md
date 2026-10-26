@@ -453,8 +453,10 @@ page that rendered a form (`${csrfField}` or `${csrfToken}`) or a flash message 
 the first visitor's CSRF token and flash text (which can include an email address) to every
 later visitor, and every later visitor's form was rejected with 403.
 
-A render whose output contains the visitor's CSRF token, or that carries a non-empty flash, is
-now served to that visitor but not stored. Pages without a form or flash are cached exactly as
+A response that contains the visitor's CSRF token, or whose handler rendered a View carrying a
+non-empty flash, is now served to that visitor but not stored. The check reads the final
+response, so a View's output returned inside another result (a JSON field, `Result.html(...)`)
+counts too. Pages without a form or flash are cached exactly as
 before, with or without sessions. In dev mode (`brace.mode=dev`) the first skipped render per
 path logs a warning.
 
