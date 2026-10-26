@@ -660,7 +660,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - An `http://` base is rejected.
   - **Tier: mid** (touches the release process; see `RELEASE.md`).
 
-- [ ] **L9: HTML responses carry no charset**, `View.java:39`, `Result.java:264`
+- [x] **L9: HTML responses carry no charset**, `View.java:39`, `Result.java:264`
   - **What's wrong.** The type is `text/html` alone. Layout-less pages are open to
     encoding-sniffing attacks: ISO-2022-JP `ESC ( J` undoes JTE's `\"` escaping inside
     `<script>`.

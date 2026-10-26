@@ -292,8 +292,8 @@ rejected with `413 Payload Too Large` before your handler runs.
 All response factory methods are on the `Result` class:
 
 ```java
-Result.text("hello")                        // 200 text/plain
-Result.html("<h1>hi</h1>")                  // 200 text/html
+Result.text("hello")                        // 200 text/plain; charset=utf-8
+Result.html("<h1>hi</h1>")                  // 200 text/html; charset=utf-8 — raw, NOT escaped: never put request or DB data in it
 Result.noContent()                          // 204
 Result.notFound()                           // 404
 Result.notFoundIfNull(thing)                // throws 404 if null, returns thing otherwise

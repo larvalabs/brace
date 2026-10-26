@@ -57,7 +57,7 @@ public class View extends Result {
     private boolean rendered;
 
     private View(String template, Map<String, Object> params) {
-        super(200, "text/html", (String) null);
+        super(200, "text/html; charset=utf-8", (String) null);
         this.template = template;
         this.params = params;
     }

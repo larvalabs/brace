@@ -19,6 +19,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
 | `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
 | `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
+| HTML and text responses declare `charset=utf-8` | security | tests that assert the exact `Content-Type` string | [§](#security-html-and-text-responses-declare-charsetutf-8) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -299,3 +300,23 @@ doubles (`-0.0` still equals `0`), integral types unchanged. `float`, `double`, 
 
 No code change is needed unless a form relied on a fractional value passing a bound it
 actually violates; that input now gets a field error.
+
+## Security: HTML and text responses declare `charset=utf-8`
+
+`View`, `Result.html` and the plain-text results (`Result.text`, `notFound`, `error`,
+`unauthorized`, `forbidden`, `badRequest`, `created`, `noContent`, `notModified`) now send
+`text/html; charset=utf-8` and `text/plain; charset=utf-8` instead of a bare `text/html` /
+`text/plain`. Without a declared charset, a page with no `<meta charset>` was open to
+encoding sniffing, which can undo the template's escaping inside `<script>`.
+
+Browsers render the same. Only code that compares the exact header string changes:
+
+```java
+// before
+assertEquals("text/html", res.header("Content-Type"));
+// after
+assertEquals("text/html; charset=utf-8", res.header("Content-Type"));
+```
+
+Results that set their own content type (`Result.bytes`, `Result.stream`, `Result.file`, ...)
+are unchanged.

@@ -94,7 +94,7 @@ class CacheSerializationTest {
         assertEquals(1, renders.get(), "B must serve A's cached render without re-running the handler");
         assertEquals("<p>hello</p>", bodyOf(first));
         assertEquals("<p>hello</p>", bodyOf(second));
-        assertEquals("text/html", second.contentType());
+        assertEquals("text/html; charset=utf-8", second.contentType());
     }
 
     @Test
@@ -109,7 +109,7 @@ class CacheSerializationTest {
         var hit = wrapped.apply(req);       // hit → rebuilt from bytes
 
         assertEquals(503, hit.status(), "status survives the serialization round-trip");
-        assertEquals("text/plain", hit.contentType());
+        assertEquals("text/plain; charset=utf-8", hit.contentType());
         assertEquals("120", hit.header("Retry-After"), "custom headers survive the round-trip");
         assertEquals("down for maintenance", bodyOf(hit));
     }

@@ -232,11 +232,11 @@ public class Result {
     }
 
     public static Result text(String body) {
-        return new Result(200, "text/plain", body);
+        return new Result(200, "text/plain; charset=utf-8", body);
     }
 
     public static Result notFound() {
-        return new Result(404, "text/plain", "Not Found");
+        return new Result(404, "text/plain; charset=utf-8", "Not Found");
     }
 
     public static <T> T notFoundIfNull(T value) {
@@ -245,24 +245,24 @@ public class Result {
     }
 
     public static Result error(int status, String message) {
-        return new Result(status, "text/plain", message);
+        return new Result(status, "text/plain; charset=utf-8", message);
     }
 
     public static Result noContent() {
-        return new Result(204, "text/plain", "");
+        return new Result(204, "text/plain; charset=utf-8", "");
     }
 
     /** A 304 Not Modified with an empty body, for conditional-GET revalidation hits. */
     public static Result notModified() {
-        return new Result(304, "text/plain", "");
+        return new Result(304, "text/plain; charset=utf-8", "");
     }
 
     public static Result unauthorized(String message) {
-        return new Result(401, "text/plain", message);
+        return new Result(401, "text/plain; charset=utf-8", message);
     }
 
     public static Result html(String body) {
-        return new Result(200, "text/html", body);
+        return new Result(200, "text/html; charset=utf-8", body);
     }
 
     public static Result json(Object value) {
@@ -286,23 +286,23 @@ public class Result {
     }
 
     public static Result unauthorized() {
-        return new Result(401, "text/plain", "Unauthorized");
+        return new Result(401, "text/plain; charset=utf-8", "Unauthorized");
     }
 
     public static Result forbidden() {
-        return new Result(403, "text/plain", "Forbidden");
+        return new Result(403, "text/plain; charset=utf-8", "Forbidden");
     }
 
     public static Result forbidden(String message) {
-        return new Result(403, "text/plain", message);
+        return new Result(403, "text/plain; charset=utf-8", message);
     }
 
     public static Result badRequest(String message) {
-        return new Result(400, "text/plain", message);
+        return new Result(400, "text/plain; charset=utf-8", message);
     }
 
     public static Result created(String location) {
-        return new Result(201, "text/plain", "Created")
+        return new Result(201, "text/plain; charset=utf-8", "Created")
             .header("Location", location);
     }
 
