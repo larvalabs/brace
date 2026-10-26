@@ -1706,6 +1706,7 @@ public class Brace {
             msg.append("\nAdd app.defaultAccess(...), put them in a group with access, or mark them .publicRoute().");
             throw new IllegalStateException(msg.toString());
         }
+        checkCsrfOptOuts(routes);
         if (readsSession && sessionSecret == null) {
             throw new IllegalStateException("A route has a session-reading access requirement "
                 + "(Access.session or Access.check) but sessions are not enabled — call .sessions(secret) "
@@ -1715,6 +1716,36 @@ public class Brace {
         if (defaultAccess != null && defaultAccess.isNone()) {
             Log.info("defaultAccess(Access.none()): routes without their own requirement are public");
         }
+    }
+
+    /**
+     * M2: a mutating route with {@code .csrf(false)} that uses the cookie session (its handler
+     * takes the Session, or an access requirement reads it) is forgeable from any site the user
+     * visits — {@code .csrf(false)} is for bearer-token routes. Refuse it unless the opt-out says
+     * why ({@code .csrf(false, "reason")}). Runs after access is resolved, since a requirement
+     * can be what makes a route session-authenticated.
+     */
+    private void checkCsrfOptOuts(List<Route> routes) {
+        if (sessionSecret == null) return; // no session cookie to forge requests with
+        var violations = new ArrayList<Route>();
+        for (Route route : routes) {
+            if (route.isFramework() || route.csrfRequired()) continue;
+            if (!BraceHandler.isMutating(route.method())) continue;
+            if (!route.usesCookieSession()) continue;
+            if (route.csrfOptOutReason() != null) {
+                Log.info("CSRF disabled on cookie-session route " + route.method() + " " + route.pattern()
+                    + ": " + route.csrfOptOutReason());
+                continue;
+            }
+            violations.add(route);
+        }
+        if (violations.isEmpty()) return;
+        var msg = new StringBuilder(".csrf(false) on a route that uses the cookie session makes it forgeable "
+            + "from any site the user visits:");
+        for (Route r : violations) msg.append("\n  ").append(String.format("%-6s %s", r.method(), r.pattern()));
+        msg.append("\n.csrf(false) is for bearer-token routes. Remove it and send the token (${csrfField}, "
+            + "${csrfMeta}), or say why the route is safe with .csrf(false, \"reason\").");
+        throw new IllegalStateException(msg.toString());
     }
 
     private static String describe(List<Access> group, List<Access> own) {

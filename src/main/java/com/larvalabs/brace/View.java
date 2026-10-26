@@ -88,8 +88,11 @@ public class View extends Result {
             String fieldToken = Csrf.maskedToken(session);
             String metaToken = Csrf.maskedToken(session);
             params.put("csrfField", new CsrfField(Csrf.hiddenFieldFor(fieldToken)));
-            // The bare masked token, for a <meta> tag that fetch/htmx read into X-CSRF-Token.
+            // The bare masked token, for a <meta> tag that fetch/htmx read into X-CSRF-Token, and
+            // that tag ready-made (M2): ${csrfMeta} in the layout plus /__brace/csrf-htmx.js makes
+            // every non-GET htmx request carry the token.
             params.put("csrfToken", metaToken);
+            params.put("csrfMeta", new CsrfField(Csrf.metaTagFor(metaToken)));
             csrfValues = List.of(fieldToken, metaToken);
         }
         boolean carriesFlash = false;

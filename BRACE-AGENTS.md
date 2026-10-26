@@ -645,22 +645,28 @@ Flash messages (display once, on the next request): `session.flash("notice", "Po
 
 ## CSRF
 
-CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Content-Type does **not** affect enforcement — `application/json` requests are validated the same as form submissions.
+CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Content-Type does **not** affect enforcement — `application/json` requests are validated the same as form submissions. On top of the token, every POST/PUT/DELETE/PATCH to a CSRF-protected route that a browser marks as cross-site (`Sec-Fetch-Site: cross-site`, or an `Origin` from another host) is refused with 403 — with or without sessions, so an app with its own auth cookie is covered too.
 
 - **Forms:** declare `@param gg.jte.Content csrfField = null` and put `${csrfField}` inside the
   `<form>` (an auto-provided hidden input). It is `Content`, so it renders as markup — never
   declare it `String` or reach for `$unsafe`. Its value is masked and changes on every render;
   that is expected, and any rendered value validates.
-- **AJAX/fetch/htmx:** declare `@param String csrfToken = null` and render
-  `<meta name="csrf-token" content="${csrfToken}">`, then send it in the `X-CSRF-Token` header
-  with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;
+- **htmx:** put `${csrfMeta}` (declare `@param gg.jte.Content csrfMeta = null`) in the layout's
+  `<head>` and load `<script src="/__brace/csrf-htmx.js"></script>` after htmx. Every non-GET
+  htmx request then carries the token; no per-element `hx-headers`.
+- **fetch:** declare `@param String csrfToken = null` and render
+  `<meta name="csrf-token" content="${csrfToken}">` (or use `${csrfMeta}`), then send it in the
+  `X-CSRF-Token` header with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;
   never print `Csrf.getToken(session)` into a page — a raw token repeated on every page can
   leak through compressed response sizes (BREACH; see "Response Compression" in
   `docs/SECURITY.md`).
 - **Bearer-token APIs (no cookies):** opt out per route with
   `app.post("/api/data", handler).csrf(false)`.
 
-**Important:** Only disable CSRF for endpoints that do NOT use cookie-based authentication. Cookie-authenticated JSON endpoints still need CSRF protection.
+**`.csrf(false)` on a route that uses the cookie session fails `start()`** — a handler that
+takes the `Session`, or a route under a session access requirement. Remove the opt-out and send
+the token, or, for a route that is genuinely safe to force (an idempotent sign-out, a deliberate
+cross-site callback), say why: `.csrf(false, "sign-out is idempotent")`.
 
 **GET and HEAD handlers must not change state.** CSRF checks cover POST/PUT/PATCH/DELETE only,
 and session cookies are `SameSite=Lax`, so a cross-site link or redirect can trigger a GET with
@@ -1277,7 +1283,10 @@ entirely — they reach neither stdout nor `/ops/logs`.
 
 ## htmx
 
-Bundled htmx 2.0.10 — add `<script src="/__brace/htmx.min.js"></script>` to your layout.
+Bundled htmx 2.0.10 — add `<script src="/__brace/htmx.min.js"></script>` to your layout, plus
+`${csrfMeta}` in the `<head>` and `<script src="/__brace/csrf-htmx.js"></script>` so non-GET htmx
+requests carry the CSRF token (see CSRF). An htmx request rejected by `Access.session` gets 401
+with `HX-Redirect`, so the browser navigates to the login page instead of swapping it in.
 Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize by detecting htmx requests:
 
 ```java

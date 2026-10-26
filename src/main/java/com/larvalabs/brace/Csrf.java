@@ -94,6 +94,11 @@ public class Csrf {
         return "<input type=\"hidden\" name=\"_csrf\" value=\"" + escape(maskedToken) + "\">";
     }
 
+    /** The {@code <meta name="csrf-token">} tag for an already-masked token (M2's ${csrfMeta}). */
+    static String metaTagFor(String maskedToken) {
+        return "<meta name=\"csrf-token\" content=\"" + escape(maskedToken) + "\">";
+    }
+
     /** Minimal HTML-attribute escaping for the token value. */
     private static String escape(String s) {
         if (s == null) return "";

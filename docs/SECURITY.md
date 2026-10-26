@@ -176,6 +176,34 @@ Brace automatically validates CSRF tokens on mutating requests (POST, PUT, DELET
    page from leaking the token through its size (see [Response Compression](#response-compression)).
    Outside a template, use `Csrf.maskedToken(session)` rather than `Csrf.getToken(session)`.
 
+### Cross-site requests
+
+Every POST/PUT/DELETE/PATCH to a CSRF-protected route is also checked against the browser's own
+account of where it came from, before the body is read:
+
+- `Sec-Fetch-Site: cross-site` → 403. `same-origin`, `same-site` (a sibling subdomain) and
+  `none` (typed, bookmarked) pass.
+- Without `Sec-Fetch-Site`, an `Origin` header must name the host the client addressed
+  (`X-Forwarded-Host` from a trusted proxy, else `Host`); another host, or `Origin: null`, → 403.
+- A request with neither header (curl, a server-to-server client) passes: it carries no ambient
+  cookie to abuse.
+
+This runs whether or not the app uses Brace sessions, so an app that authenticates with its own
+cookie is covered too; with sessions it backs up the token check (a leaked token alone is not
+enough cross-site). Routes with `.csrf(false)` are exempt.
+
+### Opt-outs are checked
+
+`.csrf(false)` is for bearer-token routes. On a mutating route that uses the cookie session —
+its handler takes the `Session`, or a session access requirement covers it — `start()` fails.
+A route that is safe to force anyway states why with `.csrf(false, "reason")`, which is logged
+at startup.
+
+### htmx
+
+`${csrfMeta}` renders `<meta name="csrf-token" content="…">` with a masked token, and the bundled
+`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request.
+
 ### Exemptions
 
 CSRF validation is **skipped** for:

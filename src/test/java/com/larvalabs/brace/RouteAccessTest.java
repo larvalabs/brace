@@ -262,7 +262,8 @@ class RouteAccessTest {
             a.strictAccessCheck();
             a.before(req -> "1".equals(req.queryParam("shed")) ? Result.error(429, "slow down") : null);
             a.defaultAccess(Access.session("userId", "/login"));
-            a.post("/upload", req -> Result.text("got " + req.body().length())).csrf(false);
+            a.post("/upload", req -> Result.text("got " + req.body().length()))
+                .csrf(false, "test fixture: about body reads, not CSRF");
         });
         try {
             assertEquals(429, app.request("POST", "/upload?shed=1").send().status(),

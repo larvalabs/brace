@@ -267,7 +267,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - A page with no CSRF field or flash is still cached.
   - **Tier: mid.**
 
-- [ ] **M2: CSRF can be silently disabled on cookie-authenticated routes**, `BraceHandler.java:374`, `RouteConfig.java:37`
+- [x] **M2: CSRF can be silently disabled on cookie-authenticated routes**, `BraceHandler.java:374`, `RouteConfig.java:37`
   - **Verified.** `app.post("/transfer", (SessionHandler) …).csrf(false)` starts with no
     warning, and a token-less POST returns 200, running with the cookie session.
   - **Gaps.**

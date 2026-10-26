@@ -141,6 +141,24 @@ public class Route {
         this.csrfRequired = required;
     }
 
+    // M2: why a cookie-session route is exempt from CSRF, when it is. Brace.start() refuses a
+    // mutating .csrf(false) route that uses the cookie session unless one is given.
+    private String csrfOptOutReason;
+
+    String csrfOptOutReason() { return csrfOptOutReason; }
+
+    void setCsrfOptOut(String reason) {
+        this.csrfRequired = false;
+        this.csrfOptOutReason = reason;
+    }
+
+    /** True if the handler takes the Session or a resolved access requirement reads it (M2). */
+    boolean usesCookieSession() {
+        if (invoker != null && invoker.needsSession()) return true;
+        for (Access a : access) if (a.usesSession()) return true;
+        return false;
+    }
+
     void setName(String name) {
         this.name = name;
     }

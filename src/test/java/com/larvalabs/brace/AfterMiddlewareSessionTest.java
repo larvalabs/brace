@@ -36,7 +36,7 @@ class AfterMiddlewareSessionTest {
         app.post("/login", (SessionHandler) (req, session) -> {
             session.set("user", "alice");
             return Result.text("ok");
-        }).csrf(false);
+        }).csrf(false, "test fixture: this test is about cookie persistence, not CSRF");
 
         // Protected handler: reads from session
         app.get("/whoami", (SessionHandler) (req, session) -> {

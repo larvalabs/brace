@@ -42,6 +42,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private final TrustedProxies trustedProxies;
     private final byte[] htmxJs;
     private final String htmxEtag; // content-derived validator for the bundled htmx asset (L21)
+    // M2: the bundled htmx CSRF helper (sends ${csrfMeta}'s token as X-CSRF-Token), served like htmx.
+    private final byte[] csrfHtmxJs;
+    private final String csrfHtmxEtag;
     // L3: dev mode is detected once at construction from the brace.mode system property —
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
@@ -206,6 +209,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.htmxEtag = htmxBytes == null ? null
             : "\"htmx-" + Long.toHexString(htmxBytes.length) + "-"
                 + Integer.toHexString(java.util.Arrays.hashCode(htmxBytes)) + "\"";
+        byte[] csrfBytes = null;
+        try (var stream = BraceHandler.class.getResourceAsStream("/brace/csrf-htmx.js")) {
+            if (stream != null) csrfBytes = stream.readAllBytes();
+        } catch (Exception ignored) {}
+        this.csrfHtmxJs = csrfBytes;
+        this.csrfHtmxEtag = csrfBytes == null ? null
+            : "\"csrf-htmx-" + Long.toHexString(csrfBytes.length) + "-"
+                + Integer.toHexString(java.util.Arrays.hashCode(csrfBytes)) + "\"";
         this.devMode = "dev".equals(System.getProperty("brace.mode"));
     }
 
@@ -364,6 +375,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // the handler — so nothing downstream sees a half-set-up request. An over-limit body
             // throws to the PayloadTooLargeException catch below, which owns every 413 regardless of
             // who triggered the read.
+            // M2: refuse a cross-site mutating request on a CSRF-protected route, whether or not the
+            // app uses Brace sessions. With sessions it backs up the token check; without them (an
+            // app with its own auth cookie) it is the only CSRF defence. Before the body is read, so
+            // a forged request costs nothing. .csrf(false) routes (bearer-token APIs, deliberate
+            // cross-site callbacks) are exempt.
+            if (match.route().csrfRequired() && isMutating(method) && isCrossSite(headers, remoteAddr)) {
+                respond(braceRequest, Result.json(java.util.Map.of("error", "cross_site_request"), 403),
+                    response, callback, session, csrfOnlySession, cookieSecure, exchange);
+                return true;
+            }
+
             braceRequest.resolveBody();
 
             // Build the invoker
@@ -395,9 +417,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // CSRF validation for routes that require it when sessions are enabled.
             // M5a: PATCH is mutating — added alongside POST/PUT/DELETE.
             if (sessionSecret != null && match.route().csrfRequired()) {
-                boolean isMutating = method.equals("POST") || method.equals("PUT")
-                    || method.equals("DELETE") || method.equals("PATCH");
-                if (isMutating) {
+                if (isMutating(method)) {
                     Session csrfSession = session != null ? session : csrfOnlySession.get();
                     // One body parser: _csrf extraction sees the same decoded, last-wins
                     // view of the form body as FormBinder (it used to be a third divergent
@@ -1160,6 +1180,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     private Result serveStaticFile(Request request) {
         String requestPath = request.path();
+        if ("/__brace/csrf-htmx.js".equals(requestPath) && csrfHtmxJs != null) {
+            String cacheControl = "public, max-age=0, must-revalidate";
+            if (isNotModified(request, csrfHtmxEtag, 0)) {
+                return Result.notModified().header("ETag", csrfHtmxEtag).header("Cache-Control", cacheControl);
+            }
+            return Result.bytes(csrfHtmxJs, "text/javascript; charset=utf-8")
+                .header("X-Content-Type-Options", "nosniff")
+                .header("ETag", csrfHtmxEtag)
+                .header("Cache-Control", cacheControl);
+        }
         if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
             // Bundled, version-pinned asset served from memory. NOT immutable — a brace upgrade can
             // change the bytes at this fixed URL — so use an ETag + revalidate-always, letting
@@ -1359,6 +1389,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             return Session.fromCookie(sessionCookie, sessionSecret);
         }
         return new Session();
+    }
+
+    /** POST, PUT, DELETE and PATCH: the methods CSRF protection covers. */
+    static boolean isMutating(String method) {
+        return method.equals("POST") || method.equals("PUT")
+            || method.equals("DELETE") || method.equals("PATCH");
+    }
+
+    /**
+     * M2: whether a mutating request came from another site, by the browser's own account of it.
+     * {@code Sec-Fetch-Site} when present (every current browser sends it): only
+     * {@code cross-site} is refused; {@code same-site} (a sibling subdomain) and {@code none}
+     * (typed or bookmarked) pass. Otherwise the {@code Origin} host must be the host the client
+     * addressed; an unparseable or {@code null} Origin is refused. No header at all (curl, a
+     * server-to-server client) passes: such a client carries no ambient cookie to abuse.
+     */
+    boolean isCrossSite(Map<String, String> headers, String remoteAddr) {
+        String site = headers.get("Sec-Fetch-Site");
+        if (site != null) return site.strip().equalsIgnoreCase("cross-site");
+        String origin = headers.get("Origin");
+        if (origin == null || origin.isBlank()) return false;
+        String host = ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies);
+        return !Brace.originAllowed(origin, host, List.of());
     }
 
     /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */

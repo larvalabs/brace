@@ -31,6 +31,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | The page cache no longer stores pages that carry a CSRF token or flash | security | none | [§](#security-the-page-cache-no-longer-stores-per-visitor-pages) |
 | Every route needs an access requirement or `.publicRoute()`; `requireSession` removed | security, **breaking** | add `defaultAccess(...)`, mark public routes | [§](#breaking-every-route-needs-an-access-requirement) |
 | WebSocket upgrades run `before()` and access requirements; `app.ws(...)` returns a `RouteConfig` | security, **breaking** | split builder chains that continue after `.ws(...)` | [§](#breaking-websocket-upgrades-are-guarded) |
+| `.csrf(false)` on a cookie-session route fails `start()`; cross-site mutating requests refused; `${csrfMeta}` + `csrf-htmx.js` | security, **breaking** | remove the opt-out or give `.csrf(false, "reason")` | [§](#breaking-csrf-opt-outs-are-checked-and-cross-site-requests-refused) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -539,4 +540,35 @@ var app = Brace.app().port(8080);
 app.ws("/live", Live::new);
 app.ws("/status", Status::new).publicRoute();
 ```
+
+## Breaking: CSRF opt-outs are checked and cross-site requests refused
+
+Three changes.
+
+**`.csrf(false)` on a cookie-session route fails `start()`.** `.csrf(false)` is meant for
+bearer-token routes, but nothing checked that, so it could silently switch CSRF off on a route
+authenticated by the session cookie. Now a POST/PUT/DELETE/PATCH route with `.csrf(false)` whose
+handler takes the `Session`, or that a session access requirement covers, fails `start()` with
+the routes listed. Remove the opt-out and send the token, or, if the route is genuinely safe to
+force, say why:
+
+```java
+// before
+app.postSession("/logout", auth::logout).csrf(false);
+// after
+app.postSession("/logout", auth::logout).csrf(false, "sign-out is idempotent");
+```
+
+**Cross-site mutating requests are refused.** A POST/PUT/DELETE/PATCH to a CSRF-protected route
+that the browser marks `Sec-Fetch-Site: cross-site`, or whose `Origin` names another host (or is
+`null`), gets 403 before the body is read. This applies with or without Brace sessions, so an
+app that sets its own auth cookie is now covered. Requests without either header (curl,
+server-to-server) are unaffected, and so are `.csrf(false)` routes. A route that legitimately
+receives cross-site browser POSTs (a payment provider's return URL, a SAML endpoint) needs
+`.csrf(false)`, with a reason if it uses the session.
+
+**htmx CSRF wiring.** Add `${csrfMeta}` to the layout's `<head>` (declare
+`@param gg.jte.Content csrfMeta = null`) and `<script src="/__brace/csrf-htmx.js"></script>`
+after htmx, and every non-GET htmx request carries the token. Replace any per-element
+`hx-headers` CSRF wiring with it.
 

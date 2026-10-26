@@ -34,11 +34,11 @@ class TestAppHelpersTest {
                 app.get("/whoami", (SessionHandler) (req, session) ->
                     Result.text(String.valueOf(session.get("user"))));
                 app.post("/api/echo", (SessionHandler) (req, session) ->
-                    Result.text(session.get("user") + ":" + req.body())).csrf(false);
+                    Result.text(session.get("user") + ":" + req.body())).csrf(false, "test fixture: exercises the TestApp request helpers, not CSRF");
                 app.put("/api/items", (SessionHandler) (req, session) ->
-                    Result.text(session.get("user") + ":" + req.formParam("title"))).csrf(false);
+                    Result.text(session.get("user") + ":" + req.formParam("title"))).csrf(false, "test fixture: exercises the TestApp request helpers, not CSRF");
                 app.delete("/api/items", (SessionHandler) (req, session) ->
-                    Result.text("deleted-by:" + session.get("user"))).csrf(false);
+                    Result.text("deleted-by:" + session.get("user"))).csrf(false, "test fixture: exercises the TestApp request helpers, not CSRF");
 
                 // CSRF-protected mutating routes — the default when sessions are enabled.
                 app.post("/protected", (SessionHandler) (req, session) ->
