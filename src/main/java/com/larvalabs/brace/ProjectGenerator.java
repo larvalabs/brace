@@ -206,8 +206,11 @@ public class App {
      *   Brace.test().templates("views").start(App::routes)
      */
     public static void routes(Brace app) {
+        // Every route needs an access requirement or .publicRoute(); start() refuses otherwise.
+        // Once the app has a login, require it everywhere by default and mark the public pages:
+        //   app.defaultAccess(Access.session("userId", "/login"));
         var home = new HomeController();
-        app.get("/", home::index).name(Routes.HOME);
+        app.get("/", home::index).name(Routes.HOME).publicRoute();
         // DB-backed routes use the typed registration methods, e.g.:
         //   app.getRead("/posts", posts::index).name(Routes.POSTS);   // read-only DB handler
         //   app.postDb("/posts", posts::create);                      // transactional DB handler

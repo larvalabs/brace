@@ -4,6 +4,7 @@ This document describes Brace's security features and best practices for buildin
 
 ## Table of Contents
 
+- [Authorization](#authorization)
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
 - [Serialization](#serialization)
@@ -18,6 +19,48 @@ This document describes Brace's security features and best practices for buildin
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
 - [Secrets Management](#secrets-management)
+
+---
+
+## Authorization
+
+### Route access is required, not opt-in
+
+Every route — HTTP and WebSocket — carries a list of access requirements, and `start()`
+refuses to run while any route has none and isn't explicitly marked `.publicRoute()`. A route
+therefore cannot become public by being registered outside a guarded path, or by its author
+forgetting a guard: the app fails to start (and its tests fail) instead.
+
+```java
+app.defaultAccess(Access.session("userId", "/login"));  // applies to every route
+app.get("/", home::index).publicRoute();                 // explicit, greppable opt-out
+app.group("/admin", Access.check((req, s) ->
+    "admin".equals(s.get("role")) ? null : Result.forbidden()), admin -> { ... });
+```
+
+Requirements are bound to the `Route` object at `start()`, not matched against the request
+path, so a guard and a route can't disagree about a path: `/admin/x/`, `/admin/%78` and
+`HEAD /admin/x` reach the same route and run the same requirements. They run after plain
+`before(...)` middleware (so a rate limiter sheds load first) and before the request body is
+read, so an unauthenticated client can't make the app buffer a body. Rejections go through the
+normal response path, so security headers and session write-back apply.
+
+Plain `before(...)` middleware never counts as access. The previous model —
+`requireSession("/admin/*", …)` path-pattern guards — is removed.
+
+The framework's own `/ops/*` routes follow the same rule: each is registered with the ops
+credential requirement (`ops:read` or `ops:control`), the handlers carry no auth code, and an
+ops route registered without one fails `start()`. The app's default access never applies under
+`/ops`.
+
+`/ops/routes` and the startup banner list each route's resolved access.
+
+### Object-level access is the handler's job
+
+Route access answers "may this user call this endpoint". It does not answer "may this user
+touch row 42": `GET /posts/{id}/edit` is reachable by every logged-in user, and loading the
+post by id returns anyone's post. Check ownership after loading — and return 404, not 403, so
+the response doesn't confirm the row exists.
 
 ---
 
@@ -78,9 +121,36 @@ altered without the secret.
 - **Reserved key.** `_exp` is server-managed: `session.set("_exp", …)` is silently
   ignored, and `_exp` is stripped from the decrypted data so it never appears via
   `get`/`has`.
-- **Back-compat (0.1.7):** cookies minted by ≤0.1.6 have no `_exp` and are **accepted**
-  this release (re-minted with `_exp` on the next write). A future release will reject
-  expiry-less cookies — see the 0.1.6→0.1.7 migration guide.
+- **Absolute lifetime (`_abs`).** `_exp` moves forward with every write, so on its own a
+  session that is used (or replayed) continuously never expires. `_abs` is stamped once, when
+  the session is first issued, and carried unchanged: 30 days by default, or `maxAge` if that
+  is longer (`SessionOptions.absoluteMaxAge(Duration)`). `session.regenerate()` restarts it.
+- **No `_exp`, no session.** Cookies minted by 0.1.6 or earlier carry no `_exp`; accepted
+  through 0.1.10, rejected since 0.1.11.
+
+### Rotation and revocation
+
+- **`session.regenerate()`** at login and logout drops the CSRF token minted before the
+  privilege change (one seen on a shared computer, or planted by a tossed cookie, is useless
+  afterwards) and restarts the absolute lifetime.
+- **Server-side revocation.** A sealed cookie is valid until it expires, wherever it is copied
+  to. `app.sessionValidator(session -> boolean)` runs once per request that reads a non-empty
+  session, and on WebSocket upgrades; returning false makes the request anonymous and clears
+  the client's cookie. Compare a version stored in the session at login with the user's
+  current one to implement "log out everywhere", password-change logout and immediate
+  demotion. Cache the lookup.
+- **Secret rotation.** `SessionOptions.previousSecrets(...)` opens cookies sealed with earlier
+  secrets and re-seals them with the current one, so rotating logs nobody out. The ops token
+  secret is derived from the session secret, so ops clients re-authenticate after a rotation.
+- **Cookie name.** Wherever the browser allows it (`Secure`, `Path=/`, no `Domain` — every
+  default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
+  set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant
+  a session or CSRF token of its choosing, and a request reads only the name it would be given,
+  so a tossed `brace_session` is ignored. Plain-HTTP localhost keeps `brace_session`, and so
+  does an app behind a proxy that rewrites `Host` to a loopback address: there `Secure` is
+  inferred per request from the browser's `Origin`/`Referer`, which come and go, and the name
+  must not change with them. Pass the real host through (see "Pass the real `Host` through") to
+  get the prefix.
 
 ### Example: Storing User Session Data
 
@@ -132,6 +202,35 @@ Brace automatically validates CSRF tokens on mutating requests (POST, PUT, DELET
    page. Validation accepts the masked form and the raw token alike. This keeps a compressed
    page from leaking the token through its size (see [Response Compression](#response-compression)).
    Outside a template, use `Csrf.maskedToken(session)` rather than `Csrf.getToken(session)`.
+
+### Cross-site requests
+
+Every POST/PUT/DELETE/PATCH to a CSRF-protected route is also checked against the browser's own
+account of where it came from, before the body is read:
+
+- `Sec-Fetch-Site: cross-site` → 403. `same-origin`, `same-site` (a sibling subdomain) and
+  `none` (typed, bookmarked) pass.
+- Without `Sec-Fetch-Site`, an `Origin` header must name the host the client addressed
+  (`X-Forwarded-Host` from a trusted proxy, else `Host`); another host, or `Origin: null`, → 403.
+- A request with neither header (curl, a server-to-server client) passes: it carries no ambient
+  cookie to abuse.
+
+This runs whether or not the app uses Brace sessions, so an app that authenticates with its own
+cookie is covered too; with sessions it backs up the token check (a leaked token alone is not
+enough cross-site). Routes with `.csrf(false)` are exempt.
+
+### Opt-outs are checked
+
+`.csrf(false)` is for bearer-token routes. On a mutating route that uses the cookie session —
+its handler takes the `Session`, or a session access requirement or a session-aware
+`before(pattern, BeforeSession)` covers it — `start()` fails.
+A route that is safe to force anyway states why with `.csrf(false, "reason")`, which is logged
+at startup.
+
+### htmx
+
+`${csrfMeta}` renders `<meta name="csrf-token" content="…">` with a masked token, and the bundled
+`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request.
 
 ### Exemptions
 
@@ -604,6 +703,11 @@ What it doesn't cover, and what to do:
 
 ## WebSockets
 
+A WebSocket upgrade runs plain `before(...)` middleware, then the `Origin` check below, then
+the route's access requirements (see [Authorization](#authorization)); a rejection declines the
+handshake. Before 0.1.11 the upgrade ran no guard at all, so a socket under a guarded path
+accepted anonymous clients.
+
 WebSocket upgrades are validated against the request's `Origin`. A handshake is **not**
 subject to the same-origin policy, so without this an attacker's page could open a socket
 to your app, have the browser attach the victim's session cookie, and hold an authenticated
@@ -621,9 +725,9 @@ socket for its lifetime (cross-site WebSocket hijacking).
 Declare deliberate cross-origin clients:
 
 ```java
-app.wsAllowedOrigins("https://studio.example.com")   // exact origin: scheme, host and port
-   .ws("/live", ctx -> new LiveHandler(ctx));
-app.wsAllowedOrigins("studio.example.com")           // bare host: any scheme or port
+app.wsAllowedOrigins("https://studio.example.com");  // exact origin: scheme, host and port
+app.wsAllowedOrigins("studio.example.com");          // bare host: any scheme or port
+app.ws("/live", ctx -> new LiveHandler(ctx));
 ```
 
 Prefer the full origin: listing `https://studio.example.com` does not admit

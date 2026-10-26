@@ -133,6 +133,9 @@ class OpsIntegrationTest {
         assertTrue(response.body().contains("GET"));
         assertTrue(response.body().contains("\"name\":\"hello\""), "named routes expose their name: " + response.body());
         assertFalse(response.body().contains("\"name\":null"), "unnamed routes omit the key: " + response.body());
+        // H1: each route reports its resolved access.
+        assertTrue(response.body().contains("\"pattern\":\"/ops/status\",\"access\":\"ops:read\""), response.body());
+        assertTrue(response.body().contains("\"pattern\":\"/ops/auth\",\"access\":\"public\""), response.body());
     }
 
     @Test

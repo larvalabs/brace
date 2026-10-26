@@ -303,6 +303,10 @@ public class TestApp {
         return app.sessionSecret();
     }
 
+    String sessionCookieName() {
+        return app.loopbackSessionCookieName();
+    }
+
     /**
      * Evict any {@code brace_session} cookie captured in the shared cookie jar. With
      * sessions enabled the framework mints a CSRF token (and Set-Cookie) on the first
@@ -314,7 +318,7 @@ public class TestApp {
     void evictSessionCookie() {
         var store = cookieManager.getCookieStore();
         for (var cookie : new java.util.ArrayList<>(store.getCookies())) {
-            if ("brace_session".equals(cookie.getName())) {
+            if (sessionCookieName().equals(cookie.getName())) {
                 store.remove(null, cookie);
             }
         }

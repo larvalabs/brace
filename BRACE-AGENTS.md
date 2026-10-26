@@ -66,6 +66,7 @@ var app = Brace.app()
     .database(db)
     .templates("views")
     .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
+    .defaultAccess(Access.session("userId", "/login"))   // every route requires login unless .publicRoute()
     .trustedProxies("10.0.0.0/8", "172.16.0.0/12")
     .mailer(new Mailer(config.get("smtp.url")).from("noreply@app.com"))
     .cache(Brace.cache())
@@ -76,7 +77,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -173,6 +174,52 @@ Url.query("tag", List.of("a", "b"))                      // tag=a&tag=b
 query and change one parameter (sort or filter links), use `req.urlWith(name, value)`; for
 page links use `Paged` (see Database → Pagination).
 
+## Access
+
+**Every route needs an access requirement or `.publicRoute()`.** `start()` — and so
+`Brace.test()` — refuses to start otherwise and lists the unmarked routes. Requirements attach
+to routes, never to path patterns:
+
+```java
+app.defaultAccess(Access.session("userId", "/login"));  // every route, unless marked public
+app.get("/", home::index).publicRoute();                 // opt out of the default
+app.post("/login", auth::login).publicRoute();
+
+app.group("/admin", Access.check((req, s) -> "admin".equals(s.get("role")) ? null : Result.forbidden()),
+    admin -> admin.getRead("/users", ctrl::list));      // default + group requirement
+
+app.postDb("/billing/refund", billing::refund)
+    .access(Access.check(Billing::canRefund));          // default + route requirement
+```
+
+| Factory | Meaning |
+|---|---|
+| `Access.session(key, loginUrl)` | Logged in: the session has `key`. Otherwise a page gets 302 to `loginUrl`, htmx gets 401 + `HX-Redirect`, JSON gets 401 |
+| `Access.check((req, session) -> …)` | Custom check; return `null` to allow, a `Result` to reject |
+| `Access.checkRequest(req -> …)` | Custom check without the session (bearer token, IP allowlist) |
+| `Access.insteadOfDefault(requirement)` | `requirement` replaces the default for the route or group it's on: a bearer-token API or signature-checked webhook in a session-login app |
+| `Access.none()` | Only as `defaultAccess`: the app has no login, every route is public (logged at startup) |
+
+- Requirements **stack**: the default, then groups outer to inner (`RouteGroup.group(sub,
+  access, cfg)` nests), then the route's own `.access(...)`. All must pass.
+- A route that authenticates differently (an API with bearer tokens, a webhook with a
+  signature) uses `Access.insteadOfDefault(...)`, on the route or its group:
+  `app.group("/api", Access.insteadOfDefault(Access.checkRequest(Api::bearer)), g -> ...)`.
+  Don't mark it `.publicRoute()` and check inside the handler.
+- `.publicRoute()` removes **only** the default. Combining it with `.access(...)`, or using it
+  inside a group that has a requirement, fails `start()`: register public pages outside the
+  restricted group.
+- They run after plain `before(...)` middleware (rate limiters shed load first) and before the
+  body is read and CSRF is checked. A session-reading requirement sees the same `Session` the
+  handler gets, and needs `.sessions(...)` (`start()` throws without it).
+- They are bound to the route, so `/x/`, percent-encoded and `HEAD` requests to a guarded route
+  are guarded the same way. WebSocket routes work the same: `app.ws(...).publicRoute()`.
+- `/ops/*` has its own credential; the app default never applies there. The startup banner and
+  `/ops/routes` show each route's access.
+
+This is route-level access — whether a user may call the endpoint. Whether they may touch a
+particular row (`/posts/{id}/edit` for someone else's post) is still the handler's check.
+
 ## Middleware
 
 Before middleware runs before the handler. Return `null` to continue, or a `Result` to short-circuit:
@@ -182,35 +229,25 @@ app.before(req -> req.header("X-Maintenance") != null ? Result.error(503, "down"
 app.before("/api/*", req -> req.header("Authorization") == null ? Result.unauthorized() : null);
 ```
 
-**Auth guards use session-aware before-middleware** — never repeat a login check inside
-handlers. The one-liner covers the whole subtree:
+**Auth is not middleware** — use access requirements (see Access). `before(...)` never counts
+toward the `start()` check. The 2-arg `before` receives the session — the SAME instance the
+handler gets, so mutations persist via the normal cookie write-back — for session work that
+isn't an access decision:
 
 ```java
-app.requireSession("/admin/*", "userId", "/login");  // redirect to /login unless session has userId
+app.before("/app/*", (req, session) -> { session.set("lastSeen", Instant.now().toString()); return null; });
 ```
 
-`requireSession` requires `.sessions(secret)` — `start()` throws without it (an empty
-per-request session would make the guard redirect forever).
-
-For custom logic, the 2-arg `before` receives the session — the SAME instance the handler
-gets, so mutations made in the guard persist via the normal cookie write-back:
-
-```java
-app.before("/admin/*", (req, session) ->
-    "admin".equals(session.get("role")) ? null : Result.forbidden());
-```
-
-Session-aware before-middleware runs after all plain `before(...)` middleware and before
-CSRF validation. Handlers behind the guard can assume the session key is present.
+Session-aware before-middleware runs after plain `before(...)` and the route's access
+requirements, and before CSRF validation.
 
 Pattern semantics: a trailing `/*` matches the bare prefix too — `/admin/*` covers
-`/admin`, `/admin/`, and `/admin/anything` — so a guard cannot be bypassed by requesting
-the prefix itself. Only a trailing wildcard is allowed; an interior wildcard
+`/admin`, `/admin/`, and `/admin/anything`. Only a trailing wildcard is allowed; an interior wildcard
 (`/api/*/admin`) throws `IllegalArgumentException` at startup.
 
 A trailing-slash request (`/users/`) is routed to the `/users` route and is then treated as
 `/users` throughout: middleware patterns, `req.path()` and the handler all see the canonical
-path, so an exact-path guard on `/admin` also covers `/admin/`.
+path, so exact-path middleware on `/admin` also covers `/admin/`.
 
 After middleware can transform the response:
 
@@ -589,6 +626,40 @@ client's `Max-Age`. The horizon is `SessionOptions.maxAge()` when set, otherwise
 `_exp` is a reserved, server-managed key — `session.set("_exp", …)` is silently ignored.
 (Details: the 0.1.6→0.1.7 migration guide's session-expiry section.)
 
+Sessions also carry an **absolute lifetime** (`_abs`) that, unlike `_exp`, never slides: 30
+days from sign-in by default, or `maxAge` if longer; `SessionOptions.absoluteMaxAge(Duration)`
+to set it. In production the cookie is named `__Host-brace_session` (a sibling subdomain can't
+set it); on plain-HTTP localhost it is `brace_session`.
+
+**Login and logout:** call `session.regenerate()` at both — it drops the CSRF token minted
+before the privilege change and restarts the absolute lifetime:
+
+```java
+// login
+session.regenerate();
+session.set("userId", user.id);
+session.set("sessionVersion", user.sessionVersion);
+// logout
+session.clear();
+session.regenerate();
+```
+
+**Revocation:** the cookie is self-contained, so logout only clears the client's copy. To
+revoke sessions server-side (log out everywhere, password change, demotion), store a version at
+login and check it with `app.sessionValidator(session -> …)`, which runs once per request that
+reads a non-empty session; `false` makes the request anonymous and clears the cookie. Cache the
+per-user value — don't query on every request:
+
+```java
+app.sessionValidator(s -> !s.has("userId") || Objects.equals(s.get("sessionVersion"),
+    cache.getOrSet("session-version:" + s.get("userId"), "5m",
+        () -> dbFactory.withSession(db -> { return db.find(User.class, s.getLong("userId")).sessionVersion; }))));
+```
+
+**Rotating the secret:** `SessionOptions.of(newSecret).previousSecrets(oldSecret)` keeps old
+cookies working and re-seals them with the new secret; drop the old one after the absolute
+lifetime.
+
 ```java
 session.set("userId", user.id);        // store int
 session.set("role", "admin");          // store string
@@ -608,22 +679,29 @@ Flash messages (display once, on the next request): `session.flash("notice", "Po
 
 ## CSRF
 
-CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Content-Type does **not** affect enforcement — `application/json` requests are validated the same as form submissions.
+CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Content-Type does **not** affect enforcement — `application/json` requests are validated the same as form submissions. On top of the token, every POST/PUT/DELETE/PATCH to a CSRF-protected route that a browser marks as cross-site (`Sec-Fetch-Site: cross-site`, or an `Origin` from another host) is refused with 403 — with or without sessions, so an app with its own auth cookie is covered too.
 
 - **Forms:** declare `@param gg.jte.Content csrfField = null` and put `${csrfField}` inside the
   `<form>` (an auto-provided hidden input). It is `Content`, so it renders as markup — never
   declare it `String` or reach for `$unsafe`. Its value is masked and changes on every render;
   that is expected, and any rendered value validates.
-- **AJAX/fetch/htmx:** declare `@param String csrfToken = null` and render
-  `<meta name="csrf-token" content="${csrfToken}">`, then send it in the `X-CSRF-Token` header
-  with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;
+- **htmx:** put `${csrfMeta}` (declare `@param gg.jte.Content csrfMeta = null`) in the layout's
+  `<head>` and load `<script src="/__brace/csrf-htmx.js"></script>` after htmx. Every non-GET
+  htmx request then carries the token; no per-element `hx-headers`.
+- **fetch:** declare `@param String csrfToken = null` and render
+  `<meta name="csrf-token" content="${csrfToken}">` (or use `${csrfMeta}`), then send it in the
+  `X-CSRF-Token` header with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;
   never print `Csrf.getToken(session)` into a page — a raw token repeated on every page can
   leak through compressed response sizes (BREACH; see "Response Compression" in
   `docs/SECURITY.md`).
 - **Bearer-token APIs (no cookies):** opt out per route with
   `app.post("/api/data", handler).csrf(false)`.
 
-**Important:** Only disable CSRF for endpoints that do NOT use cookie-based authentication. Cookie-authenticated JSON endpoints still need CSRF protection.
+**`.csrf(false)` on a route that uses the cookie session fails `start()`** — a handler that
+takes the `Session`, or a route under a session access requirement or a session-aware
+`before(pattern, BeforeSession)` guard. Remove the opt-out and send
+the token, or, for a route that is genuinely safe to force (an idempotent sign-out, a deliberate
+cross-site callback), say why: `.csrf(false, "sign-out is idempotent")`.
 
 **GET and HEAD handlers must not change state.** CSRF checks cover POST/PUT/PATCH/DELETE only,
 and session cookies are `SameSite=Lax`, so a cross-site link or redirect can trigger a GET with
@@ -662,6 +740,13 @@ page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("
 or the cache will serve the same entry for every value. Undeclared params never key the cache
 (so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
 entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
+
+**A cached page is shared by every visitor**, so it must not contain per-visitor content. A
+response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose
+handler rendered a View carrying a pending flash message, is served but not stored — also when
+the handler returns a View's output inside another result (`Result.json(Map.of("html", view.body()))`) (dev mode logs it once per path); pages without
+forms or flash cache normally. Anything else per-user (a name in the header) is on you: don't
+wrap such pages.
 
 Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path are cached separately (they don't clobber each other).
 
@@ -921,8 +1006,14 @@ try (var s = Http.post(url).bodyJson(request).stream()) {
 ## WebSocket
 
 ```java
-app.ws("/chat", ctx -> new ChatHandler(ctx));
+app.ws("/chat", ctx -> new ChatHandler(ctx));               // gets the app's default access
+app.ws("/status", ctx -> new StatusHandler(ctx)).publicRoute();
 ```
+
+The upgrade runs plain `before(...)` middleware, the Origin check, then the route's access
+requirements (see Access); any rejection declines the handshake (a login redirect becomes 401).
+The socket's `session()` is the session the requirements read. Joining a room is still an
+authorization decision: check the user may see a room before `ctx.join(room)`.
 
 `WsContext` methods: `send(message)`, `join(room)`, `leave(room)`, `broadcast(room, message)`, `session()`, `close()`.
 
@@ -1228,7 +1319,10 @@ entirely — they reach neither stdout nor `/ops/logs`.
 
 ## htmx
 
-Bundled htmx 2.0.10 — add `<script src="/__brace/htmx.min.js"></script>` to your layout.
+Bundled htmx 2.0.10 — add `<script src="/__brace/htmx.min.js"></script>` to your layout, plus
+`${csrfMeta}` in the `<head>` and `<script src="/__brace/csrf-htmx.js"></script>` so non-GET htmx
+requests carry the CSRF token (see CSRF). An htmx request rejected by `Access.session` gets 401
+with `HX-Redirect`, so the browser navigates to the login page instead of swapping it in.
 Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize by detecting htmx requests:
 
 ```java

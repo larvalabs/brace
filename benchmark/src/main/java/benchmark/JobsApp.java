@@ -41,7 +41,8 @@ public class JobsApp {
 
         var app = Brace.app()
             .port(Integer.parseInt(System.getenv().getOrDefault("PORT", "8081")))
-            .database(db);
+            .database(db)
+            .defaultAccess(Access.none()); // benchmark endpoints are public
 
         app.get("/ping-db", (DbHandler) (req, session) ->
             Json.of(Map.of("one", session.sqlQueryLong("SELECT 1"))));

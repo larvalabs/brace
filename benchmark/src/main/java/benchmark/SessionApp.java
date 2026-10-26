@@ -16,7 +16,8 @@ public class SessionApp {
     public static void main(String[] args) throws Exception {
         var app = Brace.app()
             .port(Integer.parseInt(System.getenv().getOrDefault("PORT", "8081")))
-            .sessions("brace-benchmark-session-secret-0123456789abcdef");
+            .sessions("brace-benchmark-session-secret-0123456789abcdef")
+            .defaultAccess(Access.none()); // benchmark endpoints are public
 
         // Prime: establish a session with a value and a CSRF token; body = the token.
         app.get("/sess/prime", (SessionHandler) (req, session) -> {

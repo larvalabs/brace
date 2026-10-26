@@ -77,7 +77,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
 
 ## High
 
-- [ ] **H1: Routes are allow-by-default, and auth is a parallel list not tied to routes**, `Router.java:20-43`, `Middleware.java:57-88`, `Brace.java:910`, `RouteGroup.java`
+- [x] **H1: Routes are allow-by-default, and auth is a parallel list not tied to routes**, `Router.java:20-43`, `Middleware.java:57-88`, `Brace.java:910`, `RouteGroup.java`
   - **What's wrong.**
     - A route registers with only method, pattern and handler; no access declaration exists.
     - Protection is a separate list of path patterns (`requireSession("/admin/*", …)`,
@@ -107,7 +107,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     equivalent paths, rejections per client type, lifecycle order, ops and the M2 interaction.
   - **Tier: frontier.** A new core API that every app and the framework's own tests change for.
 
-- [ ] **H2: WebSocket upgrades bypass all before-middleware, including `requireSession`**, `Brace.java:1140-1162`
+- [x] **H2: WebSocket upgrades bypass all before-middleware, including `requireSession`**, `Brace.java:1140-1162`
   - **What's wrong.** The upgrade mapping runs in `WebSocketUpgradeHandler`, outside
     `BraceHandler`. It checks only Origin, then hands the decrypted session to the handler.
     No before or session guard runs, and neither does `RateLimiter`.
@@ -243,7 +243,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
 
 ## Medium
 
-- [ ] **M1: The page cache serves one user's CSRF token and flash message to every visitor**, `Cache.java:353-375`, `View.java:55-63`, `BraceHandler.java:412-430`
+- [x] **M1: The page cache serves one user's CSRF token and flash message to every visitor**, `Cache.java:353-375`, `View.java:55-63`, `BraceHandler.java:412-430`
   - **What's wrong.** `View.of` resolves the CSRF field and flash into the template params, and
     `BraceHandler` wires both for plain `Handler` routes too. `CachedHandler` then stores the
     rendered body.
@@ -267,7 +267,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - A page with no CSRF field or flash is still cached.
   - **Tier: mid.**
 
-- [ ] **M2: CSRF can be silently disabled on cookie-authenticated routes**, `BraceHandler.java:374`, `RouteConfig.java:37`
+- [x] **M2: CSRF can be silently disabled on cookie-authenticated routes**, `BraceHandler.java:374`, `RouteConfig.java:37`
   - **Verified.** `app.post("/transfer", (SessionHandler) …).csrf(false)` starts with no
     warning, and a token-less POST returns 200, running with the cookie session.
   - **Gaps.**
@@ -434,7 +434,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     before/after.
   - **Tier: small.**
 
-- [ ] **M10: Sessions can't be revoked or rotated, and login doesn't rotate the CSRF token**, `Session.java:300-314`, `Csrf.java` (`ensureToken`), `SessionOptions.java:195`, `BraceHandler.parseCookieValue`
+- [x] **M10: Sessions can't be revoked or rotated, and login doesn't rotate the CSRF token**, `Session.java:300-314`, `Csrf.java` (`ensureToken`), `SessionOptions.java:195`, `BraceHandler.parseCookieValue`
   - **What's fine.** AES-256-GCM with random nonces, HttpOnly, SameSite=Lax, `Secure`
     resolved per request, and 256-bit CSRF tokens.
   - **Gaps.**

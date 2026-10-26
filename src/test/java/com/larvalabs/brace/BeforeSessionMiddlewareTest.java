@@ -20,9 +20,6 @@ class BeforeSessionMiddlewareTest {
                 app.before("/admin/*", req ->
                     "1".equals(req.queryParam("blockPlain")) ? Result.forbidden("plain-first") : null);
 
-                // The one-line auth guard.
-                app.requireSession("/admin/*", "userId", "/login");
-
                 // A session-aware guard that MUTATES the session before passing through —
                 // the handler must observe the same instance.
                 app.before("/admin/*", (req, session) -> {
@@ -37,14 +34,17 @@ class BeforeSessionMiddlewareTest {
                     return Redirect.to("/login");
                 });
 
-                app.getSession("/admin/home", (req, session) ->
-                    Result.text(session.get("userId") + ":" + session.get("guardTouched")));
+                // The auth guard: an access requirement bound to the group's routes (H1).
+                app.group("/admin", Access.session("userId", "/login"), admin -> {
+                    admin.getSession("/home", (req, session) ->
+                        Result.text(session.get("userId") + ":" + session.get("guardTouched")));
 
-                // Guarded route whose handler takes no session at all — the guard still applies.
-                app.get("/admin/plainhandler", req -> Result.text("plain-ok"));
+                    // Guarded route whose handler takes no session at all — the guard still applies.
+                    admin.get("/plainhandler", req -> Result.text("plain-ok"));
 
-                // Mutating guarded route: CSRF interplay must be unchanged.
-                app.postSession("/admin/save", (req, session) -> Result.text("saved"));
+                    // Mutating guarded route: CSRF interplay must be unchanged.
+                    admin.postSession("/save", (req, session) -> Result.text("saved"));
+                });
 
                 app.getSession("/login", (req, session) ->
                     Result.text("login:" + session.flash("notice")));
@@ -64,9 +64,10 @@ class BeforeSessionMiddlewareTest {
     }
 
     @Test
-    void bareGuardPrefixIsCoveredToo() {
-        var response = testApp.get("/admin");
-        assertEquals(302, response.status());
+    void bareGroupPrefixWithNoRouteIsNotFound() {
+        // Access is bound to routes, not to a path prefix: with no /admin route there is
+        // nothing to guard or serve.
+        assertEquals(404, testApp.get("/admin").status());
     }
 
     @Test
@@ -106,21 +107,22 @@ class BeforeSessionMiddlewareTest {
     }
 
     @Test
-    void requireSessionWithoutSessionsThrowsAtStartup() {
-        // Without .sessions(secret) every request gets an empty session, so the guard
+    void sessionAccessWithoutSessionsThrowsAtStartup() {
+        // Without .sessions(secret) every request gets an empty session, so the requirement
         // redirects forever — a provable infinite loop whose runtime symptom
         // (ERR_TOO_MANY_REDIRECTS) points nowhere. Startup must fail, not warn.
         var ex = assertThrows(IllegalStateException.class, () ->
-            Brace.test().start(app ->
-                app.requireSession("/x/*", "userId", "/login")));
-        assertTrue(ex.getMessage().contains("/x/*"), ex.getMessage());
+            Brace.test().start(app -> {
+                app.defaultAccess(Access.session("userId", "/login"));
+                app.get("/x", req -> Result.text("x"));
+            }));
         assertTrue(ex.getMessage().contains(".sessions(secret)"), ex.getMessage());
     }
 
     @Test
     void genericBeforeSessionWithoutSessionsWarnsAtStartup() throws Exception {
         // A generic BeforeSession may be read-only or tolerant of an empty session,
-        // so it keeps the loud warning instead of the requireSession throw.
+        // so it keeps the loud warning instead of the session-access throw.
         LogTap.clear();
         var noSessions = Brace.test().start(app ->
             app.before("/x/*", (req, session) -> null));

@@ -26,8 +26,16 @@ public class Brace {
     List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
-    /** First requireSession pattern, or null — backs the start()-time misconfiguration check. */
-    private String requireSessionPattern;
+    private SessionValidator sessionValidator;
+    // H1 access model: the requirement every route gets unless it is marked .publicRoute().
+    private Access defaultAccess;
+    /**
+     * Default used when the app sets none. Null for every app (start() then refuses unmarked
+     * routes); the framework's own test suite sets {@link #frameworkTestDefaultAccess} through a
+     * test-only JUnit listener so its hundreds of fixture routes don't each need a marker.
+     */
+    private Access fallbackDefaultAccess = frameworkTestDefaultAccess;
+    static volatile Access frameworkTestDefaultAccess;
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
@@ -56,7 +64,11 @@ public class Brace {
     private BraceHandler handler; // set by start(); read by tests through handler()
     private Cache cache;
     private Storage storage;
-    private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
+    // WebSocket routes by path. Each carries a Route (method "WS") so it takes part in the H1
+    // access model exactly like an HTTP route; it is not in the Router, which matches HTTP only.
+    private final Map<String, WsRoute> wsRoutes = new LinkedHashMap<>();
+
+    record WsRoute(Route route, Function<WsContext, Object> factory) {}
     private WsRegistry wsRegistry;
     private long wsMaxQueuedBytes = 4L * 1024 * 1024; // M18: per-connection outgoing backlog cap (4 MB)
     // M3: extra origins allowed to open a WebSocket. Same-origin is always allowed; this is the
@@ -183,6 +195,15 @@ public class Brace {
 
     String sessionSecret() {
         return sessionSecret;
+    }
+
+    /**
+     * The session cookie name for a request to this app over localhost, which is how
+     * {@link TestApp} talks to it: always {@code brace_session}, since a loopback host never gets
+     * the {@code __Host-} prefix (M10).
+     */
+    String loopbackSessionCookieName() {
+        return SessionOptions.COOKIE_NAME;
     }
 
     SessionOptions sessionOptions() {
@@ -502,9 +523,18 @@ public class Brace {
         return this;
     }
 
-    public Brace ws(String path, Function<WsContext, Object> handlerFactory) {
-        wsRoutes.put(path, handlerFactory);
-        return this;
+    /**
+     * A WebSocket endpoint. It takes part in the access model like any route (H2): it gets the
+     * app's default access unless marked {@code .publicRoute()}, takes {@code .access(...)}, and
+     * the upgrade request runs plain {@code before()} middleware, the Origin check, then the
+     * route's access requirements; any rejection declines the handshake. Inside the socket,
+     * joining a room is still an authorization decision for the handler.
+     */
+    public RouteConfig ws(String path, Function<WsContext, Object> handlerFactory) {
+        router.requireNotStarted("Registering WS " + path);
+        var route = new Route("WS", path, handlerFactory, null);
+        wsRoutes.put(path, new WsRoute(route, handlerFactory));
+        return new RouteConfig(this, route);
     }
 
     /**
@@ -869,6 +899,47 @@ public class Brace {
         return this;
     }
 
+    /**
+     * A group whose routes all carry {@code requirement}, on top of the app's default access.
+     * The requirement is bound to the routes the group registers, not to the prefix, so a route
+     * can't fall outside it by its path.
+     */
+    public Brace group(String prefix, Access requirement, Consumer<RouteGroup> config) {
+        var group = new RouteGroup(prefix, router, RouteGroup.extend(List.of(), requirement));
+        config.accept(group);
+        return this;
+    }
+
+    /**
+     * A server-side check on every decoded session (M10): return false to revoke it — "log out
+     * everywhere", a password change, a demoted role. The usual check compares a version stored in
+     * the session at login with the user's current one. See {@link SessionValidator}.
+     */
+    public Brace sessionValidator(SessionValidator validator) {
+        this.sessionValidator = validator;
+        return this;
+    }
+
+    // Access
+
+    /**
+     * The access requirement every route gets unless it is marked {@code .publicRoute()}:
+     * typically {@code Access.session("userId", "/login")}. {@link #start()} refuses to start
+     * while any route has no requirement and isn't public; an app with no login at all says so
+     * with {@code defaultAccess(Access.none())}. See {@link Access}.
+     */
+    public Brace defaultAccess(Access requirement) {
+        if (requirement == null) throw new IllegalArgumentException("defaultAccess must not be null");
+        this.defaultAccess = requirement;
+        return this;
+    }
+
+    /** Framework tests that exercise the access check itself: no fallback default. */
+    Brace strictAccessCheck() {
+        this.fallbackDefaultAccess = null;
+        return this;
+    }
+
     // Middleware
 
     public Brace before(Middleware.Before handler) {
@@ -897,24 +968,6 @@ public class Brace {
         beforeSessionMiddleware.add(new Middleware.BoundBeforeSession(
                 Middleware.PathPattern.compile(pathPattern), handler));
         return this;
-    }
-
-    /**
-     * The one-line auth guard: redirect to {@code redirectTo} unless the session has
-     * {@code sessionKey}. Equivalent to
-     * {@code before(pattern, (req, session) -> session.has(key) ? null : Redirect.to(redirectTo))}.
-     * Handlers under the pattern can then assume the key is present.
-     *
-     * <p>Requires sessions: {@link #start()} throws {@link IllegalStateException} if a
-     * requireSession guard is registered without {@code .sessions(secret)} — without a
-     * session the guard is a provable infinite redirect loop.
-     */
-    public Brace requireSession(String pathPattern, String sessionKey, String redirectTo) {
-        if (requireSessionPattern == null) {
-            requireSessionPattern = pathPattern;
-        }
-        return before(pathPattern, (req, session) ->
-                session.has(sessionKey) ? null : Redirect.to(redirectTo));
     }
 
     public Brace after(Middleware.After handler) {
@@ -975,19 +1028,11 @@ public class Brace {
         if (trustedProxies != null) {
             trustedProxies.resumeRefresh();
         }
-        // Session-aware middleware without .sessions(secret) is a silent trap: every
-        // request gets a fresh empty Session. For requireSession that is *provably* an
-        // infinite redirect loop (the session can never carry the key), and the runtime
-        // symptom — ERR_TOO_MANY_REDIRECTS — points nowhere near the cause, so fail at
-        // start(). A generic BeforeSession may be read-only or otherwise tolerant of an
-        // empty session, so it keeps the loud warning instead.
+        // Session-aware middleware without .sessions(secret) is a silent trap: every request
+        // gets a fresh empty Session. A session-reading access requirement fails start() for
+        // that (see resolveAccess); a generic BeforeSession may be read-only or otherwise
+        // tolerant of an empty session, so it keeps the loud warning instead.
         if (sessionSecret == null) {
-            if (requireSessionPattern != null) {
-                throw new IllegalStateException("requireSession(\"" + requireSessionPattern
-                    + "\", ...) is registered but sessions are not enabled — call .sessions(secret) "
-                    + "before start(). Without it every request sees an empty session, so the guard "
-                    + "redirects unconditionally: an infinite redirect loop (ERR_TOO_MANY_REDIRECTS).");
-            }
             if (!beforeSessionMiddleware.isEmpty()) {
                 Log.warn("Session-aware before-middleware (before(pattern, BeforeSession)) "
                     + "is registered but sessions are not enabled — call .sessions(secret). Without it "
@@ -1067,26 +1112,26 @@ public class Brace {
             }
             // Ops POSTs use signed-payload or bearer auth, not cookies — CSRF is the wrong layer
             // and would block the CLI on any app that also calls .sessions(...).
-            router.add("POST", "/ops/auth", noStore(opsHandler::auth)).setCsrfRequired(false);
-            router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken)).setCsrfRequired(false);
-            router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange));
-            router.add("GET", "/ops/status", noStore(opsHandler::status));
-            router.add("GET", "/ops/routes", noStore(opsHandler::routes));
-            router.add("GET", "/ops/logs", noStore(opsHandler::logs));
-            router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard));
-            router.add("GET", "/ops/errors", noStore(opsHandler::errors));
-            router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail));
-            router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError)).setCsrfRequired(false);
-            router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache)).setCsrfRequired(false);
-            router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats));
-            router.add("GET", "/ops/regressions", noStore(opsHandler::regressions));
-            router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression)).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/auth", noStore(opsHandler::auth)), null).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken)), opsHandler.access(OpsScope.READ)).setCsrfRequired(false);
+            frameworkRoute(router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange)), null);
+            frameworkRoute(router.add("GET", "/ops/status", noStore(opsHandler::status)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/routes", noStore(opsHandler::routes)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/logs", noStore(opsHandler::logs)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/errors", noStore(opsHandler::errors)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError)), opsHandler.access(OpsScope.CONTROL)).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache)), opsHandler.access(OpsScope.CONTROL)).setCsrfRequired(false);
+            frameworkRoute(router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/regressions", noStore(opsHandler::regressions)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression)), opsHandler.access(OpsScope.CONTROL)).setCsrfRequired(false);
             if (analytics != null) {
-                router.add("GET", "/ops/analytics", noStore(opsHandler::analytics));
-                router.add("GET", "/ops/analytics/data", noStore(opsHandler::analyticsData));
+                frameworkRoute(router.add("GET", "/ops/analytics", noStore(opsHandler::analytics)), opsHandler.access(OpsScope.READ));
+                frameworkRoute(router.add("GET", "/ops/analytics/data", noStore(opsHandler::analyticsData)), opsHandler.access(OpsScope.READ));
                 // Cookie-authenticated, but the ops cookie is SameSite=Strict, so a cross-site form
                 // can't carry it; and the only effect is a cookie on the caller's own browser.
-                router.add("POST", "/ops/analytics/ignore", noStore(opsHandler::analyticsIgnore)).setCsrfRequired(false);
+                frameworkRoute(router.add("POST", "/ops/analytics/ignore", noStore(opsHandler::analyticsIgnore)), opsHandler.access(OpsScope.READ)).setCsrfRequired(false);
             }
         }
 
@@ -1126,10 +1171,13 @@ public class Brace {
                 Log.debug("routes.unnamed", Map.of("unnamed", unnamed, "named", router.names().size()));
             }
         }
+        resolveAccess();
+        router.freeze();
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
         handler.setAnalytics(analytics);
+        handler.setSessionValidator(sessionValidator);
         org.eclipse.jetty.server.Handler httpHandler = compression ? new CompressionHandler(handler) : handler;
 
         if (!wsRoutes.isEmpty()) {
@@ -1143,34 +1191,59 @@ public class Brace {
             final TrustedProxies wsTrustedProxies = trustedProxies;
             // Wrap with WebSocketUpgradeHandler for WebSocket support
             var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {
+                final List<Middleware.BoundBefore> wsBefore = List.copyOf(beforeMiddleware);
                 for (var entry : wsRoutes.entrySet()) {
                     String wsPath = entry.getKey();
-                    Function<WsContext, Object> factory = entry.getValue();
+                    Route wsRoute = entry.getValue().route();
+                    Function<WsContext, Object> factory = entry.getValue().factory();
                     container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> {
+                        String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest);
+                        // H2: the upgrade is a request like any other, so it runs plain before()
+                        // middleware (a rate limiter sheds load first) and, below, the route's access
+                        // requirements. Before this, every guard was skipped and a socket under a
+                        // guarded prefix accepted anonymous clients.
+                        Map<String, String> headers = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+                        for (var field : upgradeRequest.getHeaders()) headers.put(field.getName(), field.getValue());
+                        var request = new Request("GET", wsPath, Map.of(),
+                            Request.parseSingleValues(upgradeRequest.getHttpURI().getQuery(), true),
+                            headers, "", Map.of(), remoteAddr, wsTrustedProxies);
+                        for (var before : wsBefore) {
+                            Result early = before.apply(request);
+                            if (early != null) return declineUpgrade(upgradeRequest, upgradeResponse, callback, early.status());
+                        }
                         // M3: reject a cross-origin handshake before the session cookie below turns
                         // it into an authenticated socket. Returning null declines the upgrade.
                         // The host is the one the client addressed: X-Forwarded-Host when a trusted
-                        // proxy sent it, else Host.
+                        // proxy sent it, else Host. Cheap and decrypts nothing, so it runs before
+                        // the access requirements.
                         String origin = upgradeRequest.getHeaders().get("Origin");
                         String host = ProxyHeaders.effectiveHost(upgradeRequest.getHeaders()::get,
-                            org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest), wsTrustedProxies);
+                            remoteAddr, wsTrustedProxies);
                         if (!originAllowed(origin, host, allowedOrigins)) {
                             if (host != null && BraceHandler.isLoopbackHost(host)) {
                                 ProxyHeaders.warnWebSocketHostRewrite(origin, host);
                             }
-                            upgradeResponse.setStatus(403);
-                            return null;
+                            return declineUpgrade(upgradeRequest, upgradeResponse, callback, 403);
                         }
                         // Extract session from upgrade request cookie
                         Session braceSession = null;
                         if (sessionSecret != null) {
+                            // M10: the name this request would be given (__Host- when Secure).
+                            String cookieName = handler.cookieSpec(headers, remoteAddr).name();
                             var cookies = org.eclipse.jetty.server.Request.getCookies(upgradeRequest);
                             for (var cookie : cookies) {
-                                if ("brace_session".equals(cookie.getName())) {
-                                    braceSession = Session.fromCookie(cookie.getValue(), sessionSecret);
+                                if (cookieName.equals(cookie.getName())) {
+                                    braceSession = handler.decodeSession(cookie.getValue());
                                     break;
                                 }
                             }
+                            if (braceSession == null) braceSession = new Session();
+                        }
+                        // H2: the route's resolved access requirements. The session they read is the
+                        // one the socket gets.
+                        for (var access : wsRoute.access()) {
+                            Result rejected = access.check(request, access.usesSession() ? braceSession : null);
+                            if (rejected != null) return declineUpgrade(upgradeRequest, upgradeResponse, callback, rejected.status());
                         }
                         return new WsHandler(factory, braceSession, wsRegistryRef);
                     });
@@ -1426,10 +1499,10 @@ public class Brace {
         int routeCount = router.routes().size() + wsRoutes.size();
         System.out.printf("     routes (%d) {%n", routeCount);
         for (var route : router.routes()) {
-            System.out.printf("        %-6s %s%n", route.method(), route.pattern());
+            System.out.printf("        %-6s %-32s %s%n", route.method(), route.pattern(), route.accessLabel());
         }
-        for (var wsPath : wsRoutes.keySet()) {
-            System.out.printf("        %-6s %s%n", "WS", wsPath);
+        for (var ws : wsRoutes.values()) {
+            System.out.printf("        %-6s %-32s %s%n", "WS", ws.route().pattern(), ws.route().accessLabel());
         }
         System.out.println("     }");
         System.out.println("  }");
@@ -1452,6 +1525,7 @@ public class Brace {
         if (!stopped.compareAndSet(false, true)) {
             return;
         }
+        router.unfreeze(); // a stopped app may be reconfigured before the next start()
         var hook = shutdownHook;
         shutdownHook = null;
         if (hook != null && Thread.currentThread() != hook) {
@@ -1579,6 +1653,147 @@ public class Brace {
      * <p>Applied at registration so a new ops endpoint gets it by construction rather than by
      * remembering. An explicit {@code Cache-Control} set by the handler wins.
      */
+    /**
+     * Declines a WebSocket upgrade (H2). When the creator returns null Jetty leaves the response to
+     * it, so the decline must be written and the callback completed here; setting a status alone
+     * left the client waiting until its own timeout. A browser socket can't follow a redirect, so a
+     * redirect (Access.session's answer to a page request) becomes 401; anything else that isn't an
+     * error status becomes 403.
+     */
+    private static Object declineUpgrade(org.eclipse.jetty.websocket.server.ServerUpgradeRequest request,
+                                         org.eclipse.jetty.websocket.server.ServerUpgradeResponse response,
+                                         org.eclipse.jetty.util.Callback callback, int status) {
+        if (status >= 300 && status < 400) status = 401;
+        else if (status < 400) status = 403;
+        org.eclipse.jetty.server.Response.writeError(request, response, callback, status);
+        return null;
+    }
+
+    /**
+     * A route the framework registers (/ops/*): outside the app's default access, which is an
+     * app login and not the ops credential. {@code requirement} is the ops access check; null
+     * marks the route public (the auth handshake endpoints, which take the credential itself).
+     */
+    private static Route frameworkRoute(Route route, Access requirement) {
+        route.markFramework();
+        if (requirement == null) {
+            route.markPublic();
+        } else {
+            route.addAccess(requirement);
+        }
+        return route;
+    }
+
+    /**
+     * H1: resolve every route's effective access requirements — the default (unless the route is
+     * public or the framework's), then its groups outer to inner, then its own — and refuse to
+     * start while any route has none and isn't marked public. Runs once per start(), after the
+     * framework's own routes are registered.
+     */
+    void resolveAccess() {
+        Access fallback = defaultAccess != null ? defaultAccess : fallbackDefaultAccess;
+        var unmarked = new ArrayList<Route>();
+        boolean readsSession = false;
+        var routes = new ArrayList<>(router.routes());
+        for (var ws : wsRoutes.values()) routes.add(ws.route());
+        for (Route route : routes) {
+            boolean hasOwn = !route.groupAccess().isEmpty() || !route.declaredAccess().isEmpty();
+            if (route.isPublicRoute() && hasOwn && !route.isFramework()) {
+                throw new IllegalStateException(route.method() + " " + route.pattern()
+                    + " is marked .publicRoute() but also has access requirements ("
+                    + describe(route.groupAccess(), route.declaredAccess()) + "). .publicRoute() only "
+                    + "removes the app's default access; register a public route outside the restricted group.");
+            }
+            boolean replaced = false;
+            for (Access a : route.groupAccess()) replaced |= a.replacesDefault();
+            for (Access a : route.declaredAccess()) replaced |= a.replacesDefault();
+            var effective = new ArrayList<Access>();
+            if (!route.isFramework() && !route.isPublicRoute() && !replaced
+                    && fallback != null && !fallback.isNone()) {
+                effective.add(fallback);
+            }
+            effective.addAll(route.groupAccess());
+            effective.addAll(route.declaredAccess());
+            route.setResolvedAccess(effective);
+            boolean covered = route.isPublicRoute() || !effective.isEmpty()
+                || (fallback != null && !route.isFramework());
+            if (!covered) unmarked.add(route);
+            for (Access a : effective) readsSession |= a.usesSession();
+        }
+        if (!unmarked.isEmpty()) {
+            var msg = new StringBuilder().append(unmarked.size())
+                .append(unmarked.size() == 1 ? " route has" : " routes have")
+                .append(" no access requirement and ").append(unmarked.size() == 1 ? "is" : "are")
+                .append(" not marked public:");
+            for (Route r : unmarked) {
+                msg.append("\n  ").append(String.format("%-6s %s", r.method(), r.pattern()));
+                if (r.name() != null) msg.append("  (").append(r.name()).append(")");
+            }
+            msg.append("\nAdd app.defaultAccess(...), put them in a group with access, or mark them .publicRoute().");
+            throw new IllegalStateException(msg.toString());
+        }
+        checkCsrfOptOuts(routes);
+        if (readsSession && sessionSecret == null) {
+            throw new IllegalStateException("A route has a session-reading access requirement "
+                + "(Access.session or Access.check) but sessions are not enabled — call .sessions(secret) "
+                + "before start(). Without it every request sees an empty session, so the requirement "
+                + "rejects every request.");
+        }
+        if (defaultAccess != null && defaultAccess.isNone()) {
+            Log.info("defaultAccess(Access.none()): routes without their own requirement are public");
+        }
+    }
+
+    /**
+     * M2: a mutating route with {@code .csrf(false)} that uses the cookie session (its handler
+     * takes the Session, or an access requirement reads it) is forgeable from any site the user
+     * visits — {@code .csrf(false)} is for bearer-token routes. Refuse it unless the opt-out says
+     * why ({@code .csrf(false, "reason")}). Runs after access is resolved, since a requirement
+     * can be what makes a route session-authenticated, and so can a session-aware
+     * {@code before(pattern, BeforeSession)} guard covering the route.
+     */
+    private void checkCsrfOptOuts(List<Route> routes) {
+        if (sessionSecret == null) return; // no session cookie to forge requests with
+        var violations = new ArrayList<Route>();
+        for (Route route : routes) {
+            if (route.isFramework() || route.csrfRequired()) continue;
+            if (!BraceHandler.isMutating(route.method())) continue;
+            if (!route.usesCookieSession() && !coveredBySessionMiddleware(route)) continue;
+            if (route.csrfOptOutReason() != null) {
+                Log.info("CSRF disabled on cookie-session route " + route.method() + " " + route.pattern()
+                    + ": " + route.csrfOptOutReason());
+                continue;
+            }
+            violations.add(route);
+        }
+        if (violations.isEmpty()) return;
+        var msg = new StringBuilder(".csrf(false) on a route that uses the cookie session makes it forgeable "
+            + "from any site the user visits:");
+        for (Route r : violations) msg.append("\n  ").append(String.format("%-6s %s", r.method(), r.pattern()));
+        msg.append("\n.csrf(false) is for bearer-token routes. Remove it and send the token (${csrfField}, "
+            + "${csrfMeta}), or say why the route is safe with .csrf(false, \"reason\").");
+        throw new IllegalStateException(msg.toString());
+    }
+
+    /**
+     * Whether a session-aware {@code before(...)} runs for this route. Path parameters are
+     * filled with a placeholder, which a {@code /prefix/*} pattern over them still matches.
+     */
+    private boolean coveredBySessionMiddleware(Route route) {
+        String sample = route.pattern().replaceAll("\\{[^/]+}", "_");
+        for (var before : beforeSessionMiddleware) {
+            if (before.matches(sample)) return true;
+        }
+        return false;
+    }
+
+    private static String describe(List<Access> group, List<Access> own) {
+        var labels = new ArrayList<String>();
+        for (Access a : group) labels.add(a.label());
+        for (Access a : own) labels.add(a.label());
+        return String.join(" + ", labels);
+    }
+
     private static Handler noStore(Handler handler) {
         return req -> {
             Result result = handler.apply(req);

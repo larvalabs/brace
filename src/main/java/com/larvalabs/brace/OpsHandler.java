@@ -177,7 +177,7 @@ public class OpsHandler {
      * Requires valid Bearer token authentication.
      */
     public Result loginToken(Request req) {
-        var claims = authorizedClaims(req, OpsScope.READ);
+        var claims = req.opsClaims();
         if (claims == null) return Result.unauthorized("Invalid ops key");
 
         // Stateless, short-lived HMAC token — no server-side store, so exchange works on any
@@ -260,7 +260,6 @@ public class OpsHandler {
      * by default — they dominated the payload while most pollers only read the scalars.
      */
     public Result status(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
 
         var include = includeParams(req);
 
@@ -494,7 +493,7 @@ public class OpsHandler {
     }
 
     public Result dashboard(Request req) {
-        var claims = authorizedClaims(req, OpsScope.READ);
+        var claims = req.opsClaims();
         if (claims == null) return Result.unauthorized("Invalid ops key");
         // Generate a dashboard token with 2h TTL for htmx polling. Minted at the caller's
         // own scope and key id — never above it (H1: this token is embedded in the page
@@ -513,7 +512,6 @@ public class OpsHandler {
     }
 
     public Result routes(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
 
         var routeList = new ArrayList<Map<String, Object>>();
         for (var route : router.routes()) {
@@ -521,13 +519,13 @@ public class OpsHandler {
             r.put("method", route.method());
             r.put("pattern", route.pattern());
             if (route.name() != null) r.put("name", route.name());
+            r.put("access", route.accessLabel());
             routeList.add(r);
         }
         return Json.of(routeList);
     }
 
     public Result logs(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
 
         String sinceStr = req.queryParam("since");
         String sinceTsStr = req.queryParam("since_ts");
@@ -589,7 +587,6 @@ public class OpsHandler {
      * across the ops endpoints.
      */
     public Result errors(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         String status = req.queryParam("status");
         String since = req.queryParam("since");
         Instant sinceTs = null;
@@ -629,7 +626,6 @@ public class OpsHandler {
 
     /** GET /ops/errors/{id} — full detail for one tracked error; 404 for unknown ids. */
     public Result errorDetail(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         long id;
         try {
             id = req.longPathParam("id");
@@ -647,7 +643,6 @@ public class OpsHandler {
     }
 
     public Result resolveError(Request req) {
-        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
         long id;
         try {
             id = req.longPathParam("id");
@@ -736,7 +731,6 @@ public class OpsHandler {
 
     /** GET /ops/analytics?range=today|7d|30d|12mo&metric=visitors|pageviews — the analytics page. */
     public Result analytics(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         String range = req.queryParam("range", "30d");
         if (!Analytics.RANGES.contains(range)) return Result.badRequest("range must be one of " + Analytics.RANGES);
         String metric = "pageviews".equals(req.queryParam("metric")) ? "pageviews" : "visitors";
@@ -746,7 +740,6 @@ public class OpsHandler {
 
     /** GET /ops/analytics/data?range=today|7d|30d|12mo — the same report as JSON (the CLI reads this). */
     public Result analyticsData(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         String range = req.queryParam("range", "7d");
         if (!Analytics.RANGES.contains(range)) return Result.badRequest("range must be one of " + Analytics.RANGES);
         return Json.of(analytics.cachedReport(range));
@@ -758,7 +751,6 @@ public class OpsHandler {
      * recognise an operator from it; this separate marker is scoped to / for that reason.
      */
     public Result analyticsIgnore(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         boolean on = !"0".equals(req.formParam("on"));
         String range = req.formParam("range");
         String back = "/ops/analytics" + (range != null && Analytics.RANGES.contains(range) ? "?range=" + range : "");
@@ -779,7 +771,6 @@ public class OpsHandler {
 
     /** GET /ops/regressions — new error kinds since startup (the /ops/errors shape + acknowledged). */
     public Result regressions(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         if (regressionTracker == null) return Json.of(List.of());
         var out = new ArrayList<Map<String, Object>>();
         for (var r : regressionTracker.list()) {
@@ -798,7 +789,6 @@ public class OpsHandler {
 
     /** POST /ops/regressions/{id}/acknowledge — stop flagging a regression (control action). */
     public Result acknowledgeRegression(Request req) {
-        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
         if (regressionTracker == null) return Result.notFound();
         String id = req.pathParam("id");
         if (id == null || !regressionTracker.acknowledge(id)) return Result.notFound();
@@ -806,7 +796,6 @@ public class OpsHandler {
     }
 
     public Result clearCache(Request req) {
-        if (!authorize(req, OpsScope.CONTROL)) return Result.unauthorized("Invalid ops key");
         if (cache == null) return Result.notFound();
         cache.clear();
         if (wantsJson(req)) {
@@ -818,7 +807,6 @@ public class OpsHandler {
     }
 
     public Result cacheStats(Request req) {
-        if (!authorize(req, OpsScope.READ)) return Result.unauthorized("Invalid ops key");
         var out = new LinkedHashMap<String, Object>();
         if (cache == null) {
             out.put("enabled", false);
@@ -903,8 +891,23 @@ public class OpsHandler {
      * Every authenticated request (granted or scope-denied) is recorded to the ops
      * audit log, attributed to the token's key fingerprint.
      */
-    private boolean authorize(Request req, OpsScope required) {
-        return authorizedClaims(req, required) != null;
+    /**
+     * The route-level access requirement for an ops endpoint (H1): every /ops route is registered
+     * with one, so an endpoint can't be added without authentication, and the handlers carry no
+     * auth code of their own. Verifies the credential, audits it, caps it at the key's current
+     * ceiling, and attaches the claims to the request for the handlers that mint derived tokens
+     * ({@code loginToken}, {@code dashboard}). A rejection is {@code no-store}, like every ops
+     * response.
+     */
+    Access access(OpsScope required) {
+        return Access.internal("ops:" + required.wire(), req -> {
+            var claims = authorizedClaims(req, required);
+            if (claims == null) {
+                return Result.unauthorized("Invalid ops key").header("Cache-Control", "no-store");
+            }
+            req.setOpsClaims(claims);
+            return null;
+        });
     }
 
     /**

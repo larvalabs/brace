@@ -17,7 +17,8 @@ public class App {
         var app = Brace.app()
             .port(Integer.parseInt(System.getenv().getOrDefault("PORT", "8080")))
             .database(db)
-            .templates("benchmark/src/main/resources/views");
+            .templates("benchmark/src/main/resources/views")
+            .defaultAccess(Access.none()); // benchmark endpoints are public
 
         // Server header
         app.after((req, result) -> {

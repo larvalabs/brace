@@ -68,7 +68,7 @@ public class TestRequest {
             }
             if (session != null) {
                 app.evictSessionCookie();
-                builder.header("Cookie", "brace_session=" + session.toCookie(app.sessionSecret()));
+                builder.header("Cookie", app.sessionCookieName() + "=" + session.toCookie(app.sessionSecret()));
             }
             if (contentType != null) {
                 builder.header("Content-Type", contentType);

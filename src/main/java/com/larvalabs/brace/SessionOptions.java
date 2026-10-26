@@ -14,6 +14,8 @@ public class SessionOptions {
     private Boolean secure = null;
     private String sameSite = "Lax";
     private Duration maxAge = null;
+    private Duration absoluteMaxAge = null;
+    private java.util.List<String> previousSecrets = java.util.List.of();
     private String path = "/";
     private String domain = null;
 
@@ -131,6 +133,41 @@ public class SessionOptions {
         return this;
     }
 
+    /**
+     * The longest a session can live from sign-in, however active it is (M10). {@link #maxAge}
+     * slides forward on every write; this does not, so a continuously used — or continuously
+     * replayed — cookie still expires. Default: 30 days, or {@code maxAge} if that is longer.
+     * {@link Session#regenerate()} (call it at login) starts the clock again.
+     */
+    public SessionOptions absoluteMaxAge(Duration absoluteMaxAge) {
+        this.absoluteMaxAge = absoluteMaxAge;
+        return this;
+    }
+
+    public Duration absoluteMaxAge() {
+        return absoluteMaxAge;
+    }
+
+    /**
+     * Secrets the session cookie was sealed with before the current one (M10). Cookies sealed
+     * with any of them still open, and are re-sealed with the current secret on the response, so
+     * a rotation logs nobody out. Drop a secret from the list once cookies sealed with it have
+     * expired ({@link #absoluteMaxAge}).
+     */
+    public SessionOptions previousSecrets(String... secrets) {
+        for (String previous : secrets) {
+            if (previous == null || previous.length() < 32) {
+                throw new IllegalArgumentException("previous session secrets must be at least 32 characters");
+            }
+        }
+        this.previousSecrets = java.util.List.of(secrets);
+        return this;
+    }
+
+    public java.util.List<String> previousSecrets() {
+        return previousSecrets;
+    }
+
     /** Cookie Path; must start with {@code /} and contain no {@code ;} or control characters. */
     public SessionOptions path(String path) {
         this.path = Result.requireCookiePath(path);
@@ -191,8 +228,31 @@ public class SessionOptions {
      * Build the Set-Cookie header value with the {@code Secure} attribute already resolved for
      * this response (see {@link #resolveSecure}).
      */
+    /** Cookie name without the {@code __Host-} prefix: plain-HTTP localhost, or a custom path or domain. */
+    static final String COOKIE_NAME = "brace_session";
+
+    /** The prefixed name used whenever the browser allows it (M10). */
+    static final String HOST_COOKIE_NAME = "__Host-brace_session";
+
+    /**
+     * The session cookie's name when the {@code __Host-} prefix is wanted ({@code hostPrefix}) (M10).
+     * {@code __Host-brace_session} whenever the browser allows the prefix — {@code Secure},
+     * {@code Path=/}, no {@code Domain} — which is every production deployment by default. A
+     * {@code __Host-} cookie can only be set by this exact host over HTTPS, so a sibling subdomain
+     * can't plant ("toss") a session or CSRF token of its choosing. Requests read only the name
+     * they would write, so a tossed {@code brace_session} is ignored where the prefix applies.
+     */
+    String cookieName(boolean hostPrefix) {
+        return hostPrefix && "/".equals(path) && domain == null ? HOST_COOKIE_NAME : COOKIE_NAME;
+    }
+
     String buildSetCookie(String cookieValue, boolean secureResolved) {
-        var sb = new StringBuilder("brace_session=");
+        return buildSetCookie(cookieValue, secureResolved, cookieName(secureResolved));
+    }
+
+    /** As {@link #buildSetCookie(String, boolean)} with the cookie name already resolved (M10). */
+    String buildSetCookie(String cookieValue, boolean secureResolved, String name) {
+        var sb = new StringBuilder(name).append('=');
         sb.append(cookieValue);
 
         if (path != null) {

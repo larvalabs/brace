@@ -1,6 +1,7 @@
 package com.larvalabs.brace;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -17,6 +18,9 @@ public class View extends Result {
     // consumes the session's cookie-borne flash when — and only when — a View actually renders, so
     // flash survives requests that render nothing (redirects, JSON, polling).
     private static final ThreadLocal<Supplier<Map<String, String>>> currentFlash = new ThreadLocal<>();
+    // M1: the Views created while the page cache runs a handler. The cache checks the final response
+    // against all of them, since a handler can return a View's output inside another Result.
+    private static final ThreadLocal<List<View>> created = new ThreadLocal<>();
 
     static void setCsrfSession(Supplier<Session> sessionSupplier) { currentCsrfSession.set(sessionSupplier); }
     static void clearCsrfSession() { currentCsrfSession.remove(); }
@@ -55,11 +59,18 @@ public class View extends Result {
     private final String template;
     private final Map<String, Object> params;
     private boolean rendered;
+    // M1: the values this render took from the visitor's session — the masked CSRF tokens it was
+    // handed, and whether a non-empty flash came with them. The page cache must not store (and replay
+    // to everyone) a page carrying one user's token or flash; sessionDerived() decides from these.
+    private final List<String> csrfValues;
+    private final boolean carriesFlash;
 
-    private View(String template, Map<String, Object> params) {
+    private View(String template, Map<String, Object> params, List<String> csrfValues, boolean carriesFlash) {
         super(200, "text/html; charset=utf-8", (String) null);
         this.template = template;
         this.params = params;
+        this.csrfValues = csrfValues;
+        this.carriesFlash = carriesFlash;
     }
 
     static void setEngine(TemplateEngine engine) {
@@ -73,20 +84,49 @@ public class View extends Result {
         // here — before the cookie-write decision — exactly as it was when rendering happened eagerly.
         // The template render itself is deferred to materialize() (M12); the resolved values ride along
         // in params, so it no longer depends on the ThreadLocals, which are cleared before it runs.
+        List<String> csrfValues = List.of();
         Supplier<Session> csrfSession = currentCsrfSession.get();
         if (csrfSession != null) {
             Session session = csrfSession.get();
-            params.put("csrfField", new CsrfField(Csrf.hiddenField(session)));
-            // The bare masked token, for a <meta> tag that fetch/htmx read into X-CSRF-Token.
-            params.put("csrfToken", Csrf.maskedToken(session));
+            String fieldToken = Csrf.maskedToken(session);
+            String metaToken = Csrf.maskedToken(session);
+            params.put("csrfField", new CsrfField(Csrf.hiddenFieldFor(fieldToken)));
+            // The bare masked token, for a <meta> tag that fetch/htmx read into X-CSRF-Token, and
+            // that tag ready-made (M2): ${csrfMeta} in the layout plus /__brace/csrf-htmx.js makes
+            // every non-GET htmx request carry the token.
+            params.put("csrfToken", metaToken);
+            params.put("csrfMeta", new CsrfField(Csrf.metaTagFor(metaToken)));
+            csrfValues = List.of(fieldToken, metaToken);
         }
+        boolean carriesFlash = false;
         // R1: consuming the flash source here (View.of == a render is happening) clears the
         // session's flash exactly when a View renders, not on redirects/JSON/polling.
         Supplier<Map<String, String>> flashSource = currentFlash.get();
         if (flashSource != null) {
-            params.put("flash", flashSource.get());
+            var flash = flashSource.get();
+            params.put("flash", flash);
+            carriesFlash = flash != null && !flash.isEmpty();
         }
-        return new View(template, params);
+        var view = new View(template, params, csrfValues, carriesFlash);
+        List<View> recording = created.get();
+        if (recording != null) recording.add(view);
+        return view;
+    }
+
+    /** Runs {@code body}, adding every View it creates to {@code into} (M1, the page cache). */
+    static <T> T recordingViews(List<View> into, Supplier<T> body) {
+        List<View> outer = created.get();
+        created.set(into);
+        try {
+            return body.get();
+        } finally {
+            if (outer == null) {
+                created.remove();
+            } else {
+                outer.addAll(into); // a cached handler inside another one: the outer sees them too
+                created.set(outer);
+            }
+        }
     }
 
     /**
@@ -140,6 +180,27 @@ public class View extends Result {
             params.put((String) keyValues[i], keyValues[i + 1]);
         }
         return params;
+    }
+
+    /**
+     * Whether a response built while {@code views} were created carries values taken from the
+     * visitor's session (M1): pending flash, or a CSRF token in {@code output}. Such a response is
+     * per-visitor and must never be stored in a shared cache. {@code output} is the final response
+     * (body and headers), not each View's own render, so a View's body wrapped in
+     * {@code Result.html(...)} or a JSON field is caught too.
+     */
+    static boolean sessionDerived(List<View> views, String output) {
+        for (View view : views) {
+            if (view.carriesFlash) return true;
+            // Every render on a CSRF-active route is handed tokens, but only a response that
+            // contains them is per-visitor; a page with no form shows none and stays cacheable.
+            // The masked tokens are random per render and base64url (unchanged by HTML, JS or JSON
+            // escaping), so a substring match has no false positives and catches them anywhere.
+            for (String value : view.csrfValues) {
+                if (output.contains(value)) return true;
+            }
+        }
+        return false;
     }
 
     public String template() { return template; }

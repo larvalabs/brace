@@ -86,7 +86,17 @@ public class Csrf {
      * value there. Escaping costs nothing and removes the question.
      */
     public static String hiddenField(Session session) {
-        return "<input type=\"hidden\" name=\"_csrf\" value=\"" + escape(maskedToken(session)) + "\">";
+        return hiddenFieldFor(maskedToken(session));
+    }
+
+    /** The hidden field for an already-masked token (View keeps the value to recognise it, M1). */
+    static String hiddenFieldFor(String maskedToken) {
+        return "<input type=\"hidden\" name=\"_csrf\" value=\"" + escape(maskedToken) + "\">";
+    }
+
+    /** The {@code <meta name="csrf-token">} tag for an already-masked token (M2's ${csrfMeta}). */
+    static String metaTagFor(String maskedToken) {
+        return "<meta name=\"csrf-token\" content=\"" + escape(maskedToken) + "\">";
     }
 
     /** Minimal HTML-attribute escaping for the token value. */

@@ -285,6 +285,7 @@ declares whether it reads the session. It is a small sealed type in a new `Acces
 | `Access.session(key, loginUrl)` | Allow if the session has `key`, else reject (see "Rejections") | yes |
 | `Access.check((req, session) -> Result)` | Custom logic; `null` allows | yes |
 | `Access.checkRequest(req -> Result)` | Custom logic without a session (e.g. a bearer-token check). A separate name rather than an overload of `check`, so method references never need a cast, following the `getDb`/`getSession` precedent. | no |
+| `Access.insteadOfDefault(requirement)` | Added during implementation: `requirement` replaces the default on the route or group it's on. Without it, a bearer-token API or signed webhook in a session-login app had no way to drop the session default while staying guarded (`.publicRoute()` can't be combined with `.access(...)`). | as `requirement` |
 | `Access.none()` | Only valid in `defaultAccess(...)`: an explicit statement that the app has no login. It is logged at startup in the access table. | no |
 | `Access.ops(OpsScope)` | Internal; used for the framework's `/ops` routes | no |
 
@@ -389,8 +390,10 @@ data: `.csrf(false)` on such a route is an error unless it gives a reason
   `group:/admin + session:userId`, `ops:READ`. With `Access.none()` as the default, the banner
   says so in a single warning line.
 - **`/ops/routes`:** gets an `access` field per route.
-- **`brace check`:** reports the same violations as `start()`, so CI catches them without
-  booting the app.
+- **`brace check`:** not changed (decided during implementation). It is a health check of a
+  running server, and an app that violates the rule can't start. CI catches violations through
+  `Brace.test()`, which runs the same `start()` check, so `brace test` fails on an unmarked
+  route.
 
 ### Commit breakdown (all under H1, except where noted)
 

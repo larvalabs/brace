@@ -18,6 +18,15 @@ public class Route {
     private boolean csrfRequired;
     private String name;
     private Analytics.Track analytics = Analytics.Track.PATH;
+    // H1 access model. groupAccess and declaredAccess are what registration said (outer group
+    // first, then the route's own .access(...)); access is the effective list Brace.start()
+    // resolves once, default included, and what BraceHandler runs on every request.
+    private List<Access> groupAccess = List.of();
+    private final List<Access> declaredAccess = new ArrayList<>();
+    private boolean publicRoute;
+    private List<Access> access = List.of();
+    // Registered by the framework itself (/ops/*): the app's default access never applies.
+    private boolean framework;
 
     public Route(String method, String pattern, Object handler, Invoker invoker) {
         this(method, pattern, handler, invoker, true);
@@ -72,12 +81,82 @@ public class Route {
     /** How {@link Analytics} records views of this route; {@code PATH} unless configured. */
     public Analytics.Track analytics() { return analytics; }
 
+    /** Effective access requirements, resolved by {@link Brace#start()}; run in order. */
+    public List<Access> access() { return access; }
+
+    /**
+     * The route's resolved access in one line, for the startup banner and {@code /ops/routes}:
+     * {@code public}, the requirement labels joined with {@code +} (e.g.
+     * {@code session:userId + check}), or {@code none} when the app declared
+     * {@code defaultAccess(Access.none())}.
+     */
+    public String accessLabel() {
+        if (!access.isEmpty()) {
+            var labels = new ArrayList<String>();
+            for (Access a : access) labels.add(a.label());
+            return String.join(" + ", labels);
+        }
+        return publicRoute ? "public" : "none";
+    }
+
+    /** True if the route opted out of the app's default access with {@code .publicRoute()}. */
+    public boolean isPublicRoute() { return publicRoute; }
+
+    List<Access> groupAccess() { return groupAccess; }
+
+    List<Access> declaredAccess() { return declaredAccess; }
+
+    void setGroupAccess(List<Access> groupAccess) {
+        this.groupAccess = List.copyOf(groupAccess);
+    }
+
+    void addAccess(Access requirement) {
+        if (requirement == null) throw new IllegalArgumentException("access requirement must not be null");
+        if (requirement.isNone()) {
+            throw new IllegalArgumentException("Access.none() is only valid as app.defaultAccess(...); "
+                + "use .publicRoute() to make " + method + " " + pattern + " public");
+        }
+        declaredAccess.add(requirement);
+    }
+
+    boolean isFramework() { return framework; }
+
+    void markFramework() {
+        this.framework = true;
+    }
+
+    void markPublic() {
+        this.publicRoute = true;
+    }
+
+    void setResolvedAccess(List<Access> access) {
+        this.access = List.copyOf(access);
+    }
+
     void setAnalytics(Analytics.Track track) {
         this.analytics = track;
     }
 
     void setCsrfRequired(boolean required) {
         this.csrfRequired = required;
+    }
+
+    // M2: why a cookie-session route is exempt from CSRF, when it is. Brace.start() refuses a
+    // mutating .csrf(false) route that uses the cookie session unless one is given.
+    private String csrfOptOutReason;
+
+    String csrfOptOutReason() { return csrfOptOutReason; }
+
+    void setCsrfOptOut(String reason) {
+        this.csrfRequired = false;
+        this.csrfOptOutReason = reason;
+    }
+
+    /** True if the handler takes the Session or a resolved access requirement reads it (M2). */
+    boolean usesCookieSession() {
+        if (invoker != null && invoker.needsSession()) return true;
+        for (Access a : access) if (a.usesSession()) return true;
+        return false;
     }
 
     void setName(String name) {

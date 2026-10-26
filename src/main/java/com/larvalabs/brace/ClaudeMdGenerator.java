@@ -41,6 +41,7 @@ brace test Name   # run specific test class
 Full API reference: see `BRACE-AGENTS.md`. Below is what's available — check the reference when you need method signatures or usage details.
 
 - **Routing** — `app.get("/path", handler)` with four handler types: `Handler` (request only), `DbHandler` (+database), `SessionHandler` (+session), `FullHandler` (+both). Read-only routes (query-only, no transaction): `app.getRead("/path", (req, db) -> ...)`, `app.getReadFull(...)` (+session). Path params: `/posts/{id}`. Route groups: `app.group("/prefix", g -> ...)`.
+- **Access** — every route needs a requirement or `.publicRoute()`, or `start()` fails: `app.defaultAccess(Access.session("userId", "/login"))`, `app.group("/admin", Access.check((req, s) -> ...), g -> ...)`, `.access(Access.checkRequest(req -> ...))` per route. Never auth in `before(...)`.
 - **Request** — `req.queryParam(name)`, `req.pathParam(name)`, `req.formParam(name)`, `req.header(name)`, `req.body()`, `req.bodyAs(Class)` (never an `@Entity`; bind a record with `jsonForm` and `apply` it), `req.form(Class)`, `req.jsonForm(Class)`, `req.file(name)`, `req.ip()`, `req.isHtmx()`.
 - **Responses** — `Result.text()`, `.html()`, `.json()`, `.bytes()`, `.view()`, `.redirect()`, `.error()`, `.notFound()`, `.unauthorized()`, `.forbidden()`, `.badRequest()`, `.created()`, `.noContent()`, `.download()`, `.file(path)` (streamed, Range support), `.stream(in | out -> ..., contentType)`, `.sse(events -> ...)` (Server-Sent Events). `Json.obj("k", v, ...)` for one-line ad-hoc JSON shapes. Put java.time values in as objects (`Json` writes ISO-8601); never `.toString()` them. `Redirect.toLocal(path)` for user-derived redirect targets (rejects off-site URLs).
 - **HTTP client** — `Http.get(url).fetchJson(Class)`, `Http.post(url).bodyJson(obj).fetch()`, `.bearer(token)`, `.header()`, `.timeout()`, `.bodyForm()`, `.multipart()`, streamed responses via `.fetchEvents(ev -> ...)` (SSE) or `.stream()` with `.idleTimeout()`. Use this, not raw `java.net.http`.
@@ -104,7 +105,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | `GET /ops/logs` | Recent structured log entries (filter by level and time) |
 | `GET /ops/cache` | Cache stats (`POST /ops/cache/clear` to clear) |
 | `GET /ops/regressions` | New error kinds since startup |
-| `GET /ops/routes` | All registered routes |
+| `GET /ops/routes` | All registered routes, with each one's access (`public`, `session:userId`, `ops:read`, …) |
 | `GET /ops/dashboard` | HTML dashboard |
 | `GET /ops/analytics` / `GET /ops/analytics/data` | Analytics page / its report as JSON (`?range=today\\|7d\\|30d\\|12mo`), when enabled |
 
