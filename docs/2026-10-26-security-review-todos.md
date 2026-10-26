@@ -506,6 +506,9 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Add an OSV-Scanner (or OWASP dependency-check) step that fails on HIGH/CRITICAL to the
       merge gate.
   - **Tests.** Full `mvn verify`. Re-run the jackson number-string timing check (under 50 ms).
+  - **Progress.** Dependency bumps landed: Jetty 12.0.40, Jackson 2.18.12, pgjdbc 42.7.14, all
+    clean on OSV; the timing check is under 50 ms for every probe. The OSV gate remains (Phase 5),
+    so the box stays open.
   - **Tier: small** for the bumps; **mid** for the CI gate.
 
 - [ ] **M13: The generated container is root, unpinned and shell-bearing, and no hardened runtime config is generated**, `ProjectGenerator.java:386-420`, `Brace.java:1105-1106`

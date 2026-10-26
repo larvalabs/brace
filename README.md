@@ -684,7 +684,7 @@ committed `application.conf.example`, all `${VAR}`, that the scaffolded `Dockerf
 |---|---|
 | HTTP | Jetty 12 (virtual threads) |
 | ORM | Hibernate 7 (StatelessSession) |
-| JDBC Drivers | PostgreSQL 42.7.10 (bundled), H2 (test) |
+| JDBC Drivers | PostgreSQL 42.7.14 (bundled), H2 (test) |
 | Templates | JTE |
 | Migrations | Flyway |
 | JSON | Jackson |

@@ -28,6 +28,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class PathDecodingTest {
 
+    private static final String SECRET_CONTENT = "brace-h3-secret-content-7f3a";
+
     static TestApp app;
     static Path assetDir;
 
@@ -39,7 +41,7 @@ class PathDecodingTest {
         Files.createDirectory(assetDir.resolve("sub"));
         Files.writeString(assetDir.resolve("sub").resolve("nested.css"), "a{}");
         // A file OUTSIDE the mapped directory, as a traversal target.
-        Files.writeString(assetDir.getParent().resolve("brace-h3-secret.txt"), "secret");
+        Files.writeString(assetDir.getParent().resolve("brace-h3-secret.txt"), SECRET_CONTENT);
 
         app = Brace.test().start(a -> {
             a.staticFiles("/assets", assetDir.toString());
@@ -119,7 +121,9 @@ class PathDecodingTest {
                 "/assets/%2E%2E%2F%2E%2E%2Fetc/passwd"}) {
             var res = app.get(attempt);
             assertTrue(res.status() >= 400, attempt + " must not succeed, got " + res.status());
-            assertFalse(res.body().contains("secret"), attempt + " leaked the target file");
+            // Assert on the file's CONTENT, not its name: Jetty's own 400 page echoes the request
+            // URI (12.0.35+), so the filename legitimately appears in a rejection body.
+            assertFalse(res.body().contains(SECRET_CONTENT), attempt + " leaked the target file");
         }
     }
 

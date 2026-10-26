@@ -15,6 +15,7 @@ responses by default, masks the CSRF token rendered into pages, and `HEAD` reque
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
+| Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
 
@@ -192,3 +193,21 @@ The ops dashboard header shows the running Brace version next to the Java versio
 has it as `app.braceVersion`, and `brace status` prints it. A build from a JitPack tag reports
 that tag's version, release candidates included (before, an rc build reported the previous
 release's version).
+
+## Security: dependency updates
+
+Brace now ships with patched versions of three dependencies:
+
+| Dependency | Before | After | Advisories fixed |
+|---|---|---|---|
+| Jetty | 12.0.33 | 12.0.40 | CVE-2026-8384 (path-parameter traversal), CVE-2026-10051 (trailer leakage across keep-alive requests), CVE-2026-6790 (HTTP/2 and HTTP/3 authority mismatch) |
+| Jackson | 2.18.6 | 2.18.12 | CVE-2026-89407 (quadratic parsing of long numeric strings, reachable through `req.json()`), CVE-2026-89425, CVE-2026-68494, and the jackson-databind advisories for 2.18.6 |
+| PostgreSQL JDBC | 42.7.10 | 42.7.14 | CVE-2026-42198, CVE-2026-54291 |
+
+Nothing to change in app code. If your own `pom.xml` pins any of these artifacts to an older
+version, drop the pin or raise it; an explicit pin overrides the version Brace brings in.
+
+Visible difference: when Jetty rejects an ambiguous URI itself (for example `%2e%2e` in a path),
+its built-in 400 page now echoes the request URI. Tests that assert a rejected path's name never
+appears in the response body need to check the file's content instead.
+
