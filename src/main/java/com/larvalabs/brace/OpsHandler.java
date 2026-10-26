@@ -11,6 +11,10 @@ public class OpsHandler {
     private final Mailer mailer;
     private final Router router;
     private final Map<String, OpsScope> authorizedKeys;
+    // Fingerprints (token kid) of the keys authorized at construction. A token is honored only if
+    // its kid is in here, so removing a key from ops-authorized-keys revokes its outstanding
+    // tokens on the next restart even though the token secret is derived from the session secret.
+    private final Set<String> authorizedKids;
     private final String tokenSecret;
     private final ErrorStore errorStore;
     private final Cache cache;
@@ -54,6 +58,9 @@ public class OpsHandler {
         this.mailer = mailer;
         this.router = router;
         this.authorizedKeys = authorizedKeys;
+        var kids = new HashSet<String>();
+        for (String publicKey : authorizedKeys.keySet()) kids.add(OpsKeys.fingerprint(publicKey));
+        this.authorizedKids = Set.copyOf(kids);
         this.tokenSecret = tokenSecret;
         this.errorStore = errorStore;
         this.cache = cache;
@@ -211,7 +218,7 @@ public class OpsHandler {
             return Result.badRequest("Missing token parameter");
         }
 
-        var claims = OpsToken.verify(loginToken, tokenSecret);
+        var claims = verifyForKnownKey(loginToken);
         if (claims == null) {
             return Result.unauthorized("Invalid or expired login token");
         }
@@ -859,18 +866,30 @@ public class OpsHandler {
         // Check Authorization: Bearer <token> header
         var authHeader = req.header("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            var claims = OpsToken.verify(authHeader.substring(7), tokenSecret);
+            var claims = verifyForKnownKey(authHeader.substring(7));
             if (claims != null) return claims;
         }
 
         // Check ops session cookie (set by /ops/auth/exchange)
         String cookieToken = req.cookie(OPS_COOKIE_NAME);
         if (cookieToken != null) {
-            var claims = OpsToken.verify(cookieToken, tokenSecret);
+            var claims = verifyForKnownKey(cookieToken);
             if (claims != null) return claims;
         }
 
         return null;
+    }
+
+    /**
+     * Verify a token's HMAC and expiry, and that it was minted for a key that is still
+     * authorized. Every token this handler mints carries the minting key's fingerprint as
+     * {@code kid} (auth, login-token, exchange and the dashboard re-mint all do), so a token
+     * with no {@code kid} is not one we issued and is rejected rather than trusted.
+     */
+    private OpsToken.Claims verifyForKnownKey(String token) {
+        var claims = OpsToken.verify(token, tokenSecret);
+        if (claims == null || claims.kid() == null || !authorizedKids.contains(claims.kid())) return null;
+        return claims;
     }
 
     /**

@@ -245,8 +245,10 @@ class OpsIntegrationTest {
         // JfrProfiler when ops is enabled. Pre-H6 this branch emitted all-zeros cpu/gc/profiling
         // stubs; now the keys are simply absent and `brace check` tolerates that (.path defaults).
         String secret = OpsToken.generateSecret();
-        var handler = new OpsHandler(new Stats(), null, null, new Router(), java.util.Map.of(), secret);
-        String token = OpsToken.create(secret, 60, OpsScope.READ, "test");
+        var kp = OpsKeys.generateKeypair();
+        var handler = new OpsHandler(new Stats(), null, null, new Router(),
+            java.util.Map.of(kp.publicKey(), OpsScope.READ), secret);
+        String token = OpsToken.create(secret, 60, OpsScope.READ, OpsKeys.fingerprint(kp.publicKey()));
         var req = new Request("GET", "/ops/status", java.util.Map.of(), java.util.Map.of(),
             java.util.Map.of("Authorization", "Bearer " + token), null);
         var result = handler.status(req);

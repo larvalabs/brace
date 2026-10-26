@@ -604,7 +604,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Tests.** The dashboard HTML contains no `Bearer`, and polling still works with the cookie.
   - **Tier: small** (do it alongside M6's dashboard JS move).
 
-- [ ] **L4: Ops tokens survive key revocation**, `OpsHandler.java:858-873`, `Brace.java:256-262`
+- [x] **L4: Ops tokens survive key revocation**, `OpsHandler.java:858-873`, `Brace.java:256-262`
   - **What's wrong.** `authenticate` checks only the HMAC, not that the token's `kid` is still
     in `ops-authorized-keys`. The token secret derives from the session secret, so 24 h bearer
     and 8 h cookie tokens survive key removal and restarts.

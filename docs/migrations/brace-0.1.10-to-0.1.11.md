@@ -26,6 +26,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Stack traces in `/ops` are redacted like messages | security | none | [§](#security-stack-traces-are-redacted-like-messages) |
 | Static dotfiles return 404; dev warning for GETs that write | security | serve a deliberate dotfile from a route instead | [§](#security-static-dotfiles-return-404-dev-warning-for-gets-that-write) |
 | The `brace` launcher refuses an invalid pinned version | security | fix a `<brace.version>` that isn't `MAJOR.MINOR.PATCH[-SUFFIX]` | [§](#security-the-brace-launcher-refuses-an-invalid-pinned-version) |
+| Removing an ops key revokes its outstanding tokens | security | none | [§](#security-removing-an-ops-key-revokes-its-outstanding-tokens) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -413,3 +414,13 @@ and `brace self-update` apply the same rule.
 
 No change for projects that pin an ordinary version. Upgrade the installed `brace` CLI
 (`brace self-update`) to get the check: it lives in the launcher, not in the framework jar.
+
+## Security: removing an ops key revokes its outstanding tokens
+
+Ops tokens (bearer, up to 24 h; browser cookie, 8 h) stayed valid after their key was removed
+from `ops-authorized-keys`, because the token secret is derived from the session secret and
+survives a restart. A token is now honored only while the fingerprint of the key that minted it
+is still in the file, which is read at startup: removing a key and redeploying revokes its
+tokens. Tokens without a key id are rejected.
+
+No code change. Clients of a removed key get 401 and must authenticate with a remaining key.
