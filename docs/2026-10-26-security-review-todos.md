@@ -402,7 +402,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - `Storage.put` ignores a client `text/html`.
   - **Tier: mid.**
 
-- [ ] **M8: Upload filenames are passed through raw; there is no confined save helper**, `UploadedFile.java:65, 145`, `BraceHandler.java:1537-1555`
+- [x] **M8: Upload filenames are passed through raw; there is no confined save helper**, `UploadedFile.java:65, 145`, `BraceHandler.java:1537-1555`
   - **Verified.** `../../../etc/cron.d/x`, `/abs/path.txt` and backslash names come through
     `filename()` unchanged. `dir.resolve("/abs/path.txt")` discards `dir`. The framework's own
     `FileUploadTest` uses `tmp.resolve(file.filename())`.

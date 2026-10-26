@@ -62,8 +62,46 @@ public class UploadedFile {
         this.size = size;
     }
 
+    /**
+     * The filename the client sent, <strong>unmodified and attacker-controlled</strong>: it may
+     * contain {@code ../}, a leading {@code /}, backslashes, control characters, or be empty. Never
+     * pass it to {@code Path.resolve} or {@code new File(dir, ...)}. Use {@link #safeFilename()}
+     * for a storage name and {@link #saveTo(Path, String)} to write it under a directory.
+     */
     public String filename() { return filename; }
     public String contentType() { return contentType; }
+
+    /**
+     * A filename that is safe to use as a single path component: the part after the last
+     * {@code /} or {@code \}, with control characters removed and leading dots trimmed (so no
+     * dotfiles, {@code ..}, or hidden names), capped at 255 UTF-8 bytes (the usual filesystem
+     * limit). Never empty: a missing or fully stripped name becomes {@code "upload"}.
+     *
+     * <p>This is a sanitiser, not a uniqueness guarantee — two uploads can share a safe name.
+     */
+    public String safeFilename() {
+        if (filename == null) return "upload";
+        String name = filename;
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        if (slash >= 0) name = name.substring(slash + 1);
+        var sb = new StringBuilder(name.length());
+        name.codePoints().filter(cp -> !Character.isISOControl(cp)).forEach(sb::appendCodePoint);
+        name = sb.toString().strip();
+        int start = 0;
+        while (start < name.length() && name.charAt(start) == '.') start++;
+        name = name.substring(start).strip();
+        // Cap at 255 bytes, not chars: a filesystem limit is in bytes, and a code point is never split.
+        int bytes = 0, end = 0;
+        while (end < name.length()) {
+            int cp = name.codePointAt(end);
+            int n = Character.toString(cp).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes + n > 255) break;
+            bytes += n;
+            end += Character.charCount(cp);
+        }
+        name = name.substring(0, end).strip();
+        return name.isEmpty() ? "upload" : name;
+    }
     public long size() { return size; }
 
     /**
@@ -153,5 +191,58 @@ public class UploadedFile {
         // Part.writeTo moves a spilled file and streams a chunked one, and clears the part's
         // "temporary" flag so the end-of-request release does not delete what we just moved.
         part.writeTo(path);
+    }
+
+    /**
+     * Saves the upload as {@code name} under {@code dir}, refusing any name that would land outside
+     * it. Use this instead of {@code dir.resolve(name)} whenever {@code name} comes from a client
+     * ({@code saveTo(dir, file.safeFilename())} is the usual call).
+     *
+     * <p>The check is lexical (the normalized path must stay under {@code dir}) and on real paths
+     * (a symlink under {@code dir} that points elsewhere is rejected), the way static files are
+     * served. {@code dir} is created if missing; a {@code name} with subdirectories such as
+     * {@code "2026/a.png"} is allowed as long as it stays inside. Replaces an existing file.
+     *
+     * @return the path written
+     * @throws IllegalArgumentException if {@code name} is empty, absolute, or escapes {@code dir}
+     */
+    public Path saveTo(Path dir, String name) throws IOException {
+        Files.createDirectories(dir);
+        Path target = confine(dir, name);
+        saveTo(target);
+        return target;
+    }
+
+    /**
+     * Resolves {@code name} under {@code base} and verifies it cannot escape: lexically, then on
+     * real paths. The target need not exist — the deepest existing ancestor (or the target itself,
+     * which catches an existing symlink) is what gets resolved. Not atomic with the later use, like
+     * any check-then-open, but it closes the symlinks that are already on disk.
+     *
+     * @throws IllegalArgumentException when the name is empty, malformed, or escapes {@code base}
+     */
+    static Path confine(Path base, String name) {
+        if (name == null || name.isEmpty()) throw new IllegalArgumentException("Filename must not be empty");
+        Path baseDir = base.toAbsolutePath().normalize();
+        Path target;
+        try {
+            target = baseDir.resolve(name).normalize();
+        } catch (java.nio.file.InvalidPathException e) {
+            throw new IllegalArgumentException("Invalid filename", e);
+        }
+        if (target.equals(baseDir) || !target.startsWith(baseDir)) {
+            throw new IllegalArgumentException("Filename escapes the target directory");
+        }
+        try {
+            Path existing = target;
+            while (!Files.exists(existing, java.nio.file.LinkOption.NOFOLLOW_LINKS)) existing = existing.getParent();
+            if (!existing.toRealPath().startsWith(baseDir.toRealPath())) {
+                throw new IllegalArgumentException("Filename escapes the target directory");
+            }
+        } catch (IOException e) {
+            // A dangling symlink or an unreadable base: cannot prove containment, so refuse.
+            throw new IllegalArgumentException("Filename cannot be resolved inside the target directory", e);
+        }
+        return target;
     }
 }

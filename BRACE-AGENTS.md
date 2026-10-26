@@ -273,8 +273,16 @@ req.files("photos")           // List<UploadedFile>
 req.storage()                 // Storage instance
 ```
 
-**UploadedFile:** `filename()`, `contentType()`, `size()`, `stream()`, `transferTo(OutputStream)`,
-`saveTo(Path)`, `bytes()`.
+**UploadedFile:** `filename()`, `safeFilename()`, `contentType()`, `size()`, `stream()`,
+`transferTo(OutputStream)`, `saveTo(Path dir, String name)`, `saveTo(Path)`, `bytes()`.
+
+`filename()` is the client's name, unmodified and attacker-controlled (`../../x`, `/abs/x`,
+`..\x`, control characters, empty). Never pass it to `Path.resolve` or `new File(dir, ...)`.
+Save with `file.saveTo(uploadDir, file.safeFilename())`: `safeFilename()` is a single safe path
+component (basename, controls stripped, leading dots trimmed, at most 255 bytes, never empty —
+not unique, so prefix an id if names can collide), and `saveTo(dir, name)` throws
+`IllegalArgumentException` if `name` would land outside `dir`, symlinks included. It returns the
+path written. `saveTo(Path)` takes a full path and does no checking.
 
 Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
 living in the heap for the request; below it they stay in memory. Either way the API is the same.
@@ -305,6 +313,7 @@ Result.created("/posts/42")                 // 201 with Location header
 Result.bytes(data, "image/png")             // binary response
 Result.file(path)                           // stream a file (Content-Length, Range, typed by extension)
 Result.file(path, "video/mp4")              // ...with an explicit content type
+Result.fileUnder(dir, req.pathParam("name")) // a request-named file under dir; 404 if it escapes dir or is missing
 Result.download(path, "report.csv")         // stream as an attachment
 Result.stream(inputStream, "image/png")     // stream of unknown length (chunked)
 Result.stream(inputStream, "image/png", n)  // ...of known length

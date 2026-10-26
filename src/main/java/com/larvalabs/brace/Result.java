@@ -70,6 +70,26 @@ public class Result {
     }
 
     /**
+     * Streams the file {@code name} under {@code base}, or answers 404 when {@code name} would
+     * escape {@code base} (a {@code ../} traversal, an absolute path, a symlink pointing outside)
+     * or the file does not exist. Use this instead of {@code Result.file(base.resolve(name))}
+     * whenever {@code name} comes from the request.
+     *
+     * <p>The content type is guessed from the extension, so a served {@code .html} or {@code .svg}
+     * renders in the browser; for user-uploaded files prefer a download.
+     */
+    public static Result fileUnder(Path base, String name) {
+        Path target;
+        try {
+            target = UploadedFile.confine(base, name);
+            if (!Files.isRegularFile(target)) return notFound();
+            return file(target.toRealPath(), contentTypeForFile(target));
+        } catch (IllegalArgumentException | java.io.IOException | java.io.UncheckedIOException e) {
+            return notFound();
+        }
+    }
+
+    /**
      * Streams a file as a download, under {@code filename}. The streaming counterpart of
      * {@link #download(byte[], String, String)}; the filename is escaped identically.
      */

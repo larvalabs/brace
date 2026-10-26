@@ -21,6 +21,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
 | HTML and text responses declare `charset=utf-8` | security | tests that assert the exact `Content-Type` string | [§](#security-html-and-text-responses-declare-charsetutf-8) |
 | `Html.escape`; `Result.html` documented as a raw sink | new | none | [§](#new-htmlescape) |
+| `UploadedFile.safeFilename()`, `saveTo(dir, name)`, `Result.fileUnder` | new, security | switch uploads saved via `dir.resolve(file.filename())` | [§](#new-confined-upload-saving-and-file-serving) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -335,3 +336,29 @@ return Result.html("<p>Results for " + req.queryParam("q") + "</p>");
 // after
 return Result.html("<p>Results for " + Html.escape(req.queryParam("q")) + "</p>");
 ```
+
+## New: confined upload saving and file serving
+
+`UploadedFile.filename()` is the name the client sent, unmodified: it can be `../../etc/x`, an
+absolute path, contain backslashes or control characters, or be empty. `dir.resolve(filename())`
+writes wherever it points, and an absolute name replaces `dir` entirely. Three additions:
+
+- `file.safeFilename()`: a single safe path component (basename after `/` or `\`, control
+  characters stripped, leading dots trimmed, at most 255 UTF-8 bytes, never empty).
+- `file.saveTo(Path dir, String name)`: writes under `dir` (created if missing) and throws
+  `IllegalArgumentException` if `name` is empty or absolute or would leave `dir`, including
+  through a symlink. Returns the path written.
+- `Result.fileUnder(Path base, String name)`: streams `name` under `base`, or 404 if it escapes
+  `base` or doesn't exist.
+
+```java
+// before
+file.saveTo(uploadDir.resolve(file.filename()));
+return Result.file(publicDir.resolve(req.pathParam("name")));
+// after
+file.saveTo(uploadDir, file.safeFilename());
+return Result.fileUnder(publicDir, req.pathParam("name"));
+```
+
+`fileUnder` picks the content type from the extension, so an uploaded `.html` or `.svg` would
+render in the browser. Serve user uploads with `Result.download(...)` instead.
