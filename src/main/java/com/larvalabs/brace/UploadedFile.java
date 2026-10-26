@@ -84,11 +84,21 @@ public class UploadedFile {
         String name = filename;
         int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
         if (slash >= 0) name = name.substring(slash + 1);
+        // Controls and invisible format characters (bidi overrides such as U+202E, zero-width
+        // spaces) go: the latter would let a name display as something it isn't.
         var sb = new StringBuilder(name.length());
-        name.codePoints().filter(cp -> !Character.isISOControl(cp)).forEach(sb::appendCodePoint);
-        name = sb.toString().strip();
+        name.codePoints()
+            .filter(cp -> !Character.isISOControl(cp) && Character.getType(cp) != Character.FORMAT)
+            .forEach(sb::appendCodePoint);
+        name = sb.toString();
+        // Drop the whole leading run of dots AND whitespace, not dots then whitespace: trimming
+        // them one after the other turned ". .env" into ".env" and ". .." into "..".
         int start = 0;
-        while (start < name.length() && name.charAt(start) == '.') start++;
+        while (start < name.length()
+                && (name.charAt(start) == '.' || Character.isWhitespace(name.charAt(start))
+                    || Character.isSpaceChar(name.charAt(start)))) {
+            start++;
+        }
         name = name.substring(start).strip();
         // Cap at 255 bytes, not chars: a filesystem limit is in bytes, and a code point is never split.
         int bytes = 0, end = 0;

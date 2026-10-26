@@ -279,7 +279,8 @@ req.storage()                 // Storage instance
 `filename()` is the client's name, unmodified and attacker-controlled (`../../x`, `/abs/x`,
 `..\x`, control characters, empty). Never pass it to `Path.resolve` or `new File(dir, ...)`.
 Save with `file.saveTo(uploadDir, file.safeFilename())`: `safeFilename()` is a single safe path
-component (basename, controls stripped, leading dots trimmed, at most 255 bytes, never empty —
+component (basename, control and invisible format characters stripped, leading dots and
+spaces trimmed, at most 255 bytes, never empty —
 not unique, so prefix an id if names can collide), and `saveTo(dir, name)` throws
 `IllegalArgumentException` if `name` would land outside `dir`, symlinks included. It returns the
 path written. `saveTo(Path)` takes a full path and does no checking.

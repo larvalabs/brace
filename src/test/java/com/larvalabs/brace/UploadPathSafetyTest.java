@@ -46,6 +46,29 @@ class UploadPathSafetyTest {
     }
 
     @Test
+    void safeFilenameNeverReturnsADotfileAfterWhitespace() throws IOException {
+        // Trimming dots and then whitespace (or the reverse) once let a dot reach the front.
+        assertEquals("env", upload(". .env").safeFilename());
+        assertEquals("htaccess", upload(".. .htaccess").safeFilename());
+        assertEquals("git", upload(" . . .git").safeFilename());
+        assertEquals("env", upload("a/. .env").safeFilename());
+        assertEquals("env", upload(".  .env").safeFilename());
+        assertEquals("env", upload(".\u00a0.env").safeFilename());
+        assertEquals("upload", upload(". ..").safeFilename());
+        // The documented idiom therefore can't be made to throw by the client's name.
+        var saved = upload(". ..").saveTo(tmp.resolve("idiom"), upload(". ..").safeFilename());
+        assertEquals("upload", saved.getFileName().toString());
+    }
+
+    @Test
+    void safeFilenameStripsInvisibleFormatCharacters() {
+        // U+202E (right-to-left override) makes the rest of a name display reversed, so this
+        // one would show as "photoexe.png".
+        assertEquals("photognp.exe", upload("photo\u202Egnp.exe").safeFilename());
+        assertEquals("ab.txt", upload("a\u200Bb.txt").safeFilename());
+    }
+
+    @Test
     void safeFilenameIsNeverEmpty() {
         assertEquals("upload", upload(null).safeFilename());
         assertEquals("upload", upload("").safeFilename());
