@@ -25,6 +25,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | No `Server` header; plain-text errors for requests Jetty rejects | security | update monitors that match on `Server` or Jetty's HTML error text | [§](#security-no-server-header-plain-text-errors-for-rejected-requests) |
 | Stack traces in `/ops` are redacted like messages | security | none | [§](#security-stack-traces-are-redacted-like-messages) |
 | Static dotfiles return 404; dev warning for GETs that write | security | serve a deliberate dotfile from a route instead | [§](#security-static-dotfiles-return-404-dev-warning-for-gets-that-write) |
+| The `brace` launcher refuses an invalid pinned version | security | fix a `<brace.version>` that isn't `MAJOR.MINOR.PATCH[-SUFFIX]` | [§](#security-the-brace-launcher-refuses-an-invalid-pinned-version) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -399,3 +400,16 @@ request's transaction writes (`db.insert`, `update`, `delete`, `deleteBy`, `sql(
 cookies are `SameSite=Lax` and CSRF checks cover mutating methods only, so a state-changing GET
 can be triggered from another site. Move such handlers to POST, PUT or DELETE. Writes through
 raw `db.jdbc(...)` are not detected. Nothing changes in prod.
+
+## Security: the `brace` launcher refuses an invalid pinned version
+
+The launcher used `<brace.version>` from the project's `pom.xml` as a directory name under its
+toolchain cache and ran the classpath it found there. A cloned project could pin a value like
+`../../../../proc/self/cwd` and make `brace status` run a jar from the repo itself. The launcher
+now accepts only `MAJOR.MINOR.PATCH` with an optional `-SUFFIX` (`0.1.10`, `v0.1.10`,
+`0.1.11-SNAPSHOT`) and otherwise exits with `Invalid <brace.version> in pom.xml: …` for every
+command, `brace version` included. `install.sh` (`BRACE_VERSION` and the release `tag_name`)
+and `brace self-update` apply the same rule.
+
+No change for projects that pin an ordinary version. Upgrade the installed `brace` CLI
+(`brace self-update`) to get the check: it lives in the launcher, not in the framework jar.

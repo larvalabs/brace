@@ -220,7 +220,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Tier: frontier.** Connecting to the pinned address under TLS/SNI with `java.net.http` is
     the subtle part.
 
-- [ ] **H6: The `brace` launcher runs a classpath chosen by a cloned repo**, `bin/brace:65-74, 78-97, 100-111, 150-162`
+- [x] **H6: The `brace` launcher runs a classpath chosen by a cloned repo**, `bin/brace:65-74, 78-97, 100-111, 150-162`
   - **What's wrong.** `pinned_version` takes `<brace.version>` from `./pom.xml`, strips only a
     leading `v`, and splices it into `$BRACE_CACHE/$v`. That path becomes
     `exec java -cp "$HOME_DIR/lib/*"`. The same string also reaches `rm -rf "$dest"`/`mv` in
