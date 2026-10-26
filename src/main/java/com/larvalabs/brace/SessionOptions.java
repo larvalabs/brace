@@ -14,6 +14,7 @@ public class SessionOptions {
     private Boolean secure = null;
     private String sameSite = "Lax";
     private Duration maxAge = null;
+    private Duration absoluteMaxAge = null;
     private String path = "/";
     private String domain = null;
 
@@ -129,6 +130,21 @@ public class SessionOptions {
     public SessionOptions maxAgeDays(int days) {
         this.maxAge = Duration.ofDays(days);
         return this;
+    }
+
+    /**
+     * The longest a session can live from sign-in, however active it is (M10). {@link #maxAge}
+     * slides forward on every write; this does not, so a continuously used — or continuously
+     * replayed — cookie still expires. Default: 30 days, or {@code maxAge} if that is longer.
+     * {@link Session#regenerate()} (call it at login) starts the clock again.
+     */
+    public SessionOptions absoluteMaxAge(Duration absoluteMaxAge) {
+        this.absoluteMaxAge = absoluteMaxAge;
+        return this;
+    }
+
+    public Duration absoluteMaxAge() {
+        return absoluteMaxAge;
     }
 
     /** Cookie Path; must start with {@code /} and contain no {@code ;} or control characters. */

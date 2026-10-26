@@ -1418,6 +1418,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private void attachSessionCookie(Result result, Session session, boolean cookieSecure) {
         if (session == null || !session.isModified() || sessionSecret == null) return;
         session.maxAgeSeconds(sessionMaxAgeSeconds());
+        if (sessionOptions != null && sessionOptions.absoluteMaxAge() != null) {
+            session.absoluteMaxAgeSeconds(sessionOptions.absoluteMaxAge().getSeconds());
+        }
         String cookieValue = session.toCookie(sessionSecret);
         if (sessionOptions != null) {
             result.header("Set-Cookie", sessionOptions.buildSetCookie(cookieValue, cookieSecure));

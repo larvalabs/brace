@@ -81,6 +81,23 @@ public class Session {
     private long maxAgeSeconds = 0;
 
     /**
+     * Reserved key holding the absolute session deadline (epoch seconds), M10. Unlike
+     * {@link #EXPIRY_KEY}, which slides forward on every write, it is stamped once when the
+     * session is first issued and carried unchanged, so a continuously used (or continuously
+     * replayed) cookie still dies. {@link #regenerate()} resets it.
+     */
+    static final String ABSOLUTE_KEY = "_abs";
+
+    /** Default absolute lifetime when none is configured: 30 days, or the sliding max-age if longer. */
+    static final long DEFAULT_ABSOLUTE_MAX_AGE_SECONDS = 30L * 24 * 60 * 60;
+
+    /** Absolute deadline read from the cookie (epoch seconds), or 0 when this session has none yet. */
+    private long absoluteDeadline = 0;
+
+    /** Absolute lifetime to stamp on a session that has no deadline yet. 0 = the default. */
+    private long absoluteMaxAgeSeconds = 0;
+
+    /**
      * Cache for derived PBKDF2 keys. Since the session secret is fixed for process
      * lifetime, we memoize the derived SecretKeySpec to avoid re-running 100,000 PBKDF2
      * iterations on every session cookie read/write. The PBKDF2 derivation is deterministic
@@ -115,9 +132,9 @@ public class Session {
     }
 
     public void set(String key, String value) {
-        // _exp is server-managed (written at serialize time, enforced at read time). Silently
-        // reserve it so a handler can't forge or extend its own expiry via session.set("_exp", ...).
-        if (EXPIRY_KEY.equals(key)) {
+        // _exp and _abs are server-managed (written at serialize time, enforced at read time).
+        // Silently reserve them so a handler can't forge or extend its own expiry via set(...).
+        if (EXPIRY_KEY.equals(key) || ABSOLUTE_KEY.equals(key)) {
             return;
         }
         // L4: only a real change marks the session modified. A no-op write used to force a full
@@ -138,6 +155,23 @@ public class Session {
      */
     void maxAgeSeconds(long seconds) {
         this.maxAgeSeconds = seconds;
+    }
+
+    /** The absolute lifetime to stamp on a session with no deadline yet (M10); &le; 0 = default. */
+    void absoluteMaxAgeSeconds(long seconds) {
+        this.absoluteMaxAgeSeconds = seconds;
+    }
+
+    /**
+     * Start this session afresh for a privilege change — call it at login and logout (M10). It
+     * drops the CSRF token, so one planted or seen before login (a shared computer, a tossed
+     * cookie) is useless afterwards, and restarts the absolute lifetime. Session data is kept;
+     * combine with {@link #clear()} at logout.
+     */
+    public void regenerate() {
+        data.remove(Csrf.TOKEN_KEY);
+        absoluteDeadline = 0;
+        modified = true;
     }
 
     public void set(String key, int value) {
@@ -228,8 +262,15 @@ public class Session {
             // only a client hint; _exp is what bounds replay of a stolen cookie (M2). The horizon
             // is the configured SessionOptions.maxAge (when positive), else a 14-day default.
             long horizon = maxAgeSeconds > 0 ? maxAgeSeconds : DEFAULT_MAX_AGE_SECONDS;
+            long now = System.currentTimeMillis() / 1000;
             var payload = new LinkedHashMap<>(data);
-            payload.put(EXPIRY_KEY, String.valueOf(System.currentTimeMillis() / 1000 + horizon));
+            payload.put(EXPIRY_KEY, String.valueOf(now + horizon));
+            if (absoluteDeadline <= 0) {
+                long absolute = absoluteMaxAgeSeconds > 0 ? absoluteMaxAgeSeconds
+                    : Math.max(DEFAULT_ABSOLUTE_MAX_AGE_SECONDS, horizon);
+                absoluteDeadline = now + absolute;
+            }
+            payload.put(ABSOLUTE_KEY, String.valueOf(absoluteDeadline));
 
             String json = toJson(payload);
             byte[] jsonBytes = json.getBytes(StandardCharsets.UTF_8);
@@ -300,14 +341,26 @@ public class Session {
             //   keep the data.
             // - Absent (legacy ≤0.1.6 cookie) → accepted for this release; re-minted with _exp on the
             //   next write. A future release will reject expiry-less cookies (see migration guide).
+            // M10: a cookie without _exp (minted by 0.1.6 or earlier) is no longer accepted; every
+            // cookie since 0.1.7 carries one. A missing, malformed or past _exp is an empty session.
+            long now = System.currentTimeMillis() / 1000;
             String exp = session.data.remove(EXPIRY_KEY);
-            if (exp != null) {
+            try {
+                if (exp == null || Long.parseLong(exp.strip()) <= now) {
+                    return new Session();
+                }
+            } catch (NumberFormatException e) {
+                return new Session();
+            }
+            // M10: the absolute deadline, carried unchanged across writes. Absent on cookies minted
+            // before 0.1.11; those get one stamped on their next write.
+            String abs = session.data.remove(ABSOLUTE_KEY);
+            if (abs != null) {
                 try {
-                    if (Long.parseLong(exp.strip()) <= System.currentTimeMillis() / 1000) {
-                        return new Session();
-                    }
+                    long deadline = Long.parseLong(abs.strip());
+                    if (deadline <= now) return new Session();
+                    session.absoluteDeadline = deadline;
                 } catch (NumberFormatException e) {
-                    // Malformed _exp — treat as expired/invalid rather than indefinitely valid.
                     return new Session();
                 }
             }

@@ -196,12 +196,53 @@ class SessionTest {
     }
 
     @Test
-    void legacyCookieWithoutExpiryIsAccepted() {
-        // Simulate a ≤0.1.6 cookie: encrypted payload with NO _exp entry.
+    void legacyCookieWithoutExpiryIsRejected() {
+        // A ≤0.1.6 cookie: encrypted payload with NO _exp entry. Accepted through 0.1.10 so
+        // pre-expiry cookies could roll over; since M10 (0.1.11) it would never expire, so it's
+        // an empty session.
         var legacy = legacyCookieWithoutExp(SECRET, "userId", "42");
         var restored = Session.fromCookie(legacy, SECRET);
-        assertEquals("42", restored.get("userId"),
-            "Legacy cookies without _exp are accepted for this release");
+        assertNull(restored.get("userId"), "a cookie without _exp must not authenticate");
+    }
+
+    @Test
+    void absoluteDeadlineIsStampedOnceAndNotExtended() throws Exception {
+        var session = Session.of("userId", "7");
+        session.maxAgeSeconds(3600);
+        session.absoluteMaxAgeSeconds(1);
+        var first = Session.fromCookie(session.toCookie(SECRET), SECRET);
+        assertEquals("7", first.get("userId"));
+        assertFalse(first.has(Session.ABSOLUTE_KEY), "_abs is stripped from user-visible data");
+        // A write re-stamps _exp (sliding) but carries _abs unchanged.
+        first.set("seen", "1");
+        first.maxAgeSeconds(3600);
+        first.absoluteMaxAgeSeconds(3600);
+        String rewritten = first.toCookie(SECRET);
+        Thread.sleep(2100);
+        assertNull(Session.fromCookie(rewritten, SECRET).get("userId"),
+            "past the absolute deadline the session is empty, however recently it was written");
+    }
+
+    @Test
+    void regenerateDropsTheCsrfTokenAndRestartsTheAbsoluteLifetime() {
+        var session = Session.of("userId", "7");
+        Csrf.ensureToken(session);
+        String before = Csrf.getToken(session);
+        session.absoluteMaxAgeSeconds(60);
+        var restored = Session.fromCookie(session.toCookie(SECRET), SECRET);
+        restored.regenerate();
+        assertNull(Csrf.getToken(restored), "the pre-login token is gone");
+        assertTrue(restored.isModified());
+        assertEquals("7", restored.get("userId"), "data is kept");
+        Csrf.ensureToken(restored);
+        assertNotEquals(before, Csrf.getToken(restored));
+    }
+
+    @Test
+    void handlerCannotSetTheAbsoluteDeadline() {
+        var session = new Session();
+        session.set(Session.ABSOLUTE_KEY, "99999999999");
+        assertFalse(session.has(Session.ABSOLUTE_KEY));
     }
 
     @Test
