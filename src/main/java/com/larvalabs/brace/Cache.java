@@ -379,11 +379,30 @@ public class Cache {
             var key = pageKey(request);
             var cached = cache.get(key, RenderedResponse.class);
             if (cached != null) return cached.toResult();
-            var rendered = RenderedResponse.from(handler.apply(request));
+            var result = handler.apply(request);
+            if (result instanceof View view && view.sessionDerived()) {
+                // M1: this render carries one visitor's CSRF token and/or pending flash. Storing it
+                // would replay them to every other visitor, so serve it uncached.
+                warnSessionDerived(request.path());
+                return RenderedResponse.from(result).toResult();
+            }
+            var rendered = RenderedResponse.from(result);
             cache.setInternal(key, rendered, ttl, tags);
             // Replay the snapshot (not the original Result) so a miss and a hit return the same
             // materialized shape — downstream code sees identical bytes either way.
             return rendered.toResult();
+        }
+
+        // Request paths already warned about (dev mode only), so a hot route logs once, not per request.
+        private final Set<String> warnedPaths = ConcurrentHashMap.newKeySet();
+
+        private void warnSessionDerived(String path) {
+            if (!"dev".equals(System.getProperty("brace.mode"))) return;
+            // Bounded: the path is request-controlled on parameterized routes.
+            if (warnedPaths.size() < 100 && warnedPaths.add(path)) {
+                Log.warn("page cache skipped " + path + ": the render includes a CSRF token or flash message, "
+                    + "which are per-visitor. Cache pages without forms or flash, or drop the cache wrapper.");
+            }
         }
 
         private String pageKey(Request request) {

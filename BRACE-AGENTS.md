@@ -663,6 +663,12 @@ or the cache will serve the same entry for every value. Undeclared params never 
 (so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
 entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
 
+**A cached page is shared by every visitor**, so it must not contain per-visitor content. A
+render whose output includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`) or a
+pending flash message is served but not stored (dev mode logs it once per path); pages without
+forms or flash cache normally. Anything else per-user (a name in the header) is on you: don't
+wrap such pages.
+
 Cache **values must be non-null** on both backends — `null` is reserved for "missing", so `set(key, null)` throws `IllegalArgumentException`. Page caching varies on `HX-Request`, so an htmx partial and a full-page render of the same path are cached separately (they don't clobber each other).
 
 ### Backends: in-process (default) vs shared

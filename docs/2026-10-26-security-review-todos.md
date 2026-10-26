@@ -243,7 +243,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
 
 ## Medium
 
-- [ ] **M1: The page cache serves one user's CSRF token and flash message to every visitor**, `Cache.java:353-375`, `View.java:55-63`, `BraceHandler.java:412-430`
+- [x] **M1: The page cache serves one user's CSRF token and flash message to every visitor**, `Cache.java:353-375`, `View.java:55-63`, `BraceHandler.java:412-430`
   - **What's wrong.** `View.of` resolves the CSRF field and flash into the template params, and
     `BraceHandler` wires both for plain `Handler` routes too. `CachedHandler` then stores the
     rendered body.

@@ -28,6 +28,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | The `brace` launcher refuses an invalid pinned version | security | fix a `<brace.version>` that isn't `MAJOR.MINOR.PATCH[-SUFFIX]` | [§](#security-the-brace-launcher-refuses-an-invalid-pinned-version) |
 | Removing an ops key revokes its outstanding tokens | security | none | [§](#security-removing-an-ops-key-revokes-its-outstanding-tokens) |
 | Shared-cache `getOrSet` only reads classes this process has written | security | none | [§](#security-shared-cache-getorset-only-reads-classes-this-process-has-written) |
+| The page cache no longer stores pages that carry a CSRF token or flash | security | none | [§](#security-the-page-cache-no-longer-stores-per-visitor-pages) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -440,3 +441,19 @@ entry first, the first `getOrSet` for a given class recomputes and rewrites the 
 calls hit as before. `cache.get(key, Type.class)` is unchanged.
 
 No code change.
+
+## Security: the page cache no longer stores per-visitor pages
+
+`cache.wrap(...)` stored the first visitor's rendered page and replayed it to everyone. A cached
+page that rendered a form (`${csrfField}` or `${csrfToken}`) or a flash message therefore handed
+the first visitor's CSRF token and flash text (which can include an email address) to every
+later visitor, and every later visitor's form was rejected with 403.
+
+A render whose output contains the visitor's CSRF token, or that carries a non-empty flash, is
+now served to that visitor but not stored. Pages without a form or flash are cached exactly as
+before, with or without sessions. In dev mode (`brace.mode=dev`) the first skipped render per
+path logs a warning.
+
+No code change. Cached routes that render a form now render on every request; cache the data
+behind them instead, or drop the wrapper.
+

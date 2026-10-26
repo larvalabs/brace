@@ -1,6 +1,7 @@
 package com.larvalabs.brace;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -55,11 +56,18 @@ public class View extends Result {
     private final String template;
     private final Map<String, Object> params;
     private boolean rendered;
+    // M1: the values this render took from the visitor's session — the masked CSRF tokens it was
+    // handed, and whether a non-empty flash came with them. The page cache must not store (and replay
+    // to everyone) a page carrying one user's token or flash; sessionDerived() decides from these.
+    private final List<String> csrfValues;
+    private final boolean carriesFlash;
 
-    private View(String template, Map<String, Object> params) {
+    private View(String template, Map<String, Object> params, List<String> csrfValues, boolean carriesFlash) {
         super(200, "text/html; charset=utf-8", (String) null);
         this.template = template;
         this.params = params;
+        this.csrfValues = csrfValues;
+        this.carriesFlash = carriesFlash;
     }
 
     static void setEngine(TemplateEngine engine) {
@@ -73,20 +81,27 @@ public class View extends Result {
         // here — before the cookie-write decision — exactly as it was when rendering happened eagerly.
         // The template render itself is deferred to materialize() (M12); the resolved values ride along
         // in params, so it no longer depends on the ThreadLocals, which are cleared before it runs.
+        List<String> csrfValues = List.of();
         Supplier<Session> csrfSession = currentCsrfSession.get();
         if (csrfSession != null) {
             Session session = csrfSession.get();
-            params.put("csrfField", new CsrfField(Csrf.hiddenField(session)));
+            String fieldToken = Csrf.maskedToken(session);
+            String metaToken = Csrf.maskedToken(session);
+            params.put("csrfField", new CsrfField(Csrf.hiddenFieldFor(fieldToken)));
             // The bare masked token, for a <meta> tag that fetch/htmx read into X-CSRF-Token.
-            params.put("csrfToken", Csrf.maskedToken(session));
+            params.put("csrfToken", metaToken);
+            csrfValues = List.of(fieldToken, metaToken);
         }
+        boolean carriesFlash = false;
         // R1: consuming the flash source here (View.of == a render is happening) clears the
         // session's flash exactly when a View renders, not on redirects/JSON/polling.
         Supplier<Map<String, String>> flashSource = currentFlash.get();
         if (flashSource != null) {
-            params.put("flash", flashSource.get());
+            var flash = flashSource.get();
+            params.put("flash", flash);
+            carriesFlash = flash != null && !flash.isEmpty();
         }
-        return new View(template, params);
+        return new View(template, params, csrfValues, carriesFlash);
     }
 
     /**
@@ -140,6 +155,24 @@ public class View extends Result {
             params.put((String) keyValues[i], keyValues[i + 1]);
         }
         return params;
+    }
+
+    /**
+     * Whether this render carries values taken from the visitor's session (M1): the CSRF field/token
+     * or pending flash. Such a response is per-visitor and must never be stored in a shared cache.
+     */
+    boolean sessionDerived() {
+        if (carriesFlash) return true;
+        if (csrfValues.isEmpty()) return false;
+        // Every render on a CSRF-active route is handed tokens, but only one whose output contains
+        // them is per-visitor; a page with no form renders none and stays cacheable. The masked
+        // tokens are random per render and base64url (unchanged by HTML or JS escaping), so a
+        // substring match has no false positives and catches them in any context.
+        String out = body();
+        for (String value : csrfValues) {
+            if (out != null && out.contains(value)) return true;
+        }
+        return false;
     }
 
     public String template() { return template; }
