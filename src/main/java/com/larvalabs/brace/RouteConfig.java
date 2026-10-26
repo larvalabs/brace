@@ -27,6 +27,26 @@ public class RouteConfig {
     }
 
     /**
+     * Add an access requirement to this route, on top of the app default and any group's. All
+     * must pass. See {@link Access}.
+     */
+    public RouteConfig access(Access requirement) {
+        route.addAccess(requirement);
+        return this;
+    }
+
+    /**
+     * Opt this route out of the app's default access ({@link Brace#defaultAccess(Access)}).
+     * Every route must either have an access requirement or say this; {@link Brace#start()}
+     * refuses to start otherwise. It removes only the default: combining it with
+     * {@code .access(...)}, or using it inside a group that has a requirement, fails at start.
+     */
+    public RouteConfig publicRoute() {
+        route.markPublic();
+        return this;
+    }
+
+    /**
      * Configure CSRF protection for this route.
      * Set to false for API endpoints that use non-cookie authentication (bearer tokens, etc).
      * Do NOT disable for cookie-authenticated JSON endpoints - those are still CSRF-vulnerable.

@@ -299,6 +299,27 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
 
+            // H1: the matched route's access requirements, resolved once at start() — the app
+            // default (unless the route is public), its groups', its own. After plain before() so
+            // a rate limiter still sheds load first; before the body is read and CSRF is checked,
+            // so an unauthenticated request never gets its body buffered. Bound to the Route
+            // object, not to a path pattern, so trailing-slash, encoded and HEAD variants of a
+            // guarded route are guarded the same way. A session-reading requirement builds the
+            // session here, and it is the same instance session-aware middleware and the handler
+            // get (the identity invariant below).
+            if (match != null) {
+                for (var access : match.route().access()) {
+                    if (access.usesSession() && session == null) {
+                        session = buildSession(headers);
+                    }
+                    Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
+                    if (rejected != null) {
+                        respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSecure, exchange);
+                        return true;
+                    }
+                }
+            }
+
             // Run session-aware before middleware (after all plain before middleware).
             // The Session built here is the SAME instance later handed to the handler —
             // that identity is the contract: a middleware mutation (login touch, flash)

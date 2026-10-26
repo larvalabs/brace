@@ -42,8 +42,8 @@ class SessionWriteBackPathsTest {
                     session.flash("notice", "pending");
                     return Result.text("ok");
                 });
-                app.requireSession("/members/*", "userId", "/login");
-                app.get("/members/poll", req -> Result.text("data"));
+                app.get("/members/poll", req -> Result.text("data"))
+                    .access(Access.session("userId", "/login"));
                 app.getSession("/loginas42", (req, session) -> {
                     session.set("userId", "42");
                     return Result.text("ok");
@@ -133,7 +133,7 @@ class SessionWriteBackPathsTest {
     }
 
     @Test
-    void requireSessionRedirectPreservesPendingFlash() {
+    void sessionAccessRedirectPreservesPendingFlash() {
         testApp.get("/setflash");
         // Anonymous poll of a guarded route: redirected — and the pending flash must
         // survive (before the fix, buildSession consumed it and the guard's redirect

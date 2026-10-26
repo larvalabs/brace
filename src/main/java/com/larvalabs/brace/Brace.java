@@ -26,8 +26,15 @@ public class Brace {
     List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
-    /** First requireSession pattern, or null — backs the start()-time misconfiguration check. */
-    private String requireSessionPattern;
+    // H1 access model: the requirement every route gets unless it is marked .publicRoute().
+    private Access defaultAccess;
+    /**
+     * Default used when the app sets none. Null for every app (start() then refuses unmarked
+     * routes); the framework's own test suite sets {@link #frameworkTestDefaultAccess} through a
+     * test-only JUnit listener so its hundreds of fixture routes don't each need a marker.
+     */
+    private Access fallbackDefaultAccess = frameworkTestDefaultAccess;
+    static volatile Access frameworkTestDefaultAccess;
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
     private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
     private DatabaseFactory databaseFactory;
@@ -869,6 +876,37 @@ public class Brace {
         return this;
     }
 
+    /**
+     * A group whose routes all carry {@code requirement}, on top of the app's default access.
+     * The requirement is bound to the routes the group registers, not to the prefix, so a route
+     * can't fall outside it by its path.
+     */
+    public Brace group(String prefix, Access requirement, Consumer<RouteGroup> config) {
+        var group = new RouteGroup(prefix, router, RouteGroup.extend(List.of(), requirement));
+        config.accept(group);
+        return this;
+    }
+
+    // Access
+
+    /**
+     * The access requirement every route gets unless it is marked {@code .publicRoute()}:
+     * typically {@code Access.session("userId", "/login")}. {@link #start()} refuses to start
+     * while any route has no requirement and isn't public; an app with no login at all says so
+     * with {@code defaultAccess(Access.none())}. See {@link Access}.
+     */
+    public Brace defaultAccess(Access requirement) {
+        if (requirement == null) throw new IllegalArgumentException("defaultAccess must not be null");
+        this.defaultAccess = requirement;
+        return this;
+    }
+
+    /** Framework tests that exercise the access check itself: no fallback default. */
+    Brace strictAccessCheck() {
+        this.fallbackDefaultAccess = null;
+        return this;
+    }
+
     // Middleware
 
     public Brace before(Middleware.Before handler) {
@@ -897,24 +935,6 @@ public class Brace {
         beforeSessionMiddleware.add(new Middleware.BoundBeforeSession(
                 Middleware.PathPattern.compile(pathPattern), handler));
         return this;
-    }
-
-    /**
-     * The one-line auth guard: redirect to {@code redirectTo} unless the session has
-     * {@code sessionKey}. Equivalent to
-     * {@code before(pattern, (req, session) -> session.has(key) ? null : Redirect.to(redirectTo))}.
-     * Handlers under the pattern can then assume the key is present.
-     *
-     * <p>Requires sessions: {@link #start()} throws {@link IllegalStateException} if a
-     * requireSession guard is registered without {@code .sessions(secret)} — without a
-     * session the guard is a provable infinite redirect loop.
-     */
-    public Brace requireSession(String pathPattern, String sessionKey, String redirectTo) {
-        if (requireSessionPattern == null) {
-            requireSessionPattern = pathPattern;
-        }
-        return before(pathPattern, (req, session) ->
-                session.has(sessionKey) ? null : Redirect.to(redirectTo));
     }
 
     public Brace after(Middleware.After handler) {
@@ -975,19 +995,11 @@ public class Brace {
         if (trustedProxies != null) {
             trustedProxies.resumeRefresh();
         }
-        // Session-aware middleware without .sessions(secret) is a silent trap: every
-        // request gets a fresh empty Session. For requireSession that is *provably* an
-        // infinite redirect loop (the session can never carry the key), and the runtime
-        // symptom — ERR_TOO_MANY_REDIRECTS — points nowhere near the cause, so fail at
-        // start(). A generic BeforeSession may be read-only or otherwise tolerant of an
-        // empty session, so it keeps the loud warning instead.
+        // Session-aware middleware without .sessions(secret) is a silent trap: every request
+        // gets a fresh empty Session. A session-reading access requirement fails start() for
+        // that (see resolveAccess); a generic BeforeSession may be read-only or otherwise
+        // tolerant of an empty session, so it keeps the loud warning instead.
         if (sessionSecret == null) {
-            if (requireSessionPattern != null) {
-                throw new IllegalStateException("requireSession(\"" + requireSessionPattern
-                    + "\", ...) is registered but sessions are not enabled — call .sessions(secret) "
-                    + "before start(). Without it every request sees an empty session, so the guard "
-                    + "redirects unconditionally: an infinite redirect loop (ERR_TOO_MANY_REDIRECTS).");
-            }
             if (!beforeSessionMiddleware.isEmpty()) {
                 Log.warn("Session-aware before-middleware (before(pattern, BeforeSession)) "
                     + "is registered but sessions are not enabled — call .sessions(secret). Without it "
@@ -1067,26 +1079,26 @@ public class Brace {
             }
             // Ops POSTs use signed-payload or bearer auth, not cookies — CSRF is the wrong layer
             // and would block the CLI on any app that also calls .sessions(...).
-            router.add("POST", "/ops/auth", noStore(opsHandler::auth)).setCsrfRequired(false);
-            router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken)).setCsrfRequired(false);
-            router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange));
-            router.add("GET", "/ops/status", noStore(opsHandler::status));
-            router.add("GET", "/ops/routes", noStore(opsHandler::routes));
-            router.add("GET", "/ops/logs", noStore(opsHandler::logs));
-            router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard));
-            router.add("GET", "/ops/errors", noStore(opsHandler::errors));
-            router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail));
-            router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError)).setCsrfRequired(false);
-            router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache)).setCsrfRequired(false);
-            router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats));
-            router.add("GET", "/ops/regressions", noStore(opsHandler::regressions));
-            router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression)).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/auth", noStore(opsHandler::auth))).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken))).setCsrfRequired(false);
+            frameworkRoute(router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange)));
+            frameworkRoute(router.add("GET", "/ops/status", noStore(opsHandler::status)));
+            frameworkRoute(router.add("GET", "/ops/routes", noStore(opsHandler::routes)));
+            frameworkRoute(router.add("GET", "/ops/logs", noStore(opsHandler::logs)));
+            frameworkRoute(router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard)));
+            frameworkRoute(router.add("GET", "/ops/errors", noStore(opsHandler::errors)));
+            frameworkRoute(router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail)));
+            frameworkRoute(router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError))).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache))).setCsrfRequired(false);
+            frameworkRoute(router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats)));
+            frameworkRoute(router.add("GET", "/ops/regressions", noStore(opsHandler::regressions)));
+            frameworkRoute(router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression))).setCsrfRequired(false);
             if (analytics != null) {
-                router.add("GET", "/ops/analytics", noStore(opsHandler::analytics));
-                router.add("GET", "/ops/analytics/data", noStore(opsHandler::analyticsData));
+                frameworkRoute(router.add("GET", "/ops/analytics", noStore(opsHandler::analytics)));
+                frameworkRoute(router.add("GET", "/ops/analytics/data", noStore(opsHandler::analyticsData)));
                 // Cookie-authenticated, but the ops cookie is SameSite=Strict, so a cross-site form
                 // can't carry it; and the only effect is a cookie on the caller's own browser.
-                router.add("POST", "/ops/analytics/ignore", noStore(opsHandler::analyticsIgnore)).setCsrfRequired(false);
+                frameworkRoute(router.add("POST", "/ops/analytics/ignore", noStore(opsHandler::analyticsIgnore))).setCsrfRequired(false);
             }
         }
 
@@ -1126,6 +1138,7 @@ public class Brace {
                 Log.debug("routes.unnamed", Map.of("unnamed", unnamed, "named", router.names().size()));
             }
         }
+        resolveAccess();
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
@@ -1579,6 +1592,76 @@ public class Brace {
      * <p>Applied at registration so a new ops endpoint gets it by construction rather than by
      * remembering. An explicit {@code Cache-Control} set by the handler wins.
      */
+    /**
+     * A route the framework registers (/ops/*): outside the app's default access. Its handlers
+     * authenticate the ops credential themselves.
+     */
+    private static Route frameworkRoute(Route route) {
+        route.markFramework();
+        route.markPublic();
+        return route;
+    }
+
+    /**
+     * H1: resolve every route's effective access requirements — the default (unless the route is
+     * public or the framework's), then its groups outer to inner, then its own — and refuse to
+     * start while any route has none and isn't marked public. Runs once per start(), after the
+     * framework's own routes are registered.
+     */
+    void resolveAccess() {
+        Access fallback = defaultAccess != null ? defaultAccess : fallbackDefaultAccess;
+        var unmarked = new ArrayList<Route>();
+        boolean readsSession = false;
+        for (Route route : router.routes()) {
+            boolean hasOwn = !route.groupAccess().isEmpty() || !route.declaredAccess().isEmpty();
+            if (route.isPublicRoute() && hasOwn && !route.isFramework()) {
+                throw new IllegalStateException(route.method() + " " + route.pattern()
+                    + " is marked .publicRoute() but also has access requirements ("
+                    + describe(route.groupAccess(), route.declaredAccess()) + "). .publicRoute() only "
+                    + "removes the app's default access; register a public route outside the restricted group.");
+            }
+            var effective = new ArrayList<Access>();
+            if (!route.isFramework() && !route.isPublicRoute() && fallback != null && !fallback.isNone()) {
+                effective.add(fallback);
+            }
+            effective.addAll(route.groupAccess());
+            effective.addAll(route.declaredAccess());
+            route.setResolvedAccess(effective);
+            boolean covered = route.isPublicRoute() || !effective.isEmpty()
+                || (fallback != null && !route.isFramework());
+            if (!covered) unmarked.add(route);
+            for (Access a : effective) readsSession |= a.usesSession();
+        }
+        if (!unmarked.isEmpty()) {
+            var msg = new StringBuilder().append(unmarked.size())
+                .append(unmarked.size() == 1 ? " route has" : " routes have")
+                .append(" no access requirement and ").append(unmarked.size() == 1 ? "is" : "are")
+                .append(" not marked public:");
+            for (Route r : unmarked) {
+                msg.append("\n  ").append(String.format("%-6s %s", r.method(), r.pattern()));
+                if (r.name() != null) msg.append("  (").append(r.name()).append(")");
+            }
+            msg.append("\nAdd app.defaultAccess(...), put them in a group with access, or mark them .publicRoute().");
+            throw new IllegalStateException(msg.toString());
+        }
+        if (readsSession && sessionSecret == null) {
+            throw new IllegalStateException("A route has a session-reading access requirement "
+                + "(Access.session or Access.check) but sessions are not enabled — call .sessions(secret) "
+                + "before start(). Without it every request sees an empty session, so the requirement "
+                + "rejects every request.");
+        }
+        if (defaultAccess != null && defaultAccess.isNone()) {
+            Log.info("defaultAccess(Access.none()): routes without their own requirement are public");
+        }
+    }
+
+    private static String describe(List<Access> group, List<Access> own) {
+        var labels = new ArrayList<String>();
+        for (Access a : group) labels.add(a.label());
+        for (Access a : own) labels.add(a.label());
+        return String.join(" + ", labels);
+    }
+
     private static Handler noStore(Handler handler) {
         return req -> {
             Result result = handler.apply(req);

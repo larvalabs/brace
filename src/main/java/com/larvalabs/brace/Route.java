@@ -18,6 +18,15 @@ public class Route {
     private boolean csrfRequired;
     private String name;
     private Analytics.Track analytics = Analytics.Track.PATH;
+    // H1 access model. groupAccess and declaredAccess are what registration said (outer group
+    // first, then the route's own .access(...)); access is the effective list Brace.start()
+    // resolves once, default included, and what BraceHandler runs on every request.
+    private List<Access> groupAccess = List.of();
+    private final List<Access> declaredAccess = new ArrayList<>();
+    private boolean publicRoute;
+    private List<Access> access = List.of();
+    // Registered by the framework itself (/ops/*): the app's default access never applies.
+    private boolean framework;
 
     public Route(String method, String pattern, Object handler, Invoker invoker) {
         this(method, pattern, handler, invoker, true);
@@ -71,6 +80,43 @@ public class Route {
 
     /** How {@link Analytics} records views of this route; {@code PATH} unless configured. */
     public Analytics.Track analytics() { return analytics; }
+
+    /** Effective access requirements, resolved by {@link Brace#start()}; run in order. */
+    public List<Access> access() { return access; }
+
+    /** True if the route opted out of the app's default access with {@code .publicRoute()}. */
+    public boolean isPublicRoute() { return publicRoute; }
+
+    List<Access> groupAccess() { return groupAccess; }
+
+    List<Access> declaredAccess() { return declaredAccess; }
+
+    void setGroupAccess(List<Access> groupAccess) {
+        this.groupAccess = List.copyOf(groupAccess);
+    }
+
+    void addAccess(Access requirement) {
+        if (requirement == null) throw new IllegalArgumentException("access requirement must not be null");
+        if (requirement.isNone()) {
+            throw new IllegalArgumentException("Access.none() is only valid as app.defaultAccess(...); "
+                + "use .publicRoute() to make " + method + " " + pattern + " public");
+        }
+        declaredAccess.add(requirement);
+    }
+
+    boolean isFramework() { return framework; }
+
+    void markFramework() {
+        this.framework = true;
+    }
+
+    void markPublic() {
+        this.publicRoute = true;
+    }
+
+    void setResolvedAccess(List<Access> access) {
+        this.access = List.copyOf(access);
+    }
 
     void setAnalytics(Analytics.Track track) {
         this.analytics = track;
