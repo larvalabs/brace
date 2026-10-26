@@ -35,8 +35,8 @@ These follow [`reviews/README.md`](reviews/README.md) and `AGENTS.md`.
   - adds the tests named in its todo entry;
   - updates `BRACE-AGENTS.md` and `README.md` when public API changes;
   - adds a migration-guide entry for any user-visible change, in
-    `docs/migrations/brace-0.1.10-to-0.1.11.md` (the in-progress step), or the next step's
-    guide for anything staged for 0.1.12.
+    `docs/migrations/brace-0.1.10-to-0.1.11.md` (the in-progress step). Nothing is staged
+    across releases; see "Breaking changes and rollout".
 - **Every phase ends with a merge gate:**
   1. `mvn verify` **with a Docker daemon available**. The Postgres IT tier fails closed and must
      actually run: L6 and H2's fan-out path are DB-backed.
@@ -191,12 +191,9 @@ the order matters.
 | 2 | **L6** | HMAC on NOTIFY payloads; per-app channel name | M | — |
 | 3 | **L8** | Signed release checksums; verification in `bin/brace`, `install.sh`, `Toolchains`; https only | M | Release-process change (D5) |
 
-**Design note (M14).** Follow the v1→v2 precedent exactly:
-
-- the server accepts v2 and v3 in 0.1.11 and logs a deprecation warning naming the key's
-  fingerprint;
-- the CLI sends v3;
-- 0.1.12 rejects v2 with a 401 that names the cause.
+**Design note (M14).** v2 is removed in the same release that adds v3; there is no deprecation
+window. The server rejects v2 with a 401 that names the cause (as v1 does today), so the CLI and
+the server must be upgraded together. Release the CLI first, or in the same step.
 
 **Exit criteria:**
 
@@ -250,33 +247,34 @@ change from the earlier phases:
 
 ## Breaking changes and rollout
 
-Each user-visible change gets a migration-guide entry with a before/after. A change that would
-break existing apps is staged: a warning in one release, enforcement in the next. The exceptions
-are cases where staying silent would leave an exploitable hole.
+**Decision (2026-10-26):** Brace's only users are its maintainers' own apps, so every change is
+enforced in the next release (0.1.11). Nothing is staged behind a warning, there are no
+deprecation windows, and there is no dual-read. Each user-visible change still gets a
+migration-guide entry with a before/after, because the guide is how our own apps get upgraded.
 
-| ID | Change | 0.1.11 | 0.1.12 |
-|---|---|---|---|
-| H1 | Unguarded, unmarked routes | Startup **warning** with a table; `brace check` fails | `start()` **fails** (opt-out: `.accessCheck(WARN)`) |
-| H2 | Guards apply to WebSocket upgrades | **On** (closes a confirmed bypass; apps relying on it were exposed) | — |
-| M2 | `.csrf(false)` on a cookie-session route | Startup **failure** unless `.csrf(false, "reason")` (decision D3) | — |
-| M2 | Cross-site request check without sessions | **On** for mutating methods (decision D3) | — |
-| M3 | `csrfField` becomes `gg.jte.Content` | Templates declaring `@param String csrfField` must change the type | — |
-| M9 | `req.json(Entity.class)` throws | **On** (decision D4) | — |
-| M10 | Session cookie renamed to `__Host-brace_session` | Write the new name, read both | Read only the new name |
-| M10 | Cookies without `_exp` rejected | **On** (warned since 0.1.7) | — |
-| M7 | `safeKey` neutralizes `.html`/`.svg`/… extensions | **On** | — |
-| H5 | `Http` public-only policy | Opt-in per call and app-wide; log when a call **would have been blocked** | Default **on** for every call (decision D2) |
-| M14 | Ops auth v2 | Accepted with a deprecation warning; the CLI sends v3 | Rejected |
-| L9 | `text/html; charset=utf-8` | **On** (tests asserting the exact header string change) | — |
-
-## Open decisions (maintainer)
-
-| # | Decision | Recommendation |
+| ID | Change in 0.1.11 | What an app has to do |
 |---|---|---|
-| D1 | H1 API naming and end state: hard fail at `start()` in 0.1.12, or permanently a warning? | Hard fail, with `.accessCheck(WARN)` as an escape hatch. A warning is exactly the per-handler outcome this review is about. Name: `.publicRoute()` or `.allowAnonymous()`, pick before shipping. |
-| D2 | H5: should `Http` default to public-only? | Yes, from 0.1.12, after a release of "would have blocked" logging. Calls to internal services are legitimate but rare and should be declared with `.trusted()`. |
-| D3 | M2: fail startup on `.csrf(false)` + cookie session immediately, and turn on the cross-site check by default? | Yes to both in 0.1.11. Both close confirmed holes, and the opt-outs are one argument. |
-| D4 | M9: throw on `@Entity` binding immediately, or warn first? | Throw immediately. It is a mass-assignment and row-overwrite primitive, and the fix is mechanical (`jsonForm` + `apply`). |
+| H1 | `start()` **fails** on any route that has no access requirement and isn't marked public | Add `defaultAccess(...)` and mark the public routes |
+| H2 | Route access requirements apply to WebSocket upgrades | Nothing, unless a socket was meant to be anonymous: mark it public |
+| M2 | Startup **fails** on `.csrf(false)` for a route that uses the cookie session, unless `.csrf(false, "reason")` | Remove the opt-out or give a reason |
+| M2 | Cross-site check on mutating requests, even without sessions | Nothing for same-origin apps |
+| M3 | `csrfField` becomes `gg.jte.Content` | Templates declaring `@param String csrfField` change the type |
+| M9 | `req.json(Entity.class)` throws | Bind to a record (`jsonForm`) and `apply()` it |
+| M10 | Session cookie renamed to `__Host-brace_session`; the old name is not read | Users are logged out once on deploy |
+| M10 | Cookies without `_exp` rejected | None (only pre-0.1.7 cookies) |
+| M7 | `safeKey` neutralizes `.html`/`.svg`/… extensions | Nothing, unless code relied on the original extension |
+| H5 | `Http` refuses non-public destinations by default | Mark calls to internal services `.trusted()` |
+| M14 | Ops auth v2 rejected | Upgrade the CLI with the server |
+| L9 | `text/html; charset=utf-8` | Tests asserting the exact header string change |
+
+## Decisions
+
+| # | Decision | Status |
+|---|---|---|
+| D1 | H1: hard fail at `start()`, or a warning? Name of the public marker? | **Decided:** hard fail in 0.1.11, no escape hatch. Name still open: `.publicRoute()` (recommended) or `.allowAnonymous()`. |
+| D2 | H5: should `Http` default to public-only? | **Decided:** yes, in 0.1.11. Internal calls use `.trusted()`. |
+| D3 | M2: fail startup on `.csrf(false)` + cookie session, and turn on the cross-site check by default? | **Decided:** yes to both, in 0.1.11. |
+| D4 | M9: throw on `@Entity` binding immediately? | **Decided:** yes, in 0.1.11. |
 | D5 | L8: signing scheme and key custody for release artifacts | minisign, with the key held offline by the release owner and the public key embedded in the launcher and `Toolchains`. Needs a `RELEASE.md` update. |
 | D6 | M6: does `SecurityHeaders.defaults()` gain a CSP, or only the new `strict()`? | Only `strict()`. Changing `defaults()` would silently break apps with inline scripts. The scaffold uses `strict()`. |
 | D7 | M13: runtime base image | Distroless nonroot Java 25, digest-pinned and refreshed by Dependabot or Renovate. Alpine if a shell is needed for debugging; document `docker debug` instead. |

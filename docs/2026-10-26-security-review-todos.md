@@ -98,8 +98,8 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - `app.defaultAccess(Guard)` applies a guard to every route that doesn't opt out.
     - `group(prefix, guard, cfg)` binds the guard to the routes it registers.
     - `start()` prints an "unguarded routes" table, and `/ops/routes` adds an `access` column.
-    - Enforcement is staged: warn in the release that ships the API, then fail `start()` one
-      release later. `brace check` fails on any unguarded route that isn't marked public.
+    - Enforced immediately: `start()` (and `Brace.test()`) fails on any route that is neither
+      covered nor marked public, and `brace check` reports the same.
     - Register `/ops/*` through one authorizing wrapper (`opsRoute(READ, handler)`) instead of
       per-method `authorize` calls.
   - **Tests.**
@@ -204,9 +204,8 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     metadata at `http://169.254.169.254/hetzner/v1/userdata`, where cloud-init user-data often
     holds secrets. It can also reach internal services on the Docker network.
   - **Fix.**
-    - Add an outbound address policy: `Http.get(url).publicOnly()` per call, and
-      `app.outboundPolicy(OutboundPolicy.PUBLIC_ONLY)` app-wide, with
-      `Http.get(url).trusted()` as the explicit escape.
+    - Add an outbound address policy that is **on by default** for every `Http` call, with
+      `Http.get(url).trusted()` as the explicit per-call escape for internal services.
     - Resolve the host once, reject loopback, link-local, RFC 1918, CGNAT, ULA, unspecified,
       multicast and IPv4-mapped/compatible addresses, then connect to the checked address
       (rewrite the URI to the IP, keep the `Host` header, keep SNI) so DNS rebinding can't swap
@@ -461,7 +460,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     3. Add `SessionOptions.previousSecrets(String...)`: decrypt with any of them, always
        re-encrypt with the current one.
     4. Add the `__Host-` prefix: write `__Host-brace_session` when Secure and `Path=/` and no
-       `Domain`, and read both names for one release.
+       `Domain`. The old name is not read, so users are logged out once on deploy.
     5. Add an absolute lifetime (`_iat` plus `SessionOptions.absoluteMaxAge`).
     6. Reject cookies without `_exp`.
   - **Tests.** One per sub-item:
@@ -471,7 +470,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - `__Host-` is written only when its prerequisites hold.
     - The absolute cap is enforced.
     - An expiry-less cookie is rejected.
-  - **Breaking:** the cookie rename (mitigated by dual-read) and expiry-less rejection. Needs
+  - **Breaking:** the cookie rename (one forced logout) and expiry-less rejection. Needs
     migration-guide entries.
   - **Tier: frontier** (crypto and session invariants).
 
@@ -559,15 +558,15 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Fix.**
     - Key the token cache by normalized origin.
     - Add ops auth **v3**: the signed message includes the target origin, and the server checks
-      it against its effective host (via `ProxyHeaders.effectiveHost`). Keep v2 for one
-      release with a deprecation warning, as v1 was handled.
+      it against its effective host (via `ProxyHeaders.effectiveHost`). Remove v2 in the same
+      release (401 naming the cause, as v1 is handled today).
     - The CLI prints a warning when a `.brace` ops URL differs from the last one it
       authenticated to.
   - **Tests.**
     - A cached token is not sent to a different origin.
     - A v3 signature for origin A is rejected by origin B.
-    - v2 is still accepted, with a warning.
-  - **Breaking (deprecation)** for old CLIs after the window closes.
+    - v2 is rejected with a 401 that names the cause.
+  - **Breaking** for old CLIs: upgrade the CLI with the server.
   - **Tier: frontier** (auth protocol change).
 
 ## Low
