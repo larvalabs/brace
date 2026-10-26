@@ -65,6 +65,22 @@ class OpsKeyRevocationTest {
     }
 
     @Test
+    void loweringAKeysScopeCapsItsOutstandingTokens() {
+        // A CONTROL token minted while the key was CONTROL; the key is then lowered to
+        // scope:read and the app restarted. The token's own claim must not outrank the key.
+        String control = OpsToken.create(SECRET, 60, OpsScope.CONTROL, OpsKeys.fingerprint(current.publicKey()));
+        var post = new Request("POST", "/ops/cache/clear", Map.of(), Map.of(),
+            Map.of("Authorization", "Bearer " + control), null);
+        assertNotEquals(401, handler(current).clearCache(post).status(), "CONTROL key: allowed");
+
+        var readOnly = new java.util.LinkedHashMap<String, OpsScope>();
+        readOnly.put(current.publicKey(), OpsScope.READ);
+        var lowered = new OpsHandler(new Stats(), null, null, new Router(), readOnly, SECRET);
+        assertEquals(401, lowered.clearCache(post).status(), "key lowered to READ: CONTROL refused");
+        assertEquals(200, lowered.status(bearer(control)).status(), "READ still works");
+    }
+
+    @Test
     void tokenWithNoKidIsRejected() {
         // Every token this handler mints carries a kid; a kid-less one is not ours.
         var h = handler(current);

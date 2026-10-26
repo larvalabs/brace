@@ -11,10 +11,11 @@ public class OpsHandler {
     private final Mailer mailer;
     private final Router router;
     private final Map<String, OpsScope> authorizedKeys;
-    // Fingerprints (token kid) of the keys authorized at construction. A token is honored only if
-    // its kid is in here, so removing a key from ops-authorized-keys revokes its outstanding
-    // tokens on the next restart even though the token secret is derived from the session secret.
-    private final Set<String> authorizedKids;
+    // Fingerprint (token kid) → scope ceiling of each key authorized at construction. A token is
+    // honored only if its kid is in here, and never above that key's current ceiling, so removing
+    // a key from ops-authorized-keys — or lowering its scope — takes effect on its outstanding
+    // tokens at the next restart, even though the token secret is derived from the session secret.
+    private final Map<String, OpsScope> ceilingByKid;
     private final String tokenSecret;
     private final ErrorStore errorStore;
     private final Cache cache;
@@ -58,9 +59,9 @@ public class OpsHandler {
         this.mailer = mailer;
         this.router = router;
         this.authorizedKeys = authorizedKeys;
-        var kids = new HashSet<String>();
-        for (String publicKey : authorizedKeys.keySet()) kids.add(OpsKeys.fingerprint(publicKey));
-        this.authorizedKids = Set.copyOf(kids);
+        var ceilings = new HashMap<String, OpsScope>();
+        authorizedKeys.forEach((publicKey, ceiling) -> ceilings.put(OpsKeys.fingerprint(publicKey), ceiling));
+        this.ceilingByKid = Map.copyOf(ceilings);
         this.tokenSecret = tokenSecret;
         this.errorStore = errorStore;
         this.cache = cache;
@@ -884,12 +885,17 @@ public class OpsHandler {
      * Verify a token's HMAC and expiry, and that it was minted for a key that is still
      * authorized. Every token this handler mints carries the minting key's fingerprint as
      * {@code kid} (auth, login-token, exchange and the dashboard re-mint all do), so a token
-     * with no {@code kid} is not one we issued and is rejected rather than trusted.
+     * with no {@code kid} is not one we issued and is rejected rather than trusted. The returned
+     * scope is capped at the key's current ceiling: a CONTROL token minted before its key was
+     * lowered to {@code scope:read} acts as READ from then on.
      */
     private OpsToken.Claims verifyForKnownKey(String token) {
         var claims = OpsToken.verify(token, tokenSecret);
-        if (claims == null || claims.kid() == null || !authorizedKids.contains(claims.kid())) return null;
-        return claims;
+        if (claims == null || claims.kid() == null) return null;
+        OpsScope ceiling = ceilingByKid.get(claims.kid());
+        if (ceiling == null) return null;
+        OpsScope scope = claims.scope().min(ceiling);
+        return scope == claims.scope() ? claims : new OpsToken.Claims(claims.exp(), scope, claims.kid());
     }
 
     /**

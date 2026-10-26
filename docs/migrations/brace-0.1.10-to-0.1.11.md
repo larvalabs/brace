@@ -424,7 +424,9 @@ Ops tokens (bearer, up to 24 h; browser cookie, 8 h) stayed valid after their ke
 from `ops-authorized-keys`, because the token secret is derived from the session secret and
 survives a restart. A token is now honored only while the fingerprint of the key that minted it
 is still in the file, which is read at startup: removing a key and redeploying revokes its
-tokens. Tokens without a key id are rejected.
+tokens. A token's scope is also capped at its key's current ceiling, so lowering a key to
+`scope:read` turns its outstanding CONTROL tokens into READ ones. Tokens without a key id are
+rejected.
 
 No code change. Clients of a removed key get 401 and must authenticate with a remaining key.
 

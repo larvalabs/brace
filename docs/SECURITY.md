@@ -785,8 +785,9 @@ deprecation warning and will then be rejected; see the 0.1.6 → 0.1.7 migration
 
 **Key revocation.** Tokens are bound to the key that minted them. At startup the server takes
 the fingerprints of the keys in `ops-authorized-keys` and rejects any bearer token, ops session
-cookie or login token whose `kid` is not among them, or that has no `kid`. Removing a key and
-restarting or redeploying ends its access immediately, although the token secret is derived from
+cookie or login token whose `kid` is not among them, or that has no `kid`, and caps every
+token's scope at its key's current ceiling. Removing a key, or lowering it to `scope:read`, and
+restarting or redeploying takes effect on its outstanding tokens immediately, although the token secret is derived from
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
 
