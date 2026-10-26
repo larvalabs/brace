@@ -430,9 +430,12 @@ that needs full control, `db.jdbc(...)` is the raw escape hatch.
 For DB access outside request lifecycle (jobs, WebSocket):
 
 ```java
-dbFactory.withSession(db -> { db.insert(new AuditLog("event")); });
-var count = dbFactory.withSession(db -> db.count(User.class));
+dbFactory.runInSession(db -> db.insert(new AuditLog("event")));   // nothing to return
+var count = dbFactory.withSession(db -> db.count(User.class));     // returns the lambda's value
 ```
+
+Each call is its own session and transaction: committed on return, rolled back if the lambda
+throws.
 
 ### Pagination
 
@@ -926,7 +929,7 @@ app.ws("/chat", ctx -> new ChatHandler(ctx));
 
 `WsContext` methods: `send(message)`, `join(room)`, `leave(room)`, `broadcast(room, message)`, `session()`, `close()`.
 
-Use `dbFactory.withSession()` for database access inside WebSocket handlers.
+Use `dbFactory.withSession(db -> ...)` (or `runInSession` when nothing is returned) for database access inside WebSocket handlers.
 
 **Slow-consumer backpressure.** `send`/`broadcast` are non-blocking. A connection that stops reading would otherwise make its outgoing frames pile up in Jetty's queue without bound (a per-connection memory leak). Brace bounds each connection's queued-but-unflushed bytes and force-closes a connection that exceeds the cap (`TRY_AGAIN_LATER`); the bound is per connection, so one slow client never blocks healthy members of the same room. Tune with `app.wsMaxQueuedBytes(bytes)` (default 4 MB).
 

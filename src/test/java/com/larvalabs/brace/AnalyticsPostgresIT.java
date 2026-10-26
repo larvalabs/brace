@@ -61,7 +61,7 @@ class AnalyticsPostgresIT extends PostgresTestBase {
         assertEquals(1, a.flush());
         assertEquals(2, b.flush());
 
-        long salts = dbFactory.withSession(db -> { return db.sqlQueryLong("SELECT COUNT(*) FROM brace_analytics_salts"); });
+        long salts = dbFactory.withSession(db -> db.sqlQueryLong("SELECT COUNT(*) FROM brace_analytics_salts"));
         assertEquals(1, salts);
 
         var report = a.report("today");
@@ -83,7 +83,7 @@ class AnalyticsPostgresIT extends PostgresTestBase {
         assertEquals(1, s.visitors());
         assertEquals(1, s.pageviews());
         assertEquals(1, s.live());
-        dbFactory.withSession(db -> { a.prune(db); });
+        dbFactory.runInSession(db -> a.prune(db));
         assertEquals(1, a.report("7d").pageviews(), "today's rows are inside the retention window");
     }
 
@@ -91,7 +91,7 @@ class AnalyticsPostgresIT extends PostgresTestBase {
     void rollupAndTwelveMonthReport() {
         var a = new Analytics(Analytics.options(), dbFactory);
         var old = java.time.LocalDate.now(java.time.ZoneOffset.UTC).minusDays(90);
-        dbFactory.withSession(db -> {
+        dbFactory.runInSession(db -> {
             for (long v = 1; v <= 3; v++) {
                 db.sql("INSERT INTO brace_analytics_pageviews (ts, view_date, view_hour, visitor, path, source, device, browser, os) "
                     + "VALUES (?, ?, 0, ?, '/old', NULL, 'desktop', 'Chrome', 'macOS')",
@@ -99,9 +99,9 @@ class AnalyticsPostgresIT extends PostgresTestBase {
             }
             db.sql("INSERT INTO brace_analytics_rejects (view_date, reason, instance_id, n) VALUES (?, 'bot', 'i', 4)", old);
         });
-        int days = dbFactory.withSession(db -> { return a.rollup(db); });
+        int days = dbFactory.withSession(db -> a.rollup(db));
         assertEquals(90, days, "every completed day from the first raw one through yesterday");
-        dbFactory.withSession(db -> { a.prune(db); });
+        dbFactory.runInSession(db -> a.prune(db));
 
         var year = a.report("12mo");
         assertEquals(3, year.visitors());

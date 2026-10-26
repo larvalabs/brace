@@ -249,7 +249,7 @@ class AnalyticsIntegrationTest {
     @Order(7)
     void expiredSaltsAndOldRowsAreDeleted() throws Exception {
         LocalDate old = LocalDate.now(java.time.ZoneOffset.UTC).minusDays(Analytics.DEFAULT_RETENTION_DAYS + 10);
-        dbFactory.withSession(db -> {
+        dbFactory.runInSession(db -> {
             db.sql("INSERT INTO brace_analytics_salts (view_date, salt) VALUES (?, ?)", old, "00".repeat(32));
             db.sql("INSERT INTO brace_analytics_pageviews (ts, view_date, view_hour, visitor, path, device, browser, os) "
                 + "VALUES (?, ?, 0, 1, '/old', 'desktop', 'Chrome', 'macOS')",
@@ -257,11 +257,11 @@ class AnalyticsIntegrationTest {
         });
         visit("/", browser(AnalyticsTest.FIREFOX_WIN));
         flushWhenBuffered(1);
-        dbFactory.withSession(db -> { app.analyticsCollector().rollup(db); app.analyticsCollector().prune(db); });
-        long salts = dbFactory.withSession(db -> { return db.sqlQueryLong("SELECT COUNT(*) FROM brace_analytics_salts"); });
+        dbFactory.runInSession(db -> { app.analyticsCollector().rollup(db); app.analyticsCollector().prune(db); });
+        long salts = dbFactory.withSession(db -> db.sqlQueryLong("SELECT COUNT(*) FROM brace_analytics_salts"));
         assertEquals(1, salts, "only today's salt survives");
-        long oldRows = dbFactory.withSession(db -> { return db.sqlQueryLong(
-            "SELECT COUNT(*) FROM brace_analytics_pageviews WHERE path = '/old'"); });
+        long oldRows = dbFactory.withSession(db -> db.sqlQueryLong(
+            "SELECT COUNT(*) FROM brace_analytics_pageviews WHERE path = '/old'"));
         assertEquals(0, oldRows);
     }
 

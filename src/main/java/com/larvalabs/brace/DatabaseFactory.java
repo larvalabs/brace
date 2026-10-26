@@ -85,6 +85,11 @@ public class DatabaseFactory {
         return sessionFactory.openStatelessSession();
     }
 
+    /**
+     * Runs {@code action} in its own session and transaction (committed on return, rolled back on
+     * an exception) and returns its result. For database work outside the request lifecycle: jobs,
+     * WebSocket handlers, SSE producers. Use {@link #runInSession} when there is nothing to return.
+     */
     public <T> T withSession(java.util.function.Function<Database, T> action) {
         var db = new Database(openSession());
         db.beginTransaction();
@@ -100,7 +105,13 @@ public class DatabaseFactory {
         }
     }
 
-    public void withSession(java.util.function.Consumer<Database> action) {
+    /**
+     * {@link #withSession} for work that returns nothing. A separate name rather than a
+     * {@code withSession(Consumer)} overload: an expression lambda such as
+     * {@code db -> db.count(User.class)} fits both a {@code Function} and a {@code Consumer}, so
+     * javac rejected that overload pair as ambiguous.
+     */
+    public void runInSession(java.util.function.Consumer<Database> action) {
         var db = new Database(openSession());
         db.beginTransaction();
         try {

@@ -38,11 +38,9 @@ class DatabaseFactoryWithSessionTest {
     void withSessionFunctionOpensSessionExecutesQueryAndReturnsResult() {
         String title = "WithSession_Function_" + System.nanoTime();
 
-        // Insert via Consumer overload
         Consumer<Database> insert = session -> session.insert(newPost(title));
-        factory.withSession(insert);
+        factory.runInSession(insert);
 
-        // Retrieve via Function overload
         Function<Database, Post> query = session -> session.queryOne(Post.class, "title = ?", title);
         var found = factory.withSession(query);
 
@@ -51,11 +49,11 @@ class DatabaseFactoryWithSessionTest {
     }
 
     @Test
-    void withSessionConsumerInsertsDataAndCommits() {
-        String title = "WithSession_Consumer_" + System.nanoTime();
+    void runInSessionInsertsDataAndCommits() {
+        String title = "RunInSession_" + System.nanoTime();
 
         Consumer<Database> insert = session -> session.insert(newPost(title));
-        factory.withSession(insert);
+        factory.runInSession(insert);
 
         // Verify data is visible in a subsequent query
         Function<Database, Post> query = session -> session.queryOne(Post.class, "title = ?", title);
@@ -81,18 +79,41 @@ class DatabaseFactoryWithSessionTest {
     }
 
     @Test
-    void withSessionConsumerRollsBackOnException() {
-        String title = "WithSession_ConsumerRollback_" + System.nanoTime();
+    void runInSessionRollsBackOnException() {
+        String title = "RunInSession_Rollback_" + System.nanoTime();
 
         Consumer<Database> action = session -> {
             session.insert(newPost(title));
             throw new RuntimeException("Deliberate failure");
         };
-        assertThrows(RuntimeException.class, () -> factory.withSession(action));
+        assertThrows(RuntimeException.class, () -> factory.runInSession(action));
 
         // Data should not have been committed
         Function<Database, Post> query = session -> session.queryOne(Post.class, "title = ?", title);
         assertNull(factory.withSession(query));
+    }
+
+    /**
+     * The shapes BRACE-AGENTS.md and README.md teach, written as inline lambdas. Expression lambdas
+     * whose body is a method call fit both a Function and a Consumer, so when the two were
+     * withSession overloads these lines failed to compile as ambiguous. This test compiling is the
+     * point; keep the lambdas inline rather than assigned to typed variables.
+     */
+    @Test
+    void documentedLambdaFormsCompileAndRun() {
+        String title = "WithSession_Documented_" + System.nanoTime();
+
+        factory.runInSession(db -> db.insert(newPost(title)));
+        factory.runInSession(db -> { db.insert(newPost(title)); });
+        long count = factory.withSession(db -> db.count(Post.class));
+        var posts = factory.withSession(db -> db.query(Post.class, "title = ?", title));
+        var label = factory.withSession(db -> String.valueOf(db.queryOne(Post.class, "title = ?", title).title));
+        var same = factory.withSession(db -> { return db.query(Post.class, "title = ?", title); });
+
+        assertTrue(count >= 2);
+        assertEquals(2, posts.size());
+        assertEquals(title, label);
+        assertEquals(2, same.size());
     }
 
     @Test
@@ -104,7 +125,7 @@ class DatabaseFactoryWithSessionTest {
         };
         for (int i = 0; i < 15; i++) {
             try {
-                factory.withSession(action);
+                factory.runInSession(action);
             } catch (RuntimeException ignored) {
                 // expected
             }

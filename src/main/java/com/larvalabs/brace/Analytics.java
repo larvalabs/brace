@@ -462,7 +462,7 @@ public final class Analytics {
             salts.keySet().removeIf(d -> d.isBefore(saltCutoff));
             return 0;
         }
-        databaseFactory.withSession(db -> {
+        databaseFactory.runInSession(db -> {
             if (!events.isEmpty()) insertEvents(db, events);
             for (var t : tallies.entrySet()) addTallies(db, t.getKey(), t.getValue());
             db.sql("DELETE FROM brace_analytics_salts WHERE view_date < ?", saltCutoff);

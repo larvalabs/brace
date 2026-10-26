@@ -190,8 +190,7 @@ class PostgresBackend implements CacheBackend {
 
     /** Run one statement in its own transaction, reusing the framework's session/tx plumbing. */
     private <T> T run(Database.JdbcFunction<T> fn) {
-        // Block lambda (not expression) to bind the withSession(Function) overload, not Consumer.
-        return factory.withSession(db -> { return db.jdbc(fn); });
+        return factory.withSession(db -> db.jdbc(fn));
     }
 
     /** Escape LIKE wildcards in a literal prefix so {@code deletePrefix} matches only the prefix. */

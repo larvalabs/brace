@@ -33,7 +33,7 @@ class AnalyticsRollupTest {
 
     @BeforeEach
     void clean() {
-        dbFactory.withSession(db -> {
+        dbFactory.runInSession(db -> {
             for (var t : List.of("brace_analytics_pageviews", "brace_analytics_rejects", "brace_analytics_daily")) {
                 db.sql("DELETE FROM " + t);
             }
@@ -42,7 +42,7 @@ class AnalyticsRollupTest {
     }
 
     private static void view(LocalDate day, long visitor, String path, String source) {
-        dbFactory.withSession(db -> {
+        dbFactory.runInSession(db -> {
             db.sql("INSERT INTO brace_analytics_pageviews (ts, view_date, view_hour, visitor, path, source, device, browser, os) "
                 + "VALUES (?, ?, 0, ?, ?, ?, 'desktop', 'Chrome', 'macOS')",
                 OffsetDateTime.of(day.atStartOfDay(), ZoneOffset.UTC), day, visitor, path, source);
@@ -50,17 +50,17 @@ class AnalyticsRollupTest {
     }
 
     private static void rejected(LocalDate day, String reason, long n) {
-        dbFactory.withSession(db -> {
+        dbFactory.runInSession(db -> {
             db.sql("INSERT INTO brace_analytics_rejects (view_date, reason, instance_id, n) VALUES (?, ?, 'i', ?)", day, reason, n);
         });
     }
 
     private int rollup() {
-        return dbFactory.withSession(db -> { return analytics.rollup(db); });
+        return dbFactory.withSession(db -> analytics.rollup(db));
     }
 
     private long count(String sql, Object... params) {
-        return dbFactory.withSession(db -> { return db.sqlQueryLong(sql, params); });
+        return dbFactory.withSession(db -> db.sqlQueryLong(sql, params));
     }
 
     /** Three past days and today; visitor 1 returns on two days (a new id each day in reality). */
@@ -119,11 +119,11 @@ class AnalyticsRollupTest {
         view(old, 9, "/old-post", "google.com");
         view(old, 10, "/old-post", null);
 
-        dbFactory.withSession(db -> { analytics.prune(db); });
+        dbFactory.runInSession(db -> analytics.prune(db));
         assertEquals(2, count("SELECT COUNT(*) FROM brace_analytics_pageviews"), "not summarized yet, so kept");
 
         rollup();
-        dbFactory.withSession(db -> { analytics.prune(db); });
+        dbFactory.runInSession(db -> analytics.prune(db));
         assertEquals(0, count("SELECT COUNT(*) FROM brace_analytics_pageviews"), "past retention once summarized");
 
         var year = analytics.report("12mo");

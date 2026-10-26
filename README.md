@@ -170,7 +170,7 @@ public class App {
 Components included in the framework jar as of this release:
 
 - **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting, gzip response compression on by default (`.compression(false)` to opt out)
-- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
+- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()`/`runInSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
 - **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
@@ -274,11 +274,11 @@ db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns co
 For scoped DB access outside the request lifecycle (background tasks, WebSocket handlers):
 
 ```java
-dbFactory.withSession(db -> {
+dbFactory.runInSession(db -> {
     db.insert(new AuditLog("user signed up"));
 });
 
-var count = dbFactory.withSession(db -> db.count(User.class));
+var count = dbFactory.withSession(db -> db.count(User.class));   // returns the lambda's value
 ```
 
 ## Forms & Validation

@@ -18,6 +18,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
 | `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
 | `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
+| `DatabaseFactory.withSession(Consumer)` renamed to `runInSession` | **breaking** | rename calls whose lambda returns nothing | [§](#breaking-withsessionconsumer-renamed-to-runinsession) |
 | `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
 | HTML and text responses declare `charset=utf-8` | security | tests that assert the exact `Content-Type` string | [§](#security-html-and-text-responses-declare-charsetutf-8) |
 | `Html.escape`; `Result.html` documented as a raw sink | new | none | [§](#new-htmlescape) |
@@ -294,6 +295,34 @@ db.update(user);
 ```
 
 The exception message names the entity and points to this pattern.
+
+## Breaking: `withSession(Consumer)` renamed to `runInSession`
+
+`DatabaseFactory` had two `withSession` overloads, one taking a `Function<Database, T>` and one a
+`Consumer<Database>`. An expression lambda whose body is a method call fits both, so the documented
+`dbFactory.withSession(db -> db.count(User.class))` failed to compile with "reference to
+withSession is ambiguous". Only block lambdas (`db -> { return ...; }` or `db -> { ...; }`) picked
+an overload. The `Consumer` form is now `runInSession`; `withSession` takes only a `Function` and
+returns its value.
+
+Before:
+
+```java
+dbFactory.withSession(db -> { db.insert(new AuditLog("event")); });
+var count = dbFactory.withSession(db -> { return db.count(User.class); });  // block lambda to dodge the ambiguity
+```
+
+After:
+
+```java
+dbFactory.runInSession(db -> db.insert(new AuditLog("event")));
+var count = dbFactory.withSession(db -> db.count(User.class));
+```
+
+A `withSession` call left on a lambda that returns nothing no longer compiles (javac reports
+"cannot infer type-variable(s) T ... missing return value" or "inference variable T has
+incompatible bounds"): rename it to `runInSession`. Calls whose
+lambda returns a value need no change, and the `{ return ...; }` workaround can be simplified.
 
 ## Security: `@Min` and `@Max` compare exactly
 
