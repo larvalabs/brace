@@ -104,7 +104,7 @@ Setup: `app.ops("ops-authorized-keys")`. For production health, start with `brac
 | `GET /ops/logs` | Recent structured log entries (filter by level and time) |
 | `GET /ops/cache` | Cache stats (`POST /ops/cache/clear` to clear) |
 | `GET /ops/regressions` | New error kinds since startup |
-| `GET /ops/routes` | All registered routes |
+| `GET /ops/routes` | All registered routes, with each one's access (`public`, `session:userId`, `ops:read`, …) |
 | `GET /ops/dashboard` | HTML dashboard |
 | `GET /ops/analytics` / `GET /ops/analytics/data` | Analytics page / its report as JSON (`?range=today\\|7d\\|30d\\|12mo`), when enabled |
 

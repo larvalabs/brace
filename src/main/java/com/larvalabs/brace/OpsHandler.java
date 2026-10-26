@@ -519,6 +519,7 @@ public class OpsHandler {
             r.put("method", route.method());
             r.put("pattern", route.pattern());
             if (route.name() != null) r.put("name", route.name());
+            r.put("access", route.accessLabel());
             routeList.add(r);
         }
         return Json.of(routeList);

@@ -1439,7 +1439,7 @@ public class Brace {
         int routeCount = router.routes().size() + wsRoutes.size();
         System.out.printf("     routes (%d) {%n", routeCount);
         for (var route : router.routes()) {
-            System.out.printf("        %-6s %s%n", route.method(), route.pattern());
+            System.out.printf("        %-6s %-32s %s%n", route.method(), route.pattern(), route.accessLabel());
         }
         for (var wsPath : wsRoutes.keySet()) {
             System.out.printf("        %-6s %s%n", "WS", wsPath);

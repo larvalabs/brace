@@ -84,6 +84,21 @@ public class Route {
     /** Effective access requirements, resolved by {@link Brace#start()}; run in order. */
     public List<Access> access() { return access; }
 
+    /**
+     * The route's resolved access in one line, for the startup banner and {@code /ops/routes}:
+     * {@code public}, the requirement labels joined with {@code +} (e.g.
+     * {@code session:userId + check}), or {@code none} when the app declared
+     * {@code defaultAccess(Access.none())}.
+     */
+    public String accessLabel() {
+        if (!access.isEmpty()) {
+            var labels = new ArrayList<String>();
+            for (Access a : access) labels.add(a.label());
+            return String.join(" + ", labels);
+        }
+        return publicRoute ? "public" : "none";
+    }
+
     /** True if the route opted out of the app's default access with {@code .publicRoute()}. */
     public boolean isPublicRoute() { return publicRoute; }
 

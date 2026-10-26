@@ -389,8 +389,10 @@ data: `.csrf(false)` on such a route is an error unless it gives a reason
   `group:/admin + session:userId`, `ops:READ`. With `Access.none()` as the default, the banner
   says so in a single warning line.
 - **`/ops/routes`:** gets an `access` field per route.
-- **`brace check`:** reports the same violations as `start()`, so CI catches them without
-  booting the app.
+- **`brace check`:** not changed (decided during implementation). It is a health check of a
+  running server, and an app that violates the rule can't start. CI catches violations through
+  `Brace.test()`, which runs the same `start()` check, so `brace test` fails on an unmarked
+  route.
 
 ### Commit breakdown (all under H1, except where noted)
 
