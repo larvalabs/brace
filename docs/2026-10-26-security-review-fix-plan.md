@@ -187,7 +187,7 @@ the order matters.
 
 | Order | ID | What | Size | Depends on |
 |---|---|---|---|---|
-| 1 | **M14** | Ops auth v3 (origin in the signed message), a per-origin CLI token cache, a warning when a `.brace` URL changes; v2 deprecated | M | L4 (Phase 0) |
+| 1 | **M14** | Ops auth v3 (origin in the signed message), a per-origin CLI token cache, a warning when a `.brace` URL changes; v2 removed | M | L4 (Phase 0) |
 | 2 | **L6** | HMAC on NOTIFY payloads; per-app channel name | M | — |
 | 3 | **L8** | Signed release checksums; verification in `bin/brace`, `install.sh`, `Toolchains`; https only | M | Release-process change (D5) |
 
