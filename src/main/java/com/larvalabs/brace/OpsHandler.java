@@ -11,6 +11,11 @@ public class OpsHandler {
     private final Mailer mailer;
     private final Router router;
     private final Map<String, OpsScope> authorizedKeys;
+    // Fingerprint (token kid) → scope ceiling of each key authorized at construction. A token is
+    // honored only if its kid is in here, and never above that key's current ceiling, so removing
+    // a key from ops-authorized-keys — or lowering its scope — takes effect on its outstanding
+    // tokens at the next restart, even though the token secret is derived from the session secret.
+    private final Map<String, OpsScope> ceilingByKid;
     private final String tokenSecret;
     private final ErrorStore errorStore;
     private final Cache cache;
@@ -54,6 +59,9 @@ public class OpsHandler {
         this.mailer = mailer;
         this.router = router;
         this.authorizedKeys = authorizedKeys;
+        var ceilings = new HashMap<String, OpsScope>();
+        authorizedKeys.forEach((publicKey, ceiling) -> ceilings.put(OpsKeys.fingerprint(publicKey), ceiling));
+        this.ceilingByKid = Map.copyOf(ceilings);
         this.tokenSecret = tokenSecret;
         this.errorStore = errorStore;
         this.cache = cache;
@@ -211,7 +219,7 @@ public class OpsHandler {
             return Result.badRequest("Missing token parameter");
         }
 
-        var claims = OpsToken.verify(loginToken, tokenSecret);
+        var claims = verifyForKnownKey(loginToken);
         if (claims == null) {
             return Result.unauthorized("Invalid or expired login token");
         }
@@ -859,18 +867,35 @@ public class OpsHandler {
         // Check Authorization: Bearer <token> header
         var authHeader = req.header("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            var claims = OpsToken.verify(authHeader.substring(7), tokenSecret);
+            var claims = verifyForKnownKey(authHeader.substring(7));
             if (claims != null) return claims;
         }
 
         // Check ops session cookie (set by /ops/auth/exchange)
         String cookieToken = req.cookie(OPS_COOKIE_NAME);
         if (cookieToken != null) {
-            var claims = OpsToken.verify(cookieToken, tokenSecret);
+            var claims = verifyForKnownKey(cookieToken);
             if (claims != null) return claims;
         }
 
         return null;
+    }
+
+    /**
+     * Verify a token's HMAC and expiry, and that it was minted for a key that is still
+     * authorized. Every token this handler mints carries the minting key's fingerprint as
+     * {@code kid} (auth, login-token, exchange and the dashboard re-mint all do), so a token
+     * with no {@code kid} is not one we issued and is rejected rather than trusted. The returned
+     * scope is capped at the key's current ceiling: a CONTROL token minted before its key was
+     * lowered to {@code scope:read} acts as READ from then on.
+     */
+    private OpsToken.Claims verifyForKnownKey(String token) {
+        var claims = OpsToken.verify(token, tokenSecret);
+        if (claims == null || claims.kid() == null) return null;
+        OpsScope ceiling = ceilingByKid.get(claims.kid());
+        if (ceiling == null) return null;
+        OpsScope scope = claims.scope().min(ceiling);
+        return scope == claims.scope() ? claims : new OpsToken.Claims(claims.exp(), scope, claims.kid());
     }
 
     /**

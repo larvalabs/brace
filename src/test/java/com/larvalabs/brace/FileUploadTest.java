@@ -57,8 +57,7 @@ class FileUploadTest {
             if (file == null) return Result.text("no file");
             try {
                 var tmp = Files.createTempDirectory("brace-test");
-                var dest = tmp.resolve(file.filename());
-                file.saveTo(dest);
+                var dest = file.saveTo(tmp, file.safeFilename());
                 var content = Files.readString(dest);
                 Files.delete(dest);
                 Files.delete(tmp);
@@ -208,6 +207,20 @@ class FileUploadTest {
         var resp = postMultipart("/upload-save", body, boundary);
         assertEquals(200, resp.statusCode());
         assertEquals("saved content", resp.body());
+    }
+
+    @Test
+    void saveToConfinesATraversalFilenameFromTheWire() throws Exception {
+        var boundary = "----TestBoundary";
+        var body = "--" + boundary + "\r\n" +
+            "Content-Disposition: form-data; name=\"file\"; filename=\"../../evil.txt\"\r\n" +
+            "Content-Type: text/plain\r\n\r\n" +
+            "still saved\r\n" +
+            "--" + boundary + "--\r\n";
+
+        var resp = postMultipart("/upload-save", body, boundary);
+        assertEquals(200, resp.statusCode());
+        assertEquals("still saved", resp.body());
     }
 
     @Test

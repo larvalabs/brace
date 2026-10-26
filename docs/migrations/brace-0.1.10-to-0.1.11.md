@@ -1,8 +1,9 @@
 # Migrating from Brace 0.1.10 → 0.1.11
 
-This release has no breaking changes to the API. It adds opt-in server-side analytics, gzips
-responses by default, masks the CSRF token rendered into pages, and `HEAD` requests now reach
-`GET` routes instead of returning 404.
+This release carries the fixes from the 2026-10 security review, several of which are
+**breaking**. Rows marked breaking in the index need a code change. It also adds opt-in
+server-side analytics, gzips responses by default, masks the CSRF token rendered into pages, and
+`HEAD` requests now reach `GET` routes instead of returning 404.
 
 ## Index
 
@@ -15,6 +16,19 @@ responses by default, masks the CSRF token rendered into pages, and `HEAD` reque
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
+| `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
+| `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
+| `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
+| HTML and text responses declare `charset=utf-8` | security | tests that assert the exact `Content-Type` string | [§](#security-html-and-text-responses-declare-charsetutf-8) |
+| `Html.escape`; `Result.html` documented as a raw sink | new | none | [§](#new-htmlescape) |
+| `UploadedFile.safeFilename()`, `saveTo(dir, name)`, `Result.fileUnder` | new, security | switch uploads saved via `dir.resolve(file.filename())` | [§](#new-confined-upload-saving-and-file-serving) |
+| No `Server` header; plain-text errors for requests Jetty rejects | security | update monitors that match on `Server` or Jetty's HTML error text | [§](#security-no-server-header-plain-text-errors-for-rejected-requests) |
+| Stack traces in `/ops` are redacted like messages | security | none | [§](#security-stack-traces-are-redacted-like-messages) |
+| Static dotfiles return 404; dev warning for GETs that write | security | serve a deliberate dotfile from a route instead | [§](#security-static-dotfiles-return-404-dev-warning-for-gets-that-write) |
+| The `brace` launcher refuses an invalid pinned version | security | fix a `<brace.version>` that isn't `MAJOR.MINOR.PATCH[-SUFFIX]` | [§](#security-the-brace-launcher-refuses-an-invalid-pinned-version) |
+| Removing an ops key revokes its outstanding tokens | security | none | [§](#security-removing-an-ops-key-revokes-its-outstanding-tokens) |
+| Shared-cache `getOrSet` only reads classes this process has written | security | none | [§](#security-shared-cache-getorset-only-reads-classes-this-process-has-written) |
+| Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
 
@@ -192,3 +206,237 @@ The ops dashboard header shows the running Brace version next to the Java versio
 has it as `app.braceVersion`, and `brace status` prints it. A build from a JitPack tag reports
 that tag's version, release candidates included (before, an rc build reported the previous
 release's version).
+
+## Security: dependency updates
+
+Brace now ships with patched versions of three dependencies:
+
+| Dependency | Before | After | Advisories fixed |
+|---|---|---|---|
+| Jetty | 12.0.33 | 12.0.40 | CVE-2026-8384 (path-parameter traversal), CVE-2026-10051 (trailer leakage across keep-alive requests), CVE-2026-6790 (HTTP/2 and HTTP/3 authority mismatch) |
+| Jackson | 2.18.6 | 2.18.12 | CVE-2026-89407 (quadratic parsing of long numeric strings, reachable through `req.json()`), CVE-2026-89425, CVE-2026-68494, and the jackson-databind advisories for 2.18.6 |
+| PostgreSQL JDBC | 42.7.10 | 42.7.14 | CVE-2026-42198, CVE-2026-54291 |
+
+Nothing to change in app code. If your own `pom.xml` pins any of these artifacts to an older
+version, drop the pin or raise it; an explicit pin overrides the version Brace brings in.
+
+Visible difference: when Jetty rejects an ambiguous URI itself (for example `%2e%2e` in a path),
+its built-in 400 page now echoes the request URI. Tests that assert a rejected path's name never
+appears in the response body need to check the file's content instead.
+
+## Breaking: `csrfField` is `Content`; new `csrfToken`
+
+`${csrfField}` used to reach templates as a `String`. JTE escapes strings, so the documented
+`${csrfField}` printed the hidden input as visible text and the form's POST was rejected with
+403. The only workaround was `$unsafe{csrfField}`. The field is now a `gg.jte.Content` and
+renders as markup.
+
+Before:
+
+```
+@param String csrfField = null
+<form method="post">$unsafe{csrfField} ...</form>
+```
+
+After:
+
+```
+@param gg.jte.Content csrfField = null
+<form method="post">${csrfField} ...</form>
+```
+
+A template that still declares `@param String csrfField` fails at render time with a
+`ClassCastException` naming the parameter. Change the type, and replace any `$unsafe{csrfField}`
+with `${csrfField}`.
+
+New: `csrfToken` is the bare masked token for a `<meta>` tag that fetch or htmx copy into the
+`X-CSRF-Token` header:
+
+```
+@param String csrfToken = null
+<meta name="csrf-token" content="${csrfToken}">
+```
+
+Like the hidden field, it differs on every render and every rendered value validates. Use it
+instead of printing `Csrf.maskedToken(session)` yourself.
+
+## Breaking: `req.json` refuses `@Entity` classes
+
+Binding request JSON straight into an entity let a client set any public field. A body like
+`{"email":"e@x","role":"admin","id":1,"passwordHash":"p"}` set all four, and a following
+`db.update(user)` wrote them, overwriting row 1. `req.json`, `req.bodyAs` and `req.requireJson`
+now throw `IllegalArgumentException` when the target class is annotated
+`@jakarta.persistence.Entity`, or when an entity appears anywhere inside it (an array element
+such as `User[]`, a record or DTO component, a list field), in every mode. Records, DTOs and
+`Map` without entities inside bind as before.
+
+Before:
+
+```java
+var user = req.json(User.class);   // the client controls id, role, passwordHash
+db.update(user);
+```
+
+After:
+
+```java
+public record ProfileForm(@Required @Email String email, @Required String name) {}
+
+// on the entity
+public void apply(ProfileForm form) { this.email = form.email(); this.name = form.name(); }
+
+// in the handler
+var form = req.jsonForm(ProfileForm.class);
+if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422);
+var user = db.findOr404(User.class, req.longPathParam("id"));
+user.apply(form.value());          // only the fields the form declares
+db.update(user);
+```
+
+The exception message names the entity and points to this pattern.
+
+## Security: `@Min` and `@Max` compare exactly
+
+Bounds used to be checked after truncating the value to a `long`, so `@Min(0)` accepted
+`-0.99` (as `BigDecimal` or `double`), `@Max(100)` accepted `100.99`, and `NaN` and
+`BigDecimal 1e999999999` passed both. A negative amount on a refund or transfer form passed
+`@Min(0)`.
+
+Comparison is now exact: `BigDecimal` and `BigInteger` via `compareTo`, `double` and `float` as
+doubles (`-0.0` still equals `0`), integral types unchanged. `float`, `double`, `Float` and
+`Double` components also reject `NaN`, `±Infinity` and overflow (`1e999`) with the field error
+"must be a finite number", whether or not a bound is declared. This applies to `req.form` and
+`req.jsonForm` alike.
+
+No code change is needed unless a form relied on a fractional value passing a bound it
+actually violates; that input now gets a field error.
+
+## Security: HTML and text responses declare `charset=utf-8`
+
+`View`, `Result.html` and the plain-text results (`Result.text`, `notFound`, `error`,
+`unauthorized`, `forbidden`, `badRequest`, `created`, `noContent`, `notModified`) now send
+`text/html; charset=utf-8` and `text/plain; charset=utf-8` instead of a bare `text/html` /
+`text/plain`. Without a declared charset, a page with no `<meta charset>` was open to
+encoding sniffing, which can undo the template's escaping inside `<script>`.
+
+Browsers render the same. Only code that compares the exact header string changes:
+
+```java
+// before
+assertEquals("text/html", res.header("Content-Type"));
+// after
+assertEquals("text/html; charset=utf-8", res.header("Content-Type"));
+```
+
+Results that set their own content type (`Result.bytes`, `Result.stream`, `Result.file`, ...)
+are unchanged.
+
+## New: `Html.escape`
+
+`Result.html(String)` sends its body as is, with no escaping, and is now documented that way.
+For the rare hand-built snippet that has to include a value, `Html.escape(value)` escapes
+`& < > " '` (null becomes the empty string). Rendering a `View` is still the right tool for
+anything with request or database data in it.
+
+```java
+// before: reflected XSS
+return Result.html("<p>Results for " + req.queryParam("q") + "</p>");
+// after
+return Result.html("<p>Results for " + Html.escape(req.queryParam("q")) + "</p>");
+```
+
+## New: confined upload saving and file serving
+
+`UploadedFile.filename()` is the name the client sent, unmodified: it can be `../../etc/x`, an
+absolute path, contain backslashes or control characters, or be empty. `dir.resolve(filename())`
+writes wherever it points, and an absolute name replaces `dir` entirely. Three additions:
+
+- `file.safeFilename()`: a single safe path component (basename after `/` or `\`, control
+  characters stripped, leading dots trimmed, at most 255 UTF-8 bytes, never empty).
+- `file.saveTo(Path dir, String name)`: writes under `dir` (created if missing) and throws
+  `IllegalArgumentException` if `name` is empty or absolute or would leave `dir`, including
+  through a symlink. Returns the path written.
+- `Result.fileUnder(Path base, String name)`: streams `name` under `base`, or 404 if it escapes
+  `base` or doesn't exist.
+
+```java
+// before
+file.saveTo(uploadDir.resolve(file.filename()));
+return Result.file(publicDir.resolve(req.pathParam("name")));
+// after
+file.saveTo(uploadDir, file.safeFilename());
+return Result.fileUnder(publicDir, req.pathParam("name"));
+```
+
+`fileUnder` picks the content type from the extension, so an uploaded `.html` or `.svg` would
+render in the browser. Serve user uploads with `Result.download(...)` instead.
+
+## Security: no `Server` header; plain-text errors for rejected requests
+
+Responses no longer carry `Server: Jetty(x.y.z)` or `X-Powered-By`. Requests that Jetty rejects
+before Brace's handler runs (for example `//path`, `%2e%2e` path segments, malformed request
+lines) used to get Jetty's HTML error page, which showed the Jetty version and echoed the request
+URI. They now get a short `text/plain; charset=utf-8` body with only the reason phrase
+(`Bad Request`) and `X-Content-Type-Options: nosniff`.
+
+No code change. Update any monitor or test that matched on the `Server` header or on Jetty's
+HTML error text.
+
+## Security: stack traces are redacted like messages
+
+Secret-shaped tokens (long base64url or hex strings, JWTs) in an exception's message were
+redacted in the error's `message` field but appeared verbatim in its stack trace, which repeats
+the message and every `Caused by:` message. The stack traces served by `/ops/status` and
+`/ops/errors/{id}` are now redacted the same way, including `Caused by:` and `Suppressed:`
+lines. Frame (`at …`) lines are unchanged.
+
+No code change.
+
+## Security: static dotfiles return 404; dev warning for GETs that write
+
+A `staticFiles` mapping no longer serves any path with a segment starting with `.`: `.env`,
+`.git/config`, `.htaccess` and `assets/.hidden/x` are 404. The one exception is a leading
+`.well-known/`, so `/.well-known/security.txt` and ACME challenges still work. If you
+deliberately served a dotfile, rename it or serve it from a route.
+
+In dev mode (`brace.mode=dev`), Brace logs a warning once per route pattern when a GET or HEAD
+request's transaction writes (`db.insert`, `update`, `delete`, `deleteBy`, `sql(...)`). Session
+cookies are `SameSite=Lax` and CSRF checks cover mutating methods only, so a state-changing GET
+can be triggered from another site. Move such handlers to POST, PUT or DELETE. Writes through
+raw `db.jdbc(...)` are not detected. Nothing changes in prod.
+
+## Security: the `brace` launcher refuses an invalid pinned version
+
+The launcher used `<brace.version>` from the project's `pom.xml` as a directory name under its
+toolchain cache and ran the classpath it found there. A cloned project could pin a value like
+`../../../../proc/self/cwd` and make `brace status` run a jar from the repo itself. The launcher
+now accepts only `MAJOR.MINOR.PATCH` with an optional `-SUFFIX` (`0.1.10`, `v0.1.10`,
+`0.1.11-SNAPSHOT`) and otherwise exits with `Invalid <brace.version> in pom.xml: …` for every
+command, `brace version` included. `install.sh` (`BRACE_VERSION` and the release `tag_name`)
+and `brace self-update` apply the same rule.
+
+No change for projects that pin an ordinary version. Upgrade the installed `brace` CLI
+(`brace self-update`) to get the check: it lives in the launcher, not in the framework jar.
+
+## Security: removing an ops key revokes its outstanding tokens
+
+Ops tokens (bearer, up to 24 h; browser cookie, 8 h) stayed valid after their key was removed
+from `ops-authorized-keys`, because the token secret is derived from the session secret and
+survives a restart. A token is now honored only while the fingerprint of the key that minted it
+is still in the file, which is read at startup: removing a key and redeploying revokes its
+tokens. A token's scope is also capped at its key's current ceiling, so lowering a key to
+`scope:read` turns its outstanding CONTROL tokens into READ ones. Tokens without a key id are
+rejected.
+
+No code change. Clients of a removed key get 401 and must authenticate with a remaining key.
+
+## Security: shared-cache `getOrSet` only reads classes this process has written
+
+`getOrSet` has no type argument, so with a serializing backend (`CacheBackend.postgres(...)`) it
+deserialized into whatever class name the stored row carried; anyone able to write the
+`brace_cache` table could pick the class. It now reads only classes this process has itself
+written, and treats anything else as a miss. After a restart, or when another server wrote the
+entry first, the first `getOrSet` for a given class recomputes and rewrites the entry; later
+calls hit as before. `cache.get(key, Type.class)` is unchanged.
+
+No code change.

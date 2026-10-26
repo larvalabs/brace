@@ -117,11 +117,13 @@ public class ErrorStore {
             droppedKinds.increment();
             return;
         }
+        // Served on /ops/errors; the trace repeats the message (and every cause's) verbatim.
+        String redactedTrace = Redactor.redactStackTrace(stackTrace);
         pending.compute(key, (k, p) -> {
             if (p == null) p = new Pending(type, route, now);
             p.count++;
             p.message = message;
-            p.stackTrace = stackTrace;
+            p.stackTrace = redactedTrace;
             p.requestDetail = requestDetail;
             p.queriesBefore = queriesBefore;
             p.requestHeaders = requestHeaders;

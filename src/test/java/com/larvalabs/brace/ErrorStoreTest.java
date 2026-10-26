@@ -83,6 +83,23 @@ class ErrorStoreTest {
     }
 
     @Test
+    void stackTraceMessagesAreRedactedInTheStoredRow() {
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String trace = "java.lang.RuntimeException: outer\n"
+            + "\tat com.example.Foo.bar(Foo.java:12)\n"
+            + "Caused by: java.lang.IllegalStateException: bad key " + secret + "\n"
+            + "\tat com.example.Baz.qux(Baz.java:7)\n";
+        errorStore.record("RuntimeException", "outer", "GET /test", trace, "GET /test");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(1, errors.size());
+        String stored = (String) errors.get(0).get("stackTrace");
+        assertFalse(stored.contains(secret), "secret in a Caused by: message must not be persisted");
+        assertEquals(trace.replace(secret, "[redacted]"), stored, "frame lines are unchanged");
+    }
+
+    @Test
     void recordCreatesRow() {
         errorStore.record("RuntimeException", "test error", "GET /test", "stack...", "GET /test");
         errorStore.flush();
@@ -557,9 +574,8 @@ class ErrorStoreTest {
             assertTrue(body.contains("[redacted]"),
                 "redaction placeholder must appear in stored error record; body: " + body);
 
-            // Parse out the specific fields we care about — route, requestDetail, and message
-            // must not contain the raw secret. (The stackTrace field contains the original
-            // exception message verbatim, which is expected — we redact message, not the trace.)
+            // Parse out the specific fields we care about — route, requestDetail, message and
+            // stackTrace (which repeats the exception message) must not contain the raw secret.
             String routeField = extractJsonStringField(body, "route");
             String requestDetailField = extractJsonStringField(body, "requestDetail");
             String messageField = extractJsonStringField(body, "message");
@@ -570,6 +586,21 @@ class ErrorStoreTest {
                 "requestDetail field must not contain raw secret: " + requestDetailField);
             assertFalse(messageField != null && messageField.contains(secret),
                 "message field must not contain raw secret: " + messageField);
+
+            // The stack trace is only on the per-error detail endpoint.
+            String id = body.replaceFirst("(?s).*?\"id\":(\\d+).*", "$1");
+            var detailResp = client.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors/" + id))
+                    .header("Authorization", "Bearer " + token)
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, detailResp.statusCode());
+            String stackTraceField = extractJsonStringField(detailResp.body(), "stackTrace");
+            assertNotNull(stackTraceField, "stackTrace field expected in: " + detailResp.body());
+            assertTrue(stackTraceField.contains("RuntimeException: invalid token: [redacted]"), stackTraceField);
+            assertFalse(stackTraceField.contains(secret),
+                "stackTrace field must not contain raw secret: " + stackTraceField);
         } finally {
             app.stop();
         }

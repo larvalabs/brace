@@ -94,7 +94,7 @@ class CacheSerializationTest {
         assertEquals(1, renders.get(), "B must serve A's cached render without re-running the handler");
         assertEquals("<p>hello</p>", bodyOf(first));
         assertEquals("<p>hello</p>", bodyOf(second));
-        assertEquals("text/html", second.contentType());
+        assertEquals("text/html; charset=utf-8", second.contentType());
     }
 
     @Test
@@ -109,7 +109,7 @@ class CacheSerializationTest {
         var hit = wrapped.apply(req);       // hit → rebuilt from bytes
 
         assertEquals(503, hit.status(), "status survives the serialization round-trip");
-        assertEquals("text/plain", hit.contentType());
+        assertEquals("text/plain; charset=utf-8", hit.contentType());
         assertEquals("120", hit.header("Retry-After"), "custom headers survive the round-trip");
         assertEquals("down for maintenance", bodyOf(hit));
     }
@@ -151,6 +151,63 @@ class CacheSerializationTest {
         backend.setBytes("k", new byte[]{-1, -1, -1, -1}, null, new String[0]);
         var value = cache.getOrSet("k", "5m", () -> "recomputed");
         assertEquals("recomputed", value, "a corrupt cached entry must fall through to the supplier");
+    }
+
+    // --- L7: getOrSet only deserializes classes this process has itself stored ---
+    // The allowlist is process-wide static state, so each test uses its own value class that no
+    // other test in the JVM stores through a Cache.
+
+    /** Counts constructions, so a test can prove Jackson never bound a row to this class. */
+    record Foreign(String name) {
+        static final AtomicInteger CONSTRUCTED = new AtomicInteger();
+        Foreign { CONSTRUCTED.incrementAndGet(); }
+    }
+
+    record WrittenByPeer(String name) {}
+
+    record ReadWithExplicitType(String name) {}
+
+    @Test
+    void getOrSetDoesNotDeserializeAClassNamedByTheRow() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        // A row, written by someone with access to the shared store, naming a class this process
+        // never stored. It must not be bound to that class.
+        backend.setBytes("k", craft(Foreign.class.getName(), "{\"name\":\"evil\"}".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        var value = cache.getOrSet("k", "5m", () -> "recomputed");
+        assertEquals("recomputed", value);
+        assertEquals(0, Foreign.CONSTRUCTED.get(), "the foreign class must not be instantiated");
+        assertEquals(1, cache.misses());
+        assertEquals(0, cache.hits());
+    }
+
+    @Test
+    void getOrSetSelfHealsWhenAnotherInstanceWroteTheEntryFirst() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        // Another server stored a WrittenByPeer; this process has not yet stored one itself.
+        backend.setBytes("k", craft(WrittenByPeer.class.getName(), "{\"name\":\"peer\"}".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        var calls = new AtomicInteger();
+        var first = cache.getOrSet("k", "5m", () -> { calls.incrementAndGet(); return new WrittenByPeer("mine"); });
+        assertEquals(new WrittenByPeer("mine"), first, "first read recomputes and stores");
+        // The write registered the class, so the next read is a normal hit.
+        var second = cache.getOrSet("k", "5m", () -> { calls.incrementAndGet(); return new WrittenByPeer("WRONG"); });
+        assertEquals(new WrittenByPeer("mine"), second);
+        assertEquals(1, calls.get());
+        assertEquals(1, cache.hits());
+        assertEquals(1, cache.misses());
+    }
+
+    @Test
+    void explicitTypeGetStillReadsAnyAssignableStoredClass() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        backend.setBytes("k", craft(ReadWithExplicitType.class.getName(), "{\"name\":\"x\"}".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        assertEquals(new ReadWithExplicitType("x"), cache.get("k", ReadWithExplicitType.class));
+        assertEquals(1, cache.hits());
     }
 
     // --- Null values are rejected on both backends (null is reserved for 'missing') ---

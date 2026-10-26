@@ -96,7 +96,7 @@ class TemplateTest {
     @Test
     void contentTypeIsHtml() throws Exception {
         var response = get("/hello");
-        assertTrue(response.headers().firstValue("Content-Type").orElse("").contains("text/html"));
+        assertEquals("text/html; charset=utf-8", response.headers().firstValue("Content-Type").orElse(""));
     }
 
 }

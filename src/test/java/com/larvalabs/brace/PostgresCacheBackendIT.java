@@ -131,7 +131,7 @@ class PostgresCacheBackendIT extends PostgresTestBase {
         assertEquals("<h1>shared</h1>", new String(first.rawBytes() != null ? first.rawBytes()
                 : first.body().getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
         assertEquals("<h1>shared</h1>", new String(second.rawBytes(), StandardCharsets.UTF_8));
-        assertEquals("text/html", second.contentType());
+        assertEquals("text/html; charset=utf-8", second.contentType());
         assertEquals("home", second.header("X-Page"));
     }
 

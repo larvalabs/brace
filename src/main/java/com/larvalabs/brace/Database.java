@@ -17,6 +17,9 @@ public class Database {
     private final StatelessSession session;
     private int queryCount = 0;
     private long queryDurationUs = 0;
+    // Statements that wrote: insert/update/delete/deleteBy/sql. Not jdbc(...), which is opaque
+    // (it runs reads as often as writes). Only read by the dev-mode "GET wrote" warning.
+    private int writeCount = 0;
     private java.util.List<Runnable> afterCommit;
 
     public Database(StatelessSession session) {
@@ -25,6 +28,7 @@ public class Database {
 
     public int queryCount() { return queryCount; }
     public long queryDurationUs() { return queryDurationUs; }
+    int writeCount() { return writeCount; }
 
     // --- CRUD ---
 
@@ -39,6 +43,7 @@ public class Database {
     public void insert(Object entity) {
         long start = System.nanoTime();
         session.insert(entity);
+        writeCount++;
         queryDurationUs += (System.nanoTime() - start) / 1000;
         queryCount++;
     }
@@ -46,6 +51,7 @@ public class Database {
     public void update(Object entity) {
         long start = System.nanoTime();
         session.update(entity);
+        writeCount++;
         queryDurationUs += (System.nanoTime() - start) / 1000;
         queryCount++;
     }
@@ -53,6 +59,7 @@ public class Database {
     public void delete(Object entity) {
         long start = System.nanoTime();
         session.delete(entity);
+        writeCount++;
         queryDurationUs += (System.nanoTime() - start) / 1000;
         queryCount++;
     }
@@ -345,6 +352,7 @@ public class Database {
         MutationQuery query = session.createMutationQuery(hql);
         query.setParameter(1, value);
         int result = query.executeUpdate();
+        writeCount++;
         queryDurationUs += (System.nanoTime() - start) / 1000;
         queryCount++;
         return result;
@@ -367,6 +375,7 @@ public class Database {
         MutationQuery query = session.createNativeMutationQuery(convertPositionalParams(sql));
         bindParams(query, params);
         query.executeUpdate();
+        writeCount++;
         queryDurationUs += (System.nanoTime() - start) / 1000;
         queryCount++;
     }

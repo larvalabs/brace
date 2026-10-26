@@ -8,6 +8,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.*;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -36,7 +37,34 @@ final class Toolchains {
     static final String DEFAULT_LATEST_URL =
             "https://api.github.com/repos/larvalabs/brace/releases/latest";
 
+    /** A plain release or SNAPSHOT version, e.g. {@code 0.1.10} or {@code 0.1.11-SNAPSHOT}. */
+    private static final Pattern VERSION = Pattern.compile("[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?");
+
     private Toolchains() {}
+
+    /**
+     * True if {@code v} is a plain version. A version becomes a directory name and a
+     * URL component, so anything path-like ({@code ..}, {@code /}) must never pass.
+     */
+    static boolean isValidVersion(String v) {
+        return v != null && VERSION.matcher(v).matches();
+    }
+
+    /** Returns {@code v} if it is a valid version, otherwise throws. */
+    static String requireValidVersion(String v) {
+        if (!isValidVersion(v)) {
+            throw new IllegalArgumentException("Invalid brace version: " + describe(v)
+                    + " (expected e.g. 0.1.10)");
+        }
+        return v;
+    }
+
+    /** Printable form of an untrusted value for error messages (no control chars, bounded). */
+    private static String describe(String v) {
+        if (v == null) return "null";
+        String s = v.length() > 64 ? v.substring(0, 64) + "..." : v;
+        return "'" + s.replaceAll("\\p{Cntrl}", "?") + "'";
+    }
 
     static String releaseBase() {
         return envOr("BRACE_RELEASE_BASE", DEFAULT_RELEASE_BASE);
@@ -54,7 +82,7 @@ final class Toolchains {
         if (tag == null || tag.asText().isBlank()) {
             throw new IllegalStateException("No tag_name in release metadata from " + latestUrl());
         }
-        return stripV(tag.asText());
+        return requireValidVersion(stripV(tag.asText()));
     }
 
     /**
@@ -63,6 +91,7 @@ final class Toolchains {
      * Writes atomically: unpacks to a temp dir, then moves into place.
      */
     static void install(String version, Path destDir) throws Exception {
+        requireValidVersion(version);
         String url = releaseBase() + "/v" + version + "/brace-" + version + ".zip";
         byte[] zip = fetch(url);
 

@@ -125,12 +125,13 @@ Brace automatically validates CSRF tokens on mutating requests (POST, PUT, DELET
    - Form parameter: `_csrf`
    - Header: `X-CSRF-Token`
 3. Validation happens automatically before your handler runs
-4. The token written into pages is **masked per render**: `${csrfField}` carries
+4. The token written into pages is **masked per render**: `${csrfField}` (a `gg.jte.Content`
+   hidden input; declare it `@param gg.jte.Content csrfField = null`) and `${csrfToken}` (the
+   bare token, for a `<meta>` tag read by fetch or htmx) both carry
    `base64url(mask || token XOR mask)` with a fresh random mask, so the value differs on every
    page. Validation accepts the masked form and the raw token alike. This keeps a compressed
    page from leaking the token through its size (see [Response Compression](#response-compression)).
-   If you put the token in a page yourself (a `<meta>` tag for fetch or htmx headers), use
-   `Csrf.maskedToken(session)` rather than `Csrf.getToken(session)`.
+   Outside a template, use `Csrf.maskedToken(session)` rather than `Csrf.getToken(session)`.
 
 ### Exemptions
 
@@ -536,6 +537,11 @@ symlinks (`toRealPath`) before comparing, so a symlink under the served tree can
 file outside it — a lexical `normalize()` + `startsWith` check does not catch that, because
 the traversal happens in the filesystem rather than in the path string.
 
+Dotfiles and dot-directories (`.env`, `.git/config`, `.htaccess`, `assets/.hidden/x`) are never
+served (404), whatever the mapping; the only exception is a leading `.well-known/`, so ACME
+challenges and `security.txt` keep working. The check runs on the decoded path, so `%2eenv`
+is refused too.
+
 Symlinks that stay inside the served directory keep working. To serve a directory that
 lives elsewhere, register it as its own mapping rather than linking it into the web root:
 
@@ -543,6 +549,11 @@ lives elsewhere, register it as its own mapping rather than linking it into the 
 app.staticFiles("/assets", "public");
 app.staticFiles("/assets/uploads", "/var/app/uploads");
 ```
+
+Brace sends no `Server` or `X-Powered-By` header. Requests that Jetty rejects before Brace's
+handler runs (ambiguous URIs such as `//x` or `%2e%2e` segments, malformed requests) get a
+plain-text reason phrase (`Bad Request`) with `nosniff`: no server version, and the request URI
+is not echoed.
 
 Static responses carry `X-Content-Type-Options: nosniff`, and — since 0.1.8 — the app's
 after-middleware, so `app.after(SecurityHeaders.defaults())` reaches them too. That matters
@@ -575,7 +586,7 @@ input, and a secret that is byte-identical across responses.
 What Brace does about it:
 
 - **The CSRF token is masked per render**, so it is never the same twice and compression has
-  nothing to match it against. This covers `${csrfField}` and `Csrf.maskedToken(session)`. A
+  nothing to match it against. This covers `${csrfField}`, `${csrfToken}` and `Csrf.maskedToken(session)`. A
   page that prints `Csrf.getToken(session)` directly is not covered.
 - **Session cookies are not in the body**, so compression doesn't reach them.
 
@@ -772,6 +783,14 @@ recommendations below. The deprecated v1 protocol (signature over the timestamp 
 nonce — replayable as-is within the window) is accepted for one release with a logged
 deprecation warning and will then be rejected; see the 0.1.6 → 0.1.7 migration guide.
 
+**Key revocation.** Tokens are bound to the key that minted them. At startup the server takes
+the fingerprints of the keys in `ops-authorized-keys` and rejects any bearer token, ops session
+cookie or login token whose `kid` is not among them, or that has no `kid`, and caps every
+token's scope at its key's current ceiling. Removing a key, or lowering it to `scope:read`, and
+restarting or redeploying takes effect on its outstanding tokens immediately, although the token secret is derived from
+the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
+the restart.
+
 ### Security Recommendations
 
 1. **HTTPS only:** Never expose ops endpoints over HTTP
@@ -877,6 +896,11 @@ case.
 | Purely numeric segments | Page IDs, order numbers, user IDs |
 | Short slugs (< 16 chars) | Route labels, action names |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
+
+The same pass runs over stored **stack traces** (`Redactor.redactStackTrace`, at
+`Stats.recordError` and `ErrorStore.record`): every message line, including `Caused by:` and
+`Suppressed:` lines and multi-line messages, is redacted, and frame (`at …`) lines are kept
+as is. A message redacted on its own used to reappear verbatim in the trace.
 
 The heuristic is conservative by design. An over-eager redactor makes error
 records useless. If your application routes embed raw bearer tokens or reset

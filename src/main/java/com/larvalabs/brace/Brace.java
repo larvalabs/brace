@@ -1,5 +1,7 @@
 package com.larvalabs.brace;
 
+import org.eclipse.jetty.server.HttpConfiguration;
+import org.eclipse.jetty.server.HttpConnectionFactory;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.util.VirtualThreads;
@@ -1102,8 +1104,15 @@ public class Brace {
         }
 
         server = new Server(threadPool);
-        connector = new ServerConnector(server);
+        // Don't advertise the server software: no `Server: Jetty(x.y.z)` / `X-Powered-By` header.
+        var httpConfig = new HttpConfiguration();
+        httpConfig.setSendServerVersion(false);
+        httpConfig.setSendXPoweredBy(false);
+        connector = new ServerConnector(server, new HttpConnectionFactory(httpConfig));
         connector.setPort(port);
+        // Requests Jetty rejects before BraceHandler runs get a plain-text reason phrase, not
+        // Jetty's HTML page (which shows the version and echoes the request URI).
+        server.setErrorHandler(new BraceErrorHandler());
         server.addConnector(connector);
 
         var staticMappingsCopy = List.copyOf(staticFileMappings);

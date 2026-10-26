@@ -19,7 +19,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
@@ -404,15 +406,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (sessionSecret != null) {
                 // Lazy token mint (H5): ensureToken used to run eagerly here on every matched
                 // request, minting a token — and forcing a Set-Cookie below — even for responses
-                // that never render a form (JSON, redirects). The supplier mints and builds the
-                // hidden field only when something consumes it: View.of() putting csrfField into a
-                // template, or a handler calling View.getCsrfField(). ensureToken is idempotent, and
+                // that never render a form (JSON, redirects). The supplier mints the token and
+                // hands back its session only when something consumes it: View.of() putting
+                // csrfField/csrfToken into a template, or a handler calling View.getCsrfField().
+                // ensureToken is idempotent, and
                 // the consumption marks the session modified so the write-back choke point persists
                 // it (the M5c invariant — otherwise the rendered token is orphaned and POSTs 403).
-                View.setCsrfField(() -> {
+                View.setCsrfSession(() -> {
                     Session tokenSession = handlerSession != null ? handlerSession : lazySession.get();
                     Csrf.ensureToken(tokenSession);
-                    return Csrf.hiddenField(tokenSession);
+                    return tokenSession;
                 });
             }
 
@@ -443,6 +446,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                             db.beginTransaction();
                             result = invoker.invoke(braceRequest, db, session);
                             db.commitTransaction();
+                            warnIfReadMethodWrote(exchange, db);
                         }
                     } catch (Exception e) {
                         if (!invoker.needsReadOnlyDatabase()) {
@@ -456,7 +460,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     result = invoker.invoke(braceRequest, null, session);
                 }
             } finally {
-                View.clearCsrfField();
+                View.clearCsrfSession();
                 View.clearFlash();
             }
 
@@ -1102,6 +1106,37 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return i;
     }
 
+    /** True if any segment starts with {@code .}, except a first segment of exactly {@code .well-known}. */
+    private static boolean hasHiddenSegment(String relativePath) {
+        String[] segments = relativePath.split("/");
+        for (int i = 0; i < segments.length; i++) {
+            if (segments[i].startsWith(".") && !(i == 0 && segments[i].equals(".well-known"))) return true;
+        }
+        return false;
+    }
+
+    /** Route patterns already warned about by {@link #warnIfReadMethodWrote}. */
+    private final Set<String> warnedReadWrites = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Dev-mode nudge: a GET (or HEAD, which falls back to the GET route) whose transaction wrote.
+     * With SameSite=Lax cookies a top-level cross-site GET carries the session, so a state-changing
+     * GET is CSRF-able, and CSRF protection only covers POST/PUT/DELETE/PATCH. Warns once per route
+     * pattern. Counts {@code Database} insert/update/delete/deleteBy/sql; raw {@code jdbc(...)}
+     * can't be classified and isn't counted.
+     */
+    private void warnIfReadMethodWrote(Exchange exchange, Database db) {
+        if (!devMode || db.writeCount() == 0) return;
+        String method = exchange.method;
+        if (!"GET".equals(method) && !"HEAD".equals(method)) return;
+        String pattern = routeKey(exchange.match);
+        if (!warnedReadWrites.add(pattern)) return;
+        Log.warn(method + " " + pattern + " wrote to the database. GET requests should be safe: "
+            + "cookies are sent on cross-site top-level GETs (SameSite=Lax) and CSRF protection only "
+            + "covers POST/PUT/PATCH/DELETE, so a state-changing GET can be triggered from another site. "
+            + "Make this a POST (or PUT/DELETE) route.");
+    }
+
     private Result serveStaticFile(Request request) {
         String requestPath = request.path();
         if ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null) {
@@ -1136,6 +1171,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             relativePath = Route.decodePath(relativePath);
 
             if (relativePath.isEmpty() || relativePath.contains("..")) {
+                return Result.notFound();
+            }
+
+            // Dotfiles (.env, .git/config, .htaccess…) under a mapped directory are never served.
+            // Only a leading .well-known segment is let through (ACME, security.txt, app-site
+            // association). Runs on the decoded path, so %2e-encoded names can't slip past.
+            if (hasHiddenSegment(relativePath)) {
                 return Result.notFound();
             }
 

@@ -125,8 +125,16 @@ public class FormBinder {
             if (type == String.class) return raw;
             if (type == int.class || type == Integer.class) return Integer.parseInt(raw);
             if (type == long.class || type == Long.class) return Long.parseLong(raw);
-            if (type == double.class || type == Double.class) return Double.parseDouble(raw);
-            if (type == float.class || type == Float.class) return Float.parseFloat(raw);
+            if (type == double.class || type == Double.class) {
+                double d = Double.parseDouble(raw);
+                if (!Double.isFinite(d)) return notFinite(type, name, errors);
+                return d;
+            }
+            if (type == float.class || type == Float.class) {
+                float f = Float.parseFloat(raw);
+                if (!Float.isFinite(f)) return notFinite(type, name, errors);
+                return f;
+            }
             if (type == boolean.class || type == Boolean.class) return parseCheckbox(raw);
             if (type == java.math.BigDecimal.class) return new java.math.BigDecimal(raw);
             return raw;
@@ -138,6 +146,46 @@ public class FormBinder {
             if (type == float.class) return 0.0f;
             return null;
         }
+    }
+
+    /**
+     * NaN and ±Infinity (including overflow, e.g. {@code 1e999}) are not numbers a form can mean:
+     * NaN compares false against every bound, so it slipped past {@code @Min}/{@code @Max}. Same
+     * fallback values as an unparseable number.
+     */
+    private static Object notFinite(Class<?> type, String name, Errors errors) {
+        errors.add(name, "must be a finite number");
+        if (type == double.class) return 0.0;
+        if (type == float.class) return 0.0f;
+        return null;
+    }
+
+    /**
+     * Exact comparison of a bound against a bound-typed value, so a fraction below/above the
+     * bound is not truncated away ({@code long} truncation passed {@code -0.99} for
+     * {@code @Min(0)}). Integral types compare as {@code long}; {@code BigDecimal} and
+     * {@code BigInteger} compare exactly (no expansion, so {@code 1e999999999} is safe);
+     * {@code double}/{@code float} use primitive comparison so {@code -0.0} equals {@code 0}.
+     * NaN (already rejected in {@link #convert}) compares as out of range on both sides.
+     */
+    private static boolean belowMin(Number n, long min) {
+        if (n instanceof java.math.BigDecimal bd) return bd.compareTo(java.math.BigDecimal.valueOf(min)) < 0;
+        if (n instanceof java.math.BigInteger bi) return bi.compareTo(java.math.BigInteger.valueOf(min)) < 0;
+        if (n instanceof Double || n instanceof Float) {
+            double d = n.doubleValue();
+            return Double.isNaN(d) || d < (double) min;
+        }
+        return n.longValue() < min;
+    }
+
+    private static boolean aboveMax(Number n, long max) {
+        if (n instanceof java.math.BigDecimal bd) return bd.compareTo(java.math.BigDecimal.valueOf(max)) > 0;
+        if (n instanceof java.math.BigInteger bi) return bi.compareTo(java.math.BigInteger.valueOf(max)) > 0;
+        if (n instanceof Double || n instanceof Float) {
+            double d = n.doubleValue();
+            return Double.isNaN(d) || d > (double) max;
+        }
+        return n.longValue() > max;
     }
 
     /**
@@ -188,11 +236,11 @@ public class FormBinder {
                     errors.add(name, "must be at most " + ml.value() + " characters");
                 }
             } else if (ann instanceof Min min) {
-                if (value instanceof Number n && n.longValue() < min.value()) {
+                if (value instanceof Number n && belowMin(n, min.value())) {
                     errors.add(name, "must be at least " + min.value());
                 }
             } else if (ann instanceof Max max) {
-                if (value instanceof Number n && n.longValue() > max.value()) {
+                if (value instanceof Number n && aboveMax(n, max.value())) {
                     errors.add(name, "must be at most " + max.value());
                 }
             } else if (ann instanceof Email) {

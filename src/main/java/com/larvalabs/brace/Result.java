@@ -70,6 +70,26 @@ public class Result {
     }
 
     /**
+     * Streams the file {@code name} under {@code base}, or answers 404 when {@code name} would
+     * escape {@code base} (a {@code ../} traversal, an absolute path, a symlink pointing outside)
+     * or the file does not exist. Use this instead of {@code Result.file(base.resolve(name))}
+     * whenever {@code name} comes from the request.
+     *
+     * <p>The content type is guessed from the extension, so a served {@code .html} or {@code .svg}
+     * renders in the browser; for user-uploaded files prefer a download.
+     */
+    public static Result fileUnder(Path base, String name) {
+        Path target;
+        try {
+            target = UploadedFile.confine(base, name);
+            if (!Files.isRegularFile(target)) return notFound();
+            return file(target.toRealPath(), contentTypeForFile(target));
+        } catch (IllegalArgumentException | java.io.IOException | java.io.UncheckedIOException e) {
+            return notFound();
+        }
+    }
+
+    /**
      * Streams a file as a download, under {@code filename}. The streaming counterpart of
      * {@link #download(byte[], String, String)}; the filename is escaped identically.
      */
@@ -232,11 +252,11 @@ public class Result {
     }
 
     public static Result text(String body) {
-        return new Result(200, "text/plain", body);
+        return new Result(200, "text/plain; charset=utf-8", body);
     }
 
     public static Result notFound() {
-        return new Result(404, "text/plain", "Not Found");
+        return new Result(404, "text/plain; charset=utf-8", "Not Found");
     }
 
     public static <T> T notFoundIfNull(T value) {
@@ -245,24 +265,31 @@ public class Result {
     }
 
     public static Result error(int status, String message) {
-        return new Result(status, "text/plain", message);
+        return new Result(status, "text/plain; charset=utf-8", message);
     }
 
     public static Result noContent() {
-        return new Result(204, "text/plain", "");
+        return new Result(204, "text/plain; charset=utf-8", "");
     }
 
     /** A 304 Not Modified with an empty body, for conditional-GET revalidation hits. */
     public static Result notModified() {
-        return new Result(304, "text/plain", "");
+        return new Result(304, "text/plain; charset=utf-8", "");
     }
 
     public static Result unauthorized(String message) {
-        return new Result(401, "text/plain", message);
+        return new Result(401, "text/plain; charset=utf-8", message);
     }
 
+    /**
+     * A raw HTML response. <strong>The body is sent as-is, with no escaping</strong> — never
+     * concatenate request data (query params, form fields, headers, anything a user can influence)
+     * or database content into it; that is cross-site scripting. Render a {@link View} instead,
+     * which escapes automatically. If you must interpolate a value, pass it through
+     * {@link Html#escape(String)} first.
+     */
     public static Result html(String body) {
-        return new Result(200, "text/html", body);
+        return new Result(200, "text/html; charset=utf-8", body);
     }
 
     public static Result json(Object value) {
@@ -286,23 +313,23 @@ public class Result {
     }
 
     public static Result unauthorized() {
-        return new Result(401, "text/plain", "Unauthorized");
+        return new Result(401, "text/plain; charset=utf-8", "Unauthorized");
     }
 
     public static Result forbidden() {
-        return new Result(403, "text/plain", "Forbidden");
+        return new Result(403, "text/plain; charset=utf-8", "Forbidden");
     }
 
     public static Result forbidden(String message) {
-        return new Result(403, "text/plain", message);
+        return new Result(403, "text/plain; charset=utf-8", message);
     }
 
     public static Result badRequest(String message) {
-        return new Result(400, "text/plain", message);
+        return new Result(400, "text/plain; charset=utf-8", message);
     }
 
     public static Result created(String location) {
-        return new Result(201, "text/plain", "Created")
+        return new Result(201, "text/plain; charset=utf-8", "Created")
             .header("Location", location);
     }
 

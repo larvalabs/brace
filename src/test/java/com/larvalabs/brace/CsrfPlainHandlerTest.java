@@ -30,7 +30,7 @@ class CsrfPlainHandlerTest {
         // Before M5c this minted a fresh token but never wrote the cookie, so the
         // follow-up POST always 403'd.
         app.get("/form-plain", req -> {
-            // csrfField is auto-populated by the framework via View.setCsrfField().
+            // csrfField is auto-populated by the framework via View.setCsrfSession().
             // We return it in the body so the test can extract it without a real template.
             String field = View.getCsrfField();
             return Result.text(field != null ? field : "no-csrf-field");

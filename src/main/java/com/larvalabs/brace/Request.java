@@ -429,9 +429,23 @@ public class Request {
     }
 
     public <T> T bodyAs(Class<T> type) {
+        // Binding JSON straight into an entity lets the client set any public field (id, role,
+        // passwordHash), and a following db.update(entity) would write them. Always refused:
+        // here for the top-level class (before the body is read), and by EntityBindingGuard for
+        // an entity nested anywhere in the type (an array element, a record component).
+        if (type.isAnnotationPresent(jakarta.persistence.Entity.class)) {
+            throw new IllegalArgumentException(EntityBindingGuard.message(type));
+        }
         try {
-            return Json.mapper().readValue(body(), type);
+            return Json.mapper().readerFor(type)
+                .withAttribute(EntityBindingGuard.REFUSE, Boolean.TRUE)
+                .readValue(body());
         } catch (Exception e) {
+            for (Throwable t = e; t != null; t = t.getCause()) {
+                if (t instanceof EntityBindingGuard.Refused refused) {
+                    throw new IllegalArgumentException(refused.getMessage());
+                }
+            }
             throw new RuntimeException("Failed to parse request body as " + type.getSimpleName(), e);
         }
     }

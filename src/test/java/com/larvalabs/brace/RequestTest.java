@@ -1,5 +1,6 @@
 package com.larvalabs.brace;
 
+import com.larvalabs.brace.testmodels.User;
 import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.Map;
@@ -91,6 +92,87 @@ class RequestTest {
         var req = new Request("POST", "/posts", Map.of(), Map.of(), Map.of(), "{\"title\":\"hello\"}");
         var dto = req.bodyAs(TestDto.class);
         assertEquals("hello", dto.title());
+    }
+
+    private static Request jsonRequest(String body) {
+        return new Request("POST", "/users", Map.of(), Map.of(),
+            Map.of("content-type", "application/json"), body);
+    }
+
+    private static final String MASS_ASSIGNMENT =
+        "{\"email\":\"e@x\",\"role\":\"admin\",\"id\":1,\"passwordHash\":\"p\"}";
+
+    @Test
+    void bodyAsRefusesEntityTargets() {
+        var req = jsonRequest(MASS_ASSIGNMENT);
+        var ex = assertThrows(IllegalArgumentException.class, () -> req.bodyAs(User.class));
+        assertTrue(ex.getMessage().contains("User"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("jsonForm"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("apply(form)"), ex.getMessage());
+    }
+
+    @Test
+    void jsonAndRequireJsonRefuseEntityTargets() {
+        var req = jsonRequest(MASS_ASSIGNMENT);
+        assertThrows(IllegalArgumentException.class, () -> req.json(User.class));
+        assertThrows(IllegalArgumentException.class, () -> req.requireJson(User.class));
+    }
+
+    @Test
+    void entityRefusedBeforeBodyIsRead() {
+        // Even a malformed body gets the guidance, not a parse failure.
+        var req = jsonRequest("not json");
+        assertThrows(IllegalArgumentException.class, () -> req.bodyAs(User.class));
+    }
+
+    public record UserWrapper(User user) {}
+
+    public record UserList(java.util.List<User> users) {}
+
+    @Test
+    void entitiesNestedInArraysAndRecordsAreRefused() {
+        // The top-level check alone let these through: Jackson bound each nested entity field
+        // by field, client-chosen id and passwordHash included.
+        String user = "{\"email\":\"e@x\",\"id\":1,\"passwordHash\":\"p\"}";
+        var array = jsonRequest("[" + user + "]");
+        var ex = assertThrows(IllegalArgumentException.class, () -> array.bodyAs(User[].class));
+        assertTrue(ex.getMessage().contains("User"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("jsonForm"), ex.getMessage());
+
+        var wrapped = jsonRequest("{\"user\":" + user + "}");
+        assertThrows(IllegalArgumentException.class, () -> wrapped.json(UserWrapper.class));
+        assertThrows(IllegalArgumentException.class, () -> wrapped.requireJson(UserWrapper.class));
+
+        var listed = jsonRequest("{\"users\":[" + user + "]}");
+        assertThrows(IllegalArgumentException.class, () -> listed.bodyAs(UserList.class));
+    }
+
+    @Test
+    void entityDeserializationOutsideRequestBindingIsUnaffected() throws Exception {
+        // The shared mapper also reads cached values and Http responses, where an entity is
+        // legitimate: the guard only applies to reads that bodyAs marks.
+        var user = Json.mapper().readValue("{\"email\":\"e@x\",\"id\":7}", User.class);
+        assertEquals(7L, user.id);
+        var users = Json.mapper().readValue("[{\"id\":8}]", User[].class);
+        assertEquals(8L, users[0].id);
+    }
+
+    public record AccountForm(String email) {}
+
+    public static class AccountDto {
+        public String email;
+        public String role;
+    }
+
+    @Test
+    void recordsDtosAndMapsStillBind() {
+        var req = jsonRequest("{\"email\":\"e@x\"}");
+        assertEquals("e@x", req.bodyAs(AccountForm.class).email());
+        assertEquals("e@x", req.json(AccountForm.class).email());
+        assertEquals("e@x", req.requireJson(AccountForm.class).email());
+        var withRole = jsonRequest("{\"email\":\"e@x\",\"role\":\"admin\"}");
+        assertEquals("admin", withRole.bodyAs(AccountDto.class).role);
+        assertEquals("admin", withRole.bodyAs(Map.class).get("role"));
     }
 
     @Test

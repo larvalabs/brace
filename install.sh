@@ -28,6 +28,14 @@ die()  { err "$@"; exit 1; }
 command -v curl  >/dev/null 2>&1 || die "curl is required"
 command -v unzip >/dev/null 2>&1 || die "unzip is required"
 
+# The version becomes a path under $BRACE_DIR/toolchains and a URL component, so it
+# must be a plain release version. Applied to the BRACE_VERSION input and to the
+# tag_name parsed from the (network-supplied) release metadata.
+valid_version() {
+    case "$1" in *[!0-9A-Za-z.-]*|'') return 1 ;; esac
+    printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
+}
+
 # --- resolve version ---
 VERSION="${BRACE_VERSION:-}"
 if [ -z "$VERSION" ]; then
@@ -40,6 +48,7 @@ if [ -z "$VERSION" ]; then
     VERSION="${TAG#v}"
 fi
 VERSION="${VERSION#v}"
+valid_version "$VERSION" || die "Invalid brace version: $(printf '%s' "$VERSION" | tr -c 'A-Za-z0-9._-' '?') (expected e.g. 0.1.10)"
 
 DEST="$BRACE_DIR/toolchains/$VERSION"
 BIN="$BRACE_DIR/bin"

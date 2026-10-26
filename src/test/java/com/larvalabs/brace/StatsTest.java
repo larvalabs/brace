@@ -71,6 +71,25 @@ class StatsTest {
     }
 
     @Test
+    void stackTraceMessagesRedactedAtSink() {
+        var stats = new Stats();
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String trace = "java.lang.RuntimeException: outer\n"
+            + "\tat com.example.Foo.bar(Foo.java:12)\n"
+            + "Caused by: java.lang.IllegalStateException: bad key " + secret + "\n"
+            + "\tat com.example.Baz.qux(Baz.java:7)\n";
+        stats.recordError("RuntimeException", "outer", "GET /api", trace, "{}", "[]");
+        // A second occurrence takes the dedupe branch, which replaces the stored trace.
+        stats.recordError("RuntimeException", "outer", "GET /api", trace, "{}", "[]");
+
+        var errors = stats.recentErrors();
+        assertEquals(1, errors.size());
+        String stored = errors.get(0).stackTrace;
+        assertFalse(stored.contains(secret), "secret in a Caused by: message must not be served on /ops/status");
+        assertEquals(trace.replace(secret, "[redacted]"), stored, "frame lines are unchanged");
+    }
+
+    @Test
     void deduplicatesErrors() {
         var stats = new Stats();
         stats.recordError("NullPointerException", "oops", "GET /test", "stack1", "{}", "[]");

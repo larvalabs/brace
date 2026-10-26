@@ -8,10 +8,22 @@ import static org.junit.jupiter.api.Assertions.*;
 class ResultTest {
 
     @Test
+    void htmlAndTextResultsDeclareUtf8() {
+        // L9: a bare text/html lets a browser sniff the encoding (ISO-2022-JP undoes JTE's escaping).
+        assertEquals("text/html; charset=utf-8", Result.html("<p>x</p>").contentType());
+        assertEquals("text/plain; charset=utf-8", Result.text("x").contentType());
+        for (var r : List.of(Result.notFound(), Result.error(500, "x"), Result.unauthorized(),
+                Result.unauthorized("x"), Result.forbidden(), Result.forbidden("x"),
+                Result.badRequest("x"), Result.created("/x"), Result.noContent(), Result.notModified())) {
+            assertEquals("text/plain; charset=utf-8", r.contentType(), "status " + r.status());
+        }
+    }
+
+    @Test
     void textResult() {
         var result = Result.text("hello");
         assertEquals(200, result.status());
-        assertEquals("text/plain", result.contentType());
+        assertEquals("text/plain; charset=utf-8", result.contentType());
         assertEquals("hello", result.body());
     }
 
@@ -170,7 +182,7 @@ class ResultTest {
         View.setEngine(null);
         var result = View.of("posts/show", "post", "hello");
         assertEquals(200, result.status());
-        assertEquals("text/html", result.contentType());
+        assertEquals("text/html; charset=utf-8", result.contentType());
         assertTrue(result.body().contains("posts/show"));
     }
 

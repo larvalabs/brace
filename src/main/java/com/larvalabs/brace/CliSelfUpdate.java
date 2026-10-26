@@ -43,6 +43,7 @@ final class CliSelfUpdate {
                     ? Toolchains.stripV(args[0])
                     : resolveLatest();
             if (target == null) return 1;
+            Toolchains.requireValidVersion(target);
 
             if (target.equals(current) && Files.isDirectory(toolchainsRoot.resolve(target).resolve("lib"))) {
                 CliOutput.printSuccess("Already on brace " + current + " (latest).");

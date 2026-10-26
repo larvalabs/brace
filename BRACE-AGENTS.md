@@ -256,7 +256,7 @@ req.formParams("tag")         // List<String> of ALL values of a repeated field,
 req.header("Accept")          // header value or null (header names are case-insensitive)
 req.hasHeader("Accept")       // boolean (case-insensitive)
 req.body()                    // raw body string
-req.bodyAs(MyClass.class)     // JSON body deserialized
+req.bodyAs(MyClass.class)     // JSON body deserialized — never into an @Entity (throws; see Forms)
 req.json(MyClass.class)       // alias for bodyAs
 req.requireJson(MyClass.class) // enforces Content-Type: application/json
 req.isJson()                  // check if Content-Type is JSON
@@ -273,8 +273,17 @@ req.files("photos")           // List<UploadedFile>
 req.storage()                 // Storage instance
 ```
 
-**UploadedFile:** `filename()`, `contentType()`, `size()`, `stream()`, `transferTo(OutputStream)`,
-`saveTo(Path)`, `bytes()`.
+**UploadedFile:** `filename()`, `safeFilename()`, `contentType()`, `size()`, `stream()`,
+`transferTo(OutputStream)`, `saveTo(Path dir, String name)`, `saveTo(Path)`, `bytes()`.
+
+`filename()` is the client's name, unmodified and attacker-controlled (`../../x`, `/abs/x`,
+`..\x`, control characters, empty). Never pass it to `Path.resolve` or `new File(dir, ...)`.
+Save with `file.saveTo(uploadDir, file.safeFilename())`: `safeFilename()` is a single safe path
+component (basename, control and invisible format characters stripped, leading dots and
+spaces trimmed, at most 255 bytes, never empty —
+not unique, so prefix an id if names can collide), and `saveTo(dir, name)` throws
+`IllegalArgumentException` if `name` would land outside `dir`, symlinks included. It returns the
+path written. `saveTo(Path)` takes a full path and does no checking.
 
 Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
 living in the heap for the request; below it they stay in memory. Either way the API is the same.
@@ -292,8 +301,8 @@ rejected with `413 Payload Too Large` before your handler runs.
 All response factory methods are on the `Result` class:
 
 ```java
-Result.text("hello")                        // 200 text/plain
-Result.html("<h1>hi</h1>")                  // 200 text/html
+Result.text("hello")                        // 200 text/plain; charset=utf-8
+Result.html("<h1>hi</h1>")                  // 200 text/html; charset=utf-8 — raw, NOT escaped: never put request or DB data in it
 Result.noContent()                          // 204
 Result.notFound()                           // 404
 Result.notFoundIfNull(thing)                // throws 404 if null, returns thing otherwise
@@ -305,6 +314,7 @@ Result.created("/posts/42")                 // 201 with Location header
 Result.bytes(data, "image/png")             // binary response
 Result.file(path)                           // stream a file (Content-Length, Range, typed by extension)
 Result.file(path, "video/mp4")              // ...with an explicit content type
+Result.fileUnder(dir, req.pathParam("name")) // a request-named file under dir; 404 if it escapes dir or is missing
 Result.download(path, "report.csv")         // stream as an attachment
 Result.stream(inputStream, "image/png")     // stream of unknown length (chunked)
 Result.stream(inputStream, "image/png", n)  // ...of known length
@@ -318,6 +328,11 @@ View.render("emails/welcome", "user", user)     // render to String (for emails)
 Result.json(object)                         // 200 JSON — or json(object, 201) with status
 Result.json(Json.obj("count", n, "avg", avg)) // one-off shape: ordered, null-tolerant pairs
 ```
+
+`Result.html(String)` sends its body verbatim. Never concatenate request or database data into
+it; render a `View` (auto-escaped). If a hand-built snippet must include a value, pass it through
+`Html.escape(value)` (escapes `& < > " '`; not safe inside `<script>`, `<style>`, unquoted
+attributes or `href`/`src` URLs).
 
 For one-off response shapes use `Json.obj(k1, v1, k2, v2, …)` — never a
 LinkedHashMap-and-put block (`Map.of` rejects nulls and scrambles key order). For named
@@ -495,6 +510,8 @@ public record PostForm(
 ```
 
 Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@In({"a","b"})`, `@Optional`.
+`@Min`/`@Max` compare exactly, fractions included (`@Min(0)` rejects `-0.5`); `double`/`float`
+components reject NaN and ±Infinity with "must be a finite number".
 
 Component types that bind automatically: `String`, `int`/`long`/`double`/`float`/`boolean`
 (+ boxed; a `boolean` is true for `on`/`true`/`1`/`yes`/`checked`, so an HTML checkbox binds
@@ -522,6 +539,12 @@ if (jf.hasErrors()) return Result.json(Map.of("errors", jf.allErrors()), 422);
 null checks or wrap `bodyAs` in try/catch. It binds the JSON body to the record, runs the
 annotations plus `validate(Errors)`, and turns a malformed or non-object body into a
 `"_body"` error instead of an exception (a raw `req.bodyAs` parse failure surfaces as a 500).
+
+**Never bind a request body into an `@Entity`.** `req.bodyAs`/`req.json`/`req.requireJson`
+throw `IllegalArgumentException` for an `@Entity` class, or a type with one inside it (an array,
+a record component): the client would control every public
+field (`id`, `role`, `passwordHash`). Bind a record with `req.jsonForm(MyForm.class)` and copy
+the allowed fields with the entity's `apply(form)`, as above.
 
 When create and update share validation rules, put them in the record (annotations +
 `validate`) — not duplicated in the two handlers. Cross-entity checks (referenced rows
@@ -587,16 +610,26 @@ Flash messages (display once, on the next request): `session.flash("notice", "Po
 
 CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Content-Type does **not** affect enforcement — `application/json` requests are validated the same as form submissions.
 
-- **Forms:** include `${csrfField}` inside the `<form>` (an auto-provided hidden input). Its
-  value is masked and changes on every render; that is expected, and any rendered value validates.
-- **AJAX/fetch:** send the token in the `X-CSRF-Token` header with `credentials: 'include'` so
-  cookies are sent. To put it in a `<meta>` tag, render `Csrf.maskedToken(session)`, not
-  `Csrf.getToken(session)`: a raw token repeated on every page can leak through compressed
-  response sizes (BREACH; see "Response Compression" in `docs/SECURITY.md`). Both forms validate.
+- **Forms:** declare `@param gg.jte.Content csrfField = null` and put `${csrfField}` inside the
+  `<form>` (an auto-provided hidden input). It is `Content`, so it renders as markup — never
+  declare it `String` or reach for `$unsafe`. Its value is masked and changes on every render;
+  that is expected, and any rendered value validates.
+- **AJAX/fetch/htmx:** declare `@param String csrfToken = null` and render
+  `<meta name="csrf-token" content="${csrfToken}">`, then send it in the `X-CSRF-Token` header
+  with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;
+  never print `Csrf.getToken(session)` into a page — a raw token repeated on every page can
+  leak through compressed response sizes (BREACH; see "Response Compression" in
+  `docs/SECURITY.md`).
 - **Bearer-token APIs (no cookies):** opt out per route with
   `app.post("/api/data", handler).csrf(false)`.
 
 **Important:** Only disable CSRF for endpoints that do NOT use cookie-based authentication. Cookie-authenticated JSON endpoints still need CSRF protection.
+
+**GET and HEAD handlers must not change state.** CSRF checks cover POST/PUT/PATCH/DELETE only,
+and session cookies are `SameSite=Lax`, so a cross-site link or redirect can trigger a GET with
+the user's session. In dev mode Brace logs a warning, once per route, when a GET or HEAD
+transaction writes (`insert`/`update`/`delete`/`deleteBy`/`sql`; raw `jdbc(...)` is not
+detected).
 
 ## Cache
 
@@ -796,6 +829,10 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 **StoredFile** record: `key()`, `url()`.
 
 ## Asset Fingerprinting
+
+`staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
+serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
+leading `.well-known/`.
 
 Cache-bust static assets by appending a content-hash query parameter — in a JTE template
 (or any code that produces URLs): `${Assets.url("/assets/app.css")}` →

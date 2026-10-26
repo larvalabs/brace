@@ -8,6 +8,8 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -29,6 +31,14 @@ import java.util.regex.Pattern;
 public class Cache {
 
     private static final String[] NO_TAGS = new String[0];
+
+    // Value classes this process has itself serialized into a shared backend. getOrSet has no
+    // Class<T> to check a stored entry against, so it would otherwise bean-deserialize into
+    // whatever class name the row carries; anyone able to write the shared store could pick the
+    // class. A stored class not in here is treated as a miss instead (defense in depth). Process-
+    // wide so every Cache in the JVM agrees; filled on write, so a fresh instance misses once,
+    // recomputes, writes, and from then on reads its own class normally.
+    private static final Set<String> STORED_CLASSES = ConcurrentHashMap.newKeySet();
 
     private final CacheBackend backend;
     private final boolean serializes;
@@ -237,8 +247,10 @@ public class Cache {
         try {
             byte[] className = value.getClass().getName().getBytes(StandardCharsets.UTF_8);
             byte[] body = Json.mapper().writeValueAsBytes(value);
-            return ByteBuffer.allocate(4 + className.length + body.length)
+            byte[] data = ByteBuffer.allocate(4 + className.length + body.length)
                     .putInt(className.length).put(className).put(body).array();
+            STORED_CLASSES.add(value.getClass().getName());
+            return data;
         } catch (Exception e) {
             throw new IllegalArgumentException(
                     "Cache value of type " + value.getClass().getName() + " is not serializable for "
@@ -264,6 +276,14 @@ public class Cache {
         }
         int offset = 4 + len;
         String storedName = new String(className, StandardCharsets.UTF_8);
+        if (expected == null && !STORED_CLASSES.contains(storedName)) {
+            // No caller-supplied type to check against (getOrSet), and this process never stored
+            // this class: don't load or bind to a class named by the row. A miss; the caller
+            // recomputes and the write registers the class.
+            Log.debug("cache entry names a class this process has not stored; treating as a miss",
+                    Map.of("class", storedName.length() > 200 ? storedName.substring(0, 200) : storedName));
+            throw new CacheCorruptionException("cached class not stored by this process: " + storedName);
+        }
         Class<?> stored;
         try {
             stored = Class.forName(storedName, false, Thread.currentThread().getContextClassLoader());

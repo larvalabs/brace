@@ -62,8 +62,17 @@ bundled_version() {
     echo "$jar"
 }
 
+# A version is spliced into $BRACE_CACHE/<v> and then exec'd as a classpath, so
+# it must be a plain release/SNAPSHOT version, never a path. The pin comes from
+# the project's pom.xml, i.e. from whatever repo was just cloned.
+valid_version() {
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]
+}
+
 # The framework version pinned by the current project's pom.xml, if any.
 # Tolerant of whitespace/line layout and an optional leading "v" (JitPack tag form).
+# Returns 1 when nothing is pinned, 2 (after printing an error) when the pin is
+# not a valid version.
 pinned_version() {
     [[ -f pom.xml ]] || return 1
     local raw
@@ -71,12 +80,28 @@ pinned_version() {
         | sed -n 's/.*<brace\.version>\(.*\)<\/brace\.version>.*/\1/p')
     raw="${raw#v}"
     [[ -n "$raw" ]] || return 1
+    if ! valid_version "$raw"; then
+        # %q so a hostile value can't smuggle control characters into the terminal.
+        error "Invalid <brace.version> in pom.xml: $(printf '%q' "$raw")"
+        error "Expected a version like 0.1.10 or 0.1.11-SNAPSHOT."
+        return 2
+    fi
     echo "$raw"
+}
+
+# Sets PINNED to the project's pinned version ("" when it pins none); exits the
+# launcher if the pin is invalid.
+load_pin() {
+    local rc=0
+    PINNED="$(pinned_version)" || rc=$?
+    [[ "$rc" -ne 2 ]] || exit 1
+    [[ "$rc" -eq 0 ]] || PINNED=""
 }
 
 # Download + unpack the dist zip for a released version into the cache.
 fetch_toolchain() {
     local v="$1" dest="$BRACE_CACHE/$v"
+    valid_version "$v" || { error "Refusing invalid brace version: $(printf '%q' "$v")"; return 1; }
     local url="$BRACE_RELEASE_BASE/v$v/brace-$v.zip"
     command -v curl  >/dev/null || { error "curl is required to download brace $v";  return 1; }
     command -v unzip >/dev/null || { error "unzip is required to install brace $v"; return 1; }
@@ -99,6 +124,7 @@ fetch_toolchain() {
 # Echo (only) the toolchain home dir for a version, fetching it if needed.
 resolve_toolchain() {
     local v="$1"
+    valid_version "$v" || { error "Refusing invalid brace version: $(printf '%q' "$v")"; return 1; }
     if [[ "$v" == "$(bundled_version || true)" ]]; then echo "$BRACE_HOME"; return 0; fi
     if [[ -d "$BRACE_CACHE/$v/lib" ]]; then echo "$BRACE_CACHE/$v"; return 0; fi
     if [[ "$v" == *-SNAPSHOT ]]; then
@@ -122,7 +148,8 @@ case "$COMMAND" in
     # Everything else operates on a project → use its pinned version when present,
     # else fall back to bundled so Cli can emit its own "run inside a project" error.
     *)
-        if PINNED="$(pinned_version)"; then
+        load_pin
+        if [[ -n "$PINNED" ]]; then
             HOME_DIR="$(resolve_toolchain "$PINNED")" || exit 1
         else
             HOME_DIR="$BRACE_HOME"
@@ -134,7 +161,7 @@ esac
 # pom.xml — cheap, no toolchain download) so Cli can report both.
 PINNED=""
 case "$COMMAND" in
-    version|--version|-v) PINNED="$(pinned_version || true)" ;;
+    version|--version|-v) load_pin ;;
 esac
 
 # Whether stdout is a terminal, passed down because the JVM can't reliably tell

@@ -218,6 +218,42 @@ public class Redactor {
     }
 
     /**
+     * Redact the message text in a printed stack trace. {@code Throwable.printStackTrace} embeds
+     * the exception message verbatim in the first line, in every {@code Caused by:} and
+     * {@code Suppressed:} line, and on the continuation lines of a multi-line message, so
+     * redacting {@code getMessage()} alone leaves the same text readable in the trace. Every line
+     * except a frame line ({@code \tat ...} or {@code \t... N more}) goes through
+     * {@link #redactMessage}; frame lines and line endings are kept exactly as they were. A trace
+     * with nothing to redact is returned unchanged.
+     */
+    public static String redactStackTrace(String stackTrace) {
+        if (stackTrace == null || stackTrace.isEmpty()) return stackTrace;
+        int len = stackTrace.length();
+        StringBuilder out = null;
+        int copied = 0;
+        int pos = 0;
+        while (pos < len) {
+            int nl = stackTrace.indexOf('\n', pos);
+            int next = nl < 0 ? len : nl + 1;
+            int end = nl < 0 ? len : nl;
+            if (end > pos && stackTrace.charAt(end - 1) == '\r') end--;
+            boolean frame = stackTrace.startsWith("\tat ", pos) || stackTrace.startsWith("\t... ", pos);
+            if (!frame && end > pos) {
+                String line = stackTrace.substring(pos, end);
+                String redacted = redactMessage(line);
+                if (!redacted.equals(line)) {
+                    if (out == null) out = new StringBuilder(len);
+                    out.append(stackTrace, copied, pos).append(redacted);
+                    copied = end;
+                }
+            }
+            pos = next;
+        }
+        if (out == null) return stackTrace;
+        return out.append(stackTrace, copied, len).toString();
+    }
+
+    /**
      * Return {@code true} if {@code value} looks like a bearer secret or high-entropy
      * token that should be redacted. Applies the heuristic described in the class
      * Javadoc:
