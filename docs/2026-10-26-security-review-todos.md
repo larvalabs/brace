@@ -640,7 +640,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Two apps with different secrets don't cross-deliver (Postgres IT).
   - **Tier: mid.**
 
-- [ ] **L7: The shared-cache deserializer trusts the class name stored in the row**, `Cache.java:119, 269-279`
+- [x] **L7: The shared-cache deserializer trusts the class name stored in the row**, `Cache.java:119, 269-279`
   - **What's wrong.** `getOrSet` passes `expected=null`, so the type check is skipped. There's
     no default typing, so this is defense in depth against anyone who can write `brace_cache`.
   - **Fix.** Require a `Class<T>` in `getOrSet` (or infer it from the supplier's first value)

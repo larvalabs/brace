@@ -27,6 +27,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Static dotfiles return 404; dev warning for GETs that write | security | serve a deliberate dotfile from a route instead | [§](#security-static-dotfiles-return-404-dev-warning-for-gets-that-write) |
 | The `brace` launcher refuses an invalid pinned version | security | fix a `<brace.version>` that isn't `MAJOR.MINOR.PATCH[-SUFFIX]` | [§](#security-the-brace-launcher-refuses-an-invalid-pinned-version) |
 | Removing an ops key revokes its outstanding tokens | security | none | [§](#security-removing-an-ops-key-revokes-its-outstanding-tokens) |
+| Shared-cache `getOrSet` only reads classes this process has written | security | none | [§](#security-shared-cache-getorset-only-reads-classes-this-process-has-written) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -424,3 +425,14 @@ is still in the file, which is read at startup: removing a key and redeploying r
 tokens. Tokens without a key id are rejected.
 
 No code change. Clients of a removed key get 401 and must authenticate with a remaining key.
+
+## Security: shared-cache `getOrSet` only reads classes this process has written
+
+`getOrSet` has no type argument, so with a serializing backend (`CacheBackend.postgres(...)`) it
+deserialized into whatever class name the stored row carried; anyone able to write the
+`brace_cache` table could pick the class. It now reads only classes this process has itself
+written, and treats anything else as a miss. After a restart, or when another server wrote the
+entry first, the first `getOrSet` for a given class recomputes and rewrites the entry; later
+calls hit as before. `cache.get(key, Type.class)` is unchanged.
+
+No code change.
