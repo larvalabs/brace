@@ -55,6 +55,24 @@ class SessionCookiePrefixTest {
         assertTrue(res.contains("Set-Cookie: brace_session="), res);
     }
 
+    @Test
+    void hostRewritingProxyKeepsOneNameWhateverTheReferer() throws Exception {
+        // Behind a proxy that rewrites Host to loopback, Secure is inferred from the browser's
+        // https Referer/Origin, which some requests carry and others (a typed URL) don't. The
+        // name must not follow it, or the session flips between requests.
+        String withReferer = raw("GET /login-as HTTP/1.1\r\nHost: 127.0.0.1\r\nReferer: https://app.example.com/\r\n"
+            + "Connection: close\r\n\r\n");
+        assertTrue(withReferer.contains("Set-Cookie: brace_session="), withReferer);
+        assertTrue(withReferer.contains("; Secure"), "Secure is still inferred: " + withReferer);
+        String cookie = withReferer.substring(withReferer.indexOf("brace_session=") + "brace_session=".length());
+        cookie = cookie.substring(0, cookie.indexOf(';'));
+        for (String extra : new String[]{"Referer: https://app.example.com/\r\n", ""}) {
+            String me = raw("GET /me HTTP/1.1\r\nHost: 127.0.0.1\r\n" + extra + "Cookie: brace_session=" + cookie
+                + "\r\nConnection: close\r\n\r\n");
+            assertTrue(me.endsWith("me:7"), "same session with" + (extra.isEmpty() ? "out" : "") + " a Referer: " + me);
+        }
+    }
+
     private static String raw(String request) throws IOException {
         try (var socket = new Socket("localhost", app.actualPort())) {
             socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));

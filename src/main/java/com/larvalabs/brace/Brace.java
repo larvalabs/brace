@@ -198,13 +198,12 @@ public class Brace {
     }
 
     /**
-     * The session cookie name for a request to this app over plain-HTTP localhost, which is how
-     * {@link TestApp} talks to it: {@code brace_session} unless the app forces {@code Secure}, in
-     * which case the {@code __Host-} name (M10).
+     * The session cookie name for a request to this app over localhost, which is how
+     * {@link TestApp} talks to it: always {@code brace_session}, since a loopback host never gets
+     * the {@code __Host-} prefix (M10).
      */
     String loopbackSessionCookieName() {
-        if (sessionOptions == null) return SessionOptions.COOKIE_NAME;
-        return sessionOptions.cookieName(sessionOptions.resolveSecure(true, false));
+        return SessionOptions.COOKIE_NAME;
     }
 
     SessionOptions sessionOptions() {
@@ -1230,7 +1229,7 @@ public class Brace {
                         Session braceSession = null;
                         if (sessionSecret != null) {
                             // M10: the name this request would be given (__Host- when Secure).
-                            String cookieName = handler.sessionCookieName(handler.resolveCookieSecure(headers, remoteAddr));
+                            String cookieName = handler.cookieSpec(headers, remoteAddr).name();
                             var cookies = org.eclipse.jetty.server.Request.getCookies(upgradeRequest);
                             for (var cookie : cookies) {
                                 if (cookieName.equals(cookie.getName())) {

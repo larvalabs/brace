@@ -146,7 +146,11 @@ altered without the secret.
   default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
   set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant
   a session or CSRF token of its choosing, and a request reads only the name it would be given,
-  so a tossed `brace_session` is ignored. Plain-HTTP localhost keeps `brace_session`.
+  so a tossed `brace_session` is ignored. Plain-HTTP localhost keeps `brace_session`, and so
+  does an app behind a proxy that rewrites `Host` to a loopback address: there `Secure` is
+  inferred per request from the browser's `Origin`/`Referer`, which come and go, and the name
+  must not change with them. Pass the real host through (see "Pass the real `Host` through") to
+  get the prefix.
 
 ### Example: Storing User Session Data
 

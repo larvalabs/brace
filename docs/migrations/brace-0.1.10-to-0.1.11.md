@@ -581,7 +581,9 @@ host over HTTPS, so a sibling subdomain can no longer plant a session or CSRF to
 read only the name they would be given, so existing `brace_session` cookies are ignored after
 the deploy and users sign in again. Plain-HTTP localhost keeps `brace_session`, so local
 development and `Brace.test()` are unaffected. A custom `SessionOptions.path(...)` or
-`.domain(...)` also keeps the old name, because the prefix requires `Path=/` and no `Domain`.
+`.domain(...)` also keeps the old name, because the prefix requires `Path=/` and no `Domain`, and
+so does an app behind a proxy that rewrites `Host` to `127.0.0.1` (fix the proxy with
+`proxy_set_header Host $host;` to get the prefix).
 Code that reads the cookie by name (`req.cookie("brace_session")`, a proxy rule) needs the new
 name.
 
