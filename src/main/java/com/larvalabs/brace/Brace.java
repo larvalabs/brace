@@ -26,6 +26,7 @@ public class Brace {
     List<Route> routesForTesting() { return router.routes(); }
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
+    private SessionValidator sessionValidator;
     // H1 access model: the requirement every route gets unless it is marked .publicRoute().
     private Access defaultAccess;
     /**
@@ -899,6 +900,16 @@ public class Brace {
         return this;
     }
 
+    /**
+     * A server-side check on every decoded session (M10): return false to revoke it — "log out
+     * everywhere", a password change, a demoted role. The usual check compares a version stored in
+     * the session at login with the user's current one. See {@link SessionValidator}.
+     */
+    public Brace sessionValidator(SessionValidator validator) {
+        this.sessionValidator = validator;
+        return this;
+    }
+
     // Access
 
     /**
@@ -1155,6 +1166,7 @@ public class Brace {
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
         handler.setAnalytics(analytics);
+        handler.setSessionValidator(sessionValidator);
         org.eclipse.jetty.server.Handler httpHandler = compression ? new CompressionHandler(handler) : handler;
 
         if (!wsRoutes.isEmpty()) {
@@ -1208,7 +1220,7 @@ public class Brace {
                             var cookies = org.eclipse.jetty.server.Request.getCookies(upgradeRequest);
                             for (var cookie : cookies) {
                                 if ("brace_session".equals(cookie.getName())) {
-                                    braceSession = Session.fromCookie(cookie.getValue(), sessionSecret);
+                                    braceSession = handler.decodeSession(cookie.getValue());
                                     break;
                                 }
                             }

@@ -15,6 +15,7 @@ public class SessionOptions {
     private String sameSite = "Lax";
     private Duration maxAge = null;
     private Duration absoluteMaxAge = null;
+    private java.util.List<String> previousSecrets = java.util.List.of();
     private String path = "/";
     private String domain = null;
 
@@ -145,6 +146,26 @@ public class SessionOptions {
 
     public Duration absoluteMaxAge() {
         return absoluteMaxAge;
+    }
+
+    /**
+     * Secrets the session cookie was sealed with before the current one (M10). Cookies sealed
+     * with any of them still open, and are re-sealed with the current secret on the response, so
+     * a rotation logs nobody out. Drop a secret from the list once cookies sealed with it have
+     * expired ({@link #absoluteMaxAge}).
+     */
+    public SessionOptions previousSecrets(String... secrets) {
+        for (String previous : secrets) {
+            if (previous == null || previous.length() < 32) {
+                throw new IllegalArgumentException("previous session secrets must be at least 32 characters");
+            }
+        }
+        this.previousSecrets = java.util.List.of(secrets);
+        return this;
+    }
+
+    public java.util.List<String> previousSecrets() {
+        return previousSecrets;
     }
 
     /** Cookie Path; must start with {@code /} and contain no {@code ;} or control characters. */

@@ -1385,10 +1385,31 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         if (sessionSecret != null) {
             sessionDecrypts.increment();
             String cookieHeader = headers.get("Cookie");
-            String sessionCookie = parseCookieValue(cookieHeader, "brace_session");
-            return Session.fromCookie(sessionCookie, sessionSecret);
+            return decodeSession(parseCookieValue(cookieHeader, "brace_session"));
         }
         return new Session();
+    }
+
+    /** Server-side session check (M10), or null. Set by {@link Brace} before start. */
+    private SessionValidator sessionValidator;
+
+    void setSessionValidator(SessionValidator validator) {
+        this.sessionValidator = validator;
+    }
+
+    /**
+     * Opens a session cookie value — current secret first, then any previous ones (M10) — and runs
+     * the app's {@link SessionValidator} on a non-empty result; a rejected session comes back
+     * empty and marked to clear the client's cookie. Shared with the WebSocket upgrade, so a
+     * socket can't carry a session a request couldn't.
+     */
+    Session decodeSession(String cookieValue) {
+        List<String> previous = sessionOptions != null ? sessionOptions.previousSecrets() : List.of();
+        Session session = Session.fromCookie(cookieValue, sessionSecret, previous);
+        if (sessionValidator != null && !session.isEmpty() && !sessionValidator.isValid(session)) {
+            return Session.invalidated();
+        }
+        return session;
     }
 
     /** POST, PUT, DELETE and PATCH: the methods CSRF protection covers. */

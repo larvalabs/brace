@@ -304,8 +304,48 @@ public class Session {
      * is null, malformed, or fails authentication/decryption.
      */
     public static Session fromCookie(String cookie, String secret) {
+        Session session = decrypt(cookie, secret);
+        return session != null ? session : new Session();
+    }
+
+    /**
+     * {@link #fromCookie(String, String)} that also accepts cookies sealed with a previous secret
+     * (M10's {@link SessionOptions#previousSecrets}), so the secret can be rotated without logging
+     * everyone out. A session opened with an old secret is marked modified, so this response
+     * re-seals it with the current one.
+     */
+    static Session fromCookie(String cookie, String secret, java.util.List<String> previousSecrets) {
+        Session session = decrypt(cookie, secret);
+        if (session != null) return session;
+        for (String previous : previousSecrets) {
+            session = decrypt(cookie, previous);
+            if (session != null) {
+                if (!session.data.isEmpty()) session.modified = true;
+                return session;
+            }
+        }
+        return new Session();
+    }
+
+    /** An empty session that clears the client's cookie: a validator rejected the one it sent (M10). */
+    static Session invalidated() {
+        var session = new Session();
+        session.modified = true;
+        return session;
+    }
+
+    /** True if the session carries no data (flash included). */
+    boolean isEmpty() {
+        return data.isEmpty();
+    }
+
+    /**
+     * Decrypts and checks a cookie: the session it carries (empty when expired), or null when it
+     * isn't a cookie sealed with {@code secret} (missing, malformed, wrong key, tampered).
+     */
+    private static Session decrypt(String cookie, String secret) {
         if (cookie == null || cookie.isEmpty()) {
-            return new Session();
+            return null;
         }
 
         try {
@@ -313,7 +353,7 @@ public class Session {
 
             // Need at least 12 bytes (nonce) + 16 bytes (auth tag)
             if (combined.length < 28) {
-                return new Session();
+                return null;
             }
 
             // Extract nonce and ciphertext
@@ -373,8 +413,8 @@ public class Session {
             }
             return session;
         } catch (Exception e) {
-            // Any decryption or authentication failure returns empty session
-            return new Session();
+            // Any decryption or authentication failure: not a cookie sealed with this secret
+            return null;
         }
     }
 
