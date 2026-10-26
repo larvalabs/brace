@@ -662,9 +662,9 @@ public class JobPoller {
             long id = ((Number) row[0]).longValue();
             var flight = new InFlight((String) row[2]);
             if (inFlight.putIfAbsent(id, flight) != null) {
-                // H2 only: an earlier batch's thread hasn't claimed this candidate yet, so the
-                // unlocked select returned it again. That thread owns it; skip rather than track
-                // two runs under one id (the own-orphan check relies on the map being exact).
+                // Defensive: selectCandidatesH2 already filters in-flight ids, so this only fires
+                // if dispatch is ever called concurrently. Skip rather than track two runs under
+                // one id (the own-orphan check relies on the map being exact).
                 limiter.release();
                 continue;
             }
@@ -739,7 +739,13 @@ public class JobPoller {
         }
     }
 
-    /** H2 path: select claimable candidates without locking; each row claims itself in {@link #claimAndExecute}. */
+    /**
+     * H2 path: select claimable candidates without locking; each row claims itself in
+     * {@link #claimAndExecute}. A job from an earlier batch whose thread hasn't run its claim
+     * UPDATE yet still looks claimable here, so the select over-fetches by the in-flight count
+     * and drops those rows. Otherwise they could fill the whole limit, and a freed slot would
+     * claim nothing until the next poll interval while a ready job waited.
+     */
     private List<Object[]> selectCandidatesH2(DatabaseFactory factory, int limit) {
         var db = new Database(factory.openSession());
         try {
@@ -757,9 +763,14 @@ public class JobPoller {
                 "     OR NOT EXISTS (SELECT 1 FROM scheduled_jobs d " +
                 "                    WHERE d.id = j.depends_on_id AND d.completed_at IS NULL)) " +
                 "ORDER BY j.run_at " +
-                "LIMIT ?", limit);
+                "LIMIT ?", limit + inFlight.size());
             db.commitTransaction();
-            return rows;
+            var candidates = new ArrayList<Object[]>(limit);
+            for (var row : rows) {
+                if (candidates.size() == limit) break;
+                if (!inFlight.containsKey(((Number) row[0]).longValue())) candidates.add(row);
+            }
+            return candidates;
         } finally {
             db.close();
         }
