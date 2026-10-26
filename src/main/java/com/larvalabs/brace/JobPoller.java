@@ -482,14 +482,31 @@ public class JobPoller {
      * Release rows this worker owns but is no longer running — the job finished but its terminal
      * write failed. Without this, a live instance would keep such a row claimed (and heartbeat on
      * its behalf) forever.
+     *
+     * <p>Two orderings make the in-flight set exact rather than merely likely:
+     * <ul>
+     *   <li>The cutoff is read before the in-flight snapshot. An H2-path job is registered before
+     *       its claim transaction starts, so any claim older than the cutoff is already in the
+     *       snapshot. Snapshotting first let a job claimed in between (the heartbeat thread
+     *       descheduled under load) look orphaned while it ran; only the grace period hid it.</li>
+     *   <li>{@code running} is checked after the snapshot. A job released by {@link #stop} leaves
+     *       the in-flight set before {@link #releaseOwnClaims} runs; reclaiming it here would
+     *       charge it the attempt shutdown is meant to refund. Jobs are released only after
+     *       {@code running} goes false, so a snapshot that saw it true still holds them.</li>
+     * </ul>
      */
     void releaseOwnOrphans() {
-        var runningIds = new ArrayList<>(inFlight.keySet());
         var db = new Database(dbFactory.openSession());
         try {
             db.beginTransaction();
+            var cutoff = Timestamp.from(dbNow(db).minus(ownOrphanGrace));
+            var runningIds = new ArrayList<>(inFlight.keySet());
+            if (!running) {
+                db.commitTransaction();
+                return; // Shutting down: releaseOwnClaims returns this worker's rows, attempt refunded.
+            }
             var predicate = new StringBuilder("claimed_by = ? AND started_at < ?");
-            var params = new ArrayList<Object>(List.of(workerId, Timestamp.from(dbNow(db).minus(ownOrphanGrace))));
+            var params = new ArrayList<Object>(List.of(workerId, cutoff));
             if (!runningIds.isEmpty()) {
                 predicate.append(" AND id NOT IN (").append("?,".repeat(runningIds.size() - 1)).append("?)");
                 params.addAll(runningIds);
