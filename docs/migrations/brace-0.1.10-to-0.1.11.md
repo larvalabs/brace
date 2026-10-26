@@ -29,6 +29,8 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Removing an ops key revokes its outstanding tokens | security | none | [§](#security-removing-an-ops-key-revokes-its-outstanding-tokens) |
 | Shared-cache `getOrSet` only reads classes this process has written | security | none | [§](#security-shared-cache-getorset-only-reads-classes-this-process-has-written) |
 | The page cache no longer stores pages that carry a CSRF token or flash | security | none | [§](#security-the-page-cache-no-longer-stores-per-visitor-pages) |
+| Every route needs an access requirement or `.publicRoute()`; `requireSession` removed | security, **breaking** | add `defaultAccess(...)`, mark public routes | [§](#breaking-every-route-needs-an-access-requirement) |
+| WebSocket upgrades run `before()` and access requirements; `app.ws(...)` returns a `RouteConfig` | security, **breaking** | split builder chains that continue after `.ws(...)` | [§](#breaking-websocket-upgrades-are-guarded) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -456,4 +458,85 @@ path logs a warning.
 
 No code change. Cached routes that render a form now render on every request; cache the data
 behind them instead, or drop the wrapper.
+
+## Breaking: every route needs an access requirement
+
+Routes were allow-by-default, and authentication was a separate list of path patterns
+(`requireSession("/admin/*", …)`, `before("/api/*", …)`). Nothing tied a route to the guard it
+needed, so a route registered outside the guarded prefix was silently public.
+
+Access requirements now attach to routes, and `start()` (and `Brace.test()`) refuses to start
+while any route has no requirement and isn't marked `.publicRoute()`. The error lists the
+unmarked routes.
+
+Before:
+
+```java
+app.requireSession("/app/*", "userId", "/login");
+app.get("/", home::index);
+app.post("/login", auth::login);
+app.getRead("/app/posts", posts::index);
+app.before("/admin/*", (req, session) ->
+    "admin".equals(session.get("role")) ? null : Result.forbidden());
+app.getRead("/admin/users", admin::users);
+```
+
+After:
+
+```java
+app.defaultAccess(Access.session("userId", "/login"));
+app.get("/", home::index).publicRoute();
+app.post("/login", auth::login).publicRoute();
+app.getRead("/app/posts", posts::index);          // covered by the default
+app.group("/admin", Access.check((req, session) ->
+    "admin".equals(session.get("role")) ? null : Result.forbidden()),
+    admin -> admin.getRead("/users", admin::users));
+```
+
+Steps:
+
+1. Pick a default. An app with a login uses `defaultAccess(Access.session(key, loginUrl))`. An
+   app with no login at all says so with `defaultAccess(Access.none())`.
+2. Mark every page that must stay reachable without the default `.publicRoute()`: home,
+   login, signup, password reset. Routes that authenticate some other way (a bearer-token API,
+   a webhook that checks a signature) get that check instead of the default:
+   `.access(Access.insteadOfDefault(Access.checkRequest(...)))`, or the same on their group.
+3. Replace each `requireSession(pattern, key, url)` with the default or a group requirement.
+   Replace each `before(pattern, (req, session) -> …)` that makes an access decision with
+   `group(prefix, Access.check(...), …)` or `.access(Access.check(...))`. Keep `before(...)` for
+   rate limiting and other non-access work; it no longer counts as auth.
+4. Run the tests. `start()` lists any route you missed.
+
+Behavior details:
+
+- Requirements run after plain `before(...)` middleware and before the body is read and CSRF is
+  checked, and before session-aware `before(...)` middleware.
+- `Access.session` answers a page request with 302 to the login URL (as `requireSession` did),
+  an htmx request with 401 and `HX-Redirect`, and a JSON request with 401.
+- A path with no route now always 404s. A `requireSession("/admin/*", …)` used to redirect
+  `/admin` even when no `/admin` route existed.
+- The startup banner and `/ops/routes` show each route's access.
+
+## Breaking: WebSocket upgrades are guarded
+
+The WebSocket upgrade ran no `before(...)` middleware and no auth guard, so a socket under a
+guarded path accepted anonymous clients. A WebSocket route now takes part in the access model:
+it gets the default access unless marked `.publicRoute()`, takes `.access(...)`, and an
+unmarked socket fails `start()`. The upgrade runs plain `before(...)` middleware, then the
+`Origin` check, then the route's requirements; a rejection declines the handshake (a login
+redirect becomes 401). With sessions on, `ctx.session()` is never null (an empty session when
+there is no cookie). A declined cross-origin upgrade now gets its 403 immediately instead of
+leaving the client waiting.
+
+`app.ws(...)` returns a `RouteConfig` so it can take `.publicRoute()` and `.access(...)`.
+Builder chains that continued after it need a separate statement:
+
+```java
+// before
+var app = Brace.app().port(8080).ws("/live", Live::new).ws("/status", Status::new);
+// after
+var app = Brace.app().port(8080);
+app.ws("/live", Live::new);
+app.ws("/status", Status::new).publicRoute();
+```
 

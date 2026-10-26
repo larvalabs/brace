@@ -1678,8 +1678,12 @@ public class Brace {
                     + describe(route.groupAccess(), route.declaredAccess()) + "). .publicRoute() only "
                     + "removes the app's default access; register a public route outside the restricted group.");
             }
+            boolean replaced = false;
+            for (Access a : route.groupAccess()) replaced |= a.replacesDefault();
+            for (Access a : route.declaredAccess()) replaced |= a.replacesDefault();
             var effective = new ArrayList<Access>();
-            if (!route.isFramework() && !route.isPublicRoute() && fallback != null && !fallback.isNone()) {
+            if (!route.isFramework() && !route.isPublicRoute() && !replaced
+                    && fallback != null && !fallback.isNone()) {
                 effective.add(fallback);
             }
             effective.addAll(route.groupAccess());

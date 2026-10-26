@@ -4,6 +4,7 @@ This document describes Brace's security features and best practices for buildin
 
 ## Table of Contents
 
+- [Authorization](#authorization)
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
 - [Serialization](#serialization)
@@ -18,6 +19,48 @@ This document describes Brace's security features and best practices for buildin
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
 - [Secrets Management](#secrets-management)
+
+---
+
+## Authorization
+
+### Route access is required, not opt-in
+
+Every route — HTTP and WebSocket — carries a list of access requirements, and `start()`
+refuses to run while any route has none and isn't explicitly marked `.publicRoute()`. A route
+therefore cannot become public by being registered outside a guarded path, or by its author
+forgetting a guard: the app fails to start (and its tests fail) instead.
+
+```java
+app.defaultAccess(Access.session("userId", "/login"));  // applies to every route
+app.get("/", home::index).publicRoute();                 // explicit, greppable opt-out
+app.group("/admin", Access.check((req, s) ->
+    "admin".equals(s.get("role")) ? null : Result.forbidden()), admin -> { ... });
+```
+
+Requirements are bound to the `Route` object at `start()`, not matched against the request
+path, so a guard and a route can't disagree about a path: `/admin/x/`, `/admin/%78` and
+`HEAD /admin/x` reach the same route and run the same requirements. They run after plain
+`before(...)` middleware (so a rate limiter sheds load first) and before the request body is
+read, so an unauthenticated client can't make the app buffer a body. Rejections go through the
+normal response path, so security headers and session write-back apply.
+
+Plain `before(...)` middleware never counts as access. The previous model —
+`requireSession("/admin/*", …)` path-pattern guards — is removed.
+
+The framework's own `/ops/*` routes follow the same rule: each is registered with the ops
+credential requirement (`ops:read` or `ops:control`), the handlers carry no auth code, and an
+ops route registered without one fails `start()`. The app's default access never applies under
+`/ops`.
+
+`/ops/routes` and the startup banner list each route's resolved access.
+
+### Object-level access is the handler's job
+
+Route access answers "may this user call this endpoint". It does not answer "may this user
+touch row 42": `GET /posts/{id}/edit` is reachable by every logged-in user, and loading the
+post by id returns anyone's post. Check ownership after loading — and return 404, not 403, so
+the response doesn't confirm the row exists.
 
 ---
 
@@ -604,6 +647,11 @@ What it doesn't cover, and what to do:
 
 ## WebSockets
 
+A WebSocket upgrade runs plain `before(...)` middleware, then the `Origin` check below, then
+the route's access requirements (see [Authorization](#authorization)); a rejection declines the
+handshake. Before 0.1.11 the upgrade ran no guard at all, so a socket under a guarded path
+accepted anonymous clients.
+
 WebSocket upgrades are validated against the request's `Origin`. A handshake is **not**
 subject to the same-origin policy, so without this an attacker's page could open a socket
 to your app, have the browser attach the victim's session cookie, and hold an authenticated
@@ -621,9 +669,9 @@ socket for its lifetime (cross-site WebSocket hijacking).
 Declare deliberate cross-origin clients:
 
 ```java
-app.wsAllowedOrigins("https://studio.example.com")   // exact origin: scheme, host and port
-   .ws("/live", ctx -> new LiveHandler(ctx));
-app.wsAllowedOrigins("studio.example.com")           // bare host: any scheme or port
+app.wsAllowedOrigins("https://studio.example.com");  // exact origin: scheme, host and port
+app.wsAllowedOrigins("studio.example.com");          // bare host: any scheme or port
+app.ws("/live", ctx -> new LiveHandler(ctx));
 ```
 
 Prefer the full origin: listing `https://studio.example.com` does not admit

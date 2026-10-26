@@ -117,6 +117,35 @@ class RouteAccessTest {
         }
     }
 
+    @Test
+    void insteadOfDefaultReplacesTheDefaultOnARouteOrGroup() throws Exception {
+        Access bearer = Access.checkRequest(req ->
+            "Bearer good".equals(req.header("Authorization")) ? null : Result.unauthorized());
+        var app = Brace.test().sessions(SECRET).start(a -> {
+            a.strictAccessCheck();
+            a.defaultAccess(Access.session("userId", "/login"));
+            a.post("/hooks/x", req -> Result.text("hook")).access(Access.insteadOfDefault(bearer)).csrf(false);
+            a.group("/api", Access.insteadOfDefault(bearer), api -> {
+                api.get("/me", req -> Result.text("me"));
+                api.get("/admin", req -> Result.text("admin"))
+                    .access(Access.checkRequest(req -> "1".equals(req.header("X-Admin")) ? null : Result.forbidden()));
+            });
+        });
+        try {
+            // No session needed, but the replacement requirement is enforced.
+            assertEquals(401, app.request("POST", "/hooks/x").send().status());
+            assertEquals(200, app.request("POST", "/hooks/x").header("Authorization", "Bearer good").send().status());
+            assertEquals(401, app.get("/api/me").status());
+            assertEquals(200, app.request("GET", "/api/me").header("Authorization", "Bearer good").send().status());
+            // Requirements still stack on the replacement.
+            assertEquals(403, app.request("GET", "/api/admin").header("Authorization", "Bearer good").send().status());
+            assertEquals(200, app.request("GET", "/api/admin").header("Authorization", "Bearer good")
+                .header("X-Admin", "1").send().status());
+        } finally {
+            app.stop();
+        }
+    }
+
     // --- Contradictions ---
 
     @Test

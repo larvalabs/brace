@@ -285,6 +285,7 @@ declares whether it reads the session. It is a small sealed type in a new `Acces
 | `Access.session(key, loginUrl)` | Allow if the session has `key`, else reject (see "Rejections") | yes |
 | `Access.check((req, session) -> Result)` | Custom logic; `null` allows | yes |
 | `Access.checkRequest(req -> Result)` | Custom logic without a session (e.g. a bearer-token check). A separate name rather than an overload of `check`, so method references never need a cast, following the `getDb`/`getSession` precedent. | no |
+| `Access.insteadOfDefault(requirement)` | Added during implementation: `requirement` replaces the default on the route or group it's on. Without it, a bearer-token API or signed webhook in a session-login app had no way to drop the session default while staying guarded (`.publicRoute()` can't be combined with `.access(...)`). | as `requirement` |
 | `Access.none()` | Only valid in `defaultAccess(...)`: an explicit statement that the app has no login. It is logged at startup in the access table. | no |
 | `Access.ops(OpsScope)` | Internal; used for the framework's `/ops` routes | no |
 

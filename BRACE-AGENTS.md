@@ -66,6 +66,7 @@ var app = Brace.app()
     .database(db)
     .templates("views")
     .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
+    .defaultAccess(Access.session("userId", "/login"))   // every route requires login unless .publicRoute()
     .trustedProxies("10.0.0.0/8", "172.16.0.0/12")
     .mailer(new Mailer(config.get("smtp.url")).from("noreply@app.com"))
     .cache(Brace.cache())
@@ -76,7 +77,7 @@ var app = Brace.app()
     .after(SecurityHeaders.defaults());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -173,6 +174,52 @@ Url.query("tag", List.of("a", "b"))                      // tag=a&tag=b
 query and change one parameter (sort or filter links), use `req.urlWith(name, value)`; for
 page links use `Paged` (see Database → Pagination).
 
+## Access
+
+**Every route needs an access requirement or `.publicRoute()`.** `start()` — and so
+`Brace.test()` — refuses to start otherwise and lists the unmarked routes. Requirements attach
+to routes, never to path patterns:
+
+```java
+app.defaultAccess(Access.session("userId", "/login"));  // every route, unless marked public
+app.get("/", home::index).publicRoute();                 // opt out of the default
+app.post("/login", auth::login).publicRoute();
+
+app.group("/admin", Access.check((req, s) -> "admin".equals(s.get("role")) ? null : Result.forbidden()),
+    admin -> admin.getRead("/users", ctrl::list));      // default + group requirement
+
+app.postDb("/billing/refund", billing::refund)
+    .access(Access.check(Billing::canRefund));          // default + route requirement
+```
+
+| Factory | Meaning |
+|---|---|
+| `Access.session(key, loginUrl)` | Logged in: the session has `key`. Otherwise a page gets 302 to `loginUrl`, htmx gets 401 + `HX-Redirect`, JSON gets 401 |
+| `Access.check((req, session) -> …)` | Custom check; return `null` to allow, a `Result` to reject |
+| `Access.checkRequest(req -> …)` | Custom check without the session (bearer token, IP allowlist) |
+| `Access.insteadOfDefault(requirement)` | `requirement` replaces the default for the route or group it's on: a bearer-token API or signature-checked webhook in a session-login app |
+| `Access.none()` | Only as `defaultAccess`: the app has no login, every route is public (logged at startup) |
+
+- Requirements **stack**: the default, then groups outer to inner (`RouteGroup.group(sub,
+  access, cfg)` nests), then the route's own `.access(...)`. All must pass.
+- A route that authenticates differently (an API with bearer tokens, a webhook with a
+  signature) uses `Access.insteadOfDefault(...)`, on the route or its group:
+  `app.group("/api", Access.insteadOfDefault(Access.checkRequest(Api::bearer)), g -> ...)`.
+  Don't mark it `.publicRoute()` and check inside the handler.
+- `.publicRoute()` removes **only** the default. Combining it with `.access(...)`, or using it
+  inside a group that has a requirement, fails `start()`: register public pages outside the
+  restricted group.
+- They run after plain `before(...)` middleware (rate limiters shed load first) and before the
+  body is read and CSRF is checked. A session-reading requirement sees the same `Session` the
+  handler gets, and needs `.sessions(...)` (`start()` throws without it).
+- They are bound to the route, so `/x/`, percent-encoded and `HEAD` requests to a guarded route
+  are guarded the same way. WebSocket routes work the same: `app.ws(...).publicRoute()`.
+- `/ops/*` has its own credential; the app default never applies there. The startup banner and
+  `/ops/routes` show each route's access.
+
+This is route-level access — whether a user may call the endpoint. Whether they may touch a
+particular row (`/posts/{id}/edit` for someone else's post) is still the handler's check.
+
 ## Middleware
 
 Before middleware runs before the handler. Return `null` to continue, or a `Result` to short-circuit:
@@ -182,35 +229,25 @@ app.before(req -> req.header("X-Maintenance") != null ? Result.error(503, "down"
 app.before("/api/*", req -> req.header("Authorization") == null ? Result.unauthorized() : null);
 ```
 
-**Auth guards use session-aware before-middleware** — never repeat a login check inside
-handlers. The one-liner covers the whole subtree:
+**Auth is not middleware** — use access requirements (see Access). `before(...)` never counts
+toward the `start()` check. The 2-arg `before` receives the session — the SAME instance the
+handler gets, so mutations persist via the normal cookie write-back — for session work that
+isn't an access decision:
 
 ```java
-app.requireSession("/admin/*", "userId", "/login");  // redirect to /login unless session has userId
+app.before("/app/*", (req, session) -> { session.set("lastSeen", Instant.now().toString()); return null; });
 ```
 
-`requireSession` requires `.sessions(secret)` — `start()` throws without it (an empty
-per-request session would make the guard redirect forever).
-
-For custom logic, the 2-arg `before` receives the session — the SAME instance the handler
-gets, so mutations made in the guard persist via the normal cookie write-back:
-
-```java
-app.before("/admin/*", (req, session) ->
-    "admin".equals(session.get("role")) ? null : Result.forbidden());
-```
-
-Session-aware before-middleware runs after all plain `before(...)` middleware and before
-CSRF validation. Handlers behind the guard can assume the session key is present.
+Session-aware before-middleware runs after plain `before(...)` and the route's access
+requirements, and before CSRF validation.
 
 Pattern semantics: a trailing `/*` matches the bare prefix too — `/admin/*` covers
-`/admin`, `/admin/`, and `/admin/anything` — so a guard cannot be bypassed by requesting
-the prefix itself. Only a trailing wildcard is allowed; an interior wildcard
+`/admin`, `/admin/`, and `/admin/anything`. Only a trailing wildcard is allowed; an interior wildcard
 (`/api/*/admin`) throws `IllegalArgumentException` at startup.
 
 A trailing-slash request (`/users/`) is routed to the `/users` route and is then treated as
 `/users` throughout: middleware patterns, `req.path()` and the handler all see the canonical
-path, so an exact-path guard on `/admin` also covers `/admin/`.
+path, so exact-path middleware on `/admin` also covers `/admin/`.
 
 After middleware can transform the response:
 
@@ -927,8 +964,14 @@ try (var s = Http.post(url).bodyJson(request).stream()) {
 ## WebSocket
 
 ```java
-app.ws("/chat", ctx -> new ChatHandler(ctx));
+app.ws("/chat", ctx -> new ChatHandler(ctx));               // gets the app's default access
+app.ws("/status", ctx -> new StatusHandler(ctx)).publicRoute();
 ```
+
+The upgrade runs plain `before(...)` middleware, the Origin check, then the route's access
+requirements (see Access); any rejection declines the handshake (a login redirect becomes 401).
+The socket's `session()` is the session the requirements read. Joining a room is still an
+authorization decision: check the user may see a room before `ctx.join(room)`.
 
 `WsContext` methods: `send(message)`, `join(room)`, `leave(room)`, `broadcast(room, message)`, `session()`, `close()`.
 

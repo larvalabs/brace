@@ -34,11 +34,17 @@ public final class Access {
     private final String label;
     private final boolean usesSession;
     private final Check check; // null only for none()
+    private final boolean replacesDefault;
 
     private Access(String label, boolean usesSession, Check check) {
+        this(label, usesSession, check, false);
+    }
+
+    private Access(String label, boolean usesSession, Check check, boolean replacesDefault) {
         this.label = label;
         this.usesSession = usesSession;
         this.check = check;
+        this.replacesDefault = replacesDefault;
     }
 
     /**
@@ -70,6 +76,22 @@ public final class Access {
     }
 
     /**
+     * {@code requirement} in place of the app's default, for the routes it covers: a bearer-token
+     * API or a signature-checked webhook in an app whose default is a session login. On a route
+     * ({@code .access(Access.insteadOfDefault(...))}) or a group
+     * ({@code app.group("/api", Access.insteadOfDefault(...), g -> ...)}); requirements from
+     * other groups and the route still stack on it. Unlike {@code .publicRoute()}, the route is
+     * still guarded.
+     */
+    public static Access insteadOfDefault(Access requirement) {
+        if (requirement == null) throw new IllegalArgumentException("Access.insteadOfDefault needs a requirement");
+        if (requirement.isNone()) {
+            throw new IllegalArgumentException("Access.insteadOfDefault(Access.none()) is a public route: use .publicRoute()");
+        }
+        return new Access(requirement.label, requirement.usesSession, requirement.check, true);
+    }
+
+    /**
      * The explicit statement that an app has no login: every route is public. Only valid as
      * {@link Brace#defaultAccess(Access)}; logged at startup.
      */
@@ -86,6 +108,10 @@ public final class Access {
 
     boolean isNone() {
         return this == NONE;
+    }
+
+    boolean replacesDefault() {
+        return replacesDefault;
     }
 
     boolean usesSession() {

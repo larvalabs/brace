@@ -147,14 +147,15 @@ public class App {
         var pages = new PageController();
         var auth = new AuthController(mail);
 
-        app.before(Auth::requireLogin);
-        app.getRead("/", posts::index);
-        app.getRead("/posts/{id}", posts::show);
-        app.get("/about", cache.wrap("1h", pages::about));  // page cache wraps request-only handlers
-        app.postFull("/posts", posts::create);
+        // Every route needs an access requirement or .publicRoute(); start() refuses otherwise.
+        app.defaultAccess(Access.session("userId", "/auth/login"));
+        app.getRead("/", posts::index).publicRoute();
+        app.getRead("/posts/{id}", posts::show).publicRoute();
+        app.get("/about", cache.wrap("1h", pages::about)).publicRoute();  // page cache wraps request-only handlers
+        app.postFull("/posts", posts::create);                            // logged-in users only
         app.group("/auth", g -> {
-            g.get("/login", auth::loginForm);
-            g.postSession("/login", auth::login);
+            g.get("/login", auth::loginForm).publicRoute();
+            g.postSession("/login", auth::login).publicRoute();
         });
 
         app.every("5m", "cleanup", new CleanupJob());
@@ -241,6 +242,26 @@ app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for b
 // Json.obj builds an ordered, null-tolerant map for explicit JSON response shapes
 app.getRead("/api/me", (req, db) -> Json.of(Json.obj("id", userId, "name", name)));
 ```
+
+## Access
+
+Every route — HTTP and WebSocket — needs an access requirement or an explicit `.publicRoute()`;
+`start()` refuses to start otherwise and lists the unmarked routes. Requirements attach to
+routes, not to path patterns, and stack:
+
+```java
+app.defaultAccess(Access.session("userId", "/login"));   // every route unless marked public
+app.get("/", home::index).publicRoute();
+app.group("/admin", Access.check((req, s) -> "admin".equals(s.get("role")) ? null : Result.forbidden()),
+    admin -> admin.getRead("/users", ctrl::list));       // default + group
+app.post("/hooks/stripe", hooks::stripe)                  // no login, but a signature check
+    .access(Access.insteadOfDefault(Access.checkRequest(hooks::verifySignature))).csrf(false);
+```
+
+`Access.session(key, loginUrl)`, `Access.check((req, session) -> …)`,
+`Access.checkRequest(req -> …)`, `Access.insteadOfDefault(requirement)` for a route or group that
+authenticates differently (bearer-token API, webhook), and `Access.none()` as the default for an
+app with no login.
 
 ## Database
 
