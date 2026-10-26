@@ -42,8 +42,10 @@ class WebSocketFanoutPostgresIT extends PostgresTestBase {
                 POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword(), List.of());
 
         // Both instances share one factory, closed in stopInstances, so neither app owns it.
-        instanceA = Brace.app().port(0).database(dbFactory).ownsDatabase(false).ws("/ws", LobbySocket::new);
-        instanceB = Brace.app().port(0).database(dbFactory).ownsDatabase(false).ws("/ws", LobbySocket::new);
+        instanceA = Brace.app().port(0).database(dbFactory).ownsDatabase(false);
+        instanceA.ws("/ws", LobbySocket::new);
+        instanceB = Brace.app().port(0).database(dbFactory).ownsDatabase(false);
+        instanceB.ws("/ws", LobbySocket::new);
         instanceA.start();
         instanceB.start();
     }

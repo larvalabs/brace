@@ -112,11 +112,11 @@ class WebSocketTest {
             .sessions("test-secret-key-at-least-32-characters-long")
             // Small cap so the slow-consumer test trips backpressure quickly. Other tests send tiny
             // messages that clients read promptly, so their queued backlog never approaches this.
-            .wsMaxQueuedBytes(64 * 1024)
-            .ws("/echo", EchoSocket::new)
-            .ws("/room", RoomSocket::new)
-            .ws("/blast", BlastSocket::new)
-            .ws("/session", SessionSocket::new);
+            .wsMaxQueuedBytes(64 * 1024);
+        app.ws("/echo", EchoSocket::new);
+        app.ws("/room", RoomSocket::new);
+        app.ws("/blast", BlastSocket::new);
+        app.ws("/session", SessionSocket::new);
 
         // Also add a regular HTTP route to verify coexistence
         app.get("/hello", req -> Result.text("hello"));

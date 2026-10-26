@@ -63,7 +63,11 @@ public class Brace {
     private BraceHandler handler; // set by start(); read by tests through handler()
     private Cache cache;
     private Storage storage;
-    private final Map<String, Function<WsContext, Object>> wsRoutes = new LinkedHashMap<>();
+    // WebSocket routes by path. Each carries a Route (method "WS") so it takes part in the H1
+    // access model exactly like an HTTP route; it is not in the Router, which matches HTTP only.
+    private final Map<String, WsRoute> wsRoutes = new LinkedHashMap<>();
+
+    record WsRoute(Route route, Function<WsContext, Object> factory) {}
     private WsRegistry wsRegistry;
     private long wsMaxQueuedBytes = 4L * 1024 * 1024; // M18: per-connection outgoing backlog cap (4 MB)
     // M3: extra origins allowed to open a WebSocket. Same-origin is always allowed; this is the
@@ -509,9 +513,17 @@ public class Brace {
         return this;
     }
 
-    public Brace ws(String path, Function<WsContext, Object> handlerFactory) {
-        wsRoutes.put(path, handlerFactory);
-        return this;
+    /**
+     * A WebSocket endpoint. It takes part in the access model like any route (H2): it gets the
+     * app's default access unless marked {@code .publicRoute()}, takes {@code .access(...)}, and
+     * the upgrade request runs plain {@code before()} middleware, the Origin check, then the
+     * route's access requirements; any rejection declines the handshake. Inside the socket,
+     * joining a room is still an authorization decision for the handler.
+     */
+    public RouteConfig ws(String path, Function<WsContext, Object> handlerFactory) {
+        var route = new Route("WS", path, handlerFactory, null);
+        wsRoutes.put(path, new WsRoute(route, handlerFactory));
+        return new RouteConfig(this, route);
     }
 
     /**
@@ -1156,23 +1168,39 @@ public class Brace {
             final TrustedProxies wsTrustedProxies = trustedProxies;
             // Wrap with WebSocketUpgradeHandler for WebSocket support
             var wsUpgradeHandler = WebSocketUpgradeHandler.from(server, container -> {
+                final List<Middleware.BoundBefore> wsBefore = List.copyOf(beforeMiddleware);
                 for (var entry : wsRoutes.entrySet()) {
                     String wsPath = entry.getKey();
-                    Function<WsContext, Object> factory = entry.getValue();
+                    Route wsRoute = entry.getValue().route();
+                    Function<WsContext, Object> factory = entry.getValue().factory();
                     container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> {
+                        String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest);
+                        // H2: the upgrade is a request like any other, so it runs plain before()
+                        // middleware (a rate limiter sheds load first) and, below, the route's access
+                        // requirements. Before this, every guard was skipped and a socket under a
+                        // guarded prefix accepted anonymous clients.
+                        Map<String, String> headers = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+                        for (var field : upgradeRequest.getHeaders()) headers.put(field.getName(), field.getValue());
+                        var request = new Request("GET", wsPath, Map.of(),
+                            Request.parseSingleValues(upgradeRequest.getHttpURI().getQuery(), true),
+                            headers, "", Map.of(), remoteAddr, wsTrustedProxies);
+                        for (var before : wsBefore) {
+                            Result early = before.apply(request);
+                            if (early != null) return declineUpgrade(upgradeRequest, upgradeResponse, callback, early.status());
+                        }
                         // M3: reject a cross-origin handshake before the session cookie below turns
                         // it into an authenticated socket. Returning null declines the upgrade.
                         // The host is the one the client addressed: X-Forwarded-Host when a trusted
-                        // proxy sent it, else Host.
+                        // proxy sent it, else Host. Cheap and decrypts nothing, so it runs before
+                        // the access requirements.
                         String origin = upgradeRequest.getHeaders().get("Origin");
                         String host = ProxyHeaders.effectiveHost(upgradeRequest.getHeaders()::get,
-                            org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest), wsTrustedProxies);
+                            remoteAddr, wsTrustedProxies);
                         if (!originAllowed(origin, host, allowedOrigins)) {
                             if (host != null && BraceHandler.isLoopbackHost(host)) {
                                 ProxyHeaders.warnWebSocketHostRewrite(origin, host);
                             }
-                            upgradeResponse.setStatus(403);
-                            return null;
+                            return declineUpgrade(upgradeRequest, upgradeResponse, callback, 403);
                         }
                         // Extract session from upgrade request cookie
                         Session braceSession = null;
@@ -1184,6 +1212,13 @@ public class Brace {
                                     break;
                                 }
                             }
+                            if (braceSession == null) braceSession = new Session();
+                        }
+                        // H2: the route's resolved access requirements. The session they read is the
+                        // one the socket gets.
+                        for (var access : wsRoute.access()) {
+                            Result rejected = access.check(request, access.usesSession() ? braceSession : null);
+                            if (rejected != null) return declineUpgrade(upgradeRequest, upgradeResponse, callback, rejected.status());
                         }
                         return new WsHandler(factory, braceSession, wsRegistryRef);
                     });
@@ -1441,8 +1476,8 @@ public class Brace {
         for (var route : router.routes()) {
             System.out.printf("        %-6s %-32s %s%n", route.method(), route.pattern(), route.accessLabel());
         }
-        for (var wsPath : wsRoutes.keySet()) {
-            System.out.printf("        %-6s %s%n", "WS", wsPath);
+        for (var ws : wsRoutes.values()) {
+            System.out.printf("        %-6s %-32s %s%n", "WS", ws.route().pattern(), ws.route().accessLabel());
         }
         System.out.println("     }");
         System.out.println("  }");
@@ -1593,6 +1628,22 @@ public class Brace {
      * remembering. An explicit {@code Cache-Control} set by the handler wins.
      */
     /**
+     * Declines a WebSocket upgrade (H2). When the creator returns null Jetty leaves the response to
+     * it, so the decline must be written and the callback completed here; setting a status alone
+     * left the client waiting until its own timeout. A browser socket can't follow a redirect, so a
+     * redirect (Access.session's answer to a page request) becomes 401; anything else that isn't an
+     * error status becomes 403.
+     */
+    private static Object declineUpgrade(org.eclipse.jetty.websocket.server.ServerUpgradeRequest request,
+                                         org.eclipse.jetty.websocket.server.ServerUpgradeResponse response,
+                                         org.eclipse.jetty.util.Callback callback, int status) {
+        if (status >= 300 && status < 400) status = 401;
+        else if (status < 400) status = 403;
+        org.eclipse.jetty.server.Response.writeError(request, response, callback, status);
+        return null;
+    }
+
+    /**
      * A route the framework registers (/ops/*): outside the app's default access, which is an
      * app login and not the ops credential. {@code requirement} is the ops access check; null
      * marks the route public (the auth handshake endpoints, which take the credential itself).
@@ -1617,7 +1668,9 @@ public class Brace {
         Access fallback = defaultAccess != null ? defaultAccess : fallbackDefaultAccess;
         var unmarked = new ArrayList<Route>();
         boolean readsSession = false;
-        for (Route route : router.routes()) {
+        var routes = new ArrayList<>(router.routes());
+        for (var ws : wsRoutes.values()) routes.add(ws.route());
+        for (Route route : routes) {
             boolean hasOwn = !route.groupAccess().isEmpty() || !route.declaredAccess().isEmpty();
             if (route.isPublicRoute() && hasOwn && !route.isFramework()) {
                 throw new IllegalStateException(route.method() + " " + route.pattern()
