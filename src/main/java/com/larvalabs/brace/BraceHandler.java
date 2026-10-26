@@ -480,9 +480,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             try {
                 if (invoker.needsDatabase() && databaseFactory != null) {
                     var db = new Database(databaseFactory.openSession());
-                    db.checkQueriesAgainst(braceRequest, strictQueryChecks);
                     exchange.db = db;
                     try {
+                        db.checkQueriesAgainst(braceRequest, strictQueryChecks);
                         if (invoker.needsReadOnlyDatabase()) {
                             result = invoker.invoke(braceRequest, db, session);
                         } else {

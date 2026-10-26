@@ -481,7 +481,7 @@ hard-coded; a request-chosen order goes through `Sort`:
 // ?sort=title ascending, ?sort=-date descending; anything else gets the default
 var sort = Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"), "createdAt DESC");
 var posts = db.paginate(Post.class, "published = true", sort, req, 20);
-Sort.of("createdAt DESC, id")                     // a fixed order as a Sort
+Sort.of("createdAt DESC, id")                     // a fixed order as a Sort — never request input
 ```
 
 ```html
@@ -497,7 +497,8 @@ The `Database` a handler receives checks each query string against the request's
 and form values: a query string containing one (beyond short words and numbers) throws in dev
 mode and in `Brace.test()` apps, naming the parameter, and logs a warning in production. A
 coincidence (a hard-coded `status = 'published'` on a page with `?status=published`) doesn't
-trip it; a single word only counts after `ORDER BY`, so build orders with `Sort`.
+trip it; a single word only counts after `ORDER BY`, so build orders with `Sort`. It's a backstop:
+a bare word or number concatenated elsewhere (`"id = " + id`) isn't caught, so bind everything.
 
 **Object-level access.** Route access decides who may call `/posts/{id}/edit`; it doesn't stop a
 signed-in user from changing the id to someone else's post. For user-owned rows, look them up

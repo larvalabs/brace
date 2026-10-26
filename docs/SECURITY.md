@@ -106,11 +106,25 @@ one, the call throws `IllegalArgumentException` in dev mode (`-Dbrace.mode=dev`)
 (where a false positive must not break a page). The message names the parameter, not its value.
 
 To keep coincidences out, values shorter than 3 characters and plain numbers are ignored, and a
-single word (`title`, `-createdAt`) counts only as a token after `ORDER BY` — where it picks a
-column — not inside a literal, where it can't break out. Anything with quotes, spaces,
-parentheses or operators counts anywhere. JSON bodies, headers and cookies are not checked, and
-neither are queries run outside a request (jobs, `withSession`). The check is a backstop for the
-rules above, not a substitute.
+single word (`title`, `-createdAt`) counts only as a token after `ORDER BY` (including an aliased
+`p.title`), where it picks a column, not inside a literal, where it can't break out. Anything
+with quotes, spaces, parentheses or operators counts anywhere. Form values include every value
+of a repeated field; a body that isn't valid form encoding is skipped. A `Sort.of(...)` order is
+checked like a fragment; a `Sort.from(...)` order is not, since the request only picked a key.
+Production warnings repeat at most once a minute per call site and parameter.
+
+What it does **not** catch:
+
+- A single word or a number concatenated outside `ORDER BY`: `"id = " + req.pathParam("id")`
+  with `id` as the value is a tautology that returns every row, and isn't flagged, because
+  flagging bare words everywhere would trip on ordinary code.
+- A value the handler transformed (trimmed, split into terms, re-cased) before concatenating it.
+- JSON bodies, headers and cookies; queries run outside a request (jobs, `withSession`); and,
+  past the first 1,000 values or 64 KB of a request, the rest.
+
+It can also fire on safe code: a hand-written allowlist (`switch (sort) { case "title" ->
+"title"; ... }` concatenated after `ORDER BY`) looks the same as the injection it replaces. Use
+`Sort.from`. The check is a backstop for the rules above, not a substitute.
 
 ---
 

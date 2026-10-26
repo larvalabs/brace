@@ -28,11 +28,15 @@ public final class Sort {
     private final String key;          // the allowlist key in effect, null for the default
     private final boolean descending;
     private final String orderBy;      // validated "field [ASC|DESC], ..." with no ORDER BY prefix
+    // Built by from(): the request only picked a key, so the order is code's. A Sort.of(...) order
+    // is text that could have come from the request, so the Database checks it like a fragment.
+    private final boolean fromAllowlist;
 
-    private Sort(String key, boolean descending, String orderBy) {
+    private Sort(String key, boolean descending, String orderBy, boolean fromAllowlist) {
         this.key = key;
         this.descending = descending;
         this.orderBy = orderBy;
+        this.fromAllowlist = fromAllowlist;
     }
 
     /**
@@ -44,7 +48,8 @@ public final class Sort {
     public static Sort from(Request req, String param, Map<String, String> allowed, String defaultOrder) {
         if (allowed == null || allowed.isEmpty()) throw new IllegalArgumentException("Sort.from needs at least one allowed key");
         for (var field : allowed.values()) requireFields(field);
-        Sort fallback = of(defaultOrder);
+        Sort parsed = of(defaultOrder);
+        Sort fallback = new Sort(null, false, parsed.orderBy, true);
         String requested = req != null && param != null ? req.queryParam(param) : null;
         if (requested == null || requested.isEmpty()) return fallback;
         boolean desc = requested.startsWith("-");
@@ -53,13 +58,17 @@ public final class Sort {
         if (fields == null) return fallback;
         var items = new ArrayList<String>();
         for (String field : fields.split(",")) items.add(field.strip() + (desc ? " DESC" : " ASC"));
-        return new Sort(key, desc, String.join(", ", items));
+        return new Sort(key, desc, String.join(", ", items), true);
     }
 
     /**
      * A fixed order written in code, {@code Sort.of("createdAt DESC, id")}: field paths with
      * optional {@code ASC}/{@code DESC} and {@code NULLS FIRST}/{@code LAST}. Anything else
      * (a function, a subquery) is refused; write that in the where-fragment.
+     *
+     * <p>Never pass it request input: {@code Sort.of(req.queryParam("sort"))} lets the request
+     * order by any column, which leaks it row by row. That's what {@link #from} is for; the
+     * Database checks a {@code Sort.of} order against the request like a where-fragment.
      */
     public static Sort of(String order) {
         if (order == null || order.isBlank()) throw new IllegalArgumentException("Sort.of needs an order, e.g. \"createdAt DESC\"");
@@ -76,7 +85,7 @@ public final class Sort {
             for (int i = 1; i < words.length; i++) normalized.append(' ').append(words[i].toUpperCase(java.util.Locale.ROOT));
             items.add(normalized.toString());
         }
-        return new Sort(null, false, String.join(", ", items));
+        return new Sort(null, false, String.join(", ", items), false);
     }
 
     private static void requireFields(String fields) {
@@ -105,6 +114,8 @@ public final class Sort {
     public String toggle(String key) {
         return is(key) && !descending ? "-" + key : key;
     }
+
+    boolean fromAllowlist() { return fromAllowlist; }
 
     /** {@code " ORDER BY ..."}, appended after the where-fragment. */
     String hql() {

@@ -2,7 +2,6 @@ package com.larvalabs.brace;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -26,6 +25,11 @@ import java.util.regex.Pattern;
  *       when it appears anywhere in the string.</li>
  * </ul>
  * Only the string the caller passed is checked, never the converted HQL.
+ *
+ * <p>It is a backstop, not a guarantee. It can't see a value the handler transformed (trimmed,
+ * split, re-cased), and a single word concatenated outside {@code ORDER BY} ({@code "id = " +
+ * id} with {@code id=id}, a tautology) or a number is not flagged, because flagging those would
+ * trip on ordinary code. JSON bodies, headers and cookies are not checked.
  */
 final class QueryTaint {
 
@@ -35,13 +39,21 @@ final class QueryTaint {
     private static final Pattern TOKEN_SPLIT = Pattern.compile("[^A-Za-z0-9_$.]+");
     private static final Set<String> SORT_KEYWORDS = Set.of("asc", "desc", "nulls", "first", "last");
 
+    // A request's checked values are capped so a huge form post can't make every query check
+    // expensive: past the cap, further values are not checked.
+    private static final int MAX_INPUTS = 1000;
+    private static final int MAX_VALUE_CHARS = 64 * 1024;
+
     private record Input(String source, String name, String value) {}
 
     private final List<Input> inputs;
     private final boolean strict;
 
-    // Call sites already warned about in production, so a hot query logs once. Bounded.
-    private static final Set<String> warnedSites = ConcurrentHashMap.newKeySet();
+    // When each call site + parameter last logged in production: at most once a minute each, so a
+    // hot query doesn't flood the log, and a benign hit can't silence a later real one for good.
+    private static final long WARN_INTERVAL_MS = 60_000;
+    private static final int MAX_WARN_KEYS = 1000;
+    private static final ConcurrentHashMap<String, Long> lastWarned = new ConcurrentHashMap<>();
 
     private QueryTaint(List<Input> inputs, boolean strict) {
         this.inputs = inputs;
@@ -50,26 +62,42 @@ final class QueryTaint {
 
     /** The checkable values of {@code req}; {@code null} when it has none. */
     static QueryTaint of(Request req, boolean strict) {
-        var inputs = new ArrayList<Input>();
-        add(inputs, "path parameter", req.pathParams());
-        for (String[] pair : req.queryPairs()) add(inputs, "query parameter", pair[0], pair[1]);
+        var inputs = new Inputs();
+        if (req.pathParams() != null) req.pathParams().forEach((k, v) -> inputs.add("path parameter", k, v));
+        for (String[] pair : req.queryPairs()) inputs.add("query parameter", pair[0], pair[1]);
         // The body is read before the handler runs, so this parses no more than the handler could.
-        // Only form bodies: a JSON or raw body's values reach queries through typed fields.
-        String type = req.header("Content-Type");
-        if (type != null && (type.startsWith("application/x-www-form-urlencoded") || type.startsWith("multipart/form-data"))) {
-            add(inputs, "form field", req.parsedFormBody());
+        // Every value of a repeated field counts (formParams reads them all). A body that isn't
+        // valid form encoding is skipped: the handler sees that error only if it reads the form.
+        if (isFormBody(req.header("Content-Type"))) {
+            try {
+                Request.parsePairs(req.body(), false).forEach((name, values) -> {
+                    for (String value : values) inputs.add("form field", name, value);
+                });
+            } catch (IllegalArgumentException malformed) {
+                // e.g. a stray "%" — not a form this handler can read either
+            }
         }
-        return inputs.isEmpty() ? null : new QueryTaint(inputs, strict);
+        return inputs.list.isEmpty() ? null : new QueryTaint(inputs.list, strict);
     }
 
-    private static void add(List<Input> inputs, String source, Map<String, String> values) {
-        if (values == null) return;
-        values.forEach((name, value) -> add(inputs, source, name, value));
+    /** The body types {@code formParam} reads values from in practice, matched case-insensitively. */
+    private static boolean isFormBody(String contentType) {
+        if (contentType == null) return false;
+        String type = contentType.toLowerCase(java.util.Locale.ROOT);
+        return type.startsWith("application/x-www-form-urlencoded") || type.startsWith("multipart/form-data")
+            || type.startsWith("text/plain");
     }
 
-    private static void add(List<Input> inputs, String source, String name, String value) {
-        if (value == null || value.length() < 3 || NUMBER.matcher(value).matches()) return;
-        inputs.add(new Input(source, name, value));
+    private static final class Inputs {
+        final List<Input> list = new ArrayList<>();
+        int chars;
+
+        void add(String source, String name, String value) {
+            if (value == null || value.length() < 3 || NUMBER.matcher(value).matches()) return;
+            if (list.size() >= MAX_INPUTS || chars + value.length() > MAX_VALUE_CHARS) return;
+            chars += value.length();
+            list.add(new Input(source, name, value));
+        }
     }
 
     /** Throws (strict) or logs once per call site when {@code query} contains request data. */
@@ -82,10 +110,17 @@ final class QueryTaint {
             + "and sort with Sort.from(req, ...).";
         if (strict) throw new IllegalArgumentException(message + " (Thrown in dev mode and tests; logged in production.)");
         String site = callSite();
-        if (warnedSites.size() < 1000 && warnedSites.add(site)) {
+        String key = site + "|" + hit.name;
+        long now = System.currentTimeMillis();
+        if (lastWarned.size() >= MAX_WARN_KEYS && !lastWarned.containsKey(key)) key = "(other call sites)";
+        Long previous = lastWarned.get(key);
+        if (previous == null || now - previous >= WARN_INTERVAL_MS) {
+            lastWarned.put(key, now);
             Log.warn(message + " At " + site + ".");
         }
     }
+
+    int size() { return inputs.size(); }
 
     Input find(String query) {
         String orderBy = null;
@@ -98,6 +133,12 @@ final class QueryTaint {
                 if (orderBy.isEmpty()) continue;
                 for (String token : TOKEN_SPLIT.split(orderBy)) {
                     if (token.equalsIgnoreCase(word)) return input;
+                    // An aliased column, "ORDER BY p." + sort: the word is one segment of the token.
+                    if (token.indexOf('.') >= 0 && !word.contains(".")) {
+                        for (String segment : token.split("\\.")) {
+                            if (segment.equalsIgnoreCase(word)) return input;
+                        }
+                    }
                 }
             } else if (query.contains(value)) {
                 return input;

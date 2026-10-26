@@ -107,6 +107,58 @@ class QueryTaintTest {
         assertTrue(ex.getMessage().contains("form field \"q\""), ex.getMessage());
     }
 
+    // --- Review fixes ---
+
+    @Test
+    void sortOfRequestTextIsCheckedButSortFromIsNot() {
+        var req = get(Map.of(), Map.of("sort", "body DESC"));
+        assertThrows(IllegalArgumentException.class,
+            () -> run(req, true, db -> db.query(Post.class, "", Sort.of(req.queryParam("sort")))));
+        // Sort.from only lets the request pick a key, so its order is never flagged.
+        var byTitle = get(Map.of(), Map.of("sort", "title"));
+        var sort = Sort.from(byTitle, "sort", Map.of("title", "title"), "createdAt DESC");
+        assertDoesNotThrow(() -> run(byTitle, true, db -> db.query(Post.class, "", sort)));
+        assertDoesNotThrow(() -> run(byTitle, true, db -> db.paginate(Post.class, "id > ?", sort, 1, 10, 0L)));
+    }
+
+    @Test
+    void aliasedOrderByWordThrows() {
+        var req = get(Map.of(), Map.of("sort", "title"));
+        assertThrows(IllegalArgumentException.class,
+            () -> run(req, true, db -> db.hql("SELECT p.id FROM Post p ORDER BY p." + "title")));
+    }
+
+    @Test
+    void everyValueOfARepeatedFormFieldIsChecked() {
+        var req = new Request("POST", "/search", Map.of(), Map.of(),
+            Map.of("Content-Type", "Application/X-WWW-Form-Urlencoded; charset=UTF-8"),
+            "tag=x%27+OR+%271%27%3D%271&tag=safe");
+        assertThrows(IllegalArgumentException.class,
+            () -> run(req, true, db -> db.query(Post.class, "title = '" + "x' OR '1'='1" + "'")));
+    }
+
+    @Test
+    void malformedFormBodyIsSkippedNotA500() throws Exception {
+        var app = Brace.test().entities(Post.class).start(a -> {
+            a.defaultAccess(Access.none());
+            a.post("/hook", (DbHandler) (r, db) -> Json.of(r.body().length())).csrf(false);
+        });
+        try {
+            var resp = app.request("POST", "/hook")
+                .body("{\"x\":\"50% off\"}", "application/x-www-form-urlencoded").send();
+            assertEquals(200, resp.status(), resp.body());
+        } finally {
+            app.stop();
+        }
+    }
+
+    @Test
+    void checkedValuesAreCapped() {
+        var params = new HashMap<String, String>();
+        for (int i = 0; i < 5000; i++) params.put("p" + i, "value-" + i + " x");
+        assertEquals(1000, QueryTaint.of(get(Map.of(), params), true).size());
+    }
+
     // --- No false positives ---
 
     @Test

@@ -104,7 +104,7 @@ public class Database {
     public <T> List<T> query(Class<T> type, String hqlWhere, Sort sort, Object... params) {
         checkQuery(hqlWhere, "query");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort);
+        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort, "query");
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         List<T> result = query.getResultList();
@@ -143,7 +143,7 @@ public class Database {
         if (offset < 0) throw new IllegalArgumentException("offset must be >= 0 (was " + offset + ")");
         checkQuery(hqlWhere, "queryPage");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort);
+        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort, "queryPage");
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         query.setMaxResults(limit);
@@ -198,7 +198,7 @@ public class Database {
         if (perPage <= 0) throw new IllegalArgumentException("perPage must be > 0 (was " + perPage + ")");
         checkQuery(hqlWhere, "paginate");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort);
+        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort, "paginate");
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         // Hibernate derives the count from the same query (ORDER BY dropped), so the where
@@ -662,8 +662,9 @@ public class Database {
     private static final Pattern HAS_ORDER_BY = Pattern.compile("(?i)\\border\\s+by\\b");
 
     /** The where clause plus {@code sort}'s ORDER BY; just the where clause when there's no sort. */
-    private String orderedWhere(String hqlWhere, Sort sort) {
+    private String orderedWhere(String hqlWhere, Sort sort, String method) {
         if (sort == null) return whereClause(hqlWhere, true);
+        if (!sort.fromAllowlist()) checkQuery(sort.hql(), method); // Sort.of(...) text, H3
         if (hqlWhere != null && HAS_ORDER_BY.matcher(hqlWhere).find()) {
             throw new IllegalArgumentException("The where-fragment has its own ORDER BY and a Sort was passed: "
                 + "put the whole order in the Sort (Sort.of(\"createdAt DESC, id\") for a fixed one)");

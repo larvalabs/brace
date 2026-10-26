@@ -631,8 +631,9 @@ The `Database` a handler receives now checks each query string against the reque
 query and form values. A query string that contains one throws `IllegalArgumentException` in dev
 mode and in `Brace.test()` apps, naming the parameter, and logs a warning in production. Short
 values, numbers and single words outside `ORDER BY` are ignored, so a coincidence doesn't trip
-it. A test that now fails with "appears in the query string passed to db.…" has found an
-injection.
+it. A test that now fails with "appears in the query string passed to db.…" has almost always
+found an injection. The exception is a hand-written allowlist concatenated after `ORDER BY`
+(`switch (sort) { case "title" -> "title"; ... }`), which looks the same; replace it with `Sort`.
 
 New: `Sort`, an allowlisted order, accepted by `query`, `queryPage` and `paginate`.
 
@@ -652,7 +653,13 @@ var posts = db.paginate(Post.class, "published = true", sort, req, 20);
 `?sort=title` sorts ascending and `?sort=-date` descending; an unlisted key gets the default. In
 a template, `req.urlWith("sort", sort.toggle("title"))` links a column header that flips
 direction. A fixed order can stay in the fragment, or be `Sort.of("createdAt DESC, id")`; a
-fragment passed with a `Sort` must not have its own `ORDER BY`.
+fragment passed with a `Sort` must not have its own `ORDER BY`. Never pass request input to
+`Sort.of`; that's what `Sort.from` is for, and `Sort.of` text is checked like a fragment.
+
+**A literal `null` as the first bind parameter now picks the `Sort` overload.**
+`db.query(Post.class, "a = ? OR b = ?", null, "x")` resolves to `query(Class, String, Sort,
+Object...)` and fails with "No argument for ordinal parameter". Cast it, `(Object) null`, as for
+`queryPage` and `paginate` with an explicit page.
 
 ## New: owned lookups
 
