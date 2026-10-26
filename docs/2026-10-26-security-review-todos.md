@@ -418,7 +418,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - A symlinked target dir escaping the base is rejected.
   - **Tier: small.**
 
-- [ ] **M9: `req.json()`/`bodyAs()`/`requireJson()` bind request JSON into `@Entity` classes**, `Request.java:379-388, 431-437`, `BRACE-AGENTS.md:259-261`
+- [x] **M9: `req.json()`/`bodyAs()`/`requireJson()` bind request JSON into `@Entity` classes**, `Request.java:379-388, 431-437`, `BRACE-AGENTS.md:259-261`
   - **Verified.** `{"email":"e@x","role":"admin","id":1,"passwordHash":"p"}` deserialized into
     an `Account` entity with `role=admin` and `id=1`. A following `db.update(u)` overwrites
     row 1. (The record-only `req.form`/`req.jsonForm` are already safe.)

@@ -17,6 +17,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
 | `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
+| `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -249,3 +250,35 @@ New: `csrfToken` is the bare masked token for a `<meta>` tag that fetch or htmx 
 Like the hidden field, it differs on every render and every rendered value validates. Use it
 instead of printing `Csrf.maskedToken(session)` yourself.
 
+## Breaking: `req.json` refuses `@Entity` classes
+
+Binding request JSON straight into an entity let a client set any public field. A body like
+`{"email":"e@x","role":"admin","id":1,"passwordHash":"p"}` set all four, and a following
+`db.update(user)` wrote them, overwriting row 1. `req.json`, `req.bodyAs` and `req.requireJson`
+now throw `IllegalArgumentException` when the target class is annotated
+`@jakarta.persistence.Entity`, in every mode. Records, DTOs and `Map` bind as before.
+
+Before:
+
+```java
+var user = req.json(User.class);   // the client controls id, role, passwordHash
+db.update(user);
+```
+
+After:
+
+```java
+public record ProfileForm(@Required @Email String email, @Required String name) {}
+
+// on the entity
+public void apply(ProfileForm form) { this.email = form.email(); this.name = form.name(); }
+
+// in the handler
+var form = req.jsonForm(ProfileForm.class);
+if (form.hasErrors()) return Result.json(Map.of("errors", form.allErrors()), 422);
+var user = db.findOr404(User.class, req.longPathParam("id"));
+user.apply(form.value());          // only the fields the form declares
+db.update(user);
+```
+
+The exception message names the entity and points to this pattern.

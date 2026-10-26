@@ -256,7 +256,7 @@ req.formParams("tag")         // List<String> of ALL values of a repeated field,
 req.header("Accept")          // header value or null (header names are case-insensitive)
 req.hasHeader("Accept")       // boolean (case-insensitive)
 req.body()                    // raw body string
-req.bodyAs(MyClass.class)     // JSON body deserialized
+req.bodyAs(MyClass.class)     // JSON body deserialized — never into an @Entity (throws; see Forms)
 req.json(MyClass.class)       // alias for bodyAs
 req.requireJson(MyClass.class) // enforces Content-Type: application/json
 req.isJson()                  // check if Content-Type is JSON
@@ -522,6 +522,11 @@ if (jf.hasErrors()) return Result.json(Map.of("errors", jf.allErrors()), 422);
 null checks or wrap `bodyAs` in try/catch. It binds the JSON body to the record, runs the
 annotations plus `validate(Errors)`, and turns a malformed or non-object body into a
 `"_body"` error instead of an exception (a raw `req.bodyAs` parse failure surfaces as a 500).
+
+**Never bind a request body into an `@Entity`.** `req.bodyAs`/`req.json`/`req.requireJson`
+throw `IllegalArgumentException` for an `@Entity` class: the client would control every public
+field (`id`, `role`, `passwordHash`). Bind a record with `req.jsonForm(MyForm.class)` and copy
+the allowed fields with the entity's `apply(form)`, as above.
 
 When create and update share validation rules, put them in the record (annotations +
 `validate`) — not duplicated in the two handlers. Cross-entity checks (referenced rows

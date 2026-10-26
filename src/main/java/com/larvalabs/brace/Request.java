@@ -429,6 +429,15 @@ public class Request {
     }
 
     public <T> T bodyAs(Class<T> type) {
+        // Binding JSON straight into an entity lets the client set any public field (id, role,
+        // passwordHash), and a following db.update(entity) would write them. Always refused.
+        if (type.isAnnotationPresent(jakarta.persistence.Entity.class)) {
+            throw new IllegalArgumentException(
+                "Refusing to bind request JSON into JPA entity " + type.getSimpleName() +
+                " — a client could set any field (id, role, passwordHash). Bind a record with " +
+                "req.jsonForm(" + type.getSimpleName() + "Form.class) and copy the fields with " +
+                "the entity's apply(form) (see BRACE-AGENTS.md § Forms & Validation).");
+        }
         try {
             return Json.mapper().readValue(body(), type);
         } catch (Exception e) {
