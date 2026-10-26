@@ -471,7 +471,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     migration-guide entries.
   - **Tier: frontier** (crypto and session invariants).
 
-- [ ] **M11: `@Min`/`@Max` truncate to long, so fractional, negative-fraction and NaN values pass**, `FormBinder.java:190-197`
+- [x] **M11: `@Min`/`@Max` truncate to long, so fractional, negative-fraction and NaN values pass**, `FormBinder.java:190-197`
   - **Verified.**
     - `@Min(0) BigDecimal -0.99` passes, and so do `@Min(0) double -0.9` and `NaN`.
     - `@Max(100) double 100.99` passes.

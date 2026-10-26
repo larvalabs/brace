@@ -495,6 +495,8 @@ public record PostForm(
 ```
 
 Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@In({"a","b"})`, `@Optional`.
+`@Min`/`@Max` compare exactly, fractions included (`@Min(0)` rejects `-0.5`); `double`/`float`
+components reject NaN and ±Infinity with "must be a finite number".
 
 Component types that bind automatically: `String`, `int`/`long`/`double`/`float`/`boolean`
 (+ boxed; a `boolean` is true for `on`/`true`/`1`/`yes`/`checked`, so an HTML checkbox binds

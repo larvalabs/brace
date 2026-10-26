@@ -18,6 +18,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
 | `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
 | `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
+| `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -282,3 +283,19 @@ db.update(user);
 ```
 
 The exception message names the entity and points to this pattern.
+
+## Security: `@Min` and `@Max` compare exactly
+
+Bounds used to be checked after truncating the value to a `long`, so `@Min(0)` accepted
+`-0.99` (as `BigDecimal` or `double`), `@Max(100)` accepted `100.99`, and `NaN` and
+`BigDecimal 1e999999999` passed both. A negative amount on a refund or transfer form passed
+`@Min(0)`.
+
+Comparison is now exact: `BigDecimal` and `BigInteger` via `compareTo`, `double` and `float` as
+doubles (`-0.0` still equals `0`), integral types unchanged. `float`, `double`, `Float` and
+`Double` components also reject `NaN`, `±Infinity` and overflow (`1e999`) with the field error
+"must be a finite number", whether or not a bound is declared. This applies to `req.form` and
+`req.jsonForm` alike.
+
+No code change is needed unless a form relied on a fractional value passing a bound it
+actually violates; that input now gets a field error.
