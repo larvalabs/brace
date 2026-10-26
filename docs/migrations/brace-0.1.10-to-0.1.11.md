@@ -22,6 +22,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | HTML and text responses declare `charset=utf-8` | security | tests that assert the exact `Content-Type` string | [§](#security-html-and-text-responses-declare-charsetutf-8) |
 | `Html.escape`; `Result.html` documented as a raw sink | new | none | [§](#new-htmlescape) |
 | `UploadedFile.safeFilename()`, `saveTo(dir, name)`, `Result.fileUnder` | new, security | switch uploads saved via `dir.resolve(file.filename())` | [§](#new-confined-upload-saving-and-file-serving) |
+| No `Server` header; plain-text errors for requests Jetty rejects | security | update monitors that match on `Server` or Jetty's HTML error text | [§](#security-no-server-header-plain-text-errors-for-rejected-requests) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -362,3 +363,14 @@ return Result.fileUnder(publicDir, req.pathParam("name"));
 
 `fileUnder` picks the content type from the extension, so an uploaded `.html` or `.svg` would
 render in the browser. Serve user uploads with `Result.download(...)` instead.
+
+## Security: no `Server` header; plain-text errors for rejected requests
+
+Responses no longer carry `Server: Jetty(x.y.z)` or `X-Powered-By`. Requests that Jetty rejects
+before Brace's handler runs (for example `//path`, `%2e%2e` path segments, malformed request
+lines) used to get Jetty's HTML error page, which showed the Jetty version and echoed the request
+URI. They now get a short `text/plain; charset=utf-8` body with only the reason phrase
+(`Bad Request`) and `X-Content-Type-Options: nosniff`.
+
+No code change. Update any monitor or test that matched on the `Server` header or on Jetty's
+HTML error text.

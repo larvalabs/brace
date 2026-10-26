@@ -571,7 +571,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
 
 ## Low
 
-- [ ] **L1: Version disclosure, and Jetty error pages bypass Brace's headers**, `Brace.java:1104-1107`
+- [x] **L1: Version disclosure, and Jetty error pages bypass Brace's headers**, `Brace.java:1104-1107`
   - **Verified.**
     - `Server: Jetty(12.0.33)` appears on every response.
     - Jetty's own HTML error pages ("Powered by Jetty:// 12.0.33") answer requests Jetty

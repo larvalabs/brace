@@ -545,6 +545,11 @@ app.staticFiles("/assets", "public");
 app.staticFiles("/assets/uploads", "/var/app/uploads");
 ```
 
+Brace sends no `Server` or `X-Powered-By` header. Requests that Jetty rejects before Brace's
+handler runs (ambiguous URIs such as `//x` or `%2e%2e` segments, malformed requests) get a
+plain-text reason phrase (`Bad Request`) with `nosniff`: no server version, and the request URI
+is not echoed.
+
 Static responses carry `X-Content-Type-Options: nosniff`, and — since 0.1.8 — the app's
 after-middleware, so `app.after(SecurityHeaders.defaults())` reaches them too. That matters
 most when a static directory holds user-supplied content: those are exactly the responses
