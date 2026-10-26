@@ -29,6 +29,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Removing an ops key revokes its outstanding tokens | security | none | [§](#security-removing-an-ops-key-revokes-its-outstanding-tokens) |
 | Shared-cache `getOrSet` only reads classes this process has written | security | none | [§](#security-shared-cache-getorset-only-reads-classes-this-process-has-written) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
+| `stop()` after a restart releases the server | fix | none | [§](#fix-stop-after-a-restart-releases-the-server) |
 
 ## New: server-side page-view analytics
 
@@ -438,5 +439,16 @@ deserialized into whatever class name the stored row carried; anyone able to wri
 written, and treats anything else as a miss. After a restart, or when another server wrote the
 entry first, the first `getOrSet` for a given class recomputes and rewrites the entry; later
 calls hit as before. `cache.get(key, Type.class)` is unchanged.
+
+No code change.
+
+## Fix: `stop()` after a restart releases the server
+
+`stop()` only ran once per `Brace` instance. Its guard against a double stop (the shutdown hook
+plus an explicit call) was never reset by `start()`, so on an app that was started, stopped and
+started again, the second `stop()` did nothing. The Jetty server and its non-daemon thread pool,
+the job scheduler and poller, and the shutdown hook stayed live, so the port stayed bound and the
+JVM didn't exit when `main` returned. `start()` now resets the guard, and every `stop()` releases
+what the `start()` before it took.
 
 No code change.

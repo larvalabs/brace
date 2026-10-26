@@ -3,6 +3,7 @@ package com.larvalabs.brace;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -66,6 +67,28 @@ class StopReleasesResourcesTest {
 
         factory.openSession().close();
         factory.close();
+    }
+
+    /**
+     * stop()'s idempotency flag used to stay set after the first stop(), so the stop() after a
+     * restart returned immediately: the second start's Jetty server (non-daemon thread pool),
+     * scheduler and shutdown hook stayed live and the JVM never exited when main returned.
+     */
+    @Test
+    void stopAfterARestartReleasesTheServer() throws Exception {
+        var app = Brace.app().port(0).banner(false);
+        app.get("/", req -> Result.text("ok"));
+
+        app.start();
+        app.stop();
+        app.start();
+        int port = app.actualPort();
+        new java.net.Socket("127.0.0.1", port).close();
+        app.stop();
+
+        assertThrows(java.net.ConnectException.class, () -> new java.net.Socket("127.0.0.1", port).close(),
+            "the second stop() must shut down the Jetty server the second start() created");
+        assertNull(app.shutdownHook(), "the second stop() must unregister the second start's shutdown hook");
     }
 
     @Test

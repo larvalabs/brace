@@ -954,6 +954,10 @@ public class Brace {
     }
 
     public void start() throws Exception {
+        // Re-arm stop()'s idempotency guard. Left set by a previous stop(), it made the stop()
+        // after a restart a no-op, so the second start's Jetty thread pool (non-daemon), job
+        // scheduler, poller and shutdown hook all outlived it and the JVM never exited.
+        stopped.set(false);
         try {
             startOrThrow();
         } catch (Throwable t) {
