@@ -172,7 +172,8 @@ Url.query("tag", List.of("a", "b"))                      // tag=a&tag=b
 
 `null` and empty values are left out, so optional filters need no `if`s. To keep the current
 query and change one parameter (sort or filter links), use `req.urlWith(name, value)`; for
-page links use `Paged` (see Database → Pagination).
+page links use `Paged` (see Database → Pagination), and read `?sort=` with `Sort` (see Database →
+Query safety).
 
 ## Access
 
@@ -422,7 +423,9 @@ Thin wrapper over Hibernate StatelessSession. No dirty checking, no lazy loading
 ```java
 // Basic CRUD
 db.find(Post.class, id)                          // by ID, or null
-db.findOr404(Post.class, id)                      // by ID, or throws 404 — the canonical handler lookup
+db.findOwnedOr404(Post.class, id, "ownerId", userId) // the user's own row, or 404 — the lookup for user-owned data
+db.findOr404(Doc.class, id, d -> d.ownerId.equals(userId) || d.shared) // any rule; 404 when it says no
+db.findOr404(Post.class, id)                      // by ID, or 404 — ANY user's row: only for rows every visitor may see
 db.insert(post)                                   // INSERT
 db.update(post)                                   // UPDATE
 db.delete(post)                                   // DELETE
@@ -430,9 +433,10 @@ db.delete(post)                                   // DELETE
 // Queries
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause, returns List
-db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY goes inside the where-fragment
+db.query(Post.class, "published = true ORDER BY id DESC") // a fixed order may go in the where-fragment
 db.query(Post.class, "ORDER BY id DESC")          // no condition: every row, ordered (no "1=1" needed)
-db.paginate(Post.class, "published = true ORDER BY createdAt DESC", req, 20) // Paged<Post>: ?page=, totals, links
+db.query(Post.class, "published = true", sort)    // a ?sort= order: a Sort (see Query safety), never "ORDER BY " + param
+db.paginate(Post.class, "published = true", sort, req, 20) // Paged<Post>: ?page=, totals, links
 db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // raw limit/offset, no count
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryOneOr404(Post.class, "slug = ?", slug)    // single result, or throws 404
@@ -464,6 +468,44 @@ The converter leaves alone any `?` inside single-quoted string literals or SQL c
 write a literal `?` operator (e.g. Postgres JSONB `?`/`?|`/`?&`), escape it as `??`. For SQL
 that needs full control, `db.jdbc(...)` is the raw escape hatch.
 
+### Query safety
+
+**Never concatenate request data into a query string.** Every method that takes a where-fragment
+or raw HQL/SQL (`query`, `queryOne`, `count`, `exists`, `paginate`, `queryPage`, `hql`, `sql`,
+`sqlQuery`, `sqlQueryLong`) runs that string as written: `"title = '" + q + "'"` or
+`"... ORDER BY " + req.queryParam("sort")` is an injection that can read any table. Values go in
+`?` bind params; field-name arguments (`findBy`, `queryIn`, `findOwnedOr404`'s owner field) are
+hard-coded; a request-chosen order goes through `Sort`:
+
+```java
+// ?sort=title ascending, ?sort=-date descending; anything else gets the default
+var sort = Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"), "createdAt DESC");
+var posts = db.paginate(Post.class, "published = true", sort, req, 20);
+Sort.of("createdAt DESC, id")                     // a fixed order as a Sort
+```
+
+```html
+@param Sort sort
+@param Request req
+<a href="${req.urlWith("sort", sort.toggle("title"))}">Title @if(sort.is("title"))${sort.descending() ? "↓" : "↑"}@endif</a>
+```
+
+The fragment passed with a `Sort` must not have its own `ORDER BY`. The request only picks a key
+from the map, so it never reaches the query text.
+
+The `Database` a handler receives checks each query string against the request's path, query
+and form values: a query string containing one (beyond short words and numbers) throws in dev
+mode and in `Brace.test()` apps, naming the parameter, and logs a warning in production. A
+coincidence (a hard-coded `status = 'published'` on a page with `?status=published`) doesn't
+trip it; a single word only counts after `ORDER BY`, so build orders with `Sort`.
+
+**Object-level access.** Route access decides who may call `/posts/{id}/edit`; it doesn't stop a
+signed-in user from changing the id to someone else's post. For user-owned rows, look them up
+with the owner in the query, `db.findOwnedOr404(Post.class, id, "ownerId", userId)`, or a rule,
+`db.findOr404(Doc.class, id, d -> ...)`. Both answer 404 for another user's row, so ids can't be
+probed. `db.findOr404(type, id)` alone is for rows every visitor may see. Lists filter by owner in
+the where-fragment: `db.query(Post.class, "ownerId = ?", userId)`.
+
 For DB access outside request lifecycle (jobs, WebSocket):
 
 ```java
@@ -480,6 +522,7 @@ last page, and derives the count from the same query (ORDER BY is ignored for th
 ```java
 // handler — pass req; filters stay in the query string and are read as usual
 var posts = db.paginate(Post.class, "tag = ? ORDER BY createdAt DESC", req, 20, tag);
+var sorted = db.paginate(Post.class, "tag = ?", sort, req, 20, tag); // ?sort= via Sort; links keep it
 return View.of("posts/index", "posts", posts);
 
 posts.map(PostView::of)                       // convert items (entities → view records/DTOs), keeps page + links
@@ -1357,8 +1400,10 @@ don't mix full pages with partials.
 **Token-minimizing patterns** — the framework already has a 1-line form of each of these;
 use it instead of re-deriving the verbose version:
 
-- **Lookups:** `db.findOr404(Post.class, req.longPathParam("id"))` is the canonical
-  handler lookup — never write a find / null-check / `Result.notFound()` preamble.
+- **Lookups:** `db.findOwnedOr404(Post.class, req.longPathParam("id"), "ownerId", userId)` for
+  user-owned rows, `db.findOr404(Post.class, id)` for rows every visitor may see — never write a
+  find / null-check / `Result.notFound()` preamble, and never use the plain form where a user
+  could change the id to someone else's row.
 - **Shared validation:** rules shared by create and update live in the form record
   (annotations + `validate`), bound with `req.jsonForm(MyForm.class)` for JSON bodies;
   cross-entity checks go in one static helper both handlers call (see §Forms & Validation).
@@ -1376,8 +1421,8 @@ use it instead of re-deriving the verbose version:
   var speakers = db.queryIn(Speaker.class, "id", speakerIds).stream()
       .collect(Collectors.toMap(s -> s.id, s -> s));
   ```
-- **Sorting/paging:** ORDER BY belongs inside the query's where-fragment
-  (`db.query`/`db.paginate`), not in-memory sorts; paged lists use `db.paginate` + `Paged`
-  links — see §Database → Pagination.
+- **Sorting/paging:** sort in the query, not in memory: a fixed ORDER BY in the where-fragment,
+  a `?sort=` order with `Sort.from(...)` (never concatenated); paged lists use `db.paginate` +
+  `Paged` links — see §Database → Query safety and Pagination.
 - **Aggregates:** one `db.hql` projection (`SELECT AVG(...), COUNT(...) ...`), not
   fetch-rows-and-loop-sum — see §Database.

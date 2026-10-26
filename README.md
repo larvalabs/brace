@@ -267,14 +267,15 @@ app with no login.
 
 ```java
 db.find(Post.class, id)                          // find by ID
-db.findOr404(Post.class, id)                      // find by ID or throw 404
+db.findOwnedOr404(Post.class, id, "ownerId", userId) // the user's own row, or 404
+db.findOr404(Post.class, id)                      // find by ID or throw 404 (any user's row)
 db.insert(post)                                   // insert
 db.update(post)                                   // update
 db.delete(post)                                   // delete
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause
-db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY inside the where-fragment
-db.paginate(Post.class, "published = true ORDER BY createdAt DESC", req, 20) // Paged<Post>: ?page=, totals, links
+db.query(Post.class, "published = true ORDER BY id DESC") // a fixed order inside the where-fragment
+db.paginate(Post.class, "published = true", Sort.from(req, "sort", Map.of("date", "createdAt"), "createdAt DESC"), req, 20) // ?sort= via an allowlist; Paged<Post>
 db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // limit, offset (page 2)
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryOneOr404(Post.class, "slug = ?", slug)    // single result or throw 404

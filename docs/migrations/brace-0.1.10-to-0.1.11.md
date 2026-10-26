@@ -33,6 +33,8 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | WebSocket upgrades run `before()` and access requirements; `app.ws(...)` returns a `RouteConfig` | security, **breaking** | split builder chains that continue after `.ws(...)` | [§](#breaking-websocket-upgrades-are-guarded) |
 | `.csrf(false)` on a cookie-session route fails `start()`; cross-site mutating requests refused; `${csrfMeta}` + `csrf-htmx.js` | security, **breaking** | remove the opt-out or give `.csrf(false, "reason")` | [§](#breaking-csrf-opt-outs-are-checked-and-cross-site-requests-refused) |
 | Session cookie is `__Host-brace_session` in production; cookies without `_exp` rejected; absolute lifetime; `regenerate()`, `sessionValidator`, `previousSecrets` | security, **breaking** | users are logged out once on deploy; call `session.regenerate()` at login/logout | [§](#breaking-session-cookie-hardening) |
+| Request data in a query string throws in dev and tests; `Sort` for `?sort=` | security, **breaking** | bind values with `?`, build `?sort=` orders with `Sort` | [§](#breaking-request-data-in-a-query-string-throws-in-dev-and-tests) |
+| `findOwnedOr404` and a predicate `findOr404` for user-owned rows | new, security | switch user-owned lookups from `findOr404(type, id)` | [§](#new-owned-lookups) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -617,3 +619,54 @@ app.sessionValidator(s -> !s.has("userId")
 app.sessions(SessionOptions.of(newSecret).previousSecrets(oldSecret));
 ```
 
+## Breaking: request data in a query string throws in dev and tests
+
+The where-fragment and raw-query methods run their string as written, and the docs showed
+`ORDER BY` inside the fragment next to `?sort=` links, which invites
+`"... ORDER BY " + req.queryParam("sort")`: an injection that can read any table one bit per
+request.
+
+The `Database` a handler receives now checks each query string against the request's path,
+query and form values. A query string that contains one throws `IllegalArgumentException` in dev
+mode and in `Brace.test()` apps, naming the parameter, and logs a warning in production. Short
+values, numbers and single words outside `ORDER BY` are ignored, so a coincidence doesn't trip
+it. A test that now fails with "appears in the query string passed to db.…" has found an
+injection.
+
+New: `Sort`, an allowlisted order, accepted by `query`, `queryPage` and `paginate`.
+
+Before:
+
+```java
+var posts = db.paginate(Post.class, "published = true ORDER BY " + req.queryParam("sort"), req, 20);
+```
+
+After:
+
+```java
+var sort = Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"), "createdAt DESC");
+var posts = db.paginate(Post.class, "published = true", sort, req, 20);
+```
+
+`?sort=title` sorts ascending and `?sort=-date` descending; an unlisted key gets the default. In
+a template, `req.urlWith("sort", sort.toggle("title"))` links a column header that flips
+direction. A fixed order can stay in the fragment, or be `Sort.of("createdAt DESC, id")`; a
+fragment passed with a `Sort` must not have its own `ORDER BY`.
+
+## New: owned lookups
+
+`db.findOr404(type, id)` returns any user's row, and was taught as the canonical lookup, so a
+handler written that way lets a user change the id in the URL to reach someone else's row. Two
+lookups put the owner check in the query:
+
+```java
+// before: any signed-in user can edit any post
+var post = db.findOr404(Post.class, req.longPathParam("id"));
+
+// after
+var post = db.findOwnedOr404(Post.class, req.longPathParam("id"), "ownerId", session.get("userId"));
+var doc  = db.findOr404(Doc.class, id, d -> d.ownerId.equals(userId) || d.shared);
+```
+
+Both answer 404 for a row that isn't the caller's. Nothing breaks, but review every
+`findOr404(type, id)` on user-owned data.

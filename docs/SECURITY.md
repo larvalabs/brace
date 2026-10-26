@@ -5,6 +5,7 @@ This document describes Brace's security features and best practices for buildin
 ## Table of Contents
 
 - [Authorization](#authorization)
+- [SQL Injection](#sql-injection)
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
 - [Serialization](#serialization)
@@ -55,12 +56,60 @@ ops route registered without one fails `start()`. The app's default access never
 
 `/ops/routes` and the startup banner list each route's resolved access.
 
-### Object-level access is the handler's job
+### Object-level authorization
 
 Route access answers "may this user call this endpoint". It does not answer "may this user
-touch row 42": `GET /posts/{id}/edit` is reachable by every logged-in user, and loading the
-post by id returns anyone's post. Check ownership after loading — and return 404, not 403, so
-the response doesn't confirm the row exists.
+touch row 42": `GET /posts/{id}/edit` is reachable by every signed-in user, and
+`db.findOr404(Post.class, id)` returns anyone's post, so changing the id in the URL reads or
+edits someone else's (an IDOR). Put the owner in the lookup:
+
+```java
+var post = db.findOwnedOr404(Post.class, req.longPathParam("id"), "ownerId", session.get("userId"));
+var doc  = db.findOr404(Doc.class, id, d -> d.ownerId.equals(userId) || d.sharedWith(teamId));
+var mine = db.query(Post.class, "ownerId = ?", userId);   // lists: filter in the query
+```
+
+Both lookups answer 404, not 403, for a row that exists but isn't the caller's, so the response
+doesn't confirm it exists and ids can't be probed. A null owner (nobody signed in) matches
+nothing. The owner field is an entity attribute path validated like `findBy`'s and must be
+hard-coded. Use the plain `findOr404(type, id)` only for rows every visitor may see.
+
+Brace has no row-level filter that applies itself: every query that returns user-owned rows
+must carry its owner condition.
+
+---
+
+## SQL Injection
+
+`Database` binds values only where the query says `?`. The where-fragment and raw-query methods
+(`query`, `queryOne`, `queryOneOr404`, `count`, `exists`, `paginate`, `queryPage`, `hql`, `sql`,
+`sqlQuery`, `sqlQueryLong`) run the string they're given, so request data concatenated into it is
+HQL or SQL injection: a quoted payload widens a `WHERE` to every row, and an `ORDER BY` built from
+`?sort=` takes a `CASE` subquery that leaks any column one bit per request, including tables no
+entity maps.
+
+- **Bind values with `?`.** `db.query(Post.class, "title = ?", q)`, never `"title = '" + q + "'"`.
+- **Sort with `Sort`.** `Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"),
+  "createdAt DESC")` lets the request pick a key from the map (`-key` for descending); an
+  unknown key gets the default. Pass the `Sort` to `query`, `queryPage` or `paginate`.
+- **Hard-code field names.** `findBy`, `queryIn`, `countBy`, `existsBy`, `deleteBy` and
+  `findOwnedOr404` validate their field argument as an identifier, but it must still never come
+  from the request.
+
+### Detection
+
+The `Database` a request handler receives checks each where-fragment and raw query string
+against the request's path, query and form values before running it. When the string contains
+one, the call throws `IllegalArgumentException` in dev mode (`-Dbrace.mode=dev`) and in
+`Brace.test()` apps, so the bug fails a test, and logs one warning per call site in production
+(where a false positive must not break a page). The message names the parameter, not its value.
+
+To keep coincidences out, values shorter than 3 characters and plain numbers are ignored, and a
+single word (`title`, `-createdAt`) counts only as a token after `ORDER BY` — where it picks a
+column — not inside a literal, where it can't break out. Anything with quotes, spaces,
+parentheses or operators counts anywhere. JSON bodies, headers and cookies are not checked, and
+neither are queries run outside a request (jobs, `withSession`). The check is a backstop for the
+rules above, not a substitute.
 
 ---
 
