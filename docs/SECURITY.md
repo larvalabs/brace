@@ -423,12 +423,16 @@ address the name resolves to is:
   `2000::/3`
 - an IPv6 form that carries one of the IPv4 addresses above: IPv4-mapped (`::ffff:127.0.0.1`),
   IPv4-compatible (`::127.0.0.1`), NAT64 (`64:ff9b::a9fe:a9fe`) and 6to4 (`2002:7f00:1::`)
+- Azure's WireServer, `168.63.129.16`, a platform endpoint in a public range
 
-The check runs on the **resolved address**, not the URL text, so odd spellings are judged by
-what they parse to: `http://2130706433/` (decimal), `http://0.0.0.0/`,
+The check runs on the **resolved address**, not the URL text, so `http://0.0.0.0/`,
 `http://[::ffff:127.0.0.1]/` and a hostname whose DNS record points at `10.0.0.5` are all refused.
-Nothing is sent to a refused destination, and the exception names only the host and the address
-it resolved to, so it can't be used to probe which internal ports are open.
+A numeric host must also be a plain dotted quad: `2130706433`, `0177.0.0.1`, `0x7f.1` and `127.1`
+are refused outright, because readers disagree about them (Java reads `0177.0.0.1` as decimal
+177.0.0.1, an HTTP proxy using `inet_aton` as octal 127.0.0.1). Nothing is sent to a refused
+destination. The exception's message names only the host; the resolved address is on
+`e.address()` for your logs, so a message shown to a user doesn't map internal names to private
+IPs.
 
 `Http.isPublicAddress(InetAddress)` is the same classifier, for rejecting a URL when a user
 enters it rather than when you fetch it.
@@ -484,8 +488,12 @@ internal address, and it fails, because the certificate is still verified agains
 hostname, which an internal server can't present.
 To keep it that way:
 
-1. **Don't set `networkaddress.cache.ttl=0`** (or `sun.net.inetaddr.ttl=0`). Turning the JVM's
-   DNS cache off reopens the window: the check and the connect each do a fresh lookup.
+1. **Don't set `networkaddress.cache.ttl=0`** (or `sun.net.inetaddr.ttl=0`), or anything short.
+   With the cache off, the check, the connect and the re-check each do a fresh lookup, so a
+   rebinding name can answer public to both checks and private to the connect: the request
+   (method, headers, body, any bearer token) goes to the internal address **and the response can
+   be read**. The same holds when the response takes longer than the remaining cache lifetime.
+   `Http` logs a warning once when the TTL is under 10 seconds.
 2. **Prefer https for user-supplied URLs.** If the feature allows it, refuse `http://` URLs before
    calling `Http`.
 3. **Block metadata and internal ranges at the network layer** too (firewall the container's
@@ -493,8 +501,10 @@ To keep it that way:
    client isn't the only line.
 
 If the JVM is configured with an HTTP proxy (`http.proxyHost`/`https.proxyHost`), the proxy makes
-the connection and does its own DNS lookup; the check still runs on the local lookup, so configure
-the proxy to refuse internal destinations as well.
+the connection and does its own DNS lookup, so the check (which runs on the local lookup) and the
+re-check describe what the app resolved, not where the proxy connects. Configure the proxy to
+refuse internal destinations itself. The check also needs local DNS: behind an egress proxy that
+is the only resolver, every call without `.trusted()` fails with `UnknownHostException`.
 
 ### Other clients
 

@@ -1004,8 +1004,8 @@ Http.post(uploadUrl).bearer(token).multipart()
 CGNAT, link-local incl. the cloud metadata service `169.254.169.254`, IPv6 ULA/link-local,
 multicast, reserved, and IPv4-mapped/NAT64/6to4 forms of those) and throws
 `Http.BlockedDestinationException` before sending anything. The check is on the resolved
-address, so `http://2130706433/`, `http://[::ffff:127.0.0.1]/` and names pointing inward are
-caught. It is on for every call: fetch user-supplied URLs with plain `Http`, never `.trusted()`.
+address, so `http://[::ffff:127.0.0.1]/` and names pointing inward are caught, and a numeric host
+must be a plain dotted quad (`2130706433`, `0177.0.0.1` are refused). It is on for every call: fetch user-supplied URLs with plain `Http`, never `.trusted()`.
 
 ```java
 // User-supplied URL: fetch it plainly; a private destination throws BlockedDestinationException
@@ -1014,8 +1014,8 @@ var page = Http.get(form.value().url()).timeout(Duration.ofSeconds(5)).fetchStri
 // An internal service YOU chose (sidecar, private API, URL from config): opt out per call
 var stats = Http.get(config.get("search.url") + "/stats").trusted().fetchJson(Stats.class);
 
-// Validate at input time instead of at fetch time
-boolean ok = Http.isPublicAddress(InetAddress.getByName(host));
+// Validate at input time too: every address the name resolves to must be public
+boolean ok = Arrays.stream(InetAddress.getAllByName(host)).allMatch(Http::isPublicAddress);
 ```
 
 - **Never** put `.trusted()` on a URL from a user, a user-written row, or a redirect `Location`.

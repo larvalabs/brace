@@ -362,8 +362,11 @@ public class Http {
 
     /**
      * The transport failure, with its cause named in the message ({@code ConnectException},
-     * {@code UnresolvedAddressException}, ...) so callers matching on the text can tell a refused
-     * connection from a bad host without unwrapping.
+     * {@code UnknownHostException}, ...) so callers matching on the text can tell a refused
+     * connection from a bad host without unwrapping. An unknown host is reported by the
+     * destination check's own lookup as {@code UnknownHostException}; on a {@link #trusted()}
+     * request the JDK reports it ({@code ConnectException} caused by
+     * {@code UnresolvedAddressException}).
      */
     private RuntimeException failed(Exception e) {
         String detail = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage());
@@ -456,10 +459,69 @@ public class Http {
         if (host == null || host.isEmpty()) {
             throw new IllegalArgumentException("URL has no host");
         }
+        // Java reads 0177.0.0.1 as decimal 177.0.0.1 (public), but an HTTP proxy or anything
+        // using inet_aton reads it as octal 127.0.0.1. Numeric hosts must be a plain dotted quad,
+        // so every reader agrees on the address that was checked.
+        if (isNonCanonicalNumericHost(host)) {
+            throw new BlockedDestinationException(host, null);
+        }
+        warnIfDnsCacheDisabled();
         for (var address : resolver.resolve(host)) {
             if (!isPublicAddress(address)) {
                 throw new BlockedDestinationException(host, address);
             }
+        }
+    }
+
+    private static final java.util.regex.Pattern NUMERIC_LABEL = java.util.regex.Pattern.compile("\\d+|0[xX][0-9a-fA-F]*");
+    private static final java.util.regex.Pattern DECIMAL_OCTET = java.util.regex.Pattern.compile("0|[1-9]\\d{0,2}");
+
+    /**
+     * A host made only of numeric labels (decimal, or 0x hex) that isn't a canonical dotted quad:
+     * {@code 2130706433}, {@code 0177.0.0.1}, {@code 0x7f.1}, {@code 127.1}. No real host name is
+     * all-numeric (a top-level domain never is), so refusing these costs nothing.
+     */
+    static boolean isNonCanonicalNumericHost(String host) {
+        if (host.indexOf(':') >= 0) return false; // bracketed IPv6
+        String name = host.endsWith(".") ? host.substring(0, host.length() - 1) : host;
+        String[] labels = name.split("\\.", -1);
+        for (String label : labels) {
+            if (!NUMERIC_LABEL.matcher(label).matches()) return false;
+        }
+        if (labels.length != 4) return true;
+        for (String label : labels) {
+            if (!DECIMAL_OCTET.matcher(label).matches() || Integer.parseInt(label) > 255) return true;
+        }
+        return false;
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean dnsCacheWarned = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * The re-check after the response headers relies on the JVM caching a lookup for longer than
+     * a request takes (30 seconds by default). With the cache off or very short, each lookup is
+     * fresh, so a rebinding name can pass both checks while the connection goes to a private
+     * address, and the response can be read. Warn once when that's the configuration.
+     */
+    private static void warnIfDnsCacheDisabled() {
+        if (dnsCacheWarned.get()) return;
+        Integer ttl = parseTtl(java.security.Security.getProperty("networkaddress.cache.ttl"));
+        Integer legacy = parseTtl(System.getProperty("sun.net.inetaddr.ttl"));
+        int effective = legacy != null ? legacy : ttl != null ? ttl : 30;
+        if (effective >= 0 && effective < 10 && dnsCacheWarned.compareAndSet(false, true)) {
+            Log.warn("The JVM DNS cache TTL is " + effective + "s (networkaddress.cache.ttl / sun.net.inetaddr.ttl). "
+                + "Http's destination check relies on the cache holding a lookup for longer than a request takes; "
+                + "with it this short, a DNS-rebinding host can reach internal addresses. Leave the TTL at its "
+                + "30s default or longer, and block internal ranges at the network egress too.");
+        }
+    }
+
+    private static Integer parseTtl(String value) {
+        if (value == null) return null;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -476,7 +538,8 @@ public class Http {
      *       documentation {@code 192.0.2.0/24}, {@code 198.51.100.0/24}, {@code 203.0.113.0/24},
      *       benchmarking {@code 198.18.0.0/15}, the 6to4 relay {@code 192.88.99.0/24},
      *       multicast {@code 224.0.0.0/4}, and reserved {@code 240.0.0.0/4}, which includes
-     *       broadcast 255.255.255.255.</li>
+     *       broadcast 255.255.255.255. Also Azure's WireServer {@code 168.63.129.16}, a platform
+     *       endpoint in a public range.</li>
      *   <li>IPv6: everything outside global unicast {@code 2000::/3}, which covers unspecified
      *       {@code ::}, loopback {@code ::1}, IPv4-compatible {@code ::/96}, ULA {@code fc00::/7},
      *       link-local {@code fe80::/10}, site-local {@code fec0::/10}, multicast
@@ -507,6 +570,7 @@ public class Http {
         v4(198, 18, 0, 0, 15),
         v4(198, 51, 100, 0, 24),
         v4(203, 0, 113, 0, 24),
+        v4(168, 63, 129, 16, 32),   // Azure WireServer: public-range, but a platform endpoint
         v4(224, 0, 0, 0, 4),
         v4(240, 0, 0, 0, 4),
     };
@@ -570,11 +634,14 @@ public class Http {
         private final InetAddress address;
 
         BlockedDestinationException(String host, InetAddress address) {
-            // Host and address only: nothing was connected to, so there is no port or
-            // reachability to report, and the message doesn't make Http a scanner.
-            super("Http refused " + host + ": it resolves to " + address.getHostAddress()
-                + ", which is not a public internet address. If this is an internal service you"
-                + " chose, call .trusted() on the request; never do that for a URL from a user.");
+            // The host only: the resolved address stays on address() for logs, so an app that
+            // shows the message can't be used to map internal names to private IPs, and nothing
+            // was connected to, so there's no port or reachability to report either.
+            super(address == null
+                ? "Http refused " + host + ": a numeric host must be a plain dotted quad (a.b.c.d)."
+                : "Http refused " + host + ": it does not resolve to a public internet address. If this is"
+                    + " an internal service you chose, call .trusted() on the request; never do that for a"
+                    + " URL from a user.");
             this.host = host;
             this.address = address;
         }
@@ -582,7 +649,7 @@ public class Http {
         /** The host as it appeared in the URL. */
         public String host() { return host; }
 
-        /** The resolved address that isn't public. */
+        /** The resolved address that isn't public; null for a refused numeric host spelling. */
         public InetAddress address() { return address; }
     }
 

@@ -170,15 +170,41 @@ class HttpSsrfTest {
     }
 
     @Test
-    void theMessageNamesHostAddressAndTheEscapeHatch() {
+    void theMessageNamesTheHostAndTheEscapeHatchButNotTheAddress() {
         var e = assertThrows(Http.BlockedDestinationException.class,
-            () -> Http.get("http://2130706433:" + port + "/secret?token=abc").fetch());
-        assertTrue(e.getMessage().contains("2130706433"), e.getMessage());
-        assertTrue(e.getMessage().contains("127.0.0.1"), e.getMessage());
+            () -> Http.get("http://localhost:" + port + "/secret?token=abc").fetch());
+        assertTrue(e.getMessage().contains("localhost"), e.getMessage());
         assertTrue(e.getMessage().contains(".trusted()"), e.getMessage());
+        // The resolved address is for logs, not the message: shown to a user, it would map
+        // internal names to private IPs.
+        assertTrue(e.address().isLoopbackAddress());
+        assertFalse(e.getMessage().contains("127.0.0.1"), e.getMessage());
         // Nothing was connected to, so nothing about the port or path is reported.
         assertFalse(e.getMessage().contains(String.valueOf(port)), e.getMessage());
         assertFalse(e.getMessage().contains("token"), e.getMessage());
+    }
+
+    @Test
+    void nonCanonicalNumericHostsAreRefusedWhateverTheyResolveTo() {
+        // 0177.0.0.1 is 177.0.0.1 (public) to Java but 127.0.0.1 to a proxy using inet_aton.
+        for (var host : List.of("0177.0.0.1", "010.0.0.1", "2130706433", "0x7f000001", "127.1", "1.2.3.4.5", "8.8.8.08")) {
+            assertTrue(Http.isNonCanonicalNumericHost(host), host);
+        }
+        var e = assertThrows(Http.BlockedDestinationException.class,
+            () -> Http.get("http://0177.0.0.1:" + port + "/").fetch());
+        assertNull(e.address());
+        assertTrue(e.getMessage().contains("dotted quad"), e.getMessage());
+        for (var host : List.of("8.8.8.8", "0.0.0.0", "255.255.255.255", "8.8.8.8.", "deadbeef.cafe",
+                "123.example.com", "1e100.net", "[::1]", "example.com")) {
+            assertFalse(Http.isNonCanonicalNumericHost(host), host);
+        }
+        assertEquals(0, hits.get());
+    }
+
+    @Test
+    void azureWireServerIsRefused() throws Exception {
+        assertFalse(Http.isPublicAddress(java.net.InetAddress.getByName("168.63.129.16")));
+        assertTrue(Http.isPublicAddress(java.net.InetAddress.getByName("168.63.129.17")));
     }
 
     @Test
@@ -269,7 +295,9 @@ class HttpSsrfTest {
 
     private static void assertBlocked(String host, Executable call) {
         var e = assertThrows(Http.BlockedDestinationException.class, call, host);
-        assertFalse(Http.isPublicAddress(e.address()), host);
+        // A non-canonical numeric spelling (2130706433) is refused before any lookup.
+        if (e.address() != null) assertFalse(Http.isPublicAddress(e.address()), host);
+        else assertTrue(Http.isNonCanonicalNumericHost(e.host()), host);
     }
 
     private static void withResolver(Http.Resolver resolver, Executable body) throws Exception {

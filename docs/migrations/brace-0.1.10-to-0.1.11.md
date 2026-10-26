@@ -692,8 +692,14 @@ Spellings like `http://2130706433/` and `http://[::ffff:127.0.0.1]/` got there t
 Every `Http` call (`fetch*`, `stream()`, `fetchEvents`, `multipart()`) now resolves the host
 first and throws `Http.BlockedDestinationException` if any address it resolves to is loopback,
 `0.0.0.0`, private (RFC 1918, CGNAT `100.64/10`, IPv6 ULA), link-local (including
-`169.254.169.254`), multicast or otherwise reserved, or an IPv6 form of one of those. Nothing is
+`169.254.169.254`), multicast or otherwise reserved, or an IPv6 form of one of those. A numeric
+host that isn't a plain dotted quad (`2130706433`, `0177.0.0.1`) is refused outright. Nothing is
 sent. Calls to public hosts behave as before.
+
+An unknown host now fails in that lookup: the message ends `(UnknownHostException: <host>)` and
+the cause is an `UnknownHostException`, where it was `(ConnectException)` caused by
+`UnresolvedAddressException`. Code that matches on the old text needs updating. The check needs
+local DNS, so behind an egress proxy that is the only resolver, calls without `.trusted()` fail.
 
 Calls to your **own** internal services, and tests that call a local server with `Http`, now
 fail and need `.trusted()`:
