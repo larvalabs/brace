@@ -319,6 +319,11 @@ Result.json(object)                         // 200 JSON — or json(object, 201)
 Result.json(Json.obj("count", n, "avg", avg)) // one-off shape: ordered, null-tolerant pairs
 ```
 
+`Result.html(String)` sends its body verbatim. Never concatenate request or database data into
+it; render a `View` (auto-escaped). If a hand-built snippet must include a value, pass it through
+`Html.escape(value)` (escapes `& < > " '`; not safe inside `<script>`, `<style>`, unquoted
+attributes or `href`/`src` URLs).
+
 For one-off response shapes use `Json.obj(k1, v1, k2, v2, …)` — never a
 LinkedHashMap-and-put block (`Map.of` rejects nulls and scrambles key order). For named
 or reused shapes, prefer a 1-line local record: it self-documents the schema and

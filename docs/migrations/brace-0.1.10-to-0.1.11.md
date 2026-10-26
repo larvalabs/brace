@@ -20,6 +20,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
 | `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
 | HTML and text responses declare `charset=utf-8` | security | tests that assert the exact `Content-Type` string | [§](#security-html-and-text-responses-declare-charsetutf-8) |
+| `Html.escape`; `Result.html` documented as a raw sink | new | none | [§](#new-htmlescape) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -320,3 +321,17 @@ assertEquals("text/html; charset=utf-8", res.header("Content-Type"));
 
 Results that set their own content type (`Result.bytes`, `Result.stream`, `Result.file`, ...)
 are unchanged.
+
+## New: `Html.escape`
+
+`Result.html(String)` sends its body as is, with no escaping, and is now documented that way.
+For the rare hand-built snippet that has to include a value, `Html.escape(value)` escapes
+`& < > " '` (null becomes the empty string). Rendering a `View` is still the right tool for
+anything with request or database data in it.
+
+```java
+// before: reflected XSS
+return Result.html("<p>Results for " + req.queryParam("q") + "</p>");
+// after
+return Result.html("<p>Results for " + Html.escape(req.queryParam("q")) + "</p>");
+```

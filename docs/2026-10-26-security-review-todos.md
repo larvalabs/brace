@@ -670,7 +670,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     `Result.html` and `Result.text`.
   - **Tier: small.**
 
-- [ ] **L10: `Result.html(String)` is a raw-HTML sink documented with no warning**, `Result.java:264`, `BRACE-AGENTS.md:296`
+- [x] **L10: `Result.html(String)` is a raw-HTML sink documented with no warning**, `Result.java:264`, `BRACE-AGENTS.md:296`
   - **Fix.**
     - Add a doc warning ("never concatenate request data; use `View`").
     - Add `Html.escape(String)` and an `html(gg.jte.Content)` overload.

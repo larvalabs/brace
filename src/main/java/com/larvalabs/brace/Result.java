@@ -261,6 +261,13 @@ public class Result {
         return new Result(401, "text/plain; charset=utf-8", message);
     }
 
+    /**
+     * A raw HTML response. <strong>The body is sent as-is, with no escaping</strong> — never
+     * concatenate request data (query params, form fields, headers, anything a user can influence)
+     * or database content into it; that is cross-site scripting. Render a {@link View} instead,
+     * which escapes automatically. If you must interpolate a value, pass it through
+     * {@link Html#escape(String)} first.
+     */
     public static Result html(String body) {
         return new Result(200, "text/html; charset=utf-8", body);
     }
