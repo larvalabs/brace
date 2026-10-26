@@ -31,6 +31,7 @@ public class RouteConfig {
      * must pass. See {@link Access}.
      */
     public RouteConfig access(Access requirement) {
+        app.router().requireNotStarted("Adding access to " + route.method() + " " + route.pattern());
         route.addAccess(requirement);
         return this;
     }
@@ -42,6 +43,7 @@ public class RouteConfig {
      * {@code .access(...)}, or using it inside a group that has a requirement, fails at start.
      */
     public RouteConfig publicRoute() {
+        app.router().requireNotStarted("Marking " + route.method() + " " + route.pattern() + " public");
         route.markPublic();
         return this;
     }
@@ -55,6 +57,7 @@ public class RouteConfig {
      * @return the Brace app for further configuration
      */
     public Brace csrf(boolean required) {
+        app.router().requireNotStarted("Changing CSRF on " + route.method() + " " + route.pattern());
         route.setCsrfRequired(required);
         return app;
     }
@@ -69,6 +72,7 @@ public class RouteConfig {
     public Brace csrf(boolean required, String reason) {
         if (required) throw new IllegalArgumentException("csrf(true, reason): a reason only applies to an opt-out");
         if (reason == null || reason.isBlank()) throw new IllegalArgumentException("csrf(false, reason) needs a reason");
+        app.router().requireNotStarted("Changing CSRF on " + route.method() + " " + route.pattern());
         route.setCsrfOptOut(reason);
         return app;
     }

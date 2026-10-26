@@ -37,6 +37,9 @@ class OpsCsrfTest {
             .port(0)
             .sessions("ops-csrf-test-secret-at-least-32-characters")
             .ops(keysFile.toString());
+        // A normal POST route that isn't csrf(false), for csrfRejectionUsesStructuredJsonBody.
+        // Registered before start(): routes are fixed once the app runs (H1).
+        app.post("/normal-mutating-route", req -> Result.text("ok"));
         app.start();
         port = app.actualPort();
     }
@@ -80,10 +83,8 @@ class OpsCsrfTest {
 
     @Test
     void csrfRejectionUsesStructuredJsonBody() throws Exception {
-        // Register a normal POST route that isn't csrf(false). Sessions are on, so it should
-        // be blocked by CSRF — and the body should be machine-readable.
-        app.post("/normal-mutating-route", req -> Result.text("ok"));
-
+        // A normal POST route (registered in setup). Sessions are on, so it should be blocked by
+        // CSRF — and the body should be machine-readable.
         var response = client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/normal-mutating-route"))

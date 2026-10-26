@@ -31,6 +31,7 @@ public class GroupRouteConfig {
      * must pass. See {@link Access}.
      */
     public GroupRouteConfig access(Access requirement) {
+        group.router().requireNotStarted("Adding access to " + route.method() + " " + route.pattern());
         route.addAccess(requirement);
         return this;
     }
@@ -42,6 +43,7 @@ public class GroupRouteConfig {
      * {@code .access(...)}, or using it inside a group that has a requirement, fails at start.
      */
     public GroupRouteConfig publicRoute() {
+        group.router().requireNotStarted("Marking " + route.method() + " " + route.pattern() + " public");
         route.markPublic();
         return this;
     }
@@ -55,6 +57,7 @@ public class GroupRouteConfig {
      * @return the RouteGroup for further configuration
      */
     public RouteGroup csrf(boolean required) {
+        group.router().requireNotStarted("Changing CSRF on " + route.method() + " " + route.pattern());
         route.setCsrfRequired(required);
         return group;
     }
@@ -69,6 +72,7 @@ public class GroupRouteConfig {
     public RouteGroup csrf(boolean required, String reason) {
         if (required) throw new IllegalArgumentException("csrf(true, reason): a reason only applies to an opt-out");
         if (reason == null || reason.isBlank()) throw new IllegalArgumentException("csrf(false, reason) needs a reason");
+        group.router().requireNotStarted("Changing CSRF on " + route.method() + " " + route.pattern());
         route.setCsrfOptOut(reason);
         return group;
     }

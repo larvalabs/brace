@@ -532,6 +532,7 @@ public class Brace {
      * joining a room is still an authorization decision for the handler.
      */
     public RouteConfig ws(String path, Function<WsContext, Object> handlerFactory) {
+        router.requireNotStarted("Registering WS " + path);
         var route = new Route("WS", path, handlerFactory, null);
         wsRoutes.put(path, new WsRoute(route, handlerFactory));
         return new RouteConfig(this, route);
@@ -1172,6 +1173,7 @@ public class Brace {
             }
         }
         resolveAccess();
+        router.freeze();
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
@@ -1524,6 +1526,7 @@ public class Brace {
         if (!stopped.compareAndSet(false, true)) {
             return;
         }
+        router.unfreeze(); // a stopped app may be reconfigured before the next start()
         var hook = shutdownHook;
         shutdownHook = null;
         if (hook != null && Thread.currentThread() != hook) {

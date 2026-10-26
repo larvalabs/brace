@@ -146,6 +146,33 @@ class RouteAccessTest {
         }
     }
 
+    @Test
+    void routesCantBeAddedOrReconfiguredWhileRunning() throws Exception {
+        // Access is resolved at start(): a route added later would have run with no requirements.
+        var app = Brace.app().port(0).banner(false).sessions(SECRET).strictAccessCheck()
+            .defaultAccess(Access.session("userId", "/login"));
+        var early = app.get("/early", req -> Result.text("early"));
+        app.start();
+        try {
+            assertThrows(IllegalStateException.class, () -> app.get("/late", req -> Result.text("late")));
+            assertThrows(IllegalStateException.class, () -> early.access(Access.checkRequest(req -> null)));
+            assertThrows(IllegalStateException.class, () -> early.publicRoute());
+            assertThrows(IllegalStateException.class, () -> app.ws("/late-ws", ctx -> new Object()));
+            assertTrue(app.routes().stream().noneMatch(r -> r.pattern().equals("/late")));
+        } finally {
+            app.stop();
+        }
+        // Stopped: configurable again, and the next start() resolves the new route.
+        app.get("/added", req -> Result.text("added"));
+        app.start();
+        try {
+            var added = app.routes().stream().filter(r -> r.pattern().equals("/added")).findFirst().orElseThrow();
+            assertEquals("session:userId", added.accessLabel());
+        } finally {
+            app.stop();
+        }
+    }
+
     // --- Contradictions ---
 
     @Test

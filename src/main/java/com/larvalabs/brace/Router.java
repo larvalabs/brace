@@ -33,7 +33,24 @@ public class Router {
         return register(new Route(method, pattern, handler, invoker, csrfRequired));
     }
 
+    // H1: set while the app is running. Access is resolved once, at start(), so a route added or
+    // re-configured afterwards would run with no requirements at all — refused instead.
+    private volatile boolean frozen;
+
+    void freeze() { frozen = true; }
+
+    void unfreeze() { frozen = false; }
+
+    /** Throws if the app is running: routes and their access are fixed at start(). */
+    void requireNotStarted(String what) {
+        if (frozen) {
+            throw new IllegalStateException(what + " after start(): routes and their access requirements "
+                + "are resolved when the app starts. Register and configure every route before start().");
+        }
+    }
+
     private Route register(Route route) {
+        requireNotStarted("Registering " + route.method() + " " + route.pattern());
         routes.add(route);
         if (route.isStatic()) {
             // putIfAbsent: first registration wins, matching the old scan order.
