@@ -549,7 +549,8 @@ Three changes.
 **`.csrf(false)` on a cookie-session route fails `start()`.** `.csrf(false)` is meant for
 bearer-token routes, but nothing checked that, so it could silently switch CSRF off on a route
 authenticated by the session cookie. Now a POST/PUT/DELETE/PATCH route with `.csrf(false)` whose
-handler takes the `Session`, or that a session access requirement covers, fails `start()` with
+handler takes the `Session`, or that a session access requirement or a session-aware
+`before(pattern, BeforeSession)` covers, fails `start()` with
 the routes listed. Remove the opt-out and send the token, or, if the route is genuinely safe to
 force, say why:
 

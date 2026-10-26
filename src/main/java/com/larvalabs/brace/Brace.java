@@ -1749,7 +1749,8 @@ public class Brace {
      * takes the Session, or an access requirement reads it) is forgeable from any site the user
      * visits — {@code .csrf(false)} is for bearer-token routes. Refuse it unless the opt-out says
      * why ({@code .csrf(false, "reason")}). Runs after access is resolved, since a requirement
-     * can be what makes a route session-authenticated.
+     * can be what makes a route session-authenticated, and so can a session-aware
+     * {@code before(pattern, BeforeSession)} guard covering the route.
      */
     private void checkCsrfOptOuts(List<Route> routes) {
         if (sessionSecret == null) return; // no session cookie to forge requests with
@@ -1757,7 +1758,7 @@ public class Brace {
         for (Route route : routes) {
             if (route.isFramework() || route.csrfRequired()) continue;
             if (!BraceHandler.isMutating(route.method())) continue;
-            if (!route.usesCookieSession()) continue;
+            if (!route.usesCookieSession() && !coveredBySessionMiddleware(route)) continue;
             if (route.csrfOptOutReason() != null) {
                 Log.info("CSRF disabled on cookie-session route " + route.method() + " " + route.pattern()
                     + ": " + route.csrfOptOutReason());
@@ -1772,6 +1773,18 @@ public class Brace {
         msg.append("\n.csrf(false) is for bearer-token routes. Remove it and send the token (${csrfField}, "
             + "${csrfMeta}), or say why the route is safe with .csrf(false, \"reason\").");
         throw new IllegalStateException(msg.toString());
+    }
+
+    /**
+     * Whether a session-aware {@code before(...)} runs for this route. Path parameters are
+     * filled with a placeholder, which a {@code /prefix/*} pattern over them still matches.
+     */
+    private boolean coveredBySessionMiddleware(Route route) {
+        String sample = route.pattern().replaceAll("\\{[^/]+}", "_");
+        for (var before : beforeSessionMiddleware) {
+            if (before.matches(sample)) return true;
+        }
+        return false;
     }
 
     private static String describe(List<Access> group, List<Access> own) {

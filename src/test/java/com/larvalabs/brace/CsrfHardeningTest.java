@@ -36,6 +36,19 @@ class CsrfHardeningTest {
     }
 
     @Test
+    void csrfOptOutUnderASessionAwareBeforeFailsStart() {
+        // A plain Handler guarded by before(pattern, BeforeSession): still cookie-authenticated.
+        var ex = assertThrows(IllegalStateException.class, () -> Brace.test().sessions(SECRET).start(a -> {
+            a.defaultAccess(Access.none());
+            a.before("/admin/*", (Middleware.BeforeSession) (req, s) -> s.has("userId") ? null : Redirect.to("/login"));
+            a.post("/admin/users/{id}/delete", req -> Result.text("gone")).csrf(false);
+            a.post("/webhook", req -> Result.text("ok")).csrf(false); // not covered: allowed
+        }));
+        assertTrue(ex.getMessage().contains("/admin/users/{id}/delete"), ex.getMessage());
+        assertFalse(ex.getMessage().contains("/webhook"), ex.getMessage());
+    }
+
+    @Test
     void justifiedOrBearerOptOutsStart() throws Exception {
         Access bearer = Access.checkRequest(req -> "Bearer t".equals(req.header("Authorization")) ? null : Result.unauthorized());
         var app = Brace.test().sessions(SECRET).start(a -> {

@@ -222,7 +222,8 @@ enough cross-site). Routes with `.csrf(false)` are exempt.
 ### Opt-outs are checked
 
 `.csrf(false)` is for bearer-token routes. On a mutating route that uses the cookie session —
-its handler takes the `Session`, or a session access requirement covers it — `start()` fails.
+its handler takes the `Session`, or a session access requirement or a session-aware
+`before(pattern, BeforeSession)` covers it — `start()` fails.
 A route that is safe to force anyway states why with `.csrf(false, "reason")`, which is logged
 at startup.
 

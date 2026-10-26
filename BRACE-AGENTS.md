@@ -698,7 +698,8 @@ CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests whe
   `app.post("/api/data", handler).csrf(false)`.
 
 **`.csrf(false)` on a route that uses the cookie session fails `start()`** — a handler that
-takes the `Session`, or a route under a session access requirement. Remove the opt-out and send
+takes the `Session`, or a route under a session access requirement or a session-aware
+`before(pattern, BeforeSession)` guard. Remove the opt-out and send
 the token, or, for a route that is genuinely safe to force (an idempotent sign-out, a deliberate
 cross-site callback), say why: `.csrf(false, "sign-out is idempotent")`.
 
