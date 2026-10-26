@@ -1,8 +1,9 @@
 # Migrating from Brace 0.1.10 → 0.1.11
 
-This release has no breaking changes to the API. It adds opt-in server-side analytics, gzips
-responses by default, masks the CSRF token rendered into pages, and `HEAD` requests now reach
-`GET` routes instead of returning 404.
+This release carries the fixes from the 2026-10 security review, several of which are
+**breaking**. Rows marked breaking in the index need a code change. It also adds opt-in
+server-side analytics, gzips responses by default, masks the CSRF token rendered into pages, and
+`HEAD` requests now reach `GET` routes instead of returning 404.
 
 ## Index
 
@@ -15,6 +16,7 @@ responses by default, masks the CSRF token rendered into pages, and `HEAD` reque
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
+| `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -210,4 +212,40 @@ version, drop the pin or raise it; an explicit pin overrides the version Brace b
 Visible difference: when Jetty rejects an ambiguous URI itself (for example `%2e%2e` in a path),
 its built-in 400 page now echoes the request URI. Tests that assert a rejected path's name never
 appears in the response body need to check the file's content instead.
+
+## Breaking: `csrfField` is `Content`; new `csrfToken`
+
+`${csrfField}` used to reach templates as a `String`. JTE escapes strings, so the documented
+`${csrfField}` printed the hidden input as visible text and the form's POST was rejected with
+403. The only workaround was `$unsafe{csrfField}`. The field is now a `gg.jte.Content` and
+renders as markup.
+
+Before:
+
+```
+@param String csrfField = null
+<form method="post">$unsafe{csrfField} ...</form>
+```
+
+After:
+
+```
+@param gg.jte.Content csrfField = null
+<form method="post">${csrfField} ...</form>
+```
+
+A template that still declares `@param String csrfField` fails at render time with a
+`ClassCastException` naming the parameter. Change the type, and replace any `$unsafe{csrfField}`
+with `${csrfField}`.
+
+New: `csrfToken` is the bare masked token for a `<meta>` tag that fetch or htmx copy into the
+`X-CSRF-Token` header:
+
+```
+@param String csrfToken = null
+<meta name="csrf-token" content="${csrfToken}">
+```
+
+Like the hidden field, it differs on every render and every rendered value validates. Use it
+instead of printing `Csrf.maskedToken(session)` yourself.
 

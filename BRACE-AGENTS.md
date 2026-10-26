@@ -587,12 +587,16 @@ Flash messages (display once, on the next request): `session.flash("notice", "Po
 
 CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests when sessions are enabled. Content-Type does **not** affect enforcement — `application/json` requests are validated the same as form submissions.
 
-- **Forms:** include `${csrfField}` inside the `<form>` (an auto-provided hidden input). Its
-  value is masked and changes on every render; that is expected, and any rendered value validates.
-- **AJAX/fetch:** send the token in the `X-CSRF-Token` header with `credentials: 'include'` so
-  cookies are sent. To put it in a `<meta>` tag, render `Csrf.maskedToken(session)`, not
-  `Csrf.getToken(session)`: a raw token repeated on every page can leak through compressed
-  response sizes (BREACH; see "Response Compression" in `docs/SECURITY.md`). Both forms validate.
+- **Forms:** declare `@param gg.jte.Content csrfField = null` and put `${csrfField}` inside the
+  `<form>` (an auto-provided hidden input). It is `Content`, so it renders as markup — never
+  declare it `String` or reach for `$unsafe`. Its value is masked and changes on every render;
+  that is expected, and any rendered value validates.
+- **AJAX/fetch/htmx:** declare `@param String csrfToken = null` and render
+  `<meta name="csrf-token" content="${csrfToken}">`, then send it in the `X-CSRF-Token` header
+  with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;
+  never print `Csrf.getToken(session)` into a page — a raw token repeated on every page can
+  leak through compressed response sizes (BREACH; see "Response Compression" in
+  `docs/SECURITY.md`).
 - **Bearer-token APIs (no cookies):** opt out per route with
   `app.post("/api/data", handler).csrf(false)`.
 

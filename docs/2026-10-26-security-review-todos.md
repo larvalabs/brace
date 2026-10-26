@@ -296,7 +296,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - An htmx POST from the scaffold layout succeeds end to end.
   - **Tier: frontier.** Changes a default and needs a startup-check design.
 
-- [ ] **M3: The documented `${csrfField}` renders escaped; only `$unsafe` makes it work**, `View.java:55-57`, `Csrf.java:88`, `BRACE-AGENTS.md:590`, `SECURITY.md:128`
+- [x] **M3: The documented `${csrfField}` renders escaped; only `$unsafe` makes it work**, `View.java:55-57`, `Csrf.java:88`, `BRACE-AGENTS.md:590`, `SECURITY.md:128`
   - **Verified.** The output is `<form method="post">&lt;input type="hidden" name="_csrf" …&gt;</form>`;
     the field shows as text and the POST 403s. No test renders `csrfField` through a `.jte`.
   - **Why it matters for security.** The only fix available to a developer or agent is

@@ -125,12 +125,13 @@ Brace automatically validates CSRF tokens on mutating requests (POST, PUT, DELET
    - Form parameter: `_csrf`
    - Header: `X-CSRF-Token`
 3. Validation happens automatically before your handler runs
-4. The token written into pages is **masked per render**: `${csrfField}` carries
+4. The token written into pages is **masked per render**: `${csrfField}` (a `gg.jte.Content`
+   hidden input; declare it `@param gg.jte.Content csrfField = null`) and `${csrfToken}` (the
+   bare token, for a `<meta>` tag read by fetch or htmx) both carry
    `base64url(mask || token XOR mask)` with a fresh random mask, so the value differs on every
    page. Validation accepts the masked form and the raw token alike. This keeps a compressed
    page from leaking the token through its size (see [Response Compression](#response-compression)).
-   If you put the token in a page yourself (a `<meta>` tag for fetch or htmx headers), use
-   `Csrf.maskedToken(session)` rather than `Csrf.getToken(session)`.
+   Outside a template, use `Csrf.maskedToken(session)` rather than `Csrf.getToken(session)`.
 
 ### Exemptions
 
@@ -575,7 +576,7 @@ input, and a secret that is byte-identical across responses.
 What Brace does about it:
 
 - **The CSRF token is masked per render**, so it is never the same twice and compression has
-  nothing to match it against. This covers `${csrfField}` and `Csrf.maskedToken(session)`. A
+  nothing to match it against. This covers `${csrfField}`, `${csrfToken}` and `Csrf.maskedToken(session)`. A
   page that prints `Csrf.getToken(session)` directly is not covered.
 - **Session cookies are not in the body**, so compression doesn't reach them.
 

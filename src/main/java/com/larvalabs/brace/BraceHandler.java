@@ -404,15 +404,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (sessionSecret != null) {
                 // Lazy token mint (H5): ensureToken used to run eagerly here on every matched
                 // request, minting a token — and forcing a Set-Cookie below — even for responses
-                // that never render a form (JSON, redirects). The supplier mints and builds the
-                // hidden field only when something consumes it: View.of() putting csrfField into a
-                // template, or a handler calling View.getCsrfField(). ensureToken is idempotent, and
+                // that never render a form (JSON, redirects). The supplier mints the token and
+                // hands back its session only when something consumes it: View.of() putting
+                // csrfField/csrfToken into a template, or a handler calling View.getCsrfField().
+                // ensureToken is idempotent, and
                 // the consumption marks the session modified so the write-back choke point persists
                 // it (the M5c invariant — otherwise the rendered token is orphaned and POSTs 403).
-                View.setCsrfField(() -> {
+                View.setCsrfSession(() -> {
                     Session tokenSession = handlerSession != null ? handlerSession : lazySession.get();
                     Csrf.ensureToken(tokenSession);
-                    return Csrf.hiddenField(tokenSession);
+                    return tokenSession;
                 });
             }
 
@@ -456,7 +457,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     result = invoker.invoke(braceRequest, null, session);
                 }
             } finally {
-                View.clearCsrfField();
+                View.clearCsrfSession();
                 View.clearFlash();
             }
 

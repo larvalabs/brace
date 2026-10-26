@@ -7,17 +7,19 @@ import java.util.function.Supplier;
 public class View extends Result {
 
     private static TemplateEngine engine;
-    // Supplier, not a materialized string (H5): the CSRF token is minted — and the
+    // Supplier, not a materialized value (H5): the CSRF token is minted — and the
     // session cookie consequently written — only when a render (or a handler via
-    // getCsrfField()) actually consumes the field, not on every matched request.
-    private static final ThreadLocal<Supplier<String>> currentCsrfField = new ThreadLocal<>();
+    // getCsrfField()) actually consumes it, not on every matched request. It yields the
+    // session holding the (now ensured) token; the field and the meta-tag token are both
+    // derived from it.
+    private static final ThreadLocal<Supplier<Session>> currentCsrfSession = new ThreadLocal<>();
     // Flash is consumed lazily via a supplier (R1): the source (set per-request by BraceHandler)
     // consumes the session's cookie-borne flash when — and only when — a View actually renders, so
     // flash survives requests that render nothing (redirects, JSON, polling).
     private static final ThreadLocal<Supplier<Map<String, String>>> currentFlash = new ThreadLocal<>();
 
-    static void setCsrfField(Supplier<String> fieldSupplier) { currentCsrfField.set(fieldSupplier); }
-    static void clearCsrfField() { currentCsrfField.remove(); }
+    static void setCsrfSession(Supplier<Session> sessionSupplier) { currentCsrfSession.set(sessionSupplier); }
+    static void clearCsrfSession() { currentCsrfSession.remove(); }
 
     /**
      * Resolves the CSRF hidden field for the current request, minting the token on first
@@ -25,8 +27,27 @@ public class View extends Result {
      * not configured).
      */
     static String getCsrfField() {
-        Supplier<String> supplier = currentCsrfField.get();
-        return supplier != null ? supplier.get() : null;
+        Supplier<Session> supplier = currentCsrfSession.get();
+        return supplier != null ? Csrf.hiddenField(supplier.get()) : null;
+    }
+
+    /**
+     * The {@code csrfField} template param: the hidden input as {@link gg.jte.Content}, so
+     * {@code ${csrfField}} writes it as markup (M3). As a plain String, JTE's HTML escaping turned
+     * the documented {@code ${csrfField}} into visible text and a form that always 403'd, and the
+     * only workaround was {@code $unsafe}. The field is framework-built and its token value is
+     * already escaped by {@link Csrf#hiddenField}.
+     */
+    record CsrfField(String html) implements gg.jte.Content {
+        @Override
+        public void writeTo(gg.jte.TemplateOutput output) {
+            output.writeContent(html);
+        }
+
+        @Override
+        public String toString() {
+            return html;
+        }
     }
     static void setFlashSource(Supplier<Map<String, String>> source) { currentFlash.set(source); }
     static void clearFlash() { currentFlash.remove(); }
@@ -52,9 +73,12 @@ public class View extends Result {
         // here — before the cookie-write decision — exactly as it was when rendering happened eagerly.
         // The template render itself is deferred to materialize() (M12); the resolved values ride along
         // in params, so it no longer depends on the ThreadLocals, which are cleared before it runs.
-        String csrfField = getCsrfField();
-        if (csrfField != null) {
-            params.put("csrfField", csrfField);
+        Supplier<Session> csrfSession = currentCsrfSession.get();
+        if (csrfSession != null) {
+            Session session = csrfSession.get();
+            params.put("csrfField", new CsrfField(Csrf.hiddenField(session)));
+            // The bare masked token, for a <meta> tag that fetch/htmx read into X-CSRF-Token.
+            params.put("csrfToken", Csrf.maskedToken(session));
         }
         // R1: consuming the flash source here (View.of == a render is happening) clears the
         // session's flash exactly when a View renders, not on redirects/JSON/polling.
