@@ -584,7 +584,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Tests.** No `Server` header; a 400 from Jetty is plain text with no version.
   - **Tier: small.**
 
-- [ ] **L2: Stack traces are stored and served unredacted**, `BraceHandler.java:518, 532`, `Stats.java:118-138`, `ErrorStore`
+- [x] **L2: Stack traces are stored and served unredacted**, `BraceHandler.java:518, 532`, `Stats.java:118-138`, `ErrorStore`
   - **What's wrong.** `Redactor.redactMessage` is applied to the message, but
     `stackTraceToString(e)` embeds the same message and every `Caused by:` message verbatim
     into `/ops/status` and `/ops/errors/{id}`. Ops READ tokens are routinely handed to on-call

@@ -116,6 +116,8 @@ public class Stats {
         // This record is served on /ops/status; exception messages can carry embedded
         // credentials or SQL literals, so run the value-shaped pass at the sink.
         message = Redactor.redactMessage(message);
+        // The stack trace repeats the message (and every cause's) verbatim in its header lines.
+        stackTrace = Redactor.redactStackTrace(stackTrace);
         synchronized (errorsLock) {
             String dedupeKey = type + "|" + route;
             for (ErrorRecord rec : errors) {

@@ -884,6 +884,11 @@ case.
 | Short slugs (< 16 chars) | Route labels, action names |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
 
+The same pass runs over stored **stack traces** (`Redactor.redactStackTrace`, at
+`Stats.recordError` and `ErrorStore.record`): every message line, including `Caused by:` and
+`Suppressed:` lines and multi-line messages, is redacted, and frame (`at …`) lines are kept
+as is. A message redacted on its own used to reappear verbatim in the trace.
+
 The heuristic is conservative by design. An over-eager redactor makes error
 records useless. If your application routes embed raw bearer tokens or reset
 secrets in path positions, consider moving them to opaque database-lookup keys

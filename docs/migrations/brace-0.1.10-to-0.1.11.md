@@ -23,6 +23,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | `Html.escape`; `Result.html` documented as a raw sink | new | none | [§](#new-htmlescape) |
 | `UploadedFile.safeFilename()`, `saveTo(dir, name)`, `Result.fileUnder` | new, security | switch uploads saved via `dir.resolve(file.filename())` | [§](#new-confined-upload-saving-and-file-serving) |
 | No `Server` header; plain-text errors for requests Jetty rejects | security | update monitors that match on `Server` or Jetty's HTML error text | [§](#security-no-server-header-plain-text-errors-for-rejected-requests) |
+| Stack traces in `/ops` are redacted like messages | security | none | [§](#security-stack-traces-are-redacted-like-messages) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -374,3 +375,13 @@ URI. They now get a short `text/plain; charset=utf-8` body with only the reason 
 
 No code change. Update any monitor or test that matched on the `Server` header or on Jetty's
 HTML error text.
+
+## Security: stack traces are redacted like messages
+
+Secret-shaped tokens (long base64url or hex strings, JWTs) in an exception's message were
+redacted in the error's `message` field but appeared verbatim in its stack trace, which repeats
+the message and every `Caused by:` message. The stack traces served by `/ops/status` and
+`/ops/errors/{id}` are now redacted the same way, including `Caused by:` and `Suppressed:`
+lines. Frame (`at …`) lines are unchanged.
+
+No code change.

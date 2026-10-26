@@ -228,4 +228,75 @@ class RedactorTest {
     void isSecretShapedReturnsFalseForShortToken() {
         assertFalse(Redactor.isSecretShaped("abc123")); // below MIN_SECRET_LENGTH
     }
+
+    // ---- redactStackTrace tests ----
+
+    private static String traceOf(Throwable t) {
+        var sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        return sw.toString();
+    }
+
+    @Test
+    void redactStackTraceRedactsEveryMessageLine() {
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String other = "9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        var suppressed = new IllegalStateException("suppressed key " + other);
+        var root = new java.sql.SQLException("connect failed password=" + secret);
+        var top = new RuntimeException("outer", new RuntimeException("middle", root));
+        top.addSuppressed(suppressed);
+
+        String trace = traceOf(top);
+        assertTrue(trace.contains(secret) && trace.contains(other), "precondition: raw trace has both");
+
+        String redacted = Redactor.redactStackTrace(trace);
+        assertFalse(redacted.contains(secret), "Caused by: message must be redacted");
+        assertFalse(redacted.contains(other), "Suppressed: message must be redacted");
+        assertTrue(redacted.contains("Caused by: java.sql.SQLException: connect failed password=[redacted]"), redacted);
+        assertTrue(redacted.contains("RuntimeException: outer"));
+    }
+
+    @Test
+    void redactStackTraceRedactsTheFirstLine() {
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String redacted = Redactor.redactStackTrace(traceOf(new RuntimeException("bad token " + secret)));
+        assertFalse(redacted.contains(secret));
+        assertTrue(redacted.startsWith("java.lang.RuntimeException: bad token [redacted]"), redacted);
+    }
+
+    @Test
+    void redactStackTraceRedactsContinuationLinesOfAMultiLineMessage() {
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String redacted = Redactor.redactStackTrace(
+            traceOf(new RuntimeException("line one\nsecond line " + secret + "\nthird")));
+        assertFalse(redacted.contains(secret));
+        assertTrue(redacted.contains("line one\nsecond line [redacted]\nthird"), redacted);
+    }
+
+    @Test
+    void redactStackTraceLeavesFrameLinesUntouched() {
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String trace = "java.lang.RuntimeException: boom " + secret + "\n"
+            + "\tat com.example.Foo.bar(Foo.java:12)\n"
+            + "\tat com.example.Foo.longMethodName0123456789abcdef(Foo.java:99)\n"
+            + "Caused by: java.lang.Error: root " + secret + "\n"
+            + "\tat com.example.Baz.qux(Baz.java:7)\n"
+            + "\t... 3 more\n";
+        assertEquals(trace.replace(secret, "[redacted]"), Redactor.redactStackTrace(trace));
+    }
+
+    @Test
+    void redactStackTraceKeepsLineEndingsAndReturnsCleanTracesUnchanged() {
+        String clean = "java.lang.RuntimeException: user not found\r\n\tat a.B.c(B.java:1)\r\n";
+        assertSame(clean, Redactor.redactStackTrace(clean));
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        assertEquals("java.lang.RuntimeException: x [redacted]\r\n\tat a.B.c(B.java:1)\r\n",
+            Redactor.redactStackTrace("java.lang.RuntimeException: x " + secret + "\r\n\tat a.B.c(B.java:1)\r\n"));
+    }
+
+    @Test
+    void redactStackTraceHandlesNullAndEmpty() {
+        assertNull(Redactor.redactStackTrace(null));
+        assertEquals("", Redactor.redactStackTrace(""));
+    }
 }
