@@ -35,6 +35,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Session cookie is `__Host-brace_session` in production; cookies without `_exp` rejected; absolute lifetime; `regenerate()`, `sessionValidator`, `previousSecrets` | security, **breaking** | users are logged out once on deploy; call `session.regenerate()` at login/logout | [§](#breaking-session-cookie-hardening) |
 | Request data in a query string throws in dev and tests; `Sort` for `?sort=` | security, **breaking** | bind values with `?`, build `?sort=` orders with `Sort` | [§](#breaking-request-data-in-a-query-string-throws-in-dev-and-tests) |
 | `findOwnedOr404` and a predicate `findOr404` for user-owned rows | new, security | switch user-owned lookups from `findOr404(type, id)` | [§](#new-owned-lookups) |
+| `Http` refuses non-public destinations; buffered responses capped at 10 MB | security, **breaking** | add `.trusted()` to calls to your own internal services and local test servers; `.maxResponseBytes(n)` for bodies over 10 MB | [§](#breaking-http-refuses-non-public-destinations-by-default) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -670,3 +671,69 @@ var doc  = db.findOr404(Doc.class, id, d -> d.ownerId.equals(userId) || d.shared
 
 Both answer 404 for a row that isn't the caller's. Nothing breaks, but review every
 `findOr404(type, id)` on user-owned data.
+
+ 
+
+## Breaking: `Http` refuses non-public destinations by default
+
+`Http` fetched whatever URL it was given, so a feature that fetched a user's URL (import from
+URL, link preview, webhook test) could be pointed at the server's own network: the Hetzner
+metadata service at `http://169.254.169.254/hetzner/v1/userdata` (cloud-init secrets), the
+Docker bridge and the Postgres container on `172.17.0.0/16`, or the app itself on `localhost`.
+Spellings like `http://2130706433/` and `http://[::ffff:127.0.0.1]/` got there too.
+
+Every `Http` call (`fetch*`, `stream()`, `fetchEvents`, `multipart()`) now resolves the host
+first and throws `Http.BlockedDestinationException` if any address it resolves to is loopback,
+`0.0.0.0`, private (RFC 1918, CGNAT `100.64/10`, IPv6 ULA), link-local (including
+`169.254.169.254`), multicast or otherwise reserved, or an IPv6 form of one of those. Nothing is
+sent. Calls to public hosts behave as before.
+
+Calls to your **own** internal services, and tests that call a local server with `Http`, now
+fail and need `.trusted()`:
+
+Before:
+
+```java
+var stats = Http.get("http://search:9200/_stats").fetchJson(Stats.class);
+var resp = Http.get("http://localhost:" + port + "/echo").fetch();      // in a test
+```
+
+After:
+
+```java
+var stats = Http.get("http://search:9200/_stats").trusted().fetchJson(Stats.class);
+var resp = Http.get("http://localhost:" + port + "/echo").trusted().fetch();
+```
+
+`.trusted()` is per call (on `multipart()` too) and there is no global switch. Only add it where
+you chose the destination: a URL literal or one from your config. A URL from a user, a
+user-written row or a redirect `Location` stays without it; that is the case this change exists
+for. To find the calls, search for `Http.get(`, `Http.post(`, `Http.put(` and `Http.delete(` whose
+URL is `localhost`, an IP literal, a Docker or Kubernetes service name, or a config value.
+`Brace.test()` requests (`TestApp`), `Storage` and `WebhookNotifier` don't go through `Http` and
+are unaffected.
+
+**Buffered responses are capped at 10 MB.** `fetch()`, `fetchString()`, `fetchBytes()` and
+`fetchJson()` throw `Http.ResponseTooLargeException` once the body passes 10 MB (immediately, if
+`Content-Length` says so), without downloading the rest. A download that can be larger needs a
+higher limit, or `stream()`, which isn't capped:
+
+Before:
+
+```java
+byte[] export = Http.get(exportUrl).bearer(token).fetchBytes();   // 40 MB
+```
+
+After:
+
+```java
+byte[] export = Http.get(exportUrl).bearer(token).maxResponseBytes(100L * 1024 * 1024).fetchBytes();
+// or, without holding it all in memory:
+try (var s = Http.get(exportUrl).bearer(token).stream()) {
+    Files.copy(s.body(), target);
+}
+```
+
+New: `Http.isPublicAddress(InetAddress)` applies the same check, to reject a URL when a user
+enters it. See "Server-Side Request Forgery (SSRF)" in `docs/SECURITY.md` for the full range list
+and the DNS-rebinding window that remains.

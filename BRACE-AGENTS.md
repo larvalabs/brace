@@ -997,6 +997,37 @@ Http.post(uploadUrl).bearer(token).multipart()
 
 `Response`: `status()`, `body()`, `header(name)`, `ok()`, `as(Class)`.
 
+### Public destinations only (SSRF)
+
+`Http` refuses any host that resolves to a non-public address (loopback, `0.0.0.0`, RFC 1918,
+CGNAT, link-local incl. the cloud metadata service `169.254.169.254`, IPv6 ULA/link-local,
+multicast, reserved, and IPv4-mapped/NAT64/6to4 forms of those) and throws
+`Http.BlockedDestinationException` before sending anything. The check is on the resolved
+address, so `http://2130706433/`, `http://[::ffff:127.0.0.1]/` and names pointing inward are
+caught. It is on for every call: fetch user-supplied URLs with plain `Http`, never `.trusted()`.
+
+```java
+// User-supplied URL: fetch it plainly; a private destination throws BlockedDestinationException
+var page = Http.get(form.value().url()).timeout(Duration.ofSeconds(5)).fetchString();
+
+// An internal service YOU chose (sidecar, private API, URL from config): opt out per call
+var stats = Http.get(config.get("search.url") + "/stats").trusted().fetchJson(Stats.class);
+
+// Validate at input time instead of at fetch time
+boolean ok = Http.isPublicAddress(InetAddress.getByName(host));
+```
+
+- **Never** put `.trusted()` on a URL from a user, a user-written row, or a redirect `Location`.
+  There is no global off switch.
+- Redirects are never followed. To follow one, make a new `Http` call with `header("Location")`
+  (it is checked again); don't pass it to another client.
+- Buffered fetches (`fetch`, `fetchString`, `fetchBytes`, `fetchJson`) are capped at 10 MB and
+  throw `Http.ResponseTooLargeException` past it, without downloading the rest; change it with
+  `.maxResponseBytes(n)`. `stream()` is uncapped: bound what you read. Both `.trusted()` and
+  `.maxResponseBytes(n)` work on `multipart()` too.
+- `Storage`, `WebhookNotifier` and raw `java.net.http` don't apply this check. Details, and the
+  narrow DNS-rebinding window that remains, in `docs/SECURITY.md` ("Server-Side Request Forgery").
+
 ### Streaming responses
 
 `fetch*` buffers the whole body. To read it as it arrives (LLM APIs, long exports), use

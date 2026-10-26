@@ -189,7 +189,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - The predicate variant behaves the same way.
   - **Tier: mid** (API plus docs). The docs rewrite matters as much as the code.
 
-- [ ] **H5: The `Http` client has no SSRF protection**, `Http.java:36-38, 141-150`, `BRACE-AGENTS.md:807-860`
+- [x] **H5: The `Http` client has no SSRF protection**, `Http.java:36-38, 141-150`, `BRACE-AGENTS.md:807-860`
   - **Verified.**
     - These reach a 127.0.0.1 listener: `127.0.0.1`, `localhost`, `0.0.0.0`, `2130706433`
       (decimal), `[::ffff:127.0.0.1]`.
