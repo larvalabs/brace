@@ -1079,26 +1079,26 @@ public class Brace {
             }
             // Ops POSTs use signed-payload or bearer auth, not cookies — CSRF is the wrong layer
             // and would block the CLI on any app that also calls .sessions(...).
-            frameworkRoute(router.add("POST", "/ops/auth", noStore(opsHandler::auth))).setCsrfRequired(false);
-            frameworkRoute(router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken))).setCsrfRequired(false);
-            frameworkRoute(router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange)));
-            frameworkRoute(router.add("GET", "/ops/status", noStore(opsHandler::status)));
-            frameworkRoute(router.add("GET", "/ops/routes", noStore(opsHandler::routes)));
-            frameworkRoute(router.add("GET", "/ops/logs", noStore(opsHandler::logs)));
-            frameworkRoute(router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard)));
-            frameworkRoute(router.add("GET", "/ops/errors", noStore(opsHandler::errors)));
-            frameworkRoute(router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail)));
-            frameworkRoute(router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError))).setCsrfRequired(false);
-            frameworkRoute(router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache))).setCsrfRequired(false);
-            frameworkRoute(router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats)));
-            frameworkRoute(router.add("GET", "/ops/regressions", noStore(opsHandler::regressions)));
-            frameworkRoute(router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression))).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/auth", noStore(opsHandler::auth)), null).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/auth/login-token", noStore(opsHandler::loginToken)), opsHandler.access(OpsScope.READ)).setCsrfRequired(false);
+            frameworkRoute(router.add("GET", "/ops/auth/exchange", noStore(opsHandler::exchange)), null);
+            frameworkRoute(router.add("GET", "/ops/status", noStore(opsHandler::status)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/routes", noStore(opsHandler::routes)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/logs", noStore(opsHandler::logs)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/dashboard", noStore(opsHandler::dashboard)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/errors", noStore(opsHandler::errors)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/errors/{id}", noStore(opsHandler::errorDetail)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("POST", "/ops/errors/{id}/resolve", noStore(opsHandler::resolveError)), opsHandler.access(OpsScope.CONTROL)).setCsrfRequired(false);
+            frameworkRoute(router.add("POST", "/ops/cache/clear", noStore(opsHandler::clearCache)), opsHandler.access(OpsScope.CONTROL)).setCsrfRequired(false);
+            frameworkRoute(router.add("GET", "/ops/cache", noStore(opsHandler::cacheStats)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("GET", "/ops/regressions", noStore(opsHandler::regressions)), opsHandler.access(OpsScope.READ));
+            frameworkRoute(router.add("POST", "/ops/regressions/{id}/acknowledge", noStore(opsHandler::acknowledgeRegression)), opsHandler.access(OpsScope.CONTROL)).setCsrfRequired(false);
             if (analytics != null) {
-                frameworkRoute(router.add("GET", "/ops/analytics", noStore(opsHandler::analytics)));
-                frameworkRoute(router.add("GET", "/ops/analytics/data", noStore(opsHandler::analyticsData)));
+                frameworkRoute(router.add("GET", "/ops/analytics", noStore(opsHandler::analytics)), opsHandler.access(OpsScope.READ));
+                frameworkRoute(router.add("GET", "/ops/analytics/data", noStore(opsHandler::analyticsData)), opsHandler.access(OpsScope.READ));
                 // Cookie-authenticated, but the ops cookie is SameSite=Strict, so a cross-site form
                 // can't carry it; and the only effect is a cookie on the caller's own browser.
-                frameworkRoute(router.add("POST", "/ops/analytics/ignore", noStore(opsHandler::analyticsIgnore))).setCsrfRequired(false);
+                frameworkRoute(router.add("POST", "/ops/analytics/ignore", noStore(opsHandler::analyticsIgnore)), opsHandler.access(OpsScope.READ)).setCsrfRequired(false);
             }
         }
 
@@ -1593,12 +1593,17 @@ public class Brace {
      * remembering. An explicit {@code Cache-Control} set by the handler wins.
      */
     /**
-     * A route the framework registers (/ops/*): outside the app's default access. Its handlers
-     * authenticate the ops credential themselves.
+     * A route the framework registers (/ops/*): outside the app's default access, which is an
+     * app login and not the ops credential. {@code requirement} is the ops access check; null
+     * marks the route public (the auth handshake endpoints, which take the credential itself).
      */
-    private static Route frameworkRoute(Route route) {
+    private static Route frameworkRoute(Route route, Access requirement) {
         route.markFramework();
-        route.markPublic();
+        if (requirement == null) {
+            route.markPublic();
+        } else {
+            route.addAccess(requirement);
+        }
         return route;
     }
 

@@ -188,6 +188,43 @@ class RouteAccessTest {
         }
     }
 
+    // --- /ops ---
+
+    @Test
+    void everyOpsRouteResolvesToAnOpsScopeOrIsAnAuthHandshake(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        var keys = dir.resolve("ops-authorized-keys");
+        java.nio.file.Files.writeString(keys, OpsKeys.generateKeypair().publicKey() + "\n");
+        var app = Brace.app().port(0).banner(false).ops(keys.toString())
+            .strictAccessCheck()
+            .defaultAccess(Access.session("userId", "/login"))
+            .sessions(SECRET);
+        app.get("/login", req -> Result.text("login")).publicRoute();
+        app.start();
+        try {
+            var publicOps = List.of("/ops/auth", "/ops/auth/exchange");
+            int opsRoutes = 0;
+            for (Route r : app.routes()) {
+                if (!r.pattern().startsWith("/ops")) continue;
+                opsRoutes++;
+                var labels = r.access().stream().map(Access::label).toList();
+                if (publicOps.contains(r.pattern())) {
+                    assertTrue(r.isPublicRoute() && labels.isEmpty(), r.pattern() + " " + labels);
+                } else {
+                    // Exactly the ops credential: the app's session default never applies under /ops.
+                    assertEquals(1, labels.size(), r.pattern() + " " + labels);
+                    assertTrue(labels.get(0).startsWith("ops:"), r.pattern() + " " + labels);
+                }
+            }
+            assertEquals(14, opsRoutes, "ops routes registered without analytics");
+            var status = app.routes().stream().filter(r -> r.pattern().equals("/ops/status")).findFirst().orElseThrow();
+            assertEquals("ops:read", status.access().get(0).label());
+            var clear = app.routes().stream().filter(r -> r.pattern().equals("/ops/cache/clear")).findFirst().orElseThrow();
+            assertEquals("ops:control", clear.access().get(0).label());
+        } finally {
+            app.stop();
+        }
+    }
+
     // --- Lifecycle order ---
 
     @Test

@@ -679,6 +679,13 @@ public class Request {
         this.rawQuery = rawQuery;
     }
 
+    /** Verified ops credential, attached by the ops routes' access requirement (H1). */
+    private OpsToken.Claims opsClaims;
+
+    OpsToken.Claims opsClaims() { return opsClaims; }
+
+    void setOpsClaims(OpsToken.Claims claims) { this.opsClaims = claims; }
+
     public Storage storage() {
         if (storage == null) {
             throw new IllegalStateException("Storage not configured. Call app.storage() to configure.");

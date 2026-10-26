@@ -29,6 +29,17 @@ class OpsKeyRevocationTest {
         return OpsToken.create(SECRET, 60, OpsScope.READ, OpsKeys.fingerprint(key.publicKey()));
     }
 
+    /** What the router does for an ops route: the route's access requirement, then the handler (H1). */
+    private static Result guarded(OpsHandler h, OpsScope scope, Request req,
+                                  java.util.function.Function<Request, Result> handler) {
+        Result rejected = h.access(scope).check(req, null);
+        return rejected != null ? rejected : handler.apply(req);
+    }
+
+    private static Result status(OpsHandler h, Request req) {
+        return guarded(h, OpsScope.READ, req, h::status);
+    }
+
     private static Request bearer(String token) {
         return new Request("GET", "/ops/status", Map.of(), Map.of(),
             Map.of("Authorization", "Bearer " + token), null);
@@ -42,26 +53,26 @@ class OpsKeyRevocationTest {
     @Test
     void tokenForACurrentKeyStillWorks() {
         var h = handler(current, removed);
-        assertEquals(200, h.status(bearer(token(current))).status());
-        assertEquals(200, h.status(cookie(token(current))).status());
+        assertEquals(200, status(h, bearer(token(current))).status());
+        assertEquals(200, status(h, cookie(token(current))).status());
     }
 
     @Test
     void tokenForAKeyNotInTheAuthorizedSetIsRejected() {
         var h = handler(current);
-        assertEquals(401, h.status(bearer(token(removed))).status());
-        assertEquals(401, h.status(cookie(token(removed))).status());
+        assertEquals(401, status(h, bearer(token(removed))).status());
+        assertEquals(401, status(h, cookie(token(removed))).status());
     }
 
     @Test
     void removingAKeyAndRestartingRevokesItsOutstandingToken() {
         String outstanding = token(removed);
         // Before: both keys authorized.
-        assertEquals(200, handler(current, removed).status(bearer(outstanding)).status());
+        assertEquals(200, status(handler(current, removed), bearer(outstanding)).status());
         // "Restart" with the key removed from ops-authorized-keys: same secret, new handler.
         var restarted = handler(current);
-        assertEquals(401, restarted.status(bearer(outstanding)).status());
-        assertEquals(200, restarted.status(bearer(token(current))).status());
+        assertEquals(401, status(restarted, bearer(outstanding)).status());
+        assertEquals(200, status(restarted, bearer(token(current))).status());
     }
 
     @Test
@@ -71,13 +82,13 @@ class OpsKeyRevocationTest {
         String control = OpsToken.create(SECRET, 60, OpsScope.CONTROL, OpsKeys.fingerprint(current.publicKey()));
         var post = new Request("POST", "/ops/cache/clear", Map.of(), Map.of(),
             Map.of("Authorization", "Bearer " + control), null);
-        assertNotEquals(401, handler(current).clearCache(post).status(), "CONTROL key: allowed");
+        assertNotEquals(401, guarded(handler(current), OpsScope.CONTROL, post, handler(current)::clearCache).status(), "CONTROL key: allowed");
 
         var readOnly = new java.util.LinkedHashMap<String, OpsScope>();
         readOnly.put(current.publicKey(), OpsScope.READ);
         var lowered = new OpsHandler(new Stats(), null, null, new Router(), readOnly, SECRET);
-        assertEquals(401, lowered.clearCache(post).status(), "key lowered to READ: CONTROL refused");
-        assertEquals(200, lowered.status(bearer(control)).status(), "READ still works");
+        assertEquals(401, guarded(lowered, OpsScope.CONTROL, post, lowered::clearCache).status(), "key lowered to READ: CONTROL refused");
+        assertEquals(200, status(lowered, bearer(control)).status(), "READ still works");
     }
 
     @Test
@@ -85,7 +96,7 @@ class OpsKeyRevocationTest {
         // Every token this handler mints carries a kid; a kid-less one is not ours.
         var h = handler(current);
         String noKid = OpsToken.create(SECRET, 60, OpsScope.READ, null);
-        assertEquals(401, h.status(bearer(noKid)).status());
+        assertEquals(401, status(h, bearer(noKid)).status());
     }
 
     @Test
