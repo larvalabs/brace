@@ -372,8 +372,8 @@ class ProjectGeneratorTest {
         // The build context must not carry local secrets.
         var dockerignore = Files.readString(projDir.resolve(".dockerignore")).lines().toList();
         assertTrue(dockerignore.contains("application.conf"), "dev session secret stays out");
-        assertTrue(dockerignore.contains("*.key"), "ops private key stays out");
-        assertTrue(dockerignore.contains(".env"));
+        assertTrue(dockerignore.contains("**/*.key"), "ops private keys stay out, wherever they are");
+        assertTrue(dockerignore.contains("**/.env"));
         assertTrue(dockerignore.contains("target/"));
 
         // The reference compose file locks the app down and keeps Postgres private.
@@ -387,12 +387,17 @@ class ProjectGeneratorTest {
         assertFalse(db.contains("\n    ports:"), "Postgres must not publish a port");
         assertTrue(compose.contains("  db:\n    internal: true\n"), "the database network is internal");
         assertTrue(compose.contains("SESSION_SECRET: ${SESSION_SECRET:?"), "secrets come from the environment");
+        // The password travels separately: in the URL, a / or + (base64) would break parsing.
+        assertTrue(compose.contains("DATABASE_URL: postgresql://db:5432/myproject\n"), compose);
+        assertTrue(compose.contains("DB_PASS: ${POSTGRES_PASSWORD:?"), compose);
         assertTrue(compose.contains("\"127.0.0.1:8080:8080\""), "published on loopback only");
 
         // Dependabot keeps the digests current (decision D7).
         var dependabot = Files.readString(projDir.resolve(".github/dependabot.yml"));
         assertTrue(dependabot.contains("package-ecosystem: docker\n"), dependabot);
         assertTrue(dependabot.contains("package-ecosystem: docker-compose\n"), dependabot);
+        assertEquals(2, dependabot.split("version-update:semver-major", -1).length - 1,
+            "major bumps (e.g. Postgres 17 -> 18 on existing data) are ignored: " + dependabot);
 
         assertTrue(Files.readString(projDir.resolve(".gitignore")).lines().anyMatch(".env"::equals));
     }

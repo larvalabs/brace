@@ -637,18 +637,24 @@ app.trustedProxies(config.get("trusted.proxies"));   // the scaffold sets TRUSTE
 ```
 
 **Trust the proxy, not the private address space.** Every address in the list can set
-`req.ip()` to anything it likes. `10.0.0.0/8` or `172.16.0.0/12` trusts every container on a
-Docker host (they all get addresses in `172.16.0.0/12`) and every machine in a typical VPC, so
-any of them can forge `X-Forwarded-For` and pose as any client: rate limits, IP allowlists and
-audit logs all believe it. List the proxy's own address, or the subnet of a network only the
-proxy shares with the app. Behind Traefik (Dokploy), that is the proxy network's subnet:
+`req.ip()` to anything it likes. `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16` trusts every
+container on a Docker host (bridge networks, Swarm overlays and their default address pools all
+come from those ranges) and every machine in a typical VPC, so any of them can forge
+`X-Forwarded-For` and pose as any client: rate limits, IP allowlists and audit logs all believe
+it. List the proxy's own address, or the subnet of a network that only the proxy shares with
+the app.
+
+Behind Traefik on Dokploy, the proxy network is `dokploy-network`:
 
 ```bash
 docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
 ```
 
-A container's own address changes when it is recreated, so prefer the network's subnet and keep
-other services off that network.
+Trusting that subnet is far narrower than a whole private range, but Dokploy attaches every app
+it routes to `dokploy-network`, so any other app on the same host can still forge the header.
+That is acceptable when you run every app on the host. If you don't trust the other apps, trust
+only Traefik's own address, and give the Traefik container a fixed address on that network so
+it survives a restart.
 
 **Unconfigured proxy warning.** Behind a proxy that isn't trusted, `req.ip()` is the proxy's
 address for every client: `RateLimiter.perIp` becomes one shared bucket (one client can lock
@@ -1258,7 +1264,9 @@ alternative (turning every rate-limited endpoint into a 500) is worse. A warning
   digest updates weekly. The process runs as uid 65532 (`USER 65532:65532`), and the app's files
   are owned by root, so the process can't modify its own code or config. The `ENTRYPOINT` is
   exec form: `java` is PID 1 and gets `docker stop`'s SIGTERM. JVM flags come from
-  `JAVA_TOOL_OPTIONS`.
+  `JAVA_TOOL_OPTIONS`, which the health-check JVM also reads: flags that bind a port, write a
+  file or load an agent don't belong there unless the `HEALTHCHECK` is replaced by the
+  platform's HTTP check.
 - **`.dockerignore`.** Keeps `application.conf` (the dev session secret), `*.key` (the ops
   private key), `.env` files and `target/` out of the build context. The image's config is
   `application.conf.example`, whose values all come from environment variables.

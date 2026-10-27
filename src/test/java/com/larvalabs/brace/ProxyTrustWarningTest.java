@@ -87,6 +87,19 @@ class ProxyTrustWarningTest {
     }
 
     @Test
+    void anEmptyListMeansNoTrustedProxiesToo() throws Exception {
+        Brace app = start(Brace.app().trustedProxies(java.util.List.of()));
+        try {
+            get(app, "203.0.113.9");
+            var warnings = proxyWarnings();
+            assertEquals(1, warnings.size(), warnings.toString());
+            assertTrue(warnings.get(0).contains("no trusted proxies are configured"), warnings.get(0));
+        } finally {
+            app.stop();
+        }
+    }
+
+    @Test
     void blankOrNullConfigMeansNoTrustedProxies() throws Exception {
         Brace app = start(Brace.app().trustedProxies((String) null).trustedProxies("", " , "));
         try {

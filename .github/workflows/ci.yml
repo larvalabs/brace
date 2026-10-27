@@ -47,22 +47,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: .github/scripts/osv-scan.sh
 
-  # M13: builds a freshly scaffolded app's image with its own Dockerfile and runs its
-  # compose.yaml (read-only, non-root, Postgres alongside) until the health check passes.
-  # BRACE_REQUIRE_DOCKER makes a missing daemon a failure instead of a skip.
-  scaffold-image:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - name: Set up JDK 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
-        with:
-          java-version: '25'
-          distribution: 'temurin'
-          cache: maven
-
+      # M13: builds a freshly scaffolded app's image with its own Dockerfile and runs its
+      # compose.yaml (read-only, non-root, Postgres alongside) until the health check passes.
+      # In this job so the existing required check covers it. BRACE_REQUIRE_DOCKER makes a
+      # missing daemon a failure instead of a skip.
       - name: Scaffolded app image (build, run read-only as non-root, health check)
+        if: ${{ !cancelled() }}
         run: tests/cli/test-docker-image.sh
         env:
           BRACE_REQUIRE_DOCKER: '1'

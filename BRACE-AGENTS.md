@@ -1213,11 +1213,12 @@ app.trustedProxies(config.get("trusted.proxies")); // from config/env: comma-sep
 ```
 
 Name your proxy, not a whole private range. Every address in the list can set `req.ip()` to
-anything, and on a Docker host every container has an address in `172.16.0.0/12`, so trusting
-that range (or `10.0.0.0/8`) lets any container on the host impersonate any client. Behind
+anything, and Docker gives containers addresses from the private ranges, so trusting
+`10.0.0.0/8` or `172.16.0.0/12` lets any container on the host impersonate any client. Behind
 Traefik (Dokploy), trust the proxy network's subnet:
-`docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`. The
-scaffold reads it from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
+`docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`. Every
+app Dokploy routes joins that network, so on a host shared with apps you don't trust, trust
+Traefik's own (fixed) address instead. The scaffold reads the value from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
 without being trusted, Brace logs a one-time warning naming its address.
 
 Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.

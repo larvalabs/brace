@@ -1090,7 +1090,9 @@ regenerates it. To adopt the new setup, run `brace new` on a scratch name and co
 then:
 
 - move JVM flags from `JAVA_OPTS` to `JAVA_TOOL_OPTIONS` (the runtime has no shell to expand
-  `$JAVA_OPTS`);
+  `$JAVA_OPTS`). The `HEALTHCHECK`'s JVM reads it too, so keep out flags that bind a port
+  (`-agentlib:jdwp`, JMX), write a file or load an agent, or replace the `HEALTHCHECK` with your
+  platform's HTTP check on `/__brace/health`;
 - make sure nothing in the image writes outside `/tmp` if you use `read_only: true`;
 - point your platform's health check at `/__brace/health`;
 - if the app registered its own `GET /__brace/health` route, that route is no longer reachable:
@@ -1104,9 +1106,9 @@ everyone, and analytics sees one visitor. Nothing said so. Brace now logs a warn
 process, when a peer on a private or loopback address sends `X-Forwarded-For` or `Forwarded`
 and isn't a trusted proxy.
 
-The docs used to suggest `trustedProxies("10.0.0.0/8", "172.16.0.0/12")`. On a Docker host every
-container has an address in `172.16.0.0/12`, so that lets any container forge any client's
-address. They now show the proxy's own network.
+The docs used to suggest `trustedProxies("10.0.0.0/8", "172.16.0.0/12")`. Docker gives
+containers addresses from those ranges, so that lets any container on the host forge any
+client's address. They now show the proxy's own network.
 
 `app.trustedProxies(String...)` now accepts comma-separated values and skips null and blank
 ones, so a config value can be passed straight in; nothing left means no proxy is trusted. New
@@ -1118,6 +1120,8 @@ projects pass `config.get("trusted.proxies")`, which `application.conf.example` 
 - If the warning appears, set `trustedProxies` to the proxy's address or its network's CIDR.
   Behind Traefik (Dokploy):
   `docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`.
+  Every app Dokploy routes joins that network, so if the host runs apps you don't trust, trust
+  Traefik's own fixed address instead.
 - If you trust `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`, narrow it the same way.
 
 To read it from the environment as new projects do:

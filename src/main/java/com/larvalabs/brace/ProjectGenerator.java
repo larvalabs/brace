@@ -491,11 +491,17 @@ h1 { margin-bottom: 1rem; }
                 "#       box use an explicit -Xmx instead.\n" +
                 "#   -XX:+UseCompactObjectHeaders  (JDK 25+) smaller object headers, usually\n" +
                 "#       10-20% less heap for entity-heavy apps. Worth adding once tried under load.\n" +
+                "# The HEALTHCHECK below is a JVM too and reads JAVA_TOOL_OPTIONS as well, every 30s.\n" +
+                "# Keep flags that bind a port (-agentlib:jdwp, JMX), write a file (-Xlog:...:file=)\n" +
+                "# or load an agent (-javaagent) out of it: the probe would fail or duplicate them.\n" +
+                "# For those, delete the HEALTHCHECK and point your platform's HTTP health check at\n" +
+                "# /__brace/health instead.\n" +
                 "ENV JAVA_TOOL_OPTIONS=\"-XX:MaxRAMPercentage=50\"\n" +
                 "# Polls GET /__brace/health, Brace's built-in liveness route. There is no curl in\n" +
-                "# the image, so a small JVM makes the request; its flags keep it cheap.\n" +
+                "# the image, so a small JVM makes the request. It sets no heap or GC flags, which\n" +
+                "# could conflict with ones in JAVA_TOOL_OPTIONS and stop it starting.\n" +
                 "HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \\\n" +
-                "    CMD [\"java\", \"-XX:TieredStopAtLevel=1\", \"-XX:+UseSerialGC\", \"-Xmx32m\", \\\n" +
+                "    CMD [\"java\", \"-XX:TieredStopAtLevel=1\", \\\n" +
                 "         \"-cp\", \"app.jar\", \"com.larvalabs.brace.HealthCheck\", \"8080\"]\n" +
                 "# Exec form: java is PID 1 and gets SIGTERM from `docker stop`, so Brace's\n" +
                 "# shutdown hook drains in-flight work. brace.mode=prod (as `brace run` sets) is\n" +
@@ -507,10 +513,11 @@ h1 { margin-bottom: 1rem; }
             // image's config is application.conf.example, which reads its values from env vars.
             Files.writeString(root.resolve(".dockerignore"), """
 # Secrets: the image reads its config from env vars (application.conf.example).
+# Patterns here match from the context root only, hence **/ for files that may be anywhere.
 application.conf
-*.key
-.env
-.env.*
+**/*.key
+**/.env
+**/.env.*
 # Build output and local state: the image builds its own.
 target/
 lib/
@@ -537,7 +544,10 @@ jte-classes/
                 "    build: .\n" +
                 "    restart: unless-stopped\n" +
                 "    environment:\n" +
-                "      DATABASE_URL: postgresql://" + projectName + ":${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/" + projectName + "\n" +
+                "      # Credentials stay out of the URL, where a / or + in the password would break it.\n" +
+                "      DATABASE_URL: postgresql://db:5432/" + projectName + "\n" +
+                "      DB_USER: " + projectName + "\n" +
+                "      DB_PASS: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}\n" +
                 "      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}\n" +
                 "      OPS_ORIGINS: ${OPS_ORIGINS:?set OPS_ORIGINS}\n" +
                 "      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}\n" +
@@ -590,14 +600,22 @@ jte-classes/
 version: 2
 updates:
   # The Dockerfile's and compose.yaml's base images are pinned by digest; these keep them current.
+  # Major versions are left alone: a new Postgres major can't start on the old one's data
+  # directory, and a new Maven or JDK major is an upgrade to plan, not a weekly bump.
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 """);
 
             // CLAUDE.md — capability index with pointers to full reference

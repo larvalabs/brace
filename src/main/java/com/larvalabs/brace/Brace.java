@@ -155,9 +155,9 @@ public class Brace {
         return this;
     }
 
+    /** As {@link #trustedProxies(String...)}: comma-separated entries split, blanks skipped. */
     public Brace trustedProxies(List<String> cidrs) {
-        this.trustedProxies = new TrustedProxies(cidrs);
-        return this;
+        return trustedProxies(cidrs == null ? null : cidrs.toArray(new String[0]));
     }
 
     /**

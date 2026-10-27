@@ -97,7 +97,8 @@ services:
       - "127.0.0.1::8080"
 EOF
 export SESSION_SECRET="smoke-test-session-secret-$(date +%s)-0123456789abcdef"
-export POSTGRES_PASSWORD="smoke-test-postgres-password"
+# Base64 characters on purpose: the scaffold says to generate it with openssl rand -base64.
+export POSTGRES_PASSWORD="smoke/test+pass=word"
 export OPS_ORIGINS="http://localhost:8080"
 compose build > "$WORK/build.out" 2>&1 || { tail -50 "$WORK/build.out"; fail "docker build failed"; }
 pass "Image built"
