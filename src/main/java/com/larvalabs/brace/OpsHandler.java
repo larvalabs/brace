@@ -34,6 +34,36 @@ public class OpsHandler {
     // damage window of a stolen cookie.
     private static final int SESSION_TTL_SECONDS = 28800; // 8 hours
 
+    /**
+     * The Content-Security-Policy on every /ops response (M6). The dashboard and analytics pages
+     * load their script and CSS from {@code /__brace/} and carry no inline script, handler or
+     * style, so nothing but same-origin script, style and fetches is needed. Stricter than
+     * {@link SecurityHeaders#strict()} ({@code default-src 'none'}), so the two never conflict.
+     */
+    static final String CONTENT_SECURITY_POLICY = "default-src 'none'; script-src 'self'; style-src 'self'; "
+        + "img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+    /**
+     * Put the ops security headers on {@code result}, replacing any the app's after-middleware
+     * set. Called by the response choke point for the framework's /ops routes, after the app's
+     * after-middleware has run, so the ops policy holds whatever the app configures.
+     */
+    static void applySecurityHeaders(Result result) {
+        // An app's CORS headers don't apply to ops: one that reflects any Origin with credentials
+        // would let a same-site page read cookie-authenticated ops JSON.
+        result.headers().keySet().removeIf(name -> name.regionMatches(true, 0, "Access-Control-", 0, 15));
+        for (var header : List.of(
+                Map.entry("Content-Security-Policy", CONTENT_SECURITY_POLICY),
+                Map.entry("X-Content-Type-Options", "nosniff"),
+                Map.entry("X-Frame-Options", "DENY"),
+                // The exchange URL carries the login token; no ops page should send a Referer.
+                Map.entry("Referrer-Policy", "no-referrer"))) {
+            // Result's header map is case-sensitive: drop an app's differently-cased copy too.
+            result.headers().keySet().removeIf(name -> name.equalsIgnoreCase(header.getKey()));
+            result.header(header.getKey(), header.getValue());
+        }
+    }
+
     public OpsHandler(Stats stats, JobScheduler jobScheduler, Mailer mailer,
                       Router router, Map<String, OpsScope> authorizedKeys, String tokenSecret) {
         this(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, null, null, null);
@@ -179,6 +209,12 @@ public class OpsHandler {
     public Result loginToken(Request req) {
         var claims = req.opsClaims();
         if (claims == null) return Result.unauthorized("Invalid ops key");
+        // L3: only a bearer credential (the CLI) may mint one. The dashboard's session cookie is
+        // sent by any same-origin request, so script on any app page could otherwise mint a
+        // login token here, read it from the response, and carry it off the browser.
+        if (claims.type() != OpsToken.Type.BEARER) {
+            return Result.json(Map.of("error", "bearer_token_required"), 403).header("Cache-Control", "no-store");
+        }
 
         // Stateless, short-lived HMAC token — no server-side store, so exchange works on any
         // instance behind a load balancer (B5). It conveys exactly the access the caller
@@ -186,8 +222,12 @@ public class OpsHandler {
         // preserves into the browser session cookie — a read key yields a read-only,
         // attributed browser session. READ-gated because the dashboard itself is READ;
         // no escalation is possible since the minted token never exceeds the caller's scope.
-        String loginToken = OpsToken.create(tokenSecret, LOGIN_TOKEN_TTL_SECONDS, claims.scope(), claims.kid());
-        Instant expiry = Instant.now().plusSeconds(LOGIN_TOKEN_TTL_SECONDS);
+        // Never outlives the bearer it came from. The session the exchange mints from it is a
+        // cookie-only credential that can't mint anything itself, so no chain renews itself.
+        long now = System.currentTimeMillis() / 1000;
+        long exp = Math.min(now + LOGIN_TOKEN_TTL_SECONDS, claims.exp());
+        String loginToken = OpsToken.create(tokenSecret, exp, claims.scope(), claims.kid(), OpsToken.Type.LOGIN);
+        Instant expiry = Instant.ofEpochSecond(exp);
 
         return Json.of(Map.of(
             "loginToken", loginToken,
@@ -220,14 +260,15 @@ public class OpsHandler {
         }
 
         var claims = verifyForKnownKey(loginToken);
-        if (claims == null) {
+        if (claims == null || claims.type() != OpsToken.Type.LOGIN) {
             return Result.unauthorized("Invalid or expired login token");
         }
 
         // Mint an 8h ops session token (one workday), preserving the login token's scope (H1).
         // 8h rather than 24h: with scope-preservation the session is already bound to the
         // caller's ceiling; shorter TTL limits the damage window of a stolen cookie further.
-        String sessionToken = OpsToken.create(tokenSecret, SESSION_TTL_SECONDS, claims.scope(), claims.kid());
+        String sessionToken = OpsToken.create(tokenSecret, System.currentTimeMillis() / 1000 + SESSION_TTL_SECONDS,
+            claims.scope(), claims.kid(), OpsToken.Type.SESSION);
 
         // ?next=analytics lands on the analytics page instead (brace ops dashboard --analytics).
         // An allowlist, not a path: an open redirect here would bounce a fresh ops session anywhere.
@@ -495,10 +536,9 @@ public class OpsHandler {
     public Result dashboard(Request req) {
         var claims = req.opsClaims();
         if (claims == null) return Result.unauthorized("Invalid ops key");
-        // Generate a dashboard token with 2h TTL for htmx polling. Minted at the caller's
-        // own scope and key id — never above it (H1: this token is embedded in the page
-        // HTML, so a CONTROL default would hand every read-only caller a control token).
-        String dashboardToken = OpsToken.create(tokenSecret, 7200, claims.scope(), claims.kid());
+        // No token is minted into the page (L3): it used to embed a 2h bearer token for htmx,
+        // which any script on the app's origin could fetch this page to read. The dashboard's
+        // requests are same-origin under /ops, so they carry the httpOnly session cookie instead.
         Analytics.Summary today = null;
         if (analytics != null) {
             try {
@@ -507,7 +547,7 @@ public class OpsHandler {
                 // The ops dashboard must render even when the analytics query fails.
             }
         }
-        return Result.html(OpsDashboard.html(dashboardToken, claims.scope(), stats, jobScheduler, mailer,
+        return Result.html(OpsDashboard.html(claims.scope(), stats, jobScheduler, mailer,
             errorStore, cache, profiler, analytics != null, today));
     }
 
@@ -830,14 +870,18 @@ public class OpsHandler {
         return accept != null && accept.contains("application/json");
     }
 
+    /** A verified ops credential, and whether it came from the browser session cookie. */
+    private record Credential(OpsToken.Claims claims, boolean cookie) {}
+
     /**
      * Verify the request's token and return its claims, or {@code null} if unauthenticated.
      * Two credential channels are accepted:
      * <ol>
      *   <li>{@code Authorization: Bearer <token>} header — the standard machine-to-machine
-     *       channel used by the CLI and the dashboard's htmx polling.</li>
+     *       channel used by the CLI.</li>
      *   <li>The {@code __brace_ops_session} httpOnly cookie — set by the
-     *       {@code /ops/auth/exchange} browser handoff.</li>
+     *       {@code /ops/auth/exchange} browser handoff, and the only credential the dashboard
+     *       and analytics pages use (L3: no token is written into their HTML).</li>
      * </ol>
      * {@code ?token=} query-param credentials are intentionally NOT accepted here. Tokens in
      * URLs leak via proxy access logs, browser history, and the {@code Referer} header on
@@ -846,24 +890,25 @@ public class OpsHandler {
      * channel to carry a credential into a plain GET redirect — and the login token it accepts
      * is short-lived (60s) and scope-capped. See {@link #exchange} for the full rationale.
      *
-     * <p>This is the single choke point where a request's identity (kid) and scope are resolved —
-     * the natural place for a future ops audit log to attach.
+     * <p>This is the single choke point where a request's identity (kid) and scope are resolved.
      */
-    private OpsToken.Claims authenticate(Request req) {
+    private Credential authenticate(Request req) {
         if (tokenSecret == null) return null;
 
         // Check Authorization: Bearer <token> header
+        // Each channel takes only its own token type (L3): a login or session token presented as a
+        // bearer, or a bearer token planted in the cookie, is no credential at all.
         var authHeader = req.header("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             var claims = verifyForKnownKey(authHeader.substring(7));
-            if (claims != null) return claims;
+            if (claims != null && claims.type() == OpsToken.Type.BEARER) return new Credential(claims, false);
         }
 
         // Check ops session cookie (set by /ops/auth/exchange)
         String cookieToken = req.cookie(OPS_COOKIE_NAME);
         if (cookieToken != null) {
             var claims = verifyForKnownKey(cookieToken);
-            if (claims != null) return claims;
+            if (claims != null && claims.type() == OpsToken.Type.SESSION) return new Credential(claims, true);
         }
 
         return null;
@@ -872,7 +917,7 @@ public class OpsHandler {
     /**
      * Verify a token's HMAC and expiry, and that it was minted for a key that is still
      * authorized. Every token this handler mints carries the minting key's fingerprint as
-     * {@code kid} (auth, login-token, exchange and the dashboard re-mint all do), so a token
+     * {@code kid} (auth, login-token and exchange all do), so a token
      * with no {@code kid} is not one we issued and is rejected rather than trusted. The returned
      * scope is capped at the key's current ceiling: a CONTROL token minted before its key was
      * lowered to {@code scope:read} acts as READ from then on.
@@ -883,26 +928,38 @@ public class OpsHandler {
         OpsScope ceiling = ceilingByKid.get(claims.kid());
         if (ceiling == null) return null;
         OpsScope scope = claims.scope().min(ceiling);
-        return scope == claims.scope() ? claims : new OpsToken.Claims(claims.exp(), scope, claims.kid());
+        return scope == claims.scope() ? claims : new OpsToken.Claims(claims.exp(), scope, claims.kid(), claims.type());
     }
 
     /**
-     * True if the request carries a valid token whose scope grants {@code required}.
-     * Every authenticated request (granted or scope-denied) is recorded to the ops
-     * audit log, attributed to the token's key fingerprint.
-     */
-    /**
      * The route-level access requirement for an ops endpoint (H1): every /ops route is registered
      * with one, so an endpoint can't be added without authentication, and the handlers carry no
-     * auth code of their own. Verifies the credential, audits it, caps it at the key's current
-     * ceiling, and attaches the claims to the request for the handlers that mint derived tokens
-     * ({@code loginToken}, {@code dashboard}). A rejection is {@code no-store}, like every ops
-     * response.
+     * auth code of their own. Verifies the credential, caps it at the key's current ceiling,
+     * audits it (granted or scope-denied, attributed to the key's fingerprint), and attaches the
+     * claims to the request for the handlers that need them ({@code loginToken},
+     * {@code dashboard}). A rejection is {@code no-store}, like every ops response.
+     *
+     * <p>A mutating request authenticated by the session cookie must come from a page on this
+     * origin (L3). The dashboard's CONTROL buttons now post with the cookie alone, and
+     * {@code SameSite=Strict} keeps it off cross-site requests but not off a sibling subdomain's
+     * (same-site) form. A bearer header needs no such check: a cross-origin page can't set it.
+     * The ops routes are {@code .csrf(false)} because the CLI posts with a bearer token, so the
+     * framework's own cross-site check doesn't cover them.
      */
     Access access(OpsScope required) {
         return Access.internal("ops:" + required.wire(), req -> {
-            var claims = authorizedClaims(req, required);
-            if (claims == null) {
+            var credential = authenticate(req);
+            if (credential == null) {
+                return Result.unauthorized("Invalid ops key").header("Cache-Control", "no-store");
+            }
+            var claims = credential.claims();
+            if (credential.cookie() && BraceHandler.isMutating(req.method()) && !sameOrigin(req)) {
+                OpsAudit.record(req.method(), req.path(), claims.kid(), claims.scope(), required, false);
+                return Result.json(Map.of("error", "cross_origin_request"), 403).header("Cache-Control", "no-store");
+            }
+            boolean granted = claims.scope().grants(required);
+            OpsAudit.record(req.method(), req.path(), claims.kid(), claims.scope(), required, granted);
+            if (!granted) {
                 return Result.unauthorized("Invalid ops key").header("Cache-Control", "no-store");
             }
             req.setOpsClaims(claims);
@@ -911,18 +968,37 @@ public class OpsHandler {
     }
 
     /**
-     * Like {@link #authorize}, but returns the verified claims on success so the caller
-     * can act at the token's <em>actual</em> scope — e.g. re-mint a derived token capped
-     * at the caller's scope and attributed to the caller's key (H1: a READ caller must
-     * never receive a CONTROL token). Returns {@code null} when unauthenticated or
-     * scope-denied. Audited identically to {@link #authorize}.
+     * Whether a browser request came from a page on this origin: {@code Sec-Fetch-Site} when
+     * present (every current browser sends it), otherwise the {@code Origin} host must be the
+     * host the client addressed. With neither it is refused: a browser sends at least
+     * {@code Origin} on every POST, and non-browser clients authenticate with a bearer token.
      */
-    private OpsToken.Claims authorizedClaims(Request req, OpsScope required) {
-        var claims = authenticate(req);
-        if (claims == null) return null;
-        boolean granted = claims.scope().grants(required);
-        OpsAudit.record(req.method(), req.path(), claims.kid(), claims.scope(), required, granted);
-        return granted ? claims : null;
+    static boolean sameOrigin(Request req) {
+        String site = req.header("Sec-Fetch-Site");
+        if (site != null) return site.strip().equalsIgnoreCase("same-origin");
+        String origin = req.header("Origin");
+        if (origin == null || origin.isBlank() || !origin.contains("://")) return false;
+        String requestAuthority = req.hostWithPort();
+        if (requestAuthority == null) return false;
+        // Host and port, not the scheme: behind a TLS-terminating proxy the request's own scheme
+        // is http whatever the browser used. Another port on the same host is another origin
+        // (and gets the ops cookie, which isn't port-scoped), so it doesn't pass.
+        String originAuthority = Brace.normalizeOrigin(origin);
+        originAuthority = originAuthority.substring(originAuthority.indexOf("://") + 3);
+        if (originAuthority.equals(withoutDefaultPort(requestAuthority))) return true;
+        // A proxy rewriting Host to loopback makes a same-origin page look foreign; say so once.
+        String host = req.host();
+        if (host != null && BraceHandler.isLoopbackHost(host)) {
+            String pageHost = ProxyHeaders.httpsPageHost(origin, null);
+            if (pageHost != null) ProxyHeaders.warnHostRewrite(pageHost);
+        }
+        return false;
+    }
+
+    private static String withoutDefaultPort(String authority) {
+        if (authority.endsWith(":443")) return authority.substring(0, authority.length() - 4);
+        if (authority.endsWith(":80")) return authority.substring(0, authority.length() - 3);
+        return authority;
     }
 
     private static int levelRank(String level) {

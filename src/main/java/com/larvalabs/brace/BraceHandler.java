@@ -45,6 +45,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     // M2: the bundled htmx CSRF helper (sends ${csrfMeta}'s token as X-CSRF-Token), served like htmx.
     private final byte[] csrfHtmxJs;
     private final String csrfHtmxEtag;
+    // M6: the ops pages' script and stylesheets, served like htmx so the pages carry no inline
+    // script or style and run under the ops Content-Security-Policy. Keyed by request path.
+    private static final Map<String, BundledAsset> OPS_ASSETS = Map.of(
+        "/__brace/ops.js", BundledAsset.load("ops.js", "text/javascript; charset=utf-8"),
+        "/__brace/ops.css", BundledAsset.load("ops.css", "text/css; charset=utf-8"),
+        "/__brace/ops-analytics.css", BundledAsset.load("ops-analytics.css", "text/css; charset=utf-8"));
     // L3: dev mode is detected once at construction from the brace.mode system property —
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
@@ -88,7 +94,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         prepareUploadTempDir(tempDir);
     }
 
-    record StaticFileMapping(String urlPrefix, String directory) {}
+    record StaticFileMapping(String urlPrefix, String directory, StaticFiles mode) {
+        StaticFileMapping(String urlPrefix, String directory) {
+            this(urlPrefix, directory, StaticFiles.TRUSTED);
+        }
+    }
 
     void setBeforeSessionMiddleware(List<Middleware.BoundBeforeSession> middleware) {
         this.beforeSessionMiddleware = middleware;
@@ -635,6 +645,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     static final String STATIC_ROUTE_KEY = Stats.STATIC_ROUTE;
 
+    /** A file bundled at {@code /brace/<name>} in the jar, served from memory with a content-derived ETag. */
+    private record BundledAsset(byte[] bytes, String etag, String contentType) {
+        static BundledAsset load(String name, String contentType) {
+            try (var stream = BraceHandler.class.getResourceAsStream("/brace/" + name)) {
+                if (stream == null) throw new IllegalStateException("bundled resource /brace/" + name + " is missing");
+                byte[] bytes = stream.readAllBytes();
+                String etag = "\"" + name + "-" + Long.toHexString(bytes.length) + "-"
+                    + Integer.toHexString(java.util.Arrays.hashCode(bytes)) + "\"";
+                return new BundledAsset(bytes, etag, contentType);
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
+    }
+
     /**
      * Per-request state the response choke point needs to finish a request (H2): when it
      * started, what was asked for, which route answered, and how much database work it did.
@@ -796,6 +821,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (!name.equalsIgnoreCase("Content-Length")) ranged.header(name, value);
         });
         result.setCookies().forEach(cookie -> ranged.header("Set-Cookie", cookie));
+        ranged.untrusted = result.untrusted;
         return ranged.header("Content-Range",
             "bytes " + range.first() + "-" + range.last() + "/" + total);
     }
@@ -834,6 +860,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private void send(Request req, Result result, Response response, Callback callback,
                       Session session, LazySession csrfOnlySession, CookieSpec cookieSpec,
                       Exchange exchange) {
+        // M6: the framework's /ops routes get their own Content-Security-Policy, set here, after
+        // the app's after-middleware, so it replaces whatever policy the app sets (or doesn't).
+        // The ops pages are known content that runs under the strict policy; an app policy that
+        // is laxer ('unsafe-inline') would weaken them, and a different one could break them.
+        if (exchange.match != null && exchange.match.route().isFramework()) {
+            OpsHandler.applySecurityHeaders(result);
+        }
         attachSessionCookie(result, session, cookieSpec);
         attachSessionCookie(result, csrfOnlySession != null ? csrfOnlySession.peek() : null, cookieSpec);
         // H2: recording lives here, not at the call sites, because this is the ONE place every
@@ -945,6 +978,26 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // Set-Cookie may repeat — append each value so multiple cookies survive to the wire.
         for (var setCookie : result.setCookies()) {
             response.getHeaders().add("Set-Cookie", setCookie);
+        }
+        // M7: an after-middleware that sets the app's own CSP (SecurityHeaders) replaced the
+        // untrusted response's "sandbox" in the single-value header map. Send sandbox as its own
+        // field instead: a browser enforces every CSP header, so the two policies intersect.
+        if (result.untrusted
+                && !"sandbox".equals(response.getHeaders().get("Content-Security-Policy"))) {
+            response.getHeaders().add("Content-Security-Policy", "sandbox");
+        }
+        if (result.untrusted) {
+            // M7: untrusted() set these on the Result, but a header the handler added afterwards
+            // or an after-middleware could replace them; enforce them on what actually goes out.
+            String type = UntrustedContent.safeType(response.getHeaders().get("Content-Type"));
+            response.getHeaders().put("Content-Type", type);
+            if (!UntrustedContent.isRasterImage(type)) {
+                String disposition = response.getHeaders().get("Content-Disposition");
+                if (disposition == null || !disposition.strip().toLowerCase(java.util.Locale.ROOT).startsWith("attachment")) {
+                    response.getHeaders().put("Content-Disposition", "attachment");
+                }
+            }
+            response.getHeaders().put("X-Content-Type-Options", "nosniff");
         }
         if (result instanceof StreamResult streamResult) {
             if (HttpMethod.HEAD.is(response.getRequest().getMethod())) {
@@ -1209,6 +1262,18 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 .header("ETag", htmxEtag)
                 .header("Cache-Control", cacheControl);
         }
+        BundledAsset opsAsset = OPS_ASSETS.get(requestPath);
+        if (opsAsset != null) {
+            // Like htmx: a fixed URL whose bytes change with a brace upgrade, so revalidate always.
+            String cacheControl = "public, max-age=0, must-revalidate";
+            if (isNotModified(request, opsAsset.etag(), 0)) {
+                return Result.notModified().header("ETag", opsAsset.etag()).header("Cache-Control", cacheControl);
+            }
+            return Result.bytes(opsAsset.bytes(), opsAsset.contentType())
+                .header("X-Content-Type-Options", "nosniff")
+                .header("ETag", opsAsset.etag())
+                .header("Cache-Control", cacheControl);
+        }
         for (var mapping : staticFileMappings) {
             String prefix = mapping.urlPrefix();
             if (!requestPath.startsWith(prefix)) continue;
@@ -1295,7 +1360,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             try {
-                String contentType = contentTypeForPath(filePath.toString());
+                // M7: an untrusted directory takes its types from the upload allowlist, not the
+                // asset table, so an uploaded .html/.svg/.js is octet-stream, never text/html. A
+                // file that resolves into an untrusted directory is untrusted whichever mapping
+                // reached it: registration refuses nested directories, but a symlink made later
+                // could still put one under the other.
+                boolean untrusted = mapping.mode() == StaticFiles.UNTRUSTED || insideUntrustedDirectory(realFile);
+                String contentType = untrusted
+                    ? UntrustedContent.typeForName(filePath.toString())
+                    : contentTypeForPath(filePath.toString());
                 // Streamed, not read whole: this used to be Files.readAllBytes, so serving a large
                 // asset cost its full size in heap for every concurrent request. Range support
                 // rides along with the streaming result, which is what makes seeking in a served
@@ -1307,12 +1380,36 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 if (mtime > 0) {
                     result.header("Last-Modified", DateGenerator.formatDate(mtime));
                 }
-                return result;
+                return untrusted ? result.untrusted() : result;
             } catch (Exception e) {
                 return Result.error(500, "Internal Server Error");
             }
         }
         return null;
+    }
+
+    private boolean insideUntrustedDirectory(Path realFile) {
+        for (var mapping : staticFileMappings) {
+            if (mapping.mode() != StaticFiles.UNTRUSTED) continue;
+            Path dir = realPathOrNearest(Path.of(mapping.directory()).toAbsolutePath().normalize());
+            if (realFile.startsWith(dir)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * {@code path} with symlinks resolved; for a path that doesn't exist yet, its nearest existing
+     * ancestor resolved, plus the rest as written.
+     */
+    static Path realPathOrNearest(Path path) {
+        Path existing = path;
+        while (existing != null && !Files.exists(existing)) existing = existing.getParent();
+        if (existing == null) return path;
+        try {
+            return existing.toRealPath().resolve(existing.relativize(path));
+        } catch (java.io.IOException e) {
+            return path;
+        }
     }
 
     /** True when the client's conditional-GET headers show it already holds the current resource. */

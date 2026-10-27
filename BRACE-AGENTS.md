@@ -74,7 +74,7 @@ var app = Brace.app()
     .ops("ops-authorized-keys")
     .staticFiles("/assets", "public")
     .maxUploadSize("10MB")
-    .after(SecurityHeaders.defaults());
+    .after(SecurityHeaders.strict());
 ```
 
 Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
@@ -321,7 +321,20 @@ component (basename, control and invisible format characters stripped, leading d
 spaces trimmed, at most 255 bytes, never empty —
 not unique, so prefix an id if names can collide), and `saveTo(dir, name)` throws
 `IllegalArgumentException` if `name` would land outside `dir`, symlinks included. It returns the
-path written. `saveTo(Path)` takes a full path and does no checking.
+path written. `saveTo(Path)` takes a full path and does no checking. `contentType()` is the
+uploader's claim; never serve or store by it.
+
+**Serving uploads:** an uploaded `.html`/`.svg` served inline runs script on your origin. Serve
+upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED)` and handler
+responses with `.untrusted()` (`Result.fileUnder(dir, name).untrusted()`). Untrusted responses get
+an allowlisted type (else `application/octet-stream`), `Content-Disposition: attachment` unless a
+raster image (png/jpeg/gif/webp/avif/bmp/ico; not svg), and always `CSP: sandbox` + `nosniff`,
+enforced as the response is written, so a later header or after-middleware can't undo them.
+`.untrusted()` applies to 2xx responses only (an error page is the app's own). `safeFilename()` and
+`Storage.safeKey` neutralize executable extensions (`html`, `svg`, `xml`, `rss`, `js`, `css`,
+`php`…, anywhere in the name): `page.html` → `page_html.bin`, `a.php.png` → `a_php.png`, key
+`…/<uuid>.bin`. `Storage.put(key, bytes, type)` and `put(key, path, type)` store the type you
+pass: never pass `file.contentType()`, which the uploader chose.
 
 Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
 living in the heap for the request; below it they stay in memory. Either way the API is the same.
@@ -354,6 +367,7 @@ Result.file(path)                           // stream a file (Content-Length, Ra
 Result.file(path, "video/mp4")              // ...with an explicit content type
 Result.fileUnder(dir, req.pathParam("name")) // a request-named file under dir; 404 if it escapes dir or is missing
 Result.download(path, "report.csv")         // stream as an attachment
+Result.fileUnder(dir, name).untrusted()     // a user upload: sandboxed, attachment unless a raster image
 Result.stream(inputStream, "image/png")     // stream of unknown length (chunked)
 Result.stream(inputStream, "image/png", n)  // ...of known length
 Result.stream(out -> {...}, "text/csv")     // generated content, written as it is produced
@@ -590,7 +604,9 @@ public record PostForm(
 }
 ```
 
-Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@In({"a","b"})`, `@Optional`.
+Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@SafeUrl`, `@In({"a","b"})`, `@Optional`.
+`@SafeUrl` accepts only an absolute `http`/`https` URL with a host: use it on any link a user
+supplies (a profile website) that a page will render as an `href`.
 `@Min`/`@Max` compare exactly, fractions included (`@Min(0)` rejects `-0.5`); `double`/`float`
 components reject NaN and ±Infinity with "must be a finite number".
 
@@ -650,6 +666,30 @@ JTE compiled templates. Files are `.jte` in the configured templates directory.
 Render from handler: `Result.view("posts/index", "title", "Posts", "posts", posts)`. Template params are type-checked at compile time.
 
 Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
+
+**Output escaping.** `${...}` is escaped for where it lands: text, attribute, `<script>`. On top
+of JTE's escaping, Brace's template output:
+- **URL attributes** (`href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `hx-get`/
+  `hx-post`/... and their `data-hx-` forms; `to`/`values` on SVG `<set>`/`<animate>`): the whole
+  value, every `${...}` in it together, is checked as a browser parses it. When the template's own
+  text fixed the scheme or made it relative (`href="mailto:${email}"`, `href="/users/${id}"`) it
+  is kept; when user data decides the scheme, only `http`/`https`/`mailto`/`tel` pass (plus raster
+  `data:image/png|jpeg|gif|webp|avif|bmp` on `src`/`poster`), and anything else (`javascript:`,
+  `data:`, `java\tscript:`, `${scheme}://${host}` with a `javascript` scheme) renders as
+  `about:invalid#blocked`.
+- **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request`,
+  `hx-trigger`): user data is escaped with `\uXXXX` sequences, valid in a JavaScript string and in
+  JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and
+  `hx-vals='{"q": "${q}"}'` stays valid JSON. Still, these attributes are code: prefer passing user
+  data as `hx-vals` JSON or `data-*` attributes over writing it into a handler.
+- `srcdoc`: user data is escaped twice, so it becomes text in the frame, never markup. Its content
+  isn't URL-checked; for an HTML preview, sanitize the HTML, write it with
+  `srcdoc="$unsafe{Html.escape(sanitized)}"`, and add `sandbox` to the iframe.
+- A `@template` call inside an attribute value renders its output in body context (JTE), without
+  attribute escaping or the URL check: pass values, not template calls, into attributes.
+
+`$unsafe{...}` bypasses all of it. Outside templates, `Url.isSafe(url)` / `Url.safe(url)` apply
+the same URL rule (e.g. a URL returned in JSON for a client to put in an `href`).
 
 **Dev vs prod compilation.** In dev mode templates compile on first render and
 hot-reload on change. In prod mode (`brace.mode=prod`, set by `brace run`) the
@@ -949,9 +989,15 @@ storage.keyFromUrl("https://cdn.example.com/...");  // extract key from URL
 var stored = storage.putGenerated("avatars", req.file("avatar"));
 stored.key();   // "avatars/a1b2c3d4-….jpg"     stored.url();  // "https://cdn.example.com/avatars/…"
 var stored2 = storage.put("custom/path.jpg", file);          // UploadedFile at an explicit key
-String key = Storage.safeKey("uploads", "user photo.jpg");   // sanitizes and adds UUID
+storage.put("logos/a.svg", file, "image/svg+xml");           // a type you verified yourself
+String key = Storage.safeKey("uploads", "user photo.jpg");   // UUID + extension; "x.svg" -> "<uuid>.bin"
 String ext = Storage.extension("photo.jpg");                 // "jpg" (alphanumeric only)
 ```
+
+`put(key, uploadedFile)` and `putGenerated` ignore the uploader's `contentType()`: the object's
+type comes from the key's extension via an allowlist (raster images, pdf, txt, csv, json, office
+docs, archives, audio, video; else `application/octet-stream`), and all but raster images are
+stored with `Content-Disposition: attachment`.
 
 Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`, `s3.timeoutSeconds` (per-request timeout, default 60).
 
@@ -961,7 +1007,9 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 
 `staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
 serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
-leading `.well-known/`.
+leading `.well-known/`. The longest matching prefix wins. For a directory users write to, use
+`staticFiles(prefix, dir, StaticFiles.UNTRUSTED)` (see Serving uploads); it must not be inside
+a trusted mapping's directory, or `staticFiles` throws.
 
 Cache-bust static assets by appending a content-hash query parameter — in a JTE template
 (or any code that produces URLs): `${Assets.url("/assets/app.css")}` →
@@ -1161,17 +1209,39 @@ app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefr
 
 ### Security Headers
 
-`app.after(SecurityHeaders.defaults())` adds `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`, and
-`Permissions-Policy: interest-cohort=()` to all responses. Customize with the builder:
+Use `app.after(SecurityHeaders.strict())`. It sets `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`,
+`Permissions-Policy: interest-cohort=()` and this Content-Security-Policy on every response
+(handlers, static files, 404s, 500s):
+
+```
+default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+```
+
+Under it the browser runs no inline `<script>`, `on*=` handler, `javascript:` URL or `eval`, so
+markup injected past escaping can't execute. Put JavaScript in files under your static
+directory and bind events with `addEventListener`. Inline `<style>` blocks and `style=""`
+attributes are blocked too (styles fall back to `default-src 'self'`); use a stylesheet.
+Brace's own `/__brace/htmx.min.js` and `/__brace/csrf-htmx.js` are same-origin and load fine.
+htmx inserts a small `<style>` for its request indicators: blocked, it only logs a console
+violation; add `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>` to the
+layout to stop it. htmx attributes still work (`hx-on:*` needs `eval` and doesn't).
+
+`SecurityHeaders.defaults()` is the same minus the CSP, for an app that still has inline
+scripts. Customize with the builder; never put `'unsafe-inline'` in `script-src`, which lets any
+injected inline script run and makes the policy pointless:
 
 ```java
 app.after(SecurityHeaders.builder()
     .contentTypeOptions("nosniff").referrerPolicy("no-referrer").frameOptions("SAMEORIGIN")
     .strictTransportSecurity("max-age=31536000; includeSubDomains")
-    .contentSecurityPolicy("default-src 'self'; script-src 'self' 'unsafe-inline'")
+    .contentSecurityPolicy(SecurityHeaders.STRICT_CSP + "; img-src 'self' https://cdn.example.com")
     .build());
 ```
+
+The `/ops` pages get the framework's own, stricter policy (`default-src 'none'`, scripts and
+styles from `/__brace/` only), which replaces the app's on those responses. `brace check` warns
+when `GET /` has no CSP or one that allows inline scripts.
 
 ### Response Compression
 
@@ -1396,7 +1466,18 @@ entirely — they reach neither stdout nor `/ops/logs`.
 
 Bundled htmx 2.0.10 — add `<script src="/__brace/htmx.min.js"></script>` to your layout, plus
 `${csrfMeta}` in the `<head>` and `<script src="/__brace/csrf-htmx.js"></script>` so non-GET htmx
-requests carry the CSRF token (see CSRF). An htmx request rejected by `Access.session` gets 401
+requests carry the CSRF token (see CSRF). Also turn off htmx's script evaluation, which nothing
+in the default pattern needs:
+
+```html
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+```
+
+`allowEval:false` stops htmx evaluating code from attributes: `hx-on*` handlers, `hx-vals="js:..."`
+and `hx-trigger` filters don't run (plain `onclick` and script files are unaffected), so attach
+behavior with `addEventListener` in a script file. `allowScriptTags:false` stops `<script>` in
+swapped-in HTML from running. Drop either only if a page needs it; Brace still escapes user data
+in those attributes (see Templates). An htmx request rejected by `Access.session` gets 401
 with `HX-Redirect`, so the browser navigates to the login page instead of swapping it in.
 Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize by detecting htmx requests:
 

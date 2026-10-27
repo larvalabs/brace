@@ -13,21 +13,21 @@ public class OpsDashboard {
     static final int TOP_ROUTES_WINDOW_MINUTES = 5;
 
     /**
-     * Render the dashboard for a caller holding {@code scope}. The embedded {@code token}
-     * must be minted at that same scope (see {@code OpsHandler.dashboard}); mutating
-     * controls (cache clear, error resolve) are only rendered when the scope grants
-     * {@link OpsScope#CONTROL} — read tokens can view the dashboard but never mutate (H1).
+     * Render the dashboard for a caller holding {@code scope}. Mutating controls (cache clear,
+     * error resolve) are only rendered when the scope grants {@link OpsScope#CONTROL}; read
+     * callers can view the dashboard but never mutate (H1). The page carries no credential:
+     * its htmx requests authenticate with the ops session cookie (L3).
      */
-    public static String html(String token, OpsScope scope, Stats stats, JobScheduler jobScheduler,
+    public static String html(OpsScope scope, Stats stats, JobScheduler jobScheduler,
                               Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler) {
-        return html(token, scope, stats, jobScheduler, mailer, errorStore, cache, profiler, false, null);
+        return html(scope, stats, jobScheduler, mailer, errorStore, cache, profiler, false, null);
     }
 
     /**
      * As above, plus the analytics header switch and "Visitors today" card when analytics is on.
      * {@code today} may be null with analytics on (its query failed); the card then shows a dash.
      */
-    public static String html(String token, OpsScope scope, Stats stats, JobScheduler jobScheduler,
+    public static String html(OpsScope scope, Stats stats, JobScheduler jobScheduler,
                               Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler,
                               boolean analyticsEnabled, Analytics.Summary today) {
         boolean canControl = scope != null && scope.grants(OpsScope.CONTROL);
@@ -67,88 +67,27 @@ public class OpsDashboard {
             resolvedErrors = errorStore.list("resolved");
         }
 
-        // Page head
+        // Page head. No inline <style>, style="" or <script>: the CSS and JS are served from
+        // /__brace/ so the page runs under the ops Content-Security-Policy (M6). The htmx-config
+        // meta stops htmx injecting its indicator <style>, which that policy would block.
         sb.append("""
             <!DOCTYPE html>
             <html>
             <head>
             <title>Brace Ops</title>
             <meta charset="UTF-8">
-            <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12px; padding: 16px; }
-            .header { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 12px; }
-            .header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; white-space: nowrap; }
-            .header .meta { color: #565f89; }
-            .header .brand { display: flex; align-items: center; gap: 12px; }
-            .switch { display: inline-flex; border: 1px solid #30363d; }
-            .switch a { padding: 1px 10px; color: #565f89; text-decoration: none; }
-            .switch a[aria-current="page"] { color: #e6edf3; background: rgba(122,162,247,.14); }
-            .switch a:hover { color: #c9d1d9; }
-            a.stat-link { color: inherit; text-decoration: none; }
-            a.stat-link:hover { border-color: #7aa2f7; }
-            .stats-row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
-            .stat-card { flex: 1; border: 1px solid #30363d; padding: 8px; min-width: 120px; }
-            .stat-card .label { color: #565f89; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-            .stat-card .value { font-size: 20px; font-weight: bold; margin-top: 2px; }
-            .stat-card .detail { color: #565f89; font-size: 10px; margin-top: 1px; }
-            .section { border: 1px solid #30363d; padding: 10px; margin-bottom: 14px; }
-            .section-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
-            .two-col { display: flex; gap: 10px; margin-bottom: 14px; }
-            .two-col > div { flex: 1; min-width: 0; }
-            @media (max-width: 800px) { .two-col { flex-direction: column; } }
-            table { border-collapse: collapse; width: 100%; }
-            th { text-align: left; color: #565f89; font-size: 9px; text-transform: uppercase; padding: 3px 0; }
-            td { padding: 3px 0; }
-            th.num, td.num { text-align: right; white-space: nowrap; padding-left: 10px; }
-            .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 45px; }
-            .sparkline .bar { flex: 1; min-width: 4px; }
-            .sparkline .bar-lo { background: #238636; }
-            .sparkline .bar-md { background: #2ea043; }
-            .sparkline .bar-hi { background: #3fb950; }
-            .sparkline-sm { height: 25px; }
-            .sparkline .bar-err { background: #f7768e; }
-            .sparkline .bar-heap { background: #bb9af7; }
-            .sparkline .lat { position: relative; align-self: stretch; }
-            .sparkline .lat > div { position: absolute; left: 0; right: 0; bottom: 0; }
-            .lat-p95 { background: #3d59a1; }
-            .lat-avg { background: #7aa2f7; }
-            .lat-key-p95 { color: #3d59a1; }
-            .lat-key-avg { color: #7aa2f7; }
-            .c-blue { color: #7aa2f7; }
-            .c-green { color: #9ece6a; }
-            .c-purple { color: #bb9af7; }
-            .c-amber { color: #e0af68; }
-            .c-red { color: #f7768e; }
-            .c-cyan { color: #7dcfff; }
-            .c-muted { color: #565f89; }
-            td.name { max-width: 0; width: 100%; }
-            .lt { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl; text-align: left; }
-            .lt > bdi { direction: ltr; unicode-bidi: isolate; }
-            .pkg { color: #565f89; }
-            .method { color: #c9d1d9; font-weight: bold; }
-            .ok-dot { color: #9ece6a; }
-            .err-dot { color: #f7768e; }
-            .btn { background: transparent; color: #7aa2f7; border: 1px solid #30363d; padding: 2px 8px; cursor: pointer; font-family: inherit; font-size: 11px; }
-            .btn:hover { border-color: #7aa2f7; }
-            .btn-resolve { color: #9ece6a; }
-            .btn-resolve:hover { border-color: #9ece6a; }
-            .btn-danger { color: #f7768e; }
-            .btn-danger:hover { border-color: #f7768e; }
-            .tab-bar { display: flex; gap: 0; margin-bottom: 0; }
-            .tab { background: transparent; border: 1px solid #30363d; border-bottom: none; padding: 4px 16px; cursor: pointer; color: #565f89; font-family: inherit; font-size: 11px; }
-            .tab.active { color: #7aa2f7; border-color: #7aa2f7; border-bottom: 1px solid #0d1117; margin-bottom: -1px; z-index: 1; position: relative; }
-            .tab-content { border: 1px solid #30363d; border-top: 1px solid #7aa2f7; padding: 10px; margin-bottom: 14px; }
-            .stack-trace { max-height: 200px; overflow-y: auto; background: #161b22; padding: 8px; margin-top: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-all; border: 1px solid #30363d; color: #c9d1d9; }
-            </style>
+            <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
+            <link rel="stylesheet" href="/__brace/ops.css">
             <script src="/__brace/htmx.min.js"></script>
+            <script src="/__brace/ops.js"></script>
             </head>
             <body>
             """);
 
-        // Dashboard content — this is the div that htmx polls and replaces
+        // Dashboard content: the div htmx polls and replaces. Cookie-only (L3): the request
+        // carries the httpOnly ops session cookie, so no credential is written into the page,
+        // where any script running on the app's origin could read it.
         sb.append("<div id=\"dashboard-content\" hx-get=\"/ops/dashboard\"")
-          .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
           .append(" hx-select=\"#dashboard-content\" hx-target=\"this\" hx-swap=\"outerHTML\" hx-trigger=\"every 5s\">\n");
 
         // Header
@@ -236,21 +175,20 @@ public class OpsDashboard {
             // Request rate sparkline: one bar per minute, the axis in the card's unit
             sb.append("<div class=\"section\">");
             long maxReq = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::requests).max().orElse(1));
-            sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;\">")
+            sb.append("<div class=\"spark-label\">")
               .append(unit == RateUnit.SECOND ? "Requests / Second" : "Requests / Minute")
-              .append(" <span style=\"float:right\">last ").append(minutes.size()).append(" / 60 min</span></div>");
-            sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
-            sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+              .append(" <span class=\"right\">last ").append(minutes.size()).append(" / 60 min</span></div>");
+            sb.append("<div class=\"spark-row\">");
+            sb.append("<div class=\"spark-axis\">")
               .append("<span>").append(unit == RateUnit.MINUTE ? String.valueOf(maxReq) : RateUnit.format(unit.fromPerMinute(maxReq)))
               .append("</span><span>0</span></div>");
-            sb.append("<div class=\"sparkline\" style=\"flex:1\">");
+            sb.append("<div class=\"sparkline\">");
             for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
             for (var m : minutes) {
                 double pct = (m.requests() * 100.0) / maxReq;
                 String barClass = pct > 75 ? "bar-hi" : pct > 40 ? "bar-md" : "bar-lo";
-                sb.append("<div class=\"bar ").append(barClass).append("\" style=\"height:")
-                  .append(String.format("%.0f", Math.max(2, pct)))
-                  .append("%\" title=\"").append(m.requests()).append(" reqs")
+                sb.append("<div class=\"bar ").append(barClass).append(' ').append(height(Math.max(2, pct)))
+                  .append("\" title=\"").append(m.requests()).append(" reqs")
                   .append(unit == RateUnit.SECOND ? " (" + RateUnit.format(unit.fromPerMinute(m.requests())) + "/s)" : "")
                   .append(", ")
                   .append(String.format("%.1f", m.avgLatencyMs())).append(" ms avg @ ")
@@ -263,14 +201,14 @@ public class OpsDashboard {
                 .mapToDouble(m -> Math.max(m.p95LatencyMs(), m.avgLatencyMs())).max().orElse(0);
             if (maxLat > 0) {
                 var lastLat = minutes.getLast();
-                sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;\">")
+                sb.append("<div class=\"spark-label next\">")
                   .append("Latency ms <span class=\"lat-key-avg\">■ avg</span> <span class=\"lat-key-p95\">■ p95</span>")
-                  .append("<span style=\"float:right\">last min avg ").append(formatMetric(lastLat.avgLatencyMs()))
+                  .append("<span class=\"right\">last min avg ").append(formatMetric(lastLat.avgLatencyMs()))
                   .append(" · p95 ").append(formatMetric(lastLat.p95LatencyMs())).append("</span></div>");
-                sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
-                sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                sb.append("<div class=\"spark-row\">");
+                sb.append("<div class=\"spark-axis\">")
                   .append("<span>").append(formatMetric(maxLat)).append("</span><span>0</span></div>");
-                sb.append("<div class=\"sparkline\" style=\"flex:1\">");
+                sb.append("<div class=\"sparkline\">");
                 for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
                 for (var m : minutes) {
                     if (m.requests() == 0) {
@@ -280,10 +218,8 @@ public class OpsDashboard {
                     sb.append("<div class=\"bar lat\" title=\"").append(formatMetric(m.avgLatencyMs())).append(" ms avg, ")
                       .append(formatMetric(m.p95LatencyMs())).append(" ms p95, ")
                       .append(formatMetric(m.maxLatencyUs() / 1000.0)).append(" ms max @ ").append(m.ts()).append("\">")
-                      .append("<div class=\"lat-p95\" style=\"height:")
-                      .append(String.format("%.0f", Math.max(2, m.p95LatencyMs() * 100.0 / maxLat))).append("%\"></div>")
-                      .append("<div class=\"lat-avg\" style=\"height:")
-                      .append(String.format("%.0f", Math.max(2, m.avgLatencyMs() * 100.0 / maxLat))).append("%\"></div></div>");
+                      .append("<div class=\"lat-p95 ").append(height(Math.max(2, m.p95LatencyMs() * 100.0 / maxLat))).append("\"></div>")
+                      .append("<div class=\"lat-avg ").append(height(Math.max(2, m.avgLatencyMs() * 100.0 / maxLat))).append("\"></div></div>");
                 }
                 sb.append("</div></div>\n");
             }
@@ -291,18 +227,17 @@ public class OpsDashboard {
             // Error rate sparkline
             long maxErr = minutes.stream().mapToLong(Stats.MinuteSnapshot::errors).max().orElse(0);
             if (maxErr > 0) {
-                sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;\">")
+                sb.append("<div class=\"spark-label next\">")
                   .append("Errors / Minute</div>");
-                sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
-                sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                sb.append("<div class=\"spark-row\">");
+                sb.append("<div class=\"spark-axis\">")
                   .append("<span>").append(maxErr).append("</span><span>0</span></div>");
-                sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                sb.append("<div class=\"sparkline sparkline-sm\">");
                 for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
                 for (var m : minutes) {
                     double pct = (m.errors() * 100.0) / maxErr;
-                    sb.append("<div class=\"bar bar-err\" style=\"height:")
-                      .append(String.format("%.0f", Math.max(pct > 0 ? 4 : 0, pct)))
-                      .append("%\" title=\"").append(m.errors()).append(" errors @ ").append(m.ts())
+                    sb.append("<div class=\"bar bar-err ").append(height(Math.max(pct > 0 ? 4 : 0, pct)))
+                      .append("\" title=\"").append(m.errors()).append(" errors @ ").append(m.ts())
                       .append("\"></div>");
                 }
                 sb.append("</div></div>\n");
@@ -311,18 +246,17 @@ public class OpsDashboard {
             // Heap sparkline
             long maxHeap = Math.max(1, minutes.stream().mapToLong(Stats.MinuteSnapshot::heapUsedMB).max().orElse(1));
             long minHeap = minutes.stream().mapToLong(Stats.MinuteSnapshot::heapUsedMB).min().orElse(0);
-            sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:8px;\">")
+            sb.append("<div class=\"spark-label next\">")
               .append("Heap MB</div>");
-            sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
-            sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+            sb.append("<div class=\"spark-row\">");
+            sb.append("<div class=\"spark-axis\">")
               .append("<span>").append(maxHeap).append("</span><span>").append(minHeap).append("</span></div>");
-            sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+            sb.append("<div class=\"sparkline sparkline-sm\">");
             for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
             for (var m : minutes) {
                 double pct = (m.heapUsedMB() * 100.0) / maxHeap;
-                sb.append("<div class=\"bar bar-heap\" style=\"height:")
-                  .append(String.format("%.0f", Math.max(4, pct)))
-                  .append("%\" title=\"").append(m.heapUsedMB()).append(" MB @ ").append(m.ts())
+                sb.append("<div class=\"bar bar-heap ").append(height(Math.max(4, pct)))
+                  .append("\" title=\"").append(m.heapUsedMB()).append(" MB @ ").append(m.ts())
                   .append("\"></div>");
             }
             sb.append("</div></div>\n");
@@ -353,18 +287,18 @@ public class OpsDashboard {
                 for (var name : counterNames) {
                     long maxVal = Math.max(1, minutes.stream()
                         .mapToLong(m -> m.counterDeltas().getOrDefault(name, 0L)).max().orElse(1));
-                    sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;margin-top:10px;\">")
-                      .append(esc(name)).append(" <span class=\"c-cyan\" style=\"font-size:9px\">(counter)</span></div>");
-                    sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
-                    sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                    sb.append("<div class=\"spark-label next\">")
+                      .append(esc(name)).append(" <span class=\"c-cyan small\">(counter)</span></div>");
+                    sb.append("<div class=\"spark-row\">");
+                    sb.append("<div class=\"spark-axis\">")
                       .append("<span>").append(maxVal).append("</span><span>0</span></div>");
-                    sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                    sb.append("<div class=\"sparkline sparkline-sm\">");
                     for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
                     for (var m : minutes) {
                         long val = m.counterDeltas().getOrDefault(name, 0L);
                         double pct = (val * 100.0) / maxVal;
-                        sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(val > 0 ? 4 : 0, pct)))
-                          .append("%;background:#7dcfff\" title=\"").append(val).append(" @ ").append(m.ts()).append("\"></div>");
+                        sb.append("<div class=\"bar bar-counter ").append(height(Math.max(val > 0 ? 4 : 0, pct)))
+                          .append("\" title=\"").append(val).append(" @ ").append(m.ts()).append("\"></div>");
                     }
                     sb.append("</div></div>\n");
                 }
@@ -375,18 +309,18 @@ public class OpsDashboard {
                         .mapToLong(m -> m.gaugeValues().getOrDefault(name, 0L)).max().orElse(1));
                     long minVal = minutes.stream()
                         .mapToLong(m -> m.gaugeValues().getOrDefault(name, 0L)).min().orElse(0);
-                    sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;margin-top:10px;\">")
-                      .append(esc(name)).append(" <span class=\"c-amber\" style=\"font-size:9px\">(gauge)</span></div>");
-                    sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
-                    sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                    sb.append("<div class=\"spark-label next\">")
+                      .append(esc(name)).append(" <span class=\"c-amber small\">(gauge)</span></div>");
+                    sb.append("<div class=\"spark-row\">");
+                    sb.append("<div class=\"spark-axis\">")
                       .append("<span>").append(maxVal).append("</span><span>").append(minVal).append("</span></div>");
-                    sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                    sb.append("<div class=\"sparkline sparkline-sm\">");
                     for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
                     for (var m : minutes) {
                         long val = m.gaugeValues().getOrDefault(name, 0L);
                         double pct = (val * 100.0) / maxVal;
-                        sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(4, pct)))
-                          .append("%;background:#e0af68\" title=\"").append(val).append(" @ ").append(m.ts()).append("\"></div>");
+                        sb.append("<div class=\"bar bar-gauge ").append(height(Math.max(4, pct)))
+                          .append("\" title=\"").append(val).append(" @ ").append(m.ts()).append("\"></div>");
                     }
                     sb.append("</div></div>\n");
                 }
@@ -398,19 +332,19 @@ public class OpsDashboard {
                             var t = m.timerValues().get(name);
                             return t != null ? t.avgMs() : 0;
                         }).max().orElse(1));
-                    sb.append("<div style=\"color:#565f89;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;margin-top:10px;\">")
-                      .append(esc(name)).append(" <span class=\"c-blue\" style=\"font-size:9px\">(timer avg ms)</span></div>");
-                    sb.append("<div style=\"display:flex;align-items:stretch;gap:6px\">");
-                    sb.append("<div style=\"display:flex;flex-direction:column;justify-content:space-between;color:#565f89;font-size:9px;min-width:32px;text-align:right;\">")
+                    sb.append("<div class=\"spark-label next\">")
+                      .append(esc(name)).append(" <span class=\"c-blue small\">(timer avg ms)</span></div>");
+                    sb.append("<div class=\"spark-row\">");
+                    sb.append("<div class=\"spark-axis\">")
                       .append("<span>").append(String.format("%.0f", maxAvg)).append("</span><span>0</span></div>");
-                    sb.append("<div class=\"sparkline sparkline-sm\" style=\"flex:1\">");
+                    sb.append("<div class=\"sparkline sparkline-sm\">");
                     for (int i = 0; i < emptySlots; i++) sb.append("<div class=\"bar\"></div>");
                     for (var m : minutes) {
                         var t = m.timerValues().get(name);
                         double avg = t != null ? t.avgMs() : 0;
                         double pct = (avg * 100.0) / maxAvg;
-                        sb.append("<div class=\"bar\" style=\"height:").append(String.format("%.0f", Math.max(avg > 0 ? 4 : 0, pct)))
-                          .append("%;background:#7aa2f7\" title=\"").append(t != null ? String.format("%.1fms avg, %d max, %d calls", t.avgMs(), t.maxMs(), t.count()) : "0")
+                        sb.append("<div class=\"bar bar-timer ").append(height(Math.max(avg > 0 ? 4 : 0, pct)))
+                          .append("\" title=\"").append(t != null ? String.format("%.1fms avg, %d max, %d calls", t.avgMs(), t.maxMs(), t.count()) : "0")
                           .append(" @ ").append(m.ts()).append("\"></div>");
                     }
                     sb.append("</div></div>\n");
@@ -426,7 +360,7 @@ public class OpsDashboard {
             sb.append("<div class=\"two-col\">\n");
 
             sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-blue\">Top Routes <span class=\"c-muted\" style=\"font-weight:normal\">— last ")
+            sb.append("<div class=\"section-head c-blue\">Top Routes <span class=\"c-muted sub\">— last ")
               .append(topRoutes.isEmpty() ? TOP_ROUTES_WINDOW_MINUTES : topRoutes.getFirst().windowMinutes()).append(" min</span></div>");
             if (topRoutes.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No full minute yet</p>");
@@ -444,7 +378,7 @@ public class OpsDashboard {
             sb.append("</div>\n");
 
             sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted\" style=\"font-weight:normal\">— avg latency</span></div>");
+            sb.append("<div class=\"section-head c-blue\">Slowest Routes <span class=\"c-muted sub\">— avg latency</span></div>");
             sb.append("<table><tr><th>Route</th><th class=\"num\">Avg</th><th class=\"num\">Calls</th></tr>");
             for (var e : routeStats) {
                 sb.append("<tr>");
@@ -466,7 +400,7 @@ public class OpsDashboard {
             var profiling = (Map<String, Object>) jvmSnap.get("profiling");
             var hotMethods = (List<Map<String, Object>>) profiling.get("hotMethods");
             sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-blue\">Hot Methods <span class=\"c-muted\" style=\"font-weight:normal\">— 5 min window</span></div>");
+            sb.append("<div class=\"section-head c-blue\">Hot Methods <span class=\"c-muted sub\">— 5 min window</span></div>");
             if (hotMethods.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No samples yet</p>");
             } else {
@@ -482,7 +416,7 @@ public class OpsDashboard {
 
             var topAllocs = (List<Map<String, Object>>) profiling.get("topAllocations");
             sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-purple\">Top Allocations <span class=\"c-muted\" style=\"font-weight:normal\">— 5 min window</span></div>");
+            sb.append("<div class=\"section-head c-purple\">Top Allocations <span class=\"c-muted sub\">— 5 min window</span></div>");
             if (topAllocs.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No allocation data yet</p>");
             } else {
@@ -505,7 +439,7 @@ public class OpsDashboard {
             var gc = (Map<String, Object>) jvmSnap.get("gc");
             var pauses = (List<Map<String, Object>>) gc.get("recentPauses");
             sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-red\">Recent GC Pauses <span class=\"c-muted\" style=\"font-weight:normal\">— pause = stopped, cycle = wall clock</span></div>");
+            sb.append("<div class=\"section-head c-red\">Recent GC Pauses <span class=\"c-muted sub\">— pause = stopped, cycle = wall clock</span></div>");
             if (pauses.isEmpty()) {
                 sb.append("<p class=\"c-muted\">No GC pauses recorded</p>");
             } else {
@@ -517,12 +451,12 @@ public class OpsDashboard {
                     double cycleMs = (double) p.get("cycleMs");
                     boolean full = Boolean.TRUE.equals(p.get("full"));
                     String durColor = pauseMs > 100 ? "c-red" : pauseMs > 10 ? "c-amber" : "c-green";
-                    String weight = pauseMs > 100 ? "font-weight:bold" : "";
+                    String weight = pauseMs > 100 ? " bold" : "";
                     sb.append("<tr><td class=\"c-muted\">").append(esc(time))
-                      .append("</td><td").append(full ? " class=\"c-red\" style=\"font-weight:bold\"" : "").append(">")
+                      .append("</td><td").append(full ? " class=\"c-red bold\"" : "").append(">")
                       .append(esc((String) p.get("collector"))).append(full ? " (full)" : "")
                       .append("</td><td class=\"c-muted\">").append(esc((String) p.get("cause")))
-                      .append("</td><td style=\"").append(weight).append("\" class=\"num ").append(durColor).append("\">")
+                      .append("</td><td class=\"num ").append(durColor).append(weight).append("\">")
                       .append(String.format(pauseMs < 10 ? "%.1fms" : "%.0fms", pauseMs))
                       .append("</td><td class=\"num c-muted\">")
                       .append(String.format(cycleMs < 10 ? "%.1fms" : "%.0fms", cycleMs)).append("</td></tr>");
@@ -537,7 +471,7 @@ public class OpsDashboard {
         // Recent in-memory errors
         if (!recentErrors.isEmpty()) {
             sb.append("<div class=\"section\">");
-            sb.append("<div class=\"section-head c-red\">Recent Errors <span class=\"c-muted\" style=\"font-weight:normal\">— in-memory, ").append(recentErrors.size()).append(" tracked</span></div>");
+            sb.append("<div class=\"section-head c-red\">Recent Errors <span class=\"c-muted sub\">— in-memory, ").append(recentErrors.size()).append(" tracked</span></div>");
             sb.append("<table><tr><th>Type</th><th>Route</th><th class=\"num\">Count</th><th class=\"num\">Last Seen</th></tr>");
             for (var e : recentErrors) {
                 sb.append("<tr><td class=\"c-red\">").append(esc(e.type)).append("</td><td>")
@@ -551,19 +485,20 @@ public class OpsDashboard {
 
         // Persisted error tracking
         if (errorStore != null) {
-            sb.append("<div class=\"tab-bar\">");
-            sb.append("<div class=\"tab active\" onclick=\"showErrorTab('unresolved')\">Unresolved (")
-              .append(unresolvedErrors.size()).append(")</div>");
-            sb.append("<div class=\"tab\" onclick=\"showErrorTab('resolved')\">Resolved (")
-              .append(resolvedErrors.size()).append(")</div>");
+            // Tabs and trace toggles are wired up by /__brace/ops.js through their data-ops-* attributes.
+            sb.append("<div class=\"tab-bar\" role=\"tablist\">");
+            sb.append("<button type=\"button\" class=\"tab active\" role=\"tab\" aria-selected=\"true\" data-ops-tab=\"unresolved\">Unresolved (")
+              .append(unresolvedErrors.size()).append(")</button>");
+            sb.append("<button type=\"button\" class=\"tab\" role=\"tab\" aria-selected=\"false\" data-ops-tab=\"resolved\">Resolved (")
+              .append(resolvedErrors.size()).append(")</button>");
             sb.append("</div>\n");
 
-            sb.append("<div id=\"tab-unresolved\" class=\"tab-content\" style=\"display:block\">");
-            renderPersistedErrors(sb, unresolvedErrors, token, false, canControl);
+            sb.append("<div id=\"tab-unresolved\" class=\"tab-content\" role=\"tabpanel\">");
+            renderPersistedErrors(sb, unresolvedErrors, false, canControl);
             sb.append("</div>\n");
 
-            sb.append("<div id=\"tab-resolved\" class=\"tab-content\" style=\"display:none\">");
-            renderPersistedErrors(sb, resolvedErrors, token, true, canControl);
+            sb.append("<div id=\"tab-resolved\" class=\"tab-content hidden\" role=\"tabpanel\">");
+            renderPersistedErrors(sb, resolvedErrors, true, canControl);
             sb.append("</div>\n");
         }
 
@@ -589,7 +524,7 @@ public class OpsDashboard {
                     sb.append("<td><span class=\"").append(statusDot).append("\">● </span>").append(esc(statusLabel)).append("</td>");
                     sb.append("<td class=\"num c-muted\">").append(esc(lastRun)).append("</td></tr>");
                     if (j.lastMessage() != null && !j.lastMessage().isEmpty()) {
-                        sb.append("<tr><td colspan=\"4\" class=\"c-muted\" style=\"padding-left:16px;font-style:italic\">↳ ")
+                        sb.append("<tr><td colspan=\"4\" class=\"c-muted job-msg\">↳ ")
                           .append(esc(j.lastMessage())).append("</td></tr>");
                     }
                 }
@@ -602,24 +537,23 @@ public class OpsDashboard {
                 boolean sharedCache = cache.shared();
                 String clearLabel = sharedCache ? "[clear fleet]" : "[clear]";
                 sb.append("<div class=\"section-head c-amber\">Cache");
-                sb.append(" <span class=\"c-muted\" style=\"font-weight:normal;text-transform:none;letter-spacing:0;font-size:9px\">")
+                sb.append(" <span class=\"c-muted head-note\">")
                   .append(sharedCache ? "shared" : "in-process").append("</span>");
-                sb.append(" <span style=\"float:right;font-weight:normal;text-transform:none;letter-spacing:0\">");
+                sb.append(" <span class=\"head-actions\">");
                 if (canControl) {
                     sb.append("<button class=\"btn btn-danger\" hx-post=\"/ops/cache/clear\"")
-                      .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
                       .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">").append(clearLabel).append("</button>");
                 } else {
-                    sb.append("<span class=\"c-muted\" style=\"font-size:9px\">read-only</span>");
+                    sb.append("<span class=\"c-muted small\">read-only</span>");
                 }
                 sb.append("</span></div>");
                 long hits = cache.hits(), misses = cache.misses();
                 String hitRate = (hits + misses) > 0 ? ((hits * 100) / (hits + misses)) + "%" : "-";
-                sb.append("<div style=\"display:flex;gap:16px;margin-bottom:4px;\">");
-                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">ENTRIES</span><br/><span class=\"c-amber\" style=\"font-weight:bold\">").append(cache.size()).append("</span></div>");
-                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">HIT RATE</span><br/><span class=\"c-green\" style=\"font-weight:bold\">").append(hitRate).append("</span></div>");
-                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">MISSES</span><br/><span class=\"c-muted\" style=\"font-weight:bold\">").append(misses).append("</span></div>");
-                sb.append("<div><span class=\"c-muted\" style=\"font-size:9px\">EVICTIONS</span><br/><span class=\"c-muted\" style=\"font-weight:bold\">").append(cache.evictions()).append("</span></div>");
+                sb.append("<div class=\"cache-stats\">");
+                sb.append("<div><span class=\"c-muted small\">ENTRIES</span><br/><span class=\"c-amber bold\">").append(cache.size()).append("</span></div>");
+                sb.append("<div><span class=\"c-muted small\">HIT RATE</span><br/><span class=\"c-green bold\">").append(hitRate).append("</span></div>");
+                sb.append("<div><span class=\"c-muted small\">MISSES</span><br/><span class=\"c-muted bold\">").append(misses).append("</span></div>");
+                sb.append("<div><span class=\"c-muted small\">EVICTIONS</span><br/><span class=\"c-muted bold\">").append(cache.evictions()).append("</span></div>");
                 sb.append("</div>");
                 sb.append("</div>\n");
             }
@@ -661,29 +595,12 @@ public class OpsDashboard {
 
         sb.append("</div>\n"); // dashboard-content
 
-        // Minimal JS for tab switching and stack trace expand/collapse
-        sb.append("""
-            <script>
-            function showErrorTab(tab) {
-                document.getElementById('tab-unresolved').style.display = tab === 'unresolved' ? 'block' : 'none';
-                document.getElementById('tab-resolved').style.display = tab === 'resolved' ? 'block' : 'none';
-                document.querySelectorAll('.tab').forEach((el, i) => {
-                    el.classList.toggle('active', (i === 0 && tab === 'unresolved') || (i === 1 && tab === 'resolved'));
-                });
-            }
-            function toggleTrace(el) {
-                var row = el.closest('tr').nextElementSibling;
-                row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
-            }
-            </script>
-            """);
-
         sb.append("</body></html>");
         return sb.toString();
     }
 
     private static void renderPersistedErrors(StringBuilder sb, List<Map<String, Object>> errors,
-                                               String token, boolean resolved, boolean canControl) {
+                                               boolean resolved, boolean canControl) {
         if (errors.isEmpty()) {
             sb.append("<p class=\"").append(resolved ? "c-muted" : "c-green").append("\">None</p>");
             return;
@@ -692,7 +609,7 @@ public class OpsDashboard {
         for (var e : errors) {
             long id = ((Number) e.get("id")).longValue();
             sb.append("<tr>");
-            sb.append("<td class=\"c-red\" style=\"cursor:pointer\" onclick=\"toggleTrace(this)\">")
+            sb.append("<td class=\"c-red trace-toggle\" data-ops-trace=\"").append(id).append("\">")
               .append(esc(str(e.get("errorType")))).append("</td>");
             sb.append("<td>").append(esc(str(e.get("route"), "-"))).append("</td>");
             sb.append("<td class=\"num\">").append(e.get("occurrenceCount")).append("</td>");
@@ -701,7 +618,6 @@ public class OpsDashboard {
             if (!resolved && canControl) {
                 sb.append("<td><button class=\"btn btn-resolve\" hx-post=\"/ops/errors/").append(id)
                   .append("/resolve\"")
-                  .append(" hx-headers='{\"Authorization\": \"Bearer ").append(esc(token)).append("\"}'")
                   .append(" hx-target=\"#dashboard-content\" hx-select=\"#dashboard-content\" hx-swap=\"outerHTML\">resolve</button></td>");
             } else if (!resolved) {
                 sb.append("<td></td>");
@@ -709,9 +625,9 @@ public class OpsDashboard {
                 sb.append("<td class=\"c-muted\">").append(esc(str(e.get("resolvedAt"), ""))).append("</td>");
             }
             sb.append("</tr>");
-            sb.append("<tr style=\"display:none\"><td colspan=\"6\"><div class=\"stack-trace\">")
+            sb.append("<tr class=\"hidden\"><td colspan=\"6\"><div class=\"stack-trace\">")
               .append(esc(str(e.get("stackTrace"), "No stack trace")))
-              .append("</div><div style=\"margin-top:4px\" class=\"c-muted\">")
+              .append("</div><div class=\"c-muted trace-msg\">")
               .append(esc(str(e.get("message"), ""))).append("</div></td></tr>");
         }
         sb.append("</table>");
@@ -814,6 +730,14 @@ public class OpsDashboard {
         return "<span class=\"lt\" title=\"" + esc(full) + "\"><bdi dir=\"ltr\">"
             + (pkg.isEmpty() ? "" : "<span class=\"pkg\">" + esc(pkg) + "</span>")
             + "<span class=\"method\">" + esc(tail) + "</span></bdi></span>";
+    }
+
+    /**
+     * The ops.css class for a bar {@code pct} percent tall: {@code .h0} to {@code .h100}, one per
+     * whole percent. A class rather than a {@code style} attribute, which the ops CSP blocks.
+     */
+    private static String height(double pct) {
+        return "h" + Math.round(Math.min(100, Math.max(0, pct)));
     }
 
     /** A rate or a millisecond figure: one decimal below 10 so small values don't read as 0. */

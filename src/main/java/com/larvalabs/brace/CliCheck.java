@@ -57,7 +57,7 @@ public class CliCheck {
             logs = Json.mapper().valueToTree(List.of());
         }
 
-        var result = evaluate(status, errors, logs, thresholds, cfg.env());
+        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(cfg.url())));
 
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(result));
@@ -111,6 +111,12 @@ public class CliCheck {
 
     public static CheckResult evaluate(JsonNode status, JsonNode errors, JsonNode logs,
                                        CheckThresholds thresholds, String env) {
+        return evaluate(status, errors, logs, thresholds, env, null);
+    }
+
+    /** As above, plus {@code csp} (from {@link #checkContentSecurityPolicy}) when it is non-null. */
+    public static CheckResult evaluate(JsonNode status, JsonNode errors, JsonNode logs,
+                                       CheckThresholds thresholds, String env, Check csp) {
         var checks = new ArrayList<Check>();
 
         checks.add(checkReachability(status));
@@ -122,10 +128,98 @@ public class CliCheck {
         checks.add(checkJobs(status));
         checks.add(checkCache(status, thresholds));
         checks.add(checkRecentLogs(logs, thresholds, env));
+        if (csp != null) checks.add(csp);
 
         boolean healthy = checks.stream().noneMatch(c -> "fail".equals(c.status()));
         String summary = buildSummary(checks);
         return new CheckResult(healthy, summary, checks);
+    }
+
+    /**
+     * The status, Content-Type and every Content-Security-Policy header of an unauthenticated
+     * {@code GET /}. Several CSP headers are separate policies, all enforced.
+     */
+    record RootProbe(int status, String contentType, List<String> policies) {
+        RootProbe(int status, String contentSecurityPolicy) {
+            this(status, "text/html", contentSecurityPolicy == null ? List.of() : List.of(contentSecurityPolicy));
+        }
+    }
+
+    private static final HttpClient probeClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(5))
+        .followRedirects(HttpClient.Redirect.NEVER)
+        .build();
+
+    /**
+     * Fetch {@code GET /} without credentials, or null if that fails. The app's after-middleware
+     * runs on every response, redirects and 404s included, so a login redirect still shows the
+     * headers the app sets.
+     */
+    static RootProbe probeRoot(String baseUrl) {
+        try {
+            var response = probeClient.send(
+                HttpRequest.newBuilder().uri(URI.create(baseUrl + "/")).timeout(Duration.ofSeconds(10)).GET().build(),
+                HttpResponse.BodyHandlers.discarding());
+            return new RootProbe(response.statusCode(),
+                response.headers().firstValue("Content-Type").orElse(null),
+                response.headers().allValues("Content-Security-Policy"));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * M6: warn when the app sends no Content-Security-Policy, or one whose scripts allow
+     * {@code 'unsafe-inline'} (which lets any injected inline script run). Null when the probe
+     * failed: reachability is reported by the other checks.
+     */
+    static Check checkContentSecurityPolicy(RootProbe probe) {
+        if (probe == null) return null;
+        // No page at "/" (an ops-only hostname answering 404, an API): nothing to judge.
+        boolean html = probe.contentType() != null && probe.contentType().toLowerCase(Locale.ROOT).contains("html");
+        if (probe.status() == 404 && !html) return null;
+        // The fix is a code change, not a command, so it rides in the message (followUp is a
+        // command agents run).
+        String fix = ": use app.after(SecurityHeaders.strict())";
+        var policies = probe.policies().stream().filter(p -> p != null && !p.isBlank()).toList();
+        if (policies.isEmpty()) {
+            return new Check("csp", "warn", "No Content-Security-Policy on GET /" + fix);
+        }
+        // Every policy is enforced, so scripts are restricted if any one of them restricts them.
+        String problem = null;
+        for (String policy : policies) {
+            String p = scriptProblem(policy);
+            if (p == null) return new Check("csp", "pass", "Content-Security-Policy set");
+            if (problem == null) problem = p;
+        }
+        return new Check("csp", "warn", "Content-Security-Policy on GET / " + problem + fix);
+    }
+
+    /** What lets an injected script run under {@code csp}, or null if nothing does. */
+    private static String scriptProblem(String csp) {
+        String scripts = null, fallback = null;
+        for (String directive : csp.split(";")) {
+            String[] parts = directive.strip().split("\\s+", 2);
+            String name = parts[0].toLowerCase(Locale.ROOT);
+            String value = parts.length > 1 ? parts[1] : "";
+            if (name.equals("script-src") && scripts == null) scripts = value;
+            if (name.equals("default-src") && fallback == null) fallback = value;
+        }
+        String sources = scripts != null ? scripts : fallback;
+        if (sources == null) return "doesn't restrict scripts";
+        String lower = sources.toLowerCase(Locale.ROOT);
+        // A nonce or hash makes CSP2+ browsers ignore 'unsafe-inline' (it's only a CSP1 fallback).
+        boolean inlineAllowed = lower.contains("'unsafe-inline'")
+            && !lower.contains("'nonce-") && !lower.contains("'sha256-") && !lower.contains("'sha384-")
+            && !lower.contains("'sha512-");
+        if (inlineAllowed) return "allows inline scripts ('unsafe-inline')";
+        for (String source : lower.split("\\s+")) {
+            if (source.equals("*") || source.equals("https:") || source.equals("http:")
+                    || source.equals("data:") || source.equals("blob:")) {
+                return "allows scripts from any host (" + source + ")";
+            }
+        }
+        return null;
     }
 
     static Check checkReachability(JsonNode status) {

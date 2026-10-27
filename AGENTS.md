@@ -60,6 +60,7 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Cache` | Cache facade (stats, TTL, serialization, page cache) over a `CacheBackend` |
 | `CacheBackend` | Storage SPI behind `Cache` — in-process default or shared Postgres |
 | `Storage` | S3-compatible object storage client (AWS Sig V4, no SDK) |
+| `StaticFiles` | `staticFiles` mode: `TRUSTED` (default) or `UNTRUSTED` for user uploads (sandboxed, attachment unless a raster image) |
 | `Http` | Fluent outbound HTTP client over `java.net.http` |
 | `RateLimiter` | Per-IP / per-key rate-limiting middleware |
 | `Assets` | Asset URL fingerprinting for cache busting |
@@ -123,7 +124,7 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 - **Case-insensitive request headers.** Header names are matched case-insensitively (HTTP names are case-insensitive and arrive lowercased over HTTP/2), so `req.header("content-type")` and `req.header("Content-Type")` are equivalent. Brace itself serves HTTP/1.1 only — TLS and HTTP/2 are expected to be terminated by a reverse proxy (see `docs/SECURITY.md`).
 - **Multi-value `Set-Cookie`.** `Result` keeps `Set-Cookie` in a separate list (not the single-value header map), so a response can carry several cookies — e.g. an application cookie set by a handler plus the framework session cookie — without one clobbering the other. Use `result.cookie(...)` (repeatable) or `result.header("Set-Cookie", ...)`.
 - **Trusted proxies.** IP forwarding headers only respected from configured proxy CIDRs. Prevents IP spoofing.
-- **Security headers.** Easy defaults via `app.after(SecurityHeaders.defaults())` for nosniff, frame-options, etc.
+- **Security headers.** `app.after(SecurityHeaders.strict())` sets nosniff, frame-options, referrer-policy and a strict CSP (`script-src 'self'`, no inline script); `defaults()` is the same without the CSP (decision D6 of the 2026-10 review). The framework's `/ops` pages carry their own stricter CSP, set after app after-middleware, and their JS/CSS are served from `/__brace/ops.js`, `ops.css`, `ops-analytics.css`: keep them free of inline script, `on*=` handlers and `style=""`.
 - **Secret validation.** Session secrets must be 32+ characters. Warns about weak patterns on startup.
 - **Stats use LongAdder/AtomicLong** — lock-free, zero contention on the hot path.
 - **The Postgres IT tier fails closed.** `PostgresTestBase` throws if Docker is unreachable rather than skipping. A JUnit assumption there aborts the class, which failsafe reports as `Tests run: 0` (not "skipped"), so `mvn verify` printed BUILD SUCCESS while the whole tier silently tested nothing — worthless as a merge gate. Skip the tier deliberately with `mvn verify -DskipITs`; never by weakening the check. `docker.api.version` in `pom.xml` pins the Docker Engine API version, because docker-java otherwise negotiates 1.32 and Docker 29+ requires >= 1.40.

@@ -136,7 +136,7 @@ public class App {
             .templates("views")
             .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
             .trustedProxies("10.0.0.0/8", "172.16.0.0/12")  // secure IP handling behind load balancer
-            .after(SecurityHeaders.defaults())               // security headers on all responses
+            .after(SecurityHeaders.strict())                 // security headers + strict CSP on all responses
             .mailer(mail)
             .cache(cache)
             .storage(storage)
@@ -176,7 +176,7 @@ Components included in the framework jar as of this release:
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs; tokens rendered into pages are masked per render (BREACH)
-- **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware, bcrypt password hashing
+- **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware (`SecurityHeaders.strict()` adds a strict Content-Security-Policy: no inline script), bcrypt password hashing
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
@@ -423,11 +423,15 @@ app.post("/upload", req -> {
 // Manual key with safety helpers
 app.post("/upload-manual", req -> {
     var file = req.file("photo");
-    var key = Storage.safeKey("avatars", file.filename());  // sanitizes extension, adds UUID
-    var stored = req.storage().put(key, file);
+    var key = Storage.safeKey("avatars", file.filename());  // UUID key; .html/.svg/.js… become .bin
+    var stored = req.storage().put(key, file);              // type from the key, not the browser
     return Result.json(Map.of("url", stored.url()));
 });
 ```
+
+Uploads are stored by their key's extension, never the browser-claimed `Content-Type`: raster
+images, PDFs, text, office documents, archives, audio and video keep their type, everything else
+is `application/octet-stream`, and all but raster images are stored as attachments.
 
 Uploads and downloads stream. Multipart parts over `uploadMemoryThreshold` (default 1MB) spill to a
 temp file instead of the heap, `storage.put(key, file)` sends from that file without materializing
@@ -444,6 +448,7 @@ storage.put("exports/a.csv", path, "text/csv");  // upload a file on disk, strea
 
 Result.file(path)                             // stream out: Content-Length, Range, typed by extension
 Result.download(path, "report.csv")           // ...as an attachment
+Result.fileUnder(uploadDir, name).untrusted() // a user's upload: sandboxed, never rendered as a page
 Result.stream(inputStream, "image/png")       // ...from a stream (chunked)
 Result.stream(out -> writeCsv(out), "text/csv");  // ...generated as it is produced
 ```
@@ -559,7 +564,11 @@ its own hit rate — so a clear resets counters only on the box that handled it.
 
 ```java
 app.staticFiles("/assets", "public");   // serve public/ directory at /assets/*
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);  // files users uploaded
 ```
+
+`UNTRUSTED` serves user files so nothing in them can run on your origin: an uploaded `.html` or
+`.svg` is a sandboxed `application/octet-stream` download, and only raster images display inline.
 
 ## Route Grouping
 
@@ -726,6 +735,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for security documentation covering:
 - Rate limiting
 - File upload security
 - Response compression and BREACH
+- Content-Security-Policy (`SecurityHeaders.strict()`)
 - Ops endpoint hardening
 
 ## Periodic Model Reviews

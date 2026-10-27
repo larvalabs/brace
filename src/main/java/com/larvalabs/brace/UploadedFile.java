@@ -77,6 +77,13 @@ public class UploadedFile {
      * dotfiles, {@code ..}, or hidden names), capped at 255 UTF-8 bytes (the usual filesystem
      * limit). Never empty: a missing or fully stripped name becomes {@code "upload"}.
      *
+     * <p>Every extension a browser or server could execute ({@code html}, {@code svg}, {@code xml},
+     * {@code js}, {@code css}, {@code php}, …, any case, anywhere in the name) is made inert: its
+     * dot becomes {@code _}, and {@code .bin} is appended when it was the last one:
+     * {@code "page.HTML"} becomes {@code "page_HTML.bin"}, {@code "a.php.png"} becomes
+     * {@code "a_php.png"}. Serve the directory as {@link StaticFiles#UNTRUSTED} regardless; the
+     * rename is for whatever else serves it.
+     *
      * <p>This is a sanitiser, not a uniqueness guarantee — two uploads can share a safe name.
      */
     public String safeFilename() {
@@ -99,18 +106,35 @@ public class UploadedFile {
                     || Character.isSpaceChar(name.charAt(start)))) {
             start++;
         }
-        name = name.substring(start).strip();
-        // Cap at 255 bytes, not chars: a filesystem limit is in bytes, and a code point is never split.
+        name = capBytes(name.substring(start).strip(), 255);
+        if (name.isEmpty()) return "upload";
+        // M7: executable extensions are made inert, so a trusted static mapping or a server in front
+        // of the directory can't serve "x.html" as a page or run "x.php.png". After the cap, which
+        // can itself expose a new final extension by cutting the name short; the result is capped
+        // again ahead of a ".bin" so the limit holds.
+        String neutral = UntrustedContent.neutralizeName(name);
+        if (!neutral.equals(name)) {
+            if (neutral.endsWith(".bin") && !name.endsWith(".bin")) {
+                name = capBytes(neutral.substring(0, neutral.length() - 4), 255 - 4) + ".bin";
+            } else {
+                name = capBytes(neutral, 255);
+            }
+            if (name.isEmpty()) return "upload";
+        }
+        return name;
+    }
+
+    /** {@code name} cut to at most {@code max} UTF-8 bytes, never splitting a code point, stripped. */
+    private static String capBytes(String name, int max) {
         int bytes = 0, end = 0;
         while (end < name.length()) {
             int cp = name.codePointAt(end);
             int n = Character.toString(cp).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-            if (bytes + n > 255) break;
+            if (bytes + n > max) break;
             bytes += n;
             end += Character.charCount(cp);
         }
-        name = name.substring(0, end).strip();
-        return name.isEmpty() ? "upload" : name;
+        return name.substring(0, end).strip();
     }
     public long size() { return size; }
 

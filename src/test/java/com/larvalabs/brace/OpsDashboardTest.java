@@ -47,7 +47,16 @@ class OpsDashboardTest {
     }
 
     static String render(Stats stats, JfrProfiler p) {
-        return OpsDashboard.html("tok", OpsScope.READ, stats, null, null, null, null, p);
+        return OpsDashboard.html(OpsScope.READ, stats, null, null, null, null, p);
+    }
+
+    /** The dashboard's stylesheet, served at /__brace/ops.css (M6: the page has no inline style). */
+    static String css() {
+        try (var in = OpsDashboard.class.getResourceAsStream("/brace/ops.css")) {
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 
     @Test
@@ -56,7 +65,7 @@ class OpsDashboardTest {
         stats.recordRequestPattern("GET", "/users/{id}", 200, 1500, 0, 0);
         var html = render(stats, profiler);
 
-        assertTrue(html.contains("td.num { text-align: right; white-space: nowrap;"),
+        assertTrue(css().contains("td.num { text-align: right; white-space: nowrap;"),
             "value cells must not wrap (\"459 / MB\")");
         assertFalse(html.contains("<td style=\"text-align:right"), "inline right-align styles replaced by .num");
         assertTrue(html.contains("<td class=\"num c-purple\">459 MB</td>"), html);
@@ -69,9 +78,9 @@ class OpsDashboardTest {
         var html = render(new Stats(), profiler);
 
         // CSS: one line, clipped on the left with an ellipsis, the cell giving up width first.
-        assertTrue(html.contains("td.name { max-width: 0; width: 100%; }"));
-        assertTrue(html.contains(".lt { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl;"));
-        assertTrue(html.contains(".lt > bdi { direction: ltr; unicode-bidi: isolate; }"));
+        assertTrue(css().contains("td.name { max-width: 0; width: 100%; }"));
+        assertTrue(css().contains(".lt { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl;"));
+        assertTrue(css().contains(".lt > bdi { direction: ltr; unicode-bidi: isolate; }"));
         assertFalse(html.contains("pkg-wrap"), "the fixed 30ch package clip is gone");
 
         // Method: package muted, Class$Inner.method bold, full name in the tooltip.
@@ -172,7 +181,7 @@ class OpsDashboardTest {
         assertTrue(html.contains("Latency ms <span class=\"lat-key-avg\">■ avg</span> <span class=\"lat-key-p95\">■ p95</span>"));
         // avg 10.4 ms, p95 10.2 ms (upper edge of the 10 ms bucket), max 50 ms
         assertTrue(html.contains("<div class=\"bar lat\" title=\"10 ms avg, 10 ms p95, 50 ms max @ "), html);
-        assertTrue(html.contains("<div class=\"lat-avg\" style=\"height:100%\"></div>"));
+        assertTrue(html.contains("<div class=\"lat-avg h100\"></div>"), html);
         assertTrue(html.contains("<div class=\"bar\" title=\"no requests @ "));
     }
 
@@ -183,8 +192,65 @@ class OpsDashboardTest {
         var html = render(stats, null);
 
         assertTrue(html.contains("GET</span>&nbsp;/<wbr>orgs/<wbr>{orgId}/<wbr>deployments</td>"), "break opportunities only after /");
-        assertFalse(html.contains("overflow-wrap: anywhere"), "no mid-word breaks in route cells");
-        assertTrue(html.contains(".header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; white-space: nowrap; }"));
+        assertFalse(css().contains("overflow-wrap: anywhere"), "no mid-word breaks in route cells");
+        assertTrue(css().contains(".header .title { color: #7aa2f7; font-weight: bold; font-size: 14px; white-space: nowrap; }"));
         assertTrue(html.contains("<td class=\"c-green\">200</td><td class=\"num\">30,376</td>"), "status counts use separators");
+    }
+
+    /**
+     * A dashboard with most sections populated: sparklines (requests, latency, errors, heap),
+     * profiling, recent errors, cache. The persisted-error tabs need a database, so they're
+     * covered by OpsIntegrationTest.
+     */
+    static String renderEverything(OpsScope scope) {
+        var stats = new Stats();
+        for (int i = 0; i < 40; i++) stats.recordRequestPattern("GET", "/a", i % 10 == 0 ? 500 : 200, 1000 + i * 100, 0, 0);
+        stats.recordError("java.lang.IllegalStateException", "boom", "GET /a", "at x.y(Z.java:1)", null, null);
+        stats.snapshot();
+        var cache = new Cache();
+        cache.set("k", "v", "1m");
+        return OpsDashboard.html(scope, stats, null, null, null, cache, profiler);
+    }
+
+    @Test
+    void pageHasNoInlineScriptHandlerOrStyle() {
+        // M6: the ops CSP (script-src 'self', style-src 'self') blocks all of these.
+        for (var scope : List.of(OpsScope.READ, OpsScope.CONTROL)) {
+            var html = renderEverything(scope);
+            assertFalse(java.util.regex.Pattern.compile("<script(?![^>]*\\bsrc=)[^>]*>").matcher(html).find(),
+                "no inline <script>: " + html);
+            assertFalse(java.util.regex.Pattern.compile("\\son[a-z]+\\s*=", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(html).find(), "no on*= handler attributes");
+            assertFalse(html.contains("style="), "no style attributes");
+            assertFalse(html.contains("<style"), "no <style> block");
+            assertFalse(html.contains("javascript:"), "no javascript: URLs");
+            assertTrue(html.contains("<link rel=\"stylesheet\" href=\"/__brace/ops.css\">"));
+            assertTrue(html.contains("<script src=\"/__brace/ops.js\"></script>"));
+            assertTrue(html.contains("\"includeIndicatorStyles\":false"), "htmx must not inject its indicator <style>");
+        }
+    }
+
+    @Test
+    void pageEmbedsNoCredential() {
+        // L3: the htmx polling and CONTROL buttons ride the ops session cookie.
+        var html = renderEverything(OpsScope.CONTROL);
+        assertTrue(html.contains("hx-post=\"/ops/cache/clear\""), "CONTROL renders the cache clear button");
+        assertTrue(html.contains("hx-trigger=\"every 5s\""), "still polls");
+        assertFalse(html.contains("Bearer"), html);
+        assertFalse(html.contains("hx-headers"), html);
+        assertFalse(html.contains("Authorization"), html);
+    }
+
+    @Test
+    void everyBarSizeClassExistsInTheStylesheet() {
+        var html = renderEverything(OpsScope.READ);
+        var m = java.util.regex.Pattern.compile("class=\"[^\"]*\\b(h\\d+)\\b").matcher(html);
+        int found = 0;
+        while (m.find()) {
+            found++;
+            assertTrue(css().contains("." + m.group(1) + "{height:"), m.group(1) + " missing from ops.css");
+        }
+        assertTrue(found > 0, "sparklines render sized bars");
+        assertTrue(css().contains(".h0{height:0%}") && css().contains(".h100{height:100%}"));
     }
 }

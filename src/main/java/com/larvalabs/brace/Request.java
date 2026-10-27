@@ -471,6 +471,12 @@ public class Request {
         return h == null ? null : stripPort(h.strip());
     }
 
+    /** The host the client addressed, with its port if it gave one. */
+    String hostWithPort() {
+        String h = ProxyHeaders.effectiveHost(this::header, remoteAddr, trustedProxies);
+        return h == null ? null : h.strip().toLowerCase(java.util.Locale.ROOT);
+    }
+
     /** True when the immediate peer is a configured trusted proxy, so its headers can be believed. */
     boolean fromTrustedProxy() {
         return trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr);

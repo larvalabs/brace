@@ -312,7 +312,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     entry.
   - **Tier: small.**
 
-- [ ] **M4: JTE's `javascript:` guard is narrow and bypassable; Brace adds no URL sanitizing**, `TemplateEngine.java`
+- [x] **M4: JTE's `javascript:` guard is narrow and bypassable; Brace adds no URL sanitizing**, `TemplateEngine.java`
   - **What's wrong.** JTE's `OwaspHtmlTemplateOutput` checks only `<a href>`, and only for the
     literal (trimmed, case-insensitive) prefix `javascript:`.
   - **Verified.**
@@ -337,7 +337,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Precompiled templates get the same output class.
   - **Tier: frontier.** It hooks JTE internals, and both the dev and precompiled paths need it.
 
-- [ ] **M5: User data inside `hx-on*` attributes becomes JavaScript**, `TemplateEngine.java`, `src/main/resources/brace/htmx.min.js`
+- [x] **M5: User data inside `hx-on*` attributes becomes JavaScript**, `TemplateEngine.java`, `src/main/resources/brace/htmx.min.js`
   - **What's wrong.** JTE JS-escapes `on*` attributes but treats `hx-on:click`, `hx-on-click`,
     `hx-vals='js:…'` and `hx-trigger` filters as plain attributes.
   - **Verified.** `hx-on:click="go('${s}')"` with `s = "');alert(document.domain)//"` renders
@@ -354,7 +354,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     is unaffected.
   - **Tier: mid** (it rides on M4).
 
-- [ ] **M6: No CSP and no security headers by default; the documented CSP is ineffective**, `SecurityHeaders.java:25-32, 105`, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:969`, `OpsDashboard.java:555-557, 666-680, 695`
+- [x] **M6: No CSP and no security headers by default; the documented CSP is ineffective**, `SecurityHeaders.java:25-32, 105`, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:969`, `OpsDashboard.java:555-557, 666-680, 695`
   - **What's wrong.**
     - `SecurityHeaders.defaults()` is opt-in and has no CSP.
     - The scaffold doesn't add it.
@@ -376,8 +376,12 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - The ops dashboard works under the strict CSP (htmx polling, buttons).
     - The scaffold app returns the strict headers on handler, static, 404 and 500 responses.
   - **Tier: mid.**
+  - **Progress.** Done with L3, except the scaffold line, which Phase 5's scaffold integration
+    collects. `defaults()` keeps no CSP (D6). The strict-headers test runs against an app built
+    with `after(SecurityHeaders.strict())` rather than the scaffold, and the dashboard was
+    browser-checked under that app (no CSP violations; polling, tabs and both CONTROL buttons work).
 
-- [ ] **M7: Uploaded content can be served inline as HTML or SVG on the app origin**, `BraceHandler.java:1251, 1258`, `Result.java:152, 163`, `Storage.java:161-174, 247-268`, `SECURITY.md:512, 544`
+- [x] **M7: Uploaded content can be served inline as HTML or SVG on the app origin**, `BraceHandler.java:1251, 1258`, `Result.java:152, 163`, `Storage.java:161-174, 247-268`, `SECURITY.md:512, 544`
   - **What's wrong.**
     - `staticFiles` and `Result.file` map `.html` to `text/html` and `.svg` to
       `image/svg+xml`, served inline.
@@ -595,7 +599,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     `/ops/errors/{id}`.
   - **Tier: small.**
 
-- [ ] **L3: The ops dashboard embeds a live bearer token in page HTML**, `OpsDashboard.java:151, 610, 704`
+- [x] **L3: The ops dashboard embeds a live bearer token in page HTML**, `OpsDashboard.java:151, 610, 704`
   - **What's wrong.** The token sits in `hx-headers`. Any XSS on the app origin that runs in an
     operator's browser can `fetch('/ops/dashboard')` (same-origin, so the Strict cookie is
     sent) and extract a token up to CONTROL scope.

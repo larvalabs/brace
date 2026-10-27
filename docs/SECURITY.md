@@ -8,6 +8,8 @@ This document describes Brace's security features and best practices for buildin
 - [SQL Injection](#sql-injection)
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
+- [Cross-Site Scripting (XSS)](#cross-site-scripting-xss)
+- [Content Security Policy](#content-security-policy)
 - [Serialization](#serialization)
 - [Open Redirects](#open-redirects)
 - [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf)
@@ -319,6 +321,95 @@ tokens with `.csrf(false)`.
    - Send the CSRF token in the `X-CSRF-Token` request header
    - Use bearer token authentication and call `.csrf(false)` on those routes
 3. **For public APIs:** Use API keys or OAuth, not cookie-based sessions
+
+---
+
+## Cross-Site Scripting (XSS)
+
+Templates escape `${...}` for the context it lands in (JTE), and Brace's template output adds the
+contexts where escaping alone doesn't stop script:
+
+- **URL attributes.** `href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `cite`,
+  `background`, `data`, `hx-get`, `hx-post`, `hx-put`, `hx-patch`, `hx-delete` (and `data-hx-`
+  forms), on any tag. HTML escaping leaves `javascript:alert(1)` intact, and browsers strip
+  tabs, newlines and leading control characters before reading the scheme, so
+  `java\tscript:` is a script URL too. Also `to`/`from`/`by`/`values` on SVG `<set>` and
+  `<animate>`, which can set an `href`. The whole value, template text and every `${...}`, is
+  held until its closing quote and normalized the same way. If the template's own text fixed the
+  scheme or made the URL relative (`href="mailto:${email}"`, `href="/users/${id}"`), it's kept;
+  if user data decides the scheme (`href="${url}"`, `href="${a}${b}"`, `href="${scheme}://${host}"`)
+  only `http`, `https`, `mailto` and `tel` pass, plus raster `data:image/` URLs (png, jpeg, gif,
+  webp, avif, bmp; never SVG) on `src` and `poster`. Anything else renders as
+  `about:invalid#blocked`.
+- **Script attributes.** `on*`, `hx-on*` (`hx-on:click`, `hx-on-click`, `data-hx-on:*`),
+  `hx-vals`, `hx-vars`, `hx-headers`, `hx-request` and `hx-trigger`. User data is escaped with
+  `\uXXXX` sequences for every character that can end a string or start markup or a template
+  substitution, which is valid in JavaScript strings, template literals and JSON, so JSON
+  `hx-vals`/`hx-headers` keep working with quotes in the data. HTML escaping alone is undone by
+  the browser before the code runs (`&#39;` is a quote again), and JTE's JavaScript escaping for
+  `on*` left `&` alone, so an entity in user data still closed the string.
+- **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup. Template
+  markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
+  `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.
+
+Not covered: a `@template` call inside an attribute value renders in body context (JTE's
+behavior), so its output gets neither attribute escaping nor the URL check.
+
+Both the hot-reload and precompiled render paths use this output. `$unsafe{...}` bypasses it, as
+does `Result.html(...)`, which is a raw sink.
+
+At input, `@SafeUrl` on a form field accepts only an absolute `http`/`https` URL; outside
+templates, `Url.isSafe(url)` / `Url.safe(url)` apply the template rule (for a URL sent in JSON
+for a client to use as a link).
+
+**htmx evaluates code.** Bundled htmx runs with `allowEval` and `allowScriptTags` on unless a
+page sets `<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false}'>`.
+With them off, `hx-on*`, `js:` values and trigger filters don't run, and neither do `<script>`
+tags in swapped-in HTML, so a template mistake can't become code that way. Recommended unless a
+page relies on them.
+
+---
+
+## Content Security Policy
+
+Escaping is the first defence against XSS; a Content-Security-Policy is the second. It decides
+what an injected tag can do once one gets past escaping. Brace ships it as
+`SecurityHeaders.strict()`:
+
+```java
+app.after(SecurityHeaders.strict());
+```
+
+That sets the `SecurityHeaders.defaults()` headers (`nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy`, `Permissions-Policy`) plus:
+
+```
+Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+```
+
+- **`script-src 'self'`**: scripts load only from the app's origin. Inline `<script>` bodies,
+  `on*=` attributes, `javascript:` URLs and `eval` (including htmx's `hx-on:*`, which compiles
+  its handler with `Function`) don't run. Brace's `/__brace/htmx.min.js` and
+  `/__brace/csrf-htmx.js` are same-origin and load normally.
+- **`default-src 'self'`** covers styles, images, fonts and fetches, so inline `<style>` blocks
+  and `style=""` attributes are blocked as well. htmx inserts a `<style>` for its request
+  indicators at startup; under this policy that only logs a console violation. Add
+  `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>` to the layout to
+  stop it.
+- **`object-src 'none'`, `base-uri 'none'`**: no plugins, and an injected `<base>` can't
+  re-point the page's relative script URLs.
+- **`frame-ancestors 'none'`**: the CSP form of `X-Frame-Options: DENY`.
+- **`form-action 'self'`**: an injected `<form>` can't post the page's data to another site.
+
+After-middleware runs on every response (handlers, static files, 404s, 500s, CSRF rejections),
+so the policy covers them all. `defaults()` deliberately has no CSP: adding one would silently
+break apps that still have inline scripts. Avoid `'unsafe-inline'` in `script-src` in a custom
+policy (`SecurityHeaders.builder().contentSecurityPolicy(...)`): it allows every inline script,
+injected ones included, which leaves the policy doing nothing against XSS. `brace check` warns
+when `GET /` has no CSP, or one whose scripts allow `'unsafe-inline'` without a nonce or hash.
+
+The `/ops` pages carry the framework's own policy, which replaces the app's on those responses
+(see [Ops pages in the browser](#ops-pages-in-the-browser)).
 
 ---
 
@@ -788,25 +879,93 @@ trades a heap-exhaustion failure mode for a disk one, which degrades far more gr
 
 ### Security Considerations
 
-1. **Validate file types:** Check `file.contentType()` and extension
+1. **Validate file types:** check the extension against what you accept. `file.contentType()`
+   is whatever the uploader's browser (or script) claimed, so never trust it as the type
 2. **Scan for malware:** Use external virus scanning for untrusted uploads
 3. **Store safely:** Don't use user-provided filenames directly
-4. **Limit concurrency:** upload concurrency now consumes disk rather than heap — cap it
+4. **Serve as untrusted:** an uploaded `.html` or `.svg` served inline from the app's origin
+   runs its script there (stored XSS). See [Serving uploaded files](#serving-uploaded-files)
+5. **Limit concurrency:** upload concurrency now consumes disk rather than heap — cap it
    at the proxy if untrusted clients can reach an upload endpoint
 
 ### Safe Storage Pattern
 
 ```java
 // DON'T: Use user filename directly
-String key = "uploads/" + file.name(); // ❌ Unsafe
+String key = "uploads/" + file.filename();                 // ❌ Unsafe
+file.saveTo(uploadDir.resolve(file.filename()));           // ❌ Unsafe
 
-// DO: Generate safe keys
-String key = storage.safeKey("uploads", file.name()); // ✅ Safe
+// DO: Generate safe keys and names
+String key = Storage.safeKey("uploads", file.filename());  // ✅ Safe
+file.saveTo(uploadDir, file.safeFilename());               // ✅ Safe
 ```
 
 `Storage.put`, `delete`, and `url` reject keys containing `.`/`..` segments or a leading `/`
 outright: the SigV4 canonical URI and the request URL are built from the same unnormalized
 string, so a traversing key would have been *validly signed* for the path it escaped to.
+
+`Storage.safeKey` and `UploadedFile.safeFilename()` also neutralize an extension a browser or
+server could execute: markup (`html`, `htm`, `xhtml`, `shtml`, `mht`…), `svg`/`svgz`,
+`xml`/`xsl`/`xslt`/`xsd`, feeds (`rss`, `atom`, which browsers render as XHTML), `js`/`mjs`/`es`/
+`css`/`wasm`/`swf`/`htc`/`hta`, and server-side scripts (`php`, `phtml`, `asp`, `jsp`, `cgi`,
+`pl`, `py`…), in any case, and the same before a compression extension (`x.svg.gz`, which nginx's
+`gzip_static` would serve for `x.svg`). `safeKey` replaces it with `bin` (`u/<uuid>.bin`);
+`safeFilename()` turns each such extension's dot into `_` wherever it is in the name and appends
+`.bin` when it was last (`page.html` → `page_html.bin`, `a.php.png` → `a_php.png`, since some
+servers run a handler for an extension anywhere in the name). Trailing dots and spaces are
+dropped first. This is defense in depth for whatever serves the files by extension; the serving
+rules below are the fix.
+
+`Storage.put(key, bytes, contentType)` and `put(key, path, contentType)` store the type you pass.
+Never pass `file.contentType()`: the uploader chose it. Use `put(key, uploadedFile)`, which types
+the object from the key.
+
+### Serving uploaded files
+
+**Static directory.** Register an upload directory as untrusted:
+
+```java
+app.staticFiles("/assets", "public");                                       // your files
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);     // users' files
+```
+
+In `UNTRUSTED` mode:
+
+- The `Content-Type` comes from an allowlist by extension: raster images (png, jpeg, gif, webp,
+  avif, bmp, ico), PDF, plain text, CSV, JSON, office documents, zip/gzip/tar, common audio and
+  video. Anything else, `.html`, `.svg`, `.xml` and `.js` included, is `application/octet-stream`.
+- Everything except a raster image is sent with `Content-Disposition: attachment`, so following
+  a link to it downloads it instead of rendering it. **SVG is not a raster image.** PDF is an
+  attachment too: viewers that run PDF JavaScript differ, and the safe default is a download.
+- Every response carries `Content-Security-Policy: sandbox` (no script, opaque origin, even if
+  a browser renders it anyway) and `X-Content-Type-Options: nosniff`. The sandbox is sent as its
+  own header, so an app CSP set by `SecurityHeaders` doesn't replace it.
+
+Images still render in `<img>`, and audio/video still play in `<audio>`/`<video>`; those ignore
+`Content-Disposition`. `staticFiles` throws if an untrusted directory is inside a trusted one (or
+the reverse), because its files would also be reachable through the trusted mapping; it compares
+the paths as written and with symlinks resolved. A file a trusted mapping reaches that resolves
+into an untrusted directory anyway (a link made later) is served as untrusted.
+
+These headers are enforced as the response is written, after the handler and after-middleware, so
+a `Content-Type` or `Content-Disposition` set later can't undo them, and a page-cache hit keeps
+them. `.untrusted()` applies to 2xx responses; an error page is the app's own.
+
+**From a handler** (an access check, a lookup by id), apply the same rules with
+`Result.untrusted()`:
+
+```java
+app.get("/files/{name}", req -> Result.fileUnder(uploadDir, req.pathParam("name")).untrusted());
+// doc looked up with db.findOwnedOr404(...); originalName is the uploader's filename
+return Result.download(Path.of(doc.path), doc.originalName).untrusted();   // keeps the filename
+```
+
+**S3.** `storage.put(key, uploadedFile)` and `putGenerated(folder, uploadedFile)` ignore the
+uploader's `Content-Type`. The object's type comes from the key's extension through the same
+allowlist (`application/octet-stream` otherwise), and every object but a raster image is stored
+with `Content-Disposition: attachment`. That matters even off the app's origin: a bucket or CDN
+on a sibling subdomain shares the site for cookies. To store a type you checked yourself, pass it:
+`storage.put(key, file, "image/svg+xml")`.
 
 ### Serving user-supplied filenames
 
@@ -834,12 +993,19 @@ challenges and `security.txt` keep working. The check runs on the decoded path, 
 is refused too.
 
 Symlinks that stay inside the served directory keep working. To serve a directory that
-lives elsewhere, register it as its own mapping rather than linking it into the web root:
+lives elsewhere, register it as its own mapping rather than linking it into the web root. A
+directory users write to is registered `UNTRUSTED` (see
+[Serving uploaded files](#serving-uploaded-files)):
 
 ```java
 app.staticFiles("/assets", "public");
-app.staticFiles("/assets/uploads", "/var/app/uploads");
+app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);
 ```
+
+When prefixes overlap, the longest one serves the request regardless of registration order, so
+`/assets/uploads/x` is looked up in `/var/app/uploads` even though `/assets` was registered
+first. (Before 0.1.11 the first registered prefix won, and the second mapping here was
+unreachable.)
 
 Brace sends no `Server` or `X-Powered-By` header. Requests that Jetty rejects before Brace's
 handler runs (ambiguous URIs such as `//x` or `%2e%2e` segments, malformed requests) get a
@@ -1039,7 +1205,7 @@ older than 0.1.7 must be upgraded.
 **Caching.** Every `/ops/*` response carries `Cache-Control: no-store`. This matters for the
 cookie channel specifically: RFC 9111 already forbids shared caches from storing a response to
 a request carrying `Authorization`, but no such rule covers a cookie-authenticated GET, and
-`/ops/dashboard` embeds a live bearer token in its HTML.
+`/ops/dashboard` shows one operator's view of the app.
 
 The `__brace_ops_session` cookie is scoped to `Path=/ops`, so an operator credential is not
 attached to every application request where any handler could read it via `req.cookie(...)`.
@@ -1047,16 +1213,17 @@ attached to every application request where any handler could read it via `req.c
 **Credential channels (general endpoints).** All ops endpoints except the browser exchange
 handoff accept credentials through exactly two channels:
 
-1. `Authorization: Bearer <token>` header — the standard channel for the CLI and the
-   dashboard's htmx polling.
-2. The `__brace_ops_session` httpOnly cookie — set by the browser exchange flow below.
+1. `Authorization: Bearer <token>` header — the standard channel for the CLI and scripts.
+2. The `__brace_ops_session` httpOnly cookie — set by the browser exchange flow below, and the
+   only credential the dashboard and analytics pages use.
 
 `?token=` query-parameter credentials are **not accepted** on general ops endpoints. Tokens in
 URLs leak into proxy access logs, browser history, and the `Referer` header of outbound links.
 Pass credentials via the `Authorization` header or the session cookie.
 
 **Browser exchange flow.** The `brace dashboard` CLI command calls `POST /ops/auth/login-token`
-(requires Bearer auth), receives a short-lived (60s), scope-capped login token, and opens the
+(bearer only: the session cookie is refused there), receives a short-lived (60s, never past the
+bearer's own expiry), scope-capped login token, and opens the
 browser at `/ops/auth/exchange?token=<loginToken>`. The exchange endpoint is the only place
 `?token=` is accepted — it is the browser-redirect handoff, and there is no other channel that
 can carry a credential into a plain GET redirect. On success, the server sets an 8h httpOnly
@@ -1087,6 +1254,57 @@ restarting or redeploying takes effect on its outstanding tokens immediately, al
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
 
+### Ops pages in the browser
+
+`/ops/dashboard` and `/ops/analytics` are cookie-only. Their htmx polling and the CONTROL
+buttons (resolve an error, clear the cache) send the `__brace_ops_session` cookie and nothing
+else; no token is written into the page. Until 0.1.11 the dashboard embedded a 2-hour bearer
+token (up to CONTROL scope) in `hx-headers`, so any script running on the app's origin in an
+operator's browser could `fetch('/ops/dashboard')` (same-origin, so the cookie went along) and
+read it out of the HTML. The httpOnly cookie can't be read by page script.
+
+**Each token works on one channel.** Every ops token carries a type: `bearer` (issued to the CLI
+by `POST /ops/auth`, accepted only in `Authorization: Bearer`), `login` (the 60-second handoff,
+accepted only by `/ops/auth/exchange`), and `session` (the cookie the exchange sets, accepted
+only as the cookie). `POST /ops/auth/login-token` takes only a bearer token. Before this, script
+on the app's origin could post to it with the operator's cookie, read a CONTROL login token from
+the response, use it as a bearer from anywhere, and mint the next one with it. A token without a
+type (minted before 0.1.11) is refused; the CLI re-authenticates on the 401.
+
+**Cross-origin protection for cookie-authenticated changes.** The ops routes are
+`.csrf(false)`, since the CLI posts with a bearer token. A mutating ops request
+(`POST`/`PUT`/`PATCH`/`DELETE`) authenticated by the cookie must come from a page on the same
+origin: `Sec-Fetch-Site: same-origin` when the browser sends it, otherwise an `Origin` whose
+host and port are the ones requested. Anything else is refused with `403 {"error":"cross_origin_request"}`
+and audited. `SameSite=Strict` already keeps the cookie off cross-site requests, but not off a
+sibling subdomain's: `evil.example.com` is the same *site* as `app.example.com`, so its form
+post would carry the cookie. A bearer-authenticated request needs no such check, because a
+cross-origin page can't set `Authorization`.
+
+**The ops Content-Security-Policy.** Every response from a framework `/ops` route carries:
+
+```
+Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
+```
+
+plus `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy:
+no-referrer`, and any `Access-Control-*` headers the app's middleware added are removed (an app
+CORS policy that reflects origins with credentials would otherwise let a same-site page read ops
+JSON). The pages load their
+JavaScript and CSS from `/__brace/ops.js`, `/__brace/ops.css` and `/__brace/ops-analytics.css`
+and contain no inline script, event handler or `style=""` attribute. The headers are set at the
+response choke point *after* the app's after-middleware, so they replace whatever policy the app
+sets: a lax app policy can't weaken the ops pages, and an unusual one can't break them. The ops
+policy is stricter than `SecurityHeaders.strict()` in every directive, so an app using `strict()`
+loses nothing there.
+
+**What remains.** An XSS on the app's origin still runs with the operator's ops session in the
+same browser: it can't read the cookie or obtain a token, but it can drive same-origin requests,
+including `POST /ops/cache/clear` with a valid `Sec-Fetch-Site: same-origin`. The cookie is
+scoped to `Path=/ops`, which limits where it's sent, not who on the origin can trigger a
+request. For high-value apps, serve ops from its own hostname (below), so that the app's origin
+and the ops origin are different and the browser keeps them apart.
+
 ### Security Recommendations
 
 1. **HTTPS only:** Never expose ops endpoints over HTTP
@@ -1094,6 +1312,10 @@ the restart.
 3. **Don't expose publicly:** Ops endpoints should not be internet-accessible
 4. **Rotate keys regularly:** Implement key rotation for ops access
 5. **Monitor access:** Log all ops endpoint access
+6. **Separate hostname for high-value apps:** route `/ops/*` only on a dedicated hostname
+   (e.g. `ops.app.example.com`, reachable from the operator network) and refuse it on the
+   public one. The ops cookie and pages then live on an origin where no application page, and
+   so no application XSS, ever runs. Point `ops.prod.url` in `.brace` at the ops hostname for the CLI.
 
 ### Deployment Pattern
 
@@ -1103,6 +1325,25 @@ location /ops/ {
     allow 10.0.0.0/8;      # Internal network only
     deny all;
     proxy_pass http://app;
+}
+```
+
+With a separate ops hostname (recommendation 6), the public server refuses `/ops/` outright and
+only the internal one proxies it:
+
+```nginx
+server {
+    server_name app.example.com;
+    location /ops/ { return 404; }
+    location / { proxy_pass http://app; }
+}
+server {
+    server_name ops.app.example.com;
+    allow 10.0.0.0/8;
+    deny all;
+    location /ops/ { proxy_pass http://app; }
+    location /__brace/ { proxy_pass http://app; }   # the ops pages' JS and CSS
+    location / { return 404; }
 }
 ```
 

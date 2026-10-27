@@ -151,30 +151,21 @@ class OpsScopeIntegrationTest {
             HttpResponse.BodyHandlers.ofString()).body();
     }
 
-    /** Pull the htmx polling token embedded in the dashboard HTML (hx-headers Bearer value). */
-    private static String extractEmbeddedToken(String dashboardHtml) {
-        var m = java.util.regex.Pattern.compile("Bearer ([A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+)")
-            .matcher(dashboardHtml);
-        assertTrue(m.find(), "dashboard should embed a Bearer token for htmx polling");
-        return m.group(1);
-    }
-
-    // --- H1: the dashboard must mint its embedded token at the caller's scope ---
+    // --- L3: the dashboard page carries no credential at any scope ---
 
     @Test
-    void dashboardTokenForReadCallerCannotControl() throws Exception {
-        var read = authenticate(readKey, null).token();
-        String html = getBody("/ops/dashboard", read);
-        String embedded = extractEmbeddedToken(html);
-
-        // The embedded token exists for the 5s polling refresh — it must still read...
-        assertEquals(200, getStatus("/ops/dashboard", embedded),
-            "embedded dashboard token must work for the htmx refresh");
-        // ...but scraped from a READ caller's page, it must NOT reach control endpoints (H1).
-        assertEquals(401, postStatus("/ops/cache/clear", embedded),
-            "token embedded in a READ caller's dashboard must be rejected by CONTROL endpoints");
-        assertEquals(401, postStatus("/ops/errors/1/resolve", embedded),
-            "token embedded in a READ caller's dashboard must not resolve errors");
+    void dashboardEmbedsNoTokenAtAnyScope() throws Exception {
+        // It used to embed a bearer token (minted at the caller's scope, H1) for htmx polling;
+        // any script on the app's origin could fetch the page and lift it. Polling and the
+        // CONTROL buttons now ride the httpOnly session cookie.
+        for (var key : List.of(readKey, controlKey)) {
+            var token = authenticate(key, null).token();
+            String html = getBody("/ops/dashboard", token);
+            assertFalse(html.contains("Bearer"), html);
+            assertFalse(html.contains("hx-headers"), html);
+            assertFalse(java.util.regex.Pattern.compile("[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{20,}").matcher(html).find(),
+                "no token-shaped string in the page");
+        }
     }
 
     @Test
@@ -239,6 +230,7 @@ class OpsScopeIntegrationTest {
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/ops/cache/clear"))
                 .header("Cookie", cookie)
+                .header("Sec-Fetch-Site", "same-origin")
                 .POST(HttpRequest.BodyPublishers.noBody()).build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(401, clear.statusCode(),
@@ -266,15 +258,57 @@ class OpsScopeIntegrationTest {
         String setCookie = exchange.headers().firstValue("Set-Cookie").orElse("");
         String cookie = setCookie.substring(0, setCookie.indexOf(';'));
 
-        // A CONTROL key's browser session retains control (no privilege loss either).
-        var clear = client.send(
-            HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/ops/cache/clear"))
-                .header("Cookie", cookie)
-                .POST(HttpRequest.BodyPublishers.noBody()).build(),
-            HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, clear.statusCode(),
+        // A CONTROL key's browser session retains control (no privilege loss either), from a
+        // page on this origin: what the dashboard's buttons send.
+        assertEquals(200, cookiePost(cookie, "Sec-Fetch-Site", "same-origin"),
             "session cookie obtained from a CONTROL key must keep control access");
+        // Browsers without Sec-Fetch-Site: the Origin must be this host.
+        assertEquals(200, cookiePost(cookie, "Origin", "http://localhost:" + port));
+    }
+
+    // --- L3: a cookie-authenticated mutation must come from a page on this origin ---
+
+    @Test
+    void cookieMutationFromAnotherOriginIsRefused() throws Exception {
+        var control = authenticate(controlKey, null).token();
+        var loginToken = Json.mapper().readTree(client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/login-token"))
+                .header("Authorization", "Bearer " + control)
+                .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString()).body()).get("loginToken").asText();
+        String setCookie = client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/auth/exchange?token=" + loginToken))
+                .GET().build(),
+            HttpResponse.BodyHandlers.discarding()).headers().firstValue("Set-Cookie").orElse("");
+        String cookie = setCookie.substring(0, setCookie.indexOf(';'));
+
+        // SameSite=Strict keeps the cookie off cross-site requests, but a sibling subdomain is
+        // same-site: its form post would carry it.
+        assertEquals(403, cookiePost(cookie, "Sec-Fetch-Site", "same-site"));
+        assertEquals(403, cookiePost(cookie, "Sec-Fetch-Site", "cross-site"));
+        assertEquals(403, cookiePost(cookie, "Origin", "http://evil.example"));
+        assertEquals(403, cookiePost(cookie, "Origin", "null"));
+        assertEquals(403, cookiePost(cookie), "a browser always sends one of the two; neither is refused");
+        // Reads aren't affected: a cookie GET needs no origin proof.
+        assertEquals(200, client.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/ops/dashboard"))
+                .header("Cookie", cookie).GET().build(),
+            HttpResponse.BodyHandlers.discarding()).statusCode());
+        // A bearer token needs none either: a cross-origin page can't set Authorization.
+        assertEquals(200, postStatus("/ops/cache/clear", control));
+    }
+
+    /** POST /ops/cache/clear with the ops session cookie and optional extra header pairs. */
+    private int cookiePost(String cookie, String... headers) throws Exception {
+        var builder = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/ops/cache/clear"))
+            .header("Cookie", cookie)
+            .POST(HttpRequest.BodyPublishers.noBody());
+        for (int i = 0; i < headers.length; i += 2) builder.header(headers[i], headers[i + 1]);
+        return client.send(builder.build(), HttpResponse.BodyHandlers.discarding()).statusCode();
     }
 
     @Test

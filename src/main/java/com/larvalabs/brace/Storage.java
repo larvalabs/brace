@@ -128,13 +128,18 @@ public class Storage {
      *
      * <p>Holds the whole object in heap by definition. For anything that might be large, prefer
      * {@link #put(String, Path, String)} or {@link #put(String, UploadedFile)}, which stream.
+     *
+     * <p>{@code contentType} is stored as given. Never pass an upload's
+     * {@link UploadedFile#contentType()}, which the uploader chose ({@code text/html} would be
+     * served from the bucket as a page); use {@link #put(String, UploadedFile)} for uploads.
      */
     public String put(String key, byte[] data, String contentType) {
-        return putStreaming(key, () -> new java.io.ByteArrayInputStream(data), data.length, contentType);
+        return putStreaming(key, () -> new java.io.ByteArrayInputStream(data), data.length, contentType, null);
     }
 
     /**
      * Upload a file from disk without reading it into the heap. Returns the public URL.
+     * {@code contentType} is stored as given; for an upload use {@link #put(String, UploadedFile)}.
      */
     public String put(String key, Path path, String contentType) {
         long length;
@@ -149,27 +154,52 @@ public class Storage {
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
-        }, length, contentType);
+        }, length, contentType, null);
     }
 
     /**
      * Upload an UploadedFile with a user-specified key. Returns a StoredFile record.
      *
+     * <p>The object's {@code Content-Type} comes from the key's extension through an allowlist
+     * (raster images, PDF, plain text, CSV, JSON, office documents, archives, audio, video), and is
+     * {@code application/octet-stream} for anything else, {@code .html} and {@code .svg} included.
+     * The type the browser claimed ({@link UploadedFile#contentType()}) is ignored: it is whatever
+     * the uploader sent, and storing {@code text/html} made the bucket serve their page. Everything
+     * but a raster image is also stored with {@code Content-Disposition: attachment}, so opening its
+     * URL downloads it. To store a type you have verified yourself, use
+     * {@link #put(String, UploadedFile, String)}.
+     *
      * <p>Streams: an upload that spilled to a temp file goes to storage without ever being
      * materialized in the heap.
      */
     public StoredFile put(String key, UploadedFile file) {
-        String url = putStreaming(key, file::stream, file.size(), file.contentType());
+        return putUntrusted(key, file);
+    }
+
+    /**
+     * Upload an UploadedFile under a content type you vouch for, such as one you checked against
+     * the file's contents. Stored as given, with no {@code Content-Disposition}, like
+     * {@link #put(String, byte[], String)}. Never pass {@code file.contentType()} here: that is
+     * the uploader's claim, which {@link #put(String, UploadedFile)} exists to ignore.
+     */
+    public StoredFile put(String key, UploadedFile file, String contentType) {
+        String url = putStreaming(key, file::stream, file.size(), contentType, null);
         return new StoredFile(key, url);
     }
 
     /**
-     * Upload an UploadedFile with an auto-generated safe key (UUID-based).
-     * Returns a StoredFile record containing the generated key and public URL.
+     * Upload an UploadedFile with an auto-generated safe key ({@link #safeKey}). Returns a
+     * StoredFile record containing the generated key and public URL. The content type and
+     * disposition are derived from the key as in {@link #put(String, UploadedFile)}.
      */
     public StoredFile putGenerated(String folder, UploadedFile file) {
-        String key = safeKey(folder, file.filename());
-        String url = putStreaming(key, file::stream, file.size(), file.contentType());
+        return putUntrusted(safeKey(folder, file.filename()), file);
+    }
+
+    private StoredFile putUntrusted(String key, UploadedFile file) {
+        String contentType = UntrustedContent.typeForName(key);
+        String disposition = UntrustedContent.isRasterImage(contentType) ? null : "attachment";
+        String url = putStreaming(key, file::stream, file.size(), contentType, disposition);
         return new StoredFile(key, url);
     }
 
@@ -188,7 +218,7 @@ public class Storage {
      * which S3 rejects for a plain {@code PUT}.
      */
     private String putStreaming(String key, java.util.function.Supplier<InputStream> source,
-                                long length, String contentType) {
+                                long length, String contentType, String contentDisposition) {
         requireSafeKey(key);
         if (length < 0) {
             throw new IllegalArgumentException(
@@ -206,16 +236,20 @@ public class Storage {
             var dateStamp = DATE_STAMP_FORMAT.format(now);
 
             var payloadHash = sha256Hex(source);
-            var auth = buildAuthHeader("PUT", key, contentType, payloadHash, amzDate, dateStamp);
+            var auth = buildAuthHeader("PUT", key, contentType, contentDisposition,
+                    payloadHash, amzDate, dateStamp);
 
             var uploadUrl = buildUploadUrl(key);
             var body = HttpRequest.BodyPublishers.fromPublisher(
                     HttpRequest.BodyPublishers.ofInputStream(source::get), length);
-            var request = HttpRequest.newBuilder()
+            var builder = HttpRequest.newBuilder()
                     .uri(URI.create(uploadUrl))
                     .timeout(requestTimeout)
                     .method("PUT", body)
-                    .header("Content-Type", contentType)
+                    .header("Content-Type", contentType);
+            // S3 stores Content-Disposition with the object and returns it on every GET.
+            if (contentDisposition != null) builder.header("Content-Disposition", contentDisposition);
+            var request = builder
                     .header("x-amz-content-sha256", payloadHash)
                     .header("x-amz-date", amzDate)
                     .header("Authorization", auth)
@@ -240,29 +274,40 @@ public class Storage {
     static final long MAX_SINGLE_PUT_BYTES = 5L * 1024 * 1024 * 1024;
 
     /**
-     * Generate a safe storage key from a folder and original filename.
-     * Uses UUID to prevent conflicts and sanitizes the extension.
+     * Generate a safe storage key from a folder and original filename: a random UUID plus the
+     * original's extension, lowercased and alphanumeric only.
      * Example: safeKey("avatars", "user photo.jpg") -> "avatars/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jpg"
+     *
+     * <p>An extension a browser or server could execute ({@code html}, {@code svg}, {@code xml},
+     * {@code js}, {@code css}, {@code php}, … in any case) becomes {@code bin}:
+     * {@code safeKey("u", "x.SVG")} is {@code "u/<uuid>.bin"}, and so is a precompressed
+     * {@code "x.svg.gz"}. Otherwise only the final extension decides how a file is served, so
+     * {@code "x.svg.png"} keeps {@code png}. Serve the files as
+     * untrusted all the same ({@link StaticFiles#UNTRUSTED}, {@link Result#untrusted()}): the
+     * rename protects a server that maps extensions to types, not one that sniffs content.
      */
     public static String safeKey(String folder, String originalName) {
         String uuid = UUID.randomUUID().toString();
         String ext = extension(originalName);
         if (ext != null && !ext.isEmpty()) {
-            return folder + "/" + uuid + "." + ext;
+            return folder + "/" + uuid + "." + (UntrustedContent.isActiveName(originalName) ? "bin" : ext);
         }
         return folder + "/" + uuid;
     }
 
     /**
-     * Extract the file extension from a filename (without the dot).
+     * Extract the file extension from a filename (without the dot), lowercased.
      * Returns null if no extension found.
-     * Sanitizes the extension to contain only alphanumeric characters.
+     * Sanitizes the extension to contain only alphanumeric characters. Unlike {@link #safeKey}
+     * it does not rename executable extensions: {@code extension("x.html")} is {@code "html"}.
      */
     public static String extension(String filename) {
         if (filename == null || filename.isEmpty()) return null;
         int dot = filename.lastIndexOf('.');
         if (dot < 0 || dot == filename.length() - 1) return null;
-        String ext = filename.substring(dot + 1).toLowerCase();
+        // Locale.ROOT: under a Turkish default locale "CGI".toLowerCase() is "cgı", which would
+        // slip past the executable-extension check in safeKey.
+        String ext = filename.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
         // Only allow alphanumeric extensions (prevents path traversal)
         return ext.matches("[a-z0-9]+") ? ext : null;
     }
@@ -315,23 +360,35 @@ public class Storage {
      */
     String buildAuthHeader(String method, String key, String contentType,
                            String payloadHash, String amzDate, String dateStamp) {
+        return buildAuthHeader(method, key, contentType, null, payloadHash, amzDate, dateStamp);
+    }
+
+    /**
+     * As above, also signing {@code Content-Disposition} when it is non-null. Signed rather than
+     * merely sent, so the stored object's disposition is covered by the signature like its type.
+     * SigV4 wants the canonical headers sorted by name, which is the order they are listed in.
+     */
+    String buildAuthHeader(String method, String key, String contentType, String contentDisposition,
+                           String payloadHash, String amzDate, String dateStamp) {
         try {
             var uri = canonicalUri(key);
 
-            String canonicalHeaders;
-            String signedHeaders;
-            if (contentType != null) {
-                canonicalHeaders = "content-type:" + contentType + "\n"
-                        + "host:" + host + "\n"
-                        + "x-amz-content-sha256:" + payloadHash + "\n"
-                        + "x-amz-date:" + amzDate + "\n";
-                signedHeaders = "content-type;host;x-amz-content-sha256;x-amz-date";
-            } else {
-                canonicalHeaders = "host:" + host + "\n"
-                        + "x-amz-content-sha256:" + payloadHash + "\n"
-                        + "x-amz-date:" + amzDate + "\n";
-                signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+            var canonical = new StringBuilder();
+            var signed = new StringBuilder();
+            if (contentDisposition != null) {
+                canonical.append("content-disposition:").append(contentDisposition.strip()).append('\n');
+                signed.append("content-disposition;");
             }
+            if (contentType != null) {
+                canonical.append("content-type:").append(contentType.strip()).append('\n');
+                signed.append("content-type;");
+            }
+            canonical.append("host:").append(host).append('\n')
+                     .append("x-amz-content-sha256:").append(payloadHash).append('\n')
+                     .append("x-amz-date:").append(amzDate).append('\n');
+            signed.append("host;x-amz-content-sha256;x-amz-date");
+            String canonicalHeaders = canonical.toString();
+            String signedHeaders = signed.toString();
 
             var canonicalRequest = method + "\n" + uri + "\n" + "\n"
                     + canonicalHeaders + "\n" + signedHeaders + "\n" + payloadHash;

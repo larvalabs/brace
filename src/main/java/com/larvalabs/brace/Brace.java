@@ -469,8 +469,41 @@ public class Brace {
         return this;
     }
 
+    /** Serves {@code directory} at {@code urlPrefix} as {@link StaticFiles#TRUSTED} files you shipped. */
     public Brace staticFiles(String urlPrefix, String directory) {
-        staticFileMappings.add(new BraceHandler.StaticFileMapping(urlPrefix, directory));
+        return staticFiles(urlPrefix, directory, StaticFiles.TRUSTED);
+    }
+
+    /**
+     * Serves {@code directory} at {@code urlPrefix}. Use {@link StaticFiles#UNTRUSTED} for any
+     * directory users can write to (uploads), so nothing in it runs on the app's origin.
+     *
+     * <p>When prefixes overlap, the longest one serves the request, whatever the registration
+     * order. Throws {@link IllegalArgumentException} when an untrusted directory sits inside a
+     * trusted one (or the reverse): its files would be reachable through the trusted mapping too.
+     */
+    public Brace staticFiles(String urlPrefix, String directory, StaticFiles mode) {
+        java.util.Objects.requireNonNull(mode, "mode");
+        var added = new BraceHandler.StaticFileMapping(urlPrefix, directory, mode);
+        // Compared both as written and with symlinks resolved: a link (uploads -> public/uploads,
+        // current -> releases/42) puts the same directory under two paths.
+        var dir = java.nio.file.Path.of(directory).toAbsolutePath().normalize();
+        var realDir = BraceHandler.realPathOrNearest(dir);
+        for (var existing : staticFileMappings) {
+            if (existing.mode() == mode) continue;
+            var other = java.nio.file.Path.of(existing.directory()).toAbsolutePath().normalize();
+            var realOther = BraceHandler.realPathOrNearest(other);
+            if (other.startsWith(dir) || dir.startsWith(other)
+                    || realOther.startsWith(realDir) || realDir.startsWith(realOther)) {
+                var trusted = mode == StaticFiles.TRUSTED ? added : existing;
+                var untrusted = mode == StaticFiles.TRUSTED ? existing : added;
+                throw new IllegalArgumentException("Untrusted static directory " + untrusted.directory()
+                    + " overlaps trusted static directory " + trusted.directory()
+                    + ": its files would also be served as trusted at " + trusted.urlPrefix()
+                    + ". Keep the upload directory outside the trusted one.");
+            }
+        }
+        staticFileMappings.add(added);
         return this;
     }
 
@@ -1162,7 +1195,13 @@ public class Brace {
         server.setErrorHandler(new BraceErrorHandler());
         server.addConnector(connector);
 
-        var staticMappingsCopy = List.copyOf(staticFileMappings);
+        // Longest prefix first, so "/assets/uploads" is reached even when "/assets" was registered
+        // before it. Matching in registration order let the shorter prefix claim the request and
+        // answer 404, leaving the more specific (typically untrusted) mapping unreachable.
+        var staticMappingsCopy = staticFileMappings.stream()
+            .sorted(java.util.Comparator.comparingInt(
+                (BraceHandler.StaticFileMapping m) -> m.urlPrefix().length()).reversed())
+            .toList();
         Assets.init(staticMappingsCopy);
         // Adoption aid for named routes: once any route is named, report how many app
         // routes still aren't (framework /ops/* routes are excluded — apps can't name them).

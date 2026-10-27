@@ -14,9 +14,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * M4 (2026-07 security review): only {@code /ops/auth/exchange} set {@code Cache-Control:
  * no-store}. Every other ops endpoint relied on the caller's credential channel to suppress
  * caching — which RFC 9111 guarantees for an {@code Authorization} header but not for the
- * {@code __brace_ops_session} cookie the browser uses. {@code /ops/dashboard} embeds a live
- * bearer token in its HTML, so a caching intermediary could hand one operator's token to the
- * next requester.
+ * {@code __brace_ops_session} cookie the browser uses. {@code /ops/dashboard} then embedded a
+ * live bearer token in its HTML (removed by L3, 2026-10), so a caching intermediary could hand
+ * one operator's token to the next requester; it still shows one operator's view of the app.
  *
  * <p>The coverage test loops over the registered routes rather than naming endpoints, so a
  * new ops endpoint is covered without anyone remembering to add it here.
@@ -87,13 +87,12 @@ class OpsNoStoreTest {
     }
 
     @Test
-    void dashboardEmbeddingATokenIsNoStore() throws Exception {
+    void dashboardIsNoStore() throws Exception {
         var resp = HttpClient.newHttpClient().send(
             HttpRequest.newBuilder().uri(URI.create("http://localhost:" + port + "/ops/dashboard"))
                 .header("Authorization", "Bearer " + bearer()).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(200, resp.statusCode());
-        assertTrue(resp.body().contains("Bearer "), "dashboard should embed a token");
         assertEquals("no-store", resp.headers().firstValue("Cache-Control").orElse(null));
     }
 
