@@ -36,7 +36,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Request data in a query string throws in dev and tests; `Sort` for `?sort=` | security, **breaking** | bind values with `?`, build `?sort=` orders with `Sort` | [§](#breaking-request-data-in-a-query-string-throws-in-dev-and-tests) |
 | `findOwnedOr404` and a predicate `findOr404` for user-owned rows | new, security | switch user-owned lookups from `findOr404(type, id)` | [§](#new-owned-lookups) |
 | `Http` refuses non-public destinations; buffered responses capped at 10 MB | security, **breaking** | add `.trusted()` to calls to your own internal services and local test servers; `.maxResponseBytes(n)` for bodies over 10 MB | [§](#breaking-http-refuses-non-public-destinations-by-default) |
-| Templates block script URLs in URL attributes and JS-escape `hx-on*`; `@SafeUrl`, `Url.safe` | security | none, unless a template renders an SVG `data:` or custom-scheme URL from data | [§](#security-templates-neutralize-script-urls-and-escape-htmx-script-attributes) |
+| Templates block script URLs in URL attributes and JS-escape `hx-on*`; `@SafeUrl`, `Url.safe` | security | none, unless a template renders a data URL with an unlisted scheme, or HTML into `srcdoc` | [§](#security-templates-neutralize-script-urls-and-escape-htmx-script-attributes) |
 | Uploads served and stored as untrusted: `StaticFiles.UNTRUSTED`, `Result.untrusted()`; `Storage.put(key, file)` types by key; `safeKey`/`safeFilename` neutralize `.html`/`.svg`/…; longest static prefix wins | security, **breaking** for `Storage.put(key, file)` with extensionless keys and code expecting `.svg`/`.html` keys | register upload dirs `UNTRUSTED`, add `.untrusted()` to handlers serving uploads | [§](#breaking-uploads-are-served-and-stored-as-untrusted) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
@@ -764,17 +764,24 @@ for `on*` attributes left `&`, so `&#39;` in user data closed the string there t
 
 Templates now render through Brace's own output:
 
-- A value at the start of a URL attribute (`href`, `src`, `action`, `formaction`, `xlink:href`,
-  `poster`, `hx-get`/`post`/`put`/`patch`/`delete`, ...) must be relative or
-  `http`/`https`/`mailto`/`tel`; anything else becomes `about:invalid#blocked`.
-- `on*`, `hx-on*`, `hx-vals`, `hx-headers` and `hx-trigger` values are JavaScript-escaped, then
-  HTML-escaped.
+- In a URL attribute (`href`, `src`, `action`, `formaction`, `xlink:href`, `poster`,
+  `hx-get`/`post`/`put`/`patch`/`delete`, ...), when user data decides the scheme the URL must be
+  relative or `http`/`https`/`mailto`/`tel`; anything else becomes `about:invalid#blocked`. A
+  scheme the template wrote itself (`href="sms:${n}"`) is kept.
+- `on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request` and `hx-trigger` values are
+  escaped with `\uXXXX` sequences, valid in JavaScript and in JSON.
 - `srcdoc` values are text, never markup.
 
-No change for ordinary templates. Raster `data:image/...` URLs in `src`/`poster` still work. A
-template that renders an SVG `data:` URL or a custom app scheme from data into a URL attribute
-now gets `about:invalid#blocked`; write such a URL with `$unsafe{...}` after validating it
-yourself.
+What can change in an existing app:
+
+- A URL from data with a scheme outside the list (an SVG `data:` URL, `sms:`, `ftp:`, a custom
+  app scheme) now renders `about:invalid#blocked`. Raster `data:image/...` in `src`/`poster`
+  still works. Write the scheme in the template (`href="sms:${number}"`), or validate the URL and
+  write it with `$unsafe{...}`.
+- `srcdoc="${html}"` used to render `html` as markup; it's now text. For a preview, sanitize the
+  HTML and write `srcdoc="$unsafe{Html.escape(sanitized)}"` in a `sandbox` iframe.
+- `hx-vals`/`hx-headers` JSON with user data now carries the exact value (quotes included), where
+  a `"` in the data used to inject extra JSON keys.
 
 New: `@SafeUrl` (form fields that must be an absolute `http`/`https` URL), `Url.isSafe(url)` and
 `Url.safe(url)`. Recommended in every layout:

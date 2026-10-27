@@ -666,16 +666,23 @@ Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
 **Output escaping.** `${...}` is escaped for where it lands: text, attribute, `<script>`. On top
 of JTE's escaping, Brace's template output:
 - **URL attributes** (`href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `hx-get`/
-  `hx-post`/... and their `data-hx-` forms): a value at the start of the attribute must be
-  relative or `http`/`https`/`mailto`/`tel`, judged as a browser parses it; anything else
-  (`javascript:`, `data:`, `java\tscript:`) renders as `about:invalid#blocked`, except that `src`
-  and `poster` also take raster `data:image/png|jpeg|gif|webp|avif|bmp` URLs. After a static
-  prefix (`href="/users/${id}"`) the value can't pick the scheme and is only escaped.
-- **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-headers`, `hx-trigger`): JavaScript-
-  escaped, then HTML-escaped, so `hx-on:click="select('${name}')"` passes `name` as a string.
-  Still, these attributes are code: keep user data out of them where you can and pass it in
-  `data-*` attributes or `hx-vals` JSON instead.
-- `srcdoc`: user data becomes text in the frame, never markup.
+  `hx-post`/... and their `data-hx-` forms; `to`/`values` on SVG `<set>`/`<animate>`): the whole
+  value, every `${...}` in it together, is checked as a browser parses it. When the template's own
+  text fixed the scheme or made it relative (`href="mailto:${email}"`, `href="/users/${id}"`) it
+  is kept; when user data decides the scheme, only `http`/`https`/`mailto`/`tel` pass (plus raster
+  `data:image/png|jpeg|gif|webp|avif|bmp` on `src`/`poster`), and anything else (`javascript:`,
+  `data:`, `java\tscript:`, `${scheme}://${host}` with a `javascript` scheme) renders as
+  `about:invalid#blocked`.
+- **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request`,
+  `hx-trigger`): user data is escaped with `\uXXXX` sequences, valid in a JavaScript string and in
+  JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and
+  `hx-vals='{"q": "${q}"}'` stays valid JSON. Still, these attributes are code: prefer passing user
+  data as `hx-vals` JSON or `data-*` attributes over writing it into a handler.
+- `srcdoc`: user data is escaped twice, so it becomes text in the frame, never markup. Its content
+  isn't URL-checked; for an HTML preview, sanitize the HTML, write it with
+  `srcdoc="$unsafe{Html.escape(sanitized)}"`, and add `sandbox` to the iframe.
+- A `@template` call inside an attribute value renders its output in body context (JTE), without
+  attribute escaping or the URL check: pass values, not template calls, into attributes.
 
 `$unsafe{...}` bypasses all of it. Outside templates, `Url.isSafe(url)` / `Url.safe(url)` apply
 the same URL rule (e.g. a URL returned in JSON for a client to put in an `href`).

@@ -332,17 +332,27 @@ contexts where escaping alone doesn't stop script:
   `background`, `data`, `hx-get`, `hx-post`, `hx-put`, `hx-patch`, `hx-delete` (and `data-hx-`
   forms), on any tag. HTML escaping leaves `javascript:alert(1)` intact, and browsers strip
   tabs, newlines and leading control characters before reading the scheme, so
-  `java\tscript:` is a script URL too. A value at the start of the attribute is normalized the
-  same way and allowed only as a relative URL or `http`, `https`, `mailto` or `tel`; anything
-  else renders as `about:invalid#blocked`. `src` and `poster` also accept raster
-  `data:image/` URLs (png, jpeg, gif, webp, avif, bmp; never SVG). A value after a static prefix
-  (`href="/users/${id}"`) can't choose the scheme and is only escaped.
+  `java\tscript:` is a script URL too. Also `to`/`from`/`by`/`values` on SVG `<set>` and
+  `<animate>`, which can set an `href`. The whole value, template text and every `${...}`, is
+  held until its closing quote and normalized the same way. If the template's own text fixed the
+  scheme or made the URL relative (`href="mailto:${email}"`, `href="/users/${id}"`), it's kept;
+  if user data decides the scheme (`href="${url}"`, `href="${a}${b}"`, `href="${scheme}://${host}"`)
+  only `http`, `https`, `mailto` and `tel` pass, plus raster `data:image/` URLs (png, jpeg, gif,
+  webp, avif, bmp; never SVG) on `src` and `poster`. Anything else renders as
+  `about:invalid#blocked`.
 - **Script attributes.** `on*`, `hx-on*` (`hx-on:click`, `hx-on-click`, `data-hx-on:*`),
-  `hx-vals`, `hx-headers` and `hx-trigger` are JavaScript-escaped and then HTML-escaped. HTML
-  escaping alone is undone by the browser before the code runs (`&#39;` is a quote again), and
-  JTE's JavaScript escaping for `on*` left `&` alone, so an entity in user data still closed the
-  string.
-- **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup.
+  `hx-vals`, `hx-vars`, `hx-headers`, `hx-request` and `hx-trigger`. User data is escaped with
+  `\uXXXX` sequences for every character that can end a string or start markup or a template
+  substitution, which is valid in JavaScript strings, template literals and JSON, so JSON
+  `hx-vals`/`hx-headers` keep working with quotes in the data. HTML escaping alone is undone by
+  the browser before the code runs (`&#39;` is a quote again), and JTE's JavaScript escaping for
+  `on*` left `&` alone, so an entity in user data still closed the string.
+- **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup. Template
+  markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
+  `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.
+
+Not covered: a `@template` call inside an attribute value renders in body context (JTE's
+behavior), so its output gets neither attribute escaping nor the URL check.
 
 Both the hot-reload and precompiled render paths use this output. `$unsafe{...}` bypasses it, as
 does `Result.html(...)`, which is a raw sink.

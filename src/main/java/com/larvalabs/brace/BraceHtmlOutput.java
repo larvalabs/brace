@@ -4,10 +4,12 @@ import gg.jte.Content;
 import gg.jte.TemplateOutput;
 import gg.jte.html.OwaspHtmlTemplateOutput;
 import gg.jte.html.escape.Escape;
-import gg.jte.output.StringOutput;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The output every Brace template renders through (M4, M5 — 2026-10 security review). JTE's own
@@ -17,23 +19,30 @@ import java.util.Set;
  *
  * <ul>
  *   <li><strong>URL attributes</strong> ({@code href}, {@code src}, {@code action},
- *       {@code formaction}, {@code hx-get}, ... on any tag): a value written at the start of the
- *       attribute is normalized the way browsers parse URLs (leading/trailing control characters
- *       and spaces stripped, tabs and newlines removed) and allowed only as a relative URL or an
- *       {@code http}, {@code https}, {@code mailto} or {@code tel} URL. Anything else
- *       ({@code javascript:}, {@code data:}, {@code java\tscript:}) renders as
- *       {@code about:invalid#blocked}. A value after a static prefix ({@code href="/users/${id}"})
- *       can't choose the scheme and is only escaped. {@code src} and {@code poster} also take a
- *       raster {@code data:image/...} URL (png, jpeg, gif, webp, avif, bmp; never SVG).</li>
- *   <li><strong>Script attributes</strong> ({@code on*}, {@code hx-on*}, and {@code hx-vals} /
- *       {@code hx-headers} / {@code hx-trigger}, which htmx can evaluate): JavaScript-escaped and
- *       then HTML-escaped. JTE's JavaScript escaping alone leaves {@code &} as is, so
- *       {@code &#39;} in user data decoded back to a quote in the browser and closed the string.</li>
- *   <li>{@code srcdoc}: escaped twice, so user data becomes text in the frame, not markup.</li>
+ *       {@code formaction}, {@code hx-get}, ... on any tag, and {@code to}/{@code from}/
+ *       {@code by}/{@code values} on SVG {@code <set>}/{@code <animate>}): the whole value,
+ *       template text and every {@code ${...}} together, is held until its closing quote and
+ *       checked the way a browser parses a URL (leading/trailing control characters and spaces
+ *       stripped, tabs and newlines removed). If the template's own text chose the scheme
+ *       ({@code href="mailto:${email}"}) or the URL is relative, it's written as is; if user data
+ *       decides the scheme, only {@code http}, {@code https}, {@code mailto} and {@code tel}
+ *       pass, plus raster {@code data:image/...} on {@code src}/{@code poster}. Anything else
+ *       ({@code javascript:}, {@code data:text/html}, {@code java\tscript:}, or
+ *       {@code ${scheme}://${host}} with {@code scheme = "javascript"}) renders as
+ *       {@code about:invalid#blocked}.</li>
+ *   <li><strong>Script attributes</strong> ({@code on*}, {@code hx-on*}, and {@code hx-vals},
+ *       {@code hx-vars}, {@code hx-headers}, {@code hx-request}, {@code hx-trigger}, which htmx
+ *       can evaluate): user data is escaped with {@code \}{@code uXXXX} sequences, valid in a
+ *       JavaScript string, a template literal and JSON alike, so {@code hx-vals='{"q": "${q}"}'}
+ *       stays valid JSON. HTML escaping alone is undone by the browser before the code runs, and
+ *       JTE's JavaScript escaping for {@code on*} left {@code &} alone, so {@code &#39;} in user
+ *       data closed the string.</li>
+ *   <li>{@code srcdoc}: user data is escaped twice, so it is text in the frame, not markup.</li>
  * </ul>
  *
  * JTE uses an output it's given as is when it is already an HTML output, so dev (hot-reload) and
- * precompiled templates both go through this class.
+ * precompiled templates both go through this class. {@link TemplateEngine} calls {@link #finish}
+ * after each render.
  */
 public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
@@ -42,14 +51,28 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private static final Set<String> URL_ATTRIBUTES = Set.of(
         "href", "src", "action", "formaction", "xlink:href", "poster", "cite", "background", "data",
         "codebase", "manifest", "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete");
+    // SVG animation can set href: <set attributeName="href" to="javascript:...">.
+    private static final Set<String> ANIMATION_TAGS = Set.of("set", "animate");
+    private static final Set<String> ANIMATION_VALUES = Set.of("to", "from", "by", "values");
     private static final Set<String> SAFE_SCHEMES = Set.of("http", "https", "mailto", "tel");
+
+    // The end of a static chunk that opens a quoted attribute value: the attribute name, then
+    // whatever of the value the template wrote before the first ${...}.
+    private static final Pattern OPENS_VALUE = Pattern.compile(
+        "\\s([A-Za-z_:][-A-Za-z0-9_:.]*)\\s*=\\s*(?:\"([^\"]*)|'([^']*))$");
 
     private final TemplateOutput target;
     private String tagName;
     private String attributeName;
-    // Whether the next user content is the first thing in the current attribute's value: only a
-    // value there decides the URL's scheme. Set from the static template text written last.
-    private boolean atValueStart;
+
+    // An attribute value that's open: held back, not yet written, because if user data in a URL
+    // value turns out to make it unsafe the whole value is replaced.
+    private String valueAttribute;      // lower-cased attribute name; null when no value is held
+    private char valueQuote;
+    private StringBuilder valueOut;     // the value as HTML to emit: template text, escaped user data
+    private StringBuilder valueRaw;     // the value as the browser reads it, for the URL check
+    private int firstUserIndex;         // where in valueRaw user data first appears; -1 if none
+    private boolean urlValue;           // JTE's context confirmed this is a URL attribute
 
     public BraceHtmlOutput(TemplateOutput target) {
         super(target);
@@ -61,56 +84,137 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         super.setContext(tagName, attributeName);
         this.tagName = tagName;
         this.attributeName = attributeName == null ? null : attributeName.toLowerCase(Locale.ROOT);
+        if (valueAttribute == null || this.attributeName == null || urlValue) return;
+        if (valueAttribute.equals(this.attributeName) && isUrlAttribute(tagName, this.attributeName)) {
+            urlValue = true;
+        } else {
+            emitHeldValue(); // not a URL: nothing to decide, so the held start goes out now
+        }
     }
+
+    // --- template text ---
 
     @Override
     public void writeContent(String value) {
-        trackStatic(value, 0, value.length());
-        super.writeContent(value);
+        writeStatic(value, 0, value.length());
     }
 
     @Override
     public void writeContent(String value, int beginIndex, int endIndex) {
-        trackStatic(value, beginIndex, endIndex);
-        super.writeContent(value, beginIndex, endIndex);
+        writeStatic(value, beginIndex, endIndex);
     }
 
     @Override
     public void writeBinaryContent(byte[] value) {
-        // Static template text pre-encoded as UTF-8; the attribute syntax that matters is ASCII.
-        int end = value.length;
-        while (end > 0 && isUrlWhitespace((char) (value[end - 1] & 0xff))) end--;
-        atValueStart = end > 1 && (value[end - 1] == '"' || value[end - 1] == '\'') && value[end - 2] == '=';
-        super.writeBinaryContent(value);
+        // Template text pre-encoded as UTF-8: passed through untouched unless it's inside, or
+        // opens, an attribute value, which needs it as text.
+        if (valueAttribute == null && !mayOpenValue(value)) {
+            super.writeBinaryContent(value);
+            return;
+        }
+        String text = new String(value, StandardCharsets.UTF_8);
+        writeStatic(text, 0, text.length());
     }
 
-    private void trackStatic(String value, int begin, int end) {
-        while (end > begin && isUrlWhitespace(value.charAt(end - 1))) end--;
-        atValueStart = end - begin > 1 && (value.charAt(end - 1) == '"' || value.charAt(end - 1) == '\'')
-            && value.charAt(end - 2) == '=';
+    private void writeStatic(String s, int begin, int end) {
+        if (valueAttribute != null) {
+            int close = s.indexOf(valueQuote, begin);
+            if (close < 0 || close >= end) {
+                valueOut.append(s, begin, end);
+                valueRaw.append(s, begin, end);
+                return;
+            }
+            valueOut.append(s, begin, close);
+            valueRaw.append(s, begin, close);
+            emitHeldValue();
+            begin = close;
+        }
+        Matcher m = mayOpenValue(s, begin, end) ? OPENS_VALUE.matcher(s).region(begin, end) : null;
+        if (m == null || !m.find()) {
+            super.writeContent(s, begin, end);
+            return;
+        }
+        int valueStart = m.start(2) >= 0 ? m.start(2) : m.start(3);
+        super.writeContent(s, begin, valueStart);
+        valueAttribute = m.group(1).toLowerCase(Locale.ROOT);
+        valueQuote = m.start(2) >= 0 ? '"' : '\'';
+        valueOut = new StringBuilder(end - valueStart + 32).append(s, valueStart, end);
+        valueRaw = new StringBuilder(end - valueStart + 32).append(s, valueStart, end);
+        firstUserIndex = -1;
+        urlValue = false;
     }
+
+    /** A cheap test that template text might end inside an attribute value: a quote after '='. */
+    private static boolean mayOpenValue(byte[] b) {
+        for (int i = b.length - 1; i > 0; i--) {
+            byte c = b[i];
+            if (c == '"' || c == '\'') {
+                int j = i - 1;
+                while (j >= 0 && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r')) j--;
+                return j >= 0 && b[j] == '=';
+            }
+            if (c == '>' || c == '<') return false;
+        }
+        return false;
+    }
+
+    private static boolean mayOpenValue(String s, int begin, int end) {
+        for (int i = end - 1; i > begin; i--) {
+            char c = s.charAt(i);
+            if (c == '"' || c == '\'') {
+                int j = i - 1;
+                while (j >= begin && Character.isWhitespace(s.charAt(j))) j--;
+                return j >= begin && s.charAt(j) == '=';
+            }
+            if (c == '>' || c == '<') return false;
+        }
+        return false;
+    }
+
+    /** Write the held value, replaced first if it's a URL that user data made unsafe. */
+    private void emitHeldValue() {
+        if (urlValue && !isSafeValue()) {
+            Escape.htmlAttribute(BLOCKED_URL, target);
+        } else {
+            target.writeContent(valueOut.toString());
+        }
+        valueAttribute = null;
+        valueOut = null;
+        valueRaw = null;
+        urlValue = false;
+    }
+
+    /** Flushes a value still held at the end of a render. Called by {@link TemplateEngine}. */
+    void finish() {
+        if (valueAttribute != null) emitHeldValue();
+    }
+
+    // --- user data ---
 
     @Override
     public void writeUserContent(String value) {
         if (value == null) return;
-        boolean first = atValueStart;
-        atValueStart = false;
         if (tagName == null || attributeName == null) {
+            if (valueAttribute != null) emitHeldValue();
             super.writeUserContent(value);
             return;
         }
-        if (URL_ATTRIBUTES.contains(unprefixed(attributeName))) {
-            // Escaped here rather than by JTE, whose own a/href check drops a value starting with
-            // "javascript:" even after a static prefix, where it's only a harmless path segment.
-            boolean safe = isSafeUrl(value) || (isMediaAttribute(attributeName) && isRasterDataUrl(value));
-            Escape.htmlAttribute(first && !safe ? BLOCKED_URL : value, target);
+        if (urlValue) {
+            if (firstUserIndex < 0) firstUserIndex = valueRaw.length();
+            valueRaw.append(value);
+            Escape.htmlAttribute(value, new Appender(valueOut));
+            return;
+        }
+        if (valueAttribute != null) emitHeldValue();
+        if (isUrlAttribute(tagName, attributeName)) {
+            // A URL value whose opening this class didn't see: judge the value on its own.
+            boolean safe = isSafeUrl(value) || mediaDataUrl(attributeName, value);
+            Escape.htmlAttribute(safe ? value : BLOCKED_URL, target);
         } else if (isScriptAttribute(attributeName)) {
-            var js = new StringOutput();
-            Escape.javaScriptAttribute(value, js);
-            Escape.htmlAttribute(js.toString(), target);
+            Escape.htmlAttribute(escapeScript(value), target);
         } else if ("srcdoc".equals(attributeName)) {
-            var once = new StringOutput();
-            Escape.htmlAttribute(value, once);
+            var once = new StringBuilder(value.length() + 16);
+            Escape.htmlAttribute(value, new Appender(once));
             Escape.htmlAttribute(once.toString(), target);
         } else {
             super.writeUserContent(value);
@@ -121,22 +225,73 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     public void writeUserContent(Content content) {
         if (content == null) return;
         if (tagName != null && attributeName != null) {
-            // Rendered to text first, then treated like any other value in this attribute.
-            var text = new StringOutput();
+            // Rendered to text first, into the HTML-aware output JTE itself uses for this (a
+            // content block casts its output to one), then treated like any other value here.
+            var text = createOutputForAttributeContent();
             content.writeTo(text);
             writeUserContent(text.toString());
         } else {
-            atValueStart = false;
+            if (valueAttribute != null) emitHeldValue();
             super.writeUserContent(content);
         }
     }
 
-    private static final java.util.regex.Pattern RASTER_DATA_URL =
-        java.util.regex.Pattern.compile("(?i)data:image/(png|jpeg|jpg|gif|webp|avif|bmp)[;,].*", java.util.regex.Pattern.DOTALL);
+    // JTE writes primitives and enums past the String path; route them through it, so they keep
+    // their place in a held value and count as user data.
+    @Override public void writeUserContent(boolean value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(byte value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(short value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(int value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(long value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(float value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(double value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(char value) { writeUserContent(String.valueOf(value)); }
+    @Override public void writeUserContent(Boolean value) { if (value != null) writeUserContent(value.toString()); }
+    @Override public void writeUserContent(Number value) { if (value != null) writeUserContent(value.toString()); }
+    @Override public void writeUserContent(Character value) { if (value != null) writeUserContent(value.toString()); }
+    @Override public void writeUserContent(Enum<?> value) { if (value != null) writeUserContent(value.name()); }
 
-    /** {@code src} and {@code poster} load media, where a raster {@code data:} image can't run script. */
-    private static boolean isMediaAttribute(String attribute) {
-        return attribute.equals("src") || attribute.equals("poster");
+    // --- rules ---
+
+    private boolean isSafeValue() {
+        if (firstUserIndex < 0) return true; // all template text
+        String raw = valueRaw.toString();
+        if ("values".equals(valueAttribute)) {
+            for (String item : raw.split(";")) {
+                if (!isSafeUrl(item)) return false;
+            }
+            return true;
+        }
+        if (schemeWrittenByTemplate(raw, firstUserIndex)) return true;
+        return isSafeUrl(raw) || mediaDataUrl(valueAttribute, raw);
+    }
+
+    /**
+     * Whether the URL's scheme, or the path, query or fragment that rules one out, is settled
+     * before the first user data: then the template chose it ({@code href="mailto:${email}"},
+     * {@code href="/users/${id}"}).
+     */
+    private static boolean schemeWrittenByTemplate(String raw, int firstUser) {
+        int i = 0;
+        while (i < raw.length() && raw.charAt(i) <= ' ') i++;
+        for (; i < firstUser; i++) {
+            char c = raw.charAt(i);
+            if (c == ':' || c == '/' || c == '?' || c == '#') return true;
+        }
+        return false;
+    }
+
+    private static boolean isUrlAttribute(String tag, String attribute) {
+        if (URL_ATTRIBUTES.contains(unprefixed(attribute))) return true;
+        return tag != null && ANIMATION_TAGS.contains(tag.toLowerCase(Locale.ROOT)) && ANIMATION_VALUES.contains(attribute);
+    }
+
+    private static final Pattern RASTER_DATA_URL =
+        Pattern.compile("(?i)data:image/(png|jpeg|jpg|gif|webp|avif|bmp)[;,].*", Pattern.DOTALL);
+
+    /** On {@code src} and {@code poster}, a raster {@code data:} image, which can't run script. */
+    private static boolean mediaDataUrl(String attribute, String url) {
+        return (attribute.equals("src") || attribute.equals("poster")) && isRasterDataUrl(url);
     }
 
     /** A {@code data:} URL of a raster image type: never SVG, which can carry script. */
@@ -152,7 +307,30 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private static boolean isScriptAttribute(String attribute) {
         String name = unprefixed(attribute);
         return name.startsWith("on") || name.startsWith("hx-on")
-            || name.equals("hx-vals") || name.equals("hx-headers") || name.equals("hx-trigger");
+            || name.equals("hx-vals") || name.equals("hx-vars") || name.equals("hx-headers")
+            || name.equals("hx-request") || name.equals("hx-trigger");
+    }
+
+    /**
+     * Escape for a script attribute with {@code \}{@code uXXXX} for every character that could end
+     * a string or start markup or a substitution: valid in JavaScript strings, template literals
+     * and JSON. The result has none of {@code & < > " '}, so HTML-escaping it changes nothing.
+     */
+    static String escapeScript(String value) {
+        StringBuilder out = null;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean escape = c == '\\' || c < 0x20 || c == '"' || c == '\'' || c == '`' || c == '$'
+                || c == '&' || c == '<' || c == '>' || c == '\u2028' || c == '\u2029';
+            if (escape) {
+                if (out == null) out = new StringBuilder(value.length() + 16).append(value, 0, i);
+                if (c == '\\') out.append("\\\\");
+                else out.append("\\u").append(String.format("%04x", (int) c));
+            } else if (out != null) {
+                out.append(c);
+            }
+        }
+        return out == null ? value : out.toString();
     }
 
     /**
@@ -198,7 +376,9 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         return out.toString();
     }
 
-    private static boolean isUrlWhitespace(char c) {
-        return c <= ' ';
+    /** A TemplateOutput appending to a StringBuilder sized for its content. */
+    private record Appender(StringBuilder sb) implements TemplateOutput {
+        @Override public void writeContent(String value) { sb.append(value); }
+        @Override public void writeContent(String value, int beginIndex, int endIndex) { sb.append(value, beginIndex, endIndex); }
     }
 }

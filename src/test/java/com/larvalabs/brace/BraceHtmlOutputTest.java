@@ -104,9 +104,9 @@ class BraceHtmlOutputTest {
         String html = render(payload);
         for (String id : List.of("onclick", "hxon", "hxondash", "dhxon")) {
             String value = decodedAttr(html, id);
-            assertEquals("go('\\x27);alert(document.domain)//')", value, id);
+            assertEquals("go('\\u0027);alert(document.domain)//')", value, id);
         }
-        assertEquals("js:{v: \"\\x27);alert(document.domain)//\"}", decodedAttr(html, "vals"));
+        assertEquals("js:{v: \"\\u0027);alert(document.domain)//\"}", decodedAttr(html, "vals"));
     }
 
     @Test
@@ -115,7 +115,7 @@ class BraceHtmlOutputTest {
         String html = render("&#39;);alert(1)//");
         for (String id : List.of("onclick", "hxon")) {
             String decoded = decodedAttr(html, id);
-            assertEquals("go('&#39;);alert(1)//')", decoded, id);
+            assertEquals("go('\\u0026#39;);alert(1)//')", decoded, id);
         }
     }
 
@@ -132,6 +132,79 @@ class BraceHtmlOutputTest {
         assertTrue(html.contains("<input id=\"value\" value=\"&lt;b>&#34;hi&#34;&lt;/b>\">"), html);
     }
 
+    // --- Review fixes: the whole value is checked ---
+
+    @Test
+    void userDataThatDecidesTheSchemeAnywhereIsChecked() {
+        // Every ${...} counts, not only the first: "" + "javascript:..." and "javascript" + "://..."
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(combo("", "javascript:alert(1)", 1), "ab"));
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(combo(" ", "javascript:alert(1)", 1), "ab"));
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(combo("java", "script:alert(1)", 1), "ab"));
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(combo("javascript", "%0aalert(1)", 1), "scheme"));
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(combo("", "javascript:alert(1)", 1), "loop"));
+        assertEquals("https://example.com", attr(combo("https", "example.com", 1), "scheme"));
+        assertEquals("/a/b", attr(combo("/a", "/b", 1), "ab"));
+    }
+
+    @Test
+    void aSchemeTheTemplateWroteIsKept() {
+        assertEquals("mailto:javascript:x", attr(combo("javascript:x", "b", 1), "mailto"));
+        assertEquals("sms:+1555", attr(combo("+1555", "b", 1), "sms"));
+        // A quote inside the template's value isn't the value's start.
+        assertTrue(combo("a", "javascript:x", 1).contains("href='/r?x=\"javascript:x'"));
+    }
+
+    @Test
+    void primitivesKeepTheirPlaceInTheValue() {
+        assertEquals("1/x", attr(combo("a", "/x", 1), "num"));
+        // A scheme can't start with a digit, so this is a relative path, as browsers read it.
+        assertEquals("1javascript:x", attr(combo("a", "javascript:x", 1), "num"));
+    }
+
+    @Test
+    void svgAnimationValuesAreUrls() {
+        String html = combo("a", "javascript:alert(1)", 1);
+        assertTrue(html.contains("id=\"set\" attributeName=\"href\" to=\"" + BraceHtmlOutput.BLOCKED_URL + "\""), html);
+        assertTrue(html.contains("values=\"" + BraceHtmlOutput.BLOCKED_URL + "\""), html);
+        assertTrue(combo("a", "/y", 1).contains("values=\"/x;/y\""));
+    }
+
+    @Test
+    void hxVarsAndHxRequestAreScript() {
+        String html = combo("a", "'+(window.pwned=1)+'", 1);
+        assertEquals("v: '\\u0027+(window.pwned=1)+\\u0027'", named(html, "vars", "hx-vars"));
+        assertTrue(named(html, "req", "hx-request").contains("\\u0027+(window.pwned=1)"));
+    }
+
+    @Test
+    void jsonInHxValsStaysValid() throws Exception {
+        String value = "O'Brien \"Bob\" $5 `x` <b>&</b> \\ \n";
+        String html = combo("a", value, 1);
+        var mapper = Json.mapper();
+        var vals = mapper.readTree(named(html, "json", "hx-vals"));
+        assertEquals(value, vals.get("q").asText());
+        assertEquals("kept", vals.get("other").asText());
+        assertEquals(value, mapper.readTree(named(html, "hdrs", "hx-headers")).get("X-Q").asText());
+    }
+
+    @Test
+    void contentBlocksRenderInsideAttributes() {
+        String html = engine.render("xssContentCaller", Map.of("name", "<Ann>"));
+        assertTrue(html.contains("<meta id=\"m\" content=\"Hi &lt;Ann>\">"), html);
+        assertTrue(html.contains("href=\"Hi &lt;Ann>\""), html);
+    }
+
+    @Test
+    void outputAfterAHeldValueIsInOrder() {
+        String html = combo("/a", "/b", 7);
+        assertTrue(html.indexOf("id=\"ab\"") < html.indexOf("id=\"after\""), html);
+        assertTrue(html.contains("<p id=\"after\">/b</p>"), html);
+    }
+
+    private static String combo(String a, String b, int n) {
+        return engine.render("xssCombos", Map.of("a", a, "b", b, "n", n));
+    }
+
     // --- Both render paths ---
 
     @Test
@@ -146,6 +219,8 @@ class BraceHtmlOutputTest {
                 var params = Map.<String, Object>of("u", u);
                 assertArrayEquals(engine.renderToBytes("xssAttrs", params), precompiled.renderToBytes("xssAttrs", params), u);
                 assertEquals(engine.render("xssAttrs", params), precompiled.render("xssAttrs", params), u);
+                var combos = Map.<String, Object>of("a", "", "b", u, "n", 3);
+                assertArrayEquals(engine.renderToBytes("xssCombos", combos), precompiled.renderToBytes("xssCombos", combos), u);
             }
             assertTrue(precompiled.render("xssAttrs", Map.of("u", "javascript:x")).contains(BraceHtmlOutput.BLOCKED_URL));
         } finally {
@@ -169,7 +244,7 @@ class BraceHtmlOutputTest {
 
     /** The raw (still HTML-escaped) value of the URL-ish attribute on the element with this id. */
     private static String attr(String html, String id) {
-        var m = Pattern.compile("id=\"" + id + "\"[^>]*?\\s(?:href|src|action|formaction|hx-get|data-hx-post|xlink:href)=\"([^\"]*)\"")
+        var m = Pattern.compile("id=\"" + id + "\"[^>]*?\\s(?:href|src|action|formaction|hx-get|data-hx-post|xlink:href)=[\"']([^\"']*)[\"']")
             .matcher(html);
         assertTrue(m.find(), "no URL attribute on #" + id + " in " + html);
         return m.group(1);
@@ -179,6 +254,13 @@ class BraceHtmlOutputTest {
     private static String decodedAttr(String html, String id) {
         var m = Pattern.compile("id=\"" + id + "\"\\s[\\w:.-]+=(['\"])(.*?)\\1").matcher(html);
         assertTrue(m.find(), "no attribute on #" + id + " in " + html);
+        return decodeEntities(m.group(2));
+    }
+
+    /** The decoded value of attribute {@code name} on #id. */
+    private static String named(String html, String id, String name) {
+        var m = Pattern.compile("id=\"" + id + "\"[^>]*?\\s" + Pattern.quote(name) + "=(['\"])(.*?)\\1").matcher(html);
+        assertTrue(m.find(), "no " + name + " on #" + id + " in " + html);
         return decodeEntities(m.group(2));
     }
 

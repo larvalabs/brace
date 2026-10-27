@@ -85,7 +85,9 @@ public class TemplateEngine {
         var output = new StringOutput();
         // M4/M5: Brace's output, not JTE's default; JTE keeps an HTML output it's handed, so
         // precompiled and hot-reloaded templates both get it.
-        engine.render(template + ".jte", params, new BraceHtmlOutput(output));
+        var html = new BraceHtmlOutput(output);
+        engine.render(template + ".jte", params, html);
+        html.finish();
         return output.toString();
     }
 
@@ -97,7 +99,9 @@ public class TemplateEngine {
      */
     public byte[] renderToBytes(String template, Map<String, Object> params) {
         var output = new Utf8ByteOutput();
-        engine.render(template + ".jte", params, new BraceHtmlOutput(output));
+        var html = new BraceHtmlOutput(output);
+        engine.render(template + ".jte", params, html);
+        html.finish();
         return output.toByteArray();
     }
 }
