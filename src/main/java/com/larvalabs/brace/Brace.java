@@ -19,6 +19,7 @@ import java.util.function.Function;
 public class Brace {
 
     private int port = 8080;
+    private String host; // null: every interface
     private boolean showBanner = true;
     private final Router router = new Router();
 
@@ -135,14 +136,28 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Trust these proxy addresses or CIDRs to report the client's address in forwarding headers.
+     * Each argument may itself be a comma-separated list, and null or blank entries are skipped,
+     * so a config value can be passed straight through (the scaffold passes {@code TRUSTED_PROXIES}):
+     * none left means no proxy is trusted. Name your proxy's own address or network, not a whole
+     * private range: every address in the list can set {@code req.ip()} to anything.
+     */
     public Brace trustedProxies(String... cidrs) {
-        this.trustedProxies = new TrustedProxies(cidrs);
+        var list = new java.util.ArrayList<String>();
+        for (String value : cidrs == null ? new String[0] : cidrs) {
+            if (value == null) continue;
+            for (String part : value.split(",")) {
+                if (!part.isBlank()) list.add(part.strip());
+            }
+        }
+        this.trustedProxies = list.isEmpty() ? null : new TrustedProxies(list);
         return this;
     }
 
+    /** As {@link #trustedProxies(String...)}: comma-separated entries split, blanks skipped. */
     public Brace trustedProxies(List<String> cidrs) {
-        this.trustedProxies = new TrustedProxies(cidrs);
-        return this;
+        return trustedProxies(cidrs == null ? null : cidrs.toArray(new String[0]));
     }
 
     /**
@@ -161,6 +176,22 @@ public class Brace {
 
     public int port() {
         return port;
+    }
+
+    /**
+     * The address to listen on (M13), e.g. {@code "127.0.0.1"} when a reverse proxy on the same
+     * host is the only client. By default Brace listens on every interface, which is what a
+     * container needs: its port is reached through the container's own network interface.
+     * Null or blank restores the default.
+     */
+    public Brace host(String host) {
+        this.host = host == null || host.isBlank() ? null : host.strip();
+        return this;
+    }
+
+    /** The configured listen address, or null for every interface. */
+    public String host() {
+        return host;
     }
 
     public Brace banner(boolean show) {
@@ -1272,6 +1303,7 @@ public class Brace {
         httpConfig.setSendXPoweredBy(false);
         connector = new ServerConnector(server, new HttpConnectionFactory(httpConfig));
         connector.setPort(port);
+        connector.setHost(host);
         // Requests Jetty rejects before BraceHandler runs get a plain-text reason phrase, not
         // Jetty's HTML page (which shows the version and echoes the request URI).
         server.setErrorHandler(new BraceErrorHandler());

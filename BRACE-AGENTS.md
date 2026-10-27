@@ -52,6 +52,18 @@ the framework picks prod behavior (e.g. precompiled templates) under `brace run`
 Extra JVM flags for the app go in `BRACE_JAVA_OPTS` (e.g. `BRACE_JAVA_OPTS="-Xmx512m"
 brace run`); flags there override the defaults, including the mode.
 
+**Containers.** `brace new` writes a `Dockerfile`, `.dockerignore`, `compose.yaml` and
+`.github/dependabot.yml`. `docker build .` works from a clean checkout: a Maven stage runs
+`mvn package` (fat jar plus precompiled templates), and the runtime stage is distroless Java 25
+(no shell), digest-pinned, running as uid 65532 with an exec-form `ENTRYPOINT`. JVM flags go in
+`JAVA_TOOL_OPTIONS` (there is no shell to expand `$JAVA_OPTS`). `compose.yaml` is the reference
+deployment: read-only root filesystem with `/tmp` as tmpfs, `cap_drop: [ALL]`,
+`no-new-privileges`, and Postgres on an internal network with no published port. Brace answers
+`GET /__brace/health` with `200 ok` before routing and middleware (no auth, no data, not logged
+or counted); the image's `HEALTHCHECK` polls it with `com.larvalabs.brace.HealthCheck`, and a
+load balancer can use the same path. `app.host("127.0.0.1")` sets the listen address (default:
+every interface, which a container needs).
+
 ## App Setup
 
 Everything configured via `Brace.app()` builder in `main()`:
@@ -67,7 +79,7 @@ var app = Brace.app()
     .templates("views")
     .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
     .defaultAccess(Access.session("userId", "/login"))   // every route requires login unless .publicRoute()
-    .trustedProxies("10.0.0.0/8", "172.16.0.0/12")
+    .trustedProxies(config.get("trusted.proxies"))  // your proxy's address or network; comma-separated
     .mailer(new Mailer(config.get("smtp.url")).from("noreply@app.com"))
     .cache(Brace.cache())
     .storage(Storage.s3(config))
@@ -78,7 +90,7 @@ var app = Brace.app()
     .after(SecurityHeaders.strict());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -1196,8 +1208,18 @@ app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m")
 Configure which proxies to trust for IP forwarding headers. Without this, `X-Forwarded-For` is ignored to prevent IP spoofing and `req.ip()` always returns the socket's remote address:
 
 ```java
-app.trustedProxies("10.0.0.0/8", "172.16.0.0/12");  // CIDRs (here: RFC1918 private ranges)
+app.trustedProxies("172.18.0.0/16");           // the reverse proxy's network (here: a Docker network)
+app.trustedProxies(config.get("trusted.proxies")); // from config/env: comma-separated, blank = none
 ```
+
+Name your proxy, not a whole private range. Every address in the list can set `req.ip()` to
+anything, and Docker gives containers addresses from the private ranges, so trusting
+`10.0.0.0/8` or `172.16.0.0/12` lets any container on the host impersonate any client. Behind
+Traefik (Dokploy), trust the proxy network's subnet:
+`docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`. Every
+app Dokploy routes joins that network, so on a host shared with apps you don't trust, trust
+Traefik's own (fixed) address instead. The scaffold reads the value from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
+without being trusted, Brace logs a one-time warning naming its address.
 
 Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
 

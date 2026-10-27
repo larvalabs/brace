@@ -43,6 +43,9 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Ops auth protocol v3 binds the CLI's signature to the server; v2 removed; CLI token cache keyed by server | security, **breaking** | upgrade the `brace` CLI with the server; behind a Host-rewriting proxy add `app.opsOrigins(...)` | [§](#breaking-ops-auth-protocol-v3) |
 | Cross-instance WebSocket broadcasts are signed and use a per-app channel; a Postgres app with `ws(...)` routes needs `.sessions(secret)` or `.opsSecret(secret)` | security, **breaking** for Postgres apps with WebSocket routes and no secret, and for rolling deploys | set a shared secret if the app has none; upgrade all instances together | [§](#breaking-cross-instance-websocket-broadcasts-are-signed) |
 | Toolchain downloads (`install.sh`, `self-update`, the launcher) are https-only | security | none, unless `BRACE_RELEASE_BASE` points at an `http://` mirror | [§](#security-toolchain-downloads-are-https-only) |
+| Hardened container scaffold; `GET /__brace/health`; `app.host(...)` | security, new | existing projects: optionally adopt the new `Dockerfile` and `compose.yaml` | [§](#security-hardened-container-scaffold-and-__bracehealth) |
+| Warning for an untrusted proxy; `trustedProxies(String...)` accepts a config value; scaffold reads `TRUSTED_PROXIES` | security | if the warning appears, set `trustedProxies` to your proxy's address or network, not `10.0.0.0/8`/`172.16.0.0/12` | [§](#security-untrusted-proxy-warning-and-narrow-trusted-proxies) |
+| New projects start with strict headers, htmx CSRF wiring and `/public` served | new projects | existing projects: optionally adopt the same layout and `routes()` lines | [§](#new-projects-start-with-the-security-defaults) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -1059,4 +1062,115 @@ protocol. A release zip is code the CLI runs, and it isn't signed, so TLS is wha
 it. All three now download over https only, redirects included (`file://` still works for local
 trees), and refuse `http://` with an error naming the URL. An internal http mirror needs
 `BRACE_ALLOW_INSECURE_DOWNLOAD=1`, which warns on every download.
+
+## Security: hardened container scaffold and `/__brace/health`
+
+**What changed.** The `Dockerfile` that `brace new` writes ran as root on a floating
+`eclipse-temurin:25-jre` tag (Ubuntu, with a shell and apt), started through `sh -c`, had no
+health check, and needed `mvn package` run before `docker build`. A new project now gets:
+
+- a multi-stage `Dockerfile`: a Maven stage builds the jar and precompiled templates, so
+  `docker build .` works from a clean checkout; the runtime is distroless Java 25, pinned by
+  digest, running as uid 65532, with `ENTRYPOINT ["java", "-Dbrace.mode=prod", "-jar", "app.jar"]`
+  and a `HEALTHCHECK`;
+- a `.dockerignore` that keeps `application.conf`, `*.key`, `.env` and `target/` out of the build
+  context;
+- a reference `compose.yaml`: read-only root filesystem with a tmpfs `/tmp`, `cap_drop: [ALL]`,
+  `no-new-privileges`, the port published on loopback, and Postgres on an internal network with
+  no published port;
+- `.github/dependabot.yml`, which proposes base-image digest updates.
+
+Every app also gets `GET /__brace/health`, which answers `200 ok` before routing and middleware
+(no auth, no data, not logged or counted), and `app.host(String)` to choose the listen address
+(default: every interface).
+
+**Who needs to act.** Nobody has to: existing projects keep their `Dockerfile`, and nothing
+regenerates it. To adopt the new setup, run `brace new` on a scratch name and copy its
+`Dockerfile`, `.dockerignore`, `compose.yaml` and `.github/dependabot.yml` into your project,
+then:
+
+- move JVM flags from `JAVA_OPTS` to `JAVA_TOOL_OPTIONS` (the runtime has no shell to expand
+  `$JAVA_OPTS`). The `HEALTHCHECK`'s JVM reads it too, so keep out flags that bind a port
+  (`-agentlib:jdwp`, JMX), write a file or load an agent, or replace the `HEALTHCHECK` with your
+  platform's HTTP check on `/__brace/health`;
+- make sure nothing in the image writes outside `/tmp` if you use `read_only: true`;
+- point your platform's health check at `/__brace/health`;
+- if the app registered its own `GET /__brace/health` route, that route is no longer reachable:
+  the built-in probe answers first.
+
+## Security: untrusted-proxy warning and narrow trusted proxies
+
+**What changed.** Behind a reverse proxy with no `trustedProxies`, `req.ip()` is the proxy's
+address for every client, so `RateLimiter.perIp` is one bucket that any client can exhaust for
+everyone, and analytics sees one visitor. Nothing said so. Brace now logs a warning, once per
+process, when a peer on a private or loopback address sends `X-Forwarded-For` or `Forwarded`
+and isn't a trusted proxy.
+
+The docs used to suggest `trustedProxies("10.0.0.0/8", "172.16.0.0/12")`. Docker gives
+containers addresses from those ranges, so that lets any container on the host forge any
+client's address. They now show the proxy's own network.
+
+`app.trustedProxies(String...)` now accepts comma-separated values and skips null and blank
+ones, so a config value can be passed straight in; nothing left means no proxy is trusted. New
+projects pass `config.get("trusted.proxies")`, which `application.conf.example` reads from
+`TRUSTED_PROXIES`.
+
+**Who needs to act.** Apps behind a proxy:
+
+- If the warning appears, set `trustedProxies` to the proxy's address or its network's CIDR.
+  Behind Traefik (Dokploy):
+  `docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`.
+  Every app Dokploy routes joins that network, so if the host runs apps you don't trust, trust
+  Traefik's own fixed address instead.
+- If you trust `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`, narrow it the same way.
+
+To read it from the environment as new projects do:
+
+```java
+// Before
+.trustedProxies("10.0.0.0/8", "172.16.0.0/12")
+
+// After (App.java), with trusted.proxies=${TRUSTED_PROXIES} in application.conf.example
+.trustedProxies(config.get("trusted.proxies"))
+```
+
+## New projects start with the security defaults
+
+**What changed.** `brace new` now generates an app that uses this release's security defaults
+from the start:
+
+- `routes()` registers `app.after(SecurityHeaders.strict())`, so every response carries the
+  security headers and the strict Content-Security-Policy, and the generated tests see them too.
+- The layout sets the `htmx-config` meta (`allowEval:false`, `allowScriptTags:false`,
+  `includeIndicatorStyles:false`), renders `${csrfMeta}`, and loads `/__brace/htmx.min.js` and
+  `/__brace/csrf-htmx.js`, so an `hx-post` works with no per-element CSRF setup. Pages declare
+  `@param gg.jte.Content csrfMeta = null` and pass it to the layout.
+- `routes()` serves `public/` at `/public` (`app.staticFiles("/public", "public")`). Earlier
+  scaffolds linked `/public/css/style.css` without serving it, so the stylesheet was a 404.
+- The generated test enables sessions as `main()` does and checks the headers and the CSRF meta.
+
+**Who needs to act.** Nobody has to. To bring an existing project in line:
+
+```java
+public static void routes(Brace app) {
+    app.after(SecurityHeaders.strict());
+    app.staticFiles("/public", "public");   // if the layout links files under public/
+    // ... routes
+}
+```
+
+```html
+@param gg.jte.Content csrfMeta = null
+...
+<head>
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+    ${csrfMeta}
+    <script src="/__brace/htmx.min.js"></script>
+    <script src="/__brace/csrf-htmx.js"></script>
+</head>
+```
+
+Pages then pass `csrfMeta = csrfMeta` to the layout. Check pages for inline `<script>`,
+`on*=` handlers and `style=""` before turning on the strict CSP; see
+[`SecurityHeaders.strict()`](#new-securityheadersstrict).
 

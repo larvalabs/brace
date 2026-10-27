@@ -98,6 +98,11 @@ class ProjectGeneratorTest {
             "db.pass must come from the environment, got:\n" + content);
         assertFalse(content.toLowerCase().contains("change-me"),
             "no placeholder secret: it would boot with only a warning");
+        // L5: the proxy to trust differs per deployment, so it comes from the environment too,
+        // and App.java passes it through (unset means no proxy is trusted).
+        assertTrue(content.contains("\ntrusted.proxies=${TRUSTED_PROXIES}\n"), content);
+        var app = Files.readString(projDir.resolve("src/main/java/app/App.java"));
+        assertTrue(app.contains(".trustedProxies(config.get(\"trusted.proxies\"))"), app);
     }
 
     @Test
@@ -273,7 +278,7 @@ class ProjectGeneratorTest {
             "jar name must be fixed so the Dockerfile can COPY target/app.jar");
 
         var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
-        assertTrue(dockerfile.contains("COPY target/app.jar app.jar"),
+        assertTrue(dockerfile.contains("COPY --from=build /src/target/app.jar app.jar"),
             "Dockerfile must copy the shaded jar by its fixed name");
     }
 
@@ -285,19 +290,12 @@ class ProjectGeneratorTest {
         ProjectGenerator.generate(projDir.toString());
 
         var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
-        assertTrue(dockerfile.contains("FROM eclipse-temurin:25-jre"),
-            "Dockerfile must use a JDK 25 JRE image, got:\n" + dockerfile);
         // A JRE has no javac, so templates must arrive precompiled and prod mode must load them.
-        assertTrue(dockerfile.contains("COPY target/jte-classes/ target/jte-classes/"),
+        // The build stage's mvn package writes them.
+        assertTrue(dockerfile.contains("RUN mvn -B -q package -DskipTests"), dockerfile);
+        assertTrue(dockerfile.contains("COPY --from=build /src/target/jte-classes/ target/jte-classes/"),
             "Dockerfile must ship the precompiled templates, got:\n" + dockerfile);
-        assertTrue(dockerfile.contains("`brace compile`"),
-            "Dockerfile must say how to produce target/jte-classes");
-        // Exec form through sh -c: $JAVA_OPTS expands and exec makes java PID 1, so
-        // SIGTERM reaches the JVM and Brace's shutdown hook runs.
-        assertTrue(dockerfile.contains(
-                "ENTRYPOINT [\"sh\", \"-c\", \"exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar\"]"),
-            "entrypoint must exec java in prod mode with $JAVA_OPTS, got:\n" + dockerfile);
-        assertTrue(dockerfile.contains("ENV JAVA_OPTS=\"-XX:MaxRAMPercentage=50\""),
+        assertTrue(dockerfile.contains("ENV JAVA_TOOL_OPTIONS=\"-XX:MaxRAMPercentage=50\""),
             "Dockerfile must default to a heap cap relative to the container limit");
         assertTrue(dockerfile.contains("-XX:+UseCompactObjectHeaders"),
             "Dockerfile should point at compact object headers for JDK 25");
@@ -306,7 +304,7 @@ class ProjectGeneratorTest {
             "Dockerfile must ship the ops authorized-keys file the scaffold's main() loads");
         assertFalse(dockerfile.contains("private.key"), "the ops private key must never be copied");
 
-        // mvn package is the Dockerfile's one build step, so it must write target/jte-classes,
+        // mvn package is the build stage's one build step, so it must write target/jte-classes,
         // from views/ (relative, matching TemplateEngine's marker check in the container).
         var pom = Files.readString(projDir.resolve("pom.xml"));
         assertTrue(pom.contains("<artifactId>exec-maven-plugin</artifactId>"), pom);
@@ -314,6 +312,94 @@ class ProjectGeneratorTest {
                 + "\n                                <argument>views</argument>"
                 + "\n                                <argument>target/jte-classes</argument>"),
             "mvn package must precompile views/ into target/jte-classes");
+    }
+
+    @Test
+    void scaffoldShipsStrictHeadersAndHtmxCsrfWiring(@TempDir Path tempDir) throws Exception {
+        // Phase 5: the scaffold starts with the security defaults the earlier phases added.
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var app = Files.readString(projDir.resolve("src/main/java/app/App.java"));
+        int routes = app.indexOf("public static void routes(Brace app)");
+        assertTrue(app.indexOf("app.after(SecurityHeaders.strict());") > routes,
+            "strict headers are registered in routes(), so tests see them too");
+        // The layout links /public/css/style.css, so public/ must be served.
+        assertTrue(app.indexOf("app.staticFiles(\"/public\", \"public\");") > routes, app);
+
+        var layout = Files.readString(projDir.resolve("views/layout/main.jte"));
+        assertTrue(layout.contains("@param gg.jte.Content csrfMeta = null"), layout);
+        assertTrue(layout.contains("    ${csrfMeta}\n"), layout);
+        assertTrue(layout.contains(
+            "<meta name=\"htmx-config\" content='{\"allowEval\":false,\"allowScriptTags\":false,\"includeIndicatorStyles\":false}'>"),
+            layout);
+        int htmx = layout.indexOf("<script src=\"/__brace/htmx.min.js\"></script>");
+        int csrf = layout.indexOf("<script src=\"/__brace/csrf-htmx.js\"></script>");
+        assertTrue(htmx > 0 && csrf > htmx, "csrf-htmx.js loads after htmx");
+
+        var index = Files.readString(projDir.resolve("views/home/index.jte"));
+        assertTrue(index.contains("csrfMeta = csrfMeta"), "pages pass csrfMeta to the layout");
+
+        var test = Files.readString(projDir.resolve("src/test/java/app/HomeControllerTest.java"));
+        assertTrue(test.contains("body.contains(\"<meta name=\\\"csrf-token\\\"\")"), test);
+    }
+
+    @Test
+    void containerIsDigestPinnedNonRootAndShellFree(@TempDir Path tempDir) throws Exception {
+        // M13: every FROM is pinned by digest, the runtime is distroless (no shell) and runs as
+        // a non-root user, and the entrypoint is exec form (java is PID 1, gets SIGTERM).
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+        var dockerfile = Files.readString(projDir.resolve("Dockerfile"));
+
+        var froms = dockerfile.lines().filter(l -> l.startsWith("FROM ")).toList();
+        assertEquals(2, froms.size(), "a build stage and a runtime stage: " + froms);
+        for (String from : froms) {
+            assertTrue(from.matches("FROM \\S+@sha256:[0-9a-f]{64}( AS \\w+)?"), "not digest-pinned: " + from);
+        }
+        assertEquals("FROM " + ProjectGenerator.RUNTIME_IMAGE, froms.get(1));
+        assertTrue(ProjectGenerator.RUNTIME_IMAGE.startsWith("gcr.io/distroless/java25-"),
+            "runtime must be distroless Java 25");
+        assertTrue(ProjectGenerator.RUNTIME_IMAGE.contains(":nonroot@"), "runtime must be the nonroot variant");
+        assertTrue(dockerfile.contains("\nUSER 65532:65532\n"), "explicit non-root USER");
+        assertTrue(dockerfile.contains(
+                "ENTRYPOINT [\"java\", \"-Dbrace.mode=prod\", \"-jar\", \"app.jar\"]"),
+            "exec-form entrypoint in prod mode, got:\n" + dockerfile);
+        assertFalse(dockerfile.contains("sh -c"), "the runtime has no shell");
+        assertTrue(dockerfile.contains("HEALTHCHECK"), dockerfile);
+        assertTrue(dockerfile.contains("\"com.larvalabs.brace.HealthCheck\", \"8080\"]"), dockerfile);
+
+        // The build context must not carry local secrets.
+        var dockerignore = Files.readString(projDir.resolve(".dockerignore")).lines().toList();
+        assertTrue(dockerignore.contains("application.conf"), "dev session secret stays out");
+        assertTrue(dockerignore.contains("**/*.key"), "ops private keys stay out, wherever they are");
+        assertTrue(dockerignore.contains("**/.env"));
+        assertTrue(dockerignore.contains("target/"));
+
+        // The reference compose file locks the app down and keeps Postgres private.
+        var compose = Files.readString(projDir.resolve("compose.yaml"));
+        assertTrue(compose.contains("    read_only: true\n"), compose);
+        assertTrue(compose.contains("    tmpfs:\n      - /tmp\n"), compose);
+        assertTrue(compose.contains("    cap_drop: [ALL]\n"), compose);
+        assertTrue(compose.contains("      - no-new-privileges:true\n"), compose);
+        assertTrue(compose.contains("image: " + ProjectGenerator.POSTGRES_IMAGE), compose);
+        var db = compose.substring(compose.indexOf("  db:\n"), compose.indexOf("\nnetworks:\n"));
+        assertFalse(db.contains("\n    ports:"), "Postgres must not publish a port");
+        assertTrue(compose.contains("  db:\n    internal: true\n"), "the database network is internal");
+        assertTrue(compose.contains("SESSION_SECRET: ${SESSION_SECRET:?"), "secrets come from the environment");
+        // The password travels separately: in the URL, a / or + (base64) would break parsing.
+        assertTrue(compose.contains("DATABASE_URL: postgresql://db:5432/myproject\n"), compose);
+        assertTrue(compose.contains("DB_PASS: ${POSTGRES_PASSWORD:?"), compose);
+        assertTrue(compose.contains("\"127.0.0.1:8080:8080\""), "published on loopback only");
+
+        // Dependabot keeps the digests current (decision D7).
+        var dependabot = Files.readString(projDir.resolve(".github/dependabot.yml"));
+        assertTrue(dependabot.contains("package-ecosystem: docker\n"), dependabot);
+        assertTrue(dependabot.contains("package-ecosystem: docker-compose\n"), dependabot);
+        assertEquals(2, dependabot.split("version-update:semver-major", -1).length - 1,
+            "major bumps (e.g. Postgres 17 -> 18 on existing data) are ignored: " + dependabot);
+
+        assertTrue(Files.readString(projDir.resolve(".gitignore")).lines().anyMatch(".env"::equals));
     }
 
     @Test

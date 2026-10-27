@@ -51,6 +51,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         "/__brace/ops.js", BundledAsset.load("ops.js", "text/javascript; charset=utf-8"),
         "/__brace/ops.css", BundledAsset.load("ops.css", "text/css; charset=utf-8"),
         "/__brace/ops-analytics.css", BundledAsset.load("ops-analytics.css", "text/css; charset=utf-8"));
+    // M13: the liveness probe's path and body. See handle().
+    static final String HEALTH_PATH = "/__brace/health";
+    private static final byte[] HEALTH_BODY = "ok\n".getBytes(StandardCharsets.US_ASCII);
     // L3: dev mode is detected once at construction from the brace.mode system property —
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
@@ -251,6 +254,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // need it to run after-middleware over their responses (M1). Null until the route is
         // matched, which is before any response can be written.
         Request braceRequest = null;
+        // M13: liveness probe for container health checks and load balancers. Answered before
+        // routing and middleware, so an app-wide auth guard or rate limiter can't fail it, and
+        // left out of the request log, stats and analytics, which a probe every few seconds
+        // would swamp. It reports only that this process is serving requests: no data, no
+        // database check (a database outage shouldn't get every instance restarted).
+        if (HEALTH_PATH.equals(exchange.path)
+                && ("GET".equals(exchange.method) || "HEAD".equals(exchange.method))) {
+            response.setStatus(200);
+            response.getHeaders().put("Content-Type", "text/plain; charset=utf-8");
+            response.getHeaders().put("Cache-Control", "no-store");
+            response.getHeaders().put("X-Content-Type-Options", "nosniff");
+            response.write(true, "HEAD".equals(exchange.method)
+                ? ByteBuffer.allocate(0) : ByteBuffer.wrap(HEALTH_BODY), callback);
+            return true;
+        }
         try {
             String method = exchange.method;
             String path = exchange.path;
@@ -303,6 +321,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Extract remote address from socket
             String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
+            warnIfProxyNotTrusted(headers, remoteAddr);
 
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
@@ -1211,6 +1230,37 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (segments[i].startsWith(".") && !(i == 0 && segments[i].equals(".well-known"))) return true;
         }
         return false;
+    }
+
+    /** Set once {@link #warnIfProxyNotTrusted} has warned; it warns once per process. */
+    private final java.util.concurrent.atomic.AtomicBoolean warnedProxyNotTrusted =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * L5: a private-network peer sending forwarding headers is almost always the app's own reverse
+     * proxy. If it isn't trusted, {@code req.ip()} is the proxy's address for every client: a
+     * per-IP rate limit becomes one bucket that any one client can exhaust for everyone, and
+     * analytics sees one visitor. Warns once. A public peer sending them is just a client, whose
+     * headers are rightly ignored.
+     */
+    private void warnIfProxyNotTrusted(Map<String, String> headers, String remoteAddr) {
+        if (warnedProxyNotTrusted.get() || remoteAddr == null) return;
+        if (headers.get("X-Forwarded-For") == null && headers.get("Forwarded") == null) return;
+        if (trustedProxies != null && trustedProxies.isTrusted(remoteAddr)) return;
+        if (!TrustedProxies.isIpLiteral(remoteAddr)) return;
+        try {
+            if (Http.isPublicAddress(java.net.InetAddress.getByName(remoteAddr))) return;
+        } catch (java.net.UnknownHostException e) {
+            return;
+        }
+        if (!warnedProxyNotTrusted.compareAndSet(false, true)) return;
+        Log.warn("Requests from " + remoteAddr + " carry X-Forwarded-For/Forwarded, but "
+            + (trustedProxies == null ? "no trusted proxies are configured"
+                                      : "that address isn't in trustedProxies")
+            + ", so the headers are ignored and req.ip() is " + remoteAddr + " for every client "
+            + "behind it: per-IP rate limits share one bucket and analytics sees one visitor. If it "
+            + "is your reverse proxy, add its address or its network's CIDR with "
+            + "app.trustedProxies(...) (the scaffold reads TRUSTED_PROXIES). Logged once.");
     }
 
     /** Route patterns already warned about by {@link #warnIfReadMethodWrote}. */

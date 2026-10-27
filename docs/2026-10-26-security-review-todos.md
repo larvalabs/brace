@@ -489,7 +489,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     `Long.MAX_VALUE`) behave as before.
   - **Tier: small.**
 
-- [ ] **M12: Dependency CVEs (verified via OSV)**, `pom.xml`
+- [x] **M12: Dependency CVEs (verified via OSV)**, `pom.xml`
   - **jackson-core 2.18.6** (fixed in 2.18.11):
     - GHSA-p6pp-m3f8-5c89 / CVE-2026-89407 (HIGH): quadratic number-pattern backtracking,
       reachable through `req.json()`. A 20,000-character string bound to a
@@ -511,11 +511,17 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
       merge gate.
   - **Tests.** Full `mvn verify`. Re-run the jackson number-string timing check (under 50 ms).
   - **Progress.** Dependency bumps landed: Jetty 12.0.40, Jackson 2.18.12, pgjdbc 42.7.14, all
-    clean on OSV; the timing check is under 50 ms for every probe. The OSV gate remains (Phase 5),
-    so the box stays open.
+    clean on OSV; the timing check is under 50 ms for every probe. CI gate landed (Phase 5):
+    `.github/scripts/osv-scan.sh` runs a pinned, sha256-verified OSV-Scanner 2.7.0 over
+    `pom.xml`'s resolved tree (transitive, all scopes) in `ci.yml` and, before `mvn deploy`, in
+    `publish.yml`. `osv_gate.py` fails on CVSS >= 7.0, a HIGH/CRITICAL label, or an unrated
+    advisory, lists lower ones without failing, and fails if any artifact `mvn dependency:list`
+    resolves wasn't scanned. Ignores go in `osv-scanner.toml` (`[[IgnoredVulns]]` with
+    `ignoreUntil` and `reason`); runbook in `RELEASE.md`. Current tree passes (66 artifacts; two
+    MODERATE commons-compress advisories via Testcontainers, test scope, reported only).
   - **Tier: small** for the bumps; **mid** for the CI gate.
 
-- [ ] **M13: The generated container is root, unpinned and shell-bearing, and no hardened runtime config is generated**, `ProjectGenerator.java:386-420`, `Brace.java:1105-1106`
+- [x] **M13: The generated container is root, unpinned and shell-bearing, and no hardened runtime config is generated**, `ProjectGenerator.java:386-420`, `Brace.java:1105-1106`
   - **What's wrong.**
     - `FROM eclipse-temurin:25-jre` is a floating tag on Ubuntu, so the runtime has a shell
       and apt.
@@ -549,6 +555,14 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
       `.dockerignore` and `compose.yaml`.
     - A `tests/cli` smoke test builds the image and runs it read-only as non-root, where Docker
       is available.
+  - **Progress.** Done. Multi-stage Dockerfile on `gcr.io/distroless/java25-debian13:nonroot`,
+    both stages digest-pinned, `USER 65532:65532`, exec-form entrypoint, `JAVA_TOOL_OPTIONS`,
+    and a `HEALTHCHECK` running `com.larvalabs.brace.HealthCheck`; `.dockerignore`;
+    `compose.yaml`; `.github/dependabot.yml` (D7). `GET /__brace/health` is answered before
+    routing and middleware and kept out of logs, stats and analytics. `app.host(String)` added.
+    `tests/cli/test-docker-image.sh` builds a scaffolded app's image and runs its compose stack
+    (Postgres included), checking the health check, uid, read-only root, dropped capabilities
+    and the unpublished database; CI runs it.
   - **Tier: mid.**
 
 - [x] **M14: The CLI token cache isn't keyed by server, and ops auth signatures aren't bound to an audience**, `CliAuth.java:52-67, 155-175`, `CliConfig.java:19-63`, `OpsKeys.java:79-81`
@@ -616,7 +630,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Tests.** Remove a key and restart: its outstanding token gets 401.
   - **Tier: small.**
 
-- [ ] **L5: The scaffold sets no `trustedProxies`, and the docs' suggested CIDRs trust every container**, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:69, 944`
+- [x] **L5: The scaffold sets no `trustedProxies`, and the docs' suggested CIDRs trust every container**, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:69, 944`
   - **What's wrong.**
     - Behind Dokploy's Traefik, `req.ip()` is the proxy for every client. `RateLimiter.perIp`
       becomes one global bucket (one attacker throttles everyone's login), and analytics
@@ -629,6 +643,12 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Scaffold reads `TRUSTED_PROXIES` from env.
     - Docs show the specific Traefik network CIDR.
   - **Tests.** The warning fires once.
+  - **Progress.** Done. `BraceHandler` warns once when a private or loopback peer sends
+    `X-Forwarded-For`/`Forwarded` without being trusted (no proxies configured, or not in the
+    list). `trustedProxies(String...)` splits commas and skips blanks; the scaffold passes
+    `config.get("trusted.proxies")`, read from `TRUSTED_PROXIES`, and `compose.yaml` forwards it.
+    BRACE-AGENTS.md, README.md and SECURITY.md show the proxy network's subnet instead of RFC 1918
+    ranges. Test: `ProxyTrustWarningTest`.
   - **Tier: small.**
 
 - [x] **L6: NOTIFY messages are unauthenticated, and the channel is shared across apps on a database**, `PostgresMessageBus.java:34, 166, 188-207`, `WsRegistry.java:69-81`

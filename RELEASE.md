@@ -53,6 +53,57 @@ Inside a project, `brace` runs against the framework version pinned in `pom.xml`
 (`<brace.version>`), fetching it to `~/.brace/toolchains/<version>` on first use —
 independent of the installed launcher version.
 
+## Dependency vulnerability gate
+
+CI (`.github/workflows/ci.yml`, on every branch push and PR) and publishing
+(`publish.yml`, before `mvn deploy` and the GitHub Release) run
+`.github/scripts/osv-scan.sh`. It scans `pom.xml`'s resolved dependency tree (direct and
+transitive, all scopes, test included) with a pinned, checksum-verified
+[OSV-Scanner](https://google.github.io/osv-scanner/) release, and:
+
+- **fails** on any advisory scored CVSS >= 7.0, or labelled HIGH or CRITICAL by its database
+  (GitHub's advisory severity), or carrying no rating at all (unrated entries fail closed:
+  they can't be shown to be below the bar);
+- **lists without failing** everything lower (LOW/MODERATE, CVSS < 7.0);
+- **fails** if OSV-Scanner's own resolution of the tree misses any artifact (at the exact
+  version) that `mvn dependency:list` resolves, so the scan always covers what Maven builds with;
+- **fails** if the scan itself errors (for example, dependency resolution fails).
+
+The threshold rule is in `.github/scripts/osv_gate.py`. Run the same check locally from the
+repo root (needs `curl`, `python3` and `mvn`; the binary is cached under `~/.cache/brace/`):
+
+```bash
+.github/scripts/osv-scan.sh                    # what CI runs
+.github/scripts/osv-scan.sh --no-maven-check   # skip the mvn dependency:list cross-check
+```
+
+Run it after any dependency change. When it fails:
+
+1. **Bump.** Upgrade the dependency (or pin the fixed transitive version in
+   `<dependencyManagement>`) to a version the report lists under "fixed in", then run
+   `mvn verify`. This is the expected fix.
+2. **Ignore, only if unreachable.** When there is no fixed version yet, or the bump is blocked,
+   and the vulnerable code is shown to be unreachable from Brace, add an entry to
+   `osv-scanner.toml` at the repo root, in OSV-Scanner's own format:
+
+   ```toml
+   [[IgnoredVulns]]
+   id = "GHSA-xxxx-xxxx-xxxx"   # a CVE alias also matches
+   ignoreUntil = 2026-12-31     # the ignore lapses after this date and the gate fails again
+   reason = "Only reachable via X, which Brace never calls (checked 2026-10-27). Bump when Y ships a fix."
+   ```
+
+   The gate refuses an entry without `ignoreUntil` or `reason`. Keep `ignoreUntil` weeks out,
+   not years, and say in `reason` why it is unreachable and what unblocks the bump. The scan log prints every filtered advisory with its reason, and flags
+   entries that match nothing as unused; delete those.
+
+A newly published advisory can fail `publish.yml` on `main` or a tag even though the PR passed:
+fix it as above and push again. The gate runs before `mvn deploy`, so a failed tag run has
+published nothing: tag the fixed commit and push that tag.
+
+To upgrade OSV-Scanner itself, change `OSV_SCANNER_VERSION` in `osv-scan.sh` and replace the
+four pinned sums with the matching lines of that release's `osv-scanner_SHA256SUMS` asset.
+
 ## Download integrity
 
 `install.sh`, `brace self-update` and the launcher's per-project fetch download release zips over

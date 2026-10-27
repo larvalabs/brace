@@ -20,6 +20,7 @@ This document describes Brace's security features and best practices for buildin
 - [WebSockets](#websockets)
 - [File Uploads](#file-uploads)
 - [Rate Limiting](#rate-limiting)
+- [Deploying in a Container](#deploying-in-a-container)
 - [Installing and Updating Brace](#installing-and-updating-brace)
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
@@ -625,15 +626,41 @@ Without trusted proxy configuration, attackers can **spoof their IP address** by
 ### Configuration
 
 ```java
-// Trust private network proxies
-app.trustedProxies("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16");
-
 // Trust specific proxy IPs
 app.trustedProxies("10.0.0.5", "10.0.0.6");
 
-// Trust cloud provider ranges (example: AWS)
-app.trustedProxies("10.0.0.0/8");
+// Trust the reverse proxy's network (a Docker network, a VPC subnet for the load balancers)
+app.trustedProxies("172.18.0.0/16");
+
+// From config or the environment: comma-separated, blank or unset means none
+app.trustedProxies(config.get("trusted.proxies"));   // the scaffold sets TRUSTED_PROXIES
 ```
+
+**Trust the proxy, not the private address space.** Every address in the list can set
+`req.ip()` to anything it likes. `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16` trusts every
+container on a Docker host (bridge networks, Swarm overlays and their default address pools all
+come from those ranges) and every machine in a typical VPC, so any of them can forge
+`X-Forwarded-For` and pose as any client: rate limits, IP allowlists and audit logs all believe
+it. List the proxy's own address, or the subnet of a network that only the proxy shares with
+the app.
+
+Behind Traefik on Dokploy, the proxy network is `dokploy-network`:
+
+```bash
+docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
+```
+
+Trusting that subnet is far narrower than a whole private range, but Dokploy attaches every app
+it routes to `dokploy-network`, so any other app on the same host can still forge the header.
+That is acceptable when you run every app on the host. If you don't trust the other apps, trust
+only Traefik's own address, and give the Traefik container a fixed address on that network so
+it survives a restart.
+
+**Unconfigured proxy warning.** Behind a proxy that isn't trusted, `req.ip()` is the proxy's
+address for every client: `RateLimiter.perIp` becomes one shared bucket (one client can lock
+everyone out of login), and analytics sees a single visitor. When a peer on a private or loopback
+address sends `X-Forwarded-For` or `Forwarded` and isn't a trusted proxy, Brace logs a warning
+naming the address, once per process.
 
 **Behind Cloudflare**, use the built-in preset instead of pasting CIDRs. It ships with
 Cloudflare's published egress ranges (cloudflare.com/ips); `.autoRefresh()` keeps them synced
@@ -1226,6 +1253,40 @@ alternative (turning every rate-limited endpoint into a 500) is worse. A warning
 3. **Combine with authentication** for logged-in users
 
 ---
+
+## Deploying in a Container
+
+`brace new` scaffolds a container setup meant to be deployed as-is:
+
+- **`Dockerfile`.** A Maven build stage, then a distroless Java 25 runtime: a JRE and nothing
+  else, so no shell or package manager for an attacker to use. Both base images are pinned by
+  digest, so a rebuild can't pick up a different image, and `.github/dependabot.yml` proposes
+  digest updates weekly. The process runs as uid 65532 (`USER 65532:65532`), and the app's files
+  are owned by root, so the process can't modify its own code or config. The `ENTRYPOINT` is
+  exec form: `java` is PID 1 and gets `docker stop`'s SIGTERM. JVM flags come from
+  `JAVA_TOOL_OPTIONS`, which the health-check JVM also reads: flags that bind a port, write a
+  file or load an agent don't belong there unless the `HEALTHCHECK` is replaced by the
+  platform's HTTP check.
+- **`.dockerignore`.** Keeps `application.conf` (the dev session secret), `*.key` (the ops
+  private key), `.env` files and `target/` out of the build context. The image's config is
+  `application.conf.example`, whose values all come from environment variables.
+- **`compose.yaml`.** The reference deployment. The app container has a read-only root
+  filesystem (`/tmp`, where uploads spill, is an in-memory tmpfs), drops every Linux
+  capability, sets `no-new-privileges`, and publishes its port on loopback only, for a
+  TLS-terminating reverse proxy in front. Postgres sits on an `internal` network with no
+  published port, reachable only from the app. Secrets are required environment variables
+  (`${SESSION_SECRET:?…}`), never values in the file.
+- **Health.** `GET /__brace/health` answers `200 ok` before routing and middleware, so an
+  app-wide login guard or rate limiter can't fail it. It reveals nothing (no version, no
+  database status) and isn't logged, counted or recorded by analytics. The image's
+  `HEALTHCHECK` polls it with `com.larvalabs.brace.HealthCheck`, since the image has no curl.
+- **Listen address.** Brace listens on every interface by default, which a container needs.
+  Outside one, with a reverse proxy on the same host, bind to loopback with
+  `app.host("127.0.0.1")`.
+
+Behind Traefik (Dokploy) or another proxy container, set `TRUSTED_PROXIES` to the proxy's own
+address or its network's CIDR so `req.ip()` sees real clients; see
+[Trusted Proxies](#trusted-proxies).
 
 ## Installing and Updating Brace
 

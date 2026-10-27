@@ -135,7 +135,7 @@ public class App {
             .database(db)
             .templates("views")
             .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
-            .trustedProxies("10.0.0.0/8", "172.16.0.0/12")  // secure IP handling behind load balancer
+            .trustedProxies(config.get("trusted.proxies"))  // your proxy's address or network (TRUSTED_PROXIES)
             .after(SecurityHeaders.strict())                 // security headers + strict CSP on all responses
             .mailer(mail)
             .cache(cache)
