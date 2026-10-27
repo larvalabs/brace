@@ -19,7 +19,8 @@ set -euo pipefail
 #                       this script's location)
 #   BRACE_CACHE         where downloaded toolchains are cached
 #                       (default: ~/.brace/cache)
-#   BRACE_RELEASE_BASE  base URL for release downloads
+#   BRACE_RELEASE_BASE  base URL for release downloads (https:// or file:// only, unless
+#                       BRACE_ALLOW_INSECURE_DOWNLOAD=1)
 
 # Bumped only when the launcher<->toolchain bootstrap contract changes (how the
 # pinned version is read, how toolchains are laid out, how Cli is invoked).
@@ -98,16 +99,35 @@ load_pin() {
     [[ "$rc" -eq 0 ]] || PINNED=""
 }
 
+# L8: a toolchain is code this launcher runs, so it only comes over https (or from a local
+# file:// tree, which the tests use). Releases aren't signed yet; TLS is what authenticates them.
+secure_url() {
+    case "$1" in
+        https://*|file://*) return 0 ;;
+    esac
+    if [[ "${BRACE_ALLOW_INSECURE_DOWNLOAD:-}" == "1" ]]; then
+        info "warning: downloading over an insecure URL (BRACE_ALLOW_INSECURE_DOWNLOAD=1): $1"
+        return 0
+    fi
+    error "Refusing to download brace over a non-https URL: $1 (set BRACE_RELEASE_BASE to an https:// URL, or BRACE_ALLOW_INSECURE_DOWNLOAD=1 to override)"
+    return 1
+}
+
 # Download + unpack the dist zip for a released version into the cache.
 fetch_toolchain() {
     local v="$1" dest="$BRACE_CACHE/$v"
     valid_version "$v" || { error "Refusing invalid brace version: $(printf '%q' "$v")"; return 1; }
     local url="$BRACE_RELEASE_BASE/v$v/brace-$v.zip"
+    secure_url "$url" || return 1
     command -v curl  >/dev/null || { error "curl is required to download brace $v";  return 1; }
     command -v unzip >/dev/null || { error "unzip is required to install brace $v"; return 1; }
     info "Fetching brace $v ..."
     local tmp; tmp="$(mktemp -d)"
-    if ! curl -fsSL "$url" -o "$tmp/brace.zip"; then
+    # Keep the download on https, redirects included. (No arrays: bash 3.2 on macOS + set -u.)
+    local proto="--proto =https,file --proto-redir =https"
+    [[ "${BRACE_ALLOW_INSECURE_DOWNLOAD:-}" == "1" ]] && proto=""
+    # shellcheck disable=SC2086 # proto is a deliberate word list
+    if ! curl -fsSL $proto "$url" -o "$tmp/brace.zip"; then
         rm -rf "$tmp"; error "Could not download brace $v from $url"; return 1
     fi
     if ! unzip -q "$tmp/brace.zip" -d "$tmp"; then

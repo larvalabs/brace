@@ -42,6 +42,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | The ops dashboard is cookie-only (no token in the page), has its own CSP; cookie POSTs to `/ops` must be same-origin | security, **breaking** for scripts that POST to `/ops` with the session cookie | use `Authorization: Bearer` in scripts; drop the token argument from any `OpsDashboard.html(...)` call | [§](#breaking-the-ops-dashboard-is-cookie-only-and-has-its-own-csp) |
 | Ops auth protocol v3 binds the CLI's signature to the server; v2 removed; CLI token cache keyed by server | security, **breaking** | upgrade the `brace` CLI with the server; behind a Host-rewriting proxy add `app.opsOrigins(...)` | [§](#breaking-ops-auth-protocol-v3) |
 | Cross-instance WebSocket broadcasts are signed and use a per-app channel; a Postgres app with `ws(...)` routes needs `.sessions(secret)` or `.opsSecret(secret)` | security, **breaking** for Postgres apps with WebSocket routes and no secret, and for rolling deploys | set a shared secret if the app has none; upgrade all instances together | [§](#breaking-cross-instance-websocket-broadcasts-are-signed) |
+| Toolchain downloads (`install.sh`, `self-update`, the launcher) are https-only | security | none, unless `BRACE_RELEASE_BASE` points at an `http://` mirror | [§](#security-toolchain-downloads-are-https-only) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -1049,3 +1050,13 @@ counts the signature, so a broadcast within about 85 bytes of the 7900-byte limi
 go inline now spills; nothing to do.
 
 See "Broadcasts between instances (Postgres)" in `docs/SECURITY.md`.
+
+## Security: toolchain downloads are https-only
+
+`install.sh`, `brace self-update` and the launcher's download of a project's pinned version
+accepted any `BRACE_RELEASE_BASE`, `http://` included, and curl followed redirects to any
+protocol. A release zip is code the CLI runs, and it isn't signed, so TLS is what authenticates
+it. All three now download over https only, redirects included (`file://` still works for local
+trees), and refuse `http://` with an error naming the URL. An internal http mirror needs
+`BRACE_ALLOW_INSECURE_DOWNLOAD=1`, which warns on every download.
+

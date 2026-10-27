@@ -52,3 +52,15 @@ This unpacks the latest release to `~/.brace/toolchains/<version>` and links
 Inside a project, `brace` runs against the framework version pinned in `pom.xml`
 (`<brace.version>`), fetching it to `~/.brace/toolchains/<version>` on first use —
 independent of the installed launcher version.
+
+## Download integrity
+
+`install.sh`, `brace self-update` and the launcher's per-project fetch download release zips over
+**https only** (redirects included); `file://` works for local test trees, and plain `http://`
+is refused unless `BRACE_ALLOW_INSECURE_DOWNLOAD=1`. TLS to GitHub is what authenticates a
+release: assets are **not signed**. Signing (decision D5 in the 2026-10 security review fix plan)
+is deferred while Brace has no outside users: anyone able to replace a release asset can also
+change `install.sh` and `bin/brace` in this repository, so a signature only helps once the
+signing key is held somewhere a repository compromise doesn't reach. Revisit before outside
+adoption: publish `SHA256SUMS` plus an Ed25519 signature from an offline key, and verify it in
+all three download paths.

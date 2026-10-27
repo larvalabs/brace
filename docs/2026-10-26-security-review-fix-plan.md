@@ -484,7 +484,7 @@ migration-guide entry with a before/after, because the guide is how our own apps
 | D2 | H5: should `Http` default to public-only? | **Decided:** yes, in 0.1.11. Internal calls use `.trusted()`. |
 | D3 | M2: fail startup on `.csrf(false)` + cookie session, and turn on the cross-site check by default? | **Decided:** yes to both, in 0.1.11. |
 | D4 | M9: throw on `@Entity` binding immediately? | **Decided:** yes, in 0.1.11. |
-| D5 | L8: signing scheme and key custody for release artifacts | minisign, with the key held offline by the release owner and the public key embedded in the launcher and `Toolchains`. Needs a `RELEASE.md` update. |
+| D5 | L8: signing scheme and key custody for release artifacts | **Decided (Phase 4): deferred.** Brace has no outside users; anyone who can replace a release asset can also edit `install.sh`/`bin/brace` in the repo, so a CI-held key adds little and an offline key costs a manual step per release. Shipped instead: https-only downloads (redirects included) in all three paths, `BRACE_ALLOW_INSECURE_DOWNLOAD=1` to override. Revisit before outside adoption (SHA256SUMS + Ed25519 from an offline key); recorded in `RELEASE.md`. |
 | D6 | M6: does `SecurityHeaders.defaults()` gain a CSP, or only the new `strict()`? | Only `strict()`. Changing `defaults()` would silently break apps with inline scripts. The scaffold uses `strict()`. |
 | D7 | M13: runtime base image | Distroless nonroot Java 25, digest-pinned and refreshed by Dependabot or Renovate. Alpine if a shell is needed for debugging; document `docker debug` instead. |
 

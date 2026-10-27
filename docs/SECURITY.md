@@ -20,6 +20,7 @@ This document describes Brace's security features and best practices for buildin
 - [WebSockets](#websockets)
 - [File Uploads](#file-uploads)
 - [Rate Limiting](#rate-limiting)
+- [Installing and Updating Brace](#installing-and-updating-brace)
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
 - [Secrets Management](#secrets-management)
@@ -1223,6 +1224,16 @@ alternative (turning every rate-limited endpoint into a 500) is worse. A warning
    - API: 100-1000 requests per hour
    - Anonymous: 10 requests per minute
 3. **Combine with authentication** for logged-in users
+
+---
+
+## Installing and Updating Brace
+
+`install.sh`, `brace self-update` and the launcher's fetch of a project's pinned version download
+code you then run, so they use **https only**, redirects included (`file://` for local test
+trees). Plain `http://` in `BRACE_RELEASE_BASE` or `BRACE_LATEST_URL` is refused unless
+`BRACE_ALLOW_INSECURE_DOWNLOAD=1`, which warns. Release zips are not signed yet; TLS to GitHub
+authenticates them (see `RELEASE.md`, "Download integrity").
 
 ---
 

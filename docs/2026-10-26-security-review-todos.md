@@ -652,7 +652,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Tests.** A row with a foreign class name isn't deserialized.
   - **Tier: small.**
 
-- [ ] **L8: Self-update and install downloads are verified by TLS only**, `Toolchains.java:106-125`, `install.sh`, `bin/brace` (`fetch_toolchain`)
+- [x] **L8: Self-update and install downloads are verified by TLS only** (https-only shipped; signing deferred, decision D5), `Toolchains.java:106-125`, `install.sh`, `bin/brace` (`fetch_toolchain`)
   - **What's wrong.** There's no checksum or signature, and `BRACE_RELEASE_BASE` accepts
     `http://`. (The zip-slip guard is correct.)
   - **Fix.**
