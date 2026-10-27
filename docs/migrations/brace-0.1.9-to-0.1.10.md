@@ -50,6 +50,7 @@ stop-the-world time (expect lower ones).
 | Smaller correctness fixes | fix | none | [§](#fix-smaller-fixes-no-action-needed) |
 | Oversized multipart uploads return 413 | fix | none | [§](#fix-oversized-multipart-uploads-return-413-not-500) |
 | `brace ops --help` lists subcommands | fix | none | [§](#fix-brace-ops---help-lists-the-ops-subcommands) |
+| `brace check` passes jobs that haven't run yet | fix | none | [§](#fix-brace-check-no-longer-fails-on-jobs-that-havent-run-yet) |
 | A failed `start()` no longer leaves the JVM running | fix | none | [§](#fix-a-failed-start-no-longer-leaves-the-jvm-running) |
 | Request headers no longer copied twice | fix | none | [§](#fix-request-headers-are-no-longer-copied-twice-per-request) |
 | Unfiltered error list capped at 500 rows | fix | pass `?since=` for a complete window | [§](#fix-an-unfiltered-error-list-is-capped-at-500-rows) |
@@ -814,6 +815,24 @@ before, `keypair` ignored the flag and generated a keypair (or, when `ops-privat
 already existed, refused with an error).
 
 **Who needs to act.** Nobody.
+
+### Fix: `brace check` no longer fails on jobs that haven't run yet
+
+**What changed.** `brace check`'s `jobs` check failed on any job whose `lastStatus` wasn't
+`"ok"`, including `"pending"`, which every scheduled job reports from startup until its
+first run. So a healthy app reported `"healthy": false` right after every deploy:
+
+```json
+{"name":"jobs","status":"fail","message":"5 of 5 jobs failing","details":[{"name":"brace-jobs-prune","lastStatus":"pending","failCount":0}, ...]}
+```
+
+A `"pending"` job now passes (`"5 jobs, none run yet"`, or `"... all ok (2 not run yet)"`
+alongside jobs that have run). Only a failed last run (`"error"`) fails the check, and a job
+that failed before but whose last run succeeded still warns. `/ops/status` and the dashboard
+are unchanged; they already showed `"pending"` as a neutral state.
+
+**Who needs to act.** Nobody. If a deploy script retried or ignored `brace check` failures
+to get past this, it can drop that workaround.
 
 <!-- end section: ops-jvm-cli -->
 

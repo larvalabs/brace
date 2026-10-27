@@ -357,12 +357,18 @@ public class CliCheck {
             return new Check("jobs", "pass", "No scheduled jobs");
         }
         int total = scheduled.size();
+        int notYetRun = 0;
         var failing = new ArrayList<Map<String, Object>>();
         var warned = new ArrayList<Map<String, Object>>();
         for (var j : scheduled) {
             String lastStatus = j.path("lastStatus").asText("ok");
             int failCount = j.path("failCount").asInt(0);
-            if (!"ok".equals(lastStatus)) {
+            // "pending" means the job hasn't run on this instance since it started: every job
+            // after a restart, and, in a cluster, a deduped job another instance keeps winning.
+            // Neither is a failure, so it must not fail the check on every deploy.
+            if ("pending".equals(lastStatus) && failCount == 0) {
+                notYetRun++;
+            } else if (!"ok".equals(lastStatus) && !"pending".equals(lastStatus)) {
                 var d = new LinkedHashMap<String, Object>();
                 d.put("name", j.path("name").asText());
                 d.put("lastStatus", lastStatus);
@@ -387,8 +393,13 @@ public class CliCheck {
                 warned.size() + " job" + (warned.size() == 1 ? "" : "s") + " with prior failures (currently ok)",
                 warned, null);
         }
+        if (notYetRun == total) {
+            return new Check("jobs", "pass",
+                total + " job" + (total == 1 ? "" : "s") + ", none run yet");
+        }
         return new Check("jobs", "pass",
-            total + " job" + (total == 1 ? "" : "s") + ", all ok");
+            total + " job" + (total == 1 ? "" : "s") + ", all ok"
+                + (notYetRun > 0 ? " (" + notYetRun + " not run yet)" : ""));
     }
 
     static Check checkCache(JsonNode status, CheckThresholds thresholds) {
