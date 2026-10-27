@@ -79,7 +79,7 @@ var app = Brace.app()
     .templates("views")
     .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
     .defaultAccess(Access.session("userId", "/login"))   // every route requires login unless .publicRoute()
-    .trustedProxies("10.0.0.0/8", "172.16.0.0/12")
+    .trustedProxies(config.get("trusted.proxies"))  // your proxy's address or network; comma-separated
     .mailer(new Mailer(config.get("smtp.url")).from("noreply@app.com"))
     .cache(Brace.cache())
     .storage(Storage.s3(config))
@@ -1208,8 +1208,17 @@ app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m")
 Configure which proxies to trust for IP forwarding headers. Without this, `X-Forwarded-For` is ignored to prevent IP spoofing and `req.ip()` always returns the socket's remote address:
 
 ```java
-app.trustedProxies("10.0.0.0/8", "172.16.0.0/12");  // CIDRs (here: RFC1918 private ranges)
+app.trustedProxies("172.18.0.0/16");           // the reverse proxy's network (here: a Docker network)
+app.trustedProxies(config.get("trusted.proxies")); // from config/env: comma-separated, blank = none
 ```
+
+Name your proxy, not a whole private range. Every address in the list can set `req.ip()` to
+anything, and on a Docker host every container has an address in `172.16.0.0/12`, so trusting
+that range (or `10.0.0.0/8`) lets any container on the host impersonate any client. Behind
+Traefik (Dokploy), trust the proxy network's subnet:
+`docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`. The
+scaffold reads it from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
+without being trusted, Brace logs a one-time warning naming its address.
 
 Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
 

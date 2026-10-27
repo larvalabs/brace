@@ -203,7 +203,10 @@ public class App {
             .templates("views")
             .sessions(config.get("session.secret"))
             .ops("ops-authorized-keys")
-            .opsOrigins(config.get("ops.origins"));
+            .opsOrigins(config.get("ops.origins"))
+            // The reverse proxy's address or network CIDR (comma-separated; unset = none), so
+            // req.ip() is the real client. Not a whole private range: see BRACE-AGENTS.md.
+            .trustedProxies(config.get("trusted.proxies"));
 
         routes(app);
 
@@ -346,6 +349,9 @@ class HomeControllerTest {
                 "# The app's public origin, e.g. https://app.example.com: brace ops CLI logins are\n" +
                 "# signed for it, and prod refuses to start with ops on and none set.\n" +
                 "ops.origins=${OPS_ORIGINS}\n" +
+                "# The reverse proxy's address or network, e.g. Traefik's network subnet, so\n" +
+                "# req.ip() is the real client. Unset when nothing proxies the app.\n" +
+                "trusted.proxies=${TRUSTED_PROXIES}\n" +
                 "\n" +
                 "%dev.port=9000\n" +
                 "%dev.ops.origins=http://localhost:9000\n" +

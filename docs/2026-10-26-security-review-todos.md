@@ -630,7 +630,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Tests.** Remove a key and restart: its outstanding token gets 401.
   - **Tier: small.**
 
-- [ ] **L5: The scaffold sets no `trustedProxies`, and the docs' suggested CIDRs trust every container**, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:69, 944`
+- [x] **L5: The scaffold sets no `trustedProxies`, and the docs' suggested CIDRs trust every container**, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:69, 944`
   - **What's wrong.**
     - Behind Dokploy's Traefik, `req.ip()` is the proxy for every client. `RateLimiter.perIp`
       becomes one global bucket (one attacker throttles everyone's login), and analytics
@@ -643,6 +643,12 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Scaffold reads `TRUSTED_PROXIES` from env.
     - Docs show the specific Traefik network CIDR.
   - **Tests.** The warning fires once.
+  - **Progress.** Done. `BraceHandler` warns once when a private or loopback peer sends
+    `X-Forwarded-For`/`Forwarded` without being trusted (no proxies configured, or not in the
+    list). `trustedProxies(String...)` splits commas and skips blanks; the scaffold passes
+    `config.get("trusted.proxies")`, read from `TRUSTED_PROXIES`, and `compose.yaml` forwards it.
+    BRACE-AGENTS.md, README.md and SECURITY.md show the proxy network's subnet instead of RFC 1918
+    ranges. Test: `ProxyTrustWarningTest`.
   - **Tier: small.**
 
 - [x] **L6: NOTIFY messages are unauthenticated, and the channel is shared across apps on a database**, `PostgresMessageBus.java:34, 166, 188-207`, `WsRegistry.java:69-81`

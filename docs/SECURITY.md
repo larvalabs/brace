@@ -626,15 +626,35 @@ Without trusted proxy configuration, attackers can **spoof their IP address** by
 ### Configuration
 
 ```java
-// Trust private network proxies
-app.trustedProxies("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16");
-
 // Trust specific proxy IPs
 app.trustedProxies("10.0.0.5", "10.0.0.6");
 
-// Trust cloud provider ranges (example: AWS)
-app.trustedProxies("10.0.0.0/8");
+// Trust the reverse proxy's network (a Docker network, a VPC subnet for the load balancers)
+app.trustedProxies("172.18.0.0/16");
+
+// From config or the environment: comma-separated, blank or unset means none
+app.trustedProxies(config.get("trusted.proxies"));   // the scaffold sets TRUSTED_PROXIES
 ```
+
+**Trust the proxy, not the private address space.** Every address in the list can set
+`req.ip()` to anything it likes. `10.0.0.0/8` or `172.16.0.0/12` trusts every container on a
+Docker host (they all get addresses in `172.16.0.0/12`) and every machine in a typical VPC, so
+any of them can forge `X-Forwarded-For` and pose as any client: rate limits, IP allowlists and
+audit logs all believe it. List the proxy's own address, or the subnet of a network only the
+proxy shares with the app. Behind Traefik (Dokploy), that is the proxy network's subnet:
+
+```bash
+docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
+```
+
+A container's own address changes when it is recreated, so prefer the network's subnet and keep
+other services off that network.
+
+**Unconfigured proxy warning.** Behind a proxy that isn't trusted, `req.ip()` is the proxy's
+address for every client: `RateLimiter.perIp` becomes one shared bucket (one client can lock
+everyone out of login), and analytics sees a single visitor. When a peer on a private or loopback
+address sends `X-Forwarded-For` or `Forwarded` and isn't a trusted proxy, Brace logs a warning
+naming the address, once per process.
 
 **Behind Cloudflare**, use the built-in preset instead of pasting CIDRs. It ships with
 Cloudflare's published egress ranges (cloudflare.com/ips); `.autoRefresh()` keeps them synced

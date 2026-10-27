@@ -321,6 +321,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             // Extract remote address from socket
             String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
+            warnIfProxyNotTrusted(headers, remoteAddr);
 
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
@@ -1229,6 +1230,37 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (segments[i].startsWith(".") && !(i == 0 && segments[i].equals(".well-known"))) return true;
         }
         return false;
+    }
+
+    /** Set once {@link #warnIfProxyNotTrusted} has warned; it warns once per process. */
+    private final java.util.concurrent.atomic.AtomicBoolean warnedProxyNotTrusted =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * L5: a private-network peer sending forwarding headers is almost always the app's own reverse
+     * proxy. If it isn't trusted, {@code req.ip()} is the proxy's address for every client: a
+     * per-IP rate limit becomes one bucket that any one client can exhaust for everyone, and
+     * analytics sees one visitor. Warns once. A public peer sending them is just a client, whose
+     * headers are rightly ignored.
+     */
+    private void warnIfProxyNotTrusted(Map<String, String> headers, String remoteAddr) {
+        if (warnedProxyNotTrusted.get() || remoteAddr == null) return;
+        if (headers.get("X-Forwarded-For") == null && headers.get("Forwarded") == null) return;
+        if (trustedProxies != null && trustedProxies.isTrusted(remoteAddr)) return;
+        if (!TrustedProxies.isIpLiteral(remoteAddr)) return;
+        try {
+            if (Http.isPublicAddress(java.net.InetAddress.getByName(remoteAddr))) return;
+        } catch (java.net.UnknownHostException e) {
+            return;
+        }
+        if (!warnedProxyNotTrusted.compareAndSet(false, true)) return;
+        Log.warn("Requests from " + remoteAddr + " carry X-Forwarded-For/Forwarded, but "
+            + (trustedProxies == null ? "no trusted proxies are configured"
+                                      : "that address isn't in trustedProxies")
+            + ", so the headers are ignored and req.ip() is " + remoteAddr + " for every client "
+            + "behind it: per-IP rate limits share one bucket and analytics sees one visitor. If it "
+            + "is your reverse proxy, add its address or its network's CIDR with "
+            + "app.trustedProxies(...) (the scaffold reads TRUSTED_PROXIES). Logged once.");
     }
 
     /** Route patterns already warned about by {@link #warnIfReadMethodWrote}. */

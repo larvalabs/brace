@@ -136,8 +136,22 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Trust these proxy addresses or CIDRs to report the client's address in forwarding headers.
+     * Each argument may itself be a comma-separated list, and null or blank entries are skipped,
+     * so a config value can be passed straight through (the scaffold passes {@code TRUSTED_PROXIES}):
+     * none left means no proxy is trusted. Name your proxy's own address or network, not a whole
+     * private range: every address in the list can set {@code req.ip()} to anything.
+     */
     public Brace trustedProxies(String... cidrs) {
-        this.trustedProxies = new TrustedProxies(cidrs);
+        var list = new java.util.ArrayList<String>();
+        for (String value : cidrs == null ? new String[0] : cidrs) {
+            if (value == null) continue;
+            for (String part : value.split(",")) {
+                if (!part.isBlank()) list.add(part.strip());
+            }
+        }
+        this.trustedProxies = list.isEmpty() ? null : new TrustedProxies(list);
         return this;
     }
 

@@ -44,6 +44,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Cross-instance WebSocket broadcasts are signed and use a per-app channel; a Postgres app with `ws(...)` routes needs `.sessions(secret)` or `.opsSecret(secret)` | security, **breaking** for Postgres apps with WebSocket routes and no secret, and for rolling deploys | set a shared secret if the app has none; upgrade all instances together | [§](#breaking-cross-instance-websocket-broadcasts-are-signed) |
 | Toolchain downloads (`install.sh`, `self-update`, the launcher) are https-only | security | none, unless `BRACE_RELEASE_BASE` points at an `http://` mirror | [§](#security-toolchain-downloads-are-https-only) |
 | Hardened container scaffold; `GET /__brace/health`; `app.host(...)` | security, new | existing projects: optionally adopt the new `Dockerfile` and `compose.yaml` | [§](#security-hardened-container-scaffold-and-__bracehealth) |
+| Warning for an untrusted proxy; `trustedProxies(String...)` accepts a config value; scaffold reads `TRUSTED_PROXIES` | security | if the warning appears, set `trustedProxies` to your proxy's address or network, not `10.0.0.0/8`/`172.16.0.0/12` | [§](#security-untrusted-proxy-warning-and-narrow-trusted-proxies) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -1093,4 +1094,38 @@ then:
 - point your platform's health check at `/__brace/health`;
 - if the app registered its own `GET /__brace/health` route, that route is no longer reachable:
   the built-in probe answers first.
+
+## Security: untrusted-proxy warning and narrow trusted proxies
+
+**What changed.** Behind a reverse proxy with no `trustedProxies`, `req.ip()` is the proxy's
+address for every client, so `RateLimiter.perIp` is one bucket that any client can exhaust for
+everyone, and analytics sees one visitor. Nothing said so. Brace now logs a warning, once per
+process, when a peer on a private or loopback address sends `X-Forwarded-For` or `Forwarded`
+and isn't a trusted proxy.
+
+The docs used to suggest `trustedProxies("10.0.0.0/8", "172.16.0.0/12")`. On a Docker host every
+container has an address in `172.16.0.0/12`, so that lets any container forge any client's
+address. They now show the proxy's own network.
+
+`app.trustedProxies(String...)` now accepts comma-separated values and skips null and blank
+ones, so a config value can be passed straight in; nothing left means no proxy is trusted. New
+projects pass `config.get("trusted.proxies")`, which `application.conf.example` reads from
+`TRUSTED_PROXIES`.
+
+**Who needs to act.** Apps behind a proxy:
+
+- If the warning appears, set `trustedProxies` to the proxy's address or its network's CIDR.
+  Behind Traefik (Dokploy):
+  `docker network inspect dokploy-network -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`.
+- If you trust `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`, narrow it the same way.
+
+To read it from the environment as new projects do:
+
+```java
+// Before
+.trustedProxies("10.0.0.0/8", "172.16.0.0/12")
+
+// After (App.java), with trusted.proxies=${TRUSTED_PROXIES} in application.conf.example
+.trustedProxies(config.get("trusted.proxies"))
+```
 

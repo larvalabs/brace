@@ -98,6 +98,11 @@ class ProjectGeneratorTest {
             "db.pass must come from the environment, got:\n" + content);
         assertFalse(content.toLowerCase().contains("change-me"),
             "no placeholder secret: it would boot with only a warning");
+        // L5: the proxy to trust differs per deployment, so it comes from the environment too,
+        // and App.java passes it through (unset means no proxy is trusted).
+        assertTrue(content.contains("\ntrusted.proxies=${TRUSTED_PROXIES}\n"), content);
+        var app = Files.readString(projDir.resolve("src/main/java/app/App.java"));
+        assertTrue(app.contains(".trustedProxies(config.get(\"trusted.proxies\"))"), app);
     }
 
     @Test
