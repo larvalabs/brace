@@ -906,11 +906,19 @@ string, so a traversing key would have been *validly signed* for the path it esc
 
 `Storage.safeKey` and `UploadedFile.safeFilename()` also neutralize an extension a browser or
 server could execute: markup (`html`, `htm`, `xhtml`, `shtml`, `mht`…), `svg`/`svgz`,
-`xml`/`xsl`/`xslt`, `js`/`mjs`/`css`/`wasm`/`swf`, and server-side scripts (`php`, `phtml`,
-`asp`, `jsp`, `cgi`…), in any case. `safeKey` replaces it with `bin` (`u/<uuid>.bin`);
-`safeFilename()` appends `.bin` (`page.html.bin`). Only the final extension decides how a file is
-typed, so `x.svg.png` stays a `.png`. This is defense in depth for whatever serves the files by
-extension; the serving rules below are the fix.
+`xml`/`xsl`/`xslt`/`xsd`, feeds (`rss`, `atom`, which browsers render as XHTML), `js`/`mjs`/`es`/
+`css`/`wasm`/`swf`/`htc`/`hta`, and server-side scripts (`php`, `phtml`, `asp`, `jsp`, `cgi`,
+`pl`, `py`…), in any case, and the same before a compression extension (`x.svg.gz`, which nginx's
+`gzip_static` would serve for `x.svg`). `safeKey` replaces it with `bin` (`u/<uuid>.bin`);
+`safeFilename()` turns each such extension's dot into `_` wherever it is in the name and appends
+`.bin` when it was last (`page.html` → `page_html.bin`, `a.php.png` → `a_php.png`, since some
+servers run a handler for an extension anywhere in the name). Trailing dots and spaces are
+dropped first. This is defense in depth for whatever serves the files by extension; the serving
+rules below are the fix.
+
+`Storage.put(key, bytes, contentType)` and `put(key, path, contentType)` store the type you pass.
+Never pass `file.contentType()`: the uploader chose it. Use `put(key, uploadedFile)`, which types
+the object from the key.
 
 ### Serving uploaded files
 
@@ -935,7 +943,13 @@ In `UNTRUSTED` mode:
 
 Images still render in `<img>`, and audio/video still play in `<audio>`/`<video>`; those ignore
 `Content-Disposition`. `staticFiles` throws if an untrusted directory is inside a trusted one (or
-the reverse), because its files would also be reachable through the trusted mapping.
+the reverse), because its files would also be reachable through the trusted mapping; it compares
+the paths as written and with symlinks resolved. A file a trusted mapping reaches that resolves
+into an untrusted directory anyway (a link made later) is served as untrusted.
+
+These headers are enforced as the response is written, after the handler and after-middleware, so
+a `Content-Type` or `Content-Disposition` set later can't undo them, and a page-cache hit keeps
+them. `.untrusted()` applies to 2xx responses; an error page is the app's own.
 
 **From a handler** (an access check, a lookup by id), apply the same rules with
 `Result.untrusted()`:

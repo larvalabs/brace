@@ -54,6 +54,14 @@ class UntrustedUploadServingTest {
             a.get("/download/{name}", req ->
                 Result.download(uploads.resolve(req.pathParam("name")), "report \"final\".html").untrusted());
             a.get("/claimed", req -> Result.bytes(SCRIPT_PAGE.getBytes(), "text/plain, text/html").untrusted());
+            // Review fixes: headers set after untrusted(), or by an after-middleware, can't undo it.
+            a.get("/overridden/{name}", req -> Result.fileUnder(uploads, req.pathParam("name")).untrusted()
+                .header("Content-Type", "text/html").header("Content-Disposition", "inline"));
+            a.get("/mw/{name}", req -> Result.fileUnder(uploads, req.pathParam("name")).untrusted());
+            a.after("/mw/*", (req, res) -> res.header("Content-Type", "text/html")
+                .header("Content-Disposition", "inline").header("X-Content-Type-Options", "none"));
+            a.get("/cached-upload", Brace.cache().wrap("5m", req ->
+                Result.bytes(SCRIPT_PAGE.getBytes(), "text/html").untrusted()));
         });
     }
 
@@ -209,6 +217,25 @@ class UntrustedUploadServingTest {
         assertEquals("attachment", r.header("Content-Disposition"));
     }
 
+    @Test
+    void laterHeadersCantUndoUntrusted() {
+        for (String path : new String[] {"/overridden/x.html", "/mw/x.html"}) {
+            var r = app.get(path);
+            assertEquals("application/octet-stream", r.header("Content-Type"), path);
+            assertAttachment(r, path);
+            assertSandboxed(r, path);
+        }
+    }
+
+    @Test
+    void aPageCacheHitIsStillUntrusted() {
+        app.get("/cached-upload");
+        var hit = app.get("/cached-upload");
+        assertEquals("application/octet-stream", hit.header("Content-Type"));
+        assertAttachment(hit, "/cached-upload");
+        assertSandboxed(hit, "/cached-upload");
+    }
+
     // --- Registration ---
 
     @Test
@@ -224,5 +251,43 @@ class UntrustedUploadServingTest {
         assertDoesNotThrow(() -> Brace.app()
             .staticFiles("/assets", root.resolve("public").toString())
             .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED));
+    }
+
+    @Test
+    void symlinksDontHideTheNesting(@TempDir Path root) throws Exception {
+        Path pub = Files.createDirectories(root.resolve("releases/42/public"));
+        Path inner = Files.createDirectories(pub.resolve("uploads"));
+        Path link = Files.createSymbolicLink(root.resolve("uploads-link"), inner);
+        Path current = Files.createSymbolicLink(root.resolve("current"), root.resolve("releases/42"));
+        assertThrows(IllegalArgumentException.class, () -> Brace.app()
+            .staticFiles("/assets", pub.toString())
+            .staticFiles("/uploads", link.toString(), StaticFiles.UNTRUSTED));
+        assertThrows(IllegalArgumentException.class, () -> Brace.app()
+            .staticFiles("/assets", current.resolve("public").toString())
+            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED));
+        assertThrows(IllegalArgumentException.class, () -> Brace.app()
+            .staticFiles("/uploads", link.toString(), StaticFiles.UNTRUSTED)
+            .staticFiles("/assets", pub.toString()));
+    }
+
+    @Test
+    void aFileThatResolvesIntoAnUntrustedDirectoryIsUntrusted(@TempDir Path root) throws Exception {
+        // A link made after start puts the untrusted directory inside the trusted one.
+        Path pub = Files.createDirectories(root.resolve("public"));
+        Path inner = Files.createDirectories(pub.resolve("u"));
+        Files.writeString(inner.resolve("x.html"), SCRIPT_PAGE);
+        Path later = root.resolve("uploads");
+        var linked = Brace.test().start(a -> a
+            .staticFiles("/assets", pub.toString())
+            .staticFiles("/uploads", later.toString(), StaticFiles.UNTRUSTED));
+        try {
+            Files.createSymbolicLink(later, inner);
+            var r = linked.get("/assets/u/x.html");
+            assertEquals("application/octet-stream", r.header("Content-Type"));
+            assertAttachment(r, "/assets/u/x.html");
+            assertSandboxed(r, "/assets/u/x.html");
+        } finally {
+            linked.stop();
+        }
     }
 }

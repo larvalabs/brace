@@ -77,10 +77,12 @@ public class UploadedFile {
      * dotfiles, {@code ..}, or hidden names), capped at 255 UTF-8 bytes (the usual filesystem
      * limit). Never empty: a missing or fully stripped name becomes {@code "upload"}.
      *
-     * <p>A name whose final extension a browser or server could execute ({@code html}, {@code svg},
-     * {@code xml}, {@code js}, {@code css}, {@code php}, …, any case) gets {@code .bin} appended:
-     * {@code "page.HTML"} becomes {@code "page.HTML.bin"}. Serve the directory as
-     * {@link StaticFiles#UNTRUSTED} regardless; the rename is for whatever else serves it.
+     * <p>Every extension a browser or server could execute ({@code html}, {@code svg}, {@code xml},
+     * {@code js}, {@code css}, {@code php}, …, any case, anywhere in the name) is made inert: its
+     * dot becomes {@code _}, and {@code .bin} is appended when it was the last one:
+     * {@code "page.HTML"} becomes {@code "page_HTML.bin"}, {@code "a.php.png"} becomes
+     * {@code "a_php.png"}. Serve the directory as {@link StaticFiles#UNTRUSTED} regardless; the
+     * rename is for whatever else serves it.
      *
      * <p>This is a sanitiser, not a uniqueness guarantee — two uploads can share a safe name.
      */
@@ -106,11 +108,18 @@ public class UploadedFile {
         }
         name = capBytes(name.substring(start).strip(), 255);
         if (name.isEmpty()) return "upload";
-        // M7: an executable extension gets ".bin" appended, so a trusted static mapping or a server
-        // in front of the directory can't serve "x.html" as a page. Checked after the cap, which
-        // can itself expose a new final extension by cutting the name short.
-        if (UntrustedContent.isActiveExtension(UntrustedContent.extensionOf(name))) {
-            name = capBytes(name, 255 - ".bin".length()) + ".bin";
+        // M7: executable extensions are made inert, so a trusted static mapping or a server in front
+        // of the directory can't serve "x.html" as a page or run "x.php.png". After the cap, which
+        // can itself expose a new final extension by cutting the name short; the result is capped
+        // again ahead of a ".bin" so the limit holds.
+        String neutral = UntrustedContent.neutralizeName(name);
+        if (!neutral.equals(name)) {
+            if (neutral.endsWith(".bin") && !name.endsWith(".bin")) {
+                name = capBytes(neutral.substring(0, neutral.length() - 4), 255 - 4) + ".bin";
+            } else {
+                name = capBytes(neutral, 255);
+            }
+            if (name.isEmpty()) return "upload";
         }
         return name;
     }

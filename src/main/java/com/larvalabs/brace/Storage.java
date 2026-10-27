@@ -128,6 +128,10 @@ public class Storage {
      *
      * <p>Holds the whole object in heap by definition. For anything that might be large, prefer
      * {@link #put(String, Path, String)} or {@link #put(String, UploadedFile)}, which stream.
+     *
+     * <p>{@code contentType} is stored as given. Never pass an upload's
+     * {@link UploadedFile#contentType()}, which the uploader chose ({@code text/html} would be
+     * served from the bucket as a page); use {@link #put(String, UploadedFile)} for uploads.
      */
     public String put(String key, byte[] data, String contentType) {
         return putStreaming(key, () -> new java.io.ByteArrayInputStream(data), data.length, contentType, null);
@@ -135,6 +139,7 @@ public class Storage {
 
     /**
      * Upload a file from disk without reading it into the heap. Returns the public URL.
+     * {@code contentType} is stored as given; for an upload use {@link #put(String, UploadedFile)}.
      */
     public String put(String key, Path path, String contentType) {
         long length;
@@ -275,8 +280,9 @@ public class Storage {
      *
      * <p>An extension a browser or server could execute ({@code html}, {@code svg}, {@code xml},
      * {@code js}, {@code css}, {@code php}, … in any case) becomes {@code bin}:
-     * {@code safeKey("u", "x.SVG")} is {@code "u/<uuid>.bin"}. Only the final extension decides
-     * how a file is served, so {@code "x.svg.png"} keeps {@code png}. Serve the files as
+     * {@code safeKey("u", "x.SVG")} is {@code "u/<uuid>.bin"}, and so is a precompressed
+     * {@code "x.svg.gz"}. Otherwise only the final extension decides how a file is served, so
+     * {@code "x.svg.png"} keeps {@code png}. Serve the files as
      * untrusted all the same ({@link StaticFiles#UNTRUSTED}, {@link Result#untrusted()}): the
      * rename protects a server that maps extensions to types, not one that sniffs content.
      */
@@ -284,7 +290,7 @@ public class Storage {
         String uuid = UUID.randomUUID().toString();
         String ext = extension(originalName);
         if (ext != null && !ext.isEmpty()) {
-            return folder + "/" + uuid + "." + (UntrustedContent.isActiveExtension(ext) ? "bin" : ext);
+            return folder + "/" + uuid + "." + (UntrustedContent.isActiveName(originalName) ? "bin" : ext);
         }
         return folder + "/" + uuid;
     }

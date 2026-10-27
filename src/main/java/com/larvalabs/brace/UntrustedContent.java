@@ -35,11 +35,14 @@ final class UntrustedContent {
      */
     private static final Set<String> ACTIVE_EXTENSIONS = Set.of(
         "html", "htm", "xhtml", "xht", "shtml", "shtm", "stm", "mht", "mhtml",
-        "svg", "svgz", "xml", "xsl", "xslt", "rdf",
-        "js", "mjs", "cjs", "css", "wasm", "swf",
+        "svg", "svgz", "xml", "xsl", "xslt", "xsd", "rng", "rdf", "rss", "atom", "xul", "xbl",
+        "js", "mjs", "cjs", "es", "css", "wasm", "swf", "htc", "hta",
         "php", "php3", "php4", "php5", "php7", "phtml", "phar", "pht",
-        "asp", "aspx", "jsp", "jspx", "cgi"
+        "asp", "aspx", "jsp", "jspx", "cgi", "pl", "py"
     );
+
+    // Precompressed variants a server like nginx (gzip_static) serves for the name without them.
+    private static final Set<String> COMPRESSED_EXTENSIONS = Set.of("gz", "br", "zst");
 
     /**
      * The types an untrusted file is served (and stored in S3) under, by extension. Raster images
@@ -100,9 +103,52 @@ final class UntrustedContent {
         return ext != null && ACTIVE_EXTENSIONS.contains(ext.toLowerCase(Locale.ROOT));
     }
 
+    /**
+     * True when a name's extension, or the one before a compression extension
+     * ({@code x.svg.gz}), can execute where it is served.
+     */
+    static boolean isActiveName(String name) {
+        String ext = extensionOf(name);
+        if (isActiveExtension(ext)) return true;
+        if (!COMPRESSED_EXTENSIONS.contains(ext)) return false;
+        String trimmed = stripTrailingDotsAndSpaces(name);
+        return isActiveExtension(extensionOf(trimmed.substring(0, trimmed.lastIndexOf('.'))));
+    }
+
+    /**
+     * {@code name} with every executable extension made inert: the dot before it becomes
+     * {@code _}, wherever it is ({@code a.php.png} is {@code a_php.png}, since some servers run a
+     * handler for an extension anywhere in the name), and {@code .bin} is appended when the last
+     * one was executable or precompressed executable ({@code page.HTML} is {@code page_HTML.bin}).
+     * Trailing dots and spaces, which Windows drops, are removed first.
+     */
+    static String neutralizeName(String name) {
+        name = stripTrailingDotsAndSpaces(name);
+        String[] parts = name.split("\\.", -1);
+        if (parts.length < 2) return name;
+        var out = new StringBuilder(name.length() + 4).append(parts[0]);
+        boolean lastActive = false;
+        for (int i = 1; i < parts.length; i++) {
+            boolean active = isActiveExtension(parts[i]);
+            boolean last = i == parts.length - 1;
+            out.append(active ? '_' : '.').append(parts[i]);
+            if (last) lastActive = active || (COMPRESSED_EXTENSIONS.contains(parts[i].toLowerCase(Locale.ROOT))
+                && isActiveExtension(parts[i - 1]));
+        }
+        if (lastActive) out.append(".bin");
+        return out.toString();
+    }
+
+    private static String stripTrailingDotsAndSpaces(String name) {
+        int end = name.length();
+        while (end > 0 && (name.charAt(end - 1) == '.' || name.charAt(end - 1) == ' ')) end--;
+        return name.substring(0, end);
+    }
+
     /** The final extension of a file name or path, lowercased, or "" when there is none. */
     static String extensionOf(String name) {
         if (name == null) return "";
+        name = stripTrailingDotsAndSpaces(name);
         int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
         int dot = name.lastIndexOf('.');
         if (dot <= slash) return "";

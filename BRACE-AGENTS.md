@@ -328,9 +328,13 @@ uploader's claim; never serve or store by it.
 upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED)` and handler
 responses with `.untrusted()` (`Result.fileUnder(dir, name).untrusted()`). Untrusted responses get
 an allowlisted type (else `application/octet-stream`), `Content-Disposition: attachment` unless a
-raster image (png/jpeg/gif/webp/avif/bmp/ico; not svg), and always `CSP: sandbox` + `nosniff`.
-`safeFilename()` and `Storage.safeKey` neutralize executable extensions (`html`, `svg`, `xml`,
-`js`, `css`, `php`…): `page.html` → `page.html.bin`, key `…/<uuid>.bin`.
+raster image (png/jpeg/gif/webp/avif/bmp/ico; not svg), and always `CSP: sandbox` + `nosniff`,
+enforced as the response is written, so a later header or after-middleware can't undo them.
+`.untrusted()` applies to 2xx responses only (an error page is the app's own). `safeFilename()` and
+`Storage.safeKey` neutralize executable extensions (`html`, `svg`, `xml`, `rss`, `js`, `css`,
+`php`…, anywhere in the name): `page.html` → `page_html.bin`, `a.php.png` → `a_php.png`, key
+`…/<uuid>.bin`. `Storage.put(key, bytes, type)` and `put(key, path, type)` store the type you
+pass: never pass `file.contentType()`, which the uploader chose.
 
 Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
 living in the heap for the request; below it they stay in memory. Either way the API is the same.

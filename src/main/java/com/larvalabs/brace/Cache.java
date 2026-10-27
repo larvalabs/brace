@@ -193,7 +193,12 @@ public class Cache {
      * Jackson-round-trippable ({@code byte[]} body encodes as base64), so it works on both the
      * in-memory and serializing backends.
      */
-    public record RenderedResponse(int status, String contentType, Map<String, String> headers, byte[] body) {
+    public record RenderedResponse(int status, String contentType, Map<String, String> headers, byte[] body,
+                                   boolean untrusted) {
+        public RenderedResponse(int status, String contentType, Map<String, String> headers, byte[] body) {
+            this(status, contentType, headers, body, false);
+        }
+
         static RenderedResponse from(Result result) {
             if (result.isStreaming()) {
                 // Silently caching it would store an empty body and then serve that empty body to
@@ -213,11 +218,13 @@ public class Cache {
                 body = new byte[0];
             }
             return new RenderedResponse(result.status(), result.contentType(),
-                    new LinkedHashMap<>(result.headers()), body);
+                    new LinkedHashMap<>(result.headers()), body, result.untrusted);
         }
 
         Result toResult() {
-            return Result.raw(status, contentType, body, headers);
+            var result = Result.raw(status, contentType, body, headers);
+            result.untrusted = untrusted; // M7: replays enforce the untrusted headers too
+            return result;
         }
 
         /** Body and header values as one string, for View.sessionDerived's token search (M1). */

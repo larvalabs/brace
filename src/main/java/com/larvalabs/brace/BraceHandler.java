@@ -986,6 +986,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 && !"sandbox".equals(response.getHeaders().get("Content-Security-Policy"))) {
             response.getHeaders().add("Content-Security-Policy", "sandbox");
         }
+        if (result.untrusted) {
+            // M7: untrusted() set these on the Result, but a header the handler added afterwards
+            // or an after-middleware could replace them; enforce them on what actually goes out.
+            String type = UntrustedContent.safeType(response.getHeaders().get("Content-Type"));
+            response.getHeaders().put("Content-Type", type);
+            if (!UntrustedContent.isRasterImage(type)) {
+                String disposition = response.getHeaders().get("Content-Disposition");
+                if (disposition == null || !disposition.strip().toLowerCase(java.util.Locale.ROOT).startsWith("attachment")) {
+                    response.getHeaders().put("Content-Disposition", "attachment");
+                }
+            }
+            response.getHeaders().put("X-Content-Type-Options", "nosniff");
+        }
         if (result instanceof StreamResult streamResult) {
             if (HttpMethod.HEAD.is(response.getRequest().getMethod())) {
                 // HEAD sends no body, so don't produce one. Jetty would discard the bytes anyway,
@@ -1348,8 +1361,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
             try {
                 // M7: an untrusted directory takes its types from the upload allowlist, not the
-                // asset table, so an uploaded .html/.svg/.js is octet-stream, never text/html.
-                boolean untrusted = mapping.mode() == StaticFiles.UNTRUSTED;
+                // asset table, so an uploaded .html/.svg/.js is octet-stream, never text/html. A
+                // file that resolves into an untrusted directory is untrusted whichever mapping
+                // reached it: registration refuses nested directories, but a symlink made later
+                // could still put one under the other.
+                boolean untrusted = mapping.mode() == StaticFiles.UNTRUSTED || insideUntrustedDirectory(realFile);
                 String contentType = untrusted
                     ? UntrustedContent.typeForName(filePath.toString())
                     : contentTypeForPath(filePath.toString());
@@ -1370,6 +1386,30 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         return null;
+    }
+
+    private boolean insideUntrustedDirectory(Path realFile) {
+        for (var mapping : staticFileMappings) {
+            if (mapping.mode() != StaticFiles.UNTRUSTED) continue;
+            Path dir = realPathOrNearest(Path.of(mapping.directory()).toAbsolutePath().normalize());
+            if (realFile.startsWith(dir)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * {@code path} with symlinks resolved; for a path that doesn't exist yet, its nearest existing
+     * ancestor resolved, plus the rest as written.
+     */
+    static Path realPathOrNearest(Path path) {
+        Path existing = path;
+        while (existing != null && !Files.exists(existing)) existing = existing.getParent();
+        if (existing == null) return path;
+        try {
+            return existing.toRealPath().resolve(existing.relativize(path));
+        } catch (java.io.IOException e) {
+            return path;
+        }
     }
 
     /** True when the client's conditional-GET headers show it already holds the current resource. */

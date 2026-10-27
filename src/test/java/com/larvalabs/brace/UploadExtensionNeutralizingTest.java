@@ -49,6 +49,15 @@ class UploadExtensionNeutralizingTest {
     }
 
     @Test
+    void safeKeyNeutralizesPrecompressedAndNewlyListedTypes() {
+        for (String name : new String[] {"x.svg.gz", "x.html.br", "a.rss", "a.atom", "a.es", "a.xsd", "a.hta"}) {
+            assertTrue(Storage.safeKey("u", name).endsWith(".bin"), name);
+        }
+        assertFalse(Storage.safeKey("u", "x.html.").contains("html"));
+        assertTrue(Storage.safeKey("u", "backup.tar.gz").endsWith(".gz"));
+    }
+
+    @Test
     void extensionStillReportsTheRealExtension() {
         assertEquals("html", Storage.extension("x.HTML"));
         assertEquals("svg", Storage.extension("x.svg"));
@@ -61,11 +70,17 @@ class UploadExtensionNeutralizingTest {
     }
 
     @Test
-    void safeFilenameAppendsBinToActiveExtensions() {
-        assertEquals("page.HTML.bin", upload("page.HTML").safeFilename());
-        assertEquals("logo.svg.bin", upload("../logo.svg").safeFilename());
-        assertEquals("a.png.Svg.bin", upload("a.png.Svg").safeFilename());
-        assertEquals("x.svg.png", upload("x.svg.png").safeFilename());
+    void safeFilenameNeutralizesActiveExtensions() {
+        assertEquals("page_HTML.bin", upload("page.HTML").safeFilename());
+        assertEquals("logo_svg.bin", upload("../logo.svg").safeFilename());
+        assertEquals("a.png_Svg.bin", upload("a.png.Svg").safeFilename());
+        // Anywhere in the name: some servers run a handler for an extension that isn't last.
+        assertEquals("x_svg.png", upload("x.svg.png").safeFilename());
+        assertEquals("shell_php.jpg", upload("shell.php.jpg").safeFilename());
+        // Precompressed, and trailing dots (Windows drops them).
+        assertEquals("x_svg.gz.bin", upload("x.svg.gz").safeFilename());
+        assertEquals("x_html.bin", upload("x.html.").safeFilename());
+        assertEquals("feed_rss.bin", upload("feed.rss").safeFilename());
         assertEquals("report.pdf", upload("report.pdf").safeFilename());
         assertEquals("html", upload(".html").safeFilename());
     }

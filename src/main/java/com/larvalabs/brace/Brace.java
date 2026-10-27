@@ -485,11 +485,16 @@ public class Brace {
     public Brace staticFiles(String urlPrefix, String directory, StaticFiles mode) {
         java.util.Objects.requireNonNull(mode, "mode");
         var added = new BraceHandler.StaticFileMapping(urlPrefix, directory, mode);
+        // Compared both as written and with symlinks resolved: a link (uploads -> public/uploads,
+        // current -> releases/42) puts the same directory under two paths.
         var dir = java.nio.file.Path.of(directory).toAbsolutePath().normalize();
+        var realDir = BraceHandler.realPathOrNearest(dir);
         for (var existing : staticFileMappings) {
             if (existing.mode() == mode) continue;
             var other = java.nio.file.Path.of(existing.directory()).toAbsolutePath().normalize();
-            if (other.startsWith(dir) || dir.startsWith(other)) {
+            var realOther = BraceHandler.realPathOrNearest(other);
+            if (other.startsWith(dir) || dir.startsWith(other)
+                    || realOther.startsWith(realDir) || realDir.startsWith(realOther)) {
                 var trusted = mode == StaticFiles.TRUSTED ? added : existing;
                 var untrusted = mode == StaticFiles.TRUSTED ? existing : added;
                 throw new IllegalArgumentException("Untrusted static directory " + untrusted.directory()

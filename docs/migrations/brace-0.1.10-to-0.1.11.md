@@ -826,7 +826,7 @@ and `nosniff`. `<img>`, `<audio>` and `<video>` tags keep working. Links straigh
 text file now download it instead of opening it in the browser.
 
 `staticFiles` now throws `IllegalArgumentException` if an untrusted directory is inside a trusted
-one (or the reverse), and when prefixes overlap the **longest prefix wins**, whatever the
+one (or the reverse, compared with symlinks resolved too), and when prefixes overlap the **longest prefix wins**, whatever the
 registration order. In the example above, `/assets/uploads` used to be unreachable: `/assets`
 was registered first, claimed every `/assets/...` request, and answered 404.
 
@@ -870,17 +870,21 @@ storage.put("avatars/" + user.id, file, "image/png");
 
 Objects uploaded before this release keep the type they were stored with. If uploaders could
 reach `put(key, file)` or `putGenerated`, list the bucket for objects whose `Content-Type` is
-`text/html`, `image/svg+xml`, `application/xhtml+xml`, `text/xml` or `application/xml` and
-re-upload or delete them.
+`text/html`, `image/svg+xml`, `application/xhtml+xml`, `text/xml`, `application/xml`,
+`application/rss+xml` or `application/atom+xml` and re-upload or delete them. `put(key, bytes, type)`
+and `put(key, path, type)` still store the type you pass: if any call passes
+`file.contentType()`, switch it to `put(key, file)`.
 
-**`Storage.safeKey` and `UploadedFile.safeFilename()`** neutralize an executable final extension
-(`html`, `htm`, `xhtml`, `shtml`, `mht`, `svg`, `svgz`, `xml`, `xsl`, `xslt`, `js`, `mjs`, `css`,
-`wasm`, `swf`, `php`, `phtml`, `asp`, `jsp`, `cgi` and a few more, any case). `safeKey` replaces
-it: `safeKey("u", "logo.svg")` is `u/<uuid>.bin`. `safeFilename()` appends: `page.HTML` becomes
-`page.HTML.bin`. Other extensions, `pdf` included, are kept. Only the last extension counts, so
-`x.svg.png` stays `.png`. `Storage.extension(...)` is unchanged and still returns `svg`. Code that
-read the original extension back from a generated key should use `Storage.extension(file.filename())`
-instead.
+**`Storage.safeKey` and `UploadedFile.safeFilename()`** neutralize executable extensions
+(`html`, `htm`, `xhtml`, `shtml`, `mht`, `svg`, `svgz`, `xml`, `xsl`, `xslt`, `rss`, `atom`, `js`,
+`mjs`, `es`, `css`, `wasm`, `swf`, `php`, `phtml`, `asp`, `jsp`, `cgi`, `pl`, `py` and a few more,
+any case, also before `.gz`/`.br`/`.zst`). `safeKey` replaces the final one:
+`safeKey("u", "logo.svg")` is `u/<uuid>.bin`. `safeFilename()` turns each one's dot into `_`
+wherever it is and appends `.bin` when it was last: `page.HTML` becomes `page_HTML.bin`,
+`shell.php.jpg` becomes `shell_php.jpg`. Other extensions, `pdf` included, are kept.
+`Storage.extension(...)` still returns the real extension (`svg`), now lowercased locale-
+independently. Code that read the original extension back from a generated key should use
+`Storage.extension(file.filename())` instead.
 
 ## New: `SecurityHeaders.strict()`
 
