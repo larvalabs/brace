@@ -44,13 +44,13 @@ class OpsIntegrationTest {
         app.stop();
     }
 
-    /** Authenticate via POST /ops/auth (protocol v2) and return a Bearer token. */
+    /** Authenticate via POST /ops/auth (protocol v3) and return a Bearer token. */
     private static String authenticate() throws Exception {
         return authenticate(port, keypair);
     }
 
     private static String authenticate(int targetPort, OpsKeys.Keypair kp) throws Exception {
-        var response = postAuth(targetPort, v2AuthBody(kp));
+        var response = postAuth(targetPort, v3AuthBody(kp));
         assertEquals(200, response.statusCode(), "Auth should succeed: " + response.body());
         // Extract token from {"token":"..."}
         String respBody = response.body();
@@ -59,12 +59,12 @@ class OpsIntegrationTest {
         return respBody.substring(start, end);
     }
 
-    /** Build a v2 auth request body: signature over publicKey + "\n" + timestamp + "\n" + nonce. */
-    private static String v2AuthBody(OpsKeys.Keypair kp) {
+    /** Build a v3 auth request body: signed for http://localhost, the server these tests run. */
+    private static String v3AuthBody(OpsKeys.Keypair kp) {
         String timestamp = java.time.Instant.now().toString();
         String nonce = freshNonce();
-        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(kp.publicKey(), timestamp, nonce), kp.privateKey());
-        return "{\"v\":\"2\",\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp
+        String signature = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", kp.publicKey(), timestamp, nonce), kp.privateKey());
+        return "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
     }
 
@@ -278,7 +278,7 @@ class OpsIntegrationTest {
     @Test
     void authRejectsUnknownPublicKey() throws Exception {
         var unknownKp = OpsKeys.generateKeypair();
-        var response = postAuth(port, v2AuthBody(unknownKp));
+        var response = postAuth(port, v3AuthBody(unknownKp));
         assertEquals(401, response.statusCode());
     }
 
@@ -286,8 +286,8 @@ class OpsIntegrationTest {
     void authRejectsStaleTimestamp() throws Exception {
         String timestamp = java.time.Instant.now().minusSeconds(60).toString(); // 1 minute ago, outside ±30s window
         String nonce = freshNonce();
-        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(keypair.publicKey(), timestamp, nonce), keypair.privateKey());
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+        String signature = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", keypair.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
         var response = postAuth(port, body);
         assertEquals(401, response.statusCode());
@@ -296,17 +296,17 @@ class OpsIntegrationTest {
     @Test
     void authRejectsInvalidSignature() throws Exception {
         String timestamp = java.time.Instant.now().toString();
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"nonce\":\"" + freshNonce() + "\",\"signature\":\"badsignature\"}";
         var response = postAuth(port, body);
         assertEquals(401, response.statusCode());
     }
 
     @Test
-    void authV2ReplayRejected() throws Exception {
+    void authV3ReplayRejected() throws Exception {
         // The exact same signed body succeeds once, then is rejected — the nonce is single-use
         // on this instance (M3 replay suppression).
-        String body = v2AuthBody(keypair);
+        String body = v3AuthBody(keypair);
         var first = postAuth(port, body);
         assertEquals(200, first.statusCode(), "first use should succeed: " + first.body());
         var replay = postAuth(port, body);
@@ -315,26 +315,26 @@ class OpsIntegrationTest {
     }
 
     @Test
-    void authV2SignatureMustBindPublicKey() throws Exception {
-        // Sign a v2 message embedding a DIFFERENT public key, then present it with the
+    void authV3SignatureMustBindPublicKey() throws Exception {
+        // Sign a v3 message embedding a DIFFERENT public key, then present it with the
         // authorized key — the signature no longer verifies because the key is part of
         // the signed message (M3 cross-key binding).
         var other = OpsKeys.generateKeypair();
         String timestamp = java.time.Instant.now().toString();
         String nonce = freshNonce();
-        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(other.publicKey(), timestamp, nonce), keypair.privateKey());
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+        String signature = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", other.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
         var response = postAuth(port, body);
         assertEquals(401, response.statusCode());
     }
 
     @Test
-    void authV2RequiresNonce() throws Exception {
+    void authV3RequiresNonce() throws Exception {
         String timestamp = java.time.Instant.now().toString();
-        // v2 envelope, v1-style signature over the timestamp alone, no nonce — must be rejected.
+        // v3 envelope, v1-style signature over the timestamp alone, no nonce — must be rejected.
         String signature = OpsKeys.sign(timestamp, keypair.privateKey());
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"signature\":\"" + signature + "\"}";
         var response = postAuth(port, body);
         assertEquals(401, response.statusCode());
@@ -370,12 +370,46 @@ class OpsIntegrationTest {
     void authRejectsUnsupportedProtocolVersion() throws Exception {
         String timestamp = java.time.Instant.now().toString();
         String nonce = freshNonce();
-        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(keypair.publicKey(), timestamp, nonce), keypair.privateKey());
-        String body = "{\"v\":\"3\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+        String signature = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", keypair.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"4\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
         var response = postAuth(port, body);
         assertEquals(401, response.statusCode());
         assertTrue(response.body().contains("Unsupported ops auth protocol version"), response.body());
+    }
+
+    @Test
+    void authV2IsRejectedNamingTheCause() throws Exception {
+        // M14: v2 signed no audience, so its signature was good at any server.
+        String timestamp = java.time.Instant.now().toString();
+        String nonce = freshNonce();
+        String signature = OpsKeys.sign(keypair.publicKey() + "\n" + timestamp + "\n" + nonce, keypair.privateKey());
+        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+            + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
+        var response = postAuth(port, body);
+        assertEquals(401, response.statusCode());
+        assertTrue(response.body().contains("v2 was removed"), response.body());
+    }
+
+    @Test
+    void authV3SignedForAnotherOriginIsRejected() throws Exception {
+        // M14: a .brace pointing at another server collects a signature for that server; relayed
+        // here within the time window, it must not mint a token.
+        String timestamp = java.time.Instant.now().toString();
+        String nonce = freshNonce();
+        String origin = "https://evil.example";
+        String signature = OpsKeys.sign(OpsKeys.v3AuthMessage(origin, keypair.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"3\",\"origin\":\"" + origin + "\",\"publicKey\":\"" + keypair.publicKey()
+            + "\",\"timestamp\":\"" + timestamp + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
+        var response = postAuth(port, body);
+        assertEquals(401, response.statusCode());
+        assertTrue(response.body().contains("signed for https://evil.example"), response.body());
+        assertFalse(response.body().contains("\"token\""));
+        // The body's origin field can't be swapped for this server's: the signature covers it.
+        String swapped = body.replace("\"origin\":\"" + origin + "\"", "\"origin\":\"http://localhost\"");
+        var swappedResponse = postAuth(port, swapped);
+        assertEquals(401, swappedResponse.statusCode());
+        assertTrue(swappedResponse.body().contains("Invalid signature"), swappedResponse.body());
     }
 
     @Test

@@ -108,7 +108,7 @@ aren't in a project directory.
 
 Read endpoints (the `GET`s above) require a `read`-scope token; the mutating `POST`s
 require `control`. See "Token scopes" below. Authenticate with `POST /ops/auth`
-(see "Auth protocol (v2)" below), then pass `Authorization: Bearer <token>`.
+(see "Auth protocol (v3)" below), then pass `Authorization: Bearer <token>`.
 
 ### Regression notifications
 
@@ -479,7 +479,7 @@ handoff from the CLI. That endpoint accepts `?token=` because there is no other
 channel that can carry a credential into a plain GET redirect. The token it accepts
 is short-lived (60s) and scope-capped. See `docs/SECURITY.md` → "Ops Endpoints".
 
-## Auth protocol (v2)
+## Auth protocol (v3)
 
 The CLI handles this for you. It matters only if you implement the handshake
 yourself (an agent talking to `/ops/*` over raw HTTP).
@@ -488,7 +488,8 @@ yourself (an agent talking to `/ops/*` over raw HTTP).
 
 ```json
 {
-  "v": "2",
+  "v": "3",
+  "origin": "<the server's origin, e.g. https://app.example.com>",
   "publicKey": "<base64 Ed25519 public key>",
   "timestamp": "<ISO-8601 instant, e.g. 2026-06-09T12:00:00Z>",
   "nonce": "<base64url of 16+ random bytes, fresh per attempt>",
@@ -500,10 +501,12 @@ yourself (an agent talking to `/ops/*` over raw HTTP).
 The signature is computed over exactly:
 
 ```
-publicKey + "\n" + timestamp + "\n" + nonce
+"brace-ops-auth-v3\n" + origin + "\n" + publicKey + "\n" + timestamp + "\n" + nonce
 ```
 
-(newline-delimited; none of the three components can contain a newline). A
+(newline-delimited; no component can contain a newline). `origin` is
+`scheme://host[:port]`, lower-cased, with the scheme's default port dropped
+(`https://App.example.com:443/x` is `https://app.example.com`). A
 200 response carries `{"token": "...", "expiresAt": "...", "scope": "..."}` —
 pass the token as `Authorization: Bearer <token>` on every `/ops/*` call.
 Optional `scope` in the request body (`read`/`control`) caps the minted token
@@ -517,6 +520,11 @@ Rules the server enforces:
   for every attempt. A reused nonce gets `401 Nonce already used`.
 - **Key binding:** the public key is part of the signed message, so a
   signature is only valid for the key that produced it.
+- **Origin binding:** the origin must be one the server lists with
+  `app.opsOrigins(...)` / `BRACE_OPS_ORIGINS` (required in prod; without one, in
+  dev, its host must match the request's), so a signature made for another server
+  is refused with `401 This request was signed for <origin>…`. The origin is just
+  `scheme://host[:port]`: no user info, path, query or fragment.
 
 **Replay caveat (per-instance, best-effort):** the seen-nonce set is held in
 memory on each server instance — ops works without shared fleet state, so it
@@ -525,11 +533,13 @@ still be replayed against a *different* instance within the ±30s window. Keep
 `/ops/*` behind HTTPS (the protocol assumes the request body is not observable
 in transit); see `docs/SECURITY.md` → "Ops Endpoints".
 
-**Protocol v1 is deprecated.** The pre-0.1.7 format (no `v`, no `nonce`,
-signature over the timestamp alone) is still accepted this release — the
-server logs a deprecation warning — and will be **rejected in a future
-release** with `ops auth protocol v2 required; upgrade the brace CLI`. If you
-implemented v1 by hand, switch to the v2 signing payload above.
+**Protocols v1 and v2 are removed.** v1 (no `v`, signature over the timestamp
+alone) was removed in 0.1.8; v2 (no origin) in 0.1.11. Either gets a 401 naming
+the cause. If you implemented one by hand, switch to the v3 payload above.
+
+**Token cache.** The CLI caches its bearer token per server origin under
+`target/.brace-token-<id>`, and remembers the last origin each project logged in
+to in `~/.brace/ops-origins.json`, warning when `.brace` points somewhere new.
 
 ## Environment selection
 

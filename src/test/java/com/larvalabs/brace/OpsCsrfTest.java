@@ -50,20 +50,20 @@ class OpsCsrfTest {
     }
 
 /** A v2 ops-auth body: signature over publicKey + timestamp + nonce (v1 was removed in 0.1.8). */
-    private static String v2AuthBody(OpsKeys.Keypair kp) {
+    private static String v3AuthBody(OpsKeys.Keypair kp) {
         String timestamp = java.time.Instant.now().toString();
         byte[] nonceBytes = new byte[16];
         new java.security.SecureRandom().nextBytes(nonceBytes);
         String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
         String signature = OpsKeys.sign(
-            OpsKeys.v2AuthMessage(kp.publicKey(), timestamp, nonce), kp.privateKey());
-        return "{\"v\":\"2\",\"publicKey\":\"" + kp.publicKey() + "\","
+            OpsKeys.v3AuthMessage("http://localhost", kp.publicKey(), timestamp, nonce), kp.privateKey());
+        return "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + kp.publicKey() + "\","
             + "\"timestamp\":\"" + timestamp + "\",\"nonce\":\"" + nonce + "\","
             + "\"signature\":\"" + signature + "\"}";
     }
 
     private HttpResponse<String> postAuth() throws Exception {
-        String body = v2AuthBody(keypair);
+        String body = v3AuthBody(keypair);
         return client.send(
             HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/ops/auth"))

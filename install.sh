@@ -12,6 +12,8 @@
 #   BRACE_VERSION       version to install (default: latest released)
 #   BRACE_RELEASE_BASE  base URL for dist zips (<base>/v<V>/brace-<V>.zip)
 #   BRACE_LATEST_URL    release-metadata URL whose tag_name names the latest
+#                       (both https:// or file:// only, unless
+#                       BRACE_ALLOW_INSECURE_DOWNLOAD=1)
 #   BRACE_MODIFY_PATH   if "1", append the PATH export to your shell rc file
 #                       (default: off — the installer only prints the line)
 
@@ -28,6 +30,22 @@ die()  { err "$@"; exit 1; }
 command -v curl  >/dev/null 2>&1 || die "curl is required"
 command -v unzip >/dev/null 2>&1 || die "unzip is required"
 
+# L8: what this downloads is code you'll run, so it only comes over https (or from a local
+# file:// tree, which the tests use), redirects included. Releases aren't signed yet; TLS is
+# what authenticates them.
+CURL_PROTO="--proto =https,file --proto-redir =https"
+secure_url() {
+    case "$1" in
+        https://*|file://*) return 0 ;;
+    esac
+    if [ "${BRACE_ALLOW_INSECURE_DOWNLOAD:-}" = "1" ]; then
+        err "warning: downloading over an insecure URL (BRACE_ALLOW_INSECURE_DOWNLOAD=1): $1"
+        return 0
+    fi
+    die "Refusing to download over a non-https URL: $1 (use https://, or set BRACE_ALLOW_INSECURE_DOWNLOAD=1)"
+}
+[ "${BRACE_ALLOW_INSECURE_DOWNLOAD:-}" = "1" ] && CURL_PROTO=""
+
 # The version becomes a path under $BRACE_DIR/toolchains and a URL component, so it
 # must be a plain release version. Applied to the BRACE_VERSION input and to the
 # tag_name parsed from the (network-supplied) release metadata.
@@ -40,7 +58,9 @@ valid_version() {
 VERSION="${BRACE_VERSION:-}"
 if [ -z "$VERSION" ]; then
     info "Resolving latest brace version ..."
-    TAG=$(curl -fsSL "$LATEST_URL" \
+    secure_url "$LATEST_URL"
+    # shellcheck disable=SC2086 # CURL_PROTO is a deliberate word list
+    TAG=$(curl -fsSL $CURL_PROTO "$LATEST_URL" \
         | grep -o '"tag_name"[ ]*:[ ]*"[^"]*"' \
         | head -1 \
         | sed 's/.*"\([^"]*\)"$/\1/')
@@ -61,7 +81,9 @@ else
     info "Downloading brace $VERSION ..."
     TMP=$(mktemp -d)
     trap 'rm -rf "$TMP"' EXIT
-    curl -fsSL "$URL" -o "$TMP/brace.zip" || die "Download failed: $URL"
+    secure_url "$URL"
+    # shellcheck disable=SC2086
+    curl -fsSL $CURL_PROTO "$URL" -o "$TMP/brace.zip" || die "Download failed: $URL"
     unzip -q "$TMP/brace.zip" -d "$TMP" || die "Unpack failed"
     [ -d "$TMP/brace-$VERSION" ] || die "Unexpected archive layout (missing brace-$VERSION/)"
     mkdir -p "$BRACE_DIR/toolchains"

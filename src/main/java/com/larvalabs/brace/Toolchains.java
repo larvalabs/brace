@@ -131,8 +131,14 @@ final class Toolchains {
 
     // --- transport ---
 
-    /** GET the bytes at {@code url}; supports http(s) and file:// (the latter for tests). */
+    /**
+     * GET the bytes at {@code url}: https, or file:// (tests). L8: a toolchain is code the CLI
+     * will run, and releases aren't signed yet, so TLS is what authenticates it; plain http is
+     * refused unless {@code BRACE_ALLOW_INSECURE_DOWNLOAD=1}. Redirects are followed only within
+     * https ({@link HttpClient.Redirect#NORMAL} never follows https to http).
+     */
     private static byte[] fetch(String url) throws Exception {
+        requireSecure(url, System.getenv("BRACE_ALLOW_INSECURE_DOWNLOAD"));
         if (url.startsWith("file:")) {
             return Files.readAllBytes(Path.of(URI.create(url)));
         }
@@ -151,6 +157,16 @@ final class Toolchains {
             throw new IllegalStateException("HTTP " + resp.statusCode() + " fetching " + url);
         }
         return resp.body();
+    }
+
+    static void requireSecure(String url, String allowInsecure) {
+        if (url.startsWith("https://") || url.startsWith("file:")) return;
+        if ("1".equals(allowInsecure)) {
+            System.err.println("warning: downloading over an insecure URL (BRACE_ALLOW_INSECURE_DOWNLOAD=1): " + url);
+            return;
+        }
+        throw new IllegalStateException("Refusing to download brace over a non-https URL: " + url
+            + " (set BRACE_RELEASE_BASE / BRACE_LATEST_URL to https://, or BRACE_ALLOW_INSECURE_DOWNLOAD=1)");
     }
 
     // --- zip ---

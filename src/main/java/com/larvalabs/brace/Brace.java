@@ -76,6 +76,7 @@ public class Brace {
     // M3: extra origins allowed to open a WebSocket. Same-origin is always allowed; this is the
     // opt-in for deliberate cross-origin clients. Empty = same-origin only.
     private final List<String> wsAllowedOrigins = new ArrayList<>();
+    private final List<String> opsOrigins = new ArrayList<>();
     private boolean sharedRateLimiting = true; // M17: count rate limits fleet-wide via the DB on Postgres
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
@@ -246,6 +247,10 @@ public class Brace {
      * it must be identical on every instance so an ops login on one box validates on another. When
      * unset, the ops secret is derived from the session secret if present, else generated per-process
      * (single-instance only — see {@link #start()}).
+     *
+     * <p>A Postgres app with WebSocket routes and no session secret also signs its cross-instance
+     * room broadcasts with a key derived from this secret; with neither set, such an app fails to
+     * start.
      */
     public Brace opsSecret(String secret) {
         validateSecret(secret, "ops");
@@ -289,6 +294,27 @@ public class Brace {
             "the ops token secret is per-process, so the browser login flow will fail behind a load " +
             "balancer. Set a shared secret for multi-instance deployments.");
         return OpsToken.generateSecret();
+    }
+
+    /**
+     * Resolve the secret the Postgres WebSocket message bus derives its signing key and channel
+     * name from (L6): the session secret, else the explicit {@link #opsSecret(String)}. Both are
+     * shared config, identical on every instance. There's deliberately no per-process fallback: a
+     * random key would put each instance on its own channel, silently ending cross-instance
+     * fan-out, and an unsigned bus lets any database role push frames to room members. So an app
+     * with neither secret fails to start and says which to set.
+     */
+    private String resolveMessageBusSecret() {
+        if (sessionSecret != null) {
+            return sessionSecret;
+        }
+        if (opsSecret != null) {
+            return opsSecret;
+        }
+        throw new IllegalStateException("WebSocket routes on Postgres need a shared secret to sign "
+            + "broadcasts relayed between instances (LISTEN/NOTIFY), but neither .sessions(secret) "
+            + "nor .opsSecret(secret) is set. Set one of them (32+ random characters, the same value "
+            + "on every instance, e.g. from the SESSION_SECRET environment variable).");
     }
 
     /**
@@ -605,6 +631,52 @@ public class Brace {
     public Brace wsAllowedOrigins(String... origins) {
         this.wsAllowedOrigins.addAll(List.of(origins));
         return this;
+    }
+
+    /**
+     * The public origin(s) of this app ({@code "https://app.example.com"}), the only ones an ops
+     * CLI login may be signed for (M14). The {@code brace} CLI signs the server's origin into its
+     * login, so a signature collected by another server (a {@code .brace} pointing elsewhere) is
+     * refused here. Required in prod mode when ops is on; also read from the
+     * {@code BRACE_OPS_ORIGINS} environment variable when not set in code. Each argument may be a
+     * comma-separated list; null and blank entries are skipped (an unset config key).
+     * Without it (dev, tests) the origin's host must match the request's {@code Host}, which a
+     * client can choose on a directly exposed app, so it's no defense there.
+     */
+    public Brace opsOrigins(String... origins) {
+        if (origins == null) return this;
+        for (String origin : String.join(",", java.util.Arrays.stream(origins)
+                .map(o -> o == null ? "" : o).toList()).split(",")) {
+            if (origin.isBlank()) continue;
+            if (parseOrigin(origin) == null) {
+                throw new IllegalArgumentException("opsOrigins takes origins like https://app.example.com "
+                    + "(scheme and host, optional port, nothing else): " + origin);
+            }
+            this.opsOrigins.add(origin.strip());
+        }
+        return this;
+    }
+
+    /**
+     * {@code value} as a normalized origin ({@code scheme://host[:port]}, lower-case, default port
+     * dropped), or null unless it's an http(s) URL with a host and nothing but an optional
+     * trailing "/": no user info, path, query or fragment, which an origin can't carry and a URL
+     * shown to a person can use to mislead ({@code https://app.example.com@evil.example}).
+     */
+    static String parseOrigin(String value) {
+        if (value == null) return null;
+        try {
+            var uri = new java.net.URI(value.strip());
+            String scheme = uri.getScheme();
+            if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) return null;
+            if (uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawQuery() != null
+                    || uri.getRawFragment() != null) return null;
+            String path = uri.getRawPath();
+            if (path != null && !path.isEmpty() && !path.equals("/")) return null;
+            return normalizeOrigin(scheme + "://" + uri.getRawAuthority());
+        } catch (java.net.URISyntaxException e) {
+            return null;
+        }
     }
 
     // Job scheduling
@@ -1131,6 +1203,16 @@ public class Brace {
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             opsHandler.setAnalytics(analytics);
+            if (opsOrigins.isEmpty() && System.getenv("BRACE_OPS_ORIGINS") != null) {
+                opsOrigins(System.getenv("BRACE_OPS_ORIGINS"));
+            }
+            if (opsOrigins.isEmpty() && "prod".equals(System.getProperty("brace.mode"))) {
+                throw new IllegalStateException("Ops is on in prod mode without app.opsOrigins(\"https://your-app\") "
+                    + "(or BRACE_OPS_ORIGINS): the ops CLI login is bound to the server's origin, and without "
+                    + "it configured the server can only compare against the Host header, which a client "
+                    + "talking to the app directly can choose.");
+            }
+            opsHandler.setPinnedOrigins(opsOrigins);
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on
@@ -1225,7 +1307,7 @@ public class Brace {
         if (!wsRoutes.isEmpty()) {
             // Room fan-out: shared across the fleet on Postgres (LISTEN/NOTIFY), local otherwise.
             MessageBus messageBus = (databaseFactory != null && databaseFactory.isPostgres())
-                ? new PostgresMessageBus(databaseFactory)
+                ? new PostgresMessageBus(databaseFactory, resolveMessageBusSecret())
                 : new InProcessMessageBus();
             wsRegistry = new WsRegistry(messageBus, wsMaxQueuedBytes);
             final WsRegistry wsRegistryRef = wsRegistry;

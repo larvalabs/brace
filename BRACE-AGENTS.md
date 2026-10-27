@@ -72,12 +72,13 @@ var app = Brace.app()
     .cache(Brace.cache())
     .storage(Storage.s3(config))
     .ops("ops-authorized-keys")
+    .opsOrigins(config.get("ops.origins"))           // the app's public origin: required in prod with ops
     .staticFiles("/assets", "public")
     .maxUploadSize("10MB")
     .after(SecurityHeaders.strict());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -742,7 +743,8 @@ app.sessionValidator(s -> !s.has("userId") || Objects.equals(s.get("sessionVersi
 
 **Rotating the secret:** `SessionOptions.of(newSecret).previousSecrets(oldSecret)` keeps old
 cookies working and re-seals them with the new secret; drop the old one after the absolute
-lifetime.
+lifetime. On Postgres with WebSockets, instances on different secrets don't share broadcasts
+until all are rotated (the bus key derives from the current secret).
 
 ```java
 session.set("userId", user.id);        // store int
@@ -1142,6 +1144,8 @@ authorization decision: check the user may see a room before `ctx.join(room)`.
 
 Use `dbFactory.withSession()` for database access inside WebSocket handlers.
 
+**Multiple instances (Postgres).** `broadcast` reaches room members on every instance via Postgres `LISTEN`/`NOTIFY`. Each payload is HMAC-signed with a key derived from the session secret (or `.opsSecret(...)` if the app has no sessions) and sent on a per-app channel, `brace_ws_<hash>`; unsigned, wrongly signed, stale (over 60s) or replayed payloads are dropped and counted (`ws_broadcast_rejected`, logged at most once a minute). So every instance needs the **same** secret, and a Postgres app with `ws(...)` routes and neither secret fails `start()`. Instances with different secrets, including old and new versions during a rolling upgrade to 0.1.11, don't see each other's broadcasts.
+
 **Slow-consumer backpressure.** `send`/`broadcast` are non-blocking. A connection that stops reading would otherwise make its outgoing frames pile up in Jetty's queue without bound (a per-connection memory leak). Brace bounds each connection's queued-but-unflushed bytes and force-closes a connection that exceeds the cap (`TRY_AGAIN_LATER`); the bound is per connection, so one slow client never blocks healthy members of the same room. Tune with `app.wsMaxQueuedBytes(bytes)` (default 4 MB).
 
 **Origin checking.** Upgrades from a cross-host `Origin` are rejected with 403 — a WebSocket handshake is not subject to the same-origin policy, so without this an attacker page could open a socket that the browser authenticates with the victim's session cookie. A missing `Origin` is allowed (non-browser clients); hosts are compared without scheme or port, so TLS at a proxy is fine (the app's host is `X-Forwarded-Host` from a trusted proxy, else `Host` — a proxy that rewrites `Host` to `127.0.0.1` makes every browser socket fail with 403 and a logged warning; fix the proxy with `proxy_set_header Host $host;`). Declare deliberate cross-origin browser clients with `app.wsAllowedOrigins("https://studio.example.com")` — an entry with a scheme must match scheme, host and port exactly; a bare host (`"studio.example.com"`) matches any scheme or port; `"*"` disables the check.
@@ -1266,7 +1270,9 @@ all-lowercase-letters) log a warning but are allowed. Use 32+ random characters.
 
 ## Ops
 
-Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`; scaffold config with
+Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`, plus
+`app.opsOrigins("https://your-app")` (or `BRACE_OPS_ORIGINS`), the public origin CLI logins are
+signed for, which prod mode requires; scaffold config with
 `brace init`, keys with `brace ops keypair`. **Operating in production?** Start with
 `brace check --env prod --json` — not `brace status`. The full ops reference — auth keys and
 scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, storage/retention —

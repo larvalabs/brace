@@ -55,8 +55,8 @@ class RegressionIntegrationTest {
         byte[] nonceBytes = new byte[16];
         new java.security.SecureRandom().nextBytes(nonceBytes);
         String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
-        String sig = OpsKeys.sign(OpsKeys.v2AuthMessage(kp.publicKey(), ts, nonce), kp.privateKey());
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + ts
+        String sig = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", kp.publicKey(), ts, nonce), kp.privateKey());
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + kp.publicKey() + "\",\"timestamp\":\"" + ts
             + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + sig + "\"}";
         var resp = client.send(HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/ops/auth"))

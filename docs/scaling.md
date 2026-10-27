@@ -49,7 +49,7 @@ database each is trivially correct (one instance).
 | **CSRF** | Token rides in the same cookie — no server-side store. |
 | **Durable jobs** (`Jobs`/`JobPoller`) | Claimed via Postgres `SELECT … FOR UPDATE SKIP LOCKED`; the DB is the coordination point. |
 | **Recurring scheduler** (`every`/`daily`) | A wall-clock time-slot claim runs each job **once per interval cluster-wide**, not once per instance — so `daily("09:00", …)` sends one digest, not N. |
-| **WebSocket broadcast** (`ws.broadcast`) | Fans out across instances via Postgres `LISTEN`/`NOTIFY`, so a room split across boxes still receives every message. |
+| **WebSocket broadcast** (`ws.broadcast`) | Fans out across instances via Postgres `LISTEN`/`NOTIFY`, so a room split across boxes still receives every message. Payloads are signed and the channel is named from the shared session (or ops) secret, so every instance needs the same one; see "Broadcasts between instances" in `docs/SECURITY.md`. |
 | **Rate limiter** (`RateLimiter.perIp`/`perKey`) | Counts through one shared atomic counter, so a limit is enforced once across the fleet (not N× too loose). Keys longer than 64 chars are hashed (SHA-256 hex) to prevent unbounded row growth. On DB failure the limiter falls back to per-instance counting (brief over-admission is possible; see the caveats below). See the load note below. |
 | **Ops console login** | Stateless HMAC login token + a shared ops secret, so the browser login handshake works on any instance and the session cookie validates fleet-wide. |
 | **Regression detection** (`/ops/regressions`) | A shared table (keyed by `type`+`route`+`deploy`) gives one fleet-wide set: notify **exactly once**, consistent list/acknowledge, a stable id, deploy-anchored baseline. |

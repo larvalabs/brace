@@ -141,6 +141,7 @@ public class App {
             .cache(cache)
             .storage(storage)
             .ops("ops-authorized-keys")
+            .opsOrigins("https://app.example.com")          // the origin ops CLI logins are signed for
             .staticFiles("/assets", "public");
 
         var posts = new PostController();

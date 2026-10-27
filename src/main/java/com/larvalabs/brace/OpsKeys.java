@@ -66,18 +66,23 @@ public class OpsKeys {
     }
 
     /**
-     * Canonical message signed by the v2 ops auth protocol:
-     * {@code publicKey + "\n" + timestamp + "\n" + nonce}.
+     * The message an ops auth request (protocol v3) signs:
+     * {@code "brace-ops-auth-v3\n" + origin + "\n" + publicKey + "\n" + timestamp + "\n" + nonce}.
      *
-     * <p>Newline-delimited concatenation is unambiguous here because none of the three
-     * components can contain a newline: the public key is base64, the timestamp is
-     * ISO-8601, and the nonce is base64url. Binding the public key into the signed
-     * message means a captured signature is only ever valid for the key that produced
-     * it, and the per-attempt nonce makes each signed tuple single-purpose (see
-     * {@code OpsHandler.auth} for the server-side replay check).
+     * <p>M14 (2026-10 security review): v2 signed only the key, timestamp and nonce, so a
+     * signature made for one server was good at any other within the ±30s window. The CLI takes
+     * the server's URL from the committed {@code .brace} file, so a malicious change to
+     * {@code ops.prod.url} could collect a fresh signature and relay it to real prod. The origin
+     * ({@link Brace#normalizeOrigin normalized} {@code scheme://host[:port]}) binds the signature
+     * to the server the CLI meant, and the server checks it against the host it was reached at.
+     *
+     * <p>Newline-delimited concatenation is unambiguous because no component can contain a
+     * newline: the origin is normalized and validated, the public key is base64, the timestamp is
+     * ISO-8601 and the nonce is base64url. The leading tag keeps a v3 signature from ever
+     * verifying as another message format.
      */
-    public static String v2AuthMessage(String publicKey, String timestamp, String nonce) {
-        return publicKey + "\n" + timestamp + "\n" + nonce;
+    public static String v3AuthMessage(String origin, String publicKey, String timestamp, String nonce) {
+        return "brace-ops-auth-v3\n" + origin + "\n" + publicKey + "\n" + timestamp + "\n" + nonce;
     }
 
     /** Verify a signature against a message and public key (base64-encoded). */

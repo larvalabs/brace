@@ -46,4 +46,17 @@ class ToolchainsVersionTest {
         assertThrows(IllegalArgumentException.class, () -> Toolchains.install("../victim", dest));
         assertTrue(Files.isDirectory(victim), "install must not delete a directory named by a bad version");
     }
+
+    @Test
+    void downloadsMustBeHttpsUnlessOverridden() {
+        // L8: a toolchain is code the CLI runs; TLS is what authenticates it until releases are signed.
+        Toolchains.requireSecure("https://github.com/larvalabs/brace/releases/download/v1.0.0/brace-1.0.0.zip", null);
+        Toolchains.requireSecure("file:///tmp/releases/v1.0.0/brace-1.0.0.zip", null);
+        var e = org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+            () -> Toolchains.requireSecure("http://mirror.example/v1.0.0/brace-1.0.0.zip", null));
+        org.junit.jupiter.api.Assertions.assertTrue(e.getMessage().contains("non-https"), e.getMessage());
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+            () -> Toolchains.requireSecure("ftp://mirror.example/x.zip", "0"));
+        Toolchains.requireSecure("http://mirror.example/v1.0.0/brace-1.0.0.zip", "1");
+    }
 }

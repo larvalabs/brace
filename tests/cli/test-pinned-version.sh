@@ -126,5 +126,29 @@ grep -q "Invalid brace version" <<<"$OUT" || fail "no clear error for bad tag_na
 [[ ! -e "$INSTALL" ]] || fail "install.sh created $INSTALL before validating"
 pass "install.sh validates both inputs before touching disk"
 
+step "Toolchain downloads must be https (L8)"
+pin 0.1.99   # not cached: the launcher would fetch it
+rm -f "$WORK/java.calls"
+RC=0
+OUT=$(cd "$PROJECT" && PATH="$FAKEBIN:$PATH" BRACE_HOME="$HOME_FAKE" BRACE_CACHE="$CACHE" \
+    BRACE_RELEASE_BASE="http://127.0.0.1:1/releases" "$REPO/bin/brace" status 2>&1) || RC=$?
+[[ $RC -ne 0 ]] || fail "an http:// release base was accepted"
+grep -q "non-https" <<<"$OUT" || fail "no clear error for an http:// base: $OUT"
+[[ ! -e "$WORK/java.calls" ]] || fail "java ran after a refused download"
+RC=0
+OUT=$(BRACE_DIR="$INSTALL" BRACE_VERSION=0.1.99 BRACE_RELEASE_BASE="http://127.0.0.1:1/releases" sh "$REPO/install.sh" 2>&1) || RC=$?
+[[ $RC -ne 0 ]] || fail "install.sh accepted an http:// release base"
+grep -q "non-https" <<<"$OUT" || fail "install.sh: no clear error for an http:// base: $OUT"
+RC=0
+OUT=$(BRACE_DIR="$INSTALL" BRACE_LATEST_URL="http://127.0.0.1:1/latest.json" sh "$REPO/install.sh" 2>&1) || RC=$?
+[[ $RC -ne 0 ]] || fail "install.sh accepted an http:// latest URL"
+grep -q "non-https" <<<"$OUT" || fail "install.sh: no clear error for an http:// latest URL: $OUT"
+# The explicit override still lets it try (and fail to connect, here).
+RC=0
+OUT=$(cd "$PROJECT" && PATH="$FAKEBIN:$PATH" BRACE_HOME="$HOME_FAKE" BRACE_CACHE="$CACHE" \
+    BRACE_ALLOW_INSECURE_DOWNLOAD=1 BRACE_RELEASE_BASE="http://127.0.0.1:1/releases" "$REPO/bin/brace" status 2>&1) || RC=$?
+grep -q "insecure URL" <<<"$OUT" || fail "the override didn't warn: $OUT"
+pass "http:// refused in the launcher and installer; override warns"
+
 echo ""
 echo -e "${GREEN}All pinned-version tests passed.${NC}"

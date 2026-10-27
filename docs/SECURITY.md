@@ -20,6 +20,7 @@ This document describes Brace's security features and best practices for buildin
 - [WebSockets](#websockets)
 - [File Uploads](#file-uploads)
 - [Rate Limiting](#rate-limiting)
+- [Installing and Updating Brace](#installing-and-updating-brace)
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
 - [Secrets Management](#secrets-management)
@@ -207,7 +208,9 @@ altered without the secret.
   demotion. Cache the lookup.
 - **Secret rotation.** `SessionOptions.previousSecrets(...)` opens cookies sealed with earlier
   secrets and re-seals them with the current one, so rotating logs nobody out. The ops token
-  secret is derived from the session secret, so ops clients re-authenticate after a rotation.
+  secret is derived from the session secret, so ops clients re-authenticate after a rotation, and
+  so is the key for WebSocket broadcasts between instances on Postgres: during a rolling rotation,
+  instances on the old and new secret don't receive each other's broadcasts until all match.
 - **Cookie name.** Wherever the browser allows it (`Secure`, `Path=/`, no `Domain` — every
   default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
   set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant
@@ -710,6 +713,7 @@ Fix the proxy:
 location / {
     proxy_pass http://127.0.0.1:8080;
     proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Host  $host;   # don't pass a client's X-Forwarded-Host through
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
@@ -720,6 +724,7 @@ location /live {                       # each WebSocket path
     proxy_set_header Upgrade           $http_upgrade;
     proxy_set_header Connection        "upgrade";
     proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Host  $host;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
@@ -1098,6 +1103,52 @@ Do not rely on `SameSite` alone for this. The default `SameSite=Lax` session coo
 make modern browsers withhold the cookie on a cross-site handshake, but that protection
 disappears the moment an app calls `sameSiteNone()`.
 
+### Broadcasts between instances (Postgres)
+
+On Postgres, `broadcast(room, message)` reaches members on other instances through `LISTEN`/
+`NOTIFY`. Postgres puts no permission on either: any role that can connect to the database can
+`NOTIFY` any channel and `LISTEN` on any channel. Before 0.1.11 the channel was a fixed
+`brace_ws` and payloads were plain JSON, so anyone with a database login (a reporting user, a
+compromised neighbour app) could push frames to room members, which is script injection when an
+app broadcasts HTML fragments for htmx. Two apps sharing a database also received each other's
+broadcasts in same-named rooms.
+
+Since 0.1.11:
+
+- **Every payload is signed.** It is HMAC-SHA256 over the exact JSON body, with a key derived
+  (under its own label) from the session secret, or from `.opsSecret(...)` when the app has no
+  sessions. A receiver checks it in constant time and drops anything unsigned or wrongly signed.
+  Payloads too large for a `NOTIFY` (over 7900 bytes, signature included) go through the
+  `brace_ws_messages` table as before; the row is signed too, and the signed reference to it
+  carries the row's content hash, so writing that table can't inject or swap messages (deleting
+  rows can still suppress them, as it always could).
+- **The channel is per app**: `brace_ws_` plus 16 hex digits of a hash of the key. Instances of
+  one app agree on it; apps with different secrets never share one. The name is not a secret
+  (it is visible to a superuser in `pg_stat_activity`), and nothing depends on it being one.
+- **Replays are refused.** Every payload carries an issued-at time and a random nonce. A
+  receiver drops a payload more than 60 seconds from its own clock, either way, and any nonce it
+  has already accepted. It also refuses anything issued before it started (its nonce memory
+  starts empty) or before the newest nonce it had to forget early under load, and the window's old
+  edge never moves back with the clock. `LISTEN` needs no privilege, so a forger can also capture
+  genuine payloads; without this, one captured message could be re-sent thousands of times to
+  flood a room. Instances' clocks must agree to well within 60 seconds (NTP does), and a payload
+  that waits over 60 seconds in a backed-up listener is dropped rather than delivered late.
+- **Rejections are counted, not shouted.** Dropped payloads are logged as a
+  `ws_broadcast_rejected` event at most once a minute, with the reason and a count since the last
+  line.
+- **No secret, no start.** A Postgres app with WebSocket routes and neither `.sessions(secret)`
+  nor `.opsSecret(secret)` fails `start()` with a message naming both. There is no per-process
+  fallback: a random key would put each instance on its own channel and silently end
+  cross-instance delivery.
+
+The secret must be identical on every instance. Instances with different secrets (a rolling
+deploy that changes it, or one that mixes 0.1.10 and 0.1.11) don't see each other's broadcasts
+until they all match; nothing is delivered wrongly, but members on the other side miss messages.
+
+The signature authenticates the sender as *an instance of this app*. It does not decide who may
+read a room: joining one is still an authorization decision the handler makes before
+`ctx.join(room)`.
+
 ---
 
 ## Rate Limiting
@@ -1176,6 +1227,16 @@ alternative (turning every rate-limited endpoint into a 500) is worse. A warning
 
 ---
 
+## Installing and Updating Brace
+
+`install.sh`, `brace self-update` and the launcher's fetch of a project's pinned version download
+code you then run, so they use **https only**, redirects included (`file://` for local test
+trees). Plain `http://` in `BRACE_RELEASE_BASE` or `BRACE_LATEST_URL` is refused unless
+`BRACE_ALLOW_INSECURE_DOWNLOAD=1`, which warns. Release zips are not signed yet; TLS to GitHub
+authenticates them (see `RELEASE.md`, "Download integrity").
+
+---
+
 ## Ops Endpoints
 
 Ops endpoints (`/ops/*`) provide powerful observability and control. **Secure them carefully.**
@@ -1190,12 +1251,34 @@ app.ops("authorized-keys");
 
 The `authorized-keys` file contains public keys of clients allowed to access ops endpoints.
 
-Clients mint a bearer token via `POST /ops/auth` (protocol v2): an Ed25519 signature over
-`publicKey + "\n" + timestamp + "\n" + nonce`, where the timestamp must be within ±30 seconds
-of server time and the nonce is fresh random (16+ bytes, base64url) per attempt. Binding the
-public key into the signed message means a captured signature is only valid for the key that
-produced it; the nonce makes each signed request single-use. The exact wire format is in
-`docs/agent-ops-guide.md`.
+Clients mint a bearer token via `POST /ops/auth` (protocol v3): an Ed25519 signature over
+`"brace-ops-auth-v3\n" + origin + "\n" + publicKey + "\n" + timestamp + "\n" + nonce`, where
+the origin is the server the client means (`https://app.example.com`), the timestamp must be
+within ±30 seconds of server time and the nonce is fresh random (16+ bytes, base64url) per
+attempt. Binding the public key means a captured signature is only valid for the key that
+produced it; the nonce makes each signed request single-use; the origin makes it valid only at
+the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
+
+**The signature is bound to a server.** The CLI reads the server's URL from the committed
+`.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
+signature and relay it to the real server within the time window. The server accepts a v3
+signature only for an origin listed with `app.opsOrigins("https://app.example.com")` (or the
+`BRACE_OPS_ORIGINS` environment variable, comma-separated), compared exactly: scheme, host and
+port. The request's `Host` and `X-Forwarded-Host` play no part, because the client relaying a
+signature chooses those: an app reachable directly, or a proxy that passes a client's
+`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Prod
+mode refuses to start with ops on and no origin configured. In dev and tests, with none set, the
+origin's host must match the request's host instead, which is no defense against a client that
+can reach the app directly.
+
+The CLI keys its token cache by origin (and checks the origin stored in the cache file), so a
+token minted for one server is never sent to another; it refuses an ops URL that is more than an
+origin (user info, path, query); and it warns when a project's ops URL changes from the last
+server it logged in to (remembered in `~/.brace/ops-origins.json`; a best-effort hint, not a
+control: a new clone or a new `ops.env` won't trigger it).
+
+Protocol **v2 is removed** as of 0.1.11: it signed no origin, so a signature was good at any
+server. A v2 body gets a 401 naming the cause; upgrade the CLI with the server.
 
 Protocol **v1 is removed** as of 0.1.8. It signed the timestamp alone — not bound to the key,
 no nonce — so a captured request was replayable verbatim inside the ±30 s window to mint a
