@@ -173,6 +173,92 @@ class CliCheckTest {
     }
 
     @Test
+    void jobsPassWhenNoneHaveRunYet() {
+        // A just-started app: every job is "pending". That is every deploy, not a failure.
+        var status = json(Map.of("jobs", Map.of("scheduled", List.of(
+            Map.of("name", "brace-jobs-prune", "lastStatus", "pending", "failCount", 0),
+            Map.of("name", "ops-flush-http", "lastStatus", "pending", "failCount", 0)
+        ))));
+        var check = CliCheck.checkJobs(status);
+        assertEquals("pass", check.status(), check.message());
+        assertEquals("2 jobs, none run yet", check.message());
+    }
+
+    @Test
+    void jobsPendingAlongsideOkPass() {
+        var status = json(Map.of("jobs", Map.of("scheduled", List.of(
+            Map.of("name", "cleanup", "lastStatus", "ok", "failCount", 0),
+            Map.of("name", "digest", "lastStatus", "pending", "failCount", 0)
+        ))));
+        var check = CliCheck.checkJobs(status);
+        assertEquals("pass", check.status(), check.message());
+        assertEquals("2 jobs, all ok (1 not run yet)", check.message());
+    }
+
+    @Test
+    void jobsFailOnErrorEvenWhenOthersArePending() {
+        var status = json(Map.of("jobs", Map.of("scheduled", List.of(
+            Map.of("name", "digest", "lastStatus", "pending", "failCount", 0),
+            Map.of("name", "email", "lastStatus", "error", "failCount", 1, "lastError", "boom")
+        ))));
+        var check = CliCheck.checkJobs(status);
+        assertEquals("fail", check.status());
+        assertEquals("1 of 2 jobs failing", check.message());
+        assertEquals(1, check.details().size());
+        assertEquals("email", check.details().get(0).get("name"));
+    }
+
+    @Test
+    void jobsCheckAgainstRealOpsStatus() throws Exception {
+        // End to end through the real /ops/status payload: registered-but-unrun jobs pass, and
+        // once one has actually failed the check fails.
+        var scheduler = new JobScheduler();
+        scheduler.every("1h", "idle", (db, ctx) -> {});
+        var failed = new java.util.concurrent.CountDownLatch(1);
+        scheduler.every("1s", "broken", (db, ctx) -> {
+            try {
+                throw new IllegalStateException("boom");
+            } finally {
+                failed.countDown();
+            }
+        });
+        String secret = OpsToken.generateSecret();
+        var kp = OpsKeys.generateKeypair();
+        var handler = new OpsHandler(new Stats(), scheduler, null, new Router(),
+            Map.of(kp.publicKey(), OpsScope.READ), secret);
+        String token = OpsToken.create(secret, 60, OpsScope.READ, OpsKeys.fingerprint(kp.publicKey()));
+        java.util.function.Supplier<JsonNode> status = () -> {
+            var req = new Request("GET", "/ops/status", Map.of(), Map.of(),
+                Map.of("Authorization", "Bearer " + token), null);
+            try {
+                return Json.mapper().readTree(handler.status(req).body());
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        };
+
+        var before = CliCheck.checkJobs(status.get());
+        assertEquals("pass", before.status(), before.message());
+
+        scheduler.start(null);
+        try {
+            assertTrue(failed.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            CliCheck.Check after = null;
+            for (int i = 0; i < 100; i++) { // the status update lands just after the job body
+                after = CliCheck.checkJobs(status.get());
+                if ("fail".equals(after.status())) break;
+                Thread.sleep(20);
+            }
+            assertEquals("fail", after.status(), after.message());
+            assertEquals("1 of 2 jobs failing", after.message());
+            assertEquals("broken", after.details().get(0).get("name"));
+            assertEquals("boom", after.details().get(0).get("lastError"));
+        } finally {
+            scheduler.stop();
+        }
+    }
+
+    @Test
     void cacheWarnWhenHitRateLow() {
         var status = json(Map.of("cache", Map.of("hits", 20, "misses", 80)));
         var check = CliCheck.checkCache(status, CheckThresholds.DEFAULTS);

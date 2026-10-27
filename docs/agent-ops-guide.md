@@ -226,7 +226,7 @@ Read the output in this order:
 4. **`http.slowestRoutes`** — anything over 500ms avg deserves investigation. Cross-check
    `http.topRoutes`: a slow route that is also a top route is where to look first.
 5. **`jvm.heap.usedMB` vs `maxMB`** — if usage is above 80% of max, memory pressure is likely. Check `jvm.gc.avgPauseMs` and `maxPauseMs` for GC impact, and `recentPauses` for `G1Full` collections.
-6. **`jobs.scheduled`** — any job with `lastStatus` != `"ok"` needs attention.
+6. **`jobs.scheduled`** — a job with `lastStatus` `"error"` needs attention; `lastError` says why. `"pending"` only means it hasn't run since the app started, which is normal right after a deploy.
 7. **`cache`** — compute hit rate (hits / (hits + misses)). Below 50% means the cache isn't helping; review TTLs and key strategies.
 
 If everything looks normal, report healthy and stop.
