@@ -171,27 +171,27 @@ public class App {
 
 Components included in the framework jar as of this release:
 
-- **HTTP** — Jetty 12 with virtual threads, programmatic routing, middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting, gzip response compression on by default (`.compression(false)` to opt out)
-- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks. PostgreSQL JDBC driver bundled — no extra dependency to add
-- **Templates** — JTE compiled type safe templates with explicit parameters, hot-reload in dev, precompiled ahead of time for prod by `brace run`
-- **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
-- **Forms** — Record-based form binding with validation annotations
-- **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs; tokens rendered into pages are masked per render (BREACH)
-- **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware (`SecurityHeaders.strict()` adds a strict Content-Security-Policy: no inline script), bcrypt password hashing
+- **HTTP** — Jetty 12 with virtual threads, programmatic routing with a required access rule per route (`app.defaultAccess(...)`, `Access.*`, `.publicRoute()`), middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting, gzip response compression on by default (`.compression(false)` to opt out), `GET /__brace/health` for container and load-balancer health checks
+- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks, `findOwnedOr404()` for user-owned rows, `Sort` for request-chosen orders. PostgreSQL JDBC driver bundled — no extra dependency to add
+- **Templates** — JTE compiled type safe templates with explicit parameters, `javascript:` and other script URLs blocked in URL attributes, hot-reload in dev, precompiled ahead of time for prod by `brace run`
+- **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless; `__Host-` cookie name in production, absolute lifetime, `session.regenerate()` at login and logout
+- **Forms** — Record-based form binding with validation annotations (`@SafeUrl` for user-supplied links)
+- **CSRF** — Required by default on POST/PUT/DELETE/PATCH, and cross-site mutating requests are refused; `${csrfMeta}` plus `/__brace/csrf-htmx.js` cover htmx. Opt out with `.csrf(false)` only on bearer-token routes (on a cookie-session route it fails `start()` unless given a reason). Tokens rendered into pages are masked per render (BREACH)
+- **Security** — Route access requirements checked at startup, trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware (`SecurityHeaders.strict()` adds a strict Content-Security-Policy: no inline script), bcrypt password hashing
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
 - **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs. Refuses loopback, private and cloud-metadata destinations by default (SSRF protection; `.trusted()` for your own internal services) and caps buffered responses at 10 MB
-- **WebSocket** — `app.ws()` with rooms, broadcast, and session access
+- **WebSocket** — `app.ws()` with rooms, broadcast, and session access; upgrades run access requirements and an Origin check
 - **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
-- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, built in S3 support
+- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, confined saving with `safeFilename()`/`saveTo(dir, name)`, served sandboxed with `StaticFiles.UNTRUSTED`, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Analytics** — Opt-in server-side page-view counts (visitors, top pages, sources, devices) with no tracking script, no cookies and no stored IPs, viewed at `/ops/analytics`
 - **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
-- **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding, `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
+- **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding (including a hardened distroless, non-root `Dockerfile` and `compose.yaml`), `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
 - **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
 
 ## Controllers
@@ -224,6 +224,8 @@ public class PostController {
 
 ## Handler Types
 
+Each route also needs an access requirement or `.publicRoute()`; see [Access](#access).
+
 ```java
 app.get("/hello", req -> Result.text("Hello!"));                       // Handler: Request only
 app.getRead("/posts", (req, db) -> Result.json(db.findAll(Post.class))); // ReadDbHandler: query-only, no transaction
@@ -237,8 +239,11 @@ app.getDb("/posts", (req, db) -> ...);          // getDb, postDb, putDb, deleteD
 app.getSession("/profile", (req, session) -> ...); // getSession, postSession, putSession, deleteSession
 app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull
 
-// CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
-app.post("/api/public", req -> Result.json(data)).csrf(false);  // no CSRF for bearer-token API
+// CSRF is required by default on POST/PUT/DELETE/PATCH - opt out only on bearer-token routes
+app.post("/api/items", req -> Result.json(data))
+    .access(Access.insteadOfDefault(Access.checkRequest(Api::bearer))).csrf(false);
+// .csrf(false) on a route that uses the cookie session fails start(); say why if it's safe anyway
+app.postSession("/logout", auth::logout).csrf(false, "sign-out is idempotent");
 
 // Json.obj builds an ordered, null-tolerant map for explicit JSON response shapes
 app.getRead("/api/me", (req, db) -> Json.of(Json.obj("id", userId, "name", name)));
@@ -294,6 +299,10 @@ db.existsBy(Post.class, "email", "user@ex.com")   // check existence
 db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns count)
 ```
 
+Request values always go in `?` bind params, and a `?sort=` order goes through `Sort.from(...)`
+with an allowlist, as above. A query string that contains a request value throws in dev mode
+and tests, naming the parameter.
+
 For scoped DB access outside the request lifecycle (background tasks, WebSocket handlers):
 
 ```java
@@ -313,7 +322,7 @@ public record PostForm(
     @Email String contactEmail
 ) {
     public void validate(Errors errors) {
-        if (title.contains("<script>")) errors.add("title", "no scripts allowed");
+        if (title != null && title.contains("<script>")) errors.add("title", "no scripts allowed");
     }
 }
 
@@ -326,11 +335,16 @@ var jsonForm = req.jsonForm(PostForm.class);
 
 A `boolean` component binds an HTML checkbox directly (`on` is true, absent is false).
 
+In the template, put `${csrfField}` inside each `<form>` (declared `@param gg.jte.Content
+csrfField = null`). Never bind a request body into an `@Entity`: `req.json`/`bodyAs` throw for
+one, so bind a record and copy the allowed fields with the entity's `apply(form)`.
+
 ## Sessions
 
 Sessions are encrypted with AES-256-GCM — you can safely store emails, roles, and permissions.
 
 ```java
+session.regenerate();             // at login and logout: new CSRF token, restarts the lifetime
 session.set("userId", user.id);
 session.set("email", user.email);
 session.set("role", user.role);
@@ -343,15 +357,20 @@ session.clear();
 Configure session cookie security:
 
 ```java
-app.sessions(SessionOptions.secure("secret")
+app.sessions(SessionOptions.secure(config.get("session.secret"))
     .maxAgeDays(14)
     .sameSiteLax());
 ```
 
+In production the cookie is named `__Host-brace_session`, and a session ends 30 days after
+sign-in (or `maxAge`, if longer) however active it is; `SessionOptions.absoluteMaxAge(...)` sets
+it. The cookie is self-contained, so to log a user out everywhere, check a per-user version with
+`app.sessionValidator(...)`.
+
 The `Secure` attribute is on by default — resolved per request, so it is set for every
 non-loopback request and omitted on `http://localhost` (local dev and in-process tests keep
 working untouched). An app genuinely served over plain HTTP on a real hostname opts out with
-`SessionOptions.of("secret").secure(false)`. Behind nginx, pass the real host through
+`SessionOptions.of(secret).secure(false)`. Behind nginx, pass the real host through
 (`proxy_set_header Host $host;`) — its default rewrites `Host` to `127.0.0.1`, which looks like
 local development; see `docs/SECURITY.md`.
 
@@ -444,7 +463,7 @@ app.maxUploadSize("500M")                     // accept large media...
    .uploadTempDir(Path.of("/var/lib/uploads"));
 
 try (var in = file.stream()) { ... }          // repeatable, bounded memory
-file.saveTo(path);                            // a filesystem move for a spilled part
+file.saveTo(uploadDir, file.safeFilename());  // a move for a spilled part; can't land outside uploadDir
 storage.put("exports/a.csv", path, "text/csv");  // upload a file on disk, streamed
 
 Result.file(path)                             // stream out: Content-Length, Range, typed by extension
@@ -575,13 +594,16 @@ app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);  // file
 
 ```java
 app.group("/admin", admin -> {
-    admin.get("/users", ctrl::list);
-    admin.post("/users", ctrl::create);
-    admin.group("/api", api -> {        // nesting supported
-        api.get("/stats", ctrl::stats); // registers /admin/api/stats
+    admin.getRead("/users", ctrl::list);    // typed route methods work on groups too
+    admin.postDb("/users", ctrl::create);
+    admin.group("/api", api -> {            // nesting supported
+        api.getRead("/stats", ctrl::stats); // registers /admin/api/stats
     });
 });
 ```
+
+`app.group(prefix, access, cfg)` adds an access requirement to every route in the group (see
+[Access](#access)).
 
 ## Named Routes
 
@@ -637,9 +659,18 @@ return View.of("posts/index", "posts", posts);
 
 Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.10 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.
 
-```java
-// In your layout: <script src="/__brace/htmx.min.js"></script>
+```html
+<!-- In your layout's <head>; declare @param gg.jte.Content csrfMeta = null -->
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+${csrfMeta}
+<script src="/__brace/htmx.min.js"></script>
+<script src="/__brace/csrf-htmx.js"></script>  <!-- sends the CSRF token on non-GET htmx requests -->
+```
 
+The `htmx-config` line stops htmx running code from attributes (`hx-on*`) or swapped-in
+`<script>` tags, which `SecurityHeaders.strict()` would block anyway.
+
+```java
 // Full page by default, partial when htmx requests it
 app.getRead("/posts", (req, db) -> {
     var posts = db.findAll(Post.class);
@@ -663,8 +694,9 @@ Brace automatically adds `HX-Request` to the `Vary` header (appending to any val
 static TestApp app = Brace.test()
     .entities(Post.class, User.class)
     .templates("views")
+    .sessions("test-session-secret-at-least-32-characters")  // for session routes and CSRF
     .start(app -> {
-        app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class)));
+        app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class))).publicRoute();
     });
 
 @Test void listPosts() {
@@ -673,12 +705,12 @@ static TestApp app = Brace.test()
     assertEquals(200, response.status());
     assertEquals("Hello", response.json().get(0).get("title").asText());
 }
-
-@Test void showPost() {
-    var response = app.get("/posts/42");
-    assertEquals(200, response.status());
-}
 ```
+
+`start()` checks access in tests too, so every route needs a requirement or `.publicRoute()`. In
+an app, register routes in a `public static void routes(Brace app)` that `main()` also calls (the
+`brace new` layout) and start tests with `.start(App::routes)`, so they run the production routes,
+access requirements and middleware.
 
 Custom headers (e.g. bearer-token APIs) via the request builder; CSRF-protected routes via `postWithCsrf`:
 
@@ -729,14 +761,19 @@ committed `application.conf.example`, all `${VAR}`, that the scaffolded `Dockerf
 ## Security
 
 See [docs/SECURITY.md](docs/SECURITY.md) for security documentation covering:
-- Encrypted sessions (AES-256-GCM)
+- Route access requirements and object-level authorization (`findOwnedOr404`)
+- SQL injection (bind params, `Sort`)
+- Encrypted sessions (AES-256-GCM), expiry, rotation and revocation
 - Trusted proxy configuration
-- CSRF protection
+- CSRF protection and cross-site request refusal
+- XSS and Content-Security-Policy (`SecurityHeaders.strict()`)
+- Server-side request forgery (`Http` destination policy)
 - Cookie security options
 - Rate limiting
-- File upload security
+- File upload security and serving uploads (`StaticFiles.UNTRUSTED`)
 - Response compression and BREACH
-- Content-Security-Policy (`SecurityHeaders.strict()`)
+- WebSockets
+- Deploying in a container
 - Ops endpoint hardening
 
 ## Periodic Model Reviews
