@@ -321,7 +321,16 @@ component (basename, control and invisible format characters stripped, leading d
 spaces trimmed, at most 255 bytes, never empty —
 not unique, so prefix an id if names can collide), and `saveTo(dir, name)` throws
 `IllegalArgumentException` if `name` would land outside `dir`, symlinks included. It returns the
-path written. `saveTo(Path)` takes a full path and does no checking.
+path written. `saveTo(Path)` takes a full path and does no checking. `contentType()` is the
+uploader's claim; never serve or store by it.
+
+**Serving uploads:** an uploaded `.html`/`.svg` served inline runs script on your origin. Serve
+upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED)` and handler
+responses with `.untrusted()` (`Result.fileUnder(dir, name).untrusted()`). Untrusted responses get
+an allowlisted type (else `application/octet-stream`), `Content-Disposition: attachment` unless a
+raster image (png/jpeg/gif/webp/avif/bmp/ico; not svg), and always `CSP: sandbox` + `nosniff`.
+`safeFilename()` and `Storage.safeKey` neutralize executable extensions (`html`, `svg`, `xml`,
+`js`, `css`, `php`…): `page.html` → `page.html.bin`, key `…/<uuid>.bin`.
 
 Parts larger than `uploadMemoryThreshold` (builder, default 1MB) spill to a temp file instead of
 living in the heap for the request; below it they stay in memory. Either way the API is the same.
@@ -354,6 +363,7 @@ Result.file(path)                           // stream a file (Content-Length, Ra
 Result.file(path, "video/mp4")              // ...with an explicit content type
 Result.fileUnder(dir, req.pathParam("name")) // a request-named file under dir; 404 if it escapes dir or is missing
 Result.download(path, "report.csv")         // stream as an attachment
+Result.fileUnder(dir, name).untrusted()     // a user upload: sandboxed, attachment unless a raster image
 Result.stream(inputStream, "image/png")     // stream of unknown length (chunked)
 Result.stream(inputStream, "image/png", n)  // ...of known length
 Result.stream(out -> {...}, "text/csv")     // generated content, written as it is produced
@@ -968,9 +978,15 @@ storage.keyFromUrl("https://cdn.example.com/...");  // extract key from URL
 var stored = storage.putGenerated("avatars", req.file("avatar"));
 stored.key();   // "avatars/a1b2c3d4-….jpg"     stored.url();  // "https://cdn.example.com/avatars/…"
 var stored2 = storage.put("custom/path.jpg", file);          // UploadedFile at an explicit key
-String key = Storage.safeKey("uploads", "user photo.jpg");   // sanitizes and adds UUID
+storage.put("logos/a.svg", file, "image/svg+xml");           // a type you verified yourself
+String key = Storage.safeKey("uploads", "user photo.jpg");   // UUID + extension; "x.svg" -> "<uuid>.bin"
 String ext = Storage.extension("photo.jpg");                 // "jpg" (alphanumeric only)
 ```
+
+`put(key, uploadedFile)` and `putGenerated` ignore the uploader's `contentType()`: the object's
+type comes from the key's extension via an allowlist (raster images, pdf, txt, csv, json, office
+docs, archives, audio, video; else `application/octet-stream`), and all but raster images are
+stored with `Content-Disposition: attachment`.
 
 Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.endpoint`, `s3.publicUrl`, `s3.timeoutSeconds` (per-request timeout, default 60).
 
@@ -980,7 +996,9 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 
 `staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
 serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
-leading `.well-known/`.
+leading `.well-known/`. The longest matching prefix wins. For a directory users write to, use
+`staticFiles(prefix, dir, StaticFiles.UNTRUSTED)` (see Serving uploads); it must not be inside
+a trusted mapping's directory, or `staticFiles` throws.
 
 Cache-bust static assets by appending a content-hash query parameter — in a JTE template
 (or any code that produces URLs): `${Assets.url("/assets/app.css")}` →

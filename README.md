@@ -423,11 +423,15 @@ app.post("/upload", req -> {
 // Manual key with safety helpers
 app.post("/upload-manual", req -> {
     var file = req.file("photo");
-    var key = Storage.safeKey("avatars", file.filename());  // sanitizes extension, adds UUID
-    var stored = req.storage().put(key, file);
+    var key = Storage.safeKey("avatars", file.filename());  // UUID key; .html/.svg/.js… become .bin
+    var stored = req.storage().put(key, file);              // type from the key, not the browser
     return Result.json(Map.of("url", stored.url()));
 });
 ```
+
+Uploads are stored by their key's extension, never the browser-claimed `Content-Type`: raster
+images, PDFs, text, office documents, archives, audio and video keep their type, everything else
+is `application/octet-stream`, and all but raster images are stored as attachments.
 
 Uploads and downloads stream. Multipart parts over `uploadMemoryThreshold` (default 1MB) spill to a
 temp file instead of the heap, `storage.put(key, file)` sends from that file without materializing
@@ -444,6 +448,7 @@ storage.put("exports/a.csv", path, "text/csv");  // upload a file on disk, strea
 
 Result.file(path)                             // stream out: Content-Length, Range, typed by extension
 Result.download(path, "report.csv")           // ...as an attachment
+Result.fileUnder(uploadDir, name).untrusted() // a user's upload: sandboxed, never rendered as a page
 Result.stream(inputStream, "image/png")       // ...from a stream (chunked)
 Result.stream(out -> writeCsv(out), "text/csv");  // ...generated as it is produced
 ```
@@ -559,7 +564,11 @@ its own hit rate — so a clear resets counters only on the box that handled it.
 
 ```java
 app.staticFiles("/assets", "public");   // serve public/ directory at /assets/*
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);  // files users uploaded
 ```
+
+`UNTRUSTED` serves user files so nothing in them can run on your origin: an uploaded `.html` or
+`.svg` is a sandboxed `application/octet-stream` download, and only raster images display inline.
 
 ## Route Grouping
 

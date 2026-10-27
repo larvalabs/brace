@@ -77,6 +77,11 @@ public class UploadedFile {
      * dotfiles, {@code ..}, or hidden names), capped at 255 UTF-8 bytes (the usual filesystem
      * limit). Never empty: a missing or fully stripped name becomes {@code "upload"}.
      *
+     * <p>A name whose final extension a browser or server could execute ({@code html}, {@code svg},
+     * {@code xml}, {@code js}, {@code css}, {@code php}, …, any case) gets {@code .bin} appended:
+     * {@code "page.HTML"} becomes {@code "page.HTML.bin"}. Serve the directory as
+     * {@link StaticFiles#UNTRUSTED} regardless; the rename is for whatever else serves it.
+     *
      * <p>This is a sanitiser, not a uniqueness guarantee — two uploads can share a safe name.
      */
     public String safeFilename() {
@@ -99,18 +104,28 @@ public class UploadedFile {
                     || Character.isSpaceChar(name.charAt(start)))) {
             start++;
         }
-        name = name.substring(start).strip();
-        // Cap at 255 bytes, not chars: a filesystem limit is in bytes, and a code point is never split.
+        name = capBytes(name.substring(start).strip(), 255);
+        if (name.isEmpty()) return "upload";
+        // M7: an executable extension gets ".bin" appended, so a trusted static mapping or a server
+        // in front of the directory can't serve "x.html" as a page. Checked after the cap, which
+        // can itself expose a new final extension by cutting the name short.
+        if (UntrustedContent.isActiveExtension(UntrustedContent.extensionOf(name))) {
+            name = capBytes(name, 255 - ".bin".length()) + ".bin";
+        }
+        return name;
+    }
+
+    /** {@code name} cut to at most {@code max} UTF-8 bytes, never splitting a code point, stripped. */
+    private static String capBytes(String name, int max) {
         int bytes = 0, end = 0;
         while (end < name.length()) {
             int cp = name.codePointAt(end);
             int n = Character.toString(cp).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-            if (bytes + n > 255) break;
+            if (bytes + n > max) break;
             bytes += n;
             end += Character.charCount(cp);
         }
-        name = name.substring(0, end).strip();
-        return name.isEmpty() ? "upload" : name;
+        return name.substring(0, end).strip();
     }
     public long size() { return size; }
 

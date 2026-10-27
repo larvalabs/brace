@@ -825,25 +825,79 @@ trades a heap-exhaustion failure mode for a disk one, which degrades far more gr
 
 ### Security Considerations
 
-1. **Validate file types:** Check `file.contentType()` and extension
+1. **Validate file types:** check the extension against what you accept. `file.contentType()`
+   is whatever the uploader's browser (or script) claimed, so never trust it as the type
 2. **Scan for malware:** Use external virus scanning for untrusted uploads
 3. **Store safely:** Don't use user-provided filenames directly
-4. **Limit concurrency:** upload concurrency now consumes disk rather than heap — cap it
+4. **Serve as untrusted:** an uploaded `.html` or `.svg` served inline from the app's origin
+   runs its script there (stored XSS). See [Serving uploaded files](#serving-uploaded-files)
+5. **Limit concurrency:** upload concurrency now consumes disk rather than heap — cap it
    at the proxy if untrusted clients can reach an upload endpoint
 
 ### Safe Storage Pattern
 
 ```java
 // DON'T: Use user filename directly
-String key = "uploads/" + file.name(); // ❌ Unsafe
+String key = "uploads/" + file.filename();                 // ❌ Unsafe
+file.saveTo(uploadDir.resolve(file.filename()));           // ❌ Unsafe
 
-// DO: Generate safe keys
-String key = storage.safeKey("uploads", file.name()); // ✅ Safe
+// DO: Generate safe keys and names
+String key = Storage.safeKey("uploads", file.filename());  // ✅ Safe
+file.saveTo(uploadDir, file.safeFilename());               // ✅ Safe
 ```
 
 `Storage.put`, `delete`, and `url` reject keys containing `.`/`..` segments or a leading `/`
 outright: the SigV4 canonical URI and the request URL are built from the same unnormalized
 string, so a traversing key would have been *validly signed* for the path it escaped to.
+
+`Storage.safeKey` and `UploadedFile.safeFilename()` also neutralize an extension a browser or
+server could execute: markup (`html`, `htm`, `xhtml`, `shtml`, `mht`…), `svg`/`svgz`,
+`xml`/`xsl`/`xslt`, `js`/`mjs`/`css`/`wasm`/`swf`, and server-side scripts (`php`, `phtml`,
+`asp`, `jsp`, `cgi`…), in any case. `safeKey` replaces it with `bin` (`u/<uuid>.bin`);
+`safeFilename()` appends `.bin` (`page.html.bin`). Only the final extension decides how a file is
+typed, so `x.svg.png` stays a `.png`. This is defense in depth for whatever serves the files by
+extension; the serving rules below are the fix.
+
+### Serving uploaded files
+
+**Static directory.** Register an upload directory as untrusted:
+
+```java
+app.staticFiles("/assets", "public");                                       // your files
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);     // users' files
+```
+
+In `UNTRUSTED` mode:
+
+- The `Content-Type` comes from an allowlist by extension: raster images (png, jpeg, gif, webp,
+  avif, bmp, ico), PDF, plain text, CSV, JSON, office documents, zip/gzip/tar, common audio and
+  video. Anything else, `.html`, `.svg`, `.xml` and `.js` included, is `application/octet-stream`.
+- Everything except a raster image is sent with `Content-Disposition: attachment`, so following
+  a link to it downloads it instead of rendering it. **SVG is not a raster image.** PDF is an
+  attachment too: viewers that run PDF JavaScript differ, and the safe default is a download.
+- Every response carries `Content-Security-Policy: sandbox` (no script, opaque origin, even if
+  a browser renders it anyway) and `X-Content-Type-Options: nosniff`. The sandbox is sent as its
+  own header, so an app CSP set by `SecurityHeaders` doesn't replace it.
+
+Images still render in `<img>`, and audio/video still play in `<audio>`/`<video>`; those ignore
+`Content-Disposition`. `staticFiles` throws if an untrusted directory is inside a trusted one (or
+the reverse), because its files would also be reachable through the trusted mapping.
+
+**From a handler** (an access check, a lookup by id), apply the same rules with
+`Result.untrusted()`:
+
+```java
+app.get("/files/{name}", req -> Result.fileUnder(uploadDir, req.pathParam("name")).untrusted());
+// doc looked up with db.findOwnedOr404(...); originalName is the uploader's filename
+return Result.download(Path.of(doc.path), doc.originalName).untrusted();   // keeps the filename
+```
+
+**S3.** `storage.put(key, uploadedFile)` and `putGenerated(folder, uploadedFile)` ignore the
+uploader's `Content-Type`. The object's type comes from the key's extension through the same
+allowlist (`application/octet-stream` otherwise), and every object but a raster image is stored
+with `Content-Disposition: attachment`. That matters even off the app's origin: a bucket or CDN
+on a sibling subdomain shares the site for cookies. To store a type you checked yourself, pass it:
+`storage.put(key, file, "image/svg+xml")`.
 
 ### Serving user-supplied filenames
 
@@ -871,12 +925,19 @@ challenges and `security.txt` keep working. The check runs on the decoded path, 
 is refused too.
 
 Symlinks that stay inside the served directory keep working. To serve a directory that
-lives elsewhere, register it as its own mapping rather than linking it into the web root:
+lives elsewhere, register it as its own mapping rather than linking it into the web root. A
+directory users write to is registered `UNTRUSTED` (see
+[Serving uploaded files](#serving-uploaded-files)):
 
 ```java
 app.staticFiles("/assets", "public");
-app.staticFiles("/assets/uploads", "/var/app/uploads");
+app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);
 ```
+
+When prefixes overlap, the longest one serves the request regardless of registration order, so
+`/assets/uploads/x` is looked up in `/var/app/uploads` even though `/assets` was registered
+first. (Before 0.1.11 the first registered prefix won, and the second mapping here was
+unreachable.)
 
 Brace sends no `Server` or `X-Powered-By` header. Requests that Jetty rejects before Brace's
 handler runs (ambiguous URIs such as `//x` or `%2e%2e` segments, malformed requests) get a

@@ -377,7 +377,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - The scaffold app returns the strict headers on handler, static, 404 and 500 responses.
   - **Tier: mid.**
 
-- [ ] **M7: Uploaded content can be served inline as HTML or SVG on the app origin**, `BraceHandler.java:1251, 1258`, `Result.java:152, 163`, `Storage.java:161-174, 247-268`, `SECURITY.md:512, 544`
+- [x] **M7: Uploaded content can be served inline as HTML or SVG on the app origin**, `BraceHandler.java:1251, 1258`, `Result.java:152, 163`, `Storage.java:161-174, 247-268`, `SECURITY.md:512, 544`
   - **What's wrong.**
     - `staticFiles` and `Result.file` map `.html` to `text/html` and `.svg` to
       `image/svg+xml`, served inline.

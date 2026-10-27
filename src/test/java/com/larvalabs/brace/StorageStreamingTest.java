@@ -31,6 +31,10 @@ class StorageStreamingTest {
     static final AtomicReference<String> receivedEncoding = new AtomicReference<>();
     static final AtomicReference<String> receivedContentType = new AtomicReference<>();
     static final AtomicReference<String> receivedHost = new AtomicReference<>();
+    static final AtomicReference<String> receivedDisposition = new AtomicReference<>();
+    /** Whether the request's SigV4 signature verifies against the headers actually received. */
+    static final AtomicReference<Boolean> signatureValid = new AtomicReference<>();
+    static final AtomicReference<String> receivedSignedHeaders = new AtomicReference<>();
 
     @BeforeAll
     static void startServer() throws Exception {
@@ -42,6 +46,8 @@ class StorageStreamingTest {
             receivedEncoding.set(exchange.getRequestHeaders().getFirst("Transfer-Encoding"));
             receivedContentType.set(exchange.getRequestHeaders().getFirst("Content-Type"));
             receivedHost.set(exchange.getRequestHeaders().getFirst("Host"));
+            receivedDisposition.set(exchange.getRequestHeaders().getFirst("Content-Disposition"));
+            verifySignature(exchange);
             exchange.sendResponseHeaders(200, -1);
             exchange.close();
         });
@@ -63,6 +69,9 @@ class StorageStreamingTest {
         receivedEncoding.set(null);
         receivedContentType.set(null);
         receivedHost.set(null);
+        receivedDisposition.set(null);
+        signatureValid.set(null);
+        receivedSignedHeaders.set(null);
     }
 
     @Test
@@ -75,6 +84,7 @@ class StorageStreamingTest {
         assertEquals(sha256Hex(payload), receivedSha.get(),
             "x-amz-content-sha256 must be the real digest — it is part of the signature");
         assertEquals("application/octet-stream", receivedContentType.get());
+        assertTrue(signatureValid.get(), "baseline: the test's SigV4 check accepts a plain put");
     }
 
     @Test
@@ -165,7 +175,97 @@ class StorageStreamingTest {
             "the streaming and byte[] digests must agree, or signatures break by payload size");
     }
 
+    // --- M7: the stored type comes from the key, never from the uploader ---
+
+    @Test
+    void putIgnoresAClientClaimedHtmlType() {
+        var upload = new UploadedFile("evil.html", "text/html", SCRIPT);
+
+        storage.put("files/evil.html", upload);
+
+        assertEquals("application/octet-stream", receivedContentType.get());
+        assertEquals("attachment", receivedDisposition.get());
+        assertTrue(signatureValid.get(), "the signature must cover the headers actually sent");
+        assertTrue(receivedSignedHeaders.get().contains("content-disposition"), receivedSignedHeaders.get());
+    }
+
+    @Test
+    void putTypesARasterImageByItsKeyAndKeepsItInline() {
+        // The client claims text/html for a .png key: the key wins.
+        storage.put("files/a.png", new UploadedFile("a.png", "text/html", SCRIPT));
+
+        assertEquals("image/png", receivedContentType.get());
+        assertNull(receivedDisposition.get(), "raster images stay inline");
+        assertTrue(signatureValid.get());
+    }
+
+    @Test
+    void putTypesSvgAndExtensionlessKeysAsOctetStream() {
+        storage.put("files/a.svg", new UploadedFile("a.svg", "image/svg+xml", SCRIPT));
+        assertEquals("application/octet-stream", receivedContentType.get());
+        assertEquals("attachment", receivedDisposition.get());
+
+        storage.put("files/avatar", new UploadedFile("a.png", "image/png", SCRIPT));
+        assertEquals("application/octet-stream", receivedContentType.get());
+    }
+
+    @Test
+    void putDocumentsKeepTheirTypeAsAttachments() {
+        storage.put("files/a.pdf", new UploadedFile("a.pdf", "text/html", SCRIPT));
+        assertEquals("application/pdf", receivedContentType.get());
+        assertEquals("attachment", receivedDisposition.get());
+        assertTrue(signatureValid.get());
+    }
+
+    @Test
+    void putGeneratedNeutralizesTheKeyAndTheType() {
+        var stored = storage.putGenerated("u", new UploadedFile("x.SVG", "image/svg+xml", SCRIPT));
+
+        assertTrue(stored.key().endsWith(".bin"), stored.key());
+        assertEquals("application/octet-stream", receivedContentType.get());
+        assertEquals("attachment", receivedDisposition.get());
+    }
+
+    @Test
+    void anExplicitTypeIsStoredAsGiven() {
+        storage.put("files/logo.svg", new UploadedFile("logo.svg", "text/html", SCRIPT), "image/svg+xml");
+
+        assertEquals("image/svg+xml", receivedContentType.get());
+        assertNull(receivedDisposition.get());
+        assertTrue(signatureValid.get());
+        assertFalse(receivedSignedHeaders.get().contains("content-disposition"));
+    }
+
     // --- helpers ---
+
+    static final byte[] SCRIPT = "<script>alert(1)</script>".getBytes(StandardCharsets.UTF_8);
+
+    /**
+     * Recomputes the SigV4 signature from the request as received, the way S3 does, so a header
+     * that is signed with one value and sent with another (or sent but not signed) fails here.
+     */
+    private static void verifySignature(com.sun.net.httpserver.HttpExchange exchange) {
+        var h = exchange.getRequestHeaders();
+        String auth = h.getFirst("Authorization");
+        if (auth == null) return;
+        String signedHeaders = auth.replaceFirst(".*SignedHeaders=([^,]+),.*", "$1");
+        String signature = auth.replaceFirst(".*Signature=([0-9a-f]+).*", "$1");
+        receivedSignedHeaders.set(signedHeaders);
+        var canonicalHeaders = new StringBuilder();
+        for (String name : signedHeaders.split(";")) {
+            canonicalHeaders.append(name).append(':').append(h.getFirst(name).strip()).append('\n');
+        }
+        String canonicalRequest = exchange.getRequestMethod() + "\n"
+            + exchange.getRequestURI().getRawPath() + "\n\n"
+            + canonicalHeaders + "\n" + signedHeaders + "\n" + h.getFirst("x-amz-content-sha256");
+        String amzDate = h.getFirst("x-amz-date");
+        String dateStamp = amzDate.substring(0, 8);
+        String stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + dateStamp + "/us-east-1/s3/aws4_request\n"
+            + Storage.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
+        String expected = Storage.bytesToHex(Storage.hmacSha256(
+            Storage.getSignatureKey("secret", dateStamp, "us-east-1", "s3"), stringToSign));
+        signatureValid.set(expected.equals(signature));
+    }
 
     /** An UploadedFile whose content lives on disk, as a spilled multipart part would. */
     private static UploadedFile fileBackedUpload(Path path, String filename, String contentType)

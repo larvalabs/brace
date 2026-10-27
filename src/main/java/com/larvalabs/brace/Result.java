@@ -22,6 +22,11 @@ public class Result {
     // cookies (e.g. an app cookie plus the framework session cookie). It is kept out of the
     // single-value `headers` map — which would collapse repeats — and appended here instead.
     private final List<String> setCookies = new ArrayList<>();
+    /**
+     * Set by {@link #untrusted()}. Read when the response is written, which re-adds the
+     * {@code sandbox} CSP if an after-middleware replaced it.
+     */
+    boolean untrusted;
 
     protected Result(int status, String contentType, String body) {
         this.status = status;
@@ -76,7 +81,8 @@ public class Result {
      * whenever {@code name} comes from the request.
      *
      * <p>The content type is guessed from the extension, so a served {@code .html} or {@code .svg}
-     * renders in the browser; for user-uploaded files prefer a download.
+     * renders in the browser. For files users uploaded, add {@link #untrusted()}:
+     * {@code Result.fileUnder(uploadDir, name).untrusted()}.
      */
     public static Result fileUnder(Path base, String name) {
         Path target;
@@ -96,6 +102,53 @@ public class Result {
     public static Result download(Path path, String filename) {
         return file(path, contentTypeForFile(path))
             .header("Content-Disposition", contentDisposition(filename));
+    }
+
+    /**
+     * Marks this response as content a user supplied, so it cannot run on the app's origin. The
+     * handler counterpart of {@link StaticFiles#UNTRUSTED}, for uploads served behind a route
+     * (an access check, a database lookup):
+     *
+     * <pre>{@code
+     * return Result.fileUnder(uploadDir, req.pathParam("name")).untrusted();
+     * return Result.download(path, doc.originalName).untrusted();
+     * }</pre>
+     *
+     * <ul>
+     *   <li>A content type off the allowlist (raster images, PDF, plain text, CSV, JSON, office
+     *       documents, archives, audio, video) becomes {@code application/octet-stream}, so an
+     *       {@code .html}, {@code .svg} or {@code .js} is never served as markup or script.</li>
+     *   <li>Anything but a raster image gets {@code Content-Disposition: attachment}; a
+     *       {@code Content-Disposition} that already says {@code attachment} (a filename from
+     *       {@link #download}) is kept.</li>
+     *   <li>Always: {@code Content-Security-Policy: sandbox} and
+     *       {@code X-Content-Type-Options: nosniff}. The sandbox is sent even if an after-middleware
+     *       sets its own CSP.</li>
+     * </ul>
+     *
+     * A non-2xx response (the 404 from {@code fileUnder}) is returned unchanged.
+     */
+    public Result untrusted() {
+        if (status < 200 || status >= 300) return this;
+        contentType = UntrustedContent.safeType(contentType);
+        if (!UntrustedContent.isRasterImage(contentType)) {
+            String disposition = null;
+            String existingName = null;
+            for (var entry : headers.entrySet()) {
+                if (entry.getKey().equalsIgnoreCase("Content-Disposition")) {
+                    existingName = entry.getKey();
+                    disposition = entry.getValue();
+                }
+            }
+            if (disposition == null || !disposition.strip().toLowerCase(java.util.Locale.ROOT).startsWith("attachment")) {
+                if (existingName != null) headers.remove(existingName);
+                header("Content-Disposition", "attachment");
+            }
+        }
+        header("X-Content-Type-Options", "nosniff");
+        header("Content-Security-Policy", "sandbox");
+        untrusted = true;
+        return this;
     }
 
     /**
@@ -180,6 +233,8 @@ public class Result {
             case "jpg", "jpeg" -> "image/jpeg";
             case "gif" -> "image/gif";
             case "webp" -> "image/webp";
+            case "avif" -> "image/avif";
+            case "bmp" -> "image/bmp";
             case "svg" -> "image/svg+xml";
             case "ico" -> "image/x-icon";
             case "pdf" -> "application/pdf";

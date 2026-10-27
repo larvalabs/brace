@@ -88,7 +88,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         prepareUploadTempDir(tempDir);
     }
 
-    record StaticFileMapping(String urlPrefix, String directory) {}
+    record StaticFileMapping(String urlPrefix, String directory, StaticFiles mode) {
+        StaticFileMapping(String urlPrefix, String directory) {
+            this(urlPrefix, directory, StaticFiles.TRUSTED);
+        }
+    }
 
     void setBeforeSessionMiddleware(List<Middleware.BoundBeforeSession> middleware) {
         this.beforeSessionMiddleware = middleware;
@@ -796,6 +800,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (!name.equalsIgnoreCase("Content-Length")) ranged.header(name, value);
         });
         result.setCookies().forEach(cookie -> ranged.header("Set-Cookie", cookie));
+        ranged.untrusted = result.untrusted;
         return ranged.header("Content-Range",
             "bytes " + range.first() + "-" + range.last() + "/" + total);
     }
@@ -945,6 +950,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // Set-Cookie may repeat — append each value so multiple cookies survive to the wire.
         for (var setCookie : result.setCookies()) {
             response.getHeaders().add("Set-Cookie", setCookie);
+        }
+        // M7: an after-middleware that sets the app's own CSP (SecurityHeaders) replaced the
+        // untrusted response's "sandbox" in the single-value header map. Send sandbox as its own
+        // field instead: a browser enforces every CSP header, so the two policies intersect.
+        if (result.untrusted
+                && !"sandbox".equals(response.getHeaders().get("Content-Security-Policy"))) {
+            response.getHeaders().add("Content-Security-Policy", "sandbox");
         }
         if (result instanceof StreamResult streamResult) {
             if (HttpMethod.HEAD.is(response.getRequest().getMethod())) {
@@ -1295,7 +1307,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
 
             try {
-                String contentType = contentTypeForPath(filePath.toString());
+                // M7: an untrusted directory takes its types from the upload allowlist, not the
+                // asset table, so an uploaded .html/.svg/.js is octet-stream, never text/html.
+                boolean untrusted = mapping.mode() == StaticFiles.UNTRUSTED;
+                String contentType = untrusted
+                    ? UntrustedContent.typeForName(filePath.toString())
+                    : contentTypeForPath(filePath.toString());
                 // Streamed, not read whole: this used to be Files.readAllBytes, so serving a large
                 // asset cost its full size in heap for every concurrent request. Range support
                 // rides along with the streaming result, which is what makes seeking in a served
@@ -1307,7 +1324,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 if (mtime > 0) {
                     result.header("Last-Modified", DateGenerator.formatDate(mtime));
                 }
-                return result;
+                return untrusted ? result.untrusted() : result;
             } catch (Exception e) {
                 return Result.error(500, "Internal Server Error");
             }

@@ -60,6 +60,7 @@ Request lifecycle: Jetty receives HTTP → BraceHandler matches route → runs b
 | `Cache` | Cache facade (stats, TTL, serialization, page cache) over a `CacheBackend` |
 | `CacheBackend` | Storage SPI behind `Cache` — in-process default or shared Postgres |
 | `Storage` | S3-compatible object storage client (AWS Sig V4, no SDK) |
+| `StaticFiles` | `staticFiles` mode: `TRUSTED` (default) or `UNTRUSTED` for user uploads (sandboxed, attachment unless a raster image) |
 | `Http` | Fluent outbound HTTP client over `java.net.http` |
 | `RateLimiter` | Per-IP / per-key rate-limiting middleware |
 | `Assets` | Asset URL fingerprinting for cache busting |

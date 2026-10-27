@@ -37,6 +37,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | `findOwnedOr404` and a predicate `findOr404` for user-owned rows | new, security | switch user-owned lookups from `findOr404(type, id)` | [§](#new-owned-lookups) |
 | `Http` refuses non-public destinations; buffered responses capped at 10 MB | security, **breaking** | add `.trusted()` to calls to your own internal services and local test servers; `.maxResponseBytes(n)` for bodies over 10 MB | [§](#breaking-http-refuses-non-public-destinations-by-default) |
 | Templates block script URLs in URL attributes and JS-escape `hx-on*`; `@SafeUrl`, `Url.safe` | security | none, unless a template renders an SVG `data:` or custom-scheme URL from data | [§](#security-templates-neutralize-script-urls-and-escape-htmx-script-attributes) |
+| Uploads served and stored as untrusted: `StaticFiles.UNTRUSTED`, `Result.untrusted()`; `Storage.put(key, file)` types by key; `safeKey`/`safeFilename` neutralize `.html`/`.svg`/…; longest static prefix wins | security, **breaking** for `Storage.put(key, file)` with extensionless keys and code expecting `.svg`/`.html` keys | register upload dirs `UNTRUSTED`, add `.untrusted()` to handlers serving uploads | [§](#breaking-uploads-are-served-and-stored-as-untrusted) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -378,7 +379,8 @@ return Result.fileUnder(publicDir, req.pathParam("name"));
 ```
 
 `fileUnder` picks the content type from the extension, so an uploaded `.html` or `.svg` would
-render in the browser. Serve user uploads with `Result.download(...)` instead.
+render in the browser. Serve user uploads with `.untrusted()`; see
+[uploads are served and stored as untrusted](#breaking-uploads-are-served-and-stored-as-untrusted).
 
 ## Security: no `Server` header; plain-text errors for rejected requests
 
@@ -783,3 +785,90 @@ New: `@SafeUrl` (form fields that must be an absolute `http`/`https` URL), `Url.
 
 With it, `hx-on*`, `hx-vals="js:..."` and `hx-trigger` filters don't run; move such handlers to a
 script file.
+
+## Breaking: uploads are served and stored as untrusted
+
+An uploaded `.html` or `.svg` in a directory served by `staticFiles` came back
+`200 text/html` (or `image/svg+xml`) inline, so its `<script>` ran on the app's origin: stored
+XSS. `Storage.put(key, uploadedFile)` stored the browser-claimed `Content-Type`, so an uploader
+could put a `text/html` object in the bucket. `Storage.safeKey` kept the uploader's extension.
+
+**Static upload directories.** Register them `UNTRUSTED`:
+
+Before:
+
+```java
+app.staticFiles("/assets", "public")
+   .staticFiles("/assets/uploads", "/var/app/uploads");
+```
+
+After:
+
+```java
+app.staticFiles("/assets", "public")
+   .staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);
+```
+
+An untrusted mapping serves a type from an allowlist (raster images, PDF, text, CSV, JSON, office
+documents, archives, audio, video; anything else, `.html`/`.svg`/`.xml`/`.js` included, is
+`application/octet-stream`), sends `Content-Disposition: attachment` for everything but a raster
+image (png, jpeg, gif, webp, avif, bmp, ico), and always sends `Content-Security-Policy: sandbox`
+and `nosniff`. `<img>`, `<audio>` and `<video>` tags keep working. Links straight to a PDF or a
+text file now download it instead of opening it in the browser.
+
+`staticFiles` now throws `IllegalArgumentException` if an untrusted directory is inside a trusted
+one (or the reverse), and when prefixes overlap the **longest prefix wins**, whatever the
+registration order. In the example above, `/assets/uploads` used to be unreachable: `/assets`
+was registered first, claimed every `/assets/...` request, and answered 404.
+
+**Uploads served from a handler.** Add `.untrusted()`; it applies the same rules to any
+`Result` and keeps a `download(...)` filename:
+
+Before:
+
+```java
+return Result.fileUnder(uploadDir, req.pathParam("name"));
+return Result.download(Path.of(doc.path), doc.originalName);
+```
+
+After:
+
+```java
+return Result.fileUnder(uploadDir, req.pathParam("name")).untrusted();
+return Result.download(Path.of(doc.path), doc.originalName).untrusted();
+```
+
+**`Storage.put(key, uploadedFile)` and `putGenerated`** ignore `file.contentType()`. The stored
+type comes from the key's extension through the same allowlist, and every object except a raster
+image is stored with `Content-Disposition: attachment` (signed, like the type). A key without an
+extension is now stored as `application/octet-stream`. Browsers usually still display
+such images in `<img>` tags (they sniff image data), but if you need the type on the object, put the extension in the key or pass a
+type you have verified yourself:
+
+Before:
+
+```java
+storage.put("avatars/" + user.id, file);           // stored as whatever the browser claimed
+```
+
+After:
+
+```java
+storage.put("avatars/" + user.id + ".png", file);  // image/png, from the key
+// or, after checking the bytes yourself:
+storage.put("avatars/" + user.id, file, "image/png");
+```
+
+Objects uploaded before this release keep the type they were stored with. If uploaders could
+reach `put(key, file)` or `putGenerated`, list the bucket for objects whose `Content-Type` is
+`text/html`, `image/svg+xml`, `application/xhtml+xml`, `text/xml` or `application/xml` and
+re-upload or delete them.
+
+**`Storage.safeKey` and `UploadedFile.safeFilename()`** neutralize an executable final extension
+(`html`, `htm`, `xhtml`, `shtml`, `mht`, `svg`, `svgz`, `xml`, `xsl`, `xslt`, `js`, `mjs`, `css`,
+`wasm`, `swf`, `php`, `phtml`, `asp`, `jsp`, `cgi` and a few more, any case). `safeKey` replaces
+it: `safeKey("u", "logo.svg")` is `u/<uuid>.bin`. `safeFilename()` appends: `page.HTML` becomes
+`page.HTML.bin`. Other extensions, `pdf` included, are kept. Only the last extension counts, so
+`x.svg.png` stays `.png`. `Storage.extension(...)` is unchanged and still returns `svg`. Code that
+read the original extension back from a generated key should use `Storage.extension(file.filename())`
+instead.
