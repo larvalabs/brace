@@ -43,8 +43,8 @@ final class MessageBusSigner {
     /** Unpadded base64url of a 32-byte HMAC. */
     static final int SIG_LENGTH = 43;
     // Bounds the nonce cache under a very high legitimate broadcast rate (forgeries never reach it).
-    // Past this, the oldest nonces are forgotten early and fall back to the time window alone.
-    private static final int MAX_SEEN = 100_000;
+    // Past this the oldest nonces are forgotten early, and the floor below rises to cover them.
+    static final int MAX_SEEN = 100_000;
     private static final String KEY_LABEL = "brace-ws-message-bus/v1";
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -67,6 +67,13 @@ final class MessageBusSigner {
     // Nonce -> the time after which the timestamp check alone rejects it. Insertion order is close
     // to expiry order, so expired entries are trimmed from the head.
     private final LinkedHashMap<String, Long> seen = new LinkedHashMap<>();
+    // Nothing issued at or before this is accepted: a message issued before this instance started
+    // (its nonce cache was empty then), or one whose nonce had to be evicted while still in its
+    // window. Without it a captured payload could be replayed once after a restart or a full cache.
+    private long floor;
+    // The latest clock reading seen. The window's old edge follows it, not the raw clock, so a
+    // clock stepping backwards can't bring an already-trimmed payload back into the window.
+    private long latestNow;
 
     MessageBusSigner(String baseSecret) {
         this(baseSecret, System::currentTimeMillis);
@@ -82,6 +89,9 @@ final class MessageBusSigner {
                 KEY_LABEL.getBytes(StandardCharsets.UTF_8));
         this.channel = channelFor(key);
         this.clock = clock;
+        long start = clock.getAsLong();
+        this.floor = start - 1; // messages issued from this instance's first millisecond on
+        this.latestNow = start;
     }
 
     /**
@@ -149,25 +159,43 @@ final class MessageBusSigner {
             throw new RejectedException(Rejection.MALFORMED);
         }
         long now = clock.getAsLong();
+        latestNow = Math.max(latestNow, now);
         long issued = t.longValue();
-        if (Math.abs(now - issued) > WINDOW_MS) {
+        if (issued > now + WINDOW_MS || issued < latestNow - WINDOW_MS) {
             throw new RejectedException(Rejection.EXPIRED);
         }
-        trimSeen(now);
+        if (issued <= floor) {
+            throw new RejectedException(Rejection.REPLAYED);
+        }
+        trimSeen();
         if (seen.putIfAbsent(nonce, issued + WINDOW_MS) != null) {
             throw new RejectedException(Rejection.REPLAYED);
         }
         return body;
     }
 
-    private void trimSeen(long now) {
+    private void trimSeen() {
         Iterator<Map.Entry<String, Long>> it = seen.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<String, Long> head = it.next();
-            if (head.getValue() >= now && seen.size() < MAX_SEEN) {
+            boolean expired = head.getValue() < latestNow;
+            if (!expired && seen.size() < MAX_SEEN) {
                 break;
             }
+            // Evicted while still in its window (the cache is full): refuse anything issued up to
+            // then, since its nonce is no longer remembered.
+            if (!expired) floor = Math.max(floor, head.getValue() - WINDOW_MS);
             it.remove();
+        }
+    }
+
+    /** Base64url SHA-256 of a spill row's payload, carried in the signed reference to it. */
+    static String contentHash(String payload) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 

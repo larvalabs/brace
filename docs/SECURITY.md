@@ -207,7 +207,9 @@ altered without the secret.
   demotion. Cache the lookup.
 - **Secret rotation.** `SessionOptions.previousSecrets(...)` opens cookies sealed with earlier
   secrets and re-seals them with the current one, so rotating logs nobody out. The ops token
-  secret is derived from the session secret, so ops clients re-authenticate after a rotation.
+  secret is derived from the session secret, so ops clients re-authenticate after a rotation, and
+  so is the key for WebSocket broadcasts between instances on Postgres: during a rolling rotation,
+  instances on the old and new secret don't receive each other's broadcasts until all match.
 - **Cookie name.** Wherever the browser allows it (`Secure`, `Path=/`, no `Domain` — every
   default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
   set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant
@@ -1114,16 +1116,20 @@ Since 0.1.11:
   (under its own label) from the session secret, or from `.opsSecret(...)` when the app has no
   sessions. A receiver checks it in constant time and drops anything unsigned or wrongly signed.
   Payloads too large for a `NOTIFY` (over 7900 bytes, signature included) go through the
-  `brace_ws_messages` table as before; the row is signed too, so writing that table doesn't help
-  either.
+  `brace_ws_messages` table as before; the row is signed too, and the signed reference to it
+  carries the row's content hash, so writing that table can't inject or swap messages (deleting
+  rows can still suppress them, as it always could).
 - **The channel is per app**: `brace_ws_` plus 16 hex digits of a hash of the key. Instances of
   one app agree on it; apps with different secrets never share one. The name is not a secret
   (it is visible to a superuser in `pg_stat_activity`), and nothing depends on it being one.
 - **Replays are refused.** Every payload carries an issued-at time and a random nonce. A
   receiver drops a payload more than 60 seconds from its own clock, either way, and any nonce it
-  has already accepted. `LISTEN` needs no privilege, so a forger can also capture genuine
-  payloads; without this, one captured message could be re-sent thousands of times to flood a
-  room. Instances' clocks must agree to well within 60 seconds (NTP does).
+  has already accepted. It also refuses anything issued before it started (its nonce memory
+  starts empty) or before the newest nonce it had to forget early under load, and the window's old
+  edge never moves back with the clock. `LISTEN` needs no privilege, so a forger can also capture
+  genuine payloads; without this, one captured message could be re-sent thousands of times to
+  flood a room. Instances' clocks must agree to well within 60 seconds (NTP does), and a payload
+  that waits over 60 seconds in a backed-up listener is dropped rather than delivered late.
 - **Rejections are counted, not shouted.** Dropped payloads are logged as a
   `ws_broadcast_rejected` event at most once a minute, with the reason and a count since the last
   line.

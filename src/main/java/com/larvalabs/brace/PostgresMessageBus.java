@@ -156,7 +156,9 @@ final class PostgresMessageBus implements MessageBus {
                 }
                 String ref;
                 try {
-                    ref = signer.seal(Map.of("sid", id));
+                    // The reference names the row and its content hash, so a row rewritten after
+                    // this (another genuine signed payload copied in) isn't accepted for it.
+                    ref = signer.seal(Map.of("sid", id, "h", MessageBusSigner.contentHash(payload)));
                 } catch (Exception e) {
                     throw new IllegalStateException("could not sign the spill reference", e);
                 }
@@ -246,6 +248,10 @@ final class PostgresMessageBus implements MessageBus {
                 }
                 String full = fetchSpill(sid.longValue());
                 if (full == null) {
+                    return;
+                }
+                if (!MessageBusSigner.contentHash(full).equals(body.get("h"))) {
+                    reject(MessageBusSigner.Rejection.BAD_SIGNATURE);
                     return;
                 }
                 // The row is no harder to write than the channel, so it carries its own signature.

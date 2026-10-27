@@ -189,9 +189,12 @@ class WebSocketBusSigningPostgresIT extends PostgresTestBase {
         Thread.sleep(500);
 
         // Just under the inline limit before signing, over it after: exercises the overhead.
+        long spilledBefore = maxSpillId();
         String big = "y".repeat(PostgresMessageBus.INLINE_LIMIT_BYTES - 40);
         wsA1.sendText(big, true);
         assertEquals(big, onA2.messages.poll(10, TimeUnit.SECONDS));
+        // It went through the spill table, not inline: the signature counted toward the limit.
+        assertTrue(maxSpillId() > spilledBefore, "the signed payload must have spilled");
 
         wsA1.sendClose(WebSocket.NORMAL_CLOSURE, "done");
         wsA2.sendClose(WebSocket.NORMAL_CLOSURE, "done");
@@ -209,6 +212,14 @@ class WebSocketBusSigningPostgresIT extends PostgresTestBase {
                 .newWebSocketBuilder()
                 .buildAsync(URI.create("ws://localhost:" + app.actualPort() + "/ws"), listener)
                 .get(5, TimeUnit.SECONDS);
+    }
+
+    private static long maxSpillId() throws Exception {
+        try (Connection conn = raw(); var rs = conn.createStatement().executeQuery(
+                "SELECT COALESCE(MAX(id), 0) FROM brace_ws_messages")) {
+            rs.next();
+            return rs.getLong(1);
+        }
     }
 
     private static Connection raw() throws Exception {
