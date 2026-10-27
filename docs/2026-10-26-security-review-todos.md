@@ -312,7 +312,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     entry.
   - **Tier: small.**
 
-- [ ] **M4: JTE's `javascript:` guard is narrow and bypassable; Brace adds no URL sanitizing**, `TemplateEngine.java`
+- [x] **M4: JTE's `javascript:` guard is narrow and bypassable; Brace adds no URL sanitizing**, `TemplateEngine.java`
   - **What's wrong.** JTE's `OwaspHtmlTemplateOutput` checks only `<a href>`, and only for the
     literal (trimmed, case-insensitive) prefix `javascript:`.
   - **Verified.**
@@ -337,7 +337,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Precompiled templates get the same output class.
   - **Tier: frontier.** It hooks JTE internals, and both the dev and precompiled paths need it.
 
-- [ ] **M5: User data inside `hx-on*` attributes becomes JavaScript**, `TemplateEngine.java`, `src/main/resources/brace/htmx.min.js`
+- [x] **M5: User data inside `hx-on*` attributes becomes JavaScript**, `TemplateEngine.java`, `src/main/resources/brace/htmx.min.js`
   - **What's wrong.** JTE JS-escapes `on*` attributes but treats `hx-on:click`, `hx-on-click`,
     `hx-vals='js:…'` and `hx-trigger` filters as plain attributes.
   - **Verified.** `hx-on:click="go('${s}')"` with `s = "');alert(document.domain)//"` renders

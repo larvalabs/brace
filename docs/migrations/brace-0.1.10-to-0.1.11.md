@@ -36,6 +36,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Request data in a query string throws in dev and tests; `Sort` for `?sort=` | security, **breaking** | bind values with `?`, build `?sort=` orders with `Sort` | [§](#breaking-request-data-in-a-query-string-throws-in-dev-and-tests) |
 | `findOwnedOr404` and a predicate `findOr404` for user-owned rows | new, security | switch user-owned lookups from `findOr404(type, id)` | [§](#new-owned-lookups) |
 | `Http` refuses non-public destinations; buffered responses capped at 10 MB | security, **breaking** | add `.trusted()` to calls to your own internal services and local test servers; `.maxResponseBytes(n)` for bodies over 10 MB | [§](#breaking-http-refuses-non-public-destinations-by-default) |
+| Templates block script URLs in URL attributes and JS-escape `hx-on*`; `@SafeUrl`, `Url.safe` | security | none, unless a template renders an SVG `data:` or custom-scheme URL from data | [§](#security-templates-neutralize-script-urls-and-escape-htmx-script-attributes) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -750,3 +751,35 @@ try (var s = Http.get(exportUrl).bearer(token).stream()) {
 New: `Http.isPublicAddress(InetAddress)` applies the same check, to reject a URL when a user
 enters it. See "Server-Side Request Forgery (SSRF)" in `docs/SECURITY.md` for the full range list
 and the DNS-rebinding window that remains.
+
+## Security: templates neutralize script URLs and escape htmx script attributes
+
+JTE only checked `<a href>`, and only for a literal `javascript:` prefix, so `java\tscript:`,
+`data:text/html,...`, and any script URL in `src`, `action`, `formaction` or `hx-get` reached
+the page: `<a href="${user.website}">` was stored XSS. User data in `hx-on:click="..."` was only
+HTML-escaped, which the browser undoes before htmx runs the code, and JTE's JavaScript escaping
+for `on*` attributes left `&`, so `&#39;` in user data closed the string there too.
+
+Templates now render through Brace's own output:
+
+- A value at the start of a URL attribute (`href`, `src`, `action`, `formaction`, `xlink:href`,
+  `poster`, `hx-get`/`post`/`put`/`patch`/`delete`, ...) must be relative or
+  `http`/`https`/`mailto`/`tel`; anything else becomes `about:invalid#blocked`.
+- `on*`, `hx-on*`, `hx-vals`, `hx-headers` and `hx-trigger` values are JavaScript-escaped, then
+  HTML-escaped.
+- `srcdoc` values are text, never markup.
+
+No change for ordinary templates. Raster `data:image/...` URLs in `src`/`poster` still work. A
+template that renders an SVG `data:` URL or a custom app scheme from data into a URL attribute
+now gets `about:invalid#blocked`; write such a URL with `$unsafe{...}` after validating it
+yourself.
+
+New: `@SafeUrl` (form fields that must be an absolute `http`/`https` URL), `Url.isSafe(url)` and
+`Url.safe(url)`. Recommended in every layout:
+
+```html
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+```
+
+With it, `hx-on*`, `hx-vals="js:..."` and `hx-trigger` filters don't run; move such handlers to a
+script file.

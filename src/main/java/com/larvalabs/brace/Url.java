@@ -28,6 +28,36 @@ public class Url {
 
     private static volatile Router router;
 
+    /**
+     * Whether {@code url} is safe to put in a link: relative, or an {@code http}, {@code https},
+     * {@code mailto} or {@code tel} URL, judged the way a browser parses it (so
+     * {@code "java\tscript:"} is a script URL). Templates apply the same rule to URL attributes
+     * on output (M4); use this where a URL goes somewhere they don't, such as a JSON field a
+     * client puts in an {@code href}.
+     */
+    public static boolean isSafe(String url) {
+        return url != null && BraceHtmlOutput.isSafeUrl(url);
+    }
+
+    /** {@code url} if {@link #isSafe}, otherwise an inert {@code about:invalid#blocked}. */
+    public static String safe(String url) {
+        return isSafe(url) ? url : BraceHtmlOutput.BLOCKED_URL;
+    }
+
+    /** An absolute {@code http}/{@code https} URL with a host: what {@code @SafeUrl} accepts. */
+    static boolean isAbsoluteHttp(String url) {
+        String normalized = BraceHtmlOutput.normalize(url);
+        if (!normalized.equals(url.strip())) return false; // embedded tabs/newlines: refuse, don't repair
+        try {
+            var uri = new java.net.URI(normalized);
+            String scheme = uri.getScheme();
+            return scheme != null && (scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))
+                && uri.getHost() != null && !uri.getHost().isEmpty();
+        } catch (java.net.URISyntaxException e) {
+            return false;
+        }
+    }
+
     /** Set by {@link Brace} at construction; the router named routes resolve against. */
     static void router(Router r) {
         router = r;

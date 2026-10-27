@@ -590,7 +590,9 @@ public record PostForm(
 }
 ```
 
-Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@In({"a","b"})`, `@Optional`.
+Annotations: `@Required`, `@MinLength(n)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@Email`, `@SafeUrl`, `@In({"a","b"})`, `@Optional`.
+`@SafeUrl` accepts only an absolute `http`/`https` URL with a host: use it on any link a user
+supplies (a profile website) that a page will render as an `href`.
 `@Min`/`@Max` compare exactly, fractions included (`@Min(0)` rejects `-0.5`); `double`/`float`
 components reject NaN and ±Infinity with "must be a finite number".
 
@@ -650,6 +652,23 @@ JTE compiled templates. Files are `.jte` in the configured templates directory.
 Render from handler: `Result.view("posts/index", "title", "Posts", "posts", posts)`. Template params are type-checked at compile time.
 
 Partial templates use `_` prefix convention: `_list.jte`, `_stats.jte`.
+
+**Output escaping.** `${...}` is escaped for where it lands: text, attribute, `<script>`. On top
+of JTE's escaping, Brace's template output:
+- **URL attributes** (`href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `hx-get`/
+  `hx-post`/... and their `data-hx-` forms): a value at the start of the attribute must be
+  relative or `http`/`https`/`mailto`/`tel`, judged as a browser parses it; anything else
+  (`javascript:`, `data:`, `java\tscript:`) renders as `about:invalid#blocked`, except that `src`
+  and `poster` also take raster `data:image/png|jpeg|gif|webp|avif|bmp` URLs. After a static
+  prefix (`href="/users/${id}"`) the value can't pick the scheme and is only escaped.
+- **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-headers`, `hx-trigger`): JavaScript-
+  escaped, then HTML-escaped, so `hx-on:click="select('${name}')"` passes `name` as a string.
+  Still, these attributes are code: keep user data out of them where you can and pass it in
+  `data-*` attributes or `hx-vals` JSON instead.
+- `srcdoc`: user data becomes text in the frame, never markup.
+
+`$unsafe{...}` bypasses all of it. Outside templates, `Url.isSafe(url)` / `Url.safe(url)` apply
+the same URL rule (e.g. a URL returned in JSON for a client to put in an `href`).
 
 **Dev vs prod compilation.** In dev mode templates compile on first render and
 hot-reload on change. In prod mode (`brace.mode=prod`, set by `brace run`) the
@@ -1396,7 +1415,18 @@ entirely — they reach neither stdout nor `/ops/logs`.
 
 Bundled htmx 2.0.10 — add `<script src="/__brace/htmx.min.js"></script>` to your layout, plus
 `${csrfMeta}` in the `<head>` and `<script src="/__brace/csrf-htmx.js"></script>` so non-GET htmx
-requests carry the CSRF token (see CSRF). An htmx request rejected by `Access.session` gets 401
+requests carry the CSRF token (see CSRF). Also turn off htmx's script evaluation, which nothing
+in the default pattern needs:
+
+```html
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+```
+
+`allowEval:false` stops htmx evaluating code from attributes: `hx-on*` handlers, `hx-vals="js:..."`
+and `hx-trigger` filters don't run (plain `onclick` and script files are unaffected), so attach
+behavior with `addEventListener` in a script file. `allowScriptTags:false` stops `<script>` in
+swapped-in HTML from running. Drop either only if a page needs it; Brace still escapes user data
+in those attributes (see Templates). An htmx request rejected by `Access.session` gets 401
 with `HX-Redirect`, so the browser navigates to the login page instead of swapping it in.
 Default pattern: handler returns full page, htmx uses `hx-select` to extract elements client-side. Optimize by detecting htmx requests:
 

@@ -250,6 +250,10 @@ public class FormBinder {
                         errors.add(name, "must be a valid email");
                     }
                 }
+            } else if (ann instanceof com.larvalabs.brace.annotation.SafeUrl) {
+                if (raw != null && !raw.isEmpty() && !Url.isAbsoluteHttp(raw)) {
+                    errors.add(name, "must be an http or https URL");
+                }
             } else if (ann instanceof In in) {
                 if (raw != null && !raw.isEmpty()) {
                     if (!Arrays.asList(in.value()).contains(raw)) {

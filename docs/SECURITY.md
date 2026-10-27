@@ -8,6 +8,7 @@ This document describes Brace's security features and best practices for buildin
 - [SQL Injection](#sql-injection)
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
+- [Cross-Site Scripting (XSS)](#cross-site-scripting-xss)
 - [Serialization](#serialization)
 - [Open Redirects](#open-redirects)
 - [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf)
@@ -319,6 +320,42 @@ tokens with `.csrf(false)`.
    - Send the CSRF token in the `X-CSRF-Token` request header
    - Use bearer token authentication and call `.csrf(false)` on those routes
 3. **For public APIs:** Use API keys or OAuth, not cookie-based sessions
+
+---
+
+## Cross-Site Scripting (XSS)
+
+Templates escape `${...}` for the context it lands in (JTE), and Brace's template output adds the
+contexts where escaping alone doesn't stop script:
+
+- **URL attributes.** `href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `cite`,
+  `background`, `data`, `hx-get`, `hx-post`, `hx-put`, `hx-patch`, `hx-delete` (and `data-hx-`
+  forms), on any tag. HTML escaping leaves `javascript:alert(1)` intact, and browsers strip
+  tabs, newlines and leading control characters before reading the scheme, so
+  `java\tscript:` is a script URL too. A value at the start of the attribute is normalized the
+  same way and allowed only as a relative URL or `http`, `https`, `mailto` or `tel`; anything
+  else renders as `about:invalid#blocked`. `src` and `poster` also accept raster
+  `data:image/` URLs (png, jpeg, gif, webp, avif, bmp; never SVG). A value after a static prefix
+  (`href="/users/${id}"`) can't choose the scheme and is only escaped.
+- **Script attributes.** `on*`, `hx-on*` (`hx-on:click`, `hx-on-click`, `data-hx-on:*`),
+  `hx-vals`, `hx-headers` and `hx-trigger` are JavaScript-escaped and then HTML-escaped. HTML
+  escaping alone is undone by the browser before the code runs (`&#39;` is a quote again), and
+  JTE's JavaScript escaping for `on*` left `&` alone, so an entity in user data still closed the
+  string.
+- **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup.
+
+Both the hot-reload and precompiled render paths use this output. `$unsafe{...}` bypasses it, as
+does `Result.html(...)`, which is a raw sink.
+
+At input, `@SafeUrl` on a form field accepts only an absolute `http`/`https` URL; outside
+templates, `Url.isSafe(url)` / `Url.safe(url)` apply the template rule (for a URL sent in JSON
+for a client to use as a link).
+
+**htmx evaluates code.** Bundled htmx runs with `allowEval` and `allowScriptTags` on unless a
+page sets `<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false}'>`.
+With them off, `hx-on*`, `js:` values and trigger filters don't run, and neither do `<script>`
+tags in swapped-in HTML, so a template mistake can't become code that way. Recommended unless a
+page relies on them.
 
 ---
 
