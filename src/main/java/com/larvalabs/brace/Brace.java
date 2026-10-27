@@ -634,15 +634,49 @@ public class Brace {
     }
 
     /**
-     * The public origin(s) of this app ({@code "https://app.example.com"}) for ops CLI logins
-     * (M14). A {@code brace} CLI signs the server's origin into its login, and the server accepts
-     * it when its host is the one the request arrived for; behind a proxy that rewrites
-     * {@code Host} (nginx's {@code proxy_pass} does by default), list the public origin here, or
-     * have the proxy pass the real {@code Host} through.
+     * The public origin(s) of this app ({@code "https://app.example.com"}), the only ones an ops
+     * CLI login may be signed for (M14). The {@code brace} CLI signs the server's origin into its
+     * login, so a signature collected by another server (a {@code .brace} pointing elsewhere) is
+     * refused here. Required in prod mode when ops is on; also read from the
+     * {@code BRACE_OPS_ORIGINS} environment variable when not set in code. Each argument may be a
+     * comma-separated list; null and blank entries are skipped (an unset config key).
+     * Without it (dev, tests) the origin's host must match the request's {@code Host}, which a
+     * client can choose on a directly exposed app, so it's no defense there.
      */
     public Brace opsOrigins(String... origins) {
-        this.opsOrigins.addAll(List.of(origins));
+        if (origins == null) return this;
+        for (String origin : String.join(",", java.util.Arrays.stream(origins)
+                .map(o -> o == null ? "" : o).toList()).split(",")) {
+            if (origin.isBlank()) continue;
+            if (parseOrigin(origin) == null) {
+                throw new IllegalArgumentException("opsOrigins takes origins like https://app.example.com "
+                    + "(scheme and host, optional port, nothing else): " + origin);
+            }
+            this.opsOrigins.add(origin.strip());
+        }
         return this;
+    }
+
+    /**
+     * {@code value} as a normalized origin ({@code scheme://host[:port]}, lower-case, default port
+     * dropped), or null unless it's an http(s) URL with a host and nothing but an optional
+     * trailing "/": no user info, path, query or fragment, which an origin can't carry and a URL
+     * shown to a person can use to mislead ({@code https://app.example.com@evil.example}).
+     */
+    static String parseOrigin(String value) {
+        if (value == null) return null;
+        try {
+            var uri = new java.net.URI(value.strip());
+            String scheme = uri.getScheme();
+            if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) return null;
+            if (uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawQuery() != null
+                    || uri.getRawFragment() != null) return null;
+            String path = uri.getRawPath();
+            if (path != null && !path.isEmpty() && !path.equals("/")) return null;
+            return normalizeOrigin(scheme + "://" + uri.getRawAuthority());
+        } catch (java.net.URISyntaxException e) {
+            return null;
+        }
     }
 
     // Job scheduling
@@ -1169,7 +1203,16 @@ public class Brace {
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             opsHandler.setAnalytics(analytics);
-            opsHandler.setExtraOrigins(opsOrigins);
+            if (opsOrigins.isEmpty() && System.getenv("BRACE_OPS_ORIGINS") != null) {
+                opsOrigins(System.getenv("BRACE_OPS_ORIGINS"));
+            }
+            if (opsOrigins.isEmpty() && "prod".equals(System.getProperty("brace.mode"))) {
+                throw new IllegalStateException("Ops is on in prod mode without app.opsOrigins(\"https://your-app\") "
+                    + "(or BRACE_OPS_ORIGINS): the ops CLI login is bound to the server's origin, and without "
+                    + "it configured the server can only compare against the Host header, which a client "
+                    + "talking to the app directly can choose.");
+            }
+            opsHandler.setPinnedOrigins(opsOrigins);
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on

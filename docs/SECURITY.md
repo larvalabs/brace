@@ -712,6 +712,7 @@ Fix the proxy:
 location / {
     proxy_pass http://127.0.0.1:8080;
     proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Host  $host;   # don't pass a client's X-Forwarded-Host through
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
@@ -722,6 +723,7 @@ location /live {                       # each WebSocket path
     proxy_set_header Upgrade           $http_upgrade;
     proxy_set_header Connection        "upgrade";
     proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Host  $host;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
@@ -1249,13 +1251,20 @@ the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
 **The signature is bound to a server.** The CLI reads the server's URL from the committed
 `.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
 signature and relay it to the real server within the time window. The server accepts a v3
-signature only when its origin's host is the host the request arrived for (`X-Forwarded-Host`
-from a trusted proxy, else `Host`; the port isn't compared, since behind a proxy the app listens
-on another one) or an origin listed with `app.opsOrigins("https://app.example.com")`. List the
-public origin there when a proxy rewrites `Host` (nginx's `proxy_pass` does by default), or pass
-the real `Host` through. The CLI also keys its token cache by origin, so a token minted for one
-server is never sent to another, and warns when a project's ops URL changes from the last server
-it logged in to (remembered in `~/.brace/ops-origins.json`).
+signature only for an origin listed with `app.opsOrigins("https://app.example.com")` (or the
+`BRACE_OPS_ORIGINS` environment variable, comma-separated), compared exactly: scheme, host and
+port. The request's `Host` and `X-Forwarded-Host` play no part, because the client relaying a
+signature chooses those: an app reachable directly, or a proxy that passes a client's
+`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Prod
+mode refuses to start with ops on and no origin configured. In dev and tests, with none set, the
+origin's host must match the request's host instead, which is no defense against a client that
+can reach the app directly.
+
+The CLI keys its token cache by origin (and checks the origin stored in the cache file), so a
+token minted for one server is never sent to another; it refuses an ops URL that is more than an
+origin (user info, path, query); and it warns when a project's ops URL changes from the last
+server it logged in to (remembered in `~/.brace/ops-origins.json`; a best-effort hint, not a
+control: a new clone or a new `ops.env` won't trigger it).
 
 Protocol **v2 is removed** as of 0.1.11: it signed no origin, so a signature was good at any
 server. A v2 body gets a 401 naming the cause; upgrade the CLI with the server.

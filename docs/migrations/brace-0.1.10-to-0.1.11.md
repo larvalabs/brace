@@ -979,24 +979,28 @@ within its 30-second window.
 
 - **v3 signs the origin.** The signed message is
   `"brace-ops-auth-v3\n" + origin + "\n" + publicKey + "\n" + timestamp + "\n" + nonce`, and the
-  server accepts it only when the origin's host is the host the request arrived for.
+  server accepts it only for the origins you configure with `app.opsOrigins(...)` (or
+  `BRACE_OPS_ORIGINS`), compared exactly. **Prod mode with ops on fails to start without one.**
 - **v2 is removed:** a v2 login gets `401 Ops auth protocol v2 was removed in 0.1.11…`. Upgrade
   the `brace` CLI along with the server; a 0.1.11 CLI can't log in to a 0.1.10 server either.
-- **The CLI's token cache is per server** (`target/.brace-token-<id>`), and the CLI warns when a
-  project's ops URL changes from the last server it logged in to.
+- **The CLI's token cache is per server** (`target/.brace-token-<id>`), the CLI refuses an ops
+  URL with a path, query or user info, and it warns when a project's ops URL changes from the last
+  server it logged in to.
 
-**Behind a proxy that rewrites `Host`** (nginx's `proxy_pass` sets `Host` to the upstream name
-unless told otherwise), the server sees its internal name and refuses the login with
-`This request was signed for https://app.example.com, which is not this server`. Either pass
-the real host through, or list the public origin:
-
-```nginx
-proxy_set_header Host $host;
-```
+Add the app's public origin, in code or in the environment:
 
 ```java
-app.ops("ops-authorized-keys").opsOrigins("https://app.example.com");
+app.ops("ops-authorized-keys").opsOrigins(config.get("ops.origins", "https://app.example.com"));
 ```
+
+```bash
+BRACE_OPS_ORIGINS=https://app.example.com
+```
+
+The `Host` header isn't used for this: a client that reaches the app directly, or through a proxy
+that passes its `X-Forwarded-Host` along, could claim any host. If your nginx config trusts the
+proxy (`trustedProxies`), also set `proxy_set_header X-Forwarded-Host $host;` so a client's own
+`X-Forwarded-Host` never reaches the app.
 
 Hand-written clients: see "Auth protocol (v3)" in `docs/agent-ops-guide.md`.
 

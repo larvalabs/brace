@@ -69,7 +69,7 @@ public class CliAuth {
     }
 
     private static String bearer(CliConfig cfg, Path projectDir, boolean retried) throws Exception {
-        var cached = readCache(cacheFile(projectDir, cfg));
+        var cached = readCache(cacheFile(projectDir, cfg), originOf(cfg));
         if (cached != null) return cached;
 
         var kp = loadKeypair(cfg);
@@ -105,7 +105,7 @@ public class CliAuth {
         if (response.statusCode() != 200) {
             throw new OpsAuthFailure(response.statusCode(), response.body());
         }
-        return cacheToken(cacheFile(projectDir, cfg), response);
+        return cacheToken(cacheFile(projectDir, cfg), origin, response);
     }
 
     private static HttpResponse<String> postAuth(CliConfig cfg, Map<String, ?> body) throws Exception {
@@ -118,11 +118,11 @@ public class CliAuth {
             HttpResponse.BodyHandlers.ofString());
     }
 
-    private static String cacheToken(Path file, HttpResponse<String> response) throws Exception {
+    private static String cacheToken(Path file, String origin, HttpResponse<String> response) throws Exception {
         JsonNode parsed = Json.mapper().readTree(response.body());
         String token = parsed.get("token").asText();
         String expiresAt = parsed.get("expiresAt").asText();
-        writeCache(file, token, expiresAt);
+        writeCache(file, origin, token, expiresAt);
         return token;
     }
 
@@ -133,7 +133,15 @@ public class CliAuth {
      */
     static Path cacheFile(Path projectDir, CliConfig cfg) {
         String origin = originOf(cfg);
-        String id = OpsKeys.fingerprint(origin); // base64url: safe in a file name
+        // The full SHA-256 (base64url, safe in a file name), not a short fingerprint: a name an
+        // attacker could grind to collide with prod's would get prod's token sent their way.
+        String id;
+        try {
+            id = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                java.security.MessageDigest.getInstance("SHA-256").digest(origin.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
         return projectDir.resolve("target").resolve(".brace-token-" + id);
     }
 
@@ -144,11 +152,12 @@ public class CliAuth {
     }
 
     static String originOf(CliConfig cfg) {
-        String url = cfg.url();
-        if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) {
-            throw new IllegalArgumentException("ops." + cfg.env() + ".url must start with https:// (or http:// for local): " + url);
+        String origin = Brace.parseOrigin(cfg.url());
+        if (origin == null) {
+            throw new IllegalArgumentException("ops." + cfg.env() + ".url must be the app's origin, like "
+                + "https://app.example.com (http:// for local), with no user info, path or query: " + cfg.url());
         }
-        return Brace.normalizeOrigin(url);
+        return origin;
     }
 
     /** Removes every cached token for this project, whatever server it was for. */
@@ -217,10 +226,11 @@ public class CliAuth {
         throw new RuntimeException("OPS_PRIVATE_KEY does not match any authorized key.");
     }
 
-    private static String readCache(Path file) {
+    private static String readCache(Path file, String origin) {
         try {
             if (!Files.exists(file)) return null;
             JsonNode node = Json.mapper().readTree(Files.readString(file));
+            if (!node.hasNonNull("origin") || !origin.equals(node.get("origin").asText())) return null;
             String expiresAt = node.get("expiresAt").asText();
             if (Instant.parse(expiresAt).minusSeconds(60).isBefore(Instant.now())) return null;
             return node.get("token").asText();
@@ -229,10 +239,10 @@ public class CliAuth {
         }
     }
 
-    private static void writeCache(Path file, String token, String expiresAt) {
+    private static void writeCache(Path file, String origin, String token, String expiresAt) {
         try {
             Files.createDirectories(file.getParent());
-            String json = Json.mapper().writeValueAsString(Map.of("token", token, "expiresAt", expiresAt));
+            String json = Json.mapper().writeValueAsString(Map.of("origin", origin, "token", token, "expiresAt", expiresAt));
             SecretFiles.writeStringWithOwnerOnlyPermissions(file, json);
         } catch (Exception e) {
             // Caching is best-effort

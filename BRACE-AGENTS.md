@@ -72,6 +72,7 @@ var app = Brace.app()
     .cache(Brace.cache())
     .storage(Storage.s3(config))
     .ops("ops-authorized-keys")
+    .opsOrigins(config.get("ops.origins"))           // the app's public origin: required in prod with ops
     .staticFiles("/assets", "public")
     .maxUploadSize("10MB")
     .after(SecurityHeaders.strict());
@@ -1269,7 +1270,9 @@ all-lowercase-letters) log a warning but are allowed. Use 32+ random characters.
 
 ## Ops
 
-Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`; scaffold config with
+Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`, plus
+`app.opsOrigins("https://your-app")` (or `BRACE_OPS_ORIGINS`), the public origin CLI logins are
+signed for, which prod mode requires; scaffold config with
 `brace init`, keys with `brace ops keypair`. **Operating in production?** Start with
 `brace check --env prod --json` — not `brace status`. The full ops reference — auth keys and
 scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, storage/retention —

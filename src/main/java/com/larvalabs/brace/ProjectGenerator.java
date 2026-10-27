@@ -193,7 +193,8 @@ public class App {
             .database(db)
             .templates("views")
             .sessions(config.get("session.secret"))
-            .ops("ops-authorized-keys");
+            .ops("ops-authorized-keys")
+            .opsOrigins(config.get("ops.origins"));
 
         routes(app);
 
@@ -301,8 +302,11 @@ class HomeControllerTest {
                 "db.user=" + projectName + "\n" +
                 "db.pass=\n" +
                 "session.secret=" + sessionSecret + "\n" +
+                "# The app's public origin; brace ops CLI logins are signed for it.\n" +
+                "ops.origins=http://localhost:8080\n" +
                 "\n" +
                 "%dev.port=9000\n" +
+                "%dev.ops.origins=http://localhost:9000\n" +
                 "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");
@@ -330,8 +334,12 @@ class HomeControllerTest {
                 "db.user=${DB_USER}\n" +
                 "db.pass=${DB_PASS}\n" +
                 "session.secret=${SESSION_SECRET}\n" +
+                "# The app's public origin, e.g. https://app.example.com: brace ops CLI logins are\n" +
+                "# signed for it, and prod refuses to start with ops on and none set.\n" +
+                "ops.origins=${OPS_ORIGINS}\n" +
                 "\n" +
                 "%dev.port=9000\n" +
+                "%dev.ops.origins=http://localhost:9000\n" +
                 "%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1\n" +
                 "%dev.db.user=\n" +
                 "%dev.db.pass=\n");

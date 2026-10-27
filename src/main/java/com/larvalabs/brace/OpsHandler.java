@@ -101,18 +101,13 @@ public class OpsHandler {
     public record OpsAuthRequest(String v, String publicKey, String timestamp, String signature,
                                  String nonce, Integer ttlSeconds, String scope, String origin) {}
 
-    // M14: origins a v3 auth signature may name besides the host the request arrived for: the
-    // public origin when a proxy rewrites Host (nginx's proxy_pass does by default).
-    private volatile List<String> extraOrigins = List.of();
+    // M14: the only origins a v3 auth signature may name, when configured (app.opsOrigins).
+    private volatile List<String> pinnedOrigins = List.of();
 
-    void setExtraOrigins(List<String> origins) {
+    void setPinnedOrigins(List<String> origins) {
         var normalized = new java.util.ArrayList<String>();
-        for (String o : origins) {
-            if (o == null || o.isBlank()) continue;
-            if (!o.contains("://")) throw new IllegalArgumentException("opsOrigins takes origins like https://app.example.com: " + o);
-            normalized.add(Brace.normalizeOrigin(o));
-        }
-        this.extraOrigins = List.copyOf(normalized);
+        for (String o : origins) normalized.add(Brace.parseOrigin(o));
+        this.pinnedOrigins = List.copyOf(normalized);
     }
 
     // Replay suppression for v3 auth nonces. Per-instance, in-memory, best-effort: ops must work
@@ -172,11 +167,12 @@ public class OpsHandler {
                 if (auth.nonce == null || auth.nonce.length() < 16 || auth.nonce.length() > 256) {
                     return Result.unauthorized("Missing or invalid nonce (base64url of 16+ random bytes required)");
                 }
-                if (auth.origin == null || !auth.origin.contains("://") || auth.origin.length() > 512
-                        || auth.origin.chars().anyMatch(c -> c < 0x21 || c > 0x7e)) {
+                String origin = auth.origin == null || auth.origin.length() > 512
+                        || auth.origin.chars().anyMatch(c -> c < 0x21 || c > 0x7e)
+                    ? null : Brace.parseOrigin(auth.origin);
+                if (origin == null) {
                     return Result.unauthorized("Missing or invalid origin");
                 }
-                String origin = Brace.normalizeOrigin(auth.origin);
                 String message = OpsKeys.v3AuthMessage(origin, auth.publicKey, auth.timestamp, auth.nonce);
                 if (!OpsKeys.verify(message, auth.signature, auth.publicKey)) {
                     return Result.unauthorized("Invalid signature");
@@ -186,8 +182,7 @@ public class OpsHandler {
                 if (!originIsThisServer(req, origin)) {
                     return Result.unauthorized("This request was signed for " + origin + ", which is not this "
                         + "server (Host: " + req.host() + "). Check ops.<env>.url in .brace; behind a proxy "
-                        + "that rewrites Host, pass the real Host through or list the public origin with "
-                        + "app.opsOrigins(...)");
+                        + "that rewrites Host, list the public origin with app.opsOrigins(...)");
                 }
                 // Replay check last, so only validly-signed requests consume nonce slots.
                 if (!seenNonces.checkAndRecord(auth.nonce, System.currentTimeMillis())) {
@@ -1006,12 +1001,14 @@ public class OpsHandler {
     }
 
     /**
-     * Whether a v3 auth signature's origin names this server: its host is the one the request
-     * was addressed to (the port isn't compared, as for Origin checks elsewhere: behind a proxy
-     * the app listens on another port), or it is one of {@link #setExtraOrigins}.
+     * Whether a v3 auth signature's origin names this server. With origins configured
+     * ({@code app.opsOrigins}, required in prod) it must be one of them, exactly: the request's
+     * {@code Host} and {@code X-Forwarded-Host} play no part, since the client sending a relayed
+     * signature can choose those. Without (dev, tests) its host must be the one the request was
+     * addressed to; the port isn't compared, since behind a proxy the app listens on another.
      */
     private boolean originIsThisServer(Request req, String origin) {
-        if (extraOrigins.contains(origin)) return true;
+        if (!pinnedOrigins.isEmpty()) return pinnedOrigins.contains(origin);
         String signedHost = ProxyHeaders.hostOf(origin);
         String host = req.host();
         if (signedHost != null && host != null && signedHost.equalsIgnoreCase(host)) return true;

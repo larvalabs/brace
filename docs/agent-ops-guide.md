@@ -520,9 +520,11 @@ Rules the server enforces:
   for every attempt. A reused nonce gets `401 Nonce already used`.
 - **Key binding:** the public key is part of the signed message, so a
   signature is only valid for the key that produced it.
-- **Origin binding:** the origin's host must be the host the request reached
-  (or one listed with `app.opsOrigins(...)`), so a signature made for another
-  server is refused with `401 This request was signed for <origin>…`.
+- **Origin binding:** the origin must be one the server lists with
+  `app.opsOrigins(...)` / `BRACE_OPS_ORIGINS` (required in prod; without one, in
+  dev, its host must match the request's), so a signature made for another server
+  is refused with `401 This request was signed for <origin>…`. The origin is just
+  `scheme://host[:port]`: no user info, path, query or fragment.
 
 **Replay caveat (per-instance, best-effort):** the seen-nonce set is held in
 memory on each server instance — ops works without shared fleet state, so it
