@@ -43,6 +43,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Ops auth protocol v3 binds the CLI's signature to the server; v2 removed; CLI token cache keyed by server | security, **breaking** | upgrade the `brace` CLI with the server; behind a Host-rewriting proxy add `app.opsOrigins(...)` | [§](#breaking-ops-auth-protocol-v3) |
 | Cross-instance WebSocket broadcasts are signed and use a per-app channel; a Postgres app with `ws(...)` routes needs `.sessions(secret)` or `.opsSecret(secret)` | security, **breaking** for Postgres apps with WebSocket routes and no secret, and for rolling deploys | set a shared secret if the app has none; upgrade all instances together | [§](#breaking-cross-instance-websocket-broadcasts-are-signed) |
 | Toolchain downloads (`install.sh`, `self-update`, the launcher) are https-only | security | none, unless `BRACE_RELEASE_BASE` points at an `http://` mirror | [§](#security-toolchain-downloads-are-https-only) |
+| Hardened container scaffold; `GET /__brace/health`; `app.host(...)` | security, new | existing projects: optionally adopt the new `Dockerfile` and `compose.yaml` | [§](#security-hardened-container-scaffold-and-__bracehealth) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -1059,4 +1060,37 @@ protocol. A release zip is code the CLI runs, and it isn't signed, so TLS is wha
 it. All three now download over https only, redirects included (`file://` still works for local
 trees), and refuse `http://` with an error naming the URL. An internal http mirror needs
 `BRACE_ALLOW_INSECURE_DOWNLOAD=1`, which warns on every download.
+
+## Security: hardened container scaffold and `/__brace/health`
+
+**What changed.** The `Dockerfile` that `brace new` writes ran as root on a floating
+`eclipse-temurin:25-jre` tag (Ubuntu, with a shell and apt), started through `sh -c`, had no
+health check, and needed `mvn package` run before `docker build`. A new project now gets:
+
+- a multi-stage `Dockerfile`: a Maven stage builds the jar and precompiled templates, so
+  `docker build .` works from a clean checkout; the runtime is distroless Java 25, pinned by
+  digest, running as uid 65532, with `ENTRYPOINT ["java", "-Dbrace.mode=prod", "-jar", "app.jar"]`
+  and a `HEALTHCHECK`;
+- a `.dockerignore` that keeps `application.conf`, `*.key`, `.env` and `target/` out of the build
+  context;
+- a reference `compose.yaml`: read-only root filesystem with a tmpfs `/tmp`, `cap_drop: [ALL]`,
+  `no-new-privileges`, the port published on loopback, and Postgres on an internal network with
+  no published port;
+- `.github/dependabot.yml`, which proposes base-image digest updates.
+
+Every app also gets `GET /__brace/health`, which answers `200 ok` before routing and middleware
+(no auth, no data, not logged or counted), and `app.host(String)` to choose the listen address
+(default: every interface).
+
+**Who needs to act.** Nobody has to: existing projects keep their `Dockerfile`, and nothing
+regenerates it. To adopt the new setup, run `brace new` on a scratch name and copy its
+`Dockerfile`, `.dockerignore`, `compose.yaml` and `.github/dependabot.yml` into your project,
+then:
+
+- move JVM flags from `JAVA_OPTS` to `JAVA_TOOL_OPTIONS` (the runtime has no shell to expand
+  `$JAVA_OPTS`);
+- make sure nothing in the image writes outside `/tmp` if you use `read_only: true`;
+- point your platform's health check at `/__brace/health`;
+- if the app registered its own `GET /__brace/health` route, that route is no longer reachable:
+  the built-in probe answers first.
 

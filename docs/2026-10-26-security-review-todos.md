@@ -521,7 +521,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     MODERATE commons-compress advisories via Testcontainers, test scope, reported only).
   - **Tier: small** for the bumps; **mid** for the CI gate.
 
-- [ ] **M13: The generated container is root, unpinned and shell-bearing, and no hardened runtime config is generated**, `ProjectGenerator.java:386-420`, `Brace.java:1105-1106`
+- [x] **M13: The generated container is root, unpinned and shell-bearing, and no hardened runtime config is generated**, `ProjectGenerator.java:386-420`, `Brace.java:1105-1106`
   - **What's wrong.**
     - `FROM eclipse-temurin:25-jre` is a floating tag on Ubuntu, so the runtime has a shell
       and apt.
@@ -555,6 +555,14 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
       `.dockerignore` and `compose.yaml`.
     - A `tests/cli` smoke test builds the image and runs it read-only as non-root, where Docker
       is available.
+  - **Progress.** Done. Multi-stage Dockerfile on `gcr.io/distroless/java25-debian13:nonroot`,
+    both stages digest-pinned, `USER 65532:65532`, exec-form entrypoint, `JAVA_TOOL_OPTIONS`,
+    and a `HEALTHCHECK` running `com.larvalabs.brace.HealthCheck`; `.dockerignore`;
+    `compose.yaml`; `.github/dependabot.yml` (D7). `GET /__brace/health` is answered before
+    routing and middleware and kept out of logs, stats and analytics. `app.host(String)` added.
+    `tests/cli/test-docker-image.sh` builds a scaffolded app's image and runs its compose stack
+    (Postgres included), checking the health check, uid, read-only root, dropped capabilities
+    and the unpublished database; CI runs it.
   - **Tier: mid.**
 
 - [x] **M14: The CLI token cache isn't keyed by server, and ops auth signatures aren't bound to an audience**, `CliAuth.java:52-67, 155-175`, `CliConfig.java:19-63`, `OpsKeys.java:79-81`

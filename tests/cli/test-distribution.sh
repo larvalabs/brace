@@ -56,7 +56,7 @@ grep -q "public static void routes(Brace app)" testapp/src/main/java/app/App.jav
 grep -q "App::routes" testapp/src/test/java/app/HomeControllerTest.java || fail "generated test doesn't reuse App::routes"
 grep -q "maven-surefire-plugin" testapp/pom.xml || fail "pom.xml missing surefire pin (mvn test would run zero tests)"
 grep -q "maven-shade-plugin" testapp/pom.xml || fail "pom.xml missing shade plugin (Dockerfile jar would not run)"
-grep -q "COPY target/app.jar app.jar" testapp/Dockerfile || fail "Dockerfile doesn't copy the shaded target/app.jar"
+grep -q "COPY --from=build /src/target/app.jar app.jar" testapp/Dockerfile || fail "Dockerfile doesn't copy the shaded target/app.jar"
 pass "brace new created project"
 
 step "Running brace compile"

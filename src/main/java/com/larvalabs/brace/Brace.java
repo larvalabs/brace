@@ -19,6 +19,7 @@ import java.util.function.Function;
 public class Brace {
 
     private int port = 8080;
+    private String host; // null: every interface
     private boolean showBanner = true;
     private final Router router = new Router();
 
@@ -161,6 +162,22 @@ public class Brace {
 
     public int port() {
         return port;
+    }
+
+    /**
+     * The address to listen on (M13), e.g. {@code "127.0.0.1"} when a reverse proxy on the same
+     * host is the only client. By default Brace listens on every interface, which is what a
+     * container needs: its port is reached through the container's own network interface.
+     * Null or blank restores the default.
+     */
+    public Brace host(String host) {
+        this.host = host == null || host.isBlank() ? null : host.strip();
+        return this;
+    }
+
+    /** The configured listen address, or null for every interface. */
+    public String host() {
+        return host;
     }
 
     public Brace banner(boolean show) {
@@ -1272,6 +1289,7 @@ public class Brace {
         httpConfig.setSendXPoweredBy(false);
         connector = new ServerConnector(server, new HttpConnectionFactory(httpConfig));
         connector.setPort(port);
+        connector.setHost(host);
         // Requests Jetty rejects before BraceHandler runs get a plain-text reason phrase, not
         // Jetty's HTML page (which shows the version and echoes the request URI).
         server.setErrorHandler(new BraceErrorHandler());

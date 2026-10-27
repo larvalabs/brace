@@ -51,6 +51,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         "/__brace/ops.js", BundledAsset.load("ops.js", "text/javascript; charset=utf-8"),
         "/__brace/ops.css", BundledAsset.load("ops.css", "text/css; charset=utf-8"),
         "/__brace/ops-analytics.css", BundledAsset.load("ops-analytics.css", "text/css; charset=utf-8"));
+    // M13: the liveness probe's path and body. See handle().
+    static final String HEALTH_PATH = "/__brace/health";
+    private static final byte[] HEALTH_BODY = "ok\n".getBytes(StandardCharsets.US_ASCII);
     // L3: dev mode is detected once at construction from the brace.mode system property —
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
@@ -251,6 +254,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // need it to run after-middleware over their responses (M1). Null until the route is
         // matched, which is before any response can be written.
         Request braceRequest = null;
+        // M13: liveness probe for container health checks and load balancers. Answered before
+        // routing and middleware, so an app-wide auth guard or rate limiter can't fail it, and
+        // left out of the request log, stats and analytics, which a probe every few seconds
+        // would swamp. It reports only that this process is serving requests: no data, no
+        // database check (a database outage shouldn't get every instance restarted).
+        if (HEALTH_PATH.equals(exchange.path)
+                && ("GET".equals(exchange.method) || "HEAD".equals(exchange.method))) {
+            response.setStatus(200);
+            response.getHeaders().put("Content-Type", "text/plain; charset=utf-8");
+            response.getHeaders().put("Cache-Control", "no-store");
+            response.getHeaders().put("X-Content-Type-Options", "nosniff");
+            response.write(true, "HEAD".equals(exchange.method)
+                ? ByteBuffer.allocate(0) : ByteBuffer.wrap(HEALTH_BODY), callback);
+            return true;
+        }
         try {
             String method = exchange.method;
             String path = exchange.path;

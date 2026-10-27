@@ -7,6 +7,15 @@ import java.util.Base64;
 
 public class ProjectGenerator {
 
+    // M13: the scaffold's base images, pinned by digest (tag kept for readability; the digest is
+    // what Docker uses). Refresh: docker buildx imagetools inspect <image>:<tag>.
+    static final String MAVEN_IMAGE =
+        "maven:3.9.16-eclipse-temurin-25@sha256:93b8a14ea2f412782e4e842651273b4d903e35cc496284f178fbbe2d67d00976";
+    static final String RUNTIME_IMAGE =
+        "gcr.io/distroless/java25-debian13:nonroot@sha256:5d3177252775d4b01603470fe21c015393019089904f68724bd37242e4bc6e6d";
+    static final String POSTGRES_IMAGE =
+        "postgres:17-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b";
+
     /**
      * Generate a cryptographically random session secret (32+ bytes, base64url-encoded).
      * Used at scaffold time to replace the placeholder with a real value.
@@ -390,33 +399,51 @@ body { font-family: system-ui, sans-serif; line-height: 1.6; max-width: 800px; m
 h1 { margin-bottom: 1rem; }
 """);
 
-            // Dockerfile — target/app.jar is the shaded executable jar
-            // (fixed name via <finalName>app</finalName>) and target/jte-classes the
-            // precompiled templates; `mvn package` builds both. Precompiled templates are
-            // what let the runtime image be a JRE (restores 213ac8c, lost in merge b8609b6).
+            // Dockerfile (M13): builds in a JDK stage, runs on a distroless JRE as a non-root user.
+            // Both base images are pinned by digest; .github/dependabot.yml below refreshes them.
+            // The build stage runs `mvn package`, which also precompiles views/ into
+            // target/jte-classes, so prod mode needs no compiler and the image builds from a
+            // clean checkout (a platform building from git has no target/).
             Files.writeString(root.resolve("Dockerfile"),
-                "# Build first: mvn package (writes target/app.jar and target/jte-classes)\n" +
+                "# docker build -t " + projectName + " .\n" +
+                "# The image builds from a clean checkout: the first stage runs `mvn package`.\n" +
                 "#\n" +
-                "# A JRE image is enough: templates are precompiled at build time, so the JDK's\n" +
-                "# compiler never runs in production.\n" +
-                "FROM eclipse-temurin:25-jre\n" +
+                "# Both base images are pinned by digest, so a rebuild can't silently pick up a\n" +
+                "# different image. .github/dependabot.yml proposes updates; to refresh by hand:\n" +
+                "#   docker buildx imagetools inspect <image>:<tag>   (use the top-level Digest)\n" +
+                "\n" +
+                "FROM " + MAVEN_IMAGE + " AS build\n" +
+                "WORKDIR /src\n" +
+                "# Dependencies first, so a code change doesn't download them again.\n" +
+                "COPY pom.xml .\n" +
+                "RUN mvn -B -q dependency:go-offline\n" +
+                "COPY src/ src/\n" +
+                "COPY views/ views/\n" +
+                "# Tests run in CI and locally, not in the image build.\n" +
+                "RUN mvn -B -q package -DskipTests\n" +
+                "\n" +
+                "# Distroless Java 25: a JRE and nothing else (no shell, no package manager), running\n" +
+                "# as the unprivileged \"nonroot\" user (uid 65532). The app's files are owned by root,\n" +
+                "# so the process can read but not modify them.\n" +
+                "FROM " + RUNTIME_IMAGE + "\n" +
                 "WORKDIR /app\n" +
-                "COPY target/app.jar app.jar\n" +
-                "COPY application.conf.example application.conf\n" +
+                "COPY --from=build /src/target/app.jar app.jar\n" +
                 "# Precompiled templates, which prod mode loads instead of compiling at runtime.\n" +
-                "# mvn package writes them (so does `brace compile`); run one of them before\n" +
-                "# `docker build` after any template change. Without them the build or startup fails.\n" +
-                "COPY target/jte-classes/ target/jte-classes/\n" +
+                "COPY --from=build /src/target/jte-classes/ target/jte-classes/\n" +
+                "COPY application.conf.example application.conf\n" +
                 "COPY views/ views/\n" +
                 "COPY public/ public/\n" +
                 "COPY migrations/ migrations/\n" +
                 "# Public keys only; App.java's .ops(...) refuses to start without this file.\n" +
                 "COPY ops-authorized-keys ops-authorized-keys\n" +
+                "USER 65532:65532\n" +
                 "EXPOSE 8080\n" +
-                "# Config comes from env vars (see application.conf.example):\n" +
-                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/db -e SESSION_SECRET=...\n" +
+                "# Config comes from env vars (see application.conf.example and compose.yaml):\n" +
+                "#   docker run -e DATABASE_URL=postgresql://user:pass@host:5432/db -e SESSION_SECRET=... \\\n" +
+                "#              -e OPS_ORIGINS=https://app.example.com ...\n" +
                 "\n" +
-                "# JVM flags; override at run time: docker run -e JAVA_OPTS=\"-Xmx1g\" ...\n" +
+                "# JVM flags. The JVM reads JAVA_TOOL_OPTIONS itself, so no shell is needed to pass\n" +
+                "# them; override at run time: docker run -e JAVA_TOOL_OPTIONS=\"-Xmx1g\" ...\n" +
                 "#   -XX:MaxRAMPercentage=50  caps the heap at half the container's memory limit,\n" +
                 "#       leaving the rest for metaspace, thread stacks and direct buffers.\n" +
                 "#       Give the container a limit (docker run --memory=1g, compose mem_limit):\n" +
@@ -424,11 +451,114 @@ h1 { margin-bottom: 1rem; }
                 "#       box use an explicit -Xmx instead.\n" +
                 "#   -XX:+UseCompactObjectHeaders  (JDK 25+) smaller object headers, usually\n" +
                 "#       10-20% less heap for entity-heavy apps. Worth adding once tried under load.\n" +
-                "ENV JAVA_OPTS=\"-XX:MaxRAMPercentage=50\"\n" +
-                "# sh -c expands $JAVA_OPTS; exec replaces the shell so java is PID 1 and gets\n" +
-                "# SIGTERM from `docker stop`, letting Brace's shutdown hook drain in-flight work.\n" +
-                "# brace.mode=prod (as `brace run` sets) is what loads target/jte-classes.\n" +
-                "ENTRYPOINT [\"sh\", \"-c\", \"exec java -Dbrace.mode=prod $JAVA_OPTS -jar app.jar\"]\n");
+                "ENV JAVA_TOOL_OPTIONS=\"-XX:MaxRAMPercentage=50\"\n" +
+                "# Polls GET /__brace/health, Brace's built-in liveness route. There is no curl in\n" +
+                "# the image, so a small JVM makes the request; its flags keep it cheap.\n" +
+                "HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \\\n" +
+                "    CMD [\"java\", \"-XX:TieredStopAtLevel=1\", \"-XX:+UseSerialGC\", \"-Xmx32m\", \\\n" +
+                "         \"-cp\", \"app.jar\", \"com.larvalabs.brace.HealthCheck\", \"8080\"]\n" +
+                "# Exec form: java is PID 1 and gets SIGTERM from `docker stop`, so Brace's\n" +
+                "# shutdown hook drains in-flight work. brace.mode=prod (as `brace run` sets) is\n" +
+                "# what loads target/jte-classes.\n" +
+                "ENTRYPOINT [\"java\", \"-Dbrace.mode=prod\", \"-jar\", \"app.jar\"]\n");
+
+            // .dockerignore (M13): keeps local secrets and build output out of the build context.
+            // application.conf holds the dev session secret and *.key the ops private key; the
+            // image's config is application.conf.example, which reads its values from env vars.
+            Files.writeString(root.resolve(".dockerignore"), """
+# Secrets: the image reads its config from env vars (application.conf.example).
+application.conf
+*.key
+.env
+.env.*
+# Build output and local state: the image builds its own.
+target/
+lib/
+jte-classes/
+.git/
+.idea/
+*.iml
+.DS_Store
+""");
+
+            // compose.yaml (M13): a reference deployment with the app container locked down.
+            Files.writeString(root.resolve("compose.yaml"),
+                "# Reference deployment: the app and Postgres, with the app container locked down.\n" +
+                "# Secrets come from the environment, e.g. a .env file next to this one (gitignored)\n" +
+                "# or your platform's env settings. Never commit them.\n" +
+                "#   SESSION_SECRET=   openssl rand -base64 32; keep it stable across deploys\n" +
+                "#   POSTGRES_PASSWORD=openssl rand -base64 24\n" +
+                "#   OPS_ORIGINS=      the app's public origin, e.g. https://app.example.com\n" +
+                "#   TRUSTED_PROXIES=  the reverse proxy's address or network CIDR, e.g. the\n" +
+                "#                     Traefik network's subnet (docker network inspect <net>)\n" +
+                "#   docker compose up -d --build\n" +
+                "services:\n" +
+                "  app:\n" +
+                "    build: .\n" +
+                "    restart: unless-stopped\n" +
+                "    environment:\n" +
+                "      DATABASE_URL: postgresql://" + projectName + ":${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/" + projectName + "\n" +
+                "      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}\n" +
+                "      OPS_ORIGINS: ${OPS_ORIGINS:?set OPS_ORIGINS}\n" +
+                "      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}\n" +
+                "    # Loopback only: put a TLS-terminating reverse proxy in front. Behind Traefik\n" +
+                "    # (Dokploy), drop this and join the proxy's network instead.\n" +
+                "    ports:\n" +
+                "      - \"127.0.0.1:8080:8080\"\n" +
+                "    # The image is immutable at runtime; /tmp (uploads spill there) is the only\n" +
+                "    # writable path, in memory.\n" +
+                "    read_only: true\n" +
+                "    tmpfs:\n" +
+                "      - /tmp\n" +
+                "    cap_drop: [ALL]\n" +
+                "    security_opt:\n" +
+                "      - no-new-privileges:true\n" +
+                "    mem_limit: 1g\n" +
+                "    networks: [web, db]\n" +
+                "    depends_on:\n" +
+                "      db:\n" +
+                "        condition: service_healthy\n" +
+                "  db:\n" +
+                "    image: " + POSTGRES_IMAGE + "\n" +
+                "    restart: unless-stopped\n" +
+                "    environment:\n" +
+                "      POSTGRES_DB: " + projectName + "\n" +
+                "      POSTGRES_USER: " + projectName + "\n" +
+                "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}\n" +
+                "    volumes:\n" +
+                "      - pgdata:/var/lib/postgresql/data\n" +
+                "    healthcheck:\n" +
+                "      test: [\"CMD-SHELL\", \"pg_isready -U " + projectName + " -d " + projectName + "\"]\n" +
+                "      interval: 5s\n" +
+                "      retries: 10\n" +
+                "    security_opt:\n" +
+                "      - no-new-privileges:true\n" +
+                "    # No ports: Postgres is reachable only from the app, over the internal network.\n" +
+                "    networks: [db]\n" +
+                "networks:\n" +
+                "  web: {}\n" +
+                "  # internal: no route out, and nothing outside the project can reach it.\n" +
+                "  db:\n" +
+                "    internal: true\n" +
+                "volumes:\n" +
+                "  pgdata: {}\n");
+
+            // .github/dependabot.yml (M13, decision D7): proposes updates to the digest-pinned base
+            // images. Brace itself is upgraded with its migration guides, not by a bot.
+            Files.createDirectories(root.resolve(".github"));
+            Files.writeString(root.resolve(".github/dependabot.yml"), """
+version: 2
+updates:
+  # The Dockerfile's and compose.yaml's base images are pinned by digest; these keep them current.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+""");
 
             // CLAUDE.md — capability index with pointers to full reference
             ClaudeMdGenerator.write(projectName, root.resolve("CLAUDE.md"));
@@ -457,6 +587,8 @@ jte-classes/
 .DS_Store
 *.key
 application.conf
+.env
+.env.*
 """);
 
             System.out.println("Created new Brace project: " + name);

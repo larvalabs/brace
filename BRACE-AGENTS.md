@@ -52,6 +52,18 @@ the framework picks prod behavior (e.g. precompiled templates) under `brace run`
 Extra JVM flags for the app go in `BRACE_JAVA_OPTS` (e.g. `BRACE_JAVA_OPTS="-Xmx512m"
 brace run`); flags there override the defaults, including the mode.
 
+**Containers.** `brace new` writes a `Dockerfile`, `.dockerignore`, `compose.yaml` and
+`.github/dependabot.yml`. `docker build .` works from a clean checkout: a Maven stage runs
+`mvn package` (fat jar plus precompiled templates), and the runtime stage is distroless Java 25
+(no shell), digest-pinned, running as uid 65532 with an exec-form `ENTRYPOINT`. JVM flags go in
+`JAVA_TOOL_OPTIONS` (there is no shell to expand `$JAVA_OPTS`). `compose.yaml` is the reference
+deployment: read-only root filesystem with `/tmp` as tmpfs, `cap_drop: [ALL]`,
+`no-new-privileges`, and Postgres on an internal network with no published port. Brace answers
+`GET /__brace/health` with `200 ok` before routing and middleware (no auth, no data, not logged
+or counted); the image's `HEALTHCHECK` polls it with `com.larvalabs.brace.HealthCheck`, and a
+load balancer can use the same path. `app.host("127.0.0.1")` sets the listen address (default:
+every interface, which a container needs).
+
 ## App Setup
 
 Everything configured via `Brace.app()` builder in `main()`:
@@ -78,7 +90,7 @@ var app = Brace.app()
     .after(SecurityHeaders.strict());
 ```
 
-Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
