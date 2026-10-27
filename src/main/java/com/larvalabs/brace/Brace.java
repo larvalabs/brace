@@ -247,6 +247,10 @@ public class Brace {
      * it must be identical on every instance so an ops login on one box validates on another. When
      * unset, the ops secret is derived from the session secret if present, else generated per-process
      * (single-instance only — see {@link #start()}).
+     *
+     * <p>A Postgres app with WebSocket routes and no session secret also signs its cross-instance
+     * room broadcasts with a key derived from this secret; with neither set, such an app fails to
+     * start.
      */
     public Brace opsSecret(String secret) {
         validateSecret(secret, "ops");
@@ -290,6 +294,27 @@ public class Brace {
             "the ops token secret is per-process, so the browser login flow will fail behind a load " +
             "balancer. Set a shared secret for multi-instance deployments.");
         return OpsToken.generateSecret();
+    }
+
+    /**
+     * Resolve the secret the Postgres WebSocket message bus derives its signing key and channel
+     * name from (L6): the session secret, else the explicit {@link #opsSecret(String)}. Both are
+     * shared config, identical on every instance. There's deliberately no per-process fallback: a
+     * random key would put each instance on its own channel, silently ending cross-instance
+     * fan-out, and an unsigned bus lets any database role push frames to room members. So an app
+     * with neither secret fails to start and says which to set.
+     */
+    private String resolveMessageBusSecret() {
+        if (sessionSecret != null) {
+            return sessionSecret;
+        }
+        if (opsSecret != null) {
+            return opsSecret;
+        }
+        throw new IllegalStateException("WebSocket routes on Postgres need a shared secret to sign "
+            + "broadcasts relayed between instances (LISTEN/NOTIFY), but neither .sessions(secret) "
+            + "nor .opsSecret(secret) is set. Set one of them (32+ random characters, the same value "
+            + "on every instance, e.g. from the SESSION_SECRET environment variable).");
     }
 
     /**
@@ -1239,7 +1264,7 @@ public class Brace {
         if (!wsRoutes.isEmpty()) {
             // Room fan-out: shared across the fleet on Postgres (LISTEN/NOTIFY), local otherwise.
             MessageBus messageBus = (databaseFactory != null && databaseFactory.isPostgres())
-                ? new PostgresMessageBus(databaseFactory)
+                ? new PostgresMessageBus(databaseFactory, resolveMessageBusSecret())
                 : new InProcessMessageBus();
             wsRegistry = new WsRegistry(messageBus, wsMaxQueuedBytes);
             final WsRegistry wsRegistryRef = wsRegistry;

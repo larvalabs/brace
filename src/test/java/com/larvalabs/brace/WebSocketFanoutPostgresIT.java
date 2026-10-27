@@ -26,6 +26,9 @@ class WebSocketFanoutPostgresIT extends PostgresTestBase {
     static DatabaseFactory dbFactory;
     static Brace instanceA;
     static Brace instanceB;
+    // Both instances of one app share a secret: it keys the broadcast signatures and names the
+    // channel (L6), so instances without the same one never hear each other.
+    static final String SECRET = "fanout-test-secret-0123456789abcdefghijkl";
 
     /** Joins "lobby" on connect; an inbound message is broadcast to the whole lobby (fleet-wide). */
     public static class LobbySocket {
@@ -42,9 +45,9 @@ class WebSocketFanoutPostgresIT extends PostgresTestBase {
                 POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword(), List.of());
 
         // Both instances share one factory, closed in stopInstances, so neither app owns it.
-        instanceA = Brace.app().port(0).database(dbFactory).ownsDatabase(false);
+        instanceA = Brace.app().port(0).database(dbFactory).ownsDatabase(false).sessions(SECRET);
         instanceA.ws("/ws", LobbySocket::new);
-        instanceB = Brace.app().port(0).database(dbFactory).ownsDatabase(false);
+        instanceB = Brace.app().port(0).database(dbFactory).ownsDatabase(false).sessions(SECRET);
         instanceB.ws("/ws", LobbySocket::new);
         instanceA.start();
         instanceB.start();

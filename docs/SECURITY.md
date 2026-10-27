@@ -1098,6 +1098,48 @@ Do not rely on `SameSite` alone for this. The default `SameSite=Lax` session coo
 make modern browsers withhold the cookie on a cross-site handshake, but that protection
 disappears the moment an app calls `sameSiteNone()`.
 
+### Broadcasts between instances (Postgres)
+
+On Postgres, `broadcast(room, message)` reaches members on other instances through `LISTEN`/
+`NOTIFY`. Postgres puts no permission on either: any role that can connect to the database can
+`NOTIFY` any channel and `LISTEN` on any channel. Before 0.1.11 the channel was a fixed
+`brace_ws` and payloads were plain JSON, so anyone with a database login (a reporting user, a
+compromised neighbour app) could push frames to room members, which is script injection when an
+app broadcasts HTML fragments for htmx. Two apps sharing a database also received each other's
+broadcasts in same-named rooms.
+
+Since 0.1.11:
+
+- **Every payload is signed.** It is HMAC-SHA256 over the exact JSON body, with a key derived
+  (under its own label) from the session secret, or from `.opsSecret(...)` when the app has no
+  sessions. A receiver checks it in constant time and drops anything unsigned or wrongly signed.
+  Payloads too large for a `NOTIFY` (over 7900 bytes, signature included) go through the
+  `brace_ws_messages` table as before; the row is signed too, so writing that table doesn't help
+  either.
+- **The channel is per app**: `brace_ws_` plus 16 hex digits of a hash of the key. Instances of
+  one app agree on it; apps with different secrets never share one. The name is not a secret
+  (it is visible to a superuser in `pg_stat_activity`), and nothing depends on it being one.
+- **Replays are refused.** Every payload carries an issued-at time and a random nonce. A
+  receiver drops a payload more than 60 seconds from its own clock, either way, and any nonce it
+  has already accepted. `LISTEN` needs no privilege, so a forger can also capture genuine
+  payloads; without this, one captured message could be re-sent thousands of times to flood a
+  room. Instances' clocks must agree to well within 60 seconds (NTP does).
+- **Rejections are counted, not shouted.** Dropped payloads are logged as a
+  `ws_broadcast_rejected` event at most once a minute, with the reason and a count since the last
+  line.
+- **No secret, no start.** A Postgres app with WebSocket routes and neither `.sessions(secret)`
+  nor `.opsSecret(secret)` fails `start()` with a message naming both. There is no per-process
+  fallback: a random key would put each instance on its own channel and silently end
+  cross-instance delivery.
+
+The secret must be identical on every instance. Instances with different secrets (a rolling
+deploy that changes it, or one that mixes 0.1.10 and 0.1.11) don't see each other's broadcasts
+until they all match; nothing is delivered wrongly, but members on the other side miss messages.
+
+The signature authenticates the sender as *an instance of this app*. It does not decide who may
+read a room: joining one is still an authorization decision the handler makes before
+`ctx.join(room)`.
+
 ---
 
 ## Rate Limiting

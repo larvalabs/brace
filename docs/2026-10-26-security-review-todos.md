@@ -631,7 +631,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
   - **Tests.** The warning fires once.
   - **Tier: small.**
 
-- [ ] **L6: NOTIFY messages are unauthenticated, and the channel is shared across apps on a database**, `PostgresMessageBus.java:34, 166, 188-207`, `WsRegistry.java:69-81`
+- [x] **L6: NOTIFY messages are unauthenticated, and the channel is shared across apps on a database**, `PostgresMessageBus.java:34, 166, 188-207`, `WsRegistry.java:69-81`
   - **What's wrong.** Any role that can connect can `NOTIFY brace_ws, '{"r":"room","m":"…"}'`
     and push frames to room members, which is XSS-like when broadcasts are HTML. Two Brace apps
     on one database leak broadcasts to each other's same-named rooms. Injection itself is
