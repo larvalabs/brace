@@ -60,8 +60,8 @@ class AnalyticsIntegrationTest {
         byte[] nonceBytes = new byte[16];
         new java.security.SecureRandom().nextBytes(nonceBytes);
         String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
-        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(keypair.publicKey(), timestamp, nonce), keypair.privateKey());
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
+        String signature = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", keypair.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + timestamp
             + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + signature + "\"}";
         var res = client.send(HttpRequest.newBuilder(URI.create(url("/ops/auth")))
             .header("Content-Type", "application/json")

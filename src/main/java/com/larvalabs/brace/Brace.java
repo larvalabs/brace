@@ -76,6 +76,7 @@ public class Brace {
     // M3: extra origins allowed to open a WebSocket. Same-origin is always allowed; this is the
     // opt-in for deliberate cross-origin clients. Empty = same-origin only.
     private final List<String> wsAllowedOrigins = new ArrayList<>();
+    private final List<String> opsOrigins = new ArrayList<>();
     private boolean sharedRateLimiting = true; // M17: count rate limits fleet-wide via the DB on Postgres
     private int rateLimitBatchDivisor = RateLimiter.DEFAULT_BATCH_DIVISOR; // M17: DB-load vs accuracy knob
     private long maxUploadSize = BraceHandler.DEFAULT_MAX_UPLOAD_SIZE;
@@ -607,6 +608,18 @@ public class Brace {
         return this;
     }
 
+    /**
+     * The public origin(s) of this app ({@code "https://app.example.com"}) for ops CLI logins
+     * (M14). A {@code brace} CLI signs the server's origin into its login, and the server accepts
+     * it when its host is the one the request arrived for; behind a proxy that rewrites
+     * {@code Host} (nginx's {@code proxy_pass} does by default), list the public origin here, or
+     * have the proxy pass the real {@code Host} through.
+     */
+    public Brace opsOrigins(String... origins) {
+        this.opsOrigins.addAll(List.of(origins));
+        return this;
+    }
+
     // Job scheduling
 
     public Brace every(String interval, String name, Job job) {
@@ -1131,6 +1144,7 @@ public class Brace {
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             opsHandler.setAnalytics(analytics);
+            opsHandler.setExtraOrigins(opsOrigins);
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on

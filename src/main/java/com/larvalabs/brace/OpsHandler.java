@@ -99,11 +99,25 @@ public class OpsHandler {
     }
 
     public record OpsAuthRequest(String v, String publicKey, String timestamp, String signature,
-                                 String nonce, Integer ttlSeconds, String scope) {}
+                                 String nonce, Integer ttlSeconds, String scope, String origin) {}
 
-    // Replay suppression for v2 auth nonces. Per-instance, in-memory, best-effort: ops must work
+    // M14: origins a v3 auth signature may name besides the host the request arrived for: the
+    // public origin when a proxy rewrites Host (nginx's proxy_pass does by default).
+    private volatile List<String> extraOrigins = List.of();
+
+    void setExtraOrigins(List<String> origins) {
+        var normalized = new java.util.ArrayList<String>();
+        for (String o : origins) {
+            if (o == null || o.isBlank()) continue;
+            if (!o.contains("://")) throw new IllegalArgumentException("opsOrigins takes origins like https://app.example.com: " + o);
+            normalized.add(Brace.normalizeOrigin(o));
+        }
+        this.extraOrigins = List.copyOf(normalized);
+    }
+
+    // Replay suppression for v3 auth nonces. Per-instance, in-memory, best-effort: ops must work
     // without shared fleet state (B5 — no database, no cross-instance store), so this CANNOT be
-    // fleet-global. Residual window: a captured v2 auth request can still be replayed against a
+    // fleet-global. Residual window: a captured v3 auth request can still be replayed against a
     // DIFFERENT instance behind the load balancer within the ±30s timestamp window. Documented in
     // docs/SECURITY.md ("Ops Endpoints"). TTL is 2 minutes — comfortably above the 60s total
     // acceptance window — and the map is size-bounded (entries are only recorded after a valid
@@ -113,11 +127,15 @@ public class OpsHandler {
     /**
      * POST /ops/auth — validate a signed auth request, issue a short-lived bearer token.
      *
-     * <p>Protocol v2 (current): body carries {@code v:"2"}, {@code publicKey}, {@code timestamp},
-     * a per-attempt random {@code nonce} (base64url, 16+ bytes), and a {@code signature} over
-     * {@link OpsKeys#v2AuthMessage publicKey + "\n" + timestamp + "\n" + nonce}. Binding the key
-     * into the signed message kills cross-key confusion; the nonce (rejected on reuse, see
-     * {@link #seenNonces}) makes a captured tuple single-purpose on this instance.
+     * <p>Protocol v3 (current): body carries {@code v:"3"}, the target {@code origin}, {@code publicKey},
+     * {@code timestamp}, a per-attempt random {@code nonce} (base64url, 16+ bytes), and a
+     * {@code signature} over {@link OpsKeys#v3AuthMessage}. Binding the key kills cross-key
+     * confusion; the nonce (rejected on reuse, see {@link #seenNonces}) makes a captured tuple
+     * single-purpose on this instance; the origin, checked against the host the request arrived
+     * for, makes a signature collected by another server useless here (M14).
+     *
+     * <p>Protocol v2 (0.1.7 to 0.1.10, <strong>removed in 0.1.11</strong>): the same without the
+     * origin. A v2 body gets a 401 naming the cause.
      *
      * <p>Protocol v1 (shipped in 0.1.6, deprecated in 0.1.7, <strong>removed in 0.1.8</strong>):
      * no {@code v}/{@code nonce}, signature over the timestamp alone, so a captured request was
@@ -150,18 +168,38 @@ public class OpsHandler {
             }
 
             // Verify signature per protocol version
-            if ("2".equals(auth.v)) {
+            if ("3".equals(auth.v)) {
                 if (auth.nonce == null || auth.nonce.length() < 16 || auth.nonce.length() > 256) {
                     return Result.unauthorized("Missing or invalid nonce (base64url of 16+ random bytes required)");
                 }
-                String message = OpsKeys.v2AuthMessage(auth.publicKey, auth.timestamp, auth.nonce);
+                if (auth.origin == null || !auth.origin.contains("://") || auth.origin.length() > 512
+                        || auth.origin.chars().anyMatch(c -> c < 0x21 || c > 0x7e)) {
+                    return Result.unauthorized("Missing or invalid origin");
+                }
+                String origin = Brace.normalizeOrigin(auth.origin);
+                String message = OpsKeys.v3AuthMessage(origin, auth.publicKey, auth.timestamp, auth.nonce);
                 if (!OpsKeys.verify(message, auth.signature, auth.publicKey)) {
                     return Result.unauthorized("Invalid signature");
+                }
+                // M14: the signature names the server the CLI meant. One made for another origin
+                // (a .brace pointing elsewhere, a relayed request) is refused.
+                if (!originIsThisServer(req, origin)) {
+                    return Result.unauthorized("This request was signed for " + origin + ", which is not this "
+                        + "server (Host: " + req.host() + "). Check ops.<env>.url in .brace; behind a proxy "
+                        + "that rewrites Host, pass the real Host through or list the public origin with "
+                        + "app.opsOrigins(...)");
                 }
                 // Replay check last, so only validly-signed requests consume nonce slots.
                 if (!seenNonces.checkAndRecord(auth.nonce, System.currentTimeMillis())) {
                     return Result.unauthorized("Nonce already used");
                 }
+            } else if ("2".equals(auth.v)) {
+                // M14: v2 signed no audience, so a signature made for one server worked at any
+                // other within the ±30s window. Removed in 0.1.11, the release that adds v3.
+                Log.warn("rejected ops auth protocol v2 (removed in 0.1.11) — upgrade the brace CLI"
+                    + " (key " + OpsKeys.fingerprint(auth.publicKey) + ")");
+                return Result.unauthorized("Ops auth protocol v2 was removed in 0.1.11 because a signature "
+                    + "wasn't bound to a server — upgrade the brace CLI to 0.1.11 or later");
             } else if (auth.v == null || "1".equals(auth.v)) {
                 // v1 signed the timestamp alone: not bound to the key, no nonce, so a captured
                 // request was replayable verbatim within the ±30s window to mint a fresh token at
@@ -173,7 +211,7 @@ public class OpsHandler {
                     + "replayable — upgrade the brace CLI to 0.1.7 or later");
             } else {
                 return Result.unauthorized("Unsupported ops auth protocol version \"" + auth.v
-                    + "\" — this server accepts v2");
+                    + "\" — this server accepts v3");
             }
 
             // Issue token — check for client-requested TTL
@@ -968,6 +1006,23 @@ public class OpsHandler {
     }
 
     /**
+     * Whether a v3 auth signature's origin names this server: its host is the one the request
+     * was addressed to (the port isn't compared, as for Origin checks elsewhere: behind a proxy
+     * the app listens on another port), or it is one of {@link #setExtraOrigins}.
+     */
+    private boolean originIsThisServer(Request req, String origin) {
+        if (extraOrigins.contains(origin)) return true;
+        String signedHost = ProxyHeaders.hostOf(origin);
+        String host = req.host();
+        if (signedHost != null && host != null && signedHost.equalsIgnoreCase(host)) return true;
+        if (host != null && BraceHandler.isLoopbackHost(host)) {
+            String pageHost = ProxyHeaders.httpsPageHost(origin, null);
+            if (pageHost != null) ProxyHeaders.warnHostRewrite(pageHost);
+        }
+        return false;
+    }
+
+    /**
      * Whether a browser request came from a page on this origin: {@code Sec-Fetch-Site} when
      * present (every current browser sends it), otherwise the {@code Origin} host must be the
      * host the client addressed. With neither it is refused: a browser sends at least
@@ -1022,7 +1077,7 @@ public class OpsHandler {
     }
 
     /**
-     * Per-instance, best-effort seen-nonce set for v2 ops auth replay suppression.
+     * Per-instance, best-effort seen-nonce set for v3 ops auth replay suppression.
      * Maps nonce → expiry (epoch millis); expired entries are swept opportunistically on
      * each call (the auth endpoint is low-rate, so a full sweep per call is cheap). The
      * set is size-bounded and fails closed: when full (after sweeping), new nonces are

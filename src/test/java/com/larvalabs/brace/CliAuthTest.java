@@ -39,8 +39,7 @@ class CliAuthTest {
 
     @BeforeEach
     void clearCache() throws Exception {
-        Path cache = tmp.resolve("target").resolve(".brace-token");
-        Files.deleteIfExists(cache);
+        CliAuth.clearCache(tmp);
     }
 
     @Test
@@ -59,7 +58,7 @@ class CliAuthTest {
             tmp.resolve("ops-private.key").toString(),
             "authorized-keys", "local", Map.of());
         String first = CliAuth.bearer(cfg, tmp);
-        Path tokenFile = tmp.resolve("target/.brace-token");
+        Path tokenFile = CliAuth.cacheFile(tmp, cfg);
         assertTrue(Files.exists(tokenFile), "token should be cached on disk");
         String second = CliAuth.bearer(cfg, tmp);
         assertEquals(first, second);
@@ -80,7 +79,7 @@ class CliAuthTest {
         // Simulate a server-side restart: replace the cached token body with a
         // bogus one but keep the expiresAt timestamp in the future, so the
         // client will trust the cache and present the stale token.
-        Path cachePath = tmp.resolve("target/.brace-token");
+        Path cachePath = CliAuth.cacheFile(tmp, cfg);
         String cached = Files.readString(cachePath);
         Files.writeString(cachePath, cached.replace(valid, "bogus.token.value"));
 
@@ -199,5 +198,60 @@ class CliAuthTest {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    @Test
+    void aCachedTokenIsNeverSentToAnotherServer() throws Exception {
+        // M14: the URL comes from the committed .brace; a pull request pointing ops.prod.url
+        // elsewhere must not receive the token cached for the real server.
+        var real = new CliConfig("http://localhost:" + port, tmp.resolve("ops-private.key").toString(),
+            "authorized-keys", "prod", Map.of());
+        String token = CliAuth.bearer(real, tmp);
+        var seen = new java.util.concurrent.atomic.AtomicReference<String>();
+        var other = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress(0), 0);
+        other.createContext("/", exchange -> {
+            seen.compareAndSet(null, exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] resp = "{}".getBytes();
+            exchange.sendResponseHeaders(401, resp.length);
+            exchange.getResponseBody().write(resp);
+            exchange.close();
+        });
+        other.start();
+        try {
+            var moved = new CliConfig("http://127.0.0.1:" + other.getAddress().getPort(),
+                tmp.resolve("ops-private.key").toString(), "authorized-keys", "prod", Map.of());
+            assertNotEquals(CliAuth.cacheFile(tmp, real), CliAuth.cacheFile(tmp, moved));
+            assertThrows(CliAuth.OpsAuthFailure.class, () -> CliAuth.bearer(moved, tmp));
+            assertTrue(seen.get() == null || !seen.get().contains(token), "the real token must not be sent");
+        } finally {
+            other.stop(0);
+        }
+    }
+
+    @Test
+    void aChangedOpsUrlIsWarnedAbout() throws Exception {
+        var err = new java.io.ByteArrayOutputStream();
+        var previousErr = System.err;
+        System.setErr(new java.io.PrintStream(err, true));
+        try {
+            var a = new CliConfig("https://app.example.com", "k", "a", "staging", Map.of());
+            var b = new CliConfig("https://evil.example", "k", "a", "staging", Map.of());
+            Path project = Files.createTempDirectory(tmp, "proj");
+            CliAuth.noteOrigin(a, project, CliAuth.originOf(a));
+            CliAuth.noteOrigin(a, project, CliAuth.originOf(a));
+            assertEquals("", err.toString(), "same server: no warning");
+            CliAuth.noteOrigin(b, project, CliAuth.originOf(b));
+            assertTrue(err.toString().contains("ops.staging.url is now https://evil.example"), err.toString());
+            assertTrue(err.toString().contains("https://app.example.com"), err.toString());
+        } finally {
+            System.setErr(previousErr);
+        }
+    }
+
+    @Test
+    void anOpsUrlWithoutASchemeFailsClearly() {
+        var cfg = new CliConfig("app.example.com", "k", "a", "prod", Map.of());
+        var e = assertThrows(IllegalArgumentException.class, () -> CliAuth.originOf(cfg));
+        assertTrue(e.getMessage().contains("https://"), e.getMessage());
     }
 }

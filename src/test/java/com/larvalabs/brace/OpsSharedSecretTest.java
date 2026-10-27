@@ -94,8 +94,8 @@ class OpsSharedSecretTest {
         byte[] nonceBytes = new byte[16];
         new java.security.SecureRandom().nextBytes(nonceBytes);
         String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
-        String sig = OpsKeys.sign(OpsKeys.v2AuthMessage(keypair.publicKey(), ts, nonce), keypair.privateKey());
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + ts
+        String sig = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", keypair.publicKey(), ts, nonce), keypair.privateKey());
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\",\"timestamp\":\"" + ts
             + "\",\"nonce\":\"" + nonce + "\",\"signature\":\"" + sig + "\"}";
         var resp = client.send(HttpRequest.newBuilder()
             .uri(URI.create("http://localhost:" + port + "/ops/auth"))

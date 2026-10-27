@@ -14,5 +14,12 @@ public class FrameworkTestAccessListener implements LauncherSessionListener {
     @Override
     public void launcherSessionOpened(LauncherSession session) {
         Brace.frameworkTestDefaultAccess = Access.none();
+        // CLI logins remember the last ops origin per project (M14); keep that out of ~/.brace.
+        try {
+            System.setProperty("brace.user.dir",
+                java.nio.file.Files.createTempDirectory("brace-test-user-dir").toString());
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 }

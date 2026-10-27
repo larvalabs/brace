@@ -52,8 +52,8 @@ class OpsNoStoreTest {
         new java.security.SecureRandom().nextBytes(nonceBytes);
         String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
         String signature = OpsKeys.sign(
-            OpsKeys.v2AuthMessage(keypair.publicKey(), timestamp, nonce), keypair.privateKey());
-        String body = "{\"v\":\"2\",\"publicKey\":\"" + keypair.publicKey() + "\","
+            OpsKeys.v3AuthMessage("http://localhost", keypair.publicKey(), timestamp, nonce), keypair.privateKey());
+        String body = "{\"v\":\"3\",\"origin\":\"http://localhost\",\"publicKey\":\"" + keypair.publicKey() + "\","
             + "\"timestamp\":\"" + timestamp + "\",\"nonce\":\"" + nonce + "\","
             + "\"signature\":\"" + signature + "\"}";
         var resp = HttpClient.newHttpClient().send(

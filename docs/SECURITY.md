@@ -1190,12 +1190,27 @@ app.ops("authorized-keys");
 
 The `authorized-keys` file contains public keys of clients allowed to access ops endpoints.
 
-Clients mint a bearer token via `POST /ops/auth` (protocol v2): an Ed25519 signature over
-`publicKey + "\n" + timestamp + "\n" + nonce`, where the timestamp must be within ±30 seconds
-of server time and the nonce is fresh random (16+ bytes, base64url) per attempt. Binding the
-public key into the signed message means a captured signature is only valid for the key that
-produced it; the nonce makes each signed request single-use. The exact wire format is in
-`docs/agent-ops-guide.md`.
+Clients mint a bearer token via `POST /ops/auth` (protocol v3): an Ed25519 signature over
+`"brace-ops-auth-v3\n" + origin + "\n" + publicKey + "\n" + timestamp + "\n" + nonce`, where
+the origin is the server the client means (`https://app.example.com`), the timestamp must be
+within ±30 seconds of server time and the nonce is fresh random (16+ bytes, base64url) per
+attempt. Binding the public key means a captured signature is only valid for the key that
+produced it; the nonce makes each signed request single-use; the origin makes it valid only at
+the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
+
+**The signature is bound to a server.** The CLI reads the server's URL from the committed
+`.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
+signature and relay it to the real server within the time window. The server accepts a v3
+signature only when its origin's host is the host the request arrived for (`X-Forwarded-Host`
+from a trusted proxy, else `Host`; the port isn't compared, since behind a proxy the app listens
+on another one) or an origin listed with `app.opsOrigins("https://app.example.com")`. List the
+public origin there when a proxy rewrites `Host` (nginx's `proxy_pass` does by default), or pass
+the real `Host` through. The CLI also keys its token cache by origin, so a token minted for one
+server is never sent to another, and warns when a project's ops URL changes from the last server
+it logged in to (remembered in `~/.brace/ops-origins.json`).
+
+Protocol **v2 is removed** as of 0.1.11: it signed no origin, so a signature was good at any
+server. A v2 body gets a 401 naming the cause; upgrade the CLI with the server.
 
 Protocol **v1 is removed** as of 0.1.8. It signed the timestamp alone — not bound to the key,
 no nonce — so a captured request was replayable verbatim inside the ±30 s window to mint a

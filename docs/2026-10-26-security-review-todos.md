@@ -551,7 +551,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
       is available.
   - **Tier: mid.**
 
-- [ ] **M14: The CLI token cache isn't keyed by server, and ops auth signatures aren't bound to an audience**, `CliAuth.java:52-67, 155-175`, `CliConfig.java:19-63`, `OpsKeys.java:79-81`
+- [x] **M14: The CLI token cache isn't keyed by server, and ops auth signatures aren't bound to an audience**, `CliAuth.java:52-67, 155-175`, `CliConfig.java:19-63`, `OpsKeys.java:79-81`
   - **What's wrong.**
     - The bearer token is cached at `target/.brace-token` regardless of `cfg.url()`, and
       `ops.<env>.url` comes from the committed `.brace` file.

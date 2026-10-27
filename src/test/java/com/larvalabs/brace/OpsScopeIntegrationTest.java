@@ -63,9 +63,10 @@ class OpsScopeIntegrationTest {
         byte[] nonceBytes = new byte[16];
         new java.security.SecureRandom().nextBytes(nonceBytes);
         String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
-        String sig = OpsKeys.sign(OpsKeys.v2AuthMessage(kp.publicKey(), ts, nonce), kp.privateKey());
+        String sig = OpsKeys.sign(OpsKeys.v3AuthMessage("http://localhost", kp.publicKey(), ts, nonce), kp.privateKey());
         var body = new java.util.LinkedHashMap<String, Object>();
-        body.put("v", "2");
+        body.put("v", "3");
+        body.put("origin", "http://localhost");
         body.put("publicKey", kp.publicKey());
         body.put("timestamp", ts);
         body.put("nonce", nonce);

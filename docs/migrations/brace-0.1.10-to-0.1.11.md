@@ -40,6 +40,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Uploads served and stored as untrusted: `StaticFiles.UNTRUSTED`, `Result.untrusted()`; `Storage.put(key, file)` types by key; `safeKey`/`safeFilename` neutralize `.html`/`.svg`/…; longest static prefix wins | security, **breaking** for `Storage.put(key, file)` with extensionless keys and code expecting `.svg`/`.html` keys | register upload dirs `UNTRUSTED`, add `.untrusted()` to handlers serving uploads | [§](#breaking-uploads-are-served-and-stored-as-untrusted) |
 | `SecurityHeaders.strict()`: defaults plus a strict CSP; `brace check` warns without one | new, security | none; switch `.after(SecurityHeaders.defaults())` to `strict()` once pages have no inline script or style | [§](#new-securityheadersstrict) |
 | The ops dashboard is cookie-only (no token in the page), has its own CSP; cookie POSTs to `/ops` must be same-origin | security, **breaking** for scripts that POST to `/ops` with the session cookie | use `Authorization: Bearer` in scripts; drop the token argument from any `OpsDashboard.html(...)` call | [§](#breaking-the-ops-dashboard-is-cookie-only-and-has-its-own-csp) |
+| Ops auth protocol v3 binds the CLI's signature to the server; v2 removed; CLI token cache keyed by server | security, **breaking** | upgrade the `brace` CLI with the server; behind a Host-rewriting proxy add `app.opsOrigins(...)` | [§](#breaking-ops-auth-protocol-v3) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -966,3 +967,35 @@ dashboard itself is affected; drop the argument.
 
 For high-value apps, consider serving `/ops` from its own hostname so no application page shares
 its origin: see "Ops pages in the browser" in `docs/SECURITY.md`.
+
+## Breaking: ops auth protocol v3
+
+The CLI reads the server's URL from the committed `.brace` file, signs a login, and caches the
+bearer token it gets back. The v2 signature named no server and the token cache wasn't keyed by
+server, so a pull request that changed `ops.prod.url` could collect a cached prod token (valid up
+to an hour) from anyone who ran `brace status` on it, or relay a fresh signature to real prod
+within its 30-second window.
+
+- **v3 signs the origin.** The signed message is
+  `"brace-ops-auth-v3\n" + origin + "\n" + publicKey + "\n" + timestamp + "\n" + nonce`, and the
+  server accepts it only when the origin's host is the host the request arrived for.
+- **v2 is removed:** a v2 login gets `401 Ops auth protocol v2 was removed in 0.1.11…`. Upgrade
+  the `brace` CLI along with the server; a 0.1.11 CLI can't log in to a 0.1.10 server either.
+- **The CLI's token cache is per server** (`target/.brace-token-<id>`), and the CLI warns when a
+  project's ops URL changes from the last server it logged in to.
+
+**Behind a proxy that rewrites `Host`** (nginx's `proxy_pass` sets `Host` to the upstream name
+unless told otherwise), the server sees its internal name and refuses the login with
+`This request was signed for https://app.example.com, which is not this server`. Either pass
+the real host through, or list the public origin:
+
+```nginx
+proxy_set_header Host $host;
+```
+
+```java
+app.ops("ops-authorized-keys").opsOrigins("https://app.example.com");
+```
+
+Hand-written clients: see "Auth protocol (v3)" in `docs/agent-ops-guide.md`.
+

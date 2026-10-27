@@ -69,21 +69,24 @@ public class CliAuth {
     }
 
     private static String bearer(CliConfig cfg, Path projectDir, boolean retried) throws Exception {
-        var cached = readCache(projectDir);
+        var cached = readCache(cacheFile(projectDir, cfg));
         if (cached != null) return cached;
 
         var kp = loadKeypair(cfg);
 
-        // Ops auth protocol v2: sign publicKey + "\n" + timestamp + "\n" + nonce, where the
-        // nonce is fresh random per attempt. Binds the signature to our key and lets the
-        // server reject replays of a captured request (see OpsHandler.auth).
+        // Ops auth protocol v3: sign the server's origin, our key, a timestamp and a fresh nonce.
+        // The origin binds the signature to the server this config points at (M14); the nonce
+        // lets the server reject a replay of a captured request (see OpsHandler.auth).
+        String origin = originOf(cfg);
+        noteOrigin(cfg, projectDir, origin);
         String timestamp = Instant.now().toString();
         byte[] nonceBytes = new byte[16];
         new java.security.SecureRandom().nextBytes(nonceBytes);
         String nonce = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(nonceBytes);
-        String signature = OpsKeys.sign(OpsKeys.v2AuthMessage(kp.publicKey(), timestamp, nonce), kp.privateKey());
+        String signature = OpsKeys.sign(OpsKeys.v3AuthMessage(origin, kp.publicKey(), timestamp, nonce), kp.privateKey());
         var body = Map.of(
-            "v", "2",
+            "v", "3",
+            "origin", origin,
             "publicKey", kp.publicKey(),
             "timestamp", timestamp,
             "nonce", nonce,
@@ -102,7 +105,7 @@ public class CliAuth {
         if (response.statusCode() != 200) {
             throw new OpsAuthFailure(response.statusCode(), response.body());
         }
-        return cacheToken(projectDir, response);
+        return cacheToken(cacheFile(projectDir, cfg), response);
     }
 
     private static HttpResponse<String> postAuth(CliConfig cfg, Map<String, ?> body) throws Exception {
@@ -115,16 +118,78 @@ public class CliAuth {
             HttpResponse.BodyHandlers.ofString());
     }
 
-    private static String cacheToken(Path projectDir, HttpResponse<String> response) throws Exception {
+    private static String cacheToken(Path file, HttpResponse<String> response) throws Exception {
         JsonNode parsed = Json.mapper().readTree(response.body());
         String token = parsed.get("token").asText();
         String expiresAt = parsed.get("expiresAt").asText();
-        writeCache(projectDir, token, expiresAt);
+        writeCache(file, token, expiresAt);
         return token;
     }
 
+    /**
+     * The token cache for the server {@code cfg} points at (M14). One file per origin, so a token
+     * minted for prod is never sent to another URL: the URL comes from the committed {@code .brace},
+     * which a pull request can change.
+     */
+    static Path cacheFile(Path projectDir, CliConfig cfg) {
+        String origin = originOf(cfg);
+        String id = OpsKeys.fingerprint(origin); // base64url: safe in a file name
+        return projectDir.resolve("target").resolve(".brace-token-" + id);
+    }
+
+    /** {@code ~/.brace}, or {@code -Dbrace.user.dir} (the framework's own tests point it at a temp dir). */
+    static Path userBraceDir() {
+        String override = System.getProperty("brace.user.dir");
+        return override != null ? Path.of(override) : Path.of(System.getProperty("user.home"), ".brace");
+    }
+
+    static String originOf(CliConfig cfg) {
+        String url = cfg.url();
+        if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) {
+            throw new IllegalArgumentException("ops." + cfg.env() + ".url must start with https:// (or http:// for local): " + url);
+        }
+        return Brace.normalizeOrigin(url);
+    }
+
+    /** Removes every cached token for this project, whatever server it was for. */
     public static void clearCache(Path projectDir) throws Exception {
-        Files.deleteIfExists(projectDir.resolve("target").resolve(".brace-token"));
+        Path target = projectDir.resolve("target");
+        Files.deleteIfExists(target.resolve(".brace-token")); // pre-0.1.11, not keyed by server
+        if (!Files.isDirectory(target)) return;
+        try (var files = Files.newDirectoryStream(target, ".brace-token-*")) {
+            for (Path f : files) Files.deleteIfExists(f);
+        }
+    }
+
+    /**
+     * Warn when this project's {@code ops.<env>.url} points somewhere other than the last server
+     * the CLI logged in to for it (M14): a changed {@code .brace} in a pull request is how a
+     * signature or token would be sent to the wrong place. Remembered under the user's
+     * {@code ~/.brace}, so a {@code mvn clean} doesn't forget it.
+     */
+    static void noteOrigin(CliConfig cfg, Path projectDir, String origin) {
+        try {
+            Path file = userBraceDir().resolve("ops-origins.json");
+            var known = new java.util.TreeMap<String, String>();
+            if (Files.exists(file)) {
+                Json.mapper().readTree(Files.readString(file)).fields()
+                    .forEachRemaining(e -> known.put(e.getKey(), e.getValue().asText()));
+            }
+            String key = projectDir.toAbsolutePath().normalize() + "#" + cfg.env();
+            String previous = known.get(key);
+            if (previous != null && !previous.equals(origin)) {
+                System.err.println("warning: ops." + cfg.env() + ".url is now " + origin + "; you last logged in to "
+                    + previous + " from this project. If you didn't change it, check .brace and .brace.local "
+                    + "before going on: this login is signed for " + origin + " only.");
+            }
+            if (!origin.equals(previous)) {
+                known.put(key, origin);
+                Files.createDirectories(file.getParent());
+                SecretFiles.writeStringWithOwnerOnlyPermissions(file, Json.mapper().writeValueAsString(known));
+            }
+        } catch (Exception e) {
+            // Best-effort: a warning, never a reason to fail the command.
+        }
     }
 
     private static OpsKeys.Keypair loadKeypair(CliConfig cfg) throws Exception {
@@ -152,9 +217,8 @@ public class CliAuth {
         throw new RuntimeException("OPS_PRIVATE_KEY does not match any authorized key.");
     }
 
-    private static String readCache(Path projectDir) {
+    private static String readCache(Path file) {
         try {
-            Path file = projectDir.resolve("target").resolve(".brace-token");
             if (!Files.exists(file)) return null;
             JsonNode node = Json.mapper().readTree(Files.readString(file));
             String expiresAt = node.get("expiresAt").asText();
@@ -165,12 +229,11 @@ public class CliAuth {
         }
     }
 
-    private static void writeCache(Path projectDir, String token, String expiresAt) {
+    private static void writeCache(Path file, String token, String expiresAt) {
         try {
-            Path target = projectDir.resolve("target");
-            Files.createDirectories(target);
+            Files.createDirectories(file.getParent());
             String json = Json.mapper().writeValueAsString(Map.of("token", token, "expiresAt", expiresAt));
-            SecretFiles.writeStringWithOwnerOnlyPermissions(target.resolve(".brace-token"), json);
+            SecretFiles.writeStringWithOwnerOnlyPermissions(file, json);
         } catch (Exception e) {
             // Caching is best-effort
         }
