@@ -489,7 +489,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     `Long.MAX_VALUE`) behave as before.
   - **Tier: small.**
 
-- [ ] **M12: Dependency CVEs (verified via OSV)**, `pom.xml`
+- [x] **M12: Dependency CVEs (verified via OSV)**, `pom.xml`
   - **jackson-core 2.18.6** (fixed in 2.18.11):
     - GHSA-p6pp-m3f8-5c89 / CVE-2026-89407 (HIGH): quadratic number-pattern backtracking,
       reachable through `req.json()`. A 20,000-character string bound to a
@@ -511,8 +511,14 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
       merge gate.
   - **Tests.** Full `mvn verify`. Re-run the jackson number-string timing check (under 50 ms).
   - **Progress.** Dependency bumps landed: Jetty 12.0.40, Jackson 2.18.12, pgjdbc 42.7.14, all
-    clean on OSV; the timing check is under 50 ms for every probe. The OSV gate remains (Phase 5),
-    so the box stays open.
+    clean on OSV; the timing check is under 50 ms for every probe. CI gate landed (Phase 5):
+    `.github/scripts/osv-scan.sh` runs a pinned, sha256-verified OSV-Scanner 2.7.0 over
+    `pom.xml`'s resolved tree (transitive, all scopes) in `ci.yml` and, before `mvn deploy`, in
+    `publish.yml`. `osv_gate.py` fails on CVSS >= 7.0, a HIGH/CRITICAL label, or an unrated
+    advisory, lists lower ones without failing, and fails if any artifact `mvn dependency:list`
+    resolves wasn't scanned. Ignores go in `osv-scanner.toml` (`[[IgnoredVulns]]` with
+    `ignoreUntil` and `reason`); runbook in `RELEASE.md`. Current tree passes (66 artifacts; two
+    MODERATE commons-compress advisories via Testcontainers, test scope, reported only).
   - **Tier: small** for the bumps; **mid** for the CI gate.
 
 - [ ] **M13: The generated container is root, unpinned and shell-bearing, and no hardened runtime config is generated**, `ProjectGenerator.java:386-420`, `Brace.java:1105-1106`

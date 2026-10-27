@@ -5,10 +5,15 @@ name: CI
 # runs failsafe *IT tests), which is what would have caught the missing
 # flyway-database-postgresql module that the H2-only surefire suite never could.
 #
+# The job also runs the dependency-vulnerability gate (OSV-Scanner over pom.xml's
+# resolved dependency tree, failing on HIGH/CRITICAL advisories; see
+# .github/scripts/osv-scan.sh and RELEASE.md).
+#
 # main pushes and v* tags are intentionally not handled here: publish.yml runs
 # `mvn deploy` on those, which traverses the integration-test/verify phases and
-# therefore runs the same IT tier before publishing. Skipping main here avoids a
-# redundant second run (and a redundant Postgres image pull) on every release.
+# therefore runs the same IT tier before publishing; publish.yml also runs the same
+# dependency gate. Skipping main here avoids a redundant second run (and a
+# redundant Postgres image pull) on every release.
 on:
   push:
     branches-ignore: [main]
@@ -19,17 +24,25 @@ jobs:
   verify:
     runs-on: ubuntu-latest  # GitHub-hosted ubuntu runners have Docker preinstalled, so Testcontainers works out of the box
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           java-version: '25'
           distribution: 'temurin'
           cache: maven
 
       # `mvn verify` = surefire (H2 unit suite, Docker-free) + failsafe (the
-      # Postgres testcontainer tier). The IT self-skips via assumeTrue(Docker)
-      # if Docker were ever absent, but on ubuntu-latest it is present and runs.
+      # Postgres testcontainer tier). The IT tier fails closed: PostgresTestBase
+      # throws if Docker is unreachable, so a runner without Docker fails this
+      # step rather than passing with zero ITs run. ubuntu-latest has Docker.
       - name: Verify (H2 unit suite + Postgres testcontainer tier)
         run: mvn -B verify
+
+      # Fails on any HIGH/CRITICAL (CVSS >= 7.0) or unrated advisory against a
+      # direct or transitive dependency; lower ones are listed in the log only.
+      # Runs even when Verify failed, so both results show on one push.
+      - name: Dependency vulnerability scan (OSV-Scanner, fails on HIGH/CRITICAL)
+        if: ${{ !cancelled() }}
+        run: .github/scripts/osv-scan.sh

@@ -94,6 +94,7 @@ mvn compile          # compile brace framework
 mvn test             # run all tests (H2, fast)
 mvn verify           # test + the real-Postgres Testcontainers tier (*IT). Needs Docker. Merge gate.
 mvn package          # build distribution zip (target/brace-<version>.zip; version from pom.xml)
+.github/scripts/osv-scan.sh  # dependency CVE gate (OSV-Scanner; fails on HIGH/CRITICAL). CI + publish run it; see RELEASE.md
 
 # Using brace as an end user (e.g., building the sample app)
 cd sample && brace run

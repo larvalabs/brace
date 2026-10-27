@@ -13,10 +13,10 @@ jobs:
       contents: write
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           java-version: '25'
           distribution: 'temurin'
@@ -45,6 +45,15 @@ jobs:
             echo "Will deploy version $VERSION (ref $GITHUB_REF)."
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Same gate as ci.yml: fails on any HIGH/CRITICAL (CVSS >= 7.0) or unrated
+      # advisory against a direct or transitive dependency, so nothing is deployed
+      # or released while one is open. An advisory published after the PR merged
+      # is caught here; fix it (bump, or a dated ignore in osv-scanner.toml) and
+      # push again. See RELEASE.md.
+      - name: Dependency vulnerability scan (OSV-Scanner, fails on HIGH/CRITICAL)
+        if: steps.decide.outputs.skip != 'true'
+        run: .github/scripts/osv-scan.sh
 
       - name: Deploy (runs tests then publishes)
         if: steps.decide.outputs.skip != 'true'

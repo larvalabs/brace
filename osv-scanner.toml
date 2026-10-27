@@ -1,0 +1,16 @@
+# OSV-Scanner configuration for the dependency-vulnerability gate
+# (.github/scripts/osv-scan.sh, run by ci.yml and publish.yml; see RELEASE.md).
+#
+# The gate fails on any HIGH/CRITICAL advisory against a dependency of pom.xml.
+# The fix is to bump the dependency. Only when an advisory is shown not to be
+# reachable from Brace (and no fixed version is available yet) may it be ignored
+# here, with a dated expiry and a justification:
+#
+#   [[IgnoredVulns]]
+#   id = "GHSA-xxxx-xxxx-xxxx"   # a CVE alias also matches
+#   ignoreUntil = 2026-12-31     # TOML date; the ignore lapses after this day
+#   reason = "<why it is not reachable from Brace; who checked, when; what unblocks the bump>"
+#
+# Keep ignoreUntil short (weeks, not years) so the decision is revisited.
+# OSV-Scanner prints each filtered advisory with its reason, and lists entries that
+# no longer match anything as unused: delete those.
