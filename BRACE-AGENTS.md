@@ -1471,7 +1471,9 @@ Mode-prefixed keys override base keys. A key absent from the file falls back to 
 named after it (`db.pass` → `DB_PASS`), but a key present in the file always wins, so
 per-deployment values must be `${VAR}` references — the scaffold's `application.conf.example`
 (the Dockerfile's config) uses `${DATABASE_URL}`, `${DB_USER}`, `${DB_PASS}`, `${SESSION_SECRET}`. `brace dev` sets the mode to `dev` and
-`brace run` to `prod`; outside the CLI, pass `-Dbrace.mode=...` yourself.
+`brace run` to `prod`; outside the CLI, pass `-Dbrace.mode=...` yourself. The H2 driver for the
+`%dev.` database comes from the toolchain (`brace dev` and `brace test` only, never `brace run`
+or the shaded jar); a dev-mode run outside the CLI needs H2 on its classpath.
 
 Methods: `get(key)`, `get(key, default)`, `getInt(key, default)`, `getBool(key, default)`.
 

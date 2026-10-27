@@ -47,6 +47,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Warning for an untrusted proxy; `trustedProxies(String...)` accepts a config value; scaffold reads `TRUSTED_PROXIES` | security | if the warning appears, set `trustedProxies` to your proxy's address or network, not `10.0.0.0/8`/`172.16.0.0/12` | [§](#security-untrusted-proxy-warning-and-narrow-trusted-proxies) |
 | New projects start with strict headers, htmx CSRF wiring and `/public` served | new projects | existing projects: optionally adopt the same layout and `routes()` lines | [§](#new-projects-start-with-the-security-defaults) |
 | Whole-branch review follow-ups: duplicate routes refused; bad percent-encoding is a 400; ops `no-store`; CLI token cache in `~/.brace`; launcher refuses toolchains older than 0.1.8 | security, **breaking** for apps registering one route twice | remove the duplicate registration `start()` names | [§](#security-whole-branch-review-follow-ups) |
+| `brace dev` ships the H2 driver for the scaffold's dev database | fix | none; `brace dev` on a project pinned to this version just works | [§](#fix-brace-dev-ships-the-h2-driver) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -1208,3 +1209,23 @@ A final review of the whole 0.1.11 security work found these. Only the first can
   release to bring back a CLI bug fixed since (`BRACE_ALLOW_OLD_TOOLCHAIN=1` overrides). A pin
   older than the launcher itself runs, with a note.
 
+## Fix: `brace dev` ships the H2 driver
+
+**What changed.** A project from `brace new` sets `%dev.db.url=jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1`,
+but nothing put the H2 driver on `brace dev`'s classpath: H2 is a test-scope dependency of
+Brace, the toolchain zip left test scope out, and the scaffold's `pom.xml` doesn't name it. So
+`brace new myapp && cd myapp && brace dev` failed at startup:
+
+```
+org.flywaydb.core.api.FlywayException: No database found to handle jdbc:h2:mem:dev;DB_CLOSE_DELAY=-1
+```
+
+The toolchain now ships H2 in `lib/dev/`, which `brace dev` and `brace test` add to the app's
+classpath. It stays out of production: `brace run` (prod mode) and the launcher's own
+classpath don't load `lib/dev/`, and H2 is still test scope in Brace's `pom.xml`, so the app's
+shaded `target/app.jar` (what the `Dockerfile` ships) never contains it.
+
+**Who needs to act.** Nobody. If you worked around this by copying `h2-*.jar` into your
+project's `lib/`, you can delete it; if you keep it, it comes first on the classpath and wins.
+Running dev mode outside the CLI (an IDE run configuration, `java -Dbrace.mode=dev`) still needs
+H2 on that classpath yourself.

@@ -173,6 +173,34 @@ public class BuildCommandsTest {
         assertEquals("app.App", run.get(run.size() - 1));
     }
 
+    @Test
+    public void devLibJarsOnlyOnDevClasspath(@TempDir Path dir) throws Exception {
+        // The toolchain's lib/dev holds the H2 driver behind the scaffold's %dev.db.url.
+        // brace dev needs it; brace run (prod mode) must not load it.
+        Path home = dir.resolve("toolchain");
+        Files.createDirectories(home.resolve("lib/dev"));
+        Files.createFile(home.resolve("lib/brace-0.0.0.jar"));
+        Files.createFile(home.resolve("lib/dev/h2-0.0.0.jar"));
+        Path project = Files.createDirectories(dir.resolve("app"));
+        String prev = System.getProperty("brace.home");
+        System.setProperty("brace.home", home.toString());
+        try {
+            String devCp = classpathOf(BuildCommands.appCommand(project, "app.App", true));
+            String runCp = classpathOf(BuildCommands.appCommand(project, "app.App", false));
+            assertTrue(devCp.contains("brace-0.0.0.jar"), devCp);
+            assertTrue(devCp.contains("h2-0.0.0.jar"), devCp);
+            assertTrue(runCp.contains("brace-0.0.0.jar"), runCp);
+            assertFalse(runCp.contains("h2-0.0.0.jar"), runCp);
+        } finally {
+            if (prev == null) System.clearProperty("brace.home");
+            else System.setProperty("brace.home", prev);
+        }
+    }
+
+    private static String classpathOf(List<String> cmd) {
+        return cmd.get(cmd.indexOf("-cp") + 1);
+    }
+
     // --- H7: summarizeTestRun ---------------------------------------------
 
     private static final String FAILURE_OUTPUT = """

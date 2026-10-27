@@ -75,6 +75,32 @@ find target/jte-classes/gg/jte/generated/precompiled -name '*.class' | grep -q .
     fail "no precompiled template classes found"
 pass "brace compile succeeded (sources + templates)"
 
+step "Running brace dev (scaffold serves GET / on its in-memory H2 dev database)"
+# The scaffold's %dev.db.url is H2, whose driver only the toolchain's lib/dev provides:
+# a toolchain without it fails here at startup ("No database found to handle jdbc:h2:...").
+[[ -n "$(ls "$(dirname "$BRACE_BIN")"/../lib/dev/h2-*.jar 2>/dev/null)" ]] || fail "distribution has no lib/dev/h2-*.jar"
+[[ -z "$(ls "$(dirname "$BRACE_BIN")"/../lib/h2-*.jar 2>/dev/null)" ]] || fail "H2 must not be in lib/ (the launcher and brace run would load it)"
+DEV_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+cp application.conf "$WORK/application.conf.orig"
+sed -i.bak "s/^%dev\.port=.*/%dev.port=$DEV_PORT/" application.conf && rm -f application.conf.bak
+"$BRACE_BIN" dev > "$WORK/dev.out" 2>&1 &
+DEV_PID=$!
+# SIGTERM reaches the Cli JVM (the launcher execs it), whose shutdown hook stops the app JVM.
+trap 'kill "$DEV_PID" 2>/dev/null; wait "$DEV_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+STATUS=""
+for _ in $(seq 1 60); do
+    kill -0 "$DEV_PID" 2>/dev/null || { cat "$WORK/dev.out"; fail "brace dev exited during startup"; }
+    STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DEV_PORT/" || true)
+    [[ "$STATUS" == "200" ]] && break
+    sleep 1
+done
+[[ "$STATUS" == "200" ]] || { cat "$WORK/dev.out"; fail "brace dev: GET / returned '$STATUS', expected 200"; }
+kill "$DEV_PID"
+wait "$DEV_PID" 2>/dev/null || true
+trap 'rm -rf "$WORK"' EXIT
+mv "$WORK/application.conf.orig" application.conf
+pass "brace dev started and GET / returned 200"
+
 step "Running brace agents-md"
 [[ -f BRACE-AGENTS.md ]] || fail "brace new did not write BRACE-AGENTS.md"
 [[ -f BRACE-OPS.md ]] || fail "brace new did not write BRACE-OPS.md"
