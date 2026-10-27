@@ -68,10 +68,20 @@ class RouterTest {
     }
 
     @Test
-    void duplicateStaticRouteFirstRegistrationWins() {
-        var first = router.add("GET", "/dup", this::dummyHandler);
+    void duplicateRoutesAreRefused() {
+        // Only one of two routes matching the same paths is ever reached, so the other's access
+        // requirements would be silently dead (a stale public copy serving a guarded path).
         router.add("GET", "/dup", this::dummyHandler);
-        assertSame(first, router.match("GET", "/dup").route());
+        var e = assertThrows(IllegalStateException.class, () -> router.add("GET", "/dup", this::dummyHandler));
+        assertTrue(e.getMessage().contains("GET /dup is registered twice"), e.getMessage());
+        // Same shape: trailing slash, empty segments, differently named parameters.
+        assertThrows(IllegalStateException.class, () -> router.add("GET", "/dup/", this::dummyHandler));
+        router.add("GET", "/users/{id}", this::dummyHandler);
+        assertThrows(IllegalStateException.class, () -> router.add("GET", "/users/{userId}", this::dummyHandler));
+        assertThrows(IllegalStateException.class, () -> router.add("GET", "//users//{x}", this::dummyHandler));
+        // A different method, or a different shape, is fine.
+        assertDoesNotThrow(() -> router.add("POST", "/dup", this::dummyHandler));
+        assertDoesNotThrow(() -> router.add("GET", "/users/{id}/posts", this::dummyHandler));
     }
 
     @Test

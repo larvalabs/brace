@@ -51,6 +51,15 @@ public class Router {
 
     private Route register(Route route) {
         requireNotStarted("Registering " + route.method() + " " + route.pattern());
+        // Only one of two routes matching the same paths is ever reached, so the other's handler
+        // and access requirements are silently dead: a stale public copy of a guarded route would
+        // serve instead of it. Refused, framework routes included (an app route at /ops/status).
+        for (var existing : routes) {
+            if (existing.method().equals(route.method()) && existing.shape().equals(route.shape())) {
+                throw new IllegalStateException(route.method() + " " + route.pattern() + " is registered twice (as "
+                    + existing.pattern() + " too): only one could ever be reached, with its access requirements");
+            }
+        }
         routes.add(route);
         if (route.isStatic()) {
             // putIfAbsent: first registration wins, matching the old scan order.

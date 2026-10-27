@@ -576,6 +576,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         } catch (NotFoundException e) {
             respondToError(braceRequest, Result.notFound(), response, callback, session, csrfOnlySession, cookieSpec, exchange);
             return true;
+        } catch (MalformedRequestException e) {
+            // A query string or form body with a bad percent-escape, wherever it was parsed.
+            // Like the 413, a client mistake: no error recorded, so it can't flood the error
+            // store or the regression notifier.
+            respondToError(braceRequest, Result.error(400, "Bad Request"),
+                response, callback, session, csrfOnlySession, cookieSpec, exchange);
+            return true;
         } catch (Exception e) {
             String errorMethod = jettyRequest.getMethod();
             String errorPath = jettyRequest.getHttpURI().getPath();
@@ -583,7 +590,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Redact high-entropy path segments (reset tokens, invite tokens, etc.) so they
             // are not persisted in the error store or surfaced on /ops/errors.
             String redactedPath = Redactor.redactPath(errorPath);
-            String routeInfo = errorMethod + " " + redactedPath;
+            // An error kind is (type, route PATTERN), like the stats keys (H1): keyed by the
+            // concrete path, every /users/{id} a client tried was a new kind and a new regression
+            // notification. The concrete (redacted) path is still in requestInfo below.
+            String routeInfo = errorMethod + " " + routeKey(exchange.match);
             // Redact sensitive query params (?token=…, ?password=…) before the request detail
             // is stored in the error record and served over /ops/errors.
             String requestInfo = errorMethod + " " + redactedPath
@@ -1627,6 +1637,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
+    private static final java.util.regex.Pattern PUBLIC_DIRECTIVE =
+        java.util.regex.Pattern.compile("(?i)(?<![-\\w])public(?![-\\w])");
+
     private void attachSessionCookie(Result result, Session session, CookieSpec cookieSpec) {
         if (session == null || !session.isModified() || sessionSecret == null) return;
         session.maxAgeSeconds(sessionMaxAgeSeconds());
@@ -1644,9 +1657,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // A response carrying a session cookie is per-user by definition. Without this,
         // a response with no caching headers (e.g. a static file under a lastSeen-touch
         // middleware) is heuristically cacheable, and a force-cache proxy would replay
-        // user A's Set-Cookie to everyone. An explicit Cache-Control wins.
-        if (result.header("Cache-Control") == null) {
+        // user A's Set-Cookie to everyone. An explicit Cache-Control wins, except "public": a
+        // shared cache may store that (a fingerprinted static file is public, immutable), and
+        // with it this user's session cookie, so it becomes "private".
+        String cacheControl = result.header("Cache-Control");
+        if (cacheControl == null) {
             result.header("Cache-Control", "private");
+        } else if (PUBLIC_DIRECTIVE.matcher(cacheControl).find()) {
+            result.header("Cache-Control", PUBLIC_DIRECTIVE.matcher(cacheControl).replaceAll("private"));
         }
     }
 

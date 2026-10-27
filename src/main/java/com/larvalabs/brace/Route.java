@@ -66,6 +66,8 @@ public class Route {
     }
 
     public String method() { return method; }
+    /** The path as the router matches it: two routes of one method with the same shape collide. */
+    String shape() { return compiledPattern.pattern(); }
     public String pattern() { return pattern; }
     public Object handler() { return handler; }
     public Invoker invoker() { return invoker; }

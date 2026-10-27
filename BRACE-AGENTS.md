@@ -511,6 +511,8 @@ hard-coded; a request-chosen order goes through `Sort`:
 var sort = Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"), "createdAt DESC");
 var posts = db.paginate(Post.class, "published = true", sort, req, 20);
 Sort.of("createdAt DESC, id")                     // a fixed order as a Sort — never request input
+// joins and projections: db.hql / db.sqlQuery take a Sort too (allowlist values are p.field / column)
+db.hql("SELECT p.id, p.title FROM Post p", Sort.from(req, "sort", Map.of("title", "p.title"), "p.id"))
 ```
 
 ```html
@@ -695,8 +697,11 @@ of JTE's escaping, Brace's template output:
 - **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request`,
   `hx-trigger`): user data is escaped with `\uXXXX` sequences, valid in a JavaScript string and in
   JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and
-  `hx-vals='{"q": "${q}"}'` stays valid JSON. Still, these attributes are code: prefer passing user
-  data as `hx-vals` JSON or `data-*` attributes over writing it into a handler.
+  `hx-vals='{"q": "${q}"}'` stays valid JSON. When data is the whole `hx-vals`/`hx-headers` value
+  (`hx-vals='${json}'`, JSON the handler built), it's attribute-escaped instead, so the JSON stays
+  intact; a whole value starting `js:` becomes `{}`. Still, these attributes are code: prefer passing
+  user data as `hx-vals` JSON or `data-*` attributes over writing it into a handler. The same rules
+  apply to data a `@template` call writes inside an attribute value.
 - `srcdoc`: user data is escaped twice, so it becomes text in the frame, never markup. Its content
   isn't URL-checked; for an HTML preview, sanitize the HTML, write it with
   `srcdoc="$unsafe{Html.escape(sanitized)}"`, and add `sandbox` to the iframe.

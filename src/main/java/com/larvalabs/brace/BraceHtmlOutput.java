@@ -73,6 +73,9 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private StringBuilder valueRaw;     // the value as the browser reads it, for the URL check
     private int firstUserIndex;         // where in valueRaw user data first appears; -1 if none
     private boolean urlValue;           // JTE's context confirmed this is a URL attribute
+    private boolean jsonValue;          // hx-vals or hx-headers: may be one piece of JSON data
+    private int userWrites;             // pieces of user data in the held value
+    private String soleUser;            // the last of them (the only one, if userWrites == 1)
 
     public BraceHtmlOutput(TemplateOutput target) {
         super(target);
@@ -84,9 +87,11 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         super.setContext(tagName, attributeName);
         this.tagName = tagName;
         this.attributeName = attributeName == null ? null : attributeName.toLowerCase(Locale.ROOT);
-        if (valueAttribute == null || this.attributeName == null || urlValue) return;
+        if (valueAttribute == null || this.attributeName == null || urlValue || jsonValue) return;
         if (valueAttribute.equals(this.attributeName) && isUrlAttribute(tagName, this.attributeName)) {
             urlValue = true;
+        } else if (valueAttribute.equals(this.attributeName) && isJsonAttribute(this.attributeName)) {
+            jsonValue = true;
         } else {
             emitHeldValue(); // not a URL: nothing to decide, so the held start goes out now
         }
@@ -142,16 +147,23 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         valueRaw = new StringBuilder(end - valueStart + 32).append(s, valueStart, end);
         firstUserIndex = -1;
         urlValue = false;
+        jsonValue = false;
+        userWrites = 0;
+        soleUser = null;
     }
 
-    /** A cheap test that template text might end inside an attribute value: a quote after '='. */
+    /**
+     * A cheap test that template text might end inside an attribute value: a quote after '=',
+     * back to the tag's start. Other quotes are passed over, since a value can hold the other
+     * kind ({@code onclick="go('}); {@link #OPENS_VALUE} makes the real decision.
+     */
     private static boolean mayOpenValue(byte[] b) {
         for (int i = b.length - 1; i > 0; i--) {
             byte c = b[i];
             if (c == '"' || c == '\'') {
                 int j = i - 1;
                 while (j >= 0 && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r')) j--;
-                return j >= 0 && b[j] == '=';
+                if (j >= 0 && b[j] == '=') return true;
             }
             if (c == '>' || c == '<') return false;
         }
@@ -164,7 +176,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             if (c == '"' || c == '\'') {
                 int j = i - 1;
                 while (j >= begin && Character.isWhitespace(s.charAt(j))) j--;
-                return j >= begin && s.charAt(j) == '=';
+                if (j >= begin && s.charAt(j) == '=') return true;
             }
             if (c == '>' || c == '<') return false;
         }
@@ -175,6 +187,11 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private void emitHeldValue() {
         if (urlValue && !isSafeValue()) {
             Escape.htmlAttribute(BLOCKED_URL, target);
+        } else if (jsonValue && userWrites == 1 && valueRaw.length() == soleUser.length()) {
+            // The whole value is one piece of data: JSON the app built (hx-vals='${json}').
+            // escaping its quotes as JavaScript would break the JSON, so it's attribute-escaped instead (the
+            // browser decodes that back), unless it's a js: expression htmx would evaluate.
+            Escape.htmlAttribute(evaluated(soleUser) ? "{}" : soleUser, target);
         } else {
             target.writeContent(valueOut.toString());
         }
@@ -182,6 +199,9 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         valueOut = null;
         valueRaw = null;
         urlValue = false;
+        jsonValue = false;
+        userWrites = 0;
+        soleUser = null;
     }
 
     /** Flushes a value still held at the end of a render. Called by {@link TemplateEngine}. */
@@ -194,15 +214,12 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     @Override
     public void writeUserContent(String value) {
         if (value == null) return;
-        if (tagName == null || attributeName == null) {
-            if (valueAttribute != null) emitHeldValue();
-            super.writeUserContent(value);
+        if (valueAttribute != null && (attributeName == null || urlValue || jsonValue)) {
+            appendToHeldValue(value);
             return;
         }
-        if (urlValue) {
-            if (firstUserIndex < 0) firstUserIndex = valueRaw.length();
-            valueRaw.append(value);
-            Escape.htmlAttribute(value, new Appender(valueOut));
+        if (tagName == null || attributeName == null) {
+            super.writeUserContent(value);
             return;
         }
         if (valueAttribute != null) emitHeldValue();
@@ -221,9 +238,45 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         }
     }
 
+    /**
+     * User data inside the held value. With no attribute context from JTE, it was written by a
+     * {@code @template} call (or a content block) inside the value: JTE escapes that as body text,
+     * which leaves quotes alone, so it's classified here by the held attribute's name instead,
+     * failing safe for names that are URLs only on some tags.
+     */
+    private void appendToHeldValue(String value) {
+        String attribute = valueAttribute;
+        if (!urlValue && !jsonValue) {
+            if (isUrlAttribute(tagName, attribute) || ANIMATION_VALUES.contains(attribute)) urlValue = true;
+            else if (isJsonAttribute(attribute)) jsonValue = true;
+        }
+        if (firstUserIndex < 0) firstUserIndex = valueRaw.length();
+        userWrites++;
+        soleUser = value;
+        valueRaw.append(value);
+        var out = new Appender(valueOut);
+        if (urlValue) {
+            Escape.htmlAttribute(value, out);
+        } else if (jsonValue || isScriptAttribute(attribute)) {
+            Escape.htmlAttribute(escapeScript(value), out);
+        } else if ("srcdoc".equals(attribute)) {
+            var once = new StringBuilder(value.length() + 16);
+            Escape.htmlAttribute(value, new Appender(once));
+            Escape.htmlAttribute(once.toString(), out);
+        } else {
+            Escape.htmlAttribute(value, out);
+        }
+    }
+
     @Override
     public void writeUserContent(Content content) {
         if (content == null) return;
+        if (valueAttribute != null && (attributeName == null || urlValue || jsonValue)) {
+            var text = createOutputForAttributeContent();
+            content.writeTo(text);
+            appendToHeldValue(text.toString());
+            return;
+        }
         if (tagName != null && attributeName != null) {
             // Rendered to text first, into the HTML-aware output JTE itself uses for this (a
             // content block casts its output to one), then treated like any other value here.
@@ -302,6 +355,18 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     /** {@code data-hx-get} is htmx's {@code hx-get}. */
     private static String unprefixed(String attribute) {
         return attribute.startsWith("data-hx-") ? attribute.substring(5) : attribute;
+    }
+
+    /** htmx attributes that take JSON (or, with a {@code js:} prefix, an expression). */
+    private static boolean isJsonAttribute(String attribute) {
+        String name = unprefixed(attribute);
+        return name.equals("hx-vals") || name.equals("hx-headers");
+    }
+
+    /** A {@code js:}/{@code javascript:} value, which htmx evaluates as code. */
+    private static boolean evaluated(String value) {
+        String v = normalize(value).toLowerCase(Locale.ROOT);
+        return v.startsWith("js:") || v.startsWith("javascript:");
     }
 
     private static boolean isScriptAttribute(String attribute) {

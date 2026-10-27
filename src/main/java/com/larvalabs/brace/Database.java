@@ -466,6 +466,20 @@ public class Database {
 
     public List<Object[]> hql(String hql, Object... params) {
         checkQuery(hql, "hql");
+        return runHql(hql, params);
+    }
+
+    /**
+     * {@link #hql(String, Object...)} with {@code sort}'s ORDER BY appended, for joins and
+     * projections sorted by a request-chosen key: {@code db.hql("SELECT p.id, p.title FROM Post p",
+     * Sort.from(req, "sort", allowed, "p.createdAt DESC"))}. The query text is checked before the
+     * sort is added (H3), so the allowlisted key the request picked isn't mistaken for injection.
+     */
+    public List<Object[]> hql(String hql, Sort sort, Object... params) {
+        return runHql(withSort(hql, sort, "hql"), params);
+    }
+
+    private List<Object[]> runHql(String hql, Object... params) {
         long start = System.nanoTime();
         Query<?> query = session.createQuery(convertPositionalParams(hql));
         bindParams(query, params);
@@ -488,6 +502,15 @@ public class Database {
 
     public List<Object[]> sqlQuery(String sql, Object... params) {
         checkQuery(sql, "sqlQuery");
+        return runSqlQuery(sql, params);
+    }
+
+    /** {@link #sqlQuery(String, Object...)} with {@code sort}'s ORDER BY appended; see {@link #hql(String, Sort, Object...)}. */
+    public List<Object[]> sqlQuery(String sql, Sort sort, Object... params) {
+        return runSqlQuery(withSort(sql, sort, "sqlQuery"), params);
+    }
+
+    private List<Object[]> runSqlQuery(String sql, Object... params) {
         long start = System.nanoTime();
         var query = session.createNativeQuery(convertPositionalParams(sql));
         bindParams(query, params);
@@ -670,6 +693,18 @@ public class Database {
                 + "put the whole order in the Sort (Sort.of(\"createdAt DESC, id\") for a fixed one)");
         }
         return whereClause(hqlWhere, true) + sort.hql();
+    }
+
+    /** A whole query plus {@code sort}'s ORDER BY, the query checked first (H3). */
+    private String withSort(String query, Sort sort, String method) {
+        checkQuery(query, method);
+        if (sort == null) return query;
+        if (!sort.fromAllowlist()) checkQuery(sort.hql(), method); // Sort.of(...) text
+        if (HAS_ORDER_BY.matcher(query).find()) {
+            throw new IllegalArgumentException("The query has its own ORDER BY and a Sort was passed: "
+                + "put the whole order in the Sort (Sort.of(\"p.createdAt DESC, p.id\") for a fixed one)");
+        }
+        return query + sort.hql();
     }
 
     String whereClause(String hqlWhere, boolean keepOrderBy) {
