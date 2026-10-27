@@ -100,7 +100,7 @@ if [[ "$status" -ne 0 && "$status" -ne 1 ]]; then
     exit 1
 fi
 
-gate_args=("$work/osv.json")
+gate_args=("$work/osv.json" --config osv-scanner.toml)
 if [[ "$maven_check" -eq 1 ]]; then
     # Maven's own resolution, to check OSV-Scanner scanned exactly what Maven builds with.
     mvn_cmd="${MVN:-mvn}"

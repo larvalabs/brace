@@ -29,9 +29,12 @@ import argparse
 import json
 import os
 import sys
+import tomllib
 
 CVSS_THRESHOLD = 7.0
 FAILING_LABELS = {"HIGH", "CRITICAL"}
+# Without a CVSS score, only these labels pass; any other label (e.g. "UNKNOWN") fails closed.
+PASSING_LABELS = {"LOW", "MODERATE", "MEDIUM"}
 
 
 def _label(value):
@@ -71,6 +74,25 @@ def fixed_versions(vulns, package_name):
     return sorted(fixed)
 
 
+def check_ignores(path):
+    """Problems with osv-scanner.toml's [[IgnoredVulns]]: each needs an ignoreUntil date (an entry
+    without one is a permanent ignore) and a reason. None if the file can't be read."""
+    try:
+        with open(path, "rb") as fh:
+            config = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"osv-gate: cannot read {path}: {e}", file=sys.stderr)
+        return None
+    problems = []
+    for entry in config.get("IgnoredVulns") or []:
+        vid = entry.get("id", "<no id>")
+        if not entry.get("ignoreUntil"):
+            problems.append(f"{vid}: no ignoreUntil (it would never expire)")
+        if not str(entry.get("reason") or "").strip():
+            problems.append(f"{vid}: no reason")
+    return problems
+
+
 def findings(report):
     """Yields one finding per (package, version, advisory group), deduplicated."""
     seen = set()
@@ -98,8 +120,10 @@ def findings(report):
                     failing, why = True, f"CVSS {score:.1f} >= {CVSS_THRESHOLD}"
                 elif labels & FAILING_LABELS:
                     failing, why = True, "rated " + "/".join(sorted(labels & FAILING_LABELS))
-                elif score is None and not labels:
-                    failing, why = True, "unrated (no CVSS score or severity label): fails closed"
+                elif score is None and not labels & PASSING_LABELS:
+                    failing, why = True, ("unrated (no CVSS score or known severity label"
+                                          + (f", got {'/'.join(sorted(labels))}" if labels else "")
+                                          + "): fails closed")
                 else:
                     failing, why = False, "below threshold"
                 aliases = sorted(set(group.get("aliases") or []) - set(ids))
@@ -157,7 +181,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("report", help="OSV-Scanner JSON output (--format json --all-packages)")
     parser.add_argument("--maven-list", help="`mvn dependency:list` output file to cross-check coverage against")
+    parser.add_argument("--config", help="osv-scanner.toml: every [[IgnoredVulns]] needs ignoreUntil and reason")
     args = parser.parse_args()
+
+    if args.config:
+        problems = check_ignores(args.config)
+        if problems is None:
+            return 2
+        if problems:
+            print(f"osv-gate: FAIL: {args.config} has ignores without an expiry or a reason:")
+            for problem in problems:
+                print(f"  {problem}")
+            annotate("error", "OSV ignores", f"{len(problems)} ignore(s) missing ignoreUntil/reason")
+            return 1
 
     try:
         with open(args.report, encoding="utf-8") as fh:
