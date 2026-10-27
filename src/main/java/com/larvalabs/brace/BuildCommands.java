@@ -314,9 +314,10 @@ final class BuildCommands {
     /**
      * Command line for the app JVM. {@code brace dev} runs in dev mode
      * ({@code -Dbrace.mode=dev}) — {@code %dev.} config overrides (the scaffold's in-memory H2,
-     * dev port), on-demand template compile with hot reload, and dev-only behavior like 404 route
-     * suggestions. {@code brace run} runs in <strong>prod</strong> mode ({@code -Dbrace.mode=prod}):
-     * {@code %prod.} config overrides apply ({@code %dev.} don't), and — critically — the
+     * whose driver comes from the toolchain's {@code lib/dev/}; dev port), on-demand template
+     * compile with hot reload, and dev-only behavior like 404 route suggestions. {@code brace run}
+     * runs in <strong>prod</strong> mode ({@code -Dbrace.mode=prod}): {@code %prod.} config
+     * overrides apply ({@code %dev.} don't), and — critically — the
      * {@link TemplateEngine} loads the precompiled JTE classes {@code brace run} just built
      * (M7/M20), instead of paying a first-render javac compile and keeping {@code jdk.compiler} in
      * metaspace. Our {@code -Dbrace.mode} is emitted first so a user {@code -Dbrace.mode} in
@@ -330,7 +331,7 @@ final class BuildCommands {
         if (opts != null && !opts.isBlank()) {
             cmd.addAll(List.of(opts.trim().split("\\s+")));
         }
-        cmd.addAll(List.of("-cp", projectClasspath(cwd), mainClass));
+        cmd.addAll(List.of("-cp", projectClasspath(cwd, devMode), mainClass));
         return cmd;
     }
 
@@ -580,16 +581,29 @@ final class BuildCommands {
     // --- classpath -------------------------------------------------------
 
     private static String projectClasspath(Path cwd) {
+        return projectClasspath(cwd, false);
+    }
+
+    /**
+     * The framework jars, the project's {@code lib/}, then {@code target/classes}. With
+     * {@code withDevJars}, also the toolchain's {@code lib/dev/} jars (the H2 driver behind the
+     * scaffold's {@code %dev.db.url}), placed after the project's {@code lib/} so a driver the
+     * project copied in itself wins. Only {@code brace dev} and {@code brace test} ask for them:
+     * {@code brace run} is prod mode, and the app's shaded jar never has them (H2 is a test-scope
+     * dependency of Brace, so it isn't transitive).
+     */
+    private static String projectClasspath(Path cwd, boolean withDevJars) {
         List<String> cp = new ArrayList<>(jarsIn(frameworkLibDir()));
         Path lib = cwd.resolve("lib");
         if (Files.isDirectory(lib)) cp.addAll(jarsIn(lib));
+        if (withDevJars) cp.addAll(jarsIn(frameworkDevLibDir()));
         Path classes = cwd.resolve("target/classes");
         if (Files.isDirectory(classes)) cp.add(classes.toString());
         return String.join(File.pathSeparator, cp);
     }
 
     private static String testClasspath(Path cwd) {
-        String cp = projectClasspath(cwd);
+        String cp = projectClasspath(cwd, true);
         Path testClasses = cwd.resolve("target/test-classes");
         if (Files.isDirectory(testClasses)) cp = cp + File.pathSeparator + testClasses;
         return cp;
@@ -613,6 +627,16 @@ final class BuildCommands {
             // not running from a jar (e.g. target/classes during framework dev)
         }
         return null;
+    }
+
+    /**
+     * The toolchain's {@code lib/dev/}: jars for {@code brace dev} and {@code brace test} only (the
+     * H2 driver). A subdirectory, so the launcher's {@code lib/*} classpath and {@code brace run}
+     * leave them out. Null when there is no framework lib dir.
+     */
+    private static Path frameworkDevLibDir() {
+        Path lib = frameworkLibDir();
+        return lib == null ? null : lib.resolve("dev");
     }
 
     private static List<String> jarsIn(Path dir) {

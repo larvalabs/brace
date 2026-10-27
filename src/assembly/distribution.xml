@@ -51,11 +51,25 @@
     </files>
 
     <dependencySets>
-        <!-- All runtime + compile scope deps (excludes test scope like h2) -->
+        <!-- All runtime + compile scope deps (excludes test scope; H2 goes to lib/dev below) -->
         <dependencySet>
             <outputDirectory>lib</outputDirectory>
             <useProjectArtifact>true</useProjectArtifact>
             <scope>runtime</scope>
+            <unpack>false</unpack>
+        </dependencySet>
+        <!-- The H2 driver, for `brace dev` (the scaffold's %dev.db.url is in-memory H2) and
+             `brace test` only. It stays test scope in pom.xml, so it never reaches an app's shaded
+             jar, and lives in lib/dev/ so the launcher's lib/* classpath and `brace run` (prod
+             mode) don't load it. BuildCommands adds it for dev and test. -->
+        <dependencySet>
+            <outputDirectory>lib/dev</outputDirectory>
+            <useProjectArtifact>false</useProjectArtifact>
+            <scope>test</scope>
+            <includes>
+                <include>com.h2database:h2</include>
+            </includes>
+            <useTransitiveDependencies>false</useTransitiveDependencies>
             <unpack>false</unpack>
         </dependencySet>
     </dependencySets>

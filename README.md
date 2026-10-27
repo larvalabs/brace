@@ -709,6 +709,8 @@ environment variable named after it (`db.pass` → `DB_PASS`), but a key that is
 always wins, so values that differ per deployment should be `${VAR}` references. `brace new`
 writes a gitignored `application.conf` with a generated `session.secret` for local use, and a
 committed `application.conf.example`, all `${VAR}`, that the scaffolded `Dockerfile` ships.
+The H2 driver for the `%dev.` database comes with the toolchain, for `brace dev` and
+`brace test` only; it never reaches `brace run` or the app's shaded jar.
 
 ## Tech Stack
 

@@ -652,7 +652,8 @@ application.conf
             System.out.println("Created new Brace project: " + name);
             System.out.println("  cd " + name);
             // No `brace deps` needed first: the scaffold's only runtime dependency is
-            // brace itself, which the toolchain lib dir already provides.
+            // brace itself, which the toolchain lib dir already provides, and the H2 driver
+            // behind %dev.db.url comes from the toolchain's lib/dev (brace dev/test only).
             System.out.println("  brace dev");
         } catch (IOException e) {
             System.err.println("Failed to create project: " + e.getMessage());
