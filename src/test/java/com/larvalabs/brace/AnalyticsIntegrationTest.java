@@ -187,6 +187,22 @@ class AnalyticsIntegrationTest {
         assertTrue(res.body().contains("hx-trigger=\"every 10s\""));
         assertTrue(opsGet("/ops/analytics?range=7d&metric=pageviews").body()
             .contains("hx-get=\"/ops/analytics?range=7d&amp;metric=pageviews\""));
+        // M6: renders under the ops CSP, so no inline style or script; bars are sized by classes
+        // that the served stylesheet defines.
+        assertEquals(OpsHandler.CONTENT_SECURITY_POLICY, res.headers().firstValue("Content-Security-Policy").orElse(""));
+        assertFalse(res.body().contains("style="), res.body());
+        assertFalse(res.body().contains("<style"));
+        assertFalse(java.util.regex.Pattern.compile("<script(?![^>]*\\bsrc=)").matcher(res.body()).find());
+        assertTrue(res.body().contains("<link rel=\"stylesheet\" href=\"/__brace/ops-analytics.css\">"));
+        String css = client.send(HttpRequest.newBuilder(URI.create(url("/__brace/ops-analytics.css"))).GET().build(),
+            HttpResponse.BodyHandlers.ofString()).body();
+        var sizes = java.util.regex.Pattern.compile("class=\"(?:bar [^\"]*|fill) ([hw]\\d+)\"").matcher(res.body());
+        int bars = 0;
+        while (sizes.find()) {
+            bars++;
+            assertTrue(css.contains("." + sizes.group(1) + "{"), sizes.group(1) + " missing from ops-analytics.css");
+        }
+        assertTrue(bars > 0, "chart and row bars are sized");
 
         assertEquals(400, opsGet("/ops/analytics?range=1y").statusCode());
     }

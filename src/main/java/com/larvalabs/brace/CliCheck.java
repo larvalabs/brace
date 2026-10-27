@@ -57,7 +57,7 @@ public class CliCheck {
             logs = Json.mapper().valueToTree(List.of());
         }
 
-        var result = evaluate(status, errors, logs, thresholds, cfg.env());
+        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(cfg.url())));
 
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(result));
@@ -111,6 +111,12 @@ public class CliCheck {
 
     public static CheckResult evaluate(JsonNode status, JsonNode errors, JsonNode logs,
                                        CheckThresholds thresholds, String env) {
+        return evaluate(status, errors, logs, thresholds, env, null);
+    }
+
+    /** As above, plus {@code csp} (from {@link #checkContentSecurityPolicy}) when it is non-null. */
+    public static CheckResult evaluate(JsonNode status, JsonNode errors, JsonNode logs,
+                                       CheckThresholds thresholds, String env, Check csp) {
         var checks = new ArrayList<Check>();
 
         checks.add(checkReachability(status));
@@ -122,10 +128,73 @@ public class CliCheck {
         checks.add(checkJobs(status));
         checks.add(checkCache(status, thresholds));
         checks.add(checkRecentLogs(logs, thresholds, env));
+        if (csp != null) checks.add(csp);
 
         boolean healthy = checks.stream().noneMatch(c -> "fail".equals(c.status()));
         String summary = buildSummary(checks);
         return new CheckResult(healthy, summary, checks);
+    }
+
+    /** The status and Content-Security-Policy of an unauthenticated {@code GET /}. */
+    record RootProbe(int status, String contentSecurityPolicy) {}
+
+    private static final HttpClient probeClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(5))
+        .followRedirects(HttpClient.Redirect.NEVER)
+        .build();
+
+    /**
+     * Fetch {@code GET /} without credentials, or null if that fails. The app's after-middleware
+     * runs on every response, redirects and 404s included, so a login redirect still shows the
+     * headers the app sets.
+     */
+    static RootProbe probeRoot(String baseUrl) {
+        try {
+            var response = probeClient.send(
+                HttpRequest.newBuilder().uri(URI.create(baseUrl + "/")).timeout(Duration.ofSeconds(10)).GET().build(),
+                HttpResponse.BodyHandlers.discarding());
+            return new RootProbe(response.statusCode(),
+                response.headers().firstValue("Content-Security-Policy").orElse(null));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * M6: warn when the app sends no Content-Security-Policy, or one whose scripts allow
+     * {@code 'unsafe-inline'} (which lets any injected inline script run). Null when the probe
+     * failed: reachability is reported by the other checks.
+     */
+    static Check checkContentSecurityPolicy(RootProbe probe) {
+        if (probe == null) return null;
+        // The fix is a code change, not a command, so it rides in the message (followUp is a
+        // command agents run).
+        String fix = ": use app.after(SecurityHeaders.strict())";
+        String csp = probe.contentSecurityPolicy();
+        if (csp == null || csp.isBlank()) {
+            return new Check("csp", "warn", "No Content-Security-Policy on GET /" + fix);
+        }
+        String scripts = null, fallback = null;
+        for (String directive : csp.split(";")) {
+            String[] parts = directive.strip().split("\\s+", 2);
+            String name = parts[0].toLowerCase(Locale.ROOT);
+            String value = parts.length > 1 ? parts[1] : "";
+            if (name.equals("script-src") && scripts == null) scripts = value;
+            if (name.equals("default-src") && fallback == null) fallback = value;
+        }
+        String sources = scripts != null ? scripts : fallback;
+        if (sources == null) {
+            return new Check("csp", "warn", "Content-Security-Policy on GET / doesn't restrict scripts" + fix);
+        }
+        String lower = sources.toLowerCase(Locale.ROOT);
+        // A nonce or hash makes CSP2+ browsers ignore 'unsafe-inline' (it's only a CSP1 fallback).
+        boolean inlineAllowed = lower.contains("'unsafe-inline'")
+            && !lower.contains("'nonce-") && !lower.contains("'sha256-") && !lower.contains("'sha384-")
+            && !lower.contains("'sha512-");
+        if (inlineAllowed) {
+            return new Check("csp", "warn", "Content-Security-Policy on GET / allows inline scripts ('unsafe-inline')" + fix);
+        }
+        return new Check("csp", "pass", "Content-Security-Policy set");
     }
 
     static Check checkReachability(JsonNode status) {

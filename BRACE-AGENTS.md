@@ -74,7 +74,7 @@ var app = Brace.app()
     .ops("ops-authorized-keys")
     .staticFiles("/assets", "public")
     .maxUploadSize("10MB")
-    .after(SecurityHeaders.defaults());
+    .after(SecurityHeaders.strict());
 ```
 
 Builder methods: `port()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
@@ -1205,17 +1205,39 @@ app.trustedProxies(TrustedProxies.cloudflare().plus("127.0.0.1", "::1").autoRefr
 
 ### Security Headers
 
-`app.after(SecurityHeaders.defaults())` adds `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`, and
-`Permissions-Policy: interest-cohort=()` to all responses. Customize with the builder:
+Use `app.after(SecurityHeaders.strict())`. It sets `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`,
+`Permissions-Policy: interest-cohort=()` and this Content-Security-Policy on every response
+(handlers, static files, 404s, 500s):
+
+```
+default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+```
+
+Under it the browser runs no inline `<script>`, `on*=` handler, `javascript:` URL or `eval`, so
+markup injected past escaping can't execute. Put JavaScript in files under your static
+directory and bind events with `addEventListener`. Inline `<style>` blocks and `style=""`
+attributes are blocked too (styles fall back to `default-src 'self'`); use a stylesheet.
+Brace's own `/__brace/htmx.min.js` and `/__brace/csrf-htmx.js` are same-origin and load fine.
+htmx inserts a small `<style>` for its request indicators: blocked, it only logs a console
+violation; add `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>` to the
+layout to stop it. htmx attributes still work (`hx-on:*` needs `eval` and doesn't).
+
+`SecurityHeaders.defaults()` is the same minus the CSP, for an app that still has inline
+scripts. Customize with the builder; never put `'unsafe-inline'` in `script-src`, which lets any
+injected inline script run and makes the policy pointless:
 
 ```java
 app.after(SecurityHeaders.builder()
     .contentTypeOptions("nosniff").referrerPolicy("no-referrer").frameOptions("SAMEORIGIN")
     .strictTransportSecurity("max-age=31536000; includeSubDomains")
-    .contentSecurityPolicy("default-src 'self'; script-src 'self' 'unsafe-inline'")
+    .contentSecurityPolicy(SecurityHeaders.STRICT_CSP + "; img-src 'self' https://cdn.example.com")
     .build());
 ```
+
+The `/ops` pages get the framework's own, stricter policy (`default-src 'none'`, scripts and
+styles from `/__brace/` only), which replaces the app's on those responses. `brace check` warns
+when `GET /` has no CSP or one that allows inline scripts.
 
 ### Response Compression
 

@@ -21,14 +21,45 @@ public class SecurityHeaders implements Middleware.After {
      * - Referrer-Policy: strict-origin-when-cross-origin
      * - X-Frame-Options: DENY
      * - Permissions-Policy: interest-cohort=()
+     *
+     * <p>No Content-Security-Policy: adding one here would silently break apps with inline
+     * scripts. Use {@link #strict()} for these defaults plus a strict CSP.
      */
     public static Middleware.After defaults() {
+        return new SecurityHeaders(defaultHeaders());
+    }
+
+    /** The Content-Security-Policy {@link #strict()} sets. */
+    public static final String STRICT_CSP = "default-src 'self'; script-src 'self'; object-src 'none'; "
+        + "base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+
+    /**
+     * The {@link #defaults()} plus a strict Content-Security-Policy ({@link #STRICT_CSP}).
+     *
+     * <p>Scripts load only from the app's own origin: no inline {@code <script>}, no
+     * {@code on*=} handlers, no {@code javascript:} URLs and no {@code eval}, so an HTML injection
+     * that gets past escaping can't run code. Brace's own {@code /__brace/htmx.min.js} and
+     * {@code /__brace/csrf-htmx.js} are same-origin and load fine. Styles fall back to
+     * {@code default-src 'self'}, so inline {@code <style>} blocks and {@code style=""}
+     * attributes are blocked too: move them into a stylesheet. htmx inserts a small
+     * {@code <style>} for its request indicators unless the page sets
+     * {@code <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>}; blocked, it
+     * only logs a console violation. The framework's {@code /ops} pages carry their own,
+     * stricter policy, which replaces this one on those responses.
+     */
+    public static Middleware.After strict() {
+        var headers = defaultHeaders();
+        headers.put("Content-Security-Policy", STRICT_CSP);
+        return new SecurityHeaders(headers);
+    }
+
+    private static LinkedHashMap<String, String> defaultHeaders() {
         var headers = new LinkedHashMap<String, String>();
         headers.put("X-Content-Type-Options", "nosniff");
         headers.put("Referrer-Policy", "strict-origin-when-cross-origin");
         headers.put("X-Frame-Options", "DENY");
         headers.put("Permissions-Policy", "interest-cohort=()");
-        return new SecurityHeaders(headers);
+        return headers;
     }
 
     /**
@@ -102,7 +133,8 @@ public class SecurityHeaders implements Middleware.After {
 
         /**
          * Set Content Security Policy.
-         * Example: "default-src 'self'; script-src 'self' 'unsafe-inline'"
+         * Example: {@link SecurityHeaders#STRICT_CSP}. Avoid {@code 'unsafe-inline'} in
+         * {@code script-src}: it lets any injected inline script run, which defeats the policy.
          */
         public Builder contentSecurityPolicy(String value) {
             headers.put("Content-Security-Policy", value);

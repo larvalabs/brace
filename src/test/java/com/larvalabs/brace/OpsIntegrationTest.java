@@ -487,8 +487,17 @@ class OpsIntegrationTest {
     @Test
     void dashboardIncludesErrorTracking() throws Exception {
         var response = cacheGet("/ops/dashboard");
-        assertTrue(response.body().contains("Unresolved"));
-        assertTrue(response.body().contains("resolve"));
+        var body = response.body();
+        assertTrue(body.contains("Unresolved"));
+        assertTrue(body.contains("resolve"));
+        // M6: the tabs and stack-trace toggles are bound by /__brace/ops.js, not inline handlers.
+        assertTrue(body.contains("data-ops-tab=\"unresolved\""), body);
+        assertTrue(body.contains("data-ops-tab=\"resolved\""));
+        assertTrue(body.contains("<div id=\"tab-resolved\" class=\"tab-content hidden\""), "resolved tab starts hidden");
+        assertTrue(body.contains("data-ops-trace=\""), "stack-trace toggle");
+        assertFalse(body.contains("onclick"));
+        assertFalse(body.contains("style="));
+        assertFalse(body.contains("Bearer"));
     }
 
     @Test
@@ -507,12 +516,14 @@ class OpsIntegrationTest {
     }
 
     @Test
-    void dashboardUsesBearerTokenNotQueryParam() throws Exception {
+    void dashboardEmbedsNoCredential() throws Exception {
+        // L3: htmx polls with the ops session cookie; no token in the page or the URL.
         var token = authenticate();
-        var response = getWithToken("/ops/dashboard", token);
-        var body = response.body();
-        assertTrue(body.contains("Authorization"));
-        assertTrue(body.contains("Bearer"));
+        var body = getWithToken("/ops/dashboard", token).body();
+        assertFalse(body.contains("Authorization"), body);
+        assertFalse(body.contains("Bearer"));
+        assertFalse(body.contains("hx-headers"));
+        assertFalse(body.contains(token));
         assertFalse(body.contains("?key="));
     }
 
@@ -1156,23 +1167,4 @@ class OpsIntegrationTest {
         assertEquals(401, response.statusCode());
     }
 
-    @Test
-    void dashboardEscapesSingleQuotesInToken() throws Exception {
-        // Regression test for L2: OpsDashboard.esc() must escape single quotes
-        // to safely embed the token in single-quoted hx-headers attributes.
-        var token = authenticate();
-        var response = getWithToken("/ops/dashboard", token);
-        assertEquals(200, response.statusCode());
-
-        String body = response.body();
-        // The token is embedded in hx-headers='{...}' attributes.
-        // Look for the hx-headers attribute that carries the Bearer token.
-        assertTrue(body.contains("hx-headers='{\"Authorization\": \"Bearer "),
-                   "Dashboard should have hx-headers with Authorization Bearer");
-
-        // Verify the hx-headers attribute has proper closing quote.
-        // This ensures single quotes (if any were in the token) were escaped
-        // and didn't break the attribute.
-        assertTrue(body.contains("}'"), "hx-headers attribute should have closing single quote");
-    }
 }

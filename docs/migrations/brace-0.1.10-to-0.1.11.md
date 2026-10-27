@@ -38,6 +38,8 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | `Http` refuses non-public destinations; buffered responses capped at 10 MB | security, **breaking** | add `.trusted()` to calls to your own internal services and local test servers; `.maxResponseBytes(n)` for bodies over 10 MB | [§](#breaking-http-refuses-non-public-destinations-by-default) |
 | Templates block script URLs in URL attributes and JS-escape `hx-on*`; `@SafeUrl`, `Url.safe` | security | none, unless a template renders a data URL with an unlisted scheme, or HTML into `srcdoc` | [§](#security-templates-neutralize-script-urls-and-escape-htmx-script-attributes) |
 | Uploads served and stored as untrusted: `StaticFiles.UNTRUSTED`, `Result.untrusted()`; `Storage.put(key, file)` types by key; `safeKey`/`safeFilename` neutralize `.html`/`.svg`/…; longest static prefix wins | security, **breaking** for `Storage.put(key, file)` with extensionless keys and code expecting `.svg`/`.html` keys | register upload dirs `UNTRUSTED`, add `.untrusted()` to handlers serving uploads | [§](#breaking-uploads-are-served-and-stored-as-untrusted) |
+| `SecurityHeaders.strict()`: defaults plus a strict CSP; `brace check` warns without one | new, security | none; switch `.after(SecurityHeaders.defaults())` to `strict()` once pages have no inline script or style | [§](#new-securityheadersstrict) |
+| The ops dashboard is cookie-only (no token in the page), has its own CSP; cookie POSTs to `/ops` must be same-origin | security, **breaking** for scripts that POST to `/ops` with the session cookie | use `Authorization: Bearer` in scripts; drop the token argument from any `OpsDashboard.html(...)` call | [§](#breaking-the-ops-dashboard-is-cookie-only-and-has-its-own-csp) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -879,3 +881,77 @@ it: `safeKey("u", "logo.svg")` is `u/<uuid>.bin`. `safeFilename()` appends: `pag
 `x.svg.png` stays `.png`. `Storage.extension(...)` is unchanged and still returns `svg`. Code that
 read the original extension back from a generated key should use `Storage.extension(file.filename())`
 instead.
+
+## New: `SecurityHeaders.strict()`
+
+`SecurityHeaders.strict()` is `defaults()` plus a strict Content-Security-Policy:
+
+```
+default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+```
+
+`defaults()` is unchanged and still sets no CSP. The CSP these docs used to show,
+`script-src 'self' 'unsafe-inline'`, allowed every inline script, injected ones included, so it
+did nothing against XSS; if you copied it, replace it.
+
+Before:
+
+```java
+app.after(SecurityHeaders.defaults());
+// or
+app.after(SecurityHeaders.builder()
+    .contentSecurityPolicy("default-src 'self'; script-src 'self' 'unsafe-inline'")
+    .build());
+```
+
+After:
+
+```java
+app.after(SecurityHeaders.strict());
+```
+
+Under it inline `<script>` bodies, `on*=` attributes, `javascript:` URLs and `eval` (so htmx's
+`hx-on:*` too) don't run, and inline `<style>` blocks and `style=""` attributes don't apply.
+Before switching, move page scripts into files under your static directory (bind events with
+`addEventListener`) and inline styles into a stylesheet, then load each page and check the
+browser console for CSP violations. htmx's indicator `<style>` is blocked harmlessly; add
+`<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>` to the layout to silence it.
+
+`brace check` gains a `csp` check: a warning when `GET /` has no `Content-Security-Policy`, or
+one whose scripts allow `'unsafe-inline'` without a nonce or hash. A warning doesn't make the
+app unhealthy (the exit code is unchanged).
+
+## Breaking: the ops dashboard is cookie-only and has its own CSP
+
+**No token in the page.** `/ops/dashboard` used to embed a 2-hour bearer token (up to CONTROL
+scope) in `hx-headers` for its htmx polling and buttons. Any script running on the app's origin
+in an operator's browser could fetch the page and lift it. The dashboard now uses only the
+httpOnly `__brace_ops_session` cookie, as `/ops/analytics` already did. Operators notice nothing:
+`brace ops dashboard` logs in the same way, and an open tab keeps refreshing until the 8-hour
+cookie expires.
+
+**Cookie-authenticated changes must be same-origin.** A `POST`/`PUT`/`PATCH`/`DELETE` to `/ops`
+authenticated by the cookie must carry `Sec-Fetch-Site: same-origin` or an `Origin` naming the
+requested host, or it gets `403 {"error":"cross_origin_request"}`. Browsers send these on the
+dashboard's own requests. A script that replays the browser cookie against `/ops` breaks; use a
+bearer token:
+
+```bash
+# before
+curl -X POST -b "__brace_ops_session=$COOKIE" https://app.example.com/ops/cache/clear
+# after
+curl -X POST -H "Authorization: Bearer $TOKEN" https://app.example.com/ops/cache/clear
+```
+
+**The ops pages set their own CSP.** Every `/ops` response carries
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+plus `nosniff` and `X-Frame-Options: DENY`, set after the app's after-middleware so they replace
+whatever the app sets on those responses. The pages' script and styles moved to
+`/__brace/ops.js`, `/__brace/ops.css` and `/__brace/ops-analytics.css`; a proxy that serves
+`/ops/` must also pass `/__brace/` (it already had to for htmx).
+
+**`OpsDashboard.html(...)` lost its first (`token`) argument.** Only code that renders the
+dashboard itself is affected; drop the argument.
+
+For high-value apps, consider serving `/ops` from its own hostname so no application page shares
+its origin: see "Ops pages in the browser" in `docs/SECURITY.md`.

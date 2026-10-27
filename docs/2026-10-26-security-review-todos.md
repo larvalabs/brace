@@ -354,7 +354,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     is unaffected.
   - **Tier: mid** (it rides on M4).
 
-- [ ] **M6: No CSP and no security headers by default; the documented CSP is ineffective**, `SecurityHeaders.java:25-32, 105`, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:969`, `OpsDashboard.java:555-557, 666-680, 695`
+- [x] **M6: No CSP and no security headers by default; the documented CSP is ineffective**, `SecurityHeaders.java:25-32, 105`, `ProjectGenerator.java:191-196`, `BRACE-AGENTS.md:969`, `OpsDashboard.java:555-557, 666-680, 695`
   - **What's wrong.**
     - `SecurityHeaders.defaults()` is opt-in and has no CSP.
     - The scaffold doesn't add it.
@@ -376,6 +376,10 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - The ops dashboard works under the strict CSP (htmx polling, buttons).
     - The scaffold app returns the strict headers on handler, static, 404 and 500 responses.
   - **Tier: mid.**
+  - **Progress.** Done with L3, except the scaffold line, which Phase 5's scaffold integration
+    collects. `defaults()` keeps no CSP (D6). The strict-headers test runs against an app built
+    with `after(SecurityHeaders.strict())` rather than the scaffold, and the dashboard was
+    browser-checked under that app (no CSP violations; polling, tabs and both CONTROL buttons work).
 
 - [x] **M7: Uploaded content can be served inline as HTML or SVG on the app origin**, `BraceHandler.java:1251, 1258`, `Result.java:152, 163`, `Storage.java:161-174, 247-268`, `SECURITY.md:512, 544`
   - **What's wrong.**
@@ -595,7 +599,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     `/ops/errors/{id}`.
   - **Tier: small.**
 
-- [ ] **L3: The ops dashboard embeds a live bearer token in page HTML**, `OpsDashboard.java:151, 610, 704`
+- [x] **L3: The ops dashboard embeds a live bearer token in page HTML**, `OpsDashboard.java:151, 610, 704`
   - **What's wrong.** The token sits in `hx-headers`. Any XSS on the app origin that runs in an
     operator's browser can `fetch('/ops/dashboard')` (same-origin, so the Strict cookie is
     sent) and extract a token up to CONTROL scope.

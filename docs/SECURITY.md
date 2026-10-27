@@ -9,6 +9,7 @@ This document describes Brace's security features and best practices for buildin
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
 - [Cross-Site Scripting (XSS)](#cross-site-scripting-xss)
+- [Content Security Policy](#content-security-policy)
 - [Serialization](#serialization)
 - [Open Redirects](#open-redirects)
 - [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf)
@@ -366,6 +367,49 @@ page sets `<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags
 With them off, `hx-on*`, `js:` values and trigger filters don't run, and neither do `<script>`
 tags in swapped-in HTML, so a template mistake can't become code that way. Recommended unless a
 page relies on them.
+
+---
+
+## Content Security Policy
+
+Escaping is the first defence against XSS; a Content-Security-Policy is the second. It decides
+what an injected tag can do once one gets past escaping. Brace ships it as
+`SecurityHeaders.strict()`:
+
+```java
+app.after(SecurityHeaders.strict());
+```
+
+That sets the `SecurityHeaders.defaults()` headers (`nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy`, `Permissions-Policy`) plus:
+
+```
+Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+```
+
+- **`script-src 'self'`**: scripts load only from the app's origin. Inline `<script>` bodies,
+  `on*=` attributes, `javascript:` URLs and `eval` (including htmx's `hx-on:*`, which compiles
+  its handler with `Function`) don't run. Brace's `/__brace/htmx.min.js` and
+  `/__brace/csrf-htmx.js` are same-origin and load normally.
+- **`default-src 'self'`** covers styles, images, fonts and fetches, so inline `<style>` blocks
+  and `style=""` attributes are blocked as well. htmx inserts a `<style>` for its request
+  indicators at startup; under this policy that only logs a console violation. Add
+  `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>` to the layout to
+  stop it.
+- **`object-src 'none'`, `base-uri 'none'`**: no plugins, and an injected `<base>` can't
+  re-point the page's relative script URLs.
+- **`frame-ancestors 'none'`**: the CSP form of `X-Frame-Options: DENY`.
+- **`form-action 'self'`**: an injected `<form>` can't post the page's data to another site.
+
+After-middleware runs on every response (handlers, static files, 404s, 500s, CSRF rejections),
+so the policy covers them all. `defaults()` deliberately has no CSP: adding one would silently
+break apps that still have inline scripts. Avoid `'unsafe-inline'` in `script-src` in a custom
+policy (`SecurityHeaders.builder().contentSecurityPolicy(...)`): it allows every inline script,
+injected ones included, which leaves the policy doing nothing against XSS. `brace check` warns
+when `GET /` has no CSP, or one whose scripts allow `'unsafe-inline'` without a nonce or hash.
+
+The `/ops` pages carry the framework's own policy, which replaces the app's on those responses
+(see [Ops pages in the browser](#ops-pages-in-the-browser)).
 
 ---
 
@@ -1147,7 +1191,7 @@ older than 0.1.7 must be upgraded.
 **Caching.** Every `/ops/*` response carries `Cache-Control: no-store`. This matters for the
 cookie channel specifically: RFC 9111 already forbids shared caches from storing a response to
 a request carrying `Authorization`, but no such rule covers a cookie-authenticated GET, and
-`/ops/dashboard` embeds a live bearer token in its HTML.
+`/ops/dashboard` shows one operator's view of the app.
 
 The `__brace_ops_session` cookie is scoped to `Path=/ops`, so an operator credential is not
 attached to every application request where any handler could read it via `req.cookie(...)`.
@@ -1155,9 +1199,9 @@ attached to every application request where any handler could read it via `req.c
 **Credential channels (general endpoints).** All ops endpoints except the browser exchange
 handoff accept credentials through exactly two channels:
 
-1. `Authorization: Bearer <token>` header — the standard channel for the CLI and the
-   dashboard's htmx polling.
-2. The `__brace_ops_session` httpOnly cookie — set by the browser exchange flow below.
+1. `Authorization: Bearer <token>` header — the standard channel for the CLI and scripts.
+2. The `__brace_ops_session` httpOnly cookie — set by the browser exchange flow below, and the
+   only credential the dashboard and analytics pages use.
 
 `?token=` query-parameter credentials are **not accepted** on general ops endpoints. Tokens in
 URLs leak into proxy access logs, browser history, and the `Referer` header of outbound links.
@@ -1195,6 +1239,46 @@ restarting or redeploying takes effect on its outstanding tokens immediately, al
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
 
+### Ops pages in the browser
+
+`/ops/dashboard` and `/ops/analytics` are cookie-only. Their htmx polling and the CONTROL
+buttons (resolve an error, clear the cache) send the `__brace_ops_session` cookie and nothing
+else; no token is written into the page. Until 0.1.11 the dashboard embedded a 2-hour bearer
+token (up to CONTROL scope) in `hx-headers`, so any script running on the app's origin in an
+operator's browser could `fetch('/ops/dashboard')` (same-origin, so the cookie went along) and
+read it out of the HTML. The httpOnly cookie can't be read by page script.
+
+**Cross-origin protection for cookie-authenticated changes.** The ops routes are
+`.csrf(false)`, since the CLI posts with a bearer token. A mutating ops request
+(`POST`/`PUT`/`PATCH`/`DELETE`) authenticated by the cookie must come from a page on the same
+origin: `Sec-Fetch-Site: same-origin` when the browser sends it, otherwise an `Origin` whose
+host is the one requested. Anything else is refused with `403 {"error":"cross_origin_request"}`
+and audited. `SameSite=Strict` already keeps the cookie off cross-site requests, but not off a
+sibling subdomain's: `evil.example.com` is the same *site* as `app.example.com`, so its form
+post would carry the cookie. A bearer-authenticated request needs no such check, because a
+cross-origin page can't set `Authorization`.
+
+**The ops Content-Security-Policy.** Every response from a framework `/ops` route carries:
+
+```
+Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
+```
+
+plus `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`. The pages load their
+JavaScript and CSS from `/__brace/ops.js`, `/__brace/ops.css` and `/__brace/ops-analytics.css`
+and contain no inline script, event handler or `style=""` attribute. The headers are set at the
+response choke point *after* the app's after-middleware, so they replace whatever policy the app
+sets: a lax app policy can't weaken the ops pages, and an unusual one can't break them. The ops
+policy is stricter than `SecurityHeaders.strict()` in every directive, so an app using `strict()`
+loses nothing there.
+
+**What remains.** An XSS on the app's origin still runs with the operator's ops session in the
+same browser: it can't read the cookie or a token, but it can drive same-origin requests,
+including `POST /ops/cache/clear` with a valid `Sec-Fetch-Site: same-origin`. The cookie is
+scoped to `Path=/ops`, which limits where it's sent, not who on the origin can trigger a
+request. For high-value apps, serve ops from its own hostname (below), so that the app's origin
+and the ops origin are different and the browser keeps them apart.
+
 ### Security Recommendations
 
 1. **HTTPS only:** Never expose ops endpoints over HTTP
@@ -1202,6 +1286,10 @@ the restart.
 3. **Don't expose publicly:** Ops endpoints should not be internet-accessible
 4. **Rotate keys regularly:** Implement key rotation for ops access
 5. **Monitor access:** Log all ops endpoint access
+6. **Separate hostname for high-value apps:** route `/ops/*` only on a dedicated hostname
+   (e.g. `ops.app.example.com`, reachable from the operator network) and refuse it on the
+   public one. The ops cookie and pages then live on an origin where no application page, and
+   so no application XSS, ever runs. Point `ops.prod.url` in `.brace` at the ops hostname for the CLI.
 
 ### Deployment Pattern
 
@@ -1211,6 +1299,25 @@ location /ops/ {
     allow 10.0.0.0/8;      # Internal network only
     deny all;
     proxy_pass http://app;
+}
+```
+
+With a separate ops hostname (recommendation 6), the public server refuses `/ops/` outright and
+only the internal one proxies it:
+
+```nginx
+server {
+    server_name app.example.com;
+    location /ops/ { return 404; }
+    location / { proxy_pass http://app; }
+}
+server {
+    server_name ops.app.example.com;
+    allow 10.0.0.0/8;
+    deny all;
+    location /ops/ { proxy_pass http://app; }
+    location /__brace/ { proxy_pass http://app; }   # the ops pages' JS and CSS
+    location / { return 404; }
 }
 ```
 

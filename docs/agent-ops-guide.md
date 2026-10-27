@@ -42,7 +42,11 @@ applies threshold analysis. Only use the individual commands (`brace errors`,
 }
 ```
 
-**Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, recent_logs.
+**Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, recent_logs, csp.
+
+`csp` fetches `GET /` without credentials (redirects not followed) and warns when the response
+has no `Content-Security-Policy`, or one whose scripts allow `'unsafe-inline'` without a nonce or
+hash. The fix is `app.after(SecurityHeaders.strict())` in code, so the check has no `followUp`.
 
 `gc_pressure` fails when `jvm.gc.avgPauseMs` (stop-the-world time per collection) exceeds
 `check.gc_pause_ms`, and warns when a `G1Full` collection appears among the recent ones,
@@ -448,10 +452,14 @@ green.
 
 All ops endpoints accept credentials through exactly two channels:
 
-1. `Authorization: Bearer <token>` header — the standard channel for the CLI,
-   scripts, and the dashboard's htmx polling.
+1. `Authorization: Bearer <token>` header — the standard channel for the CLI
+   and scripts.
 2. The `__brace_ops_session` httpOnly cookie — set automatically by the
-   browser exchange flow (`brace ops dashboard` → `/ops/auth/exchange`).
+   browser exchange flow (`brace ops dashboard` → `/ops/auth/exchange`). The
+   dashboard and analytics pages use it and nothing else: there is no token in
+   their HTML. A cookie-authenticated `POST` must come from a page on the same
+   origin (`Sec-Fetch-Site: same-origin`, or a matching `Origin`), or it gets
+   `403 {"error":"cross_origin_request"}`; scripts should use the bearer header.
 
 **`?token=` query-parameter auth is not accepted on general ops endpoints.**
 Tokens in URLs leak into proxy access logs, browser history, and the `Referer`

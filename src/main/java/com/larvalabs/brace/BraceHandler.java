@@ -45,6 +45,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     // M2: the bundled htmx CSRF helper (sends ${csrfMeta}'s token as X-CSRF-Token), served like htmx.
     private final byte[] csrfHtmxJs;
     private final String csrfHtmxEtag;
+    // M6: the ops pages' script and stylesheets, served like htmx so the pages carry no inline
+    // script or style and run under the ops Content-Security-Policy. Keyed by request path.
+    private static final Map<String, BundledAsset> OPS_ASSETS = Map.of(
+        "/__brace/ops.js", BundledAsset.load("ops.js", "text/javascript; charset=utf-8"),
+        "/__brace/ops.css", BundledAsset.load("ops.css", "text/css; charset=utf-8"),
+        "/__brace/ops-analytics.css", BundledAsset.load("ops-analytics.css", "text/css; charset=utf-8"));
     // L3: dev mode is detected once at construction from the brace.mode system property —
     // the same signal Brace's startup banner uses. The mode isn't otherwise threaded into
     // the handler, and a property read here avoids widening eight telescoping constructors.
@@ -639,6 +645,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     static final String STATIC_ROUTE_KEY = Stats.STATIC_ROUTE;
 
+    /** A file bundled at {@code /brace/<name>} in the jar, served from memory with a content-derived ETag. */
+    private record BundledAsset(byte[] bytes, String etag, String contentType) {
+        static BundledAsset load(String name, String contentType) {
+            try (var stream = BraceHandler.class.getResourceAsStream("/brace/" + name)) {
+                if (stream == null) throw new IllegalStateException("bundled resource /brace/" + name + " is missing");
+                byte[] bytes = stream.readAllBytes();
+                String etag = "\"" + name + "-" + Long.toHexString(bytes.length) + "-"
+                    + Integer.toHexString(java.util.Arrays.hashCode(bytes)) + "\"";
+                return new BundledAsset(bytes, etag, contentType);
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
+    }
+
     /**
      * Per-request state the response choke point needs to finish a request (H2): when it
      * started, what was asked for, which route answered, and how much database work it did.
@@ -839,6 +860,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private void send(Request req, Result result, Response response, Callback callback,
                       Session session, LazySession csrfOnlySession, CookieSpec cookieSpec,
                       Exchange exchange) {
+        // M6: the framework's /ops routes get their own Content-Security-Policy, set here, after
+        // the app's after-middleware, so it replaces whatever policy the app sets (or doesn't).
+        // The ops pages are known content that runs under the strict policy; an app policy that
+        // is laxer ('unsafe-inline') would weaken them, and a different one could break them.
+        if (exchange.match != null && exchange.match.route().isFramework()) {
+            OpsHandler.applySecurityHeaders(result);
+        }
         attachSessionCookie(result, session, cookieSpec);
         attachSessionCookie(result, csrfOnlySession != null ? csrfOnlySession.peek() : null, cookieSpec);
         // H2: recording lives here, not at the call sites, because this is the ONE place every
@@ -1219,6 +1247,18 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             return Result.bytes(htmxJs, "text/javascript; charset=utf-8")
                 .header("X-Content-Type-Options", "nosniff")
                 .header("ETag", htmxEtag)
+                .header("Cache-Control", cacheControl);
+        }
+        BundledAsset opsAsset = OPS_ASSETS.get(requestPath);
+        if (opsAsset != null) {
+            // Like htmx: a fixed URL whose bytes change with a brace upgrade, so revalidate always.
+            String cacheControl = "public, max-age=0, must-revalidate";
+            if (isNotModified(request, opsAsset.etag(), 0)) {
+                return Result.notModified().header("ETag", opsAsset.etag()).header("Cache-Control", cacheControl);
+            }
+            return Result.bytes(opsAsset.bytes(), opsAsset.contentType())
+                .header("X-Content-Type-Options", "nosniff")
+                .header("ETag", opsAsset.etag())
                 .header("Cache-Control", cacheControl);
         }
         for (var mapping : staticFileMappings) {

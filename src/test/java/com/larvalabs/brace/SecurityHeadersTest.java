@@ -87,5 +87,29 @@ class SecurityHeadersTest {
         assertEquals("default-src 'self'", updated.header("Content-Security-Policy"));
         assertEquals("enabled", updated.header("X-Custom-Security"));
     }
+
+    private static Result apply(Middleware.After middleware) {
+        var req = new Request("GET", "/", java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), null);
+        return middleware.handle(req, Result.text("ok"));
+    }
+
+    @Test
+    void strictIsDefaultsPlusAStrictCsp() {
+        // M6: the documented policy used to be script-src 'self' 'unsafe-inline', which lets any
+        // injected inline script run.
+        var strict = apply(SecurityHeaders.strict());
+        var defaults = apply(SecurityHeaders.defaults());
+        defaults.headers().forEach((name, value) -> assertEquals(value, strict.header(name), name));
+        assertEquals("default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; "
+            + "frame-ancestors 'none'; form-action 'self'", strict.header("Content-Security-Policy"));
+        assertFalse(strict.header("Content-Security-Policy").contains("unsafe"));
+        assertEquals(defaults.headers().size() + 1, strict.headers().size());
+    }
+
+    @Test
+    void defaultsSetNoCsp() {
+        // D6: a CSP in defaults() would silently break apps with inline scripts; strict() has it.
+        assertNull(apply(SecurityHeaders.defaults()).header("Content-Security-Policy"));
+    }
 }
 

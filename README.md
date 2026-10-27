@@ -136,7 +136,7 @@ public class App {
             .templates("views")
             .sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(30))
             .trustedProxies("10.0.0.0/8", "172.16.0.0/12")  // secure IP handling behind load balancer
-            .after(SecurityHeaders.defaults())               // security headers on all responses
+            .after(SecurityHeaders.strict())                 // security headers + strict CSP on all responses
             .mailer(mail)
             .cache(cache)
             .storage(storage)
@@ -176,7 +176,7 @@ Components included in the framework jar as of this release:
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless
 - **Forms** — Record-based form binding with validation annotations
 - **CSRF** — Required by default on POST/PUT/DELETE/PATCH, explicit opt-out with `.csrf(false)` for bearer-token APIs; tokens rendered into pages are masked per render (BREACH)
-- **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware, bcrypt password hashing
+- **Security** — Trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware (`SecurityHeaders.strict()` adds a strict Content-Security-Policy: no inline script), bcrypt password hashing
 - **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
@@ -735,6 +735,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for security documentation covering:
 - Rate limiting
 - File upload security
 - Response compression and BREACH
+- Content-Security-Policy (`SecurityHeaders.strict()`)
 - Ops endpoint hardening
 
 ## Periodic Model Reviews

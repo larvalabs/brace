@@ -10,6 +10,10 @@ import java.util.Map;
  * server-rendered HTML (range and metric are links, tooltips are {@code title} attributes) read
  * with the ops session cookie, so there is no token in the page. Like the ops dashboard, htmx
  * re-fetches the page and swaps its content in, every {@link #REFRESH_SECONDS} seconds.
+ *
+ * <p>No inline {@code <style>}, {@code style=""} or script: the stylesheet is served from
+ * {@code /__brace/ops-analytics.css} and bar sizes are whole-percent classes, so the page renders
+ * under the ops Content-Security-Policy (M6).
  */
 final class AnalyticsDashboard {
 
@@ -44,71 +48,8 @@ final class AnalyticsDashboard {
             <title>Brace Analytics</title>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12px; padding: 16px; line-height: 1.45; }
-            a { color: inherit; }
-            .wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
-            .num { font-variant-numeric: tabular-nums; }
-            .header { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; }
-            .brand { display: flex; align-items: center; gap: 12px; }
-            .title { color: #7aa2f7; font-weight: bold; font-size: 14px; white-space: nowrap; }
-            .switch, .ranges { display: inline-flex; border: 1px solid #30363d; }
-            .switch a, .ranges a { padding: 2px 10px; color: #6b7394; text-decoration: none; }
-            .ranges a { padding: 4px 12px; border-right: 1px solid #30363d; }
-            .ranges a:last-child { border-right: 0; }
-            .switch a[aria-current="page"], .ranges a[aria-current="page"] { color: #e6edf3; background: rgba(122,162,247,.14); }
-            .switch a:hover, .ranges a:hover { color: #c9d1d9; }
-            a:focus-visible { outline: 1px solid #7aa2f7; outline-offset: 2px; }
-            .meta { color: #6b7394; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-            .live { color: #9ece6a; white-space: nowrap; }
-            .controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; }
-            .note { color: #6b7394; }
-            .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-            @media (max-width: 760px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-            .tile { border: 1px solid #30363d; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; text-decoration: none; }
-            a.tile:hover { border-color: #7aa2f7; }
-            .tile[aria-current="true"] { border-color: #7aa2f7; box-shadow: inset 0 -2px 0 #7aa2f7; }
-            .label { color: #6b7394; font-size: 10px; text-transform: uppercase; letter-spacing: .6px; }
-            .value { font-size: 22px; font-weight: bold; color: #e6edf3; font-variant-numeric: tabular-nums; }
-            .detail { color: #6b7394; font-size: 10px; }
-            .up { color: #9ece6a; } .down { color: #f7768e; }
-            .section { border: 1px solid #30363d; padding: 10px; min-width: 0; }
-            .section-head { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; text-transform: uppercase; letter-spacing: .6px; border-bottom: 1px solid #30363d; padding-bottom: 6px; margin-bottom: 8px; }
-            .section-head .h { color: #7aa2f7; white-space: nowrap; }
-            .section-head .sub { color: #6b7394; }
-            .chart { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; }
-            .yaxis { display: flex; flex-direction: column; justify-content: space-between; text-align: right; color: #6b7394; font-size: 10px; height: 200px; }
-            .plot { position: relative; height: 200px; display: flex; align-items: flex-end; gap: 2px; border-bottom: 1px solid #30363d;
-                    background: repeating-linear-gradient(to top, transparent 0, transparent calc(25% - 1px), rgba(201,209,217,.07) calc(25% - 1px), rgba(201,209,217,.07) 25%); }
-            .bar { flex: 1; min-width: 0; border-radius: 3px 3px 0 0; }
-            .bar.v { background: #7aa2f7; } .bar.p { background: #9ece6a; }
-            .bar.partial { opacity: .55; }
-            .bar:hover { opacity: .8; }
-            .xaxis { grid-column: 2; display: flex; gap: 2px; color: #6b7394; font-size: 10px; padding-top: 4px; }
-            .xaxis span { flex: 1; min-width: 0; text-align: center; white-space: nowrap; overflow: visible; }
-            .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-            .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
-            @media (max-width: 680px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
-            table { border-collapse: collapse; width: 100%; table-layout: fixed; }
-            th { text-align: left; color: #6b7394; font-size: 9px; text-transform: uppercase; letter-spacing: .5px; font-weight: normal; padding: 3px 0; }
-            th.n, td.n { text-align: right; width: 76px; white-space: nowrap; }
-            td.n { padding: 3px 0; color: #e6edf3; font-variant-numeric: tabular-nums; }
-            td.n.m { color: #6b7394; }
-            .rowbar { position: relative; padding: 3px 6px; }
-            .rowbar .fill { position: absolute; inset: 1px auto 1px 0; background: rgba(122,162,247,.14); border-radius: 0 2px 2px 0; }
-            .rowbar .txt { position: relative; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-            .direct { color: #6b7394; font-style: italic; }
-            .empty { color: #6b7394; padding: 6px 0; }
-            .filtered { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-            .filtered div { display: flex; flex-direction: column; gap: 2px; }
-            .filtered .v { color: #e6edf3; font-size: 15px; font-variant-numeric: tabular-nums; }
-            .foot { color: #6b7394; border-top: 1px solid #30363d; padding-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; }
-            .foot form { display: inline; }
-            .foot button { font: inherit; color: #6b7394; background: transparent; border: 1px solid #30363d; padding: 2px 10px; cursor: pointer; }
-            .foot button.on { color: #9ece6a; border-color: #9ece6a; }
-            .foot button:hover { color: #c9d1d9; }
-            </style>
+            <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
+            <link rel="stylesheet" href="/__brace/ops-analytics.css">
             <script src="/__brace/htmx.min.js"></script>
             </head>
             <body>
@@ -235,8 +176,8 @@ final class AnalyticsDashboard {
             double pct = top == 0 ? 0 : v * 100.0 / top;
             boolean partial = i == series.size() - 1;
             sb.append("<div class=\"bar ").append(pageviews ? "p" : "v").append(partial ? " partial" : "")
-              .append("\" style=\"height:").append(String.format(Locale.US, "%.2f", v > 0 ? Math.max(pct, 0.6) : 0))
-              .append("%\" title=\"").append(esc(bucketLabel(p.bucket(), today))).append(partial ? " (so far)" : "")
+              .append(' ').append(size("h", v > 0 ? Math.max(pct, 1) : 0))
+              .append("\" title=\"").append(esc(bucketLabel(p.bucket(), today))).append(partial ? " (so far)" : "")
               .append(": ").append(fmt(p.visitors())).append(" visitors, ").append(fmt(p.pageviews()))
               .append(" views\"></div>");
         }
@@ -267,8 +208,8 @@ final class AnalyticsDashboard {
             String key = row.key() != null && keyHeader.equals("Device")
                 ? Character.toUpperCase(row.key().charAt(0)) + row.key().substring(1) : row.key();
             String name = key == null ? "<span class=\"direct\">Direct / none</span>" : esc(key);
-            sb.append("<tr><td><div class=\"rowbar\"><span class=\"fill\" style=\"width:")
-              .append(String.format(Locale.US, "%.1f", share)).append("%\"></span><span class=\"txt\" title=\"")
+            sb.append("<tr><td><div class=\"rowbar\"><span class=\"fill ").append(size("w", share))
+              .append("\"></span><span class=\"txt\" title=\"")
               .append(key == null ? "Direct / none" : esc(key)).append("\">").append(name)
               .append("</span></div></td><td class=\"n\">").append(fmt(row.visitors())).append("</td><td class=\"n m\">");
             if (withViews) {
@@ -279,6 +220,15 @@ final class AnalyticsDashboard {
             sb.append("</td></tr>");
         }
         sb.append("</table></section>");
+    }
+
+    /**
+     * The ops-analytics.css class for a bar {@code pct} percent tall ({@code h}) or wide ({@code w}):
+     * one per whole percent, 0 to 100. A class rather than a {@code style} attribute, which the ops
+     * CSP blocks.
+     */
+    private static String size(String axis, double pct) {
+        return axis + Math.round(Math.min(100, Math.max(0, pct)));
     }
 
     /** {@code previous} is null when stored data doesn't cover the whole earlier period. */
