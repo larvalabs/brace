@@ -625,6 +625,12 @@ public class Brace {
     public RouteConfig ws(String path, Function<WsContext, Object> handlerFactory) {
         router.requireNotStarted("Registering WS " + path);
         var route = new Route("WS", path, handlerFactory, null);
+        for (var existing : wsRoutes.values()) {
+            if (existing.route().shape().equals(route.shape())) {
+                throw new IllegalStateException("WS " + path + " is registered twice (as " + existing.route().pattern()
+                    + " too): one would shadow the other, and with it its access requirements");
+            }
+        }
         wsRoutes.put(path, new WsRoute(route, handlerFactory));
         return new RouteConfig(this, route);
     }
@@ -1244,6 +1250,7 @@ public class Brace {
                     + "talking to the app directly can choose.");
             }
             opsHandler.setPinnedOrigins(opsOrigins);
+            opsHandler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on

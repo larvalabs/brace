@@ -20,6 +20,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only token: this workflow only builds and tests.
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest  # GitHub-hosted ubuntu runners have Docker preinstalled, so Testcontainers works out of the box

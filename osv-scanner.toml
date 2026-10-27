@@ -11,6 +11,8 @@
 #   ignoreUntil = 2026-12-31     # TOML date; the ignore lapses after this day
 #   reason = "<why it is not reachable from Brace; who checked, when; what unblocks the bump>"
 #
-# Keep ignoreUntil short (weeks, not years) so the decision is revisited.
+# Keep ignoreUntil short (weeks) so the decision is revisited. The gate refuses an entry with
+# no ignoreUntil or reason, an ignoreUntil more than 90 days out, and any [[PackageOverrides]]
+# that ignores a package's advisories wholesale.
 # OSV-Scanner prints each filtered advisory with its reason, and lists entries that
 # no longer match anything as unused: delete those.

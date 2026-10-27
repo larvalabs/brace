@@ -126,6 +126,16 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void applicationConfIsOwnerOnly(@TempDir Path tempDir) throws Exception {
+        // It holds the generated session secret, like ops-private.key beside it.
+        Assumptions.assumeTrue(tempDir.getFileSystem().supportedFileAttributeViews().contains("posix"));
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+        assertEquals("rw-------", java.nio.file.attribute.PosixFilePermissions.toString(
+            Files.getPosixFilePermissions(projDir.resolve("application.conf"))));
+    }
+
+    @Test
     void applicationConfNotInRepository(@TempDir Path tempDir) throws Exception {
         var projDir = tempDir.resolve("myproject");
         ProjectGenerator.generate(projDir.toString());

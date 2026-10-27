@@ -236,10 +236,8 @@ change from the earlier phases:
 
 1. Sweep `README.md`'s API tour against `BRACE-AGENTS.md`, per the release checklist in
    `AGENTS.md`.
-2. Run the migration gate (`ai-benchmark/run-migrate.sh --from 0.1.10 --to <new>`, which
-   lives outside this repo) and require `fix_attempts: 0`. H1,
-   M3 and M9 are exactly the kind of change that gate exists for; extend the migrate fixture
-   with a guarded route, a form and a JSON body if it lacks them.
+2. ~~Run the migration gate (`ai-benchmark/run-migrate.sh --from 0.1.10 --to <new>`).~~
+   **Dropped (Phase 6):** the external migration gate is no longer part of the release process.
 3. Write `docs/reviews/2026-10-security-<reviewer>.md` with:
    - scope and findings summary;
    - the commit list;

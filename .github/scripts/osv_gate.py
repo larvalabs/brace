@@ -30,6 +30,7 @@ import json
 import os
 import sys
 import tomllib
+import datetime
 
 CVSS_THRESHOLD = 7.0
 FAILING_LABELS = {"HIGH", "CRITICAL"}
@@ -74,9 +75,15 @@ def fixed_versions(vulns, package_name):
     return sorted(fixed)
 
 
-def check_ignores(path):
-    """Problems with osv-scanner.toml's [[IgnoredVulns]]: each needs an ignoreUntil date (an entry
-    without one is a permanent ignore) and a reason. None if the file can't be read."""
+MAX_IGNORE_DAYS = 90
+
+
+def check_ignores(path, today=None):
+    """Problems with osv-scanner.toml: each [[IgnoredVulns]] needs a reason and an ignoreUntil no
+    more than MAX_IGNORE_DAYS out (an entry without one never expires), and no [[PackageOverrides]]
+    may ignore a package or its vulnerabilities (that drops every advisory for it, unreviewed and
+    forever). None if the file can't be read."""
+    today = today or datetime.date.today()
     try:
         with open(path, "rb") as fh:
             config = tomllib.load(fh)
@@ -86,10 +93,22 @@ def check_ignores(path):
     problems = []
     for entry in config.get("IgnoredVulns") or []:
         vid = entry.get("id", "<no id>")
-        if not entry.get("ignoreUntil"):
+        until = entry.get("ignoreUntil")
+        if isinstance(until, datetime.datetime):
+            until = until.date()
+        if not until:
             problems.append(f"{vid}: no ignoreUntil (it would never expire)")
+        elif not isinstance(until, datetime.date):
+            problems.append(f"{vid}: ignoreUntil must be a TOML date, like 2026-12-31")
+        elif (until - today).days > MAX_IGNORE_DAYS:
+            problems.append(f"{vid}: ignoreUntil {until} is more than {MAX_IGNORE_DAYS} days out")
         if not str(entry.get("reason") or "").strip():
             problems.append(f"{vid}: no reason")
+    for entry in config.get("PackageOverrides") or []:
+        name = entry.get("name", "<any package>")
+        if entry.get("ignore") or (entry.get("vulnerability") or {}).get("ignore"):
+            problems.append(f"PackageOverrides {name}: ignores the package's advisories wholesale; "
+                            "list each advisory in [[IgnoredVulns]] with ignoreUntil and reason instead")
     return problems
 
 
@@ -189,10 +208,10 @@ def main():
         if problems is None:
             return 2
         if problems:
-            print(f"osv-gate: FAIL: {args.config} has ignores without an expiry or a reason:")
+            print(f"osv-gate: FAIL: {args.config} has ignores the gate doesn't accept:")
             for problem in problems:
                 print(f"  {problem}")
-            annotate("error", "OSV ignores", f"{len(problems)} ignore(s) missing ignoreUntil/reason")
+            annotate("error", "OSV ignores", f"{len(problems)} ignore(s) not accepted (see log)")
             return 1
 
     try:

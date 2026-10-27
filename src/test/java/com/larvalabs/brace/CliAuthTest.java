@@ -68,6 +68,55 @@ class CliAuthTest {
     }
 
     @Test
+    void tokenCacheNeverLivesInTheProject() throws Exception {
+        // A cloned repo controls everything under the project, target/ and symlinks included.
+        // Plant a symlinked target/ and the pre-0.1.11 cache name; the CLI must write neither.
+        Path elsewhere = Files.createTempDirectory("not-the-project");
+        Path project = Files.createTempDirectory("project");
+        Files.createSymbolicLink(project.resolve("target"), elsewhere);
+        Path victim = elsewhere.resolve("victim.txt");
+        Files.writeString(victim, "untouched");
+        Files.createSymbolicLink(elsewhere.resolve(".brace-token"), victim);
+        var cfg = new CliConfig("http://localhost:" + port,
+            tmp.resolve("ops-private.key").toString(),
+            "authorized-keys", "local", Map.of());
+
+        Path cache = CliAuth.cacheFile(project, cfg);
+        assertTrue(cache.startsWith(CliAuth.userBraceDir()), cache.toString());
+        assertFalse(cache.toAbsolutePath().startsWith(project.toAbsolutePath()), cache.toString());
+
+        CliAuth.bearer(cfg, project);
+        assertTrue(Files.exists(cache));
+        assertEquals("untouched", Files.readString(victim));
+        try (var files = Files.list(elsewhere)) {
+            assertEquals(2, files.count(), "nothing written into the symlinked target/");
+        }
+
+        CliAuth.clearCache(project);
+        assertFalse(Files.exists(cache));
+        assertTrue(Files.isSymbolicLink(project.resolve("target")), "a symlinked target/ is left alone");
+        assertEquals("untouched", Files.readString(victim));
+    }
+
+    @Test
+    void secretFilesReplaceASymlinkInsteadOfWritingThroughIt() throws Exception {
+        Path dir = Files.createTempDirectory("secret");
+        Path victim = Files.createTempFile("victim", ".txt");
+        Files.writeString(victim, "untouched");
+        Path link = dir.resolve("secret.json");
+        Files.createSymbolicLink(link, victim);
+
+        SecretFiles.writeStringWithOwnerOnlyPermissions(link, "secret");
+
+        assertEquals("untouched", Files.readString(victim));
+        assertFalse(Files.isSymbolicLink(link), "the link itself was replaced");
+        assertEquals("secret", Files.readString(link));
+        try (var files = Files.list(dir)) {
+            assertEquals(1, files.count(), "no temp file left behind");
+        }
+    }
+
+    @Test
     void sendAuthenticatedRetriesOnStaleToken() throws Exception {
         var cfg = new CliConfig("http://localhost:" + port,
             tmp.resolve("ops-private.key").toString(),

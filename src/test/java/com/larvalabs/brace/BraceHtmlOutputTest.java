@@ -177,6 +177,44 @@ class BraceHtmlOutputTest {
     }
 
     @Test
+    void dataFromATemplateCallInsideAnAttributeIsEscapedForThatAttribute() {
+        // JTE gives a @template call's output no attribute context, so it used to get body
+        // escaping (quotes left alone) and skip the URL and script rules entirely.
+        String html = engine.render("xssCalleeCaller", Map.of("u", "javascript:alert(1)"));
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, named(html, "c1", "href"), html);
+
+        html = engine.render("xssCalleeCaller", Map.of("u", "x\" onmouseover=\"alert(1)"));
+        assertFalse(Pattern.compile("<[^>]*\\sonmouseover=[\"']").matcher(html).find(), html);
+        assertEquals("x\" onmouseover=\"alert(1)", named(html, "c2", "title"));
+        html = engine.render("xssCalleeCaller", Map.of("u", "x' onmouseover='alert(1)"));
+        assertFalse(Pattern.compile("<[^>]*\\sonmouseover=[\"']").matcher(html).find(), html);
+        assertEquals("x' onmouseover='alert(1)", named(html, "c3", "title"));
+
+        html = engine.render("xssCalleeCaller", Map.of("u", "');alert(1)//"));
+        assertEquals("go('\\u0027);alert(1)//')", named(html, "c4", "onclick"), html);
+        // Outside any attribute it is still body text.
+        assertTrue(html.contains("<p id=\"c6\">');alert(1)//</p>"), html);
+    }
+
+    @Test
+    void wholeValueJsonInHxValsIsKeptValid() throws Exception {
+        // hx-vals='${json}': the app built the JSON; \\u-escaping its quotes would break it.
+        String json = "{\"id\":42,\"name\":\"O'Brien <b>\"}";
+        String html = engine.render("xssCalleeCaller", Map.of("u", json));
+        var mapper = Json.mapper();
+        assertEquals("O'Brien <b>", mapper.readTree(named(html, "j1", "hx-vals")).get("name").asText(), html);
+        assertEquals(42, mapper.readTree(named(html, "j2", "hx-headers")).get("id").asInt());
+        assertEquals("O'Brien <b>", mapper.readTree(named(html, "c5", "hx-vals")).get("name").asText());
+        assertFalse(html.contains("hx-vals='{\"id\":42,\"name\":\"O'Brien"), "quotes are attribute-escaped: " + html);
+        // A js: value would be evaluated by htmx, so a whole value of data never is.
+        for (String code : List.of("js:{x: alert(1)}", " JavaScript:alert(1)")) {
+            html = engine.render("xssCalleeCaller", Map.of("u", code));
+            assertEquals("{}", named(html, "j1", "hx-vals"), code);
+            assertEquals("{}", named(html, "j2", "hx-headers"), code);
+        }
+    }
+
+    @Test
     void jsonInHxValsStaysValid() throws Exception {
         String value = "O'Brien \"Bob\" $5 `x` <b>&</b> \\ \n";
         String html = combo("a", value, 1);

@@ -46,6 +46,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Hardened container scaffold; `GET /__brace/health`; `app.host(...)` | security, new | existing projects: optionally adopt the new `Dockerfile` and `compose.yaml` | [§](#security-hardened-container-scaffold-and-__bracehealth) |
 | Warning for an untrusted proxy; `trustedProxies(String...)` accepts a config value; scaffold reads `TRUSTED_PROXIES` | security | if the warning appears, set `trustedProxies` to your proxy's address or network, not `10.0.0.0/8`/`172.16.0.0/12` | [§](#security-untrusted-proxy-warning-and-narrow-trusted-proxies) |
 | New projects start with strict headers, htmx CSRF wiring and `/public` served | new projects | existing projects: optionally adopt the same layout and `routes()` lines | [§](#new-projects-start-with-the-security-defaults) |
+| Whole-branch review follow-ups: duplicate routes refused; bad percent-encoding is a 400; ops `no-store`; CLI token cache in `~/.brace`; launcher refuses toolchains older than 0.1.8 | security, **breaking** for apps registering one route twice | remove the duplicate registration `start()` names | [§](#security-whole-branch-review-follow-ups) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -1173,4 +1174,37 @@ public static void routes(Brace app) {
 Pages then pass `csrfMeta = csrfMeta` to the layout. Check pages for inline `<script>`,
 `on*=` handlers and `style=""` before turning on the strict CSP; see
 [`SecurityHeaders.strict()`](#new-securityheadersstrict).
+
+## Security: whole-branch review follow-ups
+
+A final review of the whole 0.1.11 security work found these. Only the first can need a change.
+
+- **Breaking: a route registered twice fails at registration.** Two routes with the same method
+  and the same path shape (`/x` and `/x/`, `/users/{id}` and `/users/{userId}`, a WebSocket path
+  twice) used to be accepted, and only one was ever reached, so a stale public copy of a guarded
+  route would serve instead of it. An app route at a framework path (`GET /ops/status`) fails the
+  same way at `start()`. The error names both registrations; remove one.
+- **Malformed percent-encoding is a 400.** `?q=%zz`, or a form body with one, was a 500 that filed
+  a new error, and a new regression notification, for every path a client sent it to.
+- **Errors group by route pattern.** `/ops/errors` and regression notifications now key an error by
+  `GET /users/{id}`, not by each concrete URL; the URL is still in the error's request detail.
+- **Template output:** data a `@template` call writes inside an attribute value
+  (`<a title="@template.label(...)">`) used to get body escaping, which leaves quotes alone; it now
+  gets the escaping, URL and script rules of the attribute it's in. Data that is the whole
+  `hx-vals`/`hx-headers` value (`hx-vals='${json}'`) is attribute-escaped, so the JSON the handler
+  built stays valid (a whole value starting `js:` becomes `{}`).
+- **`db.hql(query, sort, params...)` and `db.sqlQuery(query, sort, params...)`** take a `Sort`, so
+  joins and projections can sort by a `Sort.from(...)` key without tripping the query check.
+- **Caching:** `/ops` responses are always `Cache-Control: no-store`, whatever the app's
+  after-middleware sets, and a response carrying the session cookie has `public` replaced by
+  `private` (a fingerprinted static file under a session-touching middleware was cacheable by a
+  shared cache along with the cookie).
+- **`/ops/routes` lists WebSocket routes** with their access, as the startup banner does.
+- **CLI:** the ops token cache moved from `target/.brace-token-*` to `~/.brace/tokens/`, since a
+  cloned repo controls `target/` (a committed symlink there aimed the write). Expect one fresh
+  login per project. Secret files (`application.conf` from `brace new` included, now owner-only)
+  are written to a new file and moved into place, never through an existing link.
+- **Launcher:** a project pin older than 0.1.8 is refused, since a pull request could pin an old
+  release to bring back a CLI bug fixed since (`BRACE_ALLOW_OLD_TOOLCHAIN=1` overrides). A pin
+  older than the launcher itself runs, with a note.
 

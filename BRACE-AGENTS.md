@@ -90,7 +90,7 @@ var app = Brace.app()
     .after(SecurityHeaders.strict());
 ```
 
-Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `sessionValidator()`, `analytics()`, `ownsDatabase()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -116,8 +116,10 @@ app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Req
 // getSession, postSession, putSession, deleteSession (SessionHandler)
 // getFull, postFull, putFull, deleteFull             (FullHandler — DB writes + session)
 
-// CSRF is required by default on POST/PUT/DELETE/PATCH - explicitly opt out for bearer-token APIs
-app.post("/api/public", req -> Result.json(data)).csrf(false);
+// CSRF is required by default on POST/PUT/DELETE/PATCH - opt out only on bearer-token routes,
+// which authenticate with their own requirement instead of the cookie session
+app.post("/api/items", req -> Result.json(data))
+    .access(Access.insteadOfDefault(Access.checkRequest(Api::bearer))).csrf(false);
 ```
 
 Use the `Read` variants for handlers that only query: GET routes are almost always
@@ -509,6 +511,8 @@ hard-coded; a request-chosen order goes through `Sort`:
 var sort = Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"), "createdAt DESC");
 var posts = db.paginate(Post.class, "published = true", sort, req, 20);
 Sort.of("createdAt DESC, id")                     // a fixed order as a Sort — never request input
+// joins and projections: db.hql / db.sqlQuery take a Sort too (allowlist values are p.field / column)
+db.hql("SELECT p.id, p.title FROM Post p", Sort.from(req, "sort", Map.of("title", "p.title"), "p.id"))
 ```
 
 ```html
@@ -693,8 +697,11 @@ of JTE's escaping, Brace's template output:
 - **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request`,
   `hx-trigger`): user data is escaped with `\uXXXX` sequences, valid in a JavaScript string and in
   JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and
-  `hx-vals='{"q": "${q}"}'` stays valid JSON. Still, these attributes are code: prefer passing user
-  data as `hx-vals` JSON or `data-*` attributes over writing it into a handler.
+  `hx-vals='{"q": "${q}"}'` stays valid JSON. When data is the whole `hx-vals`/`hx-headers` value
+  (`hx-vals='${json}'`, JSON the handler built), it's attribute-escaped instead, so the JSON stays
+  intact; a whole value starting `js:` becomes `{}`. Still, these attributes are code: prefer passing
+  user data as `hx-vals` JSON or `data-*` attributes over writing it into a handler. The same rules
+  apply to data a `@template` call writes inside an attribute value.
 - `srcdoc`: user data is escaped twice, so it becomes text in the frame, never markup. Its content
   isn't URL-checked; for an HTML preview, sanitize the HTML, write it with
   `srcdoc="$unsafe{Html.escape(sanitized)}"`, and add `sandbox` to the iframe.
@@ -769,7 +776,7 @@ session.remove("userId");             // remove key
 session.clear();                       // remove all
 ```
 
-Configure cookie security with `app.sessions(SessionOptions.secure("secret").maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `path(String)`, `domain(String)`.
+Configure cookie security with `app.sessions(SessionOptions.secure("secret").maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `absoluteMaxAge(Duration)`, `previousSecrets(String...)`, `path(String)`, `domain(String)`.
 
 **The `Secure` attribute is on by default.** With no explicit `.secure(...)`, Brace resolves it per request: on unless the request's host is a loopback address, and always on when a trusted proxy reports `X-Forwarded-Proto: https`. The host is `X-Forwarded-Host` when a trusted proxy sends it, else `Host`; a loopback host is still treated as production when the browser's `Origin`/`Referer` is an `https://` page on a real host (a proxy rewriting `Host` — nginx's default — logs a one-time warning naming the fix: `proxy_set_header Host $host;`). So production gets `Secure` with no configuration and `http://localhost` (dev, `Brace.test()`) keeps working. An app genuinely served over plain HTTP on a real hostname must opt out with `.secure(false)`, which logs a startup warning. Do not add `.secure(false)` to make a local setup work — check the Host first.
 
@@ -793,7 +800,9 @@ CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests whe
   leak through compressed response sizes (BREACH; see "Response Compression" in
   `docs/SECURITY.md`).
 - **Bearer-token APIs (no cookies):** opt out per route with
-  `app.post("/api/data", handler).csrf(false)`.
+  `app.post("/api/data", handler).access(Access.insteadOfDefault(Access.checkRequest(Api::bearer))).csrf(false)`
+  (under a session `defaultAccess`, a bare `.csrf(false)` route would use the cookie session
+  and fail `start()`).
 
 **`.csrf(false)` on a route that uses the cookie session fails `start()`** — a handler that
 takes the `Session`, or a route under a session access requirement or a session-aware
@@ -1375,6 +1384,7 @@ In-process integration tests with H2:
 static TestApp app = Brace.test()
     .entities(Post.class, User.class)
     .templates("views")
+    .sessions("test-session-secret-at-least-32-characters") // as main() does; needed by Access.session
     .start(App::routes);   // exact same wiring as production main()
 
 @Test void listPosts() {
@@ -1530,7 +1540,7 @@ don't mix full pages with partials.
 
 **Adding form validation:**
 1. Create record with annotations: `record MyForm(@Required String name) {}`
-2. In handler: `var form = req.form(MyForm.class); if (!form.valid()) ...`
+2. In handler: `var form = req.form(MyForm.class); if (form.hasErrors()) ...`
 3. Add `apply(MyForm form)` to entity for field mapping
 
 **Adding htmx dynamic updates:**

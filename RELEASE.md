@@ -93,8 +93,10 @@ Run it after any dependency change. When it fails:
    reason = "Only reachable via X, which Brace never calls (checked 2026-10-27). Bump when Y ships a fix."
    ```
 
-   The gate refuses an entry without `ignoreUntil` or `reason`. Keep `ignoreUntil` weeks out,
-   not years, and say in `reason` why it is unreachable and what unblocks the bump. The scan log prints every filtered advisory with its reason, and flags
+   The gate refuses an entry without `ignoreUntil` or `reason`, an `ignoreUntil` more than 90
+   days out, and any `[[PackageOverrides]]` that ignores a package's advisories wholesale. Keep
+   `ignoreUntil` weeks out, not months, and say in `reason` why it is unreachable and what
+   unblocks the bump. The scan log prints every filtered advisory with its reason, and flags
    entries that match nothing as unused; delete those.
 
 A newly published advisory can fail `publish.yml` on `main` or a tag even though the PR passed:

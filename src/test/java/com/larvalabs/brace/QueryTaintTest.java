@@ -122,6 +122,28 @@ class QueryTaintTest {
     }
 
     @Test
+    void sortFromWorksWithHqlAndSqlQueries() {
+        // Joins and projections: the request picks an allowlisted key, appended after the check.
+        var byTitle = get(Map.of(), Map.of("sort", "-title"));
+        var hqlSort = Sort.from(byTitle, "sort", Map.of("title", "p.title"), "p.id");
+        List<Object[]> rows = run(byTitle, true, db -> db.hql("SELECT p.id, p.title FROM Post p", hqlSort));
+        assertEquals("secret draft", rows.get(0)[1]);
+        assertEquals("public post", rows.get(1)[1]);
+        var sqlSort = Sort.from(byTitle, "sort", Map.of("title", "title"), "id");
+        List<Object[]> sqlRows = run(byTitle, true, db -> db.sqlQuery("SELECT id, title FROM posts", sqlSort));
+        assertEquals("secret draft", sqlRows.get(0)[1]);
+        // The query text itself is still checked, and so is Sort.of text from the request.
+        var evil = get(Map.of(), Map.of("q", "title DESC"));
+        assertThrows(IllegalArgumentException.class, () -> run(evil, true,
+            db -> db.hql("SELECT p.id FROM Post p ORDER BY " + evil.queryParam("q"), (Sort) null)));
+        assertThrows(IllegalArgumentException.class, () -> run(evil, true,
+            db -> db.hql("SELECT p.id FROM Post p", Sort.of(evil.queryParam("q")))));
+        // A query with its own ORDER BY and a Sort is ambiguous.
+        assertThrows(IllegalArgumentException.class, () -> run(byTitle, true,
+            db -> db.hql("SELECT p.id FROM Post p ORDER BY p.id", hqlSort)));
+    }
+
+    @Test
     void aliasedOrderByWordThrows() {
         var req = get(Map.of(), Map.of("sort", "title"));
         assertThrows(IllegalArgumentException.class,

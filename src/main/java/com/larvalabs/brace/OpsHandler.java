@@ -57,7 +57,9 @@ public class OpsHandler {
                 Map.entry("X-Content-Type-Options", "nosniff"),
                 Map.entry("X-Frame-Options", "DENY"),
                 // The exchange URL carries the login token; no ops page should send a Referer.
-                Map.entry("Referrer-Policy", "no-referrer"))) {
+                Map.entry("Referrer-Policy", "no-referrer"),
+                // Ops responses are per-credential: an app's "public" caching mustn't reach them.
+                Map.entry("Cache-Control", "no-store"))) {
             // Result's header map is case-sensitive: drop an app's differently-cased copy too.
             result.headers().keySet().removeIf(name -> name.equalsIgnoreCase(header.getKey()));
             result.header(header.getKey(), header.getValue());
@@ -103,6 +105,13 @@ public class OpsHandler {
 
     // M14: the only origins a v3 auth signature may name, when configured (app.opsOrigins).
     private volatile List<String> pinnedOrigins = List.of();
+
+    // WebSocket routes live outside the Router; /ops/routes lists them too.
+    private volatile List<Route> webSocketRoutes = List.of();
+
+    void setWebSocketRoutes(List<Route> routes) {
+        this.webSocketRoutes = List.copyOf(routes);
+    }
 
     void setPinnedOrigins(List<String> origins) {
         var normalized = new java.util.ArrayList<String>();
@@ -587,7 +596,9 @@ public class OpsHandler {
     public Result routes(Request req) {
 
         var routeList = new ArrayList<Map<String, Object>>();
-        for (var route : router.routes()) {
+        var all = new ArrayList<Route>(router.routes());
+        all.addAll(webSocketRoutes);
+        for (var route : all) {
             var r = new LinkedHashMap<String, Object>();
             r.put("method", route.method());
             r.put("pattern", route.pattern());

@@ -130,19 +130,30 @@ public class CliAuth {
      * The token cache for the server {@code cfg} points at (M14). One file per origin, so a token
      * minted for prod is never sent to another URL: the URL comes from the committed {@code .brace},
      * which a pull request can change.
+     *
+     * <p>It lives under the user's {@code ~/.brace/tokens/<project>/}, not in the project: a cloned
+     * repo can commit {@code target/} or a symlink in it, and the CLI must not write a file whose
+     * location the repo decides.
      */
     static Path cacheFile(Path projectDir, CliConfig cfg) {
-        String origin = originOf(cfg);
-        // The full SHA-256 (base64url, safe in a file name), not a short fingerprint: a name an
-        // attacker could grind to collide with prod's would get prod's token sent their way.
-        String id;
+        // The full SHA-256, not a short fingerprint: a name an attacker could grind to collide
+        // with prod's would get prod's token sent their way.
+        return projectCacheDir(projectDir).resolve(sha256(originOf(cfg)));
+    }
+
+    /** {@code ~/.brace/tokens/<SHA-256 of the project's absolute path>}. */
+    private static Path projectCacheDir(Path projectDir) {
+        return userBraceDir().resolve("tokens").resolve(sha256(projectDir.toAbsolutePath().normalize().toString()));
+    }
+
+    /** Base64url SHA-256, safe in a file name. */
+    private static String sha256(String value) {
         try {
-            id = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
-                java.security.MessageDigest.getInstance("SHA-256").digest(origin.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
-        return projectDir.resolve("target").resolve(".brace-token-" + id);
     }
 
     /** {@code ~/.brace}, or {@code -Dbrace.user.dir} (the framework's own tests point it at a temp dir). */
@@ -162,10 +173,18 @@ public class CliAuth {
 
     /** Removes every cached token for this project, whatever server it was for. */
     public static void clearCache(Path projectDir) throws Exception {
+        // Pre-0.1.11 caches lived in target/. Deleting removes a link itself, never its target,
+        // and a symlinked target/ is left alone.
         Path target = projectDir.resolve("target");
-        Files.deleteIfExists(target.resolve(".brace-token")); // pre-0.1.11, not keyed by server
-        if (!Files.isDirectory(target)) return;
-        try (var files = Files.newDirectoryStream(target, ".brace-token-*")) {
+        if (Files.isDirectory(target, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            Files.deleteIfExists(target.resolve(".brace-token"));
+            try (var files = Files.newDirectoryStream(target, ".brace-token-*")) {
+                for (Path f : files) Files.deleteIfExists(f);
+            }
+        }
+        Path dir = projectCacheDir(projectDir);
+        if (!Files.isDirectory(dir)) return;
+        try (var files = Files.newDirectoryStream(dir)) {
             for (Path f : files) Files.deleteIfExists(f);
         }
     }
@@ -228,7 +247,7 @@ public class CliAuth {
 
     private static String readCache(Path file, String origin) {
         try {
-            if (!Files.exists(file)) return null;
+            if (!Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null;
             JsonNode node = Json.mapper().readTree(Files.readString(file));
             if (!node.hasNonNull("origin") || !origin.equals(node.get("origin").asText())) return null;
             String expiresAt = node.get("expiresAt").asText();
@@ -239,9 +258,23 @@ public class CliAuth {
         }
     }
 
+    /** Creates {@code dir} and its missing parents, owner-only (rwx------) where POSIX. */
+    private static void createPrivateDirectories(Path dir) throws java.io.IOException {
+        if (Files.isDirectory(dir)) return;
+        createPrivateDirectories(dir.toAbsolutePath().getParent());
+        try {
+            Files.createDirectory(dir, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")));
+        } catch (UnsupportedOperationException notPosix) {
+            Files.createDirectory(dir);
+        } catch (java.nio.file.FileAlreadyExistsException raced) {
+            // created concurrently: fine
+        }
+    }
+
     private static void writeCache(Path file, String origin, String token, String expiresAt) {
         try {
-            Files.createDirectories(file.getParent());
+            createPrivateDirectories(file.getParent());
             String json = Json.mapper().writeValueAsString(Map.of("origin", origin, "token", token, "expiresAt", expiresAt));
             SecretFiles.writeStringWithOwnerOnlyPermissions(file, json);
         } catch (Exception e) {

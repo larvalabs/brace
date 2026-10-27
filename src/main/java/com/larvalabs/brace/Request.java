@@ -321,12 +321,16 @@ public class Request {
             var eq = pair.indexOf('=');
             String key;
             String value;
-            if (eq < 0 || (eq == 0 && bareKeyOnLeadingEq)) {
-                key = URLDecoder.decode(pair, StandardCharsets.UTF_8);
-                value = "";
-            } else {
-                key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
-                value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+            try {
+                if (eq < 0 || (eq == 0 && bareKeyOnLeadingEq)) {
+                    key = URLDecoder.decode(pair, StandardCharsets.UTF_8);
+                    value = "";
+                } else {
+                    key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
+                    value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+                }
+            } catch (IllegalArgumentException badEscape) {
+                throw new MalformedRequestException(badEscape); // a 400, not a 500
             }
             sink.accept(key, value);
         }
