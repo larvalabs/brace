@@ -124,7 +124,7 @@ class HttpStreamTest {
     @Test
     void parsesTheEventStreamFormat() {
         var events = new ArrayList<Http.Event>();
-        var response = Http.get(url("/sse/full")).fetchEvents(events::add);
+        var response = Http.get(url("/sse/full")).trusted().fetchEvents(events::add);
 
         assertTrue(response.ok());
         assertEquals("", response.body());
@@ -140,7 +140,7 @@ class HttpStreamTest {
     @Test
     void eventsArriveBeforeTheStreamEnds() {
         var events = new ArrayList<String>();
-        Http.get(url("/sse/handshake")).timeout(Duration.ofSeconds(10)).fetchEvents(event -> {
+        Http.get(url("/sse/handshake")).trusted().timeout(Duration.ofSeconds(10)).fetchEvents(event -> {
             events.add(event.data());
             firstEventSeen.countDown();
         });
@@ -153,7 +153,7 @@ class HttpStreamTest {
     @Test
     void nonOkStatusReturnsTheErrorBodyWithoutParsingEvents() {
         var events = new ArrayList<Http.Event>();
-        var response = Http.post(url("/sse/error")).bodyJson(Map.of("q", 1)).fetchEvents(events::add);
+        var response = Http.post(url("/sse/error")).trusted().bodyJson(Map.of("q", 1)).fetchEvents(events::add);
 
         assertFalse(response.ok());
         assertEquals(503, response.status());
@@ -165,7 +165,7 @@ class HttpStreamTest {
     @Test
     void sendsAcceptAndWorksWithMultipart() {
         var events = new java.util.LinkedHashMap<String, String>();
-        Http.post(url("/sse/echo")).multipart()
+        Http.post(url("/sse/echo")).trusted().multipart()
             .field("prompt", "hello")
             .fetchEvents(event -> events.put(event.type(), event.data()));
 
@@ -178,7 +178,7 @@ class HttpStreamTest {
     @Test
     void explicitAcceptHeaderIsKept() {
         var events = new java.util.LinkedHashMap<String, String>();
-        Http.get(url("/sse/echo")).header("accept", "application/x-ndjson")
+        Http.get(url("/sse/echo")).trusted().header("accept", "application/x-ndjson")
             .fetchEvents(event -> events.put(event.type(), event.data()));
 
         assertEquals("application/x-ndjson", events.get("accept"));
@@ -191,7 +191,7 @@ class HttpStreamTest {
         var events = new CopyOnWriteArrayList<String>();
         long start = System.nanoTime();
         var e = assertThrows(Http.StreamTimeoutException.class, () ->
-            Http.get(url("/sse/stall"))
+            Http.get(url("/sse/stall")).trusted()
                 .timeout(Duration.ofSeconds(10))
                 .idleTimeout(Duration.ofMillis(300))
                 .fetchEvents(event -> events.add(event.data())));
@@ -208,7 +208,7 @@ class HttpStreamTest {
         var events = new CopyOnWriteArrayList<String>();
         long start = System.nanoTime();
         var e = assertThrows(Http.StreamTimeoutException.class, () ->
-            Http.get(url("/sse/forever"))
+            Http.get(url("/sse/forever")).trusted()
                 .timeout(Duration.ofMillis(600))
                 .idleTimeout(Duration.ofSeconds(2))
                 .fetchEvents(event -> events.add(event.data())));
@@ -224,7 +224,7 @@ class HttpStreamTest {
     void deadlineCoversTheWaitForHeaders() {
         long start = System.nanoTime();
         var e = assertThrows(Http.StreamTimeoutException.class, () ->
-            Http.get(url("/sse/slow-headers")).timeout(Duration.ofMillis(300)).stream());
+            Http.get(url("/sse/slow-headers")).trusted().timeout(Duration.ofMillis(300)).stream());
 
         assertFalse(e.idle());
         assertTrue(elapsedMillis(start) < 2500, "deadline took " + elapsedMillis(start) + "ms");
@@ -234,7 +234,7 @@ class HttpStreamTest {
     void idleTimeoutCoversTheWaitForHeaders() {
         long start = System.nanoTime();
         var e = assertThrows(Http.StreamTimeoutException.class, () ->
-            Http.get(url("/sse/slow-headers")).idleTimeout(Duration.ofMillis(300)).fetchEvents(event -> { }));
+            Http.get(url("/sse/slow-headers")).trusted().idleTimeout(Duration.ofMillis(300)).fetchEvents(event -> { }));
 
         assertTrue(e.idle());
         assertEquals(Duration.ofMillis(300), e.limit());
@@ -246,19 +246,19 @@ class HttpStreamTest {
         for (var off : java.util.Arrays.asList(Duration.ZERO, null)) {
             // A 200ms idle timeout would fire first if ZERO/null didn't turn it off.
             var e = assertThrows(Http.StreamTimeoutException.class, () ->
-                Http.get(url("/sse/stall"))
+                Http.get(url("/sse/stall")).trusted()
                     .idleTimeout(Duration.ofMillis(200)).idleTimeout(off)
                     .timeout(Duration.ofMillis(800))
                     .fetchEvents(event -> { }));
             assertFalse(e.idle(), "idle timeout still on after idleTimeout(" + off + ")");
         }
-        assertThrows(IllegalArgumentException.class, () -> Http.get(url("/")).idleTimeout(Duration.ofMillis(-1)));
+        assertThrows(IllegalArgumentException.class, () -> Http.get(url("/")).trusted().idleTimeout(Duration.ofMillis(-1)));
     }
 
     @Test
     void slowConsumerDoesNotTripTheIdleTimeout() {
         var events = new ArrayList<String>();
-        Http.get(url("/sse/burst")).idleTimeout(Duration.ofMillis(100)).fetchEvents(event -> {
+        Http.get(url("/sse/burst")).trusted().idleTimeout(Duration.ofMillis(100)).fetchEvents(event -> {
             sleep(250);
             events.add(event.data());
         });
@@ -268,7 +268,7 @@ class HttpStreamTest {
 
     @Test
     void timeoutSurfacesFromRawBodyReads() throws IOException {
-        try (var response = Http.get(url("/sse/stall")).idleTimeout(Duration.ofMillis(200)).stream()) {
+        try (var response = Http.get(url("/sse/stall")).trusted().idleTimeout(Duration.ofMillis(200)).stream()) {
             var body = response.body();
             var first = new byte[64];
             assertTrue(body.read(first) > 0);
@@ -285,7 +285,7 @@ class HttpStreamTest {
     @Test
     void deadlineCountsTimeTheMachineSpentAsleep() {
         var asleep = new AtomicLong();
-        var http = Http.get(url("/sse/stall")).timeout(Duration.ofMinutes(10)).idleTimeout(Duration.ZERO);
+        var http = Http.get(url("/sse/stall")).trusted().timeout(Duration.ofMinutes(10)).idleTimeout(Duration.ZERO);
         http.wallClock = () -> System.currentTimeMillis() + asleep.get();
         long start = System.nanoTime();
         var e = assertThrows(Http.StreamTimeoutException.class, () ->
@@ -299,7 +299,7 @@ class HttpStreamTest {
     @Test
     void idleTimeoutCountsTimeTheMachineSpentAsleep() {
         var asleep = new AtomicLong();
-        var http = Http.get(url("/sse/stall")).idleTimeout(Duration.ofMinutes(5));
+        var http = Http.get(url("/sse/stall")).trusted().idleTimeout(Duration.ofMinutes(5));
         http.wallClock = () -> System.currentTimeMillis() + asleep.get();
         long start = System.nanoTime();
         var e = assertThrows(Http.StreamTimeoutException.class, () ->
@@ -317,7 +317,7 @@ class HttpStreamTest {
     @Test
     void timersShareOneDaemonThread() {
         for (int i = 0; i < 5; i++) {
-            Http.get(url("/sse/burst")).idleTimeout(Duration.ofSeconds(1)).fetchEvents(event -> { });
+            Http.get(url("/sse/burst")).trusted().idleTimeout(Duration.ofSeconds(1)).fetchEvents(event -> { });
         }
         var timers = Thread.getAllStackTraces().keySet().stream()
             .filter(t -> t.getName().equals("brace-http-stream-timer"))
@@ -330,7 +330,7 @@ class HttpStreamTest {
 
     @Test
     void streamReadsLinesAsTheyArrive() {
-        try (var response = Http.get(url("/lines")).stream()) {
+        try (var response = Http.get(url("/lines")).trusted().stream()) {
             assertTrue(response.ok());
             assertEquals(200, response.status());
             assertEquals("test-model", response.header("X-Model"));
@@ -341,7 +341,7 @@ class HttpStreamTest {
 
     @Test
     void streamExposesNonOkStatusAndErrorBody() {
-        try (var response = Http.get(url("/sse/error")).stream()) {
+        try (var response = Http.get(url("/sse/error")).trusted().stream()) {
             assertFalse(response.ok());
             assertEquals(503, response.status());
             assertTrue(response.readString().endsWith("{\"error\":\"overloaded\"}"));
@@ -351,7 +351,7 @@ class HttpStreamTest {
     @Test
     void eventsFromAStreamResponseAfterCheckingHeaders() {
         var events = new ArrayList<String>();
-        try (var response = Http.get(url("/sse/burst")).stream()) {
+        try (var response = Http.get(url("/sse/burst")).trusted().stream()) {
             assertTrue(response.ok());
             assertEquals("text/event-stream", response.header("Content-Type"));
             response.events(event -> events.add(event.data()));
@@ -363,7 +363,7 @@ class HttpStreamTest {
     void closingTheResponseStopsEventsEarly() {
         var events = new ArrayList<String>();
         long start = System.nanoTime();
-        try (var response = Http.get(url("/sse/forever")).stream()) {
+        try (var response = Http.get(url("/sse/forever")).trusted().stream()) {
             response.events(event -> {
                 events.add(event.data());
                 if (events.size() == 2) response.close();
@@ -376,7 +376,7 @@ class HttpStreamTest {
     @Test
     void closingEarlyReturnsPromptly() {
         long start = System.nanoTime();
-        try (var response = Http.get(url("/sse/stall")).timeout(Duration.ofSeconds(10)).stream()) {
+        try (var response = Http.get(url("/sse/stall")).trusted().timeout(Duration.ofSeconds(10)).stream()) {
             assertEquals("data: before stall", response.lines().findFirst().orElseThrow());
         }
         assertTrue(elapsedMillis(start) < 2000, "close took " + elapsedMillis(start) + "ms");

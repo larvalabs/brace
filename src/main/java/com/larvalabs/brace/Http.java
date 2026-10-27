@@ -7,13 +7,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -27,11 +30,33 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.stream.Stream;
 
+/**
+ * Fluent outbound HTTP client over {@code java.net.http}.
+ *
+ * <p><strong>Public destinations only, by default.</strong> Before each request the host is
+ * resolved and the request is refused with {@link BlockedDestinationException} if any address it
+ * resolves to is loopback, private (RFC 1918, CGNAT, IPv6 ULA), link-local (which includes the
+ * cloud metadata service at 169.254.169.254), unspecified, multicast or otherwise reserved, so a
+ * URL that reaches {@code Http} from user input can't be pointed at the app's own network
+ * (server-side request forgery). Call {@link #trusted()} on a request to an internal service you
+ * chose yourself. See {@link #isPublicAddress} for the exact ranges.
+ *
+ * <p>The check runs on the resolved {@link InetAddress}, never on the URL text, so numeric forms
+ * such as {@code http://2130706433/} or {@code http://[::ffff:127.0.0.1]/} are caught as what
+ * they are. The connection itself is made by the JDK, which resolves the name again through the
+ * JVM's address cache (the same cache entry the check just read), and the name is checked once
+ * more when the response headers arrive, before any of the response reaches the caller. What
+ * remains is a narrow DNS-rebinding window, described in {@code docs/SECURITY.md}.
+ */
 public class Http {
+
+    /** The default {@link #maxResponseBytes} for buffered fetches: 10 MB. */
+    public static final long DEFAULT_MAX_RESPONSE_BYTES = 10L * 1024 * 1024;
 
     /**
      * Shared client. {@code followRedirects} is deliberately left at the JDK default
-     * ({@code NEVER}) — see {@link #fetch()} (L7).
+     * ({@code NEVER}) — see {@link #fetch()} (L7). That also keeps the destination check
+     * complete: every connection {@code Http} makes is to a URL it has checked.
      */
     private static final HttpClient CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
@@ -44,6 +69,8 @@ public class Http {
     private Duration timeout = Duration.ofSeconds(30);
     private boolean timeoutSet;
     private Duration idleTimeout = Duration.ofSeconds(30);
+    private boolean trusted;
+    private long maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES;
     /** The wall clock the stream timeouts also go by. Tests move it to stand in for the machine sleeping. */
     LongSupplier wallClock = System::currentTimeMillis;
 
@@ -90,6 +117,33 @@ public class Http {
             throw new IllegalArgumentException("idleTimeout must not be negative: " + idleTimeout);
         }
         this.idleTimeout = idleTimeout == null || idleTimeout.isZero() ? null : idleTimeout;
+        return this;
+    }
+
+    /**
+     * Allow this request to reach any address, including loopback, private networks and the
+     * cloud metadata service. Use it only for a destination you chose yourself (an internal
+     * service, a sidecar, a URL from your own config), never for a URL that came from a user:
+     * that is exactly the request the default check exists to stop.
+     */
+    public Http trusted() {
+        this.trusted = true;
+        return this;
+    }
+
+    /**
+     * The most body bytes {@link #fetch()}, {@link #fetchString()}, {@link #fetchBytes()} and
+     * {@link #fetchJson} will buffer (default {@link #DEFAULT_MAX_RESPONSE_BYTES}, 10 MB), and the
+     * most of an error body {@link #fetchEvents} will read. A larger response fails with
+     * {@link ResponseTooLargeException} as soon as its {@code Content-Length}, or the bytes read
+     * so far, pass the limit; the rest is never read. {@link #stream()} is not capped: it hands
+     * you the body to read as you choose.
+     */
+    public Http maxResponseBytes(long maxResponseBytes) {
+        if (maxResponseBytes <= 0) {
+            throw new IllegalArgumentException("maxResponseBytes must be positive: " + maxResponseBytes);
+        }
+        this.maxResponseBytes = maxResponseBytes;
         return this;
     }
 
@@ -153,27 +207,26 @@ public class Http {
      * Send the request and return the response, <strong>whatever its status</strong>. A 4xx or 5xx
      * is a {@link Response} with that {@link Response#status()}, not an exception — check
      * {@link Response#ok()} yourself. Only a transport failure (connect refused, timeout, DNS)
-     * throws.
+     * throws, plus {@link BlockedDestinationException} for a non-public destination and
+     * {@link ResponseTooLargeException} for a body over {@link #maxResponseBytes}.
      *
      * <p>Redirects are <strong>not</strong> followed: a 301/302 comes back as itself, so read
      * {@code header("Location")} and re-issue if you want to follow it. This is the JDK's default
      * and is kept because silently following a redirect can replay a request body or leak an
-     * {@code Authorization} header to another host.
+     * {@code Authorization} header to another host. Re-issue it with {@code Http} (not another
+     * client), so the new destination is checked too, and leave off {@link #trusted()} unless
+     * you trust wherever the redirect points.
      *
      * <p>{@link #fetchBytes()} is the exception to the first rule: it throws on a non-2xx, because
      * a caller asking for bytes has nowhere to put an error body. (L7 — the asymmetry is
      * deliberate but was previously undocumented.)
      */
     public Response fetch() {
-        try {
-            var httpResponse = CLIENT.send(buildRequest(), HttpResponse.BodyHandlers.ofString());
-            return new Response(httpResponse);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("HTTP request interrupted: " + method + " " + url, e);
-        } catch (Exception e) {
-            throw failed(e);
-        }
+        return exchange(() -> {
+            var raw = send(buildRequest());
+            var body = readBody(raw.body(), raw.headers());
+            return new Response(raw.statusCode(), raw.headers(), new String(body, charset(raw.headers())));
+        });
     }
 
     /**
@@ -198,25 +251,122 @@ public class Http {
      * has nowhere to put an error body, so failing loudly is the useful behavior. (L7)
      */
     public byte[] fetchBytes() {
-        HttpResponse<byte[]> httpResponse;
+        var raw = exchange(() -> send(buildRequest()));
+        int status = raw.statusCode();
+        if (status < 200 || status >= 300) {
+            closeQuietly(raw.body());
+            throw new RuntimeException("HTTP request failed: " + method + " " + url + " (status " + status + ")");
+        }
+        return exchange(() -> readBody(raw.body(), raw.headers()));
+    }
+
+    /** One blocking step of a call: send, or read the body. */
+    private interface Step<T> {
+        T run() throws IOException, InterruptedException;
+    }
+
+    /**
+     * Run a step, turning its failures into this class's exceptions: {@link #failed} for a
+     * transport failure, with the exceptions that already say what went wrong passed through.
+     */
+    private <T> T exchange(Step<T> step) {
         try {
-            httpResponse = CLIENT.send(buildRequest(), HttpResponse.BodyHandlers.ofByteArray());
+            return step.run();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("HTTP request interrupted: " + method + " " + url, e);
+        } catch (BlockedDestinationException | ResponseTooLargeException | StreamTimeoutException e) {
+            throw e;
         } catch (Exception e) {
             throw failed(e);
         }
-        if (httpResponse.statusCode() < 200 || httpResponse.statusCode() >= 300) {
-            throw new RuntimeException("HTTP request failed: " + method + " " + url + " (status " + httpResponse.statusCode() + ")");
+    }
+
+    /**
+     * Send the request, leaving the body unread, with the destination checked before the request
+     * goes out and again once the response headers are in, unless {@link #trusted()}.
+     *
+     * <p>H5: the second check is for DNS rebinding. The JDK resolves the name again to connect,
+     * and that lookup is normally served by the JVM address cache entry the first check read, so
+     * it gets the addresses that were checked. A name whose cache entry expired between the two
+     * lookups could get a different, private answer, but the JVM caches that answer in turn, so
+     * the second check sees it and the response is discarded before the caller reads any of it.
+     */
+    private HttpResponse<InputStream> send(HttpRequest request) throws IOException, InterruptedException {
+        var host = request.uri().getHost();
+        if (!trusted) checkDestination(host);
+        var raw = CLIENT.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        if (!trusted) {
+            try {
+                checkDestination(host);
+            } catch (IOException | RuntimeException e) {
+                closeQuietly(raw.body());
+                throw e;
+            }
         }
-        return httpResponse.body();
+        return raw;
+    }
+
+    /**
+     * Read a buffered body, failing as soon as it is known to exceed {@link #maxResponseBytes}:
+     * from {@code Content-Length} before reading anything, otherwise once the bytes read pass
+     * the limit. Closing the stream early cancels the exchange, so the rest is never downloaded.
+     */
+    private byte[] readBody(InputStream body, HttpHeaders headers) throws IOException {
+        try (body) {
+            long declared = headers.firstValueAsLong("Content-Length").orElse(-1);
+            if (declared > maxResponseBytes) throw tooLarge();
+            var out = new ByteArrayOutputStream((int) Math.min(Math.max(declared, 0), 64 * 1024));
+            var buffer = new byte[8192];
+            long total = 0;
+            for (int n; (n = body.read(buffer)) != -1; ) {
+                total += n;
+                if (total > maxResponseBytes) throw tooLarge();
+                out.write(buffer, 0, n);
+            }
+            return out.toByteArray();
+        }
+    }
+
+    private ResponseTooLargeException tooLarge() {
+        return new ResponseTooLargeException(method, url, maxResponseBytes);
+    }
+
+    /** The body charset named by {@code Content-Type}, or UTF-8, as {@code BodyHandlers.ofString} does. */
+    static Charset charset(HttpHeaders headers) {
+        var contentType = headers.firstValue("Content-Type").orElse("");
+        for (var param : contentType.split(";")) {
+            var p = param.trim();
+            if (p.regionMatches(true, 0, "charset=", 0, 8)) {
+                var name = p.substring(8).trim();
+                if (name.length() >= 2 && name.startsWith("\"") && name.endsWith("\"")) {
+                    name = name.substring(1, name.length() - 1);
+                }
+                try {
+                    return Charset.forName(name);
+                } catch (IllegalArgumentException e) {
+                    return StandardCharsets.UTF_8;
+                }
+            }
+        }
+        return StandardCharsets.UTF_8;
+    }
+
+    private static void closeQuietly(InputStream in) {
+        try {
+            in.close();
+        } catch (IOException ignored) {
+            // Closing only cancels the exchange; there's nothing to report.
+        }
     }
 
     /**
      * The transport failure, with its cause named in the message ({@code ConnectException},
-     * {@code UnresolvedAddressException}, ...) so callers matching on the text can tell a refused
-     * connection from a bad host without unwrapping.
+     * {@code UnknownHostException}, ...) so callers matching on the text can tell a refused
+     * connection from a bad host without unwrapping. An unknown host is reported by the
+     * destination check's own lookup as {@code UnknownHostException}; on a {@link #trusted()}
+     * request the JDK reports it ({@code ConnectException} caused by
+     * {@code UnresolvedAddressException}).
      */
     private RuntimeException failed(Exception e) {
         String detail = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage());
@@ -231,12 +381,19 @@ public class Http {
      * {@link #timeout} the whole call; either closes the connection and throws
      * {@link StreamTimeoutException}. A non-2xx status is returned, not thrown: check
      * {@link StreamResponse#ok()}.
+     *
+     * <p>The destination is checked as for {@link #fetch()}, but the body is
+     * <strong>not</strong> capped by {@link #maxResponseBytes}: you read it, so bound what you
+     * read yourself.
      */
     public StreamResponse stream() {
         var watchdog = new Watchdog(this);
         try {
-            var raw = CLIENT.send(buildRequest(watchdog.headerTimeout()), HttpResponse.BodyHandlers.ofInputStream());
+            var raw = send(buildRequest(watchdog.headerTimeout()));
             return new StreamResponse(raw, watchdog.attach(raw.body()));
+        } catch (BlockedDestinationException e) {
+            watchdog.close();
+            throw e;
         } catch (HttpTimeoutException e) {
             watchdog.close();
             if (e instanceof HttpConnectTimeoutException) {
@@ -260,7 +417,9 @@ public class Http {
      * {@code onEvent} as it arrives, and return once the server ends the stream. The returned
      * {@link Response} carries the status and headers; on a non-2xx status no events are
      * parsed and its {@code body()} is the error body. Sends {@code Accept: text/event-stream}
-     * unless an Accept header is set. Timeouts are as for {@link #stream()}.
+     * unless an Accept header is set. Timeouts are as for {@link #stream()}. The destination is
+     * checked as for {@link #fetch()}; an error body is capped at {@link #maxResponseBytes}, the
+     * events are not.
      */
     public Response fetchEvents(Consumer<Event> onEvent) {
         if (headers.keySet().stream().noneMatch("Accept"::equalsIgnoreCase)) {
@@ -268,11 +427,249 @@ public class Http {
         }
         try (var response = stream()) {
             if (!response.ok()) {
-                return new Response(response.status(), response.raw.headers(), response.readString());
+                var responseHeaders = response.raw.headers();
+                var body = exchange(() -> readBody(response.body(), responseHeaders));
+                return new Response(response.status(), responseHeaders, new String(body, charset(responseHeaders)));
             }
             response.events(onEvent);
             return new Response(response.status(), response.raw.headers(), "");
         }
+    }
+
+    // --- Destination policy (H5) ---
+
+    /** How {@link #checkDestination} resolves a host. */
+    interface Resolver {
+        InetAddress[] resolve(String host) throws UnknownHostException;
+    }
+
+    /**
+     * The JVM resolver, whose cache the JDK's own connect reads too. Tests swap it to make a name
+     * change its answer mid-request; nothing else should.
+     */
+    static volatile Resolver resolver = InetAddress::getAllByName;
+
+    /**
+     * Resolve {@code host} and refuse it if <em>any</em> of its addresses is not public. Any, not
+     * the first: the connection may be made to a different one of them than the one checked.
+     * The check runs on the resolved addresses, so a numeric or bracketed host
+     * ({@code 2130706433}, {@code [::ffff:127.0.0.1]}) is judged by the address it parses to.
+     */
+    static void checkDestination(String host) throws UnknownHostException {
+        if (host == null || host.isEmpty()) {
+            throw new IllegalArgumentException("URL has no host");
+        }
+        // Java reads 0177.0.0.1 as decimal 177.0.0.1 (public), but an HTTP proxy or anything
+        // using inet_aton reads it as octal 127.0.0.1. Numeric hosts must be a plain dotted quad,
+        // so every reader agrees on the address that was checked.
+        if (isNonCanonicalNumericHost(host)) {
+            throw new BlockedDestinationException(host, null);
+        }
+        warnIfDnsCacheDisabled();
+        for (var address : resolver.resolve(host)) {
+            if (!isPublicAddress(address)) {
+                throw new BlockedDestinationException(host, address);
+            }
+        }
+    }
+
+    private static final java.util.regex.Pattern NUMERIC_LABEL = java.util.regex.Pattern.compile("\\d+|0[xX][0-9a-fA-F]*");
+    private static final java.util.regex.Pattern DECIMAL_OCTET = java.util.regex.Pattern.compile("0|[1-9]\\d{0,2}");
+
+    /**
+     * A host made only of numeric labels (decimal, or 0x hex) that isn't a canonical dotted quad:
+     * {@code 2130706433}, {@code 0177.0.0.1}, {@code 0x7f.1}, {@code 127.1}. No real host name is
+     * all-numeric (a top-level domain never is), so refusing these costs nothing.
+     */
+    static boolean isNonCanonicalNumericHost(String host) {
+        if (host.indexOf(':') >= 0) return false; // bracketed IPv6
+        String name = host.endsWith(".") ? host.substring(0, host.length() - 1) : host;
+        String[] labels = name.split("\\.", -1);
+        for (String label : labels) {
+            if (!NUMERIC_LABEL.matcher(label).matches()) return false;
+        }
+        if (labels.length != 4) return true;
+        for (String label : labels) {
+            if (!DECIMAL_OCTET.matcher(label).matches() || Integer.parseInt(label) > 255) return true;
+        }
+        return false;
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean dnsCacheWarned = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * The re-check after the response headers relies on the JVM caching a lookup for longer than
+     * a request takes (30 seconds by default). With the cache off or very short, each lookup is
+     * fresh, so a rebinding name can pass both checks while the connection goes to a private
+     * address, and the response can be read. Warn once when that's the configuration.
+     */
+    private static void warnIfDnsCacheDisabled() {
+        if (dnsCacheWarned.get()) return;
+        Integer ttl = parseTtl(java.security.Security.getProperty("networkaddress.cache.ttl"));
+        Integer legacy = parseTtl(System.getProperty("sun.net.inetaddr.ttl"));
+        int effective = legacy != null ? legacy : ttl != null ? ttl : 30;
+        if (effective >= 0 && effective < 10 && dnsCacheWarned.compareAndSet(false, true)) {
+            Log.warn("The JVM DNS cache TTL is " + effective + "s (networkaddress.cache.ttl / sun.net.inetaddr.ttl). "
+                + "Http's destination check relies on the cache holding a lookup for longer than a request takes; "
+                + "with it this short, a DNS-rebinding host can reach internal addresses. Leave the TTL at its "
+                + "30s default or longer, and block internal ranges at the network egress too.");
+        }
+    }
+
+    private static Integer parseTtl(String value) {
+        if (value == null) return null;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether {@code address} is on the public internet, the only destinations {@code Http}
+     * reaches without {@link #trusted()}. Useful to reject a URL when a user enters it, ahead of
+     * the request. Not public:
+     *
+     * <ul>
+     *   <li>IPv4: {@code 0.0.0.0/8} (0.0.0.0 reaches the local host), loopback
+     *       {@code 127.0.0.0/8}, private {@code 10.0.0.0/8}, {@code 172.16.0.0/12},
+     *       {@code 192.168.0.0/16}, CGNAT {@code 100.64.0.0/10}, link-local
+     *       {@code 169.254.0.0/16} (cloud metadata), {@code 192.0.0.0/24},
+     *       documentation {@code 192.0.2.0/24}, {@code 198.51.100.0/24}, {@code 203.0.113.0/24},
+     *       benchmarking {@code 198.18.0.0/15}, the 6to4 relay {@code 192.88.99.0/24},
+     *       multicast {@code 224.0.0.0/4}, and reserved {@code 240.0.0.0/4}, which includes
+     *       broadcast 255.255.255.255. Also Azure's WireServer {@code 168.63.129.16}, a platform
+     *       endpoint in a public range.</li>
+     *   <li>IPv6: everything outside global unicast {@code 2000::/3}, which covers unspecified
+     *       {@code ::}, loopback {@code ::1}, IPv4-compatible {@code ::/96}, ULA {@code fc00::/7},
+     *       link-local {@code fe80::/10}, site-local {@code fec0::/10}, multicast
+     *       {@code ff00::/8} and the local-use NAT64 prefix {@code 64:ff9b:1::/48}; inside it,
+     *       Teredo {@code 2001::/32}, benchmarking {@code 2001:2::/48} and documentation
+     *       {@code 2001:db8::/32} and {@code 3fff::/20}.</li>
+     *   <li>IPv6 forms that carry an IPv4 address are judged by that address: IPv4-mapped
+     *       {@code ::ffff:0:0/96}, NAT64 {@code 64:ff9b::/96} and 6to4 {@code 2002::/16}.</li>
+     * </ul>
+     */
+    public static boolean isPublicAddress(InetAddress address) {
+        byte[] b = address.getAddress();
+        return b.length == 4 ? isPublicV4(b, 0) : isPublicV6(b);
+    }
+
+    /** IPv4 ranges that aren't globally reachable (IANA special-purpose registry), as {network, mask}. */
+    private static final int[][] BLOCKED_V4 = {
+        v4(0, 0, 0, 0, 8),
+        v4(10, 0, 0, 0, 8),
+        v4(100, 64, 0, 0, 10),
+        v4(127, 0, 0, 0, 8),
+        v4(169, 254, 0, 0, 16),
+        v4(172, 16, 0, 0, 12),
+        v4(192, 0, 0, 0, 24),
+        v4(192, 0, 2, 0, 24),
+        v4(192, 88, 99, 0, 24),
+        v4(192, 168, 0, 0, 16),
+        v4(198, 18, 0, 0, 15),
+        v4(198, 51, 100, 0, 24),
+        v4(203, 0, 113, 0, 24),
+        v4(168, 63, 129, 16, 32),   // Azure WireServer: public-range, but a platform endpoint
+        v4(224, 0, 0, 0, 4),
+        v4(240, 0, 0, 0, 4),
+    };
+
+    private static int[] v4(int a, int b, int c, int d, int prefix) {
+        int mask = -1 << (32 - prefix);
+        return new int[] {((a << 24) | (b << 16) | (c << 8) | d) & mask, mask};
+    }
+
+    private static boolean isPublicV4(byte[] b, int offset) {
+        int address = ((b[offset] & 0xff) << 24) | ((b[offset + 1] & 0xff) << 16)
+            | ((b[offset + 2] & 0xff) << 8) | (b[offset + 3] & 0xff);
+        for (int[] range : BLOCKED_V4) {
+            if ((address & range[1]) == range[0]) return false;
+        }
+        return true;
+    }
+
+    private static boolean isPublicV6(byte[] b) {
+        // IPv4-mapped ::ffff:a.b.c.d. The JDK usually hands these back as Inet4Address already;
+        // this covers the ones it doesn't.
+        if (allZero(b, 0, 10) && (b[10] & 0xff) == 0xff && (b[11] & 0xff) == 0xff) {
+            return isPublicV4(b, 12);
+        }
+        int w0 = word(b, 0), w1 = word(b, 2), w2 = word(b, 4);
+        // NAT64 64:ff9b::a.b.c.d: the gateway connects to the embedded IPv4 address.
+        if (w0 == 0x0064 && w1 == 0xff9b && allZero(b, 4, 12)) {
+            return isPublicV4(b, 12);
+        }
+        // Only global unicast (2000::/3) is routed on the internet.
+        if ((b[0] & 0xe0) != 0x20) return false;
+        if (w0 == 0x2002) return isPublicV4(b, 2);              // 6to4: 2002:a.b.c.d::/48
+        if (w0 == 0x2001 && w1 == 0x0000) return false;         // Teredo
+        if (w0 == 0x2001 && w1 == 0x0002 && w2 == 0) return false;  // benchmarking
+        if (w0 == 0x2001 && w1 == 0x0db8) return false;         // documentation
+        if (w0 == 0x3fff && (w1 & 0xf000) == 0) return false;   // documentation (3fff::/20)
+        return true;
+    }
+
+    private static int word(byte[] b, int offset) {
+        return ((b[offset] & 0xff) << 8) | (b[offset + 1] & 0xff);
+    }
+
+    private static boolean allZero(byte[] b, int from, int to) {
+        for (int i = from; i < to; i++) {
+            if (b[i] != 0) return false;
+        }
+        return true;
+    }
+
+    /**
+     * A request was refused because its host resolves to an address that isn't on the public
+     * internet (see {@link Http#isPublicAddress}). Thrown before the request is sent; or, if the
+     * name started resolving to such an address while the request was in flight, before any of
+     * the response is read. For an internal service you chose yourself, call
+     * {@link Http#trusted()} on the request.
+     */
+    public static class BlockedDestinationException extends RuntimeException {
+
+        private final String host;
+        private final InetAddress address;
+
+        BlockedDestinationException(String host, InetAddress address) {
+            // The host only: the resolved address stays on address() for logs, so an app that
+            // shows the message can't be used to map internal names to private IPs, and nothing
+            // was connected to, so there's no port or reachability to report either.
+            super(address == null
+                ? "Http refused " + host + ": a numeric host must be a plain dotted quad (a.b.c.d)."
+                : "Http refused " + host + ": it does not resolve to a public internet address. If this is"
+                    + " an internal service you chose, call .trusted() on the request; never do that for a"
+                    + " URL from a user.");
+            this.host = host;
+            this.address = address;
+        }
+
+        /** The host as it appeared in the URL. */
+        public String host() { return host; }
+
+        /** The resolved address that isn't public; null for a refused numeric host spelling. */
+        public InetAddress address() { return address; }
+    }
+
+    /**
+     * A buffered fetch's response body was larger than {@link Http#maxResponseBytes}. The rest of
+     * the body was not read and the connection was released.
+     */
+    public static class ResponseTooLargeException extends RuntimeException {
+
+        private final long limit;
+
+        ResponseTooLargeException(String method, String url, long limit) {
+            super("HTTP response too large: " + method + " " + url + " is over maxResponseBytes ("
+                + limit + " bytes). Raise the limit with .maxResponseBytes(n), or read the body"
+                + " as it arrives with .stream().");
+            this.limit = limit;
+        }
+
+        /** The limit that was exceeded, in bytes. */
+        public long limit() { return limit; }
     }
 
     // --- Multipart builder ---
@@ -303,6 +700,10 @@ public class Http {
         public Multipart bearer(String token) { http.bearer(token); return this; }
         public Multipart timeout(Duration timeout) { http.timeout(timeout); return this; }
         public Multipart idleTimeout(Duration idleTimeout) { http.idleTimeout(idleTimeout); return this; }
+        /** See {@link Http#trusted()}. */
+        public Multipart trusted() { http.trusted(); return this; }
+        /** See {@link Http#maxResponseBytes(long)}. */
+        public Multipart maxResponseBytes(long maxResponseBytes) { http.maxResponseBytes(maxResponseBytes); return this; }
 
         /** Send the request; the status comes back rather than throwing. See {@link Http#fetch()}. */
         public Response fetch() { finalizeBody(); return http.fetch(); }
@@ -399,10 +800,6 @@ public class Http {
         private final int status;
         private final HttpHeaders headers;
         private final String body;
-
-        Response(HttpResponse<String> raw) {
-            this(raw.statusCode(), raw.headers(), raw.body());
-        }
 
         Response(int status, HttpHeaders headers, String body) {
             this.status = status;
@@ -756,14 +1153,6 @@ public class Http {
 
         private StreamTimeoutException timeoutException() {
             return new StreamTimeoutException(method, url, firedIdle, firedIdle ? idleTimeout : timeout);
-        }
-
-        private static void closeQuietly(InputStream in) {
-            try {
-                in.close();
-            } catch (IOException ignored) {
-                // Closing is how the read is cancelled; a failure here changes nothing.
-            }
         }
     }
 

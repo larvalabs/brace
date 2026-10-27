@@ -21,9 +21,21 @@ public class Database {
     // (it runs reads as often as writes). Only read by the dev-mode "GET wrote" warning.
     private int writeCount = 0;
     private java.util.List<Runnable> afterCommit;
+    // H3: the request this Database serves, whose values must not appear in a query string.
+    // Null outside a request handler (jobs, startup code, tests using a Database directly).
+    private QueryTaint taint;
 
     public Database(StatelessSession session) {
         this.session = session;
+    }
+
+    /** Check every query string this Database runs against {@code req}'s values (H3). */
+    void checkQueriesAgainst(Request req, boolean strict) {
+        this.taint = QueryTaint.of(req, strict);
+    }
+
+    private void checkQuery(String query, String method) {
+        if (taint != null) taint.check(query, method);
     }
 
     public int queryCount() { return queryCount; }
@@ -76,8 +88,23 @@ public class Database {
     }
 
     public <T> List<T> query(Class<T> type, String hqlWhere, Object... params) {
+        return query(type, hqlWhere, (Sort) null, params);
+    }
+
+    /**
+     * Like {@link #query(Class, String, Object...)}, ordered by {@code sort}: the safe way to
+     * sort by a request's {@code ?sort=} (H3). The where-fragment must not have its own
+     * {@code ORDER BY}; it may be blank to list every row.
+     *
+     * <pre>{@code
+     * var sort = Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"), "createdAt DESC");
+     * var posts = db.query(Post.class, "published = true", sort);
+     * }</pre>
+     */
+    public <T> List<T> query(Class<T> type, String hqlWhere, Sort sort, Object... params) {
+        checkQuery(hqlWhere, "query");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
+        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort, "query");
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         List<T> result = query.getResultList();
@@ -107,10 +134,16 @@ public class Database {
      * @throws IllegalArgumentException if {@code limit <= 0} or {@code offset < 0}
      */
     public <T> List<T> queryPage(Class<T> type, String hqlWhere, int limit, int offset, Object... params) {
+        return queryPage(type, hqlWhere, null, limit, offset, params);
+    }
+
+    /** Like {@link #queryPage(Class, String, int, int, Object...)}, ordered by {@code sort} (H3). */
+    public <T> List<T> queryPage(Class<T> type, String hqlWhere, Sort sort, int limit, int offset, Object... params) {
         if (limit <= 0) throw new IllegalArgumentException("limit must be > 0 (was " + limit + ")");
         if (offset < 0) throw new IllegalArgumentException("offset must be >= 0 (was " + offset + ")");
+        checkQuery(hqlWhere, "queryPage");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
+        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort, "queryPage");
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         query.setMaxResults(limit);
@@ -135,7 +168,20 @@ public class Database {
      * page boundaries are unstable. The count ignores it.
      */
     public <T> Paged<T> paginate(Class<T> type, String hqlWhere, Request req, int perPage, Object... params) {
-        return paginate(type, hqlWhere, Paged.requestedPage(req), perPage, params).linkedTo(req);
+        return paginate(type, hqlWhere, null, Paged.requestedPage(req), perPage, params).linkedTo(req);
+    }
+
+    /**
+     * Like {@link #paginate(Class, String, Request, int, Object...)}, ordered by {@code sort} (H3).
+     * The page links keep the request's {@code ?sort=}:
+     *
+     * <pre>{@code
+     * var sort = Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"), "createdAt DESC");
+     * var posts = db.paginate(Post.class, "published = true", sort, req, 20);
+     * }</pre>
+     */
+    public <T> Paged<T> paginate(Class<T> type, String hqlWhere, Sort sort, Request req, int perPage, Object... params) {
+        return paginate(type, hqlWhere, sort, Paged.requestedPage(req), perPage, params).linkedTo(req);
     }
 
     /**
@@ -144,9 +190,15 @@ public class Database {
      * {@link Paged#linkedTo(Request)}.
      */
     public <T> Paged<T> paginate(Class<T> type, String hqlWhere, int page, int perPage, Object... params) {
+        return paginate(type, hqlWhere, null, page, perPage, params);
+    }
+
+    /** Like {@link #paginate(Class, String, int, int, Object...)}, ordered by {@code sort} (H3). */
+    public <T> Paged<T> paginate(Class<T> type, String hqlWhere, Sort sort, int page, int perPage, Object... params) {
         if (perPage <= 0) throw new IllegalArgumentException("perPage must be > 0 (was " + perPage + ")");
+        checkQuery(hqlWhere, "paginate");
         long start = System.nanoTime();
-        String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
+        String hql = "FROM " + type.getSimpleName() + orderedWhere(hqlWhere, sort, "paginate");
         Query<T> query = session.createQuery(hql, type);
         bindParams(query, params);
         // Hibernate derives the count from the same query (ORDER BY dropped), so the where
@@ -199,6 +251,7 @@ public class Database {
     public <T> T queryOne(Class<T> type, String hqlWhere, Object... params) {
         // Mirrors query() but caps the result set at one row: without setMaxResults(1),
         // a non-unique predicate fetched and hydrated every matching row to return the first.
+        checkQuery(hqlWhere, "queryOne");
         long start = System.nanoTime();
         String hql = "FROM " + type.getSimpleName() + whereClause(hqlWhere, true);
         Query<T> query = session.createQuery(hql, type);
@@ -212,12 +265,62 @@ public class Database {
 
     /**
      * Like {@link #find(Class, Object)}, but throws {@link NotFoundException} (rendered as a
-     * 404 response) when no row exists. The canonical handler lookup:
-     * {@code var post = db.findOr404(Post.class, req.longPathParam("id"));}
+     * 404 response) when no row exists.
+     *
+     * <p><strong>It returns any user's row.</strong> For data that belongs to a user, an id taken
+     * from the URL must be checked against the signed-in user, or changing the id reads or edits
+     * someone else's (an IDOR). Use {@link #findOwnedOr404} or
+     * {@link #findOr404(Class, Object, java.util.function.Predicate)} there; this one is for
+     * rows every visitor may see.
      */
     public <T> T findOr404(Class<T> type, Object id) {
         T result = find(type, id);
         if (result == null) throw new NotFoundException();
+        return result;
+    }
+
+    /**
+     * The row with this id whose {@code ownerField} equals {@code ownerId}, or
+     * {@link NotFoundException} (a 404) when there is none: the lookup for user-owned data (H4).
+     * A row that exists but belongs to someone else is a 404 too, so ids of other users' rows
+     * can't be probed.
+     *
+     * <pre>{@code
+     * var post = db.findOwnedOr404(Post.class, req.longPathParam("id"), "ownerId", session.get("userId"));
+     * }</pre>
+     *
+     * {@code ownerField} is an entity attribute path ({@code "ownerId"}, {@code "owner.id"}),
+     * validated like {@link #findBy}'s field; it must be hard-coded, never request input. A null
+     * {@code ownerId} (nobody signed in) matches nothing.
+     */
+    public <T> T findOwnedOr404(Class<T> type, Object id, String ownerField, Object ownerId) {
+        requireValidFieldIdentifier(ownerField);
+        if (id == null || ownerId == null) throw new NotFoundException();
+        long start = System.nanoTime();
+        String hql = "FROM " + type.getSimpleName() + " e WHERE id(e) = ?1 AND e." + ownerField + " = ?2";
+        Query<T> query = session.createQuery(hql, type);
+        query.setParameter(1, id);
+        query.setParameter(2, ownerId);
+        List<T> result = query.getResultList();
+        queryDurationUs += (System.nanoTime() - start) / 1000;
+        queryCount++;
+        if (result.isEmpty()) throw new NotFoundException();
+        return result.get(0);
+    }
+
+    /**
+     * Like {@link #findOr404(Class, Object)}, but also a 404 when {@code allowed} rejects the
+     * row: for access rules a single owner column doesn't express (shared with a team, public
+     * once published). Rejected rows are 404, not 403, so their ids can't be probed (H4).
+     *
+     * <pre>{@code
+     * var doc = db.findOr404(Doc.class, id, d -> d.ownerId.equals(userId) || d.isPublic);
+     * }</pre>
+     */
+    public <T> T findOr404(Class<T> type, Object id, java.util.function.Predicate<? super T> allowed) {
+        if (allowed == null) throw new IllegalArgumentException("findOr404 needs an access predicate");
+        T result = find(type, id);
+        if (result == null || !allowed.test(result)) throw new NotFoundException();
         return result;
     }
 
@@ -241,6 +344,7 @@ public class Database {
     }
 
     public <T> long count(Class<T> type, String hqlWhere, Object... params) {
+        checkQuery(hqlWhere, "count");
         long start = System.nanoTime();
         String hql = "SELECT count(*) FROM " + type.getSimpleName() + whereClause(hqlWhere, false);
         Query<Long> query = session.createQuery(hql, Long.class);
@@ -361,6 +465,7 @@ public class Database {
     // --- Raw queries ---
 
     public List<Object[]> hql(String hql, Object... params) {
+        checkQuery(hql, "hql");
         long start = System.nanoTime();
         Query<?> query = session.createQuery(convertPositionalParams(hql));
         bindParams(query, params);
@@ -371,6 +476,7 @@ public class Database {
     }
 
     public void sql(String sql, Object... params) {
+        checkQuery(sql, "sql");
         long start = System.nanoTime();
         MutationQuery query = session.createNativeMutationQuery(convertPositionalParams(sql));
         bindParams(query, params);
@@ -381,6 +487,7 @@ public class Database {
     }
 
     public List<Object[]> sqlQuery(String sql, Object... params) {
+        checkQuery(sql, "sqlQuery");
         long start = System.nanoTime();
         var query = session.createNativeQuery(convertPositionalParams(sql));
         bindParams(query, params);
@@ -392,6 +499,7 @@ public class Database {
 
     @SuppressWarnings("unchecked")
     public Long sqlQueryLong(String sql, Object... params) {
+        checkQuery(sql, "sqlQueryLong");
         long start = System.nanoTime();
         var query = session.createNativeQuery(convertPositionalParams(sql));
         bindParams(query, params);
@@ -551,6 +659,19 @@ public class Database {
      * ({@code db.paginate(Post.class, "ORDER BY createdAt DESC", req, 20)} lists every row).
      * {@code keepOrderBy=false} drops an ORDER BY-only fragment entirely, for counts.
      */
+    private static final Pattern HAS_ORDER_BY = Pattern.compile("(?i)\\border\\s+by\\b");
+
+    /** The where clause plus {@code sort}'s ORDER BY; just the where clause when there's no sort. */
+    private String orderedWhere(String hqlWhere, Sort sort, String method) {
+        if (sort == null) return whereClause(hqlWhere, true);
+        if (!sort.fromAllowlist()) checkQuery(sort.hql(), method); // Sort.of(...) text, H3
+        if (hqlWhere != null && HAS_ORDER_BY.matcher(hqlWhere).find()) {
+            throw new IllegalArgumentException("The where-fragment has its own ORDER BY and a Sort was passed: "
+                + "put the whole order in the Sort (Sort.of(\"createdAt DESC, id\") for a fixed one)");
+        }
+        return whereClause(hqlWhere, true) + sort.hql();
+    }
+
     String whereClause(String hqlWhere, boolean keepOrderBy) {
         if (hqlWhere == null || hqlWhere.isBlank()) return "";
         if (ORDER_BY_ONLY.matcher(hqlWhere).matches()) {

@@ -239,6 +239,8 @@ public class TrustedProxies {
 
     /** One published list: one CIDR per line, blank lines ignored. Throws on a non-2xx status. */
     private static List<String> fetchCidrList(String url) {
+        // Not .trusted(): the URL is a fixed public Cloudflare address, so the default
+        // public-destinations check costs nothing and stays on (H5).
         var response = Http.get(url).timeout(FETCH_TIMEOUT).fetch();
         if (!response.ok()) {
             throw new RuntimeException("GET " + url + " returned status " + response.status());

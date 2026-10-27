@@ -132,7 +132,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - Origin check behavior is unchanged.
   - **Tier: frontier.** Guard semantics on a non-HTTP-response path.
 
-- [ ] **H3: HQL injection through where-fragments and ORDER BY; `sql()` escalates it to native SQL**, `Database.java:71, 102, 130, 139, 192, 221, 236, 258, 355, 365, 374, 385, 400, 413, 545-551`
+- [x] **H3: HQL injection through where-fragments and ORDER BY; `sql()` escalates it to native SQL**, `Database.java:71, 102, 130, 139, 192, 221, 236, 258, 355, 365, 374, 385, 400, 413, 545-551`
   - **What's wrong.**
     - Values are bound when the developer writes `?`, but the APIs take a raw string, and
       `whereClause` concatenates it.
@@ -166,7 +166,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - The H2 injection payloads above fail with the check on.
   - **Tier: frontier for the taint check** (false-positive tuning). **Mid for `Sort` and the docs.**
 
-- [ ] **H4: No object-level authorization; the canonical lookup is an IDOR**, `Database.java:211-215`, `BRACE-AGENTS.md:373, 1229-1230`
+- [x] **H4: No object-level authorization; the canonical lookup is an IDOR**, `Database.java:211-215`, `BRACE-AGENTS.md:373, 1229-1230`
   - **What's wrong.**
     - `findOr404(type, id)` returns any user's row, and it is taught as "the canonical handler
       lookup" with "don't write a preamble around it".
@@ -189,7 +189,7 @@ or **frontier** (changes a default, a protocol or an invariant, or needs a desig
     - The predicate variant behaves the same way.
   - **Tier: mid** (API plus docs). The docs rewrite matters as much as the code.
 
-- [ ] **H5: The `Http` client has no SSRF protection**, `Http.java:36-38, 141-150`, `BRACE-AGENTS.md:807-860`
+- [x] **H5: The `Http` client has no SSRF protection**, `Http.java:36-38, 141-150`, `BRACE-AGENTS.md:807-860`
   - **Verified.**
     - These reach a 127.0.0.1 listener: `127.0.0.1`, `localhost`, `0.0.0.0`, `2130706433`
       (decimal), `[::ffff:127.0.0.1]`.

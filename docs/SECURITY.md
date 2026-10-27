@@ -5,10 +5,12 @@ This document describes Brace's security features and best practices for buildin
 ## Table of Contents
 
 - [Authorization](#authorization)
+- [SQL Injection](#sql-injection)
 - [Sessions](#sessions)
 - [CSRF Protection](#csrf-protection)
 - [Serialization](#serialization)
 - [Open Redirects](#open-redirects)
+- [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf)
 - [Trusted Proxies](#trusted-proxies)
 - [Cookie Security](#cookie-security)
 - [Static Files](#static-files)
@@ -55,12 +57,74 @@ ops route registered without one fails `start()`. The app's default access never
 
 `/ops/routes` and the startup banner list each route's resolved access.
 
-### Object-level access is the handler's job
+### Object-level authorization
 
 Route access answers "may this user call this endpoint". It does not answer "may this user
-touch row 42": `GET /posts/{id}/edit` is reachable by every logged-in user, and loading the
-post by id returns anyone's post. Check ownership after loading — and return 404, not 403, so
-the response doesn't confirm the row exists.
+touch row 42": `GET /posts/{id}/edit` is reachable by every signed-in user, and
+`db.findOr404(Post.class, id)` returns anyone's post, so changing the id in the URL reads or
+edits someone else's (an IDOR). Put the owner in the lookup:
+
+```java
+var post = db.findOwnedOr404(Post.class, req.longPathParam("id"), "ownerId", session.get("userId"));
+var doc  = db.findOr404(Doc.class, id, d -> d.ownerId.equals(userId) || d.sharedWith(teamId));
+var mine = db.query(Post.class, "ownerId = ?", userId);   // lists: filter in the query
+```
+
+Both lookups answer 404, not 403, for a row that exists but isn't the caller's, so the response
+doesn't confirm it exists and ids can't be probed. A null owner (nobody signed in) matches
+nothing. The owner field is an entity attribute path validated like `findBy`'s and must be
+hard-coded. Use the plain `findOr404(type, id)` only for rows every visitor may see.
+
+Brace has no row-level filter that applies itself: every query that returns user-owned rows
+must carry its owner condition.
+
+---
+
+## SQL Injection
+
+`Database` binds values only where the query says `?`. The where-fragment and raw-query methods
+(`query`, `queryOne`, `queryOneOr404`, `count`, `exists`, `paginate`, `queryPage`, `hql`, `sql`,
+`sqlQuery`, `sqlQueryLong`) run the string they're given, so request data concatenated into it is
+HQL or SQL injection: a quoted payload widens a `WHERE` to every row, and an `ORDER BY` built from
+`?sort=` takes a `CASE` subquery that leaks any column one bit per request, including tables no
+entity maps.
+
+- **Bind values with `?`.** `db.query(Post.class, "title = ?", q)`, never `"title = '" + q + "'"`.
+- **Sort with `Sort`.** `Sort.from(req, "sort", Map.of("title", "title", "date", "createdAt"),
+  "createdAt DESC")` lets the request pick a key from the map (`-key` for descending); an
+  unknown key gets the default. Pass the `Sort` to `query`, `queryPage` or `paginate`.
+- **Hard-code field names.** `findBy`, `queryIn`, `countBy`, `existsBy`, `deleteBy` and
+  `findOwnedOr404` validate their field argument as an identifier, but it must still never come
+  from the request.
+
+### Detection
+
+The `Database` a request handler receives checks each where-fragment and raw query string
+against the request's path, query and form values before running it. When the string contains
+one, the call throws `IllegalArgumentException` in dev mode (`-Dbrace.mode=dev`) and in
+`Brace.test()` apps, so the bug fails a test, and logs one warning per call site in production
+(where a false positive must not break a page). The message names the parameter, not its value.
+
+To keep coincidences out, values shorter than 3 characters and plain numbers are ignored, and a
+single word (`title`, `-createdAt`) counts only as a token after `ORDER BY` (including an aliased
+`p.title`), where it picks a column, not inside a literal, where it can't break out. Anything
+with quotes, spaces, parentheses or operators counts anywhere. Form values include every value
+of a repeated field; a body that isn't valid form encoding is skipped. A `Sort.of(...)` order is
+checked like a fragment; a `Sort.from(...)` order is not, since the request only picked a key.
+Production warnings repeat at most once a minute per call site and parameter.
+
+What it does **not** catch:
+
+- A single word or a number concatenated outside `ORDER BY`: `"id = " + req.pathParam("id")`
+  with `id` as the value is a tautology that returns every row, and isn't flagged, because
+  flagging bare words everywhere would trip on ordinary code.
+- A value the handler transformed (trimmed, split into terms, re-cased) before concatenating it.
+- JSON bodies, headers and cookies; queries run outside a request (jobs, `withSession`); and,
+  past the first 1,000 values or 64 KB of a request, the rest.
+
+It can also fire on safe code: a hand-written allowlist (`switch (sort) { case "title" ->
+"title"; ... }` concatenated after `ORDER BY`) looks the same as the injection it replaces. Use
+`Sort.from`. The check is a backstop for the rules above, not a substitute.
 
 ---
 
@@ -321,6 +385,134 @@ return Redirect.toLocal(req.queryParam("next"));
 1. **Any redirect target derived from request data** (query param, form field, header) goes through `toLocal` / `permanentLocal`
 2. **Server-controlled destinations** (string literals, paths built with `Url.to()`) can use `Redirect.to()` / `Result.redirect()` freely
 3. **Catch the `IllegalArgumentException`** if you want a fallback (e.g. redirect to `/`) instead of a 500 on a tampered `next` parameter
+
+---
+
+## Server-Side Request Forgery (SSRF)
+
+### The Vulnerability
+
+Any feature that fetches a URL a user supplied (import from URL, link previews, webhook
+"send a test", avatar from URL) makes requests **from your server**, with your server's network
+position. Pointed inward, it reads things no outside client can reach:
+
+```java
+// ❌ Before 0.1.11: ?url=http://169.254.169.254/hetzner/v1/userdata returned the server's
+// cloud-init user-data, which often holds secrets. http://172.17.0.1:5432/ reached the Docker
+// bridge, http://localhost:8080/ops/... the app itself.
+var preview = Http.get(req.queryParam("url")).fetchString();
+```
+
+### What `Http` does
+
+Since 0.1.11, `Http` refuses destinations that aren't on the public internet, for every call:
+`fetch`, `fetchString`, `fetchBytes`, `fetchJson`, `stream`, `fetchEvents` and `multipart()`.
+Before sending, it resolves the host and throws `Http.BlockedDestinationException` if **any**
+address the name resolves to is:
+
+- loopback (`127.0.0.0/8`, `::1`), unspecified (`0.0.0.0`, which reaches the local host on Linux,
+  `::`) or `0.0.0.0/8`
+- private: RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), CGNAT (`100.64/10`), IPv6 ULA
+  (`fc00::/7`)
+- link-local (`169.254/16`, which is where cloud metadata services live, `fe80::/10`) and IPv6
+  site-local (`fec0::/10`)
+- multicast and broadcast (`224/4`, `ff00::/8`, `255.255.255.255`), reserved (`240/4`),
+  benchmarking (`198.18/15`, `2001:2::/48`), documentation and other special-purpose ranges
+  (`192.0.0/24`, `192.0.2/24`, `198.51.100/24`, `203.0.113/24`, `192.88.99/24`,
+  `2001:db8::/32`, `3fff::/20`), Teredo (`2001::/32`), and any IPv6 outside global unicast
+  `2000::/3`
+- an IPv6 form that carries one of the IPv4 addresses above: IPv4-mapped (`::ffff:127.0.0.1`),
+  IPv4-compatible (`::127.0.0.1`), NAT64 (`64:ff9b::a9fe:a9fe`) and 6to4 (`2002:7f00:1::`)
+- Azure's WireServer, `168.63.129.16`, a platform endpoint in a public range
+
+The check runs on the **resolved address**, not the URL text, so `http://0.0.0.0/`,
+`http://[::ffff:127.0.0.1]/` and a hostname whose DNS record points at `10.0.0.5` are all refused.
+A numeric host must also be a plain dotted quad: `2130706433`, `0177.0.0.1`, `0x7f.1` and `127.1`
+are refused outright, because readers disagree about them (Java reads `0177.0.0.1` as decimal
+177.0.0.1, an HTTP proxy using `inet_aton` as octal 127.0.0.1). Nothing is sent to a refused
+destination. The exception's message names only the host; the resolved address is on
+`e.address()` for your logs, so a message shown to a user doesn't map internal names to private
+IPs.
+
+`Http.isPublicAddress(InetAddress)` is the same classifier, for rejecting a URL when a user
+enters it rather than when you fetch it.
+
+### Internal services: `.trusted()`
+
+A request you make on purpose to your own infrastructure (a sidecar, an internal API, a URL from
+your own config) opts out per call:
+
+```java
+var health = Http.get(config.get("search.url") + "/health").trusted().fetch();
+```
+
+`.trusted()` turns the check off for that request only. **Never** call it on a URL that came
+from a user, a database row a user wrote, or a redirect `Location` from a server you don't
+control; that is the request the default exists to stop. There is deliberately no global off
+switch.
+
+### Redirects
+
+`Http` never follows redirects. To follow one, read `header("Location")` and make a new `Http`
+call with it, which checks the new destination too. Don't hand the `Location` to another
+client, and don't add `.trusted()` to the follow-up unless you trust wherever it points.
+
+### Response size
+
+Buffered fetches (`fetch`, `fetchString`, `fetchBytes`, `fetchJson`, and the error body of
+`fetchEvents`) stop at **10 MB** by default and throw `Http.ResponseTooLargeException`: at once
+if `Content-Length` says the body is larger, otherwise as soon as the bytes read pass the limit,
+without downloading the rest. Raise or lower it per call with `.maxResponseBytes(n)`. `stream()`
+is not capped, because it hands you the body to read: bound what you read yourself.
+
+### DNS rebinding: what remains
+
+An attacker who controls a domain's DNS can answer with a public address when it's checked and a
+private one when it's connected to. The robust defense is to connect to the exact address that
+was checked. `java.net.http` doesn't support that cleanly (the request URI would have to carry
+the IP, which needs the restricted `Host` header, a JVM-wide setting read once at startup, plus
+per-hostname TLS settings), so `Http` narrows the window instead:
+
+- The JDK resolves the name for the connection through the same JVM address cache that the check
+  just read, so it normally connects to an address that was checked. The JVM caches lookups for
+  30 seconds by default regardless of the DNS record's TTL.
+- The name is checked again when the response headers arrive. If its cache entry expired in the
+  instant between the check and the connect and the new answer is private, the JVM has cached
+  that answer, so the second check refuses it and the response is discarded before your code
+  reads any of it.
+
+So under the default JVM settings a rebinding attack can at most make a blind request (the
+request is sent, the response never reaches the caller), and only if it lands a cache expiry in
+a window of a few milliseconds. For https not even that: only a TLS handshake reaches the
+internal address, and it fails, because the certificate is still verified against the original
+hostname, which an internal server can't present.
+To keep it that way:
+
+1. **Don't set `networkaddress.cache.ttl=0`** (or `sun.net.inetaddr.ttl=0`), or anything short.
+   With the cache off, the check, the connect and the re-check each do a fresh lookup, so a
+   rebinding name can answer public to both checks and private to the connect: the request
+   (method, headers, body, any bearer token) goes to the internal address **and the response can
+   be read**. The same holds when the response takes longer than the remaining cache lifetime.
+   `Http` logs a warning once when the TTL is under 10 seconds.
+2. **Prefer https for user-supplied URLs.** If the feature allows it, refuse `http://` URLs before
+   calling `Http`.
+3. **Block metadata and internal ranges at the network layer** too (firewall the container's
+   egress to `169.254.169.254` and your private subnets), so `.trusted()` misuse or another HTTP
+   client isn't the only line.
+
+If the JVM is configured with an HTTP proxy (`http.proxyHost`/`https.proxyHost`), the proxy makes
+the connection and does its own DNS lookup, so the check (which runs on the local lookup) and the
+re-check describe what the app resolved, not where the proxy connects. Configure the proxy to
+refuse internal destinations itself. The check also needs local DNS: behind an egress proxy that
+is the only resolver, every call without `.trusted()` fails with `UnknownHostException`.
+
+### Other clients
+
+The check is in `Http`. `Storage`, `WebhookNotifier` and anything built directly on
+`java.net.http` or another library don't apply it; they take URLs from your configuration, not
+from users. If you must fetch a user's URL with something else, resolve it and check every
+address with `Http.isPublicAddress` first, and accept that the DNS-rebinding window above is
+then wider.
 
 ---
 

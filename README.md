@@ -181,7 +181,7 @@ Components included in the framework jar as of this release:
 - **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
 - **Mailer** — SMTP sending with dev-mode email capture using JTE templates
 - **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
-- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs
+- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs. Refuses loopback, private and cloud-metadata destinations by default (SSRF protection; `.trusted()` for your own internal services) and caps buffered responses at 10 MB
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access
 - **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
 - **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
@@ -267,14 +267,15 @@ app with no login.
 
 ```java
 db.find(Post.class, id)                          // find by ID
-db.findOr404(Post.class, id)                      // find by ID or throw 404
+db.findOwnedOr404(Post.class, id, "ownerId", userId) // the user's own row, or 404
+db.findOr404(Post.class, id)                      // find by ID or throw 404 (any user's row)
 db.insert(post)                                   // insert
 db.update(post)                                   // update
 db.delete(post)                                   // delete
 db.findAll(Post.class)                            // all rows
 db.query(Post.class, "author.id = ?", userId)     // HQL where clause
-db.query(Post.class, "published = true ORDER BY id DESC") // ORDER BY inside the where-fragment
-db.paginate(Post.class, "published = true ORDER BY createdAt DESC", req, 20) // Paged<Post>: ?page=, totals, links
+db.query(Post.class, "published = true ORDER BY id DESC") // a fixed order inside the where-fragment
+db.paginate(Post.class, "published = true", Sort.from(req, "sort", Map.of("date", "createdAt"), "createdAt DESC"), req, 20) // ?sort= via an allowlist; Paged<Post>
 db.queryPage(Post.class, "published = true ORDER BY createdAt DESC", 20, 20) // limit, offset (page 2)
 db.queryOne(Post.class, "slug = ?", slug)         // single result or null
 db.queryOneOr404(Post.class, "slug = ?", slug)    // single result or throw 404

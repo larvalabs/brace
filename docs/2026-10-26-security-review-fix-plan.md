@@ -147,6 +147,15 @@ the order matters.
   - If that proves fragile, fall back to a check-then-connect with a resolver cache whose TTL is
     longer than the request timeout, and say in the docs that a residual DNS-rebinding window
     remains. Decide this after a spike, and record the outcome in the review record.
+  - **Outcome (Phase 2 spike):** fallback chosen. The `Host` override needs
+    `jdk.httpclient.allowRestrictedHeaders`, which the JDK reads once when its HTTP client classes
+    load, so it silently doesn't apply if anything used `java.net.http` first; without it an
+    IP-literal URI sends `Host: <ip>` and breaks virtual-hosted destinations. SNI on the original
+    name did work, but needs one client per hostname. A JVM-wide `InetAddressResolverProvider` was
+    rejected as implicit global wiring. Shipped: check-then-connect through the JVM address cache
+    (30 s default), a second check when the response headers arrive, refusal of non-canonical
+    numeric hosts, and a warning when the DNS cache TTL is under 10 s. The residual window is
+    documented in `docs/SECURITY.md` ("DNS rebinding: what remains").
 
 **Exit criteria:**
 

@@ -60,7 +60,7 @@ class HttpTest {
 
     @Test
     void getJson() {
-        var resp = Http.get(url("/echo")).fetch();
+        var resp = Http.get(url("/echo")).trusted().fetch();
         assertTrue(resp.ok());
         assertEquals(200, resp.status());
         assertTrue(resp.body().contains("\"method\":\"GET\""));
@@ -69,20 +69,20 @@ class HttpTest {
     @Test
     void getJsonDeserialized() {
         record Echo(String method, String path, String auth, String custom) {}
-        var echo = Http.get(url("/echo")).fetchJson(Echo.class);
+        var echo = Http.get(url("/echo")).trusted().fetchJson(Echo.class);
         assertEquals("GET", echo.method());
         assertEquals("/echo", echo.path());
     }
 
     @Test
     void fetchString() {
-        var body = Http.get(url("/text")).fetchString();
+        var body = Http.get(url("/text")).trusted().fetchString();
         assertEquals("hello world", body);
     }
 
     @Test
     void postWithJsonBody() {
-        var resp = Http.post(url("/echo-body"))
+        var resp = Http.post(url("/echo-body")).trusted()
             .bodyJson(Map.of("name", "Alice"))
             .fetch();
         assertTrue(resp.ok());
@@ -91,7 +91,7 @@ class HttpTest {
 
     @Test
     void postWithFormBody() {
-        var resp = Http.post(url("/echo-body"))
+        var resp = Http.post(url("/echo-body")).trusted()
             .bodyForm(Map.of("name", "Bob", "age", "30"))
             .fetch();
         assertTrue(resp.ok());
@@ -101,7 +101,7 @@ class HttpTest {
 
     @Test
     void postWithStringBody() {
-        var resp = Http.post(url("/echo-body"))
+        var resp = Http.post(url("/echo-body")).trusted()
             .bodyString("raw text")
             .fetch();
         assertTrue(resp.ok());
@@ -111,7 +111,7 @@ class HttpTest {
     @Test
     void headersAreSent() {
         record Echo(String method, String path, String auth, String custom) {}
-        var echo = Http.get(url("/echo"))
+        var echo = Http.get(url("/echo")).trusted()
             .header("X-Custom", "test-value")
             .fetchJson(Echo.class);
         assertEquals("test-value", echo.custom());
@@ -120,7 +120,7 @@ class HttpTest {
     @Test
     void bearerAuth() {
         record Echo(String method, String path, String auth, String custom) {}
-        var echo = Http.get(url("/echo"))
+        var echo = Http.get(url("/echo")).trusted()
             .bearer("my-token")
             .fetchJson(Echo.class);
         assertEquals("Bearer my-token", echo.auth());
@@ -128,13 +128,13 @@ class HttpTest {
 
     @Test
     void responseHeader() {
-        var resp = Http.get(url("/text")).fetch();
+        var resp = Http.get(url("/text")).trusted().fetch();
         assertNotNull(resp.header("Content-Type"));
     }
 
     @Test
     void nonOkResponse() {
-        var resp = Http.get(url("/status/404")).fetch();
+        var resp = Http.get(url("/status/404")).trusted().fetch();
         assertFalse(resp.ok());
         assertEquals(404, resp.status());
     }
@@ -142,7 +142,7 @@ class HttpTest {
     @Test
     void timeoutThrowsException() {
         assertThrows(RuntimeException.class, () ->
-            Http.get(url("/slow"))
+            Http.get(url("/slow")).trusted()
                 .timeout(Duration.ofMillis(100))
                 .fetch());
     }
@@ -154,22 +154,22 @@ class HttpTest {
             closedPort = socket.getLocalPort();
         }
         String url = "http://127.0.0.1:" + closedPort + "/x";
-        var fetch = assertThrows(RuntimeException.class, () -> Http.get(url).fetch());
+        var fetch = assertThrows(RuntimeException.class, () -> Http.get(url).trusted().fetch());
         assertTrue(fetch.getMessage().contains("ConnectException"), fetch.getMessage());
-        var stream = assertThrows(RuntimeException.class, () -> Http.get(url).stream());
+        var stream = assertThrows(RuntimeException.class, () -> Http.get(url).trusted().stream());
         assertTrue(stream.getMessage().contains("ConnectException"), stream.getMessage());
     }
 
     @Test
     void nonOkFetchBytesIsNotDoubleWrapped() {
-        var e = assertThrows(RuntimeException.class, () -> Http.get(url("/no-such-route")).fetchBytes());
+        var e = assertThrows(RuntimeException.class, () -> Http.get(url("/no-such-route")).trusted().fetchBytes());
         assertTrue(e.getMessage().endsWith("(status 404)"), e.getMessage());
         assertNull(e.getCause(), "status failure should not wrap another exception");
     }
 
     @Test
     void putRequest() {
-        var resp = Http.put(url("/echo-body"))
+        var resp = Http.put(url("/echo-body")).trusted()
             .bodyString("put-data")
             .fetch();
         // Will get 404 since no PUT route, but the request is sent
@@ -179,7 +179,7 @@ class HttpTest {
 
     @Test
     void deleteRequest() {
-        var resp = Http.delete(url("/echo-body")).fetch();
+        var resp = Http.delete(url("/echo-body")).trusted().fetch();
         assertNotNull(resp);
     }
 
@@ -187,7 +187,7 @@ class HttpTest {
     void postWithBytesBody() {
         record Meta(String contentType, int length) {}
         var bytes = new byte[]{1, 2, 3, 4, 5, 6, 7, 8};
-        var meta = Http.post(url("/echo-meta"))
+        var meta = Http.post(url("/echo-meta")).trusted()
             .bodyBytes(bytes, "application/octet-stream")
             .fetchJson(Meta.class);
         assertEquals("application/octet-stream", meta.contentType());
@@ -198,7 +198,7 @@ class HttpTest {
     void bodyBytesRespectsExplicitContentType() {
         record Meta(String contentType, int length) {}
         var bytes = "PNG-DATA".getBytes();
-        var meta = Http.post(url("/echo-meta"))
+        var meta = Http.post(url("/echo-meta")).trusted()
             .bodyBytes(bytes, "image/png")
             .fetchJson(Meta.class);
         assertEquals("image/png", meta.contentType());
@@ -207,7 +207,7 @@ class HttpTest {
     @Test
     void multipartTextField() {
         record Upload(String name, String filename, String fileContentType, long fileSize, int fileFirstByte) {}
-        var upload = Http.post(url("/upload"))
+        var upload = Http.post(url("/upload")).trusted()
             .multipart()
             .field("name", "Alice")
             .fetchJson(Upload.class);
@@ -219,7 +219,7 @@ class HttpTest {
     void multipartFileUpload() {
         record Upload(String name, String filename, String fileContentType, long fileSize, int fileFirstByte) {}
         var bytes = new byte[]{(byte) 0x89, 0x50, 0x4E, 0x47};
-        var upload = Http.post(url("/upload"))
+        var upload = Http.post(url("/upload")).trusted()
             .multipart()
             .field("name", "Bob")
             .field("file", bytes, "logo.png")
@@ -235,7 +235,7 @@ class HttpTest {
     void multipartExplicitContentType() {
         record Upload(String name, String filename, String fileContentType, long fileSize, int fileFirstByte) {}
         var bytes = new byte[]{0x42};
-        var upload = Http.post(url("/upload"))
+        var upload = Http.post(url("/upload")).trusted()
             .multipart()
             .field("file", bytes, "weird.xyz", "application/x-custom")
             .fetchJson(Upload.class);
