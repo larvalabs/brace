@@ -70,6 +70,22 @@ valid_version() {
     [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]
 }
 
+# The oldest toolchain this launcher runs for a project pin. A pin is a committed file a pull
+# request can change, so without a floor it could select an old release and bring back a CLI bug
+# fixed since. Raise this when a release fixes a CLI-side security bug.
+#   0.1.8: `brace ops dashboard` no longer hands a .brace URL to `cmd /c start` on Windows.
+MIN_TOOLCHAIN="0.1.8"
+
+# True if version $1 is older than $2 (MAJOR.MINOR.PATCH; any -SUFFIX is ignored).
+version_lt() {
+    local a1 a2 a3 b1 b2 b3
+    IFS=. read -r a1 a2 a3 <<< "${1%%-*}"
+    IFS=. read -r b1 b2 b3 <<< "${2%%-*}"
+    (( 10#$a1 != 10#$b1 )) && { (( 10#$a1 < 10#$b1 )); return; }
+    (( 10#$a2 != 10#$b2 )) && { (( 10#$a2 < 10#$b2 )); return; }
+    (( 10#$a3 < 10#$b3 ))
+}
+
 # The framework version pinned by the current project's pom.xml, if any.
 # Tolerant of whitespace/line layout and an optional leading "v" (JitPack tag form).
 # Returns 1 when nothing is pinned, 2 (after printing an error) when the pin is
@@ -145,7 +161,17 @@ fetch_toolchain() {
 resolve_toolchain() {
     local v="$1"
     valid_version "$v" || { error "Refusing invalid brace version: $(printf '%q' "$v")"; return 1; }
-    if [[ "$v" == "$(bundled_version || true)" ]]; then echo "$BRACE_HOME"; return 0; fi
+    if version_lt "$v" "$MIN_TOOLCHAIN" && [[ "${BRACE_ALLOW_OLD_TOOLCHAIN:-}" != "1" ]]; then
+        error "This project pins brace $v, older than $MIN_TOOLCHAIN, the oldest this launcher runs:"
+        error "older CLIs have security bugs fixed since. Raise <brace.version> in pom.xml (see the"
+        error "migration guides), or set BRACE_ALLOW_OLD_TOOLCHAIN=1 to run $v anyway."
+        return 1
+    fi
+    local bundled; bundled="$(bundled_version || true)"
+    if [[ "$v" == "$bundled" ]]; then echo "$BRACE_HOME"; return 0; fi
+    if [[ -n "$bundled" ]] && version_lt "$v" "$bundled"; then
+        info "This project pins brace $v, older than this launcher ($bundled): CLI fixes since $v don't apply to it."
+    fi
     if [[ -d "$BRACE_CACHE/$v/lib" ]]; then echo "$BRACE_CACHE/$v"; return 0; fi
     if [[ "$v" == *-SNAPSHOT ]]; then
         error "Project pins brace $v, but SNAPSHOT builds are not published."

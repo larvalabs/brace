@@ -329,9 +329,9 @@ class HomeControllerTest {
 }
 """);
 
-            // application.conf with a real random session secret
+            // application.conf with a real random session secret: owner-only, like the ops key
             var sessionSecret = generateSessionSecret();
-            Files.writeString(root.resolve("application.conf"),
+            SecretFiles.writeStringWithOwnerOnlyPermissions(root.resolve("application.conf"),
                 "port=8080\n" +
                 "db.url=jdbc:postgresql://localhost:5432/" + projectName + "\n" +
                 "db.user=" + projectName + "\n" +

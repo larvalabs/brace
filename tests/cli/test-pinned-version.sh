@@ -150,5 +150,27 @@ OUT=$(cd "$PROJECT" && PATH="$FAKEBIN:$PATH" BRACE_HOME="$HOME_FAKE" BRACE_CACHE
 grep -q "insecure URL" <<<"$OUT" || fail "the override didn't warn: $OUT"
 pass "http:// refused in the launcher and installer; override warns"
 
+step "Pins below the launcher's minimum toolchain are refused"
+# A pin is committed project content: a pull request could pin an old release to bring back a
+# CLI bug fixed since (0.1.7 hands a .brace URL to `cmd /c start` on Windows).
+mkdir -p "$CACHE/0.1.7/lib" "$CACHE/0.1.9/lib"
+pin 0.1.7
+run_brace ops dashboard
+[[ $RC -ne 0 ]] || fail "pin 0.1.7 below the minimum was accepted"
+grep -q "older than 0.1.8" <<<"$OUT" || fail "no clear error for a pin below the minimum: $OUT"
+grep -q "BRACE_ALLOW_OLD_TOOLCHAIN" <<<"$OUT" || fail "the error doesn't name the override: $OUT"
+[[ ! -e "$WORK/java.calls" ]] || fail "java ran for a refused pin"
+RC=0
+OUT=$(cd "$PROJECT" && PATH="$FAKEBIN:$PATH" BRACE_HOME="$HOME_FAKE" BRACE_CACHE="$CACHE" \
+    BRACE_ALLOW_OLD_TOOLCHAIN=1 "$REPO/bin/brace" status 2>&1) || RC=$?
+[[ $RC -eq 0 ]] || fail "BRACE_ALLOW_OLD_TOOLCHAIN=1 didn't allow the old pin: $OUT"
+grep -q -- "-Dbrace.home=$CACHE/0.1.7 " "$WORK/java.calls" || fail "the allowed old pin didn't use its toolchain"
+# Above the minimum but older than the launcher: runs, with a note.
+pin 0.1.9
+run_brace status
+[[ $RC -eq 0 ]] || fail "pin 0.1.9 (above the minimum) was refused: $OUT"
+grep -q "older than this launcher (0.1.10)" <<<"$OUT" || fail "no note for a pin older than the launcher: $OUT"
+pass "below-minimum pin refused (override works); older-than-launcher pin runs with a note"
+
 echo ""
 echo -e "${GREEN}All pinned-version tests passed.${NC}"

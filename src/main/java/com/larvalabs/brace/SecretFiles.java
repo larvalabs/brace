@@ -20,10 +20,29 @@ public class SecretFiles {
      */
     public static void writeStringWithOwnerOnlyPermissions(Path path, String content)
             throws IOException {
-        // Write the file first, then set permissions.
-        // Files.writeString creates the file with default umask permissions.
-        Files.writeString(path, content);
-        setOwnerOnlyPermissions(path);
+        // Never write through whatever is at `path`: a symlink planted there (say, committed to a
+        // cloned repo) would aim the write, and the chmod, at a file of the attacker's choosing.
+        // Write a new temp file beside it instead (createTempFile is CREATE_NEW, owner-only from
+        // the start where POSIX), then move it into place, which replaces a link, not its target.
+        Path dir = path.toAbsolutePath().getParent();
+        Path tmp;
+        try {
+            tmp = Files.createTempFile(dir, ".tmp-", ".secret",
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        } catch (UnsupportedOperationException notPosix) {
+            tmp = Files.createTempFile(dir, ".tmp-", ".secret");
+        }
+        try {
+            Files.writeString(tmp, content);
+            setOwnerOnlyPermissions(tmp);
+            try {
+                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
     }
 
     /**
