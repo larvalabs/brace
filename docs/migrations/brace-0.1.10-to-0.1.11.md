@@ -45,6 +45,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Toolchain downloads (`install.sh`, `self-update`, the launcher) are https-only | security | none, unless `BRACE_RELEASE_BASE` points at an `http://` mirror | [§](#security-toolchain-downloads-are-https-only) |
 | Hardened container scaffold; `GET /__brace/health`; `app.host(...)` | security, new | existing projects: optionally adopt the new `Dockerfile` and `compose.yaml` | [§](#security-hardened-container-scaffold-and-__bracehealth) |
 | Warning for an untrusted proxy; `trustedProxies(String...)` accepts a config value; scaffold reads `TRUSTED_PROXIES` | security | if the warning appears, set `trustedProxies` to your proxy's address or network, not `10.0.0.0/8`/`172.16.0.0/12` | [§](#security-untrusted-proxy-warning-and-narrow-trusted-proxies) |
+| New projects start with strict headers, htmx CSRF wiring and `/public` served | new projects | existing projects: optionally adopt the same layout and `routes()` lines | [§](#new-projects-start-with-the-security-defaults) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 
 ## New: server-side page-view analytics
@@ -1128,4 +1129,44 @@ To read it from the environment as new projects do:
 // After (App.java), with trusted.proxies=${TRUSTED_PROXIES} in application.conf.example
 .trustedProxies(config.get("trusted.proxies"))
 ```
+
+## New projects start with the security defaults
+
+**What changed.** `brace new` now generates an app that uses this release's security defaults
+from the start:
+
+- `routes()` registers `app.after(SecurityHeaders.strict())`, so every response carries the
+  security headers and the strict Content-Security-Policy, and the generated tests see them too.
+- The layout sets the `htmx-config` meta (`allowEval:false`, `allowScriptTags:false`,
+  `includeIndicatorStyles:false`), renders `${csrfMeta}`, and loads `/__brace/htmx.min.js` and
+  `/__brace/csrf-htmx.js`, so an `hx-post` works with no per-element CSRF setup. Pages declare
+  `@param gg.jte.Content csrfMeta = null` and pass it to the layout.
+- `routes()` serves `public/` at `/public` (`app.staticFiles("/public", "public")`). Earlier
+  scaffolds linked `/public/css/style.css` without serving it, so the stylesheet was a 404.
+- The generated test enables sessions as `main()` does and checks the headers and the CSRF meta.
+
+**Who needs to act.** Nobody has to. To bring an existing project in line:
+
+```java
+public static void routes(Brace app) {
+    app.after(SecurityHeaders.strict());
+    app.staticFiles("/public", "public");   // if the layout links files under public/
+    // ... routes
+}
+```
+
+```html
+@param gg.jte.Content csrfMeta = null
+...
+<head>
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+    ${csrfMeta}
+    <script src="/__brace/htmx.min.js"></script>
+    <script src="/__brace/csrf-htmx.js"></script>
+</head>
+```
+
+Pages then pass `csrfMeta = csrfMeta` to the layout. Check pages for inline `<script>`,
+`on*=` handlers and `style=""` before turning on the strict CSP; see
+[`SecurityHeaders.strict()`](#new-securityheadersstrict).
 

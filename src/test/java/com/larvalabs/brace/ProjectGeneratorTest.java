@@ -315,6 +315,36 @@ class ProjectGeneratorTest {
     }
 
     @Test
+    void scaffoldShipsStrictHeadersAndHtmxCsrfWiring(@TempDir Path tempDir) throws Exception {
+        // Phase 5: the scaffold starts with the security defaults the earlier phases added.
+        var projDir = tempDir.resolve("myproject");
+        ProjectGenerator.generate(projDir.toString());
+
+        var app = Files.readString(projDir.resolve("src/main/java/app/App.java"));
+        int routes = app.indexOf("public static void routes(Brace app)");
+        assertTrue(app.indexOf("app.after(SecurityHeaders.strict());") > routes,
+            "strict headers are registered in routes(), so tests see them too");
+        // The layout links /public/css/style.css, so public/ must be served.
+        assertTrue(app.indexOf("app.staticFiles(\"/public\", \"public\");") > routes, app);
+
+        var layout = Files.readString(projDir.resolve("views/layout/main.jte"));
+        assertTrue(layout.contains("@param gg.jte.Content csrfMeta = null"), layout);
+        assertTrue(layout.contains("    ${csrfMeta}\n"), layout);
+        assertTrue(layout.contains(
+            "<meta name=\"htmx-config\" content='{\"allowEval\":false,\"allowScriptTags\":false,\"includeIndicatorStyles\":false}'>"),
+            layout);
+        int htmx = layout.indexOf("<script src=\"/__brace/htmx.min.js\"></script>");
+        int csrf = layout.indexOf("<script src=\"/__brace/csrf-htmx.js\"></script>");
+        assertTrue(htmx > 0 && csrf > htmx, "csrf-htmx.js loads after htmx");
+
+        var index = Files.readString(projDir.resolve("views/home/index.jte"));
+        assertTrue(index.contains("csrfMeta = csrfMeta"), "pages pass csrfMeta to the layout");
+
+        var test = Files.readString(projDir.resolve("src/test/java/app/HomeControllerTest.java"));
+        assertTrue(test.contains("body.contains(\"<meta name=\\\"csrf-token\\\"\")"), test);
+    }
+
+    @Test
     void containerIsDigestPinnedNonRootAndShellFree(@TempDir Path tempDir) throws Exception {
         // M13: every FROM is pinned by digest, the runtime is distroless (no shell) and runs as
         // a non-root user, and the entrypoint is exec form (java is PID 1, gets SIGTERM).

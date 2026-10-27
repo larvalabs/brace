@@ -132,7 +132,11 @@ BASE="http://127.0.0.1:$PORT"
 curl -fsS "$BASE/__brace/health" | grep -qx "ok" || fail "/__brace/health didn't answer ok"
 curl -fsS -D "$WORK/home.headers" -o "$WORK/home.html" "$BASE/" || fail "GET / failed"
 grep -q "Welcome" "$WORK/home.html" || fail "home page didn't render: $(head -c 300 "$WORK/home.html")"
-pass "Home page renders from the image"
+grep -qi "^Content-Security-Policy: .*script-src 'self'" "$WORK/home.headers" \
+    || fail "home page lacks the strict CSP: $(cat "$WORK/home.headers")"
+grep -qi "^X-Content-Type-Options: nosniff" "$WORK/home.headers" || fail "home page lacks nosniff"
+curl -fsS -o /dev/null "$BASE/public/css/style.css" || fail "the layout's stylesheet isn't served"
+pass "Home page renders from the image with the strict headers"
 
 echo
 pass "Docker image test passed"

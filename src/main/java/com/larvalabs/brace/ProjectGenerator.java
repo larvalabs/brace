@@ -219,6 +219,13 @@ public class App {
      *   Brace.test().templates("views").start(App::routes)
      */
     public static void routes(Brace app) {
+        // Security headers and a strict Content-Security-Policy on every response: scripts load
+        // only from this origin (no inline <script>, no on*= attributes, no style=""). It is
+        // registered here rather than in main() so the tests run with the same headers.
+        app.after(SecurityHeaders.strict());
+        // public/ (the layout's stylesheet, images) at /public/...; the Dockerfile ships it.
+        app.staticFiles("/public", "public");
+
         // Every route needs an access requirement or .publicRoute(); start() refuses otherwise.
         // Once the app has a login, require it everywhere by default and mark the public pages:
         //   app.defaultAccess(Access.session("userId", "/login"));
@@ -278,6 +285,7 @@ class HomeControllerTest {
     static void setup() throws Exception {
         testApp = Brace.test()
             .templates("views")
+            .sessions("test-session-secret-at-least-32-characters") // as main() does: CSRF tokens
             // .entities(Post.class)  // register the entities your routes query
             .start(App::routes);      // same wiring as main() — no duplication
     }
@@ -290,6 +298,21 @@ class HomeControllerTest {
         var response = testApp.get("/");
         assertEquals(200, response.status());
         assertTrue(response.body().contains("Welcome"));
+    }
+
+    @Test
+    void pagesCarryTheStrictSecurityHeaders() {
+        var response = testApp.get("/");
+        assertTrue(response.header("Content-Security-Policy").contains("script-src 'self'"));
+        assertEquals("nosniff", response.header("X-Content-Type-Options"));
+    }
+
+    @Test
+    void layoutWiresHtmxAndItsCsrfToken() {
+        var body = testApp.get("/").body();
+        assertTrue(body.contains("<meta name=\\"csrf-token\\""), "the layout renders ${csrfMeta}");
+        assertTrue(body.contains("/__brace/htmx.min.js"));
+        assertTrue(body.contains("/__brace/csrf-htmx.js"));
     }
 
     /**
@@ -369,6 +392,7 @@ class HomeControllerTest {
             Files.writeString(root.resolve("views/layout/main.jte"), """
 @param String title
 @param gg.jte.Content content
+@param gg.jte.Content csrfMeta = null
 
 <!DOCTYPE html>
 <html lang="en">
@@ -376,7 +400,16 @@ class HomeControllerTest {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${title}</title>
+    <%-- htmx evaluates no code from attributes or swapped-in <script> tags and adds no inline
+         styles: the strict Content-Security-Policy would block them anyway. --%>
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+    <%-- The CSRF token, which csrf-htmx.js sends as X-CSRF-Token on every non-GET htmx request.
+         Each page declares @param gg.jte.Content csrfMeta = null and passes it on:
+         @template.layout.main(title = title, csrfMeta = csrfMeta, content = ...) --%>
+    ${csrfMeta}
     <link rel="stylesheet" href="/public/css/style.css">
+    <script src="/__brace/htmx.min.js"></script>
+    <script src="/__brace/csrf-htmx.js"></script>
 </head>
 <body>
     <main>
@@ -391,8 +424,9 @@ class HomeControllerTest {
 @import app.Routes
 @import com.larvalabs.brace.Url
 @param String title
+@param gg.jte.Content csrfMeta = null
 
-@template.layout.main(title = title, content = @`
+@template.layout.main(title = title, csrfMeta = csrfMeta, content = @`
     <h1>${title}</h1>
     <p>Your Brace app is running. <a href="${Url.to(Routes.HOME)}">Home</a></p>
 `)
