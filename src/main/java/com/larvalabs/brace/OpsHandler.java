@@ -49,10 +49,15 @@ public class OpsHandler {
      * after-middleware has run, so the ops policy holds whatever the app configures.
      */
     static void applySecurityHeaders(Result result) {
+        // An app's CORS headers don't apply to ops: one that reflects any Origin with credentials
+        // would let a same-site page read cookie-authenticated ops JSON.
+        result.headers().keySet().removeIf(name -> name.regionMatches(true, 0, "Access-Control-", 0, 15));
         for (var header : List.of(
                 Map.entry("Content-Security-Policy", CONTENT_SECURITY_POLICY),
                 Map.entry("X-Content-Type-Options", "nosniff"),
-                Map.entry("X-Frame-Options", "DENY"))) {
+                Map.entry("X-Frame-Options", "DENY"),
+                // The exchange URL carries the login token; no ops page should send a Referer.
+                Map.entry("Referrer-Policy", "no-referrer"))) {
             // Result's header map is case-sensitive: drop an app's differently-cased copy too.
             result.headers().keySet().removeIf(name -> name.equalsIgnoreCase(header.getKey()));
             result.header(header.getKey(), header.getValue());
@@ -204,6 +209,12 @@ public class OpsHandler {
     public Result loginToken(Request req) {
         var claims = req.opsClaims();
         if (claims == null) return Result.unauthorized("Invalid ops key");
+        // L3: only a bearer credential (the CLI) may mint one. The dashboard's session cookie is
+        // sent by any same-origin request, so script on any app page could otherwise mint a
+        // login token here, read it from the response, and carry it off the browser.
+        if (claims.type() != OpsToken.Type.BEARER) {
+            return Result.json(Map.of("error", "bearer_token_required"), 403).header("Cache-Control", "no-store");
+        }
 
         // Stateless, short-lived HMAC token — no server-side store, so exchange works on any
         // instance behind a load balancer (B5). It conveys exactly the access the caller
@@ -211,8 +222,12 @@ public class OpsHandler {
         // preserves into the browser session cookie — a read key yields a read-only,
         // attributed browser session. READ-gated because the dashboard itself is READ;
         // no escalation is possible since the minted token never exceeds the caller's scope.
-        String loginToken = OpsToken.create(tokenSecret, LOGIN_TOKEN_TTL_SECONDS, claims.scope(), claims.kid());
-        Instant expiry = Instant.now().plusSeconds(LOGIN_TOKEN_TTL_SECONDS);
+        // Never outlives the bearer it came from. The session the exchange mints from it is a
+        // cookie-only credential that can't mint anything itself, so no chain renews itself.
+        long now = System.currentTimeMillis() / 1000;
+        long exp = Math.min(now + LOGIN_TOKEN_TTL_SECONDS, claims.exp());
+        String loginToken = OpsToken.create(tokenSecret, exp, claims.scope(), claims.kid(), OpsToken.Type.LOGIN);
+        Instant expiry = Instant.ofEpochSecond(exp);
 
         return Json.of(Map.of(
             "loginToken", loginToken,
@@ -245,14 +260,15 @@ public class OpsHandler {
         }
 
         var claims = verifyForKnownKey(loginToken);
-        if (claims == null) {
+        if (claims == null || claims.type() != OpsToken.Type.LOGIN) {
             return Result.unauthorized("Invalid or expired login token");
         }
 
         // Mint an 8h ops session token (one workday), preserving the login token's scope (H1).
         // 8h rather than 24h: with scope-preservation the session is already bound to the
         // caller's ceiling; shorter TTL limits the damage window of a stolen cookie further.
-        String sessionToken = OpsToken.create(tokenSecret, SESSION_TTL_SECONDS, claims.scope(), claims.kid());
+        String sessionToken = OpsToken.create(tokenSecret, System.currentTimeMillis() / 1000 + SESSION_TTL_SECONDS,
+            claims.scope(), claims.kid(), OpsToken.Type.SESSION);
 
         // ?next=analytics lands on the analytics page instead (brace ops dashboard --analytics).
         // An allowlist, not a path: an open redirect here would bounce a fresh ops session anywhere.
@@ -880,17 +896,19 @@ public class OpsHandler {
         if (tokenSecret == null) return null;
 
         // Check Authorization: Bearer <token> header
+        // Each channel takes only its own token type (L3): a login or session token presented as a
+        // bearer, or a bearer token planted in the cookie, is no credential at all.
         var authHeader = req.header("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             var claims = verifyForKnownKey(authHeader.substring(7));
-            if (claims != null) return new Credential(claims, false);
+            if (claims != null && claims.type() == OpsToken.Type.BEARER) return new Credential(claims, false);
         }
 
         // Check ops session cookie (set by /ops/auth/exchange)
         String cookieToken = req.cookie(OPS_COOKIE_NAME);
         if (cookieToken != null) {
             var claims = verifyForKnownKey(cookieToken);
-            if (claims != null) return new Credential(claims, true);
+            if (claims != null && claims.type() == OpsToken.Type.SESSION) return new Credential(claims, true);
         }
 
         return null;
@@ -910,7 +928,7 @@ public class OpsHandler {
         OpsScope ceiling = ceilingByKid.get(claims.kid());
         if (ceiling == null) return null;
         OpsScope scope = claims.scope().min(ceiling);
-        return scope == claims.scope() ? claims : new OpsToken.Claims(claims.exp(), scope, claims.kid());
+        return scope == claims.scope() ? claims : new OpsToken.Claims(claims.exp(), scope, claims.kid(), claims.type());
     }
 
     /**
@@ -959,10 +977,28 @@ public class OpsHandler {
         String site = req.header("Sec-Fetch-Site");
         if (site != null) return site.strip().equalsIgnoreCase("same-origin");
         String origin = req.header("Origin");
-        if (origin == null || origin.isBlank()) return false;
-        String originHost = ProxyHeaders.hostOf(origin);
+        if (origin == null || origin.isBlank() || !origin.contains("://")) return false;
+        String requestAuthority = req.hostWithPort();
+        if (requestAuthority == null) return false;
+        // Host and port, not the scheme: behind a TLS-terminating proxy the request's own scheme
+        // is http whatever the browser used. Another port on the same host is another origin
+        // (and gets the ops cookie, which isn't port-scoped), so it doesn't pass.
+        String originAuthority = Brace.normalizeOrigin(origin);
+        originAuthority = originAuthority.substring(originAuthority.indexOf("://") + 3);
+        if (originAuthority.equals(withoutDefaultPort(requestAuthority))) return true;
+        // A proxy rewriting Host to loopback makes a same-origin page look foreign; say so once.
         String host = req.host();
-        return originHost != null && host != null && originHost.equalsIgnoreCase(host);
+        if (host != null && BraceHandler.isLoopbackHost(host)) {
+            String pageHost = ProxyHeaders.httpsPageHost(origin, null);
+            if (pageHost != null) ProxyHeaders.warnHostRewrite(pageHost);
+        }
+        return false;
+    }
+
+    private static String withoutDefaultPort(String authority) {
+        if (authority.endsWith(":443")) return authority.substring(0, authority.length() - 4);
+        if (authority.endsWith(":80")) return authority.substring(0, authority.length() - 3);
+        return authority;
     }
 
     private static int levelRank(String level) {

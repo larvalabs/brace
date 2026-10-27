@@ -29,6 +29,11 @@ class OpsKeyRevocationTest {
         return OpsToken.create(SECRET, 60, OpsScope.READ, OpsKeys.fingerprint(key.publicKey()));
     }
 
+    private static String sessionToken(OpsKeys.Keypair key) {
+        return OpsToken.create(SECRET, System.currentTimeMillis() / 1000 + 60, OpsScope.READ,
+            OpsKeys.fingerprint(key.publicKey()), OpsToken.Type.SESSION);
+    }
+
     /** What the router does for an ops route: the route's access requirement, then the handler (H1). */
     private static Result guarded(OpsHandler h, OpsScope scope, Request req,
                                   java.util.function.Function<Request, Result> handler) {
@@ -54,14 +59,14 @@ class OpsKeyRevocationTest {
     void tokenForACurrentKeyStillWorks() {
         var h = handler(current, removed);
         assertEquals(200, status(h, bearer(token(current))).status());
-        assertEquals(200, status(h, cookie(token(current))).status());
+        assertEquals(200, status(h, cookie(sessionToken(current))).status());
     }
 
     @Test
     void tokenForAKeyNotInTheAuthorizedSetIsRejected() {
         var h = handler(current);
         assertEquals(401, status(h, bearer(token(removed))).status());
-        assertEquals(401, status(h, cookie(token(removed))).status());
+        assertEquals(401, status(h, cookie(sessionToken(removed))).status());
     }
 
     @Test

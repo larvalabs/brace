@@ -348,10 +348,25 @@ class CliCheckTest {
         try {
             var probe = CliCheck.probeRoot("http://localhost:" + app.actualPort());
             assertEquals(302, probe.status());
-            assertEquals(SecurityHeaders.STRICT_CSP, probe.contentSecurityPolicy());
+            assertEquals(List.of(SecurityHeaders.STRICT_CSP), probe.policies());
         } finally {
             app.stop();
         }
         assertNull(CliCheck.probeRoot("http://localhost:1"), "unreachable: null, not a throw");
+    }
+
+    @Test
+    void cspCheckSkipsANonHtmlNotFoundAndReadsEveryPolicy() {
+        // An ops-only hostname answers 404 at "/": there is no page to judge.
+        assertNull(CliCheck.checkContentSecurityPolicy(new CliCheck.RootProbe(404, "text/plain", List.of())));
+        assertEquals("warn", CliCheck.checkContentSecurityPolicy(new CliCheck.RootProbe(404, "text/html", List.of())).status());
+        // Two policies are both enforced: one that restricts scripts is enough.
+        assertEquals("pass", CliCheck.checkContentSecurityPolicy(new CliCheck.RootProbe(200, "text/html",
+            List.of("frame-ancestors 'none'", SecurityHeaders.STRICT_CSP))).status());
+        for (String weak : List.of("script-src *", "script-src https:", "default-src 'self' data:")) {
+            var check = CliCheck.checkContentSecurityPolicy(new CliCheck.RootProbe(200, weak));
+            assertEquals("warn", check.status(), weak);
+            assertTrue(check.message().contains("any host"), check.message());
+        }
     }
 }

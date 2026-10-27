@@ -19,12 +19,42 @@ import java.util.Base64;
  * <p>The payload carries {@code exp} (expiry, epoch seconds), an optional
  * {@code scope} ({@link OpsScope}, default {@code CONTROL} when absent for
  * backward compatibility), and an optional {@code kid} (a fingerprint of the
- * minting key, so ops access can be attributed to a key in an audit log).
+ * minting key, so ops access can be attributed to a key in an audit log), and a
+ * {@code typ} ({@link Type}) saying which channel the token is valid on.
  */
 public class OpsToken {
 
-    /** Verified token claims. {@code kid} may be null on legacy tokens. */
-    public record Claims(long exp, OpsScope scope, String kid) {}
+    /**
+     * Where a token may be presented (L3, 2026-10 security review). Without it a token minted for
+     * one channel worked on all of them: script on the app's origin could ask the cookie-
+     * authenticated login-token endpoint for a token, read it, and use it as a bearer anywhere.
+     */
+    public enum Type {
+        /** {@code Authorization: Bearer}, issued to the CLI by {@code POST /ops/auth}. */
+        BEARER("bearer"),
+        /** The 60-second browser handoff, accepted only by {@code /ops/auth/exchange}. */
+        LOGIN("login"),
+        /** The {@code __brace_ops_session} cookie the exchange sets. */
+        SESSION("session");
+
+        private final String wire;
+
+        Type(String wire) { this.wire = wire; }
+
+        public String wire() { return wire; }
+
+        static Type parse(String value) {
+            for (Type t : values()) if (t.wire.equals(value)) return t;
+            return null;
+        }
+    }
+
+    /** Verified token claims. {@code kid} may be null on legacy tokens; {@code type} is null on untyped ones. */
+    public record Claims(long exp, OpsScope scope, String kid, Type type) {
+        public Claims(long exp, OpsScope scope, String kid) {
+            this(exp, scope, kid, Type.BEARER);
+        }
+    }
 
     /** Generate a random 32-byte secret, base64-encoded. */
     public static String generateSecret() {
@@ -66,13 +96,18 @@ public class OpsToken {
         return create(secret, ttlSeconds, OpsScope.CONTROL, null);
     }
 
-    /** Create a token that expires in {@code ttlSeconds}, carrying the given scope and (optional) key id. */
+    /** Create a bearer token that expires in {@code ttlSeconds}, carrying the given scope and (optional) key id. */
     public static String create(String secret, int ttlSeconds, OpsScope scope, String kid) {
-        long exp = System.currentTimeMillis() / 1000 + ttlSeconds;
+        return create(secret, System.currentTimeMillis() / 1000 + ttlSeconds, scope, kid, Type.BEARER);
+    }
+
+    /** Create a token of {@code type} expiring at {@code exp} (epoch seconds). */
+    static String create(String secret, long exp, OpsScope scope, String kid, Type type) {
         ObjectNode node = Json.mapper().createObjectNode();
         node.put("exp", exp);
         if (scope != null) node.put("scope", scope.wire());
         if (kid != null) node.put("kid", kid);
+        node.put("typ", type.wire());
         String payload;
         try {
             payload = Json.mapper().writeValueAsString(node);
@@ -115,7 +150,8 @@ public class OpsToken {
             if (System.currentTimeMillis() / 1000 >= exp) return null;
             OpsScope scope = OpsScope.parse(n.hasNonNull("scope") ? n.get("scope").asText() : null, OpsScope.CONTROL);
             String kid = n.hasNonNull("kid") ? n.get("kid").asText() : null;
-            return new Claims(exp, scope, kid);
+            Type type = n.hasNonNull("typ") ? Type.parse(n.get("typ").asText()) : null;
+            return new Claims(exp, scope, kid, type);
         } catch (Exception e) {
             return null;
         }

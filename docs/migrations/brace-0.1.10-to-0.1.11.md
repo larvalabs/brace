@@ -934,6 +934,13 @@ httpOnly `__brace_ops_session` cookie, as `/ops/analytics` already did. Operator
 `brace ops dashboard` logs in the same way, and an open tab keeps refreshing until the 8-hour
 cookie expires.
 
+**Ops tokens are typed.** A bearer token works only in `Authorization: Bearer`, the 60-second
+login token only at `/ops/auth/exchange`, and the session token only as the cookie;
+`POST /ops/auth/login-token` refuses the cookie. Without this, page script could mint a login
+token with the cookie and use it as a bearer. Tokens minted by earlier versions carry no type and
+are refused: the CLI re-authenticates automatically, and browsers sign in again with
+`brace ops dashboard`. `OpsToken.create(secret, ttl, scope, kid)` mints bearer tokens.
+
 **Cookie-authenticated changes must be same-origin.** A `POST`/`PUT`/`PATCH`/`DELETE` to `/ops`
 authenticated by the cookie must carry `Sec-Fetch-Site: same-origin` or an `Origin` naming the
 requested host, or it gets `403 {"error":"cross_origin_request"}`. Browsers send these on the

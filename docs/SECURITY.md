@@ -1222,7 +1222,8 @@ URLs leak into proxy access logs, browser history, and the `Referer` header of o
 Pass credentials via the `Authorization` header or the session cookie.
 
 **Browser exchange flow.** The `brace dashboard` CLI command calls `POST /ops/auth/login-token`
-(requires Bearer auth), receives a short-lived (60s), scope-capped login token, and opens the
+(bearer only: the session cookie is refused there), receives a short-lived (60s, never past the
+bearer's own expiry), scope-capped login token, and opens the
 browser at `/ops/auth/exchange?token=<loginToken>`. The exchange endpoint is the only place
 `?token=` is accepted — it is the browser-redirect handoff, and there is no other channel that
 can carry a credential into a plain GET redirect. On success, the server sets an 8h httpOnly
@@ -1262,11 +1263,19 @@ token (up to CONTROL scope) in `hx-headers`, so any script running on the app's 
 operator's browser could `fetch('/ops/dashboard')` (same-origin, so the cookie went along) and
 read it out of the HTML. The httpOnly cookie can't be read by page script.
 
+**Each token works on one channel.** Every ops token carries a type: `bearer` (issued to the CLI
+by `POST /ops/auth`, accepted only in `Authorization: Bearer`), `login` (the 60-second handoff,
+accepted only by `/ops/auth/exchange`), and `session` (the cookie the exchange sets, accepted
+only as the cookie). `POST /ops/auth/login-token` takes only a bearer token. Before this, script
+on the app's origin could post to it with the operator's cookie, read a CONTROL login token from
+the response, use it as a bearer from anywhere, and mint the next one with it. A token without a
+type (minted before 0.1.11) is refused; the CLI re-authenticates on the 401.
+
 **Cross-origin protection for cookie-authenticated changes.** The ops routes are
 `.csrf(false)`, since the CLI posts with a bearer token. A mutating ops request
 (`POST`/`PUT`/`PATCH`/`DELETE`) authenticated by the cookie must come from a page on the same
 origin: `Sec-Fetch-Site: same-origin` when the browser sends it, otherwise an `Origin` whose
-host is the one requested. Anything else is refused with `403 {"error":"cross_origin_request"}`
+host and port are the ones requested. Anything else is refused with `403 {"error":"cross_origin_request"}`
 and audited. `SameSite=Strict` already keeps the cookie off cross-site requests, but not off a
 sibling subdomain's: `evil.example.com` is the same *site* as `app.example.com`, so its form
 post would carry the cookie. A bearer-authenticated request needs no such check, because a
@@ -1278,7 +1287,10 @@ cross-origin page can't set `Authorization`.
 Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
 ```
 
-plus `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`. The pages load their
+plus `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy:
+no-referrer`, and any `Access-Control-*` headers the app's middleware added are removed (an app
+CORS policy that reflects origins with credentials would otherwise let a same-site page read ops
+JSON). The pages load their
 JavaScript and CSS from `/__brace/ops.js`, `/__brace/ops.css` and `/__brace/ops-analytics.css`
 and contain no inline script, event handler or `style=""` attribute. The headers are set at the
 response choke point *after* the app's after-middleware, so they replace whatever policy the app
@@ -1287,7 +1299,7 @@ policy is stricter than `SecurityHeaders.strict()` in every directive, so an app
 loses nothing there.
 
 **What remains.** An XSS on the app's origin still runs with the operator's ops session in the
-same browser: it can't read the cookie or a token, but it can drive same-origin requests,
+same browser: it can't read the cookie or obtain a token, but it can drive same-origin requests,
 including `POST /ops/cache/clear` with a valid `Sec-Fetch-Site: same-origin`. The cookie is
 scoped to `Path=/ops`, which limits where it's sent, not who on the origin can trigger a
 request. For high-value apps, serve ops from its own hostname (below), so that the app's origin

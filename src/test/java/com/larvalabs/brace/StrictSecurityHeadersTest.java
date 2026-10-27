@@ -63,8 +63,8 @@ class StrictSecurityHeadersTest {
     }
 
     private static String cookie() {
-        return "__brace_ops_session=" + OpsToken.create(OPS_SECRET, 600, OpsScope.CONTROL,
-            OpsKeys.fingerprint(key.publicKey()));
+        return "__brace_ops_session=" + OpsToken.create(OPS_SECRET, System.currentTimeMillis() / 1000 + 600,
+            OpsScope.CONTROL, OpsKeys.fingerprint(key.publicKey()), OpsToken.Type.SESSION);
     }
 
     /** Every value for {@code name}, however the response cased it. */
