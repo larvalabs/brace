@@ -6,16 +6,17 @@ tracker: it holds each finding's checkbox, fix spec, tests and suggested model. 
 the open decisions, how the work is split across agents, the order it merges in, and what has to
 be true before it does.
 
-**Status (2026-11-10): all fix rounds merged.** All four tracks are fixed, independently
-reviewed, review-fixed and merged into the integration branch, and so are the whole-branch
-(final) review's fixes and the cleanups that followed them; `mvn test` is green on the merged
-branch. Remaining: a final verification pass, the merge gate (`mvn verify`, `tests/cli`) and the
-review record. H2's code has landed, but `MIN_TOOLCHAIN` itself is raised in the 0.1.11 release
-commit, so H2 stays unticked until then.
+**Status (2026-11-10): fix rounds, whole-branch review, verification pass and merge gate
+complete at `d8aa624`.** Awaiting Matt's confirmation of the pending decisions below. Outstanding:
+the tool reruns (SpotBugs, Semgrep, OSV; none was available offline) and the release-commit
+steps. H2's code has landed, but `MIN_TOOLCHAIN` itself is raised in the 0.1.11 release commit,
+so H2 stays unticked until then. The record is
+[`reviews/2026-11-security-fable-5-2.md`](reviews/2026-11-security-fable-5-2.md).
 
 Decisions D1 to D6 were settled on 2026-11-09: the recommended option in every case. Decisions A
-and B below were made during the fix phase, and F1 to F7 during the final review round, on the
-reviewer's recommendation; all nine are pending Matt's confirmation.
+and B below were made during the fix phase, F1 to F7 during the final review round, and V1 to V3
+during the verification pass, on the reviewer's recommendation or as the fail-closed choice; all
+twelve are pending Matt's confirmation.
 
 Two deviations from the conventions below: the integration branch is
 `claude/framework-security-review-7c9e30`, not `security-review-2026-11`; and migration-guide
@@ -69,8 +70,16 @@ confirmation**; the migration guide and `docs/SECURITY.md` describe them as appl
 | F3 | L6 saturated limiter | When a rate limiter's key table and per-address overflow table are both full of entries at their limit, a request for a new key fails closed by default (counted in one shared last-resort bucket with the limiter's limit, then 429); `.onSaturation(FAIL_OPEN)` lets such requests through uncounted |
 | F4 | L16 ops replay | Without a database (or while its nonce write fails), ops sign-ins whose timestamp is earlier than 30 s after the server started are refused, outside dev mode and the test harness; with one, accepted nonces are recorded in `brace_counters` |
 | F5 | H1 script bodies | All user data in a script body is written with `\uXXXX` escapes except ASCII letters, digits, `_`, `,` and non-ASCII characters (data inside a tag but outside a quoted value: every character) |
-| F6 | L4 page-cache eviction | A new Postgres framework migration, `V19__brace_cache_used_at.sql` (Postgres only), adds `brace_cache.used_at` |
-| F7 | M6 redaction | The shape rule redacts a 16+ character hash label in a file name (`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as `[redacted].css`), because it cannot be told from a download token |
+| F6 | L4 page-cache eviction | A new Postgres framework migration, `V19__brace_cache_used_at.sql` (Postgres only), adds `brace_cache.used_at`. The verification pass removed its index (it did not help the trim and held a table lock during the build), so it adds the column only |
+| F7 | M6 redaction | The shape rule redacts a 16+ character hash label in a file name (`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as `[redacted].css`), because it cannot be told from a download token. The verification pass added a name-versus-secret heuristic (`Redactor.isNameLike`) so names made of words survive; measured residual: a base62 token of 16 characters reads as a name about 1 in 10,000 times, none at 32 or more |
+
+Three more were taken in the verification pass. Each is **applied, pending Matt's confirmation**.
+
+| # | Finding | Applied, pending Matt's confirmation |
+|---|---|---|
+| V1 | L1 key rotation | `brace ops keypair --label X` keeps the existing entry's scope unless `--control` or `--read-only` is given, prints `scope changed: read -> control` when it changes, and refuses an old-format line with no scope until a flag is given |
+| V2 | L10 lifecycle | An app started with a database cannot be restarted: a second `start()` throws ("Build a new Brace"). Apps without a database can restart |
+| V3 | L3 client address (refines F2) | The rightmost forwarding element (the one the trusted peer appended) decides: if it names no client, `req.ip()` is `unknown`; the walk never falls back to an earlier, client-supplied element |
 
 ## Working conventions
 

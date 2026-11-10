@@ -1122,9 +1122,11 @@ Fixed in the commit of the finding named, or the closeout docs commit.
   roughly 125 tests that call `Brace.app().port(0)` directly still bind the wildcard. The same
   behaviour in production (a process binding `127.0.0.1:<app port>` with `SO_REUSEADDR` takes
   the app's loopback traffic) is reported separately for a decision.
-- **`Result.headers()` exposes the mutable header map.** It returns the `TreeMap` itself, so
-  `result.headers().put(name, value)` bypasses `Result.header(...)`'s header-name validation
-  (`requireHeaderName`) and its routing of `Set-Cookie` into the separate cookie list.
+- **`Result.headers()` exposes the mutable header map.** It returned the `TreeMap` itself, so
+  `result.headers().put(name, value)` bypassed `Result.header(...)`'s header-name validation
+  (`requireHeaderName`) and its routing of `Set-Cookie` into the separate cookie list. (Since
+  fixed in the verification pass: `headers()` is a live view whose `put` goes through
+  `header(...)`.)
 
 ### Raised during the fix phase, not done
 
@@ -1160,9 +1162,17 @@ either a hardening option, a limitation, or something that could not be verified
   likelier cause is a server left running by a test (the `stopped` flag bug, now fixed, did
   that). Several unrelated test classes also failed once and passed on rerun while four suites
   ran on one machine; a serial run on the merged branch was clean.
-- **`csrf-htmx.js` was not executed in a browser.** L8's test checks the script's text only.
-  The verification fix (a page-set header is kept for a cross-origin request) was replayed in
-  Node against a model of htmx's header copy, not in a browser.
+- **`csrf-htmx.js`'s last change was not executed in a browser.** The Java test checks the
+  script's text only. The verification reviewer ran the final-review version (`33fd77d`) against
+  the bundled htmx 2.0.10 in Chromium (token sent same-origin, not cross-origin, not after a
+  later listener rewrote the path cross-origin, not on `hx-get`). The follow-up after that
+  (`07d5f5f`: a page-set header is kept for a cross-origin request) was replayed in Node against
+  a model of htmx's header copy, not in a browser.
+- **`DurableJobTest.claimsSizedToCapacityAndSlowJobsDontStallNewBatches` is timing-sensitive.**
+  It failed once in a merge-gate run and passed alone and in the next full run on identical
+  code. The branch's only `JobPoller` changes are redaction wrappers.
+- **Tool reruns.** SpotBugs + find-sec-bugs, Semgrep and the OSV gate were not rerun: none was
+  available offline on the review machine. The dependency set is identical at base and tip.
 - **Page-cache poisoning by inputs the framework cannot see.** The dev and test check flags
   undeclared reads through `Request`; a handler that depends on global state or reads the raw
   Jetty request is not detected.
