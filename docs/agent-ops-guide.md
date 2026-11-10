@@ -385,8 +385,13 @@ A line with no `scope:` marker defaults to `control` (backward compatible). Mark
 read-only by adding `scope:read`:
 
 ```
-<base64-pubkey>  scope:read  oncall-agent
+<base64-pubkey>  scope:read  oncall-agent   # read-only CI key
 ```
+
+Any token with `:` or `=` must be exactly `scope:read` or `scope:control` (at most once), or
+the server refuses to start; other words are label text, and `#` after whitespace starts a
+comment. A lone `read`/`ro`/`control` after the key also fails: write `scope:read`. The full
+grammar is in `docs/SECURITY.md` (Ops Endpoints).
 
 `POST /ops/auth` caps the minted token at the key's ceiling, so a `scope:read` key
 **cannot** obtain a control token even if it requests one — escalation is impossible by

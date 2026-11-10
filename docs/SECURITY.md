@@ -1434,13 +1434,30 @@ restarting or redeploying takes effect on its outstanding tokens immediately, al
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
 
-**Scope tokens in `ops-authorized-keys`.** A key line is the key, then optional tokens: exactly
-`scope:read` or `scope:control`, and free-text labels. A line with no scope token is `control`
-(backward compatible) and is logged as such at boot. Anything that looks like a mistyped scope
-(`scope:readonly`, `scope: read`, `Scope:read`, `scope=read`, a bare `read`, `read-only`,
-`control`) fails startup with the line number, because a silent fallback would hand an agent a
+**Scope tokens in `ops-authorized-keys`.** The file is UTF-8 (a leading byte-order mark is
+ignored), one key per line:
+
+```
+KEY [scope:read | scope:control] [label words ...] [# comment]
+```
+
+- `#` at the start of a line, or after whitespace, starts a comment that runs to the end of the
+  line. Blank and comment-only lines are ignored. (`ci#1` is label text: no whitespace before
+  the `#`.)
+- The first token is the public key. The rest may come in any order.
+- Any token containing `:` or `=` must be exactly `scope:read` or `scope:control` (`scope:` in
+  lowercase, the value case-insensitive), and at most one appears per line. Anything else with
+  a `:` or `=` fails startup: `scope: read`, `Scope:read`, `scope=read`, `--scope=read`,
+  `role:read`, `scpoe:read`, `scope:read-only`, or a second scope token.
+- Every other token is label text, including `control`, `ro`, `read` and `scope-ci`, with one
+  exception: `read`, `ro`, `readonly`, `read-only` or `control` as the **only** token after the
+  key (`KEY read`, the classic mistake) fails startup with a message to write `scope:read`.
+- A line with no scope token is `control` (backward compatible) and is logged as such at boot.
+
+Failures name the file and line number, never the key: a silent fallback would hand an agent a
 full-privilege key. A key listed twice keeps the lower scope. Each key's fingerprint and scope
-is logged at boot (`ops.key`).
+is logged at boot (`ops.key`). A token whose payload has no scope claim, or one the server does
+not recognise, is treated as `read`, as is an unrecognised `scope` requested at `/ops/auth`.
 
 ### Ops pages in the browser
 

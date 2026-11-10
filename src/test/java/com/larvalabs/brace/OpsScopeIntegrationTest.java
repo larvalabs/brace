@@ -119,6 +119,17 @@ class OpsScopeIntegrationTest {
     }
 
     @Test
+    void anUnknownRequestedScopeIsReadEvenForAControlKey() throws Exception {
+        // L1 review: present but unrecognised fails closed to READ, never to the ceiling.
+        for (String requested : new String[] {"admin", "read-only", "CONTROL!"}) {
+            var auth = authenticate(controlKey, requested);
+            assertEquals(200, auth.status(), requested);
+            assertEquals("read", auth.scope(), requested);
+        }
+        assertEquals("control", authenticate(controlKey, "Control").scope(), "a known scope is case-insensitive");
+    }
+
+    @Test
     void readTokenCanReadButNotControl() throws Exception {
         var read = authenticate(readKey, null).token();
         assertEquals(200, getStatus("/ops/status", read), "read token may read status");

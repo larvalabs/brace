@@ -85,15 +85,75 @@ class OpsKeysTest {
     @Test
     void malformedScopeTokensFailStartup(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
+        // Any token with ':' or '=' that isn't exactly scope:read / scope:control, with or without a label.
         for (String bad : new String[] {"scope:readonly", "scope:read-only", "scope: read", "Scope:read",
-                "scope=read", "read-only", "readonly", "read", "control", "scope:"}) {
-            Path file = tmpDir.resolve("bad-" + Math.abs(bad.hashCode()));
-            Files.writeString(file, "# keys\n" + kp.publicKey() + " " + bad + " ci-agent\n");
-            var ex = assertThrows(IllegalStateException.class,
-                () -> OpsKeys.loadAuthorizedKeys(file.toString()), bad);
-            assertTrue(ex.getMessage().contains("line 2"), ex.getMessage());
-            assertFalse(ex.getMessage().contains(kp.publicKey()), "never echo key material");
+                "scope=read", "scope:", "--scope=read", "role:read", "scpoe:read", "scope:admin",
+                "label=x", "scope:read scope:control", "scope:read scope:read"}) {
+            for (String suffix : new String[] {"", " ci-agent"}) {
+                assertRejected(tmpDir, kp, bad + suffix);
+            }
         }
+        // A bare scope-like word as the ONLY token after the key: the classic `KEY read` mistake.
+        for (String bare : new String[] {"read", "ro", "control", "readonly", "read-only", "READ",
+                "read # the CI agent"}) {
+            var ex = assertRejected(tmpDir, kp, bare);
+            assertTrue(ex.getMessage().contains("scope:"), ex.getMessage());
+        }
+    }
+
+    private static IllegalStateException assertRejected(Path tmpDir, OpsKeys.Keypair kp, String rest) throws Exception {
+        Path file = tmpDir.resolve("bad-" + Math.abs(rest.hashCode()));
+        Files.writeString(file, "# keys\n" + kp.publicKey() + " " + rest + "\n");
+        var ex = assertThrows(IllegalStateException.class,
+            () -> OpsKeys.loadAuthorizedKeys(file.toString()), rest);
+        assertTrue(ex.getMessage().contains("line 2"), ex.getMessage());
+        assertFalse(ex.getMessage().contains(kp.publicKey()), "never echo key material");
+        return ex;
+    }
+
+    // --- L1 review fixes: the grammar is simple to state, and legitimate lines load ---
+
+    @Test
+    void legitimateLabelsAndCommentsLoad(@TempDir Path tmpDir) throws Exception {
+        record Case(String rest, OpsScope expected) {}
+        var cases = new Case[] {
+            new Case("scope:read control", OpsScope.READ),          // a label equal to a scope word
+            new Case("scope:control ro", OpsScope.CONTROL),
+            new Case("scope:read read", OpsScope.READ),
+            new Case("--label scope-ci", OpsScope.CONTROL),         // a label starting with "scope"
+            new Case("scope-ci", OpsScope.CONTROL),
+            new Case("scope:read # read-only CI key", OpsScope.READ),
+            new Case("scope:READ ci", OpsScope.READ),              // the value is case-insensitive
+            new Case("ci-agent scope:control", OpsScope.CONTROL),   // any order
+            new Case("read-only agent", OpsScope.CONTROL),          // two label words, no scope token
+            new Case("ci#1 scope:read", OpsScope.READ),             // '#' not after whitespace is text
+            new Case("# all comment", OpsScope.CONTROL),
+            new Case("", OpsScope.CONTROL),
+        };
+        for (var c : cases) {
+            var kp = OpsKeys.generateKeypair();
+            Path file = tmpDir.resolve("ok-" + Math.abs(c.rest().hashCode()));
+            Files.writeString(file, kp.publicKey() + (c.rest().isEmpty() ? "" : " " + c.rest()) + "\n");
+            assertEquals(c.expected(), OpsKeys.loadAuthorizedKeys(file.toString()).get(kp.publicKey()), c.rest());
+        }
+    }
+
+    @Test
+    void aCommentAfterTheKeyDoesNotMakeTheLineReadOnlyByAccident(@TempDir Path tmpDir) throws Exception {
+        // "scope:read" inside a comment is not a scope token.
+        var kp = OpsKeys.generateKeypair();
+        Path file = tmpDir.resolve("comment");
+        Files.writeString(file, kp.publicKey() + " deploy-bot # TODO scope:read\n");
+        assertEquals(OpsScope.CONTROL, OpsKeys.loadAuthorizedKeys(file.toString()).get(kp.publicKey()));
+    }
+
+    @Test
+    void aLeadingByteOrderMarkIsStripped(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path file = tmpDir.resolve("bom");
+        Files.writeString(file, "﻿" + kp.publicKey() + " scope:read ci\n");
+        var keys = OpsKeys.loadAuthorizedKeys(file.toString());
+        assertEquals(OpsScope.READ, keys.get(kp.publicKey()), "the first key must match without the BOM");
     }
 
     @Test

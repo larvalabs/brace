@@ -377,6 +377,11 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     in another case; on a duplicate key keep the lower scope or refuse; log each key's
     fingerprint and scope at boot.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L1 review fixes`). Grammar rewritten: any token with `:`
+    or `=` must be exactly `scope:read`/`scope:control`, at most once; other tokens are labels,
+    except a lone scope word after the key; `#` after whitespace is a comment; a leading BOM is
+    stripped. A token with no scope claim is READ. Tests for unknown/missing token scope and an
+    unknown requested scope on `/ops/auth`.
 
 - [x] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
   - With the mode unset, startup succeeds unpinned and `originIsThisServer` falls back to

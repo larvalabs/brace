@@ -102,12 +102,26 @@ public class OpsKeys {
     }
 
     /**
-     * Load authorized public keys and their scope ceilings from a file.
-     * Format: one key per line, then optional tokens — a {@code scope:read} /
-     * {@code scope:control} marker and/or a free-text label, in any order. A line
-     * with no scope marker defaults to {@link OpsScope#CONTROL} (backward compatible
-     * with key files written before scoping existed). Lines starting with {@code #}
-     * are comments; empty lines are ignored.
+     * Load authorized public keys and their scope ceilings from a file (UTF-8; a leading
+     * byte-order mark is ignored). The format, line by line:
+     * <ul>
+     *   <li>{@code #} at the start of a line or after whitespace starts a comment that runs to the
+     *       end of the line. Blank and comment-only lines are ignored.</li>
+     *   <li>Otherwise the first whitespace-separated token is the public key (base64, with an
+     *       optional legacy {@code ed25519:} prefix). The remaining tokens, in any order:</li>
+     *   <li>A token containing {@code :} or {@code =} must be exactly {@code scope:read} or
+     *       {@code scope:control} ({@code scope:} lowercase, the value case-insensitive), at most
+     *       once per line. Anything else with {@code :} or {@code =} ({@code scope: read},
+     *       {@code Scope:read}, {@code scope=read}, {@code --scope=read}, {@code role:read},
+     *       {@code scope:read-only}, a second scope token) fails startup.</li>
+     *   <li>Every other token is label text ({@code ci-agent}, {@code control},
+     *       {@code --label scope-ci}), with one exception: a lone {@code read}, {@code ro},
+     *       {@code readonly}, {@code read-only} or {@code control} as the only token after the
+     *       key ({@code KEY read}) fails startup, asking for {@code scope:read}.</li>
+     *   <li>A line with no scope token is {@link OpsScope#CONTROL} (backward compatible with key
+     *       files written before scoping existed).</li>
+     * </ul>
+     * Failures name the file and line number, never the key.
      *
      * <p>The returned map's value is the key's scope <em>ceiling</em>: a token minted
      * for that key can never exceed it (see {@code OpsHandler.auth}).
@@ -122,12 +136,11 @@ public class OpsKeys {
      * has no scope token. Never logs the key itself.
      *
      * <p>L1 (2026-11 review): a malformed scope used to fall back to CONTROL silently, so a
-     * hand-written {@code scope:read-only} handed an agent a full-privilege key. Now a recognised
-     * scope is exactly {@code scope:read} or {@code scope:control}; an unrecognised value, a
-     * scope-like token in another form ({@code Scope:read}, a bare {@code scope:} left by
-     * {@code scope: read}, {@code scope=read}) or a bare {@code read}/{@code readonly}/{@code read-only}/
-     * {@code control} token fails startup with the line number (never the key). A key listed
-     * twice keeps the lower scope.
+     * hand-written {@code scope:read-only} handed an agent a full-privilege key. The grammar in
+     * {@link #loadAuthorizedKeys(String)} (rewritten after the review of that fix, so that a
+     * label such as {@code control} or a trailing comment loads, while {@code --scope=read} and
+     * {@code role:read} fail) leaves no token that silently means CONTROL. A key listed twice
+     * keeps the lower scope.
      */
     public static Map<String, OpsScope> loadAuthorizedKeys(String path, boolean logKeys) {
         try {
@@ -136,31 +149,38 @@ public class OpsKeys {
             int lineNo = 0;
             for (String line : Files.readAllLines(Path.of(path))) {
                 lineNo++;
-                line = line.strip();
-                if (line.isEmpty() || line.startsWith("#")) continue;
+                // A leading UTF-8 byte-order mark (Windows editors) would otherwise stick to the
+                // first key, which then silently never matches.
+                if (lineNo == 1 && line.startsWith("﻿")) line = line.substring(1);
+                line = stripComment(line).strip();
+                if (line.isEmpty()) continue;
                 String[] tokens = line.split("\\s+");
                 String key = tokens[0];
                 // Tolerate a legacy "ed25519:" type prefix written by older `brace ops keypair`.
                 // Base64 never contains ':', so a leading "algo:" is unambiguously a prefix — strip
                 // it so a key file written by a buggy CLI still matches the raw base64 the client sends.
                 if (key.startsWith("ed25519:")) key = key.substring("ed25519:".length());
+                if (tokens.length == 2 && BARE_SCOPE_WORDS.contains(tokens[1].toLowerCase(java.util.Locale.ROOT))) {
+                    // The classic mistake: `KEY read`. Alone after the key, it is surely meant as
+                    // a scope, and as a label it would silently grant CONTROL.
+                    String meant = tokens[1].toLowerCase(java.util.Locale.ROOT).startsWith("c") ? "control" : "read";
+                    throw new IllegalStateException(badScope(path, lineNo, "'" + tokens[1]
+                        + "' alone after the key is not a scope; write scope:" + meant));
+                }
                 OpsScope scope = null;
                 for (int i = 1; i < tokens.length; i++) {
                     String token = tokens[i];
-                    String lower = token.toLowerCase();
-                    if (token.startsWith("scope:") && token.length() > "scope:".length()) {
-                        OpsScope parsed = OpsScope.parseOrNull(token.substring("scope:".length()));
-                        if (parsed == null) {
-                            throw new IllegalStateException(badScope(path, lineNo,
-                                "unrecognized scope value"));
-                        }
-                        scope = scope == null ? parsed : scope.min(parsed);
-                    } else if (lower.startsWith("scope")
-                            || lower.equals("read") || lower.equals("readonly") || lower.equals("read-only")
-                            || lower.equals("control") || lower.equals("ro")) {
+                    if (token.indexOf(':') < 0 && token.indexOf('=') < 0) continue; // label text
+                    OpsScope parsed = token.startsWith("scope:")
+                        ? OpsScope.parseOrNull(token.substring("scope:".length())) : null;
+                    if (parsed == null) {
                         throw new IllegalStateException(badScope(path, lineNo,
-                            "a token that looks like a mistyped scope"));
+                            "a token with ':' or '=' that is not scope:read or scope:control"));
                     }
+                    if (scope != null) {
+                        throw new IllegalStateException(badScope(path, lineNo, "more than one scope token"));
+                    }
+                    scope = parsed;
                 }
                 boolean explicit = scope != null;
                 if (scope == null) scope = OpsScope.CONTROL;
@@ -188,8 +208,22 @@ public class OpsKeys {
 
     private static String badScope(String path, int lineNo, String what) {
         return "Invalid ops authorized keys file " + path + ", line " + lineNo + ": " + what
-            + ". Use exactly scope:read or scope:control (lowercase, no space after the colon), or "
-            + "omit the token for control.";
+            + ". Format: KEY [scope:read|scope:control] [label words...] [# comment]. Write scope: "
+            + "in lowercase with no space after the colon, at most once; omit it for control.";
+    }
+
+    /** Words that, as the only token after a key, are a mistyped scope rather than a label. */
+    private static final java.util.Set<String> BARE_SCOPE_WORDS =
+        java.util.Set.of("read", "ro", "readonly", "read-only", "control");
+
+    /** Drops a comment: a {@code #} at the start of the line or after whitespace, to end of line. */
+    static String stripComment(String line) {
+        for (int i = 0; i < line.length(); i++) {
+            if (line.charAt(i) == '#' && (i == 0 || Character.isWhitespace(line.charAt(i - 1)))) {
+                return line.substring(0, i);
+            }
+        }
+        return line;
     }
 
     /**
