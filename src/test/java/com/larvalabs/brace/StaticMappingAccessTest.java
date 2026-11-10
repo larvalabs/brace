@@ -46,7 +46,7 @@ class StaticMappingAccessTest {
 
         keypair = OpsKeys.generateKeypair();
         Path keys = root.resolve("authorized-keys");
-        Files.writeString(keys, keypair.publicKey() + " test\n");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
 
         Access login = Access.session("userId", "/login");
         app = Brace.app().opsUnpinnedForTests().port(0).banner(false).sessions(SECRET).ops(keys.toString()).strictAccessCheck()

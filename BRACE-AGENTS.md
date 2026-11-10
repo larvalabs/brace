@@ -226,7 +226,9 @@ app.postDb("/billing/refund", billing::refund)
   inside a group that has a requirement, fails `start()`: register public pages outside the
   restricted group.
 - They run after plain `before(...)` middleware (rate limiters shed load first) and before the
-  body is read and CSRF is checked. A session-reading requirement sees the same `Session` the
+  framework reads the body for the handler and CSRF is checked. (A plain `before` that itself
+  calls `req.body()`/`formParam`/`form` reads the body first, e.g. a login limiter keyed on a
+  form field.) A session-reading requirement sees the same `Session` the
   handler gets, and needs `.sessions(...)` (`start()` throws without it).
 - They are bound to the route, so `/x/`, percent-encoded and `HEAD` requests to a guarded route
   are guarded the same way. WebSocket routes work the same: `app.ws(...).publicRoute()`.
@@ -250,9 +252,12 @@ app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
   whether or not the file exists. A served file is `Cache-Control: private, no-cache`; every
   other response under a guarded mapping (rejection, 404, 405) is `no-store`, and caching
   headers set by an `after(...)` are removed there.
-- A mapping serves `GET`/`HEAD` only; other methods get `405`. A route registered under a
-  mapping's prefix owns its path: the mapping never serves it, under any method (`start()`
-  logs a warning listing such routes).
+- A mapping serves `GET`/`HEAD` only; other methods get `405`. A route (or `app.ws(...)`
+  socket) registered under a mapping's prefix owns its path: the mapping never serves it, under
+  any method. A request for it under another method runs that route's access first (a caller it
+  refuses gets the same rejection), then gets `405` (`426` for a plain request to a socket
+  path). `start()` logs a warning listing such routes. The prefix must start with `/`
+  (`staticFiles("assets", dir)` throws).
 - `start()` throws if a mapping's directory doesn't exist, or if two mappings' directories
   overlap (same, nested, or via a symlink) with different access: pass the same `Access`
   objects to both if they should match. Registering the same prefix twice throws.
@@ -474,8 +479,10 @@ result.cookie("t", "v", 3600, true, true, "Lax", "/admin")  // ...plus an explic
 `Set-Cookie` is the one repeatable header: multiple `result.cookie(...)` calls all reach the
 wire (and your app cookies are never clobbered by the framework session cookie). Every other
 header is single-value — setting it again replaces the prior value. Header names are
-case-insensitive: `result.header("cache-control", ...)` replaces `Cache-Control`, and
-`result.header("Cache-Control")` reads either spelling. A response that carries the session
+case-insensitive (ASCII case): `result.header("cache-control", ...)` replaces `Cache-Control`, and
+`result.header("Cache-Control")` reads either spelling. A name must be an HTTP token (ASCII
+letters, digits and ``!#$%&'*+-.^_`|~``): `result.header("X A", v)` or an empty or non-ASCII
+name throws `IllegalArgumentException`. A response that carries the session
 cookie is always sent `Cache-Control: private` (added to whatever the handler set, unless it
 already says `private` or `no-store`).
 
@@ -1336,11 +1343,19 @@ case-sensitive): lower-case usernames and emails in the extractor. Key on what t
 `formParam` and, on POST/PUT/PATCH/DELETE, `req.form` read the body only.
 
 `perIp` keys an IPv6 client on its /64 (one site rotating addresses is one client); IPv4 on the full
-address. Each limiter tracks at most 100,000 distinct keys at a time; at the cap a new key replaces
-the least recently used key that is under its limit, keys at their limit are kept until their
-windows end, and only when nothing can be replaced does a new key fall back to an overflow bucket
-per client IP. Change the cap per limiter with `.maxKeys(n)` on `perIp(...)` or `perKey(...)`. On
-Postgres, two limiters with the same type, limit and window share their buckets.
+address. Each limiter's memory is bounded: at most 100,000 distinct keys plus as many per-address
+overflow buckets (`.maxKeys(n)` on `perIp(...)` or `perKey(...)` changes it). At the cap a new key
+replaces the least recently used key that is under its limit; keys at their limit are kept until
+their windows end (a blocked key stays blocked); when nothing can be replaced a new key is counted
+against its client address instead. On Postgres forgetting a key loses nothing (its fleet count is
+kept and re-read); with per-process counting the forgotten key restarts from zero. When the
+per-address buckets are all at their limit too, the limiter is **saturated** and
+`.onSaturation(RateLimiter.Saturation.FAIL_CLOSED)` (the default) refuses the requests it has no
+room to count, so a flood that large (about 1,300 req/s from 100,000 addresses against
+`perKey(…, 5, "15m")`) locks out clients it is not tracking; `Saturation.FAIL_OPEN` lets them
+through uncounted instead, which gives the same flood unlimited attempts at untracked keys. Pick
+`FAIL_OPEN` only where an uncounted request is cheap. See "Rate Limiting" in `docs/SECURITY.md`.
+On Postgres, two limiters with the same type, limit and window share their buckets.
 
 **Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see `BRACE-OPS.md` → "Scaling horizontally" and [`docs/scaling.md`](docs/scaling.md).
 
@@ -1369,7 +1384,7 @@ app Dokploy routes joins that network, so on a host shared with apps you don't t
 Traefik's own (fixed) address instead. The scaffold reads the value from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
 without being trusted, Brace logs a one-time warning naming its address.
 
-Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries (or lines), Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples. Exactly one forwarding header is read: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` with `app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader())`; the other is ignored, so a client can't supply its address in the header your proxy doesn't overwrite (a trusted proxy sending only the other one gets a one-time warning). `req.ip()` is always an IP literal: an entry that isn't one (`unknown`, `_hidden`) falls back to the socket address. `X-Forwarded-Proto` and `X-Forwarded-Host` use their **rightmost** entry across all lines, so the proxy must set (overwrite) them, not pass a client's through. An IPv4 CIDR also matches the IPv4-mapped form (`::ffff:10.1.2.3`); list `::1` separately from `127.0.0.1`. A direct IPv6 client's `req.ip()` has no brackets (`0:0:0:0:0:0:0:1`).
+Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries (or lines), Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples. Exactly one forwarding header is read: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` with `app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader())`; the other is ignored, so a client can't supply its address in the header your proxy doesn't overwrite (a trusted proxy sending only the other one gets a one-time warning). `req.ip()` is always a canonical IP literal or the string `"unknown"`: IPv4 dotted (`203.0.113.9`), IPv6 per RFC 5952 (lower-case, compressed, no brackets or port: `2001:db8::5`, `::1`), IPv4-mapped IPv6 as IPv4, a zone id kept. It is `"unknown"`, never the proxy's own address, when a trusted proxy's header names no usable client (the selected entry isn't an address, e.g. `unknown`, `_hidden` or a malformed element; the header is empty; or the proxy sent only the header Brace doesn't read): treat `"unknown"` as matching nothing in an allowlist (`TrustedProxies.isTrusted("unknown")` is false); `perIp` counts all of them in one bucket. A trusted peer sending no forwarding header at all is itself the client. `X-Forwarded-Proto` and `X-Forwarded-Host` use their **rightmost** entry across all lines, so the proxy must set (overwrite) them, not pass a client's through; an `X-Forwarded-Host` entry that isn't a `host[:port]` is ignored. An IPv4 CIDR also matches the IPv4-mapped form (`::ffff:10.1.2.3`); list `::1` separately from `127.0.0.1`.
 
 For apps behind Cloudflare, `TrustedProxies.cloudflare()` is pre-loaded with Cloudflare's published egress ranges:
 
@@ -1443,7 +1458,7 @@ all-lowercase-letters) log a warning but are allowed. Use 32+ random characters.
 Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`, plus
 `app.opsOrigins("https://your-app")` (or `BRACE_OPS_ORIGINS`), the public origin CLI logins are
 signed for, which every mode except `dev` (and tests) requires when ops is on; scaffold config with
-`brace init`, keys with `brace ops keypair`. In `ops-authorized-keys` (`KEY [scope:read|scope:control] [label...] [# comment]`) any token with `:` or `=` must be exactly `scope:read` or `scope:control`, at most once, or startup fails (`scope: read`, `--scope=read`, `role:read`); other words are labels, except a lone `read`/`ro`/`control` after the key, which fails; a duplicate key keeps the lower scope; no scope token means control. `brace ops keypair --label` refuses a label the file would reject or cut short (`:`, `=`, a leading `#`, a lone scope word without `--read-only`). **Operating in production?** Start with
+`brace init`, keys with `brace ops keypair`. In `ops-authorized-keys` every key line states its scope: `KEY scope:read [label...] [# comment]` or `KEY scope:control [label...] [# comment]`. **A key line with no scope token fails startup** (it used to mean control; add `scope:control` to keep that). Any other token with `:` or `=` fails too (`scope: read`, `--scope=read`, `role:read`), as do a scope written inside the line's comment, non-ASCII spaces or colon look-alikes, and a key that isn't the base64 key `brace ops keypair` prints (e.g. an `ssh-ed25519` line); other words are labels; a duplicate key keeps the lower scope. `brace ops keypair` always writes the scope token (`--read-only` for `scope:read`), and `--label` refuses a label the file would reject or cut short (`:`, `=`, a leading `#`). **Operating in production?** Start with
 `brace check --env prod --json` — not `brace status`. The full ops reference — auth keys and
 scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, storage/retention —
 is **`BRACE-OPS.md`** in the project root (written by `brace new`, refreshed together with this

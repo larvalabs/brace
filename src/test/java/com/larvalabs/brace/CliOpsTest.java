@@ -122,7 +122,7 @@ class CliOpsTest {
         // appended to, not overwritten.
         var existing = OpsKeys.generateKeypair();
         Files.writeString(projectDir.resolve("ops-authorized-keys"),
-            "# header\n" + existing.publicKey() + "  existing\n");
+            "# header\n" + existing.publicKey() + "  scope:control  existing\n");
         CliOps.keypair(projectDir, new String[]{"--label", "k1"});
         var keyLines = Files.readAllLines(projectDir.resolve("ops-authorized-keys")).stream()
             .map(String::strip)
@@ -147,10 +147,25 @@ class CliOpsTest {
                 assertRoundTrips(label, readOnly, projectDir.resolve("p" + n++));
             }
         }
-        // A bare scope word is a fine label on a read-only key: the scope token comes first.
+        // L1 final review: the scope token is always written, so a bare scope word is only a
+        // label, at either scope (without --read-only it used to be refused: `KEY read` loaded
+        // nowhere, and `KEY read x` loaded as CONTROL).
         for (String word : java.util.List.of("read", "ro", "readonly", "read-only", "control", "READ")) {
             assertRoundTrips(word, true, projectDir.resolve("p" + n++));
+            assertRoundTrips(word, false, projectDir.resolve("p" + n++));
         }
+    }
+
+    @Test
+    void everyEntryStatesItsScope() throws Exception {
+        assertEquals(0, CliOps.keypair(projectDir, new String[]{"--label", "laptop"}));
+        Files.delete(projectDir.resolve("ops-private.key"));
+        assertEquals(0, CliOps.keypair(projectDir, new String[]{"--label", "agent", "--read-only"}));
+        var lines = Files.readAllLines(projectDir.resolve("ops-authorized-keys"));
+        assertTrue(lines.stream().anyMatch(l -> l.matches("\\S+\\s+scope:control\\s+laptop")), lines.toString());
+        assertTrue(lines.stream().anyMatch(l -> l.matches("\\S+\\s+scope:read\\s+agent")), lines.toString());
+        var loaded = OpsKeys.loadAuthorizedKeys(projectDir.resolve("ops-authorized-keys").toString());
+        assertEquals(java.util.Set.of(OpsScope.CONTROL, OpsScope.READ), java.util.Set.copyOf(loaded.values()));
     }
 
     private void assertRoundTrips(String label, boolean readOnly, Path dir) throws Exception {
@@ -178,10 +193,10 @@ class CliOpsTest {
     void labelsTheKeysFileWouldRefuseAreRejectedBeforeAnyKeyIsGenerated() throws Exception {
         record Case(String label, boolean readOnly, String mentions) {}
         var cases = new java.util.ArrayList<Case>();
-        for (String word : java.util.List.of("read", "ro", "readonly", "read-only", "control", "READ", " read ")) {
-            cases.add(new Case(word, false, "--read-only"));
-        }
         for (boolean ro : new boolean[]{true, false}) {
+            // A look-alike of ':' would make a label read as a scope token the server ignores.
+            cases.add(new Case("scope：read", ro, "U+FF1A"));
+            cases.add(new Case("zero​width", ro, "U+200B"));
             for (String l : java.util.List.of("a:b", "k=v", "scope:read", "scope:control", "role:read", "x=")) {
                 cases.add(new Case(l, ro, "':' or '='"));
             }

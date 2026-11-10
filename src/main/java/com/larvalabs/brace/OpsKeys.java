@@ -106,24 +106,31 @@ public class OpsKeys {
     }
 
     /**
-     * Load authorized public keys and their scope ceilings from a file (UTF-8; a leading
-     * byte-order mark is ignored). The format, line by line:
+     * Load authorized public keys and their scope ceilings from a file (UTF-8; a byte-order mark
+     * at the very start of the file is ignored). Every key line states its scope; nothing is
+     * inferred, so there is no way to write a line that quietly means more than it says. The
+     * format, line by line:
      * <ul>
      *   <li>{@code #} at the start of a line or after whitespace starts a comment that runs to the
      *       end of the line. Blank and comment-only lines are ignored.</li>
-     *   <li>Otherwise the first whitespace-separated token is the public key (base64, with an
-     *       optional legacy {@code ed25519:} prefix). The remaining tokens, in any order:</li>
-     *   <li>A token containing {@code :} or {@code =} must be exactly {@code scope:read} or
-     *       {@code scope:control} ({@code scope:} lowercase, the value case-insensitive), at most
-     *       once per line. Anything else with {@code :} or {@code =} ({@code scope: read},
+     *   <li>Otherwise the first whitespace-separated token is the public key: the base64 Ed25519
+     *       key {@code brace ops keypair} prints, with an optional legacy {@code ed25519:} prefix.
+     *       Anything else (truncated or padded base64, an OpenSSH {@code ssh-ed25519 AAAA…} line)
+     *       fails startup: such a line could never authenticate anyone.</li>
+     *   <li>Exactly one of the remaining tokens must be {@code scope:read} or {@code scope:control}
+     *       ({@code scope:} lowercase, the value case-insensitive). <strong>A line with no scope
+     *       token fails startup</strong> (final review; such a line used to mean CONTROL, which is
+     *       what {@code KEY read ci-agent}, {@code KEY ci-agent read-only} and {@code KEY (read)}
+     *       silently got). Add {@code scope:control} to keep that meaning.</li>
+     *   <li>Any other token containing {@code :} or {@code =} ({@code scope: read},
      *       {@code Scope:read}, {@code scope=read}, {@code --scope=read}, {@code role:read},
      *       {@code scope:read-only}, a second scope token) fails startup.</li>
-     *   <li>Every other token is label text ({@code ci-agent}, {@code control},
-     *       {@code --label scope-ci}), with one exception: a lone {@code read}, {@code ro},
-     *       {@code readonly}, {@code read-only} or {@code control} as the only token after the
-     *       key ({@code KEY read}) fails startup, asking for {@code scope:read}.</li>
-     *   <li>A line with no scope token is {@link OpsScope#CONTROL} (backward compatible with key
-     *       files written before scoping existed).</li>
+     *   <li>Every other token is label text ({@code ci-agent}, {@code control}, {@code read}).</li>
+     *   <li>A comment on a key line may not contain {@code scope:} or {@code scope=} (a scope
+     *       written after a {@code #} is ignored, which is almost certainly not what was meant),
+     *       and a line may not contain non-ASCII whitespace, a byte-order mark, or a look-alike of
+     *       {@code :} or {@code =} such as the fullwidth colon: each makes a line read differently
+     *       from how it parses.</li>
      * </ul>
      * Failures name the file and line number, never the key.
      *
@@ -135,41 +142,44 @@ public class OpsKeys {
     }
 
     /**
-     * {@link #loadAuthorizedKeys(String)}; with {@code logKeys} each key's fingerprint and effective
-     * scope is logged ({@code ops.key}), including keys that fell back to CONTROL because their line
-     * has no scope token. Never logs the key itself.
+     * {@link #loadAuthorizedKeys(String)}; with {@code logKeys} each key's fingerprint and scope is
+     * logged ({@code ops.key}). Never logs the key itself.
      *
      * <p>L1 (2026-11 review): a malformed scope used to fall back to CONTROL silently, so a
-     * hand-written {@code scope:read-only} handed an agent a full-privilege key. The grammar in
-     * {@link #loadAuthorizedKeys(String)} (rewritten after the review of that fix, so that a
-     * label such as {@code control} or a trailing comment loads, while {@code --scope=read} and
-     * {@code role:read} fail) leaves no token that silently means CONTROL. A key listed twice
-     * keeps the lower scope.
+     * hand-written {@code scope:read-only} handed an agent a full-privilege key. Two rounds of
+     * refusing particular wrong spellings left others ({@code KEY read ci-agent}); the final
+     * review made the scope token mandatory instead. A key listed twice keeps the lower scope.
      */
     public static Map<String, OpsScope> loadAuthorizedKeys(String path, boolean logKeys) {
         try {
             var keys = new LinkedHashMap<String, OpsScope>();
-            var implicit = new java.util.HashSet<String>();
             int lineNo = 0;
             for (String line : Files.readAllLines(Path.of(path))) {
                 lineNo++;
                 // A leading UTF-8 byte-order mark (Windows editors) would otherwise stick to the
                 // first key, which then silently never matches.
                 if (lineNo == 1 && line.startsWith("﻿")) line = line.substring(1);
-                line = stripComment(line).strip();
-                if (line.isEmpty()) continue;
-                String[] tokens = line.split("\\s+");
+                String content = stripComment(line);
+                if (content.isBlank()) continue; // blank or comment-only: free text
+                String confusing = confusingCharacter(line);
+                if (confusing != null) {
+                    throw new IllegalStateException(invalid(path, lineNo, confusing));
+                }
+                String comment = line.substring(content.length()).toLowerCase(java.util.Locale.ROOT);
+                if (comment.matches(".*scope\\s*[:=].*")) {
+                    throw new IllegalStateException(invalid(path, lineNo, "the comment contains a scope, "
+                        + "which is ignored there; put scope:read or scope:control before the '#'"));
+                }
+                String[] tokens = content.strip().split("\\s+");
                 String key = tokens[0];
                 // Tolerate a legacy "ed25519:" type prefix written by older `brace ops keypair`.
                 // Base64 never contains ':', so a leading "algo:" is unambiguously a prefix — strip
                 // it so a key file written by a buggy CLI still matches the raw base64 the client sends.
                 if (key.startsWith("ed25519:")) key = key.substring("ed25519:".length());
-                if (tokens.length == 2 && BARE_SCOPE_WORDS.contains(tokens[1].toLowerCase(java.util.Locale.ROOT))) {
-                    // The classic mistake: `KEY read`. Alone after the key, it is surely meant as
-                    // a scope, and as a label it would silently grant CONTROL.
-                    String meant = tokens[1].toLowerCase(java.util.Locale.ROOT).startsWith("c") ? "control" : "read";
-                    throw new IllegalStateException(badScope(path, lineNo, "'" + tokens[1]
-                        + "' alone after the key is not a scope; write scope:" + meant));
+                String keyProblem = keyProblem(tokens);
+                if (keyProblem != null) {
+                    throw new IllegalStateException("Invalid ops authorized keys file " + path + ", line "
+                        + lineNo + ": " + keyProblem);
                 }
                 OpsScope scope = null;
                 for (int i = 1; i < tokens.length; i++) {
@@ -178,16 +188,20 @@ public class OpsKeys {
                     OpsScope parsed = token.startsWith("scope:")
                         ? OpsScope.parseOrNull(token.substring("scope:".length())) : null;
                     if (parsed == null) {
-                        throw new IllegalStateException(badScope(path, lineNo,
+                        throw new IllegalStateException(invalid(path, lineNo,
                             "a token with ':' or '=' that is not scope:read or scope:control"));
                     }
                     if (scope != null) {
-                        throw new IllegalStateException(badScope(path, lineNo, "more than one scope token"));
+                        throw new IllegalStateException(invalid(path, lineNo, "more than one scope token"));
                     }
                     scope = parsed;
                 }
-                boolean explicit = scope != null;
-                if (scope == null) scope = OpsScope.CONTROL;
+                if (scope == null) {
+                    throw new IllegalStateException(invalid(path, lineNo, "the line has no scope. Every key line "
+                        + "must say scope:read (status, logs and errors only) or scope:control (everything). "
+                        + "A line without one used to mean control: add scope:control to keep that, or "
+                        + "scope:read if the key was meant to be read-only"));
+                }
                 OpsScope existing = keys.get(key);
                 if (existing != null) {
                     scope = scope.min(existing);
@@ -196,12 +210,10 @@ public class OpsKeys {
                         + scope.wire() + ")");
                 }
                 keys.put(key, scope);
-                if (explicit) implicit.remove(key); else if (existing == null) implicit.add(key);
             }
             if (logKeys) {
                 for (var e : keys.entrySet()) {
-                    Log.info("ops.key", Map.of("kid", fingerprint(e.getKey()), "scope", e.getValue().wire(),
-                        "scopeSource", implicit.contains(e.getKey()) ? "default (no scope: token)" : "explicit"));
+                    Log.info("ops.key", Map.of("kid", fingerprint(e.getKey()), "scope", e.getValue().wire()));
                 }
             }
             return keys;
@@ -210,15 +222,75 @@ public class OpsKeys {
         }
     }
 
-    private static String badScope(String path, int lineNo, String what) {
+    private static String invalid(String path, int lineNo, String what) {
         return "Invalid ops authorized keys file " + path + ", line " + lineNo + ": " + what
-            + ". Format: KEY [scope:read|scope:control] [label words...] [# comment]. Write scope: "
-            + "in lowercase with no space after the colon, at most once; omit it for control.";
+            + ". Format, one of:  KEY scope:read [label words...] [# comment]  or  "
+            + "KEY scope:control [label words...] [# comment]. Write scope: in lowercase with no space "
+            + "after the colon, exactly once.";
     }
 
-    /** Words that, as the only token after a key, are a mistyped scope rather than a label. */
-    private static final java.util.Set<String> BARE_SCOPE_WORDS =
-        java.util.Set.of("read", "ro", "readonly", "read-only", "control");
+    /** Characters that read as {@code :} or {@code =} but are not; a token written with one is not what it looks like. */
+    private static final String LOOK_ALIKES = "：﹕꞉∶ː׃︓։܃܄⁚"
+        + "＝═⁼₌꞊﹦";
+
+    /**
+     * Why a key line cannot be trusted to mean what it appears to say, or null: it contains
+     * whitespace other than ASCII space and tab (a no-break or ideographic space joins or splits
+     * tokens invisibly), a byte-order mark, a control character, or a look-alike of {@code :} or
+     * {@code =}. Also used by {@code brace ops keypair} to refuse a label the server would.
+     */
+    static String confusingCharacter(String line) {
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == ' ' || c == '\t') continue;
+            String what = null;
+            if (c == '﻿') {
+                what = "a byte-order mark (only allowed at the very start of the file)";
+            } else if (Character.isWhitespace(c) || Character.isSpaceChar(c)) {
+                what = "a whitespace character other than space or tab";
+            } else if (Character.isISOControl(c) || Character.getType(c) == Character.FORMAT) {
+                what = "an invisible control or format character";
+            } else if (LOOK_ALIKES.indexOf(c) >= 0) {
+                what = "a look-alike of ':' or '='";
+            }
+            if (what != null) {
+                return "column " + (i + 1) + " is " + what + " (" + String.format("U+%04X", (int) c)
+                    + "); retype the line with plain ASCII spaces and ':'";
+            }
+        }
+        return null;
+    }
+
+    /** The raw length of an X.509-encoded Ed25519 public key: a 12-byte header and the 32-byte key. */
+    private static final int ED25519_X509_LENGTH = 44;
+
+    /** Why the key at the start of a line can never match a client's key, or null. */
+    private static String keyProblem(String[] tokens) {
+        String key = tokens[0];
+        String hint = " Use the public key `brace ops keypair` prints (it also writes this file).";
+        if (key.startsWith("ssh-") || key.startsWith("ecdsa-") || key.startsWith("AAAAC3NzaC1lZDI1NTE5")
+                || key.startsWith("AAAAB3NzaC1yc2E")) {
+            return "this is an OpenSSH public key line. Ops keys are not SSH keys: the server expects the "
+                + "base64 key from `brace ops keypair`, then scope:read or scope:control." + hint;
+        }
+        if (key.startsWith("ed25519:")) key = key.substring("ed25519:".length());
+        byte[] decoded;
+        try {
+            decoded = Base64.getDecoder().decode(key);
+        } catch (IllegalArgumentException e) {
+            return "the first token is not a base64 public key." + hint;
+        }
+        if (decoded.length != ED25519_X509_LENGTH) {
+            return "the first token decodes to " + decoded.length + " bytes; an Ed25519 public key is "
+                + ED25519_X509_LENGTH + " (the key looks truncated or has extra characters)." + hint;
+        }
+        try {
+            KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(decoded));
+        } catch (Exception e) {
+            return "the first token is not an Ed25519 public key." + hint;
+        }
+        return null;
+    }
 
     /** Drops a comment: a {@code #} at the start of the line or after whitespace, to end of line. */
     static String stripComment(String line) {

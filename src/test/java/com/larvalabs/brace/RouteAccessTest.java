@@ -249,7 +249,7 @@ class RouteAccessTest {
     @Test
     void everyOpsRouteResolvesToAnOpsScopeOrIsAnAuthHandshake(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
         var keys = dir.resolve("ops-authorized-keys");
-        java.nio.file.Files.writeString(keys, OpsKeys.generateKeypair().publicKey() + "\n");
+        java.nio.file.Files.writeString(keys, OpsKeys.generateKeypair().publicKey() + " scope:control\n");
         var app = Brace.app().opsUnpinnedForTests().port(0).banner(false).ops(keys.toString())
             .strictAccessCheck()
             .defaultAccess(Access.session("userId", "/login"))

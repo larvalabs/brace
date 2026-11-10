@@ -388,10 +388,60 @@ public class TrustedProxies {
             }
         }
         try {
-            return InetAddress.getByName(s);
+            // The zone id is dropped before parsing (final review): InetAddress resolves it against
+            // this machine's interfaces and throws for a name it does not have, and a zone plays
+            // no part in a CIDR match. canonical() puts it back as written.
+            int zone = s.indexOf('%');
+            return InetAddress.getByName(zone >= 0 ? s.substring(0, zone) : s);
         } catch (UnknownHostException e) {
             return null;
         }
+    }
+
+    /**
+     * The canonical text of an address literal, or null if {@code s} is not one (never resolves a
+     * name). This is the form {@link Request#ip()} returns, so string comparison in app code is
+     * reliable however a proxy or the socket layer spelled the address:
+     * <ul>
+     *   <li>IPv4: dotted decimal, {@code 203.0.113.9}.</li>
+     *   <li>IPv6: RFC 5952, lower-case hex with no leading zeros and the longest run of two or
+     *       more zero groups (the first, on a tie) written {@code ::}: {@code 2001:db8::5},
+     *       {@code ::1}. Never bracketed, never with a port.</li>
+     *   <li>An IPv4-mapped IPv6 address ({@code ::ffff:6.6.6.6}) is the IPv4 address,
+     *       {@code 6.6.6.6}.</li>
+     *   <li>A zone id is kept as written: {@code fe80::1%eth0}.</li>
+     * </ul>
+     */
+    static String canonical(String s) {
+        var addr = parseLiteral(s);
+        if (addr == null) return null;
+        byte[] b = addr.getAddress();
+        if (b.length == 4) return addr.getHostAddress();
+        int[] groups = new int[8];
+        for (int i = 0; i < 8; i++) groups[i] = (b[2 * i] & 0xFF) << 8 | b[2 * i + 1] & 0xFF;
+        int bestStart = -1, bestLen = 0;
+        for (int i = 0; i < 8; ) {
+            if (groups[i] != 0) { i++; continue; }
+            int j = i;
+            while (j < 8 && groups[j] == 0) j++;
+            if (j - i > bestLen) { bestStart = i; bestLen = j - i; }
+            i = j;
+        }
+        if (bestLen < 2) bestStart = -1;
+        var out = new StringBuilder(45);
+        for (int i = 0; i < 8; i++) {
+            if (i == bestStart) {
+                out.append("::");
+                i += bestLen - 1;
+                continue;
+            }
+            if (i > 0 && out.charAt(out.length() - 1) != ':') out.append(':');
+            out.append(Integer.toHexString(groups[i]));
+        }
+        String unbracketed = unbracket(s);
+        int zone = unbracketed.indexOf('%');
+        if (zone >= 0) out.append(unbracketed, zone, unbracketed.length());
+        return out.toString();
     }
 
     /**

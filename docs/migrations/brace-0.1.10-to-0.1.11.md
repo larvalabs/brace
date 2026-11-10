@@ -57,11 +57,11 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | **2026-11 review:** `RateLimiter.perKey` limits a request with a missing key (per client IP); distinct keys are capped; `perIp` groups IPv6 by /64 | security, **breaking** for limiters whose key can be absent | apply a login limiter to the `POST` only, or add `.exemptMissingKey()` | [§](#breaking-rate-limiter-keys) |
 | **2026-11 review:** `req.form()` ignores the query string on `POST`/`PUT`/`PATCH`/`DELETE` | security, **breaking** | send form fields in the body | [§](#breaking-reqform-ignores-the-query-string-on-mutating-methods) |
 | **2026-11 review:** `smtp://` requires STARTTLS (`smtp+plain://` opts out); `to`/`cc`/`from`/`replyTo` take one address each; `replyTo` is now applied | security, **breaking** for plain relays and comma-separated recipients | use `smtp+plain://` for a relay without TLS; send one message per recipient | [§](#breaking-smtp-requires-starttls-mail-addresses-are-single) |
-| **2026-11 review:** `opsOrigins` required whenever ops is on outside dev mode; `ops-authorized-keys` format is strict | security, **breaking** for deployments with no `brace.mode` and for keys files with scope typos | set `BRACE_OPS_ORIGINS`; write scopes exactly `scope:read` or `scope:control` | [§](#breaking-ops-origins-required-outside-dev-authorized-keys-format) |
+| **2026-11 review:** `opsOrigins` required whenever ops is on outside dev mode; every `ops-authorized-keys` line must state `scope:read` or `scope:control` | security, **breaking** for deployments with no `brace.mode` and for every keys file with a line that has no scope token (startup fails) | set `BRACE_OPS_ORIGINS`; add `scope:control` to each key line that has no scope | [§](#breaking-ops-origins-required-outside-dev-authorized-keys-format) |
 | **2026-11 review:** `Http.timeout(...)` bounds the whole buffered exchange, body included; `idleTimeout(...)` applies to `fetch*` | security, **breaking** for buffered calls that take over 30 s | add `.timeout(Duration...)` to slow downloads and slow APIs | [§](#breaking-http-timeouts-cover-the-response-body) |
-| **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; IPv6 addresses are unbracketed | security, **breaking** behind a proxy that sends only `Forwarded` | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host` | [§](#breaking-proxy-headers-and-reqip) |
 | **2026-11 review:** page cache stores only 2xx, keys on the route, bypasses on `Authorization`, htmx targeting headers and `HX-Request` values other than `true`; `HEAD` never stores; `varyHeader` values hashed; app keys on `brace:page:` refused; shared-cache supertype reads need `allowType` for app classes; Postgres migration V19 | security, **breaking** for tests of cached handlers that read undeclared input, app keys starting `brace:page:`, and app classes read through an interface from the shared cache | declare inputs with `.vary(...)`/`.varyHeader(...)`, or stop caching the route; rename `brace:page:` keys; `cache.allowType(...)` at startup or read the concrete class | [§](#breaking-page-cache-keys-bypasses-and-undeclared-reads) |
 | **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are escaped for JavaScript again, as `\uXXXX` (same value, different page source); `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"`, and for tests that string-match rendered script source | move the data to `data-*` attributes; pass CSS values, not CSS syntax; assert on values, not on script source | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
+| **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; `req.ip()` is canonical (`::1`, `2001:db8::5`) and is `unknown`, not the proxy's address, when a trusted proxy's header names no client | security, **breaking** behind a proxy that sends only `Forwarded`, and for code comparing `req.ip()` with another spelling | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host`; compare against the canonical form | [§](#breaking-proxy-headers-and-reqip) |
 | **2026-11 review:** access rejections and guarded static responses are never shared-cacheable; `Result` header names are case-insensitive; dot segments are 404; WebSocket paths are exact | security | none, unless code relied on two spellings of a header name being two headers, or on `result.headers()` order | [§](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable) |
 | **2026-11 review:** previous session secrets are validated and lifetime-bounded; `/ops/errors` redacts by value shape; the error store survives hostile input; analytics row caps; ops auth start-time floor | security | none, unless a previous secret was a placeholder | [§](#security-sessions-error-store-analytics-and-ops-auth) |
 | **2026-11 review:** CLI: env names and key labels validated, project files never written through a symlink, terminal control characters escaped; launcher: one `<brace.version>` per pom, prereleases ordered before their release, toolchain floor raised to 0.1.11 with the release | security, **breaking** for env names with other characters and for projects pinned below 0.1.11 once it ships | rename such env keys; raise `<brace.version>` to `0.1.11` | [§](#security-cli-and-launcher-on-an-untrusted-checkout) |
@@ -1322,10 +1322,24 @@ What to know:
   throws; it used to be silently ignored.
 - **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
   `app.get("/docs/payroll.pdf", ...)`, the mapping never serves `/docs/payroll.pdf` under any
-  method; a request the route doesn't handle gets a 405. `start()` logs a warning listing routes
-  under a mapping's prefix (not for a mapping at `/`). For a per-file decision (the file's
-  owner), serve the file from a route: `db.findOwnedOr404(...)`, then
-  `Result.fileUnder(dir, name).untrusted()`.
+  method. A request for it under a method the route doesn't handle runs the route's access
+  first, so a caller the route would refuse gets that rejection; a caller it admits gets a 405
+  with the route's methods in `Allow`. An `app.ws(...)` socket under the prefix owns its path
+  the same way (a plain request for it gets 426, never a file of that name). `start()` logs a
+  warning listing routes and sockets under a mapping's prefix (not for a mapping at `/`). For a
+  per-file decision (the file's owner), serve the file from a route:
+  `db.findOwnedOr404(...)`, then `Result.fileUnder(dir, name).untrusted()`.
+- **The prefix must start with `/`.** `staticFiles("assets", dir)` and `staticFiles("", dir)`
+  now throw `IllegalArgumentException` at registration; the first used to start and serve
+  nothing.
+
+  ```java
+  // before: started, and every request for these files was a 404
+  app.staticFiles("assets", "public").publicFiles();
+
+  // after
+  app.staticFiles("/assets", "public").publicFiles();
+  ```
 - **Guarded files are never shared-cacheable.** See
   [access rejections and guarded responses](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable).
 - A path guard such as `before("/uploads/*", ...)` is no longer needed for a mapping and can be
@@ -1406,9 +1420,31 @@ Also changed:
 - **`before("/api", ...)` matches only the literal `/api`.** The docs showed it for a whole API;
   use `/api/*`.
 - **Distinct keys are capped per limiter** (default 100,000; `.maxKeys(n)` on `perIp(...)` and
-  `perKey(...)`). At the cap a new key takes the place of the least recently used key that is
-  under its limit; keys at their limit are kept until their window ends, and only when nothing
-  can be replaced does a key fall back to a per-IP overflow bucket, then a global one.
+  `perKey(...)`), so a limiter's memory is bounded: at most `maxKeys` keys plus `maxKeys`
+  per-address overflow buckets. At the cap a new key takes the place of the least recently used
+  key that is under its limit; keys at their limit are kept until their window ends. On Postgres
+  a forgotten key keeps its fleet count (its row is never deleted early, and the count is read
+  again when the key returns); with per-process counting it restarts from zero. When nothing
+  can be replaced a new key is counted against its client address.
+- **A saturated limiter fails closed by default.** When the key table and the per-address
+  buckets are all at their limit (for `perKey(…, 5, "15m")` at the default cap, a sustained
+  flood of about 1,300 requests a second from 100,000 addresses), requests the limiter has no
+  room to count share one last-resort bucket and are refused with 429: clients it is not
+  tracking are locked out for as long as the flood lasts. The alternative lets them through
+  uncounted, which gives the same flood unlimited attempts at untracked keys:
+
+  ```java
+  // default: no request goes uncounted
+  app.before("/login", RateLimiter.perKey(keyFn, 5, "15m"));
+
+  // opt in where an uncounted request is cheap and a lockout is worse
+  app.before("/api/*", RateLimiter.perIp(1000, "1m").onSaturation(RateLimiter.Saturation.FAIL_OPEN));
+  ```
+
+  `docs/SECURITY.md`, Rate Limiting, has what each choice costs.
+- **`brace_counters` can hold more rows during a key flood.** A row now always lives until its
+  window ends (about one row per distinct key counted in the window), then is swept. Nothing
+  to do; size the table for the flood you expect.
 - **`perIp` groups IPv6 clients by /64**, so rotating addresses inside one allocation no longer
   resets the count. Clients that share a /64 share a budget.
 - **Keys with control characters or unpaired surrogates are hashed.** One such key used to stop
@@ -1514,26 +1550,47 @@ A generated project already reads `OPS_ORIGINS` in its compose file and pins `op
 dev. Test code that starts a real `Brace.app()` with ops should use `Brace.test()` or run with
 `-Dbrace.mode=dev`.
 
-**The `ops-authorized-keys` format is strict.** A mistyped scope silently meant full control
-(`KEY scope:read-only ci-agent` loaded as a control key). The format is now:
+**Every line of `ops-authorized-keys` must state its scope.** A mistyped scope silently meant
+full control (`KEY scope:read-only ci-agent` and `KEY read ci-agent` both loaded as control
+keys), because a line with no scope token meant control. Now a key line without `scope:read` or
+`scope:control` stops the server from starting:
 
 ```
-KEY [scope:read|scope:control] [label words...] [# comment]
+Invalid ops authorized keys file ops-authorized-keys, line 2: the line has no scope. Every key
+line must say scope:read (status, logs and errors only) or scope:control (everything). A line
+without one used to mean control: add scope:control to keep that, or scope:read if the key was
+meant to be read-only. ...
 ```
 
-- After the key, any token containing `:` or `=` must be exactly `scope:read` or
-  `scope:control` (the value is case-insensitive), at most once per line. Anything else fails
-  startup with the file and line number: `scope: read`, `Scope:read`, `--scope=read`,
-  `role:read`, `scpoe:read`, `scope:read-only`.
-- A lone `read`, `ro`, `readonly`, `read-only` or `control` as the only token after the key
-  fails startup, with a message saying to write `scope:read`.
-- Every other token is label text. `#` at the start of a line or after whitespace starts a
-  comment. A leading byte-order mark is ignored.
-- No scope token still means control, and is logged at boot along with each key's fingerprint
-  and scope. A key listed twice keeps the lower scope.
+**This affects every keys file written before 0.1.11**, including ones `brace ops keypair` and
+`brace new` wrote for full-control keys. The fix is one token per line:
 
-Check your file before deploying: a line that loaded as control by accident now stops the
-server from starting. Files written by `brace ops keypair` are unaffected. Also: an ops token
+```
+# before
+MCowBQYDK2VwAyEA...  alice@laptop
+MCowBQYDK2VwAyEA...  scope:read  oncall-agent
+
+# after: add scope:control to each line that has no scope (that is what it meant)
+MCowBQYDK2VwAyEA...  scope:control  alice@laptop
+MCowBQYDK2VwAyEA...  scope:read  oncall-agent
+```
+
+Edit the file, commit it and deploy it with the upgrade. While you are there, check that each
+`scope:control` line is a key you mean to have full control. The rest of the format:
+
+- After the key, any other token containing `:` or `=` fails startup with the file and line
+  number: `scope: read`, `Scope:read`, `--scope=read`, `role:read`, `scpoe:read`,
+  `scope:read-only`, a second scope token. The value is case-insensitive (`scope:READ`).
+- Every other token is label text, `read` and `control` included. `#` at the start of a line or
+  after whitespace starts a comment; a comment on a key line may not contain `scope:`.
+- The key must be the base64 Ed25519 key `brace ops keypair` prints. A truncated key or an
+  OpenSSH `ssh-ed25519 …` line fails startup instead of silently never matching.
+- A key line may not contain whitespace other than space and tab, a byte-order mark (one at the
+  very start of the file is ignored), or a look-alike of `:` or `=` such as a fullwidth colon.
+- A key listed twice keeps the lower scope. Each key's fingerprint and scope is logged at boot.
+
+`brace ops keypair` from 0.1.11 writes `scope:control` or (with `--read-only`) `scope:read` on
+every entry, and accepts `read`, `control` and similar words as plain labels. Also: an ops token
 whose payload has no scope claim, or an unrecognised one, is now `read`, not `control`.
 
 ## Breaking: `Http` timeouts cover the response body
@@ -1576,20 +1633,38 @@ app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());
 ```
 
 A trusted proxy that sends only the header Brace is not reading logs a one-time warning naming
-`useForwardedHeader()`. If you see every visitor with the proxy's IP after upgrading, this is
-why.
+`useForwardedHeader()`, and `req.ip()` is `unknown` for those requests. If you see every visitor
+as `unknown` after upgrading, this is why.
 
 Also changed:
 
 - **Repeated header lines are read as one list**, in order. The last line used to win.
 - **`X-Forwarded-Proto` and `X-Forwarded-Host` use the rightmost entry** across all lines, the
   one the nearest proxy added (it was the leftmost). Make sure your proxy sets (overwrites)
-  these headers; nginx `proxy_set_header`, Traefik and Caddy do.
-- **`req.ip()` is always an IP literal.** When the selected forwarding entry is not an address
-  (`unknown`, `_hidden`, anything else) it returns the socket address.
-- **IPv6 addresses are unbracketed.** `req.ip()` for a direct IPv6 client is
-  `0:0:0:0:0:0:0:1`, where 0.1.10 returned `[0:0:0:0:0:0:0:1]`. Update code or stored data that
-  compares against the bracketed form.
+  these headers; nginx `proxy_set_header`, Traefik and Caddy do. An `X-Forwarded-Host` entry
+  that is not a `host` or `host:port` is ignored and `Host` is used.
+- **`req.ip()` is always a canonical IP literal or the string `unknown`.** When the request
+  comes from a trusted proxy and the selected forwarding entry is not an address (`unknown`,
+  `_hidden`, a malformed element), or the header is empty, or the proxy sent only the header
+  Brace does not read, it returns `unknown`. 0.1.10 returned the entry as written, or the
+  proxy's own address. A trusted peer that sends no forwarding header at all is still returned
+  as itself, and an untrusted peer is always its socket address.
+
+  ```java
+  // before: a malformed header made req.ip() the proxy's address, which this admitted
+  if (req.ip().equals("127.0.0.1")) { /* local admin */ }
+
+  // after: unchanged code is safe ("unknown" equals no address); a denylist must name it
+  if (req.ip().equals("unknown") || blocked.contains(req.ip())) return Result.error(403, "Forbidden");
+  ```
+
+  `RateLimiter.perIp` counts every `unknown` request in one shared bucket.
+- **`req.ip()` is canonical.** IPv4 is dotted decimal. IPv6 follows RFC 5952: lower-case, no
+  leading zeros, the longest zero run written `::`, no brackets, no port. An IPv4-mapped IPv6
+  address is returned as IPv4, and a zone id is kept. A direct IPv6 loopback client is `::1`,
+  where 0.1.10 returned `[0:0:0:0:0:0:0:1]`; `2001:DB8:0:0:0:0:0:5` in a header is
+  `2001:db8::5`; `::ffff:6.6.6.6` is `6.6.6.6`. Update code or stored data that compares
+  against another spelling.
 - **Repeated `Cookie` lines are joined**, and the first occurrence of a name wins, on HTTP and
   WebSocket alike.
 - **Remove any `::ffff:…/104` entry from `trustedProxies`.** Earlier docs recommended it for
@@ -1806,7 +1881,9 @@ No action needed unless noted.
   as before.
 - **A response carrying the session cookie is always `private`.** If its `Cache-Control` has
   neither `private` nor `no-store`, `private` is added (`max-age=600` becomes
-  `private, max-age=600`); `public` is still rewritten to `private`.
+  `private, max-age=600`); `public` is still rewritten to `private`. The header is parsed, so
+  those words inside a quoted argument (`x="no-store"`) do not count as the directive.
+- **A dot-segment 404 under a guarded mapping is `no-store`** too (`/docs/./report.txt`).
 - **Dev mode warns once** when a route with an access requirement answers
   `Cache-Control: public` or `s-maxage`.
 - **`Result` header names are case-insensitive.** `result.header("cache-control", v)` now
@@ -1814,6 +1891,19 @@ No action needed unless noted.
   reads either spelling. `result.headers()` iterates in case-insensitive name order, not
   insertion order. Code that relied on two spellings being two headers, or on the order, must
   change.
+- **`Result.header(name, value)` validates the name.** It must be an HTTP token: ASCII letters,
+  digits and ``!#$%&'*+-.^_`|~``. An empty name, or one with a space, a colon or a non-ASCII
+  character, throws `IllegalArgumentException` where it used to reach the wire:
+
+  ```java
+  // before: sent a malformed header line
+  result.header("X Request Id", id);
+
+  // after: throws; use a token
+  result.header("X-Request-Id", id);
+  ```
+
+  Only ASCII letter case is folded when names are compared.
 - **WebSocket paths are exact.** A socket registered with `app.ws("/ws", ...)` upgrades only for
   the raw path `/ws` (any query string). `/x/../ws`, `/%77s` and `/ws;x` get 404. The path is a
   literal, not a pattern.
@@ -1821,7 +1911,12 @@ No action needed unless noted.
   `Brace.start()` has resolved it. Apps started with `start()` or `Brace.test()` are unaffected;
   code that built a `BraceHandler` or `Router` by hand and relied on routes being open is not.
 - **`start()` after `stop()` can be stopped again.** The second `stop()` of a restarted app was
-  a no-op that left the server running.
+  a no-op that left the server running. An app with `.ops(...)` can now be restarted, and
+  retried after a failed start (both used to throw `POST /ops/auth is registered twice`).
+- **`start()` on an app that is already starting or running throws `IllegalStateException`.**
+  It used to bring up a second server and lose track of the first. Call `stop()` first.
+  `stop()` stays idempotent, and one that arrives while `start()` is still running now waits
+  for it and stops what it started.
 
 ## Security: sessions, error store, analytics and ops auth
 
@@ -1905,11 +2000,28 @@ app.analytics(Analytics.options()
 
 **Ops auth**
 
-- **A signed login request timestamped before the server started is refused**, so a captured
-  request can't be replayed after a deploy. A CLI whose clock runs a few seconds ahead of the
-  server can see one 401 right after a deploy; retrying works.
-- **Each key has its own nonce quota**, so one key holder can't exhaust the replay cache and
-  block other operators' logins.
+- **An accepted sign-in can't be replayed after a deploy.** With a database
+  (`app.database(...)`) each accepted nonce is recorded in the framework's `brace_counters`
+  table, so a replay is refused by every instance and after any restart, and nothing changes
+  for the CLI. Without a database (or while it is down), the server instead refuses sign-ins
+  timestamped earlier than 30 seconds after it started:
+
+  ```
+  # before: `brace check --env prod` the moment a no-database app came up
+  ok
+
+  # after: for the first 30 to 60 seconds after a start
+  401 This server started less than a minute ago and cannot yet tell a new sign-in from a
+      replay of one made before the restart ... Retry in up to a minute.
+  ```
+
+  Wait and retry, or give the app a database. Dev mode (`brace dev`) and `Brace.test()` are
+  not affected.
+- **Each key has its own nonce quota**, sized so every key's share fits (5,000 per two minutes
+  with up to 20 keys), so no key holder or group of them can exhaust the replay cache and block
+  other operators' logins. A key over its quota gets `401 Too many sign-ins with this key ...`.
+- **`401 Stale timestamp` is exact.** A timestamp more than 30.0 seconds from the server's clock
+  is refused (it was truncated to whole seconds, allowing up to 30.9).
 
 **Development checks**
 

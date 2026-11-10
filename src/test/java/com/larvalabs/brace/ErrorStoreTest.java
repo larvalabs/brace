@@ -757,7 +757,7 @@ class ErrorStoreTest {
     void opsErrorsEndpointReturnsErrors(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
         app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
@@ -800,7 +800,7 @@ class ErrorStoreTest {
     void opsResolveErrorEndpoint(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
         app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
@@ -870,7 +870,7 @@ class ErrorStoreTest {
     void opsErrorsRequiresAuth(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
         app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
@@ -900,7 +900,7 @@ class ErrorStoreTest {
     void secretBearingPathAndMessageAreRedactedInStoredError(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
         // A 32-char hex-like secret that should trigger value-shaped redaction
         String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";

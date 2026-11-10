@@ -48,15 +48,26 @@ app.group("/admin", Access.check((req, s) ->
 Requirements are bound to the `Route` object at `start()`, not matched against the request
 path, so a guard and a route can't disagree about a path: `/admin/x/`, `/admin/%78` and
 `HEAD /admin/x` reach the same route and run the same requirements. They run after plain
-`before(...)` middleware (so a rate limiter sheds load first) and before the request body is
-read, so an unauthenticated client can't make the app buffer a body. Rejections go through the
-normal response path, so security headers and session write-back apply.
+`before(...)` middleware (so a rate limiter sheds load first) and before the framework reads
+the request body for the handler and for CSRF. The framework itself never buffers a body for a
+request an access requirement rejects. **The body is read earlier only if a plain `before(...)`
+asks for it**: `req.body()`, `req.formParam(...)`, `req.form(...)` and `req.file(...)` read it
+on first use, and a plain `before` runs ahead of access. The login limiter shown under Rate
+Limiting does exactly that (`req.formParam("username")`), so on that path an unauthenticated
+client's body is read, up to the upload limit, before any access requirement runs; that is the
+limiter's job there, since the login route is public. Keep body-reading `before(...)` middleware
+to the paths that need it. Rejections go through the normal response path, so security headers
+and session write-back apply.
 
 A request whose raw path has a segment that is exactly `.` or `..` (`/items/../y`, `/one/.`)
-is a 404 before any route, mapping, middleware or guard sees it: no handler receives `..` as a
+is answered 404 without being matched against any route or static mapping, and without any
+`before(...)` middleware, access requirement or handler running: no handler receives `..` as a
 path parameter, and a proxy that resolves dot segments for its own rules can't be made to
-disagree with Brace about which route is being called. The 404 passes through
-after-middleware, so it carries the app's security headers like any other 404.
+disagree with Brace about which route is being called. After-middleware does run for that 404,
+as for any other, so it carries the app's security headers. When the path, as written or with
+its dot segments resolved, falls under a guarded static mapping (`/docs/./report.txt`,
+`/x/../docs/report.txt`), the 404 is also sent `Cache-Control: no-store`, whatever an
+`after(...)` set.
 
 Plain `before(...)` middleware never counts as access. The previous model —
 `requireSession("/admin/*", …)` path-pattern guards — is removed.
@@ -92,18 +103,28 @@ app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
   for every method, so every spelling that reaches the mapping's files is guarded, and a
   rejected request gets the same response whether or not the file exists.
 - **A mapping serves `GET` and `HEAD` only.** Any other method on a path under a mapping
-  (`POST`, `OPTIONS`, an unknown method) gets `405` with `Allow: GET, HEAD`, after the mapping's
-  access has run, so an anonymous request to a guarded mapping still gets the rejection. The
+  (`POST`, `OPTIONS`, an unknown method) gets `405` with `Allow: GET, HEAD`. The 405 comes after
+  the mapping's access has run, so an anonymous request to a guarded mapping still gets the
+  rejection, and after session-aware `before(...)` middleware, which may answer first. The
   bundled `/__brace/*` assets answer other methods with `405` too.
 - **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
   `app.get("/docs/payroll.pdf", ...)`, the route answers `GET` (and `HEAD`) with its own access,
-  and the mapping never serves `/docs/payroll.pdf` under any method: a request the route does
-  not handle gets `405` with the route's methods in `Allow`, after the mapping's access. (Before
-  this, `POST /docs/payroll.pdf` skipped the route and was served the file by the mapping.)
-  `start()` logs a warning naming each mapping that has routes under its prefix, because every
-  other file in that directory is still served under the mapping's access alone; a mapping at
-  `/` is not warned about. Outside a mapping, a path that only matches a route under another
-  method is a `404`, as before.
+  and the mapping never serves `/docs/payroll.pdf` under any method. (Before this,
+  `POST /docs/payroll.pdf` skipped the route and was served the file by the mapping.) A request
+  for that path under a method the route does not handle is answered in this order: the
+  mapping's access; session-aware `before(...)`; then **the access of every route that owns the
+  path**, so a caller the route would refuse gets that same rejection (a login redirect, a 403)
+  and learns nothing more; and only then `405` with the routes' methods in `Allow`.
+- **A WebSocket route owns its path too.** With `app.ws("/docs/live", ...)` under that mapping,
+  a plain (non-upgrade) request for `/docs/live` is never served a file named `live`: it gets
+  the socket route's access check, then `426 Upgrade Required` for `GET`/`HEAD` or `405` with
+  `Allow: GET` for another method.
+- `start()` logs a warning naming each mapping that has routes (WebSocket routes included)
+  under its prefix, because every other file in that directory is still served under the
+  mapping's access alone; a mapping at `/` is not warned about. Outside a mapping, a path that
+  only matches a route under another method is a `404`, as before.
+- **A mapping's prefix must start with `/`.** `staticFiles("assets", dir)` throws at
+  registration; it used to start and never serve (and `""` behaved as `/`).
 - Nothing under a guarded mapping can be stored by a shared cache. A served file (200, 206, 304)
   is sent `Cache-Control: private, no-cache`, and a `?v=` fingerprint earns no `immutable`
   there. Every other response under the mapping (the access rejection, a 404, 405 or 416, an
@@ -936,18 +957,38 @@ can connect over either, list both:
 app.trustedProxies("127.0.0.1", "::1");
 ```
 
-An IPv6 peer is matched and reported without brackets: Jetty gives the socket address as
-`[0:0:0:0:0:0:0:1]`, and Brace strips the brackets where the address enters the framework, so a
-trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `0:0:0:0:0:0:0:1`.
+An IPv6 peer is matched and reported without brackets and in canonical form: Jetty gives the
+socket address as `[0:0:0:0:0:0:0:1]`, and Brace normalises it where the address enters the
+framework, so a trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `::1`.
+
+**The form of `req.ip()`.** Always canonical, whether it came from the socket or a header, so
+comparing it with a string is reliable:
+
+| Address | `req.ip()` |
+|---|---|
+| IPv4 | dotted decimal: `203.0.113.9` |
+| IPv6 | RFC 5952: lower-case hex, no leading zeros, the longest run of zero groups as `::`, no brackets, no port: `2001:db8::5`, `::1` |
+| IPv4-mapped IPv6 (`::ffff:6.6.6.6`) | the IPv4 address: `6.6.6.6` |
+| With a zone id | the zone kept as written: `fe80::1%eth0` |
+| No usable address | the literal string `unknown` (see below) |
+
+So `2001:DB8:0:0:0:0:0:5`, `[2001:db8::5]:443` and `2001:db8::5` in a header are all
+`2001:db8::5`. Write the addresses you compare against in the same form, or match with
+`new TrustedProxies("2001:db8::/32").isTrusted(req.ip())`, which compares binary values.
 
 ### Supported Headers
 
 - `X-Forwarded-For` (the default client-address header)
 - `Forwarded` (RFC 7239), instead of `X-Forwarded-For`, with `useForwardedHeader()`: elements
-  split on `,`, parameters on `;`, neither inside a quoted-string (`for="[2001:db8::1]:4711"`)
+  split on `,`, parameters on `;`, neither inside a quoted-string (`for="[2001:db8::1]:4711"`).
+  Elements are split from the right, so the element your proxy appended is delimited by its own
+  text: an unbalanced quote in what the client sent (`for="x`) spoils only the client's element
+  and cannot swallow the proxy's
 - `X-Forwarded-Proto` — the original scheme, for the session cookie's `Secure` attribute
 - `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision, the session
-  cookie's `__Host-` name, the cross-site `Origin` checks (CSRF, WebSocket, ops) and analytics
+  cookie's `__Host-` name, the cross-site `Origin` checks (CSRF, WebSocket, ops) and analytics.
+  The entry used must be a `host` or `host:port` (a name, an IPv4 address or a bracketed IPv6
+  address); anything else is ignored and `Host` is used
 
 All of them are ignored unless the immediate peer is a trusted proxy. Each is read from every
 line it arrives on, in order, as one list. For `X-Forwarded-Proto` and `X-Forwarded-Host` Brace
@@ -956,13 +997,33 @@ these headers, or passes a client's copy through, the leftmost entry is whatever
 **Your proxy must set (overwrite) both headers**, as the nginx example below does with
 `proxy_set_header`; a proxy that only passes them through lets a client choose them.
 
-`req.ip()` is always an IP address literal (or `unknown` when there is no socket address). If
-the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
-identifier, or anything a client managed to put there), the socket address is used instead.
+**`unknown`.** `req.ip()` is always a canonical IP address literal or the string `unknown`. It is
+`unknown` when the request came from a trusted proxy and the proxy's header names no usable
+client:
 
-If a trusted proxy sends the forwarding header Brace was not told to read, and not the one it
-was (say only `Forwarded` while the app reads `X-Forwarded-For`), every client would silently get
-the proxy's address; Brace logs one warning naming `TrustedProxies.useForwardedHeader()`.
+- the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
+  identifier, a malformed element, or anything a client managed to put there);
+- the header is present but empty, or (for `Forwarded`) has no `for=`;
+- the proxy sent only the forwarding header Brace was not told to read (say only `Forwarded`
+  while the app reads `X-Forwarded-For`). Brace also logs one warning naming
+  `TrustedProxies.useForwardedHeader()`.
+
+It is never the proxy's own address in those cases. Returning the proxy's address would let a
+client who can malform the header pass for the proxy: an allowlist that admits `127.0.0.1` or
+the proxy's LAN address would admit them, and they would get a second per-IP rate-limit budget.
+What the sentinel means to each consumer:
+
+- **Address allowlists must fail closed on it.** `unknown` is not an address, so
+  `TrustedProxies.isTrusted("unknown")` is false and an `equals` against a real address is
+  false. A denylist (`if (blocked.contains(req.ip()))`) does not catch it: check for it
+  explicitly if you keep one.
+- **`RateLimiter.perIp`** counts every `unknown` request in one shared bucket, so they are
+  limited together, not exempt.
+- **Analytics and logs** record the string as it is.
+
+A trusted peer that sends no forwarding header at all (a health check from the proxy itself, a
+process on the proxy's host) is the client, and `req.ip()` is its address. A request from a peer
+that is not a trusted proxy is always the socket address.
 
 Repeated `Cookie` lines are joined (with `; `) into one list on every request and WebSocket
 upgrade, and a cookie name that appears twice resolves to its first occurrence on both.
@@ -1090,7 +1151,10 @@ Any response Brace attaches a session `Set-Cookie` to is sent `private`. With no
 `Cache-Control` it gets `Cache-Control: private`. With one set by the handler or an
 after-middleware, `public` is rewritten to `private`, and `private` is added in front when the
 value has neither `private` nor `no-store` (`max-age=600` becomes `private, max-age=600`; so
-does `s-maxage=600`, which a shared cache then ignores); the other directives are kept. A
+does `s-maxage=600`, which a shared cache then ignores); the other directives are kept. The
+value is parsed into directives, so only a bare `private` or `no-store` directive counts: one
+of those words inside a quoted argument (`x="no-store"`, `no-cache="private"`) or the qualified
+form `private="set-cookie"` does not, and `private` is still added. A
 response carrying a session cookie is per-user by definition — without this it is
 *heuristically cacheable*, or explicitly storable, and a shared cache (e.g. an nginx recipe that
 force-caches everything under `/static/`) would replay user A's cookie to every user.
@@ -1098,7 +1162,12 @@ force-caches everything under `/static/`) would replay user A's cookie to every 
 Response header names are case-insensitive in `Result`: `res.header("cache-control", ...)` and
 `res.header("Cache-Control", ...)` are the same header, and the second write replaces the
 first. (Before 0.1.11 they were two entries; Brace checked one spelling and the other reached
-the wire, so a lowercase `cache-control: public` rode out with the session cookie.) Brace does
+the wire, so a lowercase `cache-control: public` rode out with the session cookie.) Only ASCII
+letter case is folded, and `res.header(name, value)` throws `IllegalArgumentException` for a
+name that is not an HTTP token (empty, or with a space, a colon, a control character or any
+non-ASCII character), so a look-alike name (a Unicode hyphen in `Cache-Control`, the Kelvin
+sign U+212A for `K`) is refused instead of reaching the wire or standing in for the real
+header. Brace does
 not strip `CDN-Cache-Control`, `Surrogate-Control` or `Expires` from a cookie-carrying response
 outside a guarded static mapping or an access rejection, so don't set those app-wide on
 responses that can carry a session.
@@ -1624,26 +1693,89 @@ can rotate through billions of source addresses; keying each address separately 
 fresh budget per request. IPv4 clients (and IPv4-mapped IPv6 addresses such as `::ffff:203.0.113.7`)
 are keyed on the full address. Clients that share a /64 share a budget.
 
-**Distinct keys are capped per limiter** (default 100,000). Each key holds memory, and on Postgres
-a `brace_counters` row, for its whole window. Once a limiter tracks that many keys (a warning is
-logged, at most once a minute):
+#### The key cap, and what a flood can and cannot do
 
-1. A new key takes the place of a tracked key that is **under** its limit, the least recently
-   used of a small sample. The forgotten key loses its count so far (fewer than the limit), an
-   accepted bypass: a client that floods fresh keys to reset one key's count pays a whole table
-   of requests for fewer than `limit` extra attempts. On Postgres the forgotten key's row is
-   deleted at the next flush, so the table stays bounded too.
-2. A key **at or over** its limit is never forgotten before its window ends, so a flood cannot
+**A limiter's memory is bounded.** Each limiter tracks at most `maxKeys` keys (default 100,000)
+plus at most `maxKeys` per-address overflow buckets and one last-resort bucket: at most
+`2 × maxKeys + 1` entries per instance, however many distinct keys clients send. (Concurrent
+requests can put a table a few entries over for a moment, at most one per request in flight.)
+Change the cap per limiter with `.maxKeys(n)`, e.g. `RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+
+Once the key table is full (a warning is logged, at most once a minute), a request for a key the
+limiter is not tracking is handled in this order:
+
+1. **It takes the place of a tracked key that is under its limit**: the least recently used of a
+   small sample, by a per-limiter sequence number, so a key in active use is not the one chosen
+   while an idler one is in the sample.
+2. **A key at or over its limit is never forgotten before its window ends**, so a flood cannot
    unblock a client that is being limited.
-3. Only when the sample finds nothing but such blocked keys does a new key fall back to an overflow
-   bucket for its client address (`ipBucket(req.ip())`; at most `maxKeys / 10` of them), and past
-   those, to one shared overflow bucket.
+3. When the sample holds only such blocked keys, the request is counted in an **overflow bucket
+   for its client address** (`ipBucket(req.ip())`, an IPv6 client's /64), with the limiter's limit:
+   that address gets `limit` requests per window across all its untracked keys. Overflow buckets
+   are replaced by the same rule (under its limit: replaceable; at its limit: kept).
+4. When the overflow table too holds only buckets at their limit, the limiter is **saturated**
+   and `onSaturation(...)` decides (below).
 
-So a flood of fresh keys no longer locks out new legitimate keys (the earlier design sent every
-new key to one shared overflow bucket once the table was full). Eviction looks at a fixed number
-of keys under a per-limiter lock taken only on that full-table path, so no request scans the
-table. Raise or lower the cap per limiter with `.maxKeys(n)`, e.g.
-`RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+**What forgetting a key costs.** It differs by mode:
+
+- *Postgres (shared counters).* Nothing is lost fleet-wide. The key's `brace_counters` row is
+  never deleted by an eviction, a count the instance had buffered for it is still written at the
+  next flush, and when the key comes back the instance reads the fleet count before judging the
+  request. A key the fleet has blocked stays blocked whichever instance sees it next.
+  (Counts buffered but unwritten can be lost only while database writes are failing.)
+- *Per-process counting (no shared database).* The forgotten key's count so far, fewer than
+  `limit`, is gone: if it returns it starts again from zero. A client that wants extra attempts
+  at one key must therefore fill the table with fresh keys and keep it turning over; with the
+  default cap that is on the order of 6,000 requests for each time the target key is forgotten,
+  buying fewer than `limit` extra attempts. That is the price of bounded memory; a `perIp`
+  limiter in front caps how fast one address can turn the table over.
+
+**Saturation, and what it costs an attacker to get there.** With the documented login limiter,
+`perKey(…, 5, "15m")` and the default cap:
+
+1. Pinning the key table takes 100,000 keys driven to their limit: 600,000 requests in one
+   15-minute window, about 670 requests a second, from any number of addresses. From then on a
+   new key is counted against its client address (step 3), so each address still gets 5 attempts
+   per window, and keys already tracked are unaffected.
+2. Pinning the overflow table as well takes 100,000 distinct client addresses (IPv4 addresses or
+   IPv6 /64s, e.g. two /48 allocations), each driven to its limit: another 600,000 requests per
+   window. Sustained, that is about 1,300 requests a second from 100,000 networks.
+
+A saturated limiter cannot count a request for a key it is not tracking from an address it is
+not tracking. You choose what happens to those requests; each choice hands that attacker
+something:
+
+| `onSaturation(...)` | Such a request is | What the attacker gains while they sustain the flood |
+|---|---|---|
+| `RateLimiter.Saturation.FAIL_CLOSED` (default) | counted in one last-resort bucket with the limiter's limit, shared by all of them, so nearly all are refused with 429 | A lockout: clients the limiter is not already tracking (in practice, anyone who has not just used the endpoint) cannot use it. No request goes uncounted. |
+| `RateLimiter.Saturation.FAIL_OPEN` | let through uncounted | Unlimited attempts at any key the limiter is not tracking, which for a login limiter is unlimited password guessing against accounts of their choice. Nobody is locked out. |
+
+```java
+// The default, spelled out:
+app.before("/login", RateLimiter.perKey(keyFn, 5, "15m").onSaturation(RateLimiter.Saturation.FAIL_CLOSED));
+
+// Availability over the limit, for an endpoint where an uncounted request is cheap:
+app.before("/api/*", RateLimiter.perIp(1000, "1m").onSaturation(RateLimiter.Saturation.FAIL_OPEN));
+```
+
+In both modes a tracked key is still counted and a blocked key stays blocked, and a warning is
+logged at most once a minute while the limiter is saturated. The default is `FAIL_CLOSED`
+because the limiter exists to bound attempts, and an attacker with this much traffic can degrade
+availability in other ways regardless. Either way, raise the cost: a larger `maxKeys` raises both
+figures in proportion (memory grows with it, a few hundred bytes per entry), and a `perIp`
+limiter registered before the key limiter bounds how many of those requests one address can
+contribute. Neither removes the trade-off; a limiter with bounded memory has to do something
+with the request it has no room for.
+
+**`brace_counters` rows are bounded by time, not by the cap.** A row is written for each key
+counted in a window and removed only after the window ends (each instance sweeps expired rows
+once a minute). A flood of fresh keys therefore holds up to one row per distinct key per window:
+600 new keys a second against a 15-minute window is about 540,000 small rows at the peak, gone a
+minute after their windows end. Rows are not deleted earlier, because an instance that has
+forgotten a key cannot know the rest of the fleet has.
+
+Eviction looks at a fixed number of keys under a per-limiter lock taken only on that full-table
+path, so no request scans a table.
 
 **Two limiters with the same type, limit and window share buckets on Postgres.** The counter key
 is built from the limiter's label (`perKey(5/15m)`), the only identity a limiter has across a
@@ -1703,7 +1835,12 @@ key is isolated; that key's buffered count is dropped with a warning instead of 
 later flush, at a cost of a few dozen statements rather than one per key. Any other failure
 (the database unreachable, SQLState class 08, 53 or 57, or an error that is not about the data)
 restores every count not yet written and retries after a one-second back-off. A flush runs on the
-request that filled the buffer, so it stops after 2 seconds and keeps the rest for the next one.
+request that filled the buffer, so it has a 2-second budget: it stops between statements once
+the budget is spent, and each statement carries a JDBC query timeout for what is left of it, so
+a statement stuck behind a lock or a slow database is cancelled rather than holding the request.
+JDBC timeouts are whole seconds, rounded up, so the hold is bounded at about the budget plus one
+second; what was not written is kept for the next flush. (Waiting for a free pooled connection
+is bounded by the pool's own connection timeout, not by this budget.)
 
 ### Best Practices
 
@@ -1782,11 +1919,11 @@ attempt. Binding the public key means a captured signature is only valid for the
 produced it; the nonce makes each signed request single-use; the origin makes it valid only at
 the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
 
-The nonce memory is per instance and empty at startup, so the server also refuses a request whose
-timestamp is earlier than its own start time (a request captured during a deploy cannot be
-replayed once after the restart). Each key has its own quota of remembered nonces (5,000 of the
-100,000 overall), so one key, even a read-scoped one, cannot fill the memory and block other
-operators' logins.
+Each key has its own quota of remembered nonces: 5,000 per two minutes, or less when there are
+more than 20 authorized keys, so that every key's share fits inside the overall 100,000. One
+key, even a read-scoped one, cannot fill the memory and block other operators' logins, and no
+group of keys can either. A key over its quota gets a 401 saying so. What "single-use" covers,
+across instances and restarts, is set out under "Replay suppression" below.
 
 **The signature is bound to a server.** The CLI reads the server's URL from the committed
 `.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
@@ -1850,14 +1987,32 @@ hits a different instance than the one that issued the token (B5). Within the 60
 login token can be exchanged more than once; single-use would require fleet-wide shared state
 that ops can't assume. The TTL is kept very short to limit the replay window.
 
-**Replay suppression (auth, per-instance, best-effort).** Used nonces are tracked in memory on
-each server instance, never fleet-wide — ops deliberately works without shared state (no
-database required), so behind a load balancer a captured auth request remains replayable against
-a *different* instance until the ±30s timestamp window closes. This residual window is accepted;
-the mitigations are HTTPS (an attacker should never observe the request body) plus the
-recommendations below. A captured request also cannot be replayed against an instance that
-started after it was signed: auth requests timestamped before the process started are refused.
-The old v1 and v2 protocols are removed (see above).
+**Replay suppression (auth).** A sign-in request that a server has accepted must not be accepted
+again. Two layers do that, and which guarantee you get depends on whether the app has a database:
+
+- *With a database* (`app.database(...)`): each accepted nonce is also recorded in the framework's
+  `brace_counters` table (a 64-character digest and an expiry two minutes on; no migration, no
+  configuration). The record is shared by every instance and outlives the process, so **an
+  accepted request is refused by every instance and after any restart or deploy**. Nothing is
+  refused after a start. If the write fails (database down), sign-in still works and the rules
+  of the next bullet apply until it succeeds again.
+- *Without a database, or while it is unreachable:* accepted nonces are remembered in each
+  instance's memory only. A replay to the same instance is refused. A restart empties that
+  memory, so for the first minute after a start the server **refuses any sign-in whose timestamp
+  is earlier than 30 seconds after it started**: the previous process accepted only timestamps
+  within 30 seconds of its clock and had stopped before this one started, so everything it
+  accepted falls in that range. The cost: a sign-in during the first 30 seconds after a start
+  (up to 60 for a client whose clock runs behind) gets a 401 that names the restart and says to
+  retry. Dev mode and the test harness skip this window. **Residual in this mode:** behind a
+  load balancer a request accepted by one live instance can be replayed against a *different*
+  instance until its ±30 s timestamp window closes; that includes the old instance of a
+  rolling deploy while both run.
+
+In both modes the checks run only after the signature and the origin have been verified, so a
+caller without an authorized key learns nothing from them, and a request no server ever accepted
+(the client's connection failed before delivery) is, like any bearer of a valid signature, good
+once within its 30 seconds. HTTPS is what keeps an attacker from observing a request in the first
+place; see the recommendations below. The old v1 and v2 protocols are removed (see above).
 
 **Key revocation.** Tokens are bound to the key that minted them. At startup the server takes
 the fingerprints of the keys in `ops-authorized-keys` and rejects any bearer token, ops session
@@ -1867,30 +2022,54 @@ restarting or redeploying takes effect on its outstanding tokens immediately, al
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
 
-**Scope tokens in `ops-authorized-keys`.** The file is UTF-8 (a leading byte-order mark is
-ignored), one key per line:
+**The `ops-authorized-keys` format: every key line states its scope.** The file is UTF-8 (a
+byte-order mark at the very start is ignored), one key per line, in one of two forms:
 
 ```
-KEY [scope:read | scope:control] [label words ...] [# comment]
+KEY scope:read    [label words ...] [# comment]
+KEY scope:control [label words ...] [# comment]
 ```
+
+`scope:read` allows status, logs, errors and the other read endpoints; `scope:control` allows
+everything. Nothing is inferred: **a key line with no scope token fails startup.** (Until
+0.1.11 such a line meant control, so `KEY read ci-agent`, `KEY ci-agent read-only` and
+`KEY (read)` all quietly loaded as full-control keys.) The rules:
 
 - `#` at the start of a line, or after whitespace, starts a comment that runs to the end of the
   line. Blank and comment-only lines are ignored. (`ci#1` is label text: no whitespace before
   the `#`.)
-- The first token is the public key. The rest may come in any order.
-- Any token containing `:` or `=` must be exactly `scope:read` or `scope:control` (`scope:` in
-  lowercase, the value case-insensitive), and at most one appears per line. Anything else with
-  a `:` or `=` fails startup: `scope: read`, `Scope:read`, `scope=read`, `--scope=read`,
-  `role:read`, `scpoe:read`, `scope:read-only`, or a second scope token.
-- Every other token is label text, including `control`, `ro`, `read` and `scope-ci`, with one
-  exception: `read`, `ro`, `readonly`, `read-only` or `control` as the **only** token after the
-  key (`KEY read`, the classic mistake) fails startup with a message to write `scope:read`.
-- A line with no scope token is `control` (backward compatible) and is logged as such at boot.
+- The first token is the public key: the base64 Ed25519 key that `brace ops keypair` prints.
+  Anything that could never match a client's key fails startup with its own message: truncated
+  or padded base64, a key of another type, an OpenSSH `ssh-ed25519 AAAA…` line.
+- Exactly one of the remaining tokens is `scope:read` or `scope:control` (`scope:` in lowercase,
+  the value case-insensitive); the tokens may come in any order.
+- Any other token containing `:` or `=` fails startup: `scope: read`, `Scope:read`,
+  `scope=read`, `--scope=read`, `role:read`, `scpoe:read`, `scope:read-only`, or a second scope
+  token.
+- Every other token is label text, including `control`, `ro`, `read` and `scope-ci`: with the
+  scope stated, a label is only a label.
+- A comment on a key line may not contain `scope:` or `scope=` (`KEY label #1 scope:read` has
+  its scope inside the comment, where it would be ignored). Comment-only lines may say anything.
+- A key line may not contain whitespace other than space and tab (a no-break space joins two
+  tokens invisibly), a byte-order mark, an invisible control or format character, or a
+  look-alike of `:` or `=` such as the fullwidth colon (`scope：read`). The error names the
+  column and the code point.
 
-Failures name the file and line number, never the key: a silent fallback would hand an agent a
-full-privilege key. A key listed twice keeps the lower scope. Each key's fingerprint and scope
-is logged at boot (`ops.key`). A token whose payload has no scope claim, or one the server does
-not recognise, is treated as `read`, as is an unrecognised `scope` requested at `/ops/auth`.
+Failures name the file and line number, never the key. The message for a missing scope reads:
+
+```
+Invalid ops authorized keys file ops-authorized-keys, line 3: the line has no scope. Every key
+line must say scope:read (status, logs and errors only) or scope:control (everything). A line
+without one used to mean control: add scope:control to keep that, or scope:read if the key was
+meant to be read-only. Format, one of:  KEY scope:read [label words...] [# comment]  or
+KEY scope:control [label words...] [# comment]. ...
+```
+
+`brace ops keypair` always writes the token (`scope:control`, or `scope:read` with
+`--read-only`), as does the file `brace new` generates. A key listed twice keeps the lower
+scope. Each key's fingerprint and scope is logged at boot (`ops.key`). A token whose payload has
+no scope claim, or one the server does not recognise, is treated as `read`, as is an
+unrecognised `scope` requested at `/ops/auth`.
 
 ### Ops pages in the browser
 

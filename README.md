@@ -185,7 +185,7 @@ Components included in the framework jar as of this release:
 - **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs. Refuses loopback, private and cloud-metadata destinations by default (SSRF protection; `.trusted()` for your own internal services) and caps buffered responses at 10 MB
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access; upgrades run access requirements and an Origin check
 - **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
-- **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support; a request without a key is counted in a missing-key bucket for its client IP (an IPv6 /64), not let through
+- **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support; a request without a key is counted against its client address, not let through; memory is bounded by a per-limiter key cap, with a documented fail-closed (default) or fail-open choice when a flood saturates it
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, confined saving with `safeFilename()`/`saveTo(dir, name)`, served sandboxed with `StaticFiles.UNTRUSTED`, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines

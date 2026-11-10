@@ -93,7 +93,8 @@ public class Brace {
     private java.time.Duration jobPollInterval = JobPoller.DEFAULT_POLL_INTERVAL;
     private Runnable enqueueHook;
     private volatile Thread shutdownHook;
-    private final java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean();
+    /** The no-database stats snapshot timer of the current start, or null. */
+    private java.util.Timer statsSnapshotTimer;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -101,11 +102,22 @@ public class Brace {
     private int regressionsWarmupSeconds = 30;
     private final List<Notifier> regressionNotifiers = new ArrayList<>();
 
-    /** Package-private for tests that start a real server with ops on and no pinned origin. */
+    /**
+     * Package-private for tests that start a real server with ops on: no pinned origin is
+     * required, and the post-start sign-in window (L16) is off, as in dev mode.
+     */
     Brace opsUnpinnedForTests() {
         this.opsOriginsOptional = true;
+        return opsNoRestartWindowForTests();
+    }
+
+    /** Package-private for tests that sign in to a real ops server the moment it starts (L16). */
+    Brace opsNoRestartWindowForTests() {
+        this.opsRestartWindowOff = true;
         return this;
     }
+
+    private boolean opsRestartWindowOff;
 
     public static Brace app() {
         JulLogging.init();
@@ -590,6 +602,13 @@ public class Brace {
      */
     public StaticFilesConfig staticFiles(String urlPrefix, String directory, StaticFiles mode) {
         java.util.Objects.requireNonNull(mode, "mode");
+        // M3 final review: a prefix with no leading slash never matched a request path, so the
+        // mapping started and silently served nothing ("" behaved as "/").
+        if (urlPrefix == null || !urlPrefix.startsWith("/")) {
+            throw new IllegalArgumentException("Static mapping prefix " + (urlPrefix == null ? "null" : "\"" + urlPrefix + "\"")
+                + " must start with \"/\": it is matched against the request path, e.g. "
+                + "staticFiles(\"/assets\", \"public\"). Use \"/\" to serve a directory at the root.");
+        }
         router.requireNotStarted("Registering static mapping " + urlPrefix);
         var added = new StaticFilesConfig(this, urlPrefix, directory, mode);
         for (var existing : staticFileMappings) {
@@ -1220,24 +1239,54 @@ public class Brace {
         return false;
     }
 
+    /**
+     * Where the app is in its life. Every transition happens under {@link #lifecycleLock}, so
+     * {@code start()} and {@code stop()} never interleave (final review: a {@code stop()} that
+     * raced a {@code start()} saw "nothing to stop", and the server that start() then brought up
+     * was one no later stop() would stop).
+     */
+    private enum Lifecycle { NEW, STARTING, RUNNING, STOPPING, STOPPED }
+
+    private final java.util.concurrent.locks.ReentrantLock lifecycleLock = new java.util.concurrent.locks.ReentrantLock();
+    /** Guarded by {@link #lifecycleLock}. */
+    private Lifecycle lifecycle = Lifecycle.NEW;
+
+    /**
+     * Start the app. A new app, or one that has been stopped (or whose start failed), can be
+     * started; {@code start()} on an app that is starting or running throws
+     * {@link IllegalStateException} and leaves it as it is. If the start fails, everything it
+     * had brought up is stopped again before the exception propagates, and the app can be
+     * reconfigured and started again.
+     */
     public void start() throws Exception {
-        // A stopped app can be started again (tests, a reconfigure-and-restart). Re-arm stop():
-        // left set, the next stop() (and the cleanup stop() below) returned at once, so Jetty
-        // kept serving, the shutdown hook stayed registered and the router stayed frozen.
-        stopped.set(false);
+        lifecycleLock.lock();
         try {
-            startOrThrow();
-        } catch (Throwable t) {
-            // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
-            // failed start can't leave threads that keep the JVM alive with no server: main()
-            // would exit with a stack trace while the process stays up. stop() is idempotent
-            // and copes with components that never started.
-            try {
-                stop();
-            } catch (Throwable cleanup) {
-                t.addSuppressed(cleanup);
+            if (lifecycle != Lifecycle.NEW && lifecycle != Lifecycle.STOPPED) {
+                throw new IllegalStateException("start() was called on an app that is already "
+                    + lifecycle.name().toLowerCase(java.util.Locale.ROOT) + ". Call stop() first to restart it; "
+                    + "starting it again would leave the first server running with nothing to stop it.");
             }
-            throw t;
+            lifecycle = Lifecycle.STARTING;
+            try {
+                startOrThrow();
+                lifecycle = Lifecycle.RUNNING;
+            } catch (Throwable t) {
+                // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
+                // failed start can't leave threads that keep the JVM alive with no server: main()
+                // would exit with a stack trace while the process stays up. The teardown copes
+                // with components that never started, and leaves the app startable again.
+                lifecycle = Lifecycle.STOPPING;
+                try {
+                    stopOrThrow();
+                } catch (Throwable cleanup) {
+                    t.addSuppressed(cleanup);
+                } finally {
+                    lifecycle = Lifecycle.STOPPED;
+                }
+                throw t;
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
     }
 
@@ -1333,6 +1382,16 @@ public class Brace {
                     + "talking to the app directly can choose.");
             }
             opsHandler.setPinnedOrigins(opsOrigins);
+            // L16 final review: with a database, accepted sign-in nonces are recorded there, so a
+            // replay is refused fleet-wide and across restarts. Without one (or while it is down)
+            // the handler refuses sign-ins for a short window after each start instead; not in dev
+            // mode or the test harness, where servers restart constantly.
+            if (databaseFactory != null) {
+                opsHandler.setDurableNonces(new Counters(databaseFactory));
+            }
+            if (testHarness || opsRestartWindowOff || "dev".equals(System.getProperty("brace.mode"))) {
+                opsHandler.disableRestartWindow();
+            }
             opsHandler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
             opsHandler.setStaticMappings(() -> resolvedStaticMappings);
 
@@ -1424,6 +1483,7 @@ public class Brace {
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
+        handler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
         handler.setAnalytics(analytics);
         handler.setSessionValidator(sessionValidator);
         handler.setStrictQueryChecks(testHarness || "dev".equals(System.getProperty("brace.mode")));
@@ -1604,6 +1664,7 @@ public class Brace {
         // Snapshot stats for dashboard sparklines (even without a database)
         if (opsKeysPath != null && databaseFactory == null) {
             var snapshotTimer = new java.util.Timer("brace-stats-snapshot", true);
+            statsSnapshotTimer = snapshotTimer; // cancelled by stop(), so a restart doesn't stack timers
             snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
                 @Override public void run() { stats.snapshot(); }
             }, 60_000, 60_000);
@@ -1788,18 +1849,39 @@ public class Brace {
         ClaudeMdGenerator.write(projectName, path);
     }
 
+    /**
+     * Stop the app and release what it holds. Idempotent, and safe to call from any thread at any
+     * time: the shutdown hook and an explicit {@code stop()} may both call it, and a
+     * {@code stop()} that arrives while {@code start()} is still running waits for it and then
+     * stops what it started. A stopped app can be reconfigured and started again.
+     */
     public void stop() throws Exception {
-        // Idempotent: the shutdown hook and an explicit stop() (or an app's own hook) may both call it.
-        if (!stopped.compareAndSet(false, true)) {
-            return;
+        lifecycleLock.lock();
+        try {
+            // STOPPED: already done. STARTING or STOPPING here means this thread is inside
+            // start() or stop() already (the lock is reentrant): that call does the teardown.
+            if (lifecycle != Lifecycle.NEW && lifecycle != Lifecycle.RUNNING) {
+                return;
+            }
+            lifecycle = Lifecycle.STOPPING;
+            try {
+                stopOrThrow();
+            } finally {
+                lifecycle = Lifecycle.STOPPED;
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
+    }
+
+    private void stopOrThrow() throws Exception {
         var hook = shutdownHook;
         shutdownHook = null;
         if (hook != null && Thread.currentThread() != hook) {
             try {
                 Runtime.getRuntime().removeShutdownHook(hook);
             } catch (IllegalStateException alreadyShuttingDown) {
-                // The JVM is exiting and our hook is queued to run; it will find stopped == true.
+                // The JVM is exiting and our hook is queued to run; it will find the app stopped.
             }
         }
         if (enqueueHook != null) {
@@ -1838,6 +1920,14 @@ public class Brace {
         // mutated the Router's plain collections under the request threads reading them. If
         // server.stop() throws, the router stays frozen.
         router.unfreeze();
+        // The framework's own routes (/ops/*) are registered by start(), bound to that start's
+        // OpsHandler. Take them out again, or the next start() (a restart, or a retry after a
+        // failed bind) fails with "POST /ops/auth is registered twice" (final review).
+        router.removeFrameworkRoutes();
+        if (statsSnapshotTimer != null) {
+            statsSnapshotTimer.cancel();
+            statsSnapshotTimer = null;
+        }
         if (wsRegistry != null) {
             wsRegistry.close();
         }
@@ -2116,6 +2206,12 @@ public class Brace {
                     under.add(route.method() + " " + route.pattern());
                 }
             }
+            // A WebSocket route owns its path under a mapping too (M3 final review).
+            for (var ws : wsRoutes.values()) {
+                if (mapping.covers(ws.route().pattern())) {
+                    under.add("WS " + ws.route().pattern());
+                }
+            }
             if (under.isEmpty()) continue;
             int shown = Math.min(5, under.size());
             Log.warn("Static mapping " + mapping.pattern() + " (" + mapping.directory() + ", "
@@ -2123,7 +2219,8 @@ public class Brace {
                 + " under its prefix: " + String.join(", ", under.subList(0, shown))
                 + (under.size() > shown ? " and " + (under.size() - shown) + " more" : "")
                 + ". A route answers its path for its own methods, with its own access, and the mapping "
-                + "never serves a path a route pattern matches (other methods get 405). Every other file in "
+                + "never serves a path a route pattern matches (another method gets the route's access "
+                + "check, then 405; a plain request for a WebSocket path gets 426). Every other file in "
                 + "the directory is served under the mapping's access alone.");
         }
     }

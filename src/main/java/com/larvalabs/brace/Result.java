@@ -22,7 +22,48 @@ public class Result {
     // case-sensitive map the two spellings were two entries; the framework read one ("is this
     // response public?") and the other reached the wire. The first-written spelling is kept, and
     // headers() iterates in case-insensitive name order.
-    private final Map<String, String> headers = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+    //
+    // M3 final review: ASCII case only. String.CASE_INSENSITIVE_ORDER folds some non-ASCII
+    // characters onto ASCII letters (U+212A KELVIN SIGN onto "K", dotless i onto "I"), so a
+    // look-alike name collapsed into a real header. Names are also validated as tokens in
+    // header(name, value), so a non-ASCII name cannot get in that way at all.
+    private final Map<String, String> headers = new java.util.TreeMap<>(ASCII_CASE_INSENSITIVE);
+
+    /** Orders strings ignoring the case of ASCII letters only; every other character compares as itself. */
+    static final java.util.Comparator<String> ASCII_CASE_INSENSITIVE = (a, b) -> {
+        int n = Math.min(a.length(), b.length());
+        for (int i = 0; i < n; i++) {
+            char x = a.charAt(i), y = b.charAt(i);
+            if (x == y) continue;
+            if (x >= 'A' && x <= 'Z') x += 32;
+            if (y >= 'A' && y <= 'Z') y += 32;
+            if (x != y) return x - y;
+        }
+        return a.length() - b.length();
+    };
+
+    /**
+     * {@code name} if it is a valid HTTP field name (RFC 9110 5.1: a token, one or more of the
+     * ASCII letters, digits and {@code !#$%&'*+-.^_`|~}); otherwise throws. A name with a space,
+     * a colon, a control character or a non-ASCII letter would reach the wire as a malformed or
+     * misleading header line.
+     */
+    static String requireHeaderName(String name) {
+        if (name == null || name.isEmpty()) {
+            throw new IllegalArgumentException("Invalid response header name: it is " + (name == null ? "null" : "empty"));
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean tchar = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+                || "!#$%&'*+-.^_`|~".indexOf(c) >= 0;
+            if (!tchar) {
+                throw new IllegalArgumentException("Invalid response header name (" + name.length()
+                    + " characters): character " + (i + 1) + " is " + String.format("U+%04X", (int) c)
+                    + ". A header name may contain only ASCII letters, digits and !#$%&'*+-.^_`|~");
+            }
+        }
+        return name;
+    }
     // Set-Cookie is the one header that legitimately repeats: a response may carry several
     // cookies (e.g. an app cookie plus the framework session cookie). It is kept out of the
     // single-value `headers` map — which would collapse repeats — and appended here instead.
@@ -432,9 +473,13 @@ public class Result {
     /**
      * Sets a header, replacing any value already set under the same name in any letter case
      * ({@code Set-Cookie} is appended instead: a response may carry several).
+     *
+     * @throws IllegalArgumentException if {@code name} is not a valid header name: empty, or
+     *         containing anything but ASCII letters, digits and {@code !#$%&'*+-.^_`|~}
      */
     public Result header(String name, String value) {
-        if (name.equalsIgnoreCase("Set-Cookie")) {
+        requireHeaderName(name);
+        if (ASCII_CASE_INSENSITIVE.compare(name, "Set-Cookie") == 0) {
             setCookies.add(value);
         } else {
             headers.put(name, value);
@@ -442,9 +487,9 @@ public class Result {
         return this;
     }
 
-    /** The header's value, or null. The name is matched case-insensitively. */
+    /** The header's value, or null. The name is matched ignoring ASCII case. */
     public String header(String name) {
-        if (name.equalsIgnoreCase("Set-Cookie")) {
+        if (ASCII_CASE_INSENSITIVE.compare(name, "Set-Cookie") == 0) {
             return setCookies.isEmpty() ? null : setCookies.get(0);
         }
         return headers.get(name);

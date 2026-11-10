@@ -113,7 +113,7 @@ class CliInitTest {
     void remoteCheckSucceedsAgainstAuthorizedServer() throws Exception {
         var keypair = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
@@ -139,7 +139,7 @@ class CliInitTest {
         // structural, not a key problem.
         var keypair = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
@@ -186,14 +186,14 @@ class CliInitTest {
         // distribution is wrong — the local/server files have probably drifted.
         var keypair = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
         // Server with a DIFFERENT authorized-keys file → 401 against this client.
         var serverKey = OpsKeys.generateKeypair();
         Path serverKeysFile = tmp.resolve("server-keys");
-        Files.writeString(serverKeysFile, serverKey.publicKey() + " server-only\n");
+        Files.writeString(serverKeysFile, serverKey.publicKey() + " scope:control server-only\n");
 
         var app = Brace.app().opsUnpinnedForTests().port(0).ops(serverKeysFile.toString());
         app.start();
@@ -224,7 +224,7 @@ class CliInitTest {
         var serverKey = OpsKeys.generateKeypair();
         var clientKey = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, serverKey.publicKey() + " server-only\n");
+        Files.writeString(keysFile, serverKey.publicKey() + " scope:control server-only\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             clientKey.privateKey() + "\n" + clientKey.publicKey() + "\n");
 

@@ -306,6 +306,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       overlapping directories were refused with a confusing message. The built-in kinds
       (session, none, `insteadOfDefault`) now have value equality; custom checks and the ops
       requirement stay identity; the message says so. Tests in `StaticMappingReviewFixesTest`.
+    - **Final review fixes.** L-I: the dot-segment 404 for a path that falls under a guarded
+      mapping (as written or with its dot segments resolved) is `no-store`. A WebSocket route
+      owns its path under a mapping (a plain request for it was served the mapping's file); it
+      is listed in the startup warning. A path a route owns, requested under another method,
+      runs every owning route's access before the 405, so `Allow` is not shown to a caller the
+      route refuses (a socket path answers 426 to a plain GET). `Cache-Control` is parsed into
+      directives, quoted-string aware, by one helper used wherever it is read or rewritten
+      (`x="no-store"` no longer counts as `no-store`). `Result.header(name, value)` requires an
+      RFC 9110 token and names compare by ASCII case only. A mapping prefix must start with `/`.
+      Docs: what "before the body is read" covers, where the static 405 sits, and the
+      dot-segment 404 and after-middleware. Tests in `StaticMappingFinalReviewTest`.
 
 - [x] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
   - **What's wrong.**
@@ -538,6 +549,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     collapsed like ASCII ones (a `#` after one starts a comment); the default label replaces
     `:`/`=` and drops a leading `#`. `CliOpsTest` round-trips a table of labels through
     `OpsKeys.loadAuthorizedKeys` at both scopes, including a same-label rotation.
+    - **Final review fixes.** L-A: scope words written as labels still loaded as CONTROL
+      (`KEY read ci-agent`, `KEY ci-agent read-only`, `KEY (read)`, `KEY scope：read`,
+      `KEY label #1 scope:read`), because the rule refused a bare scope word only when it was
+      the sole token. The scope token is now mandatory: a key line without `scope:read` or
+      `scope:control` fails startup with the line number and what to add (`scope:control` keeps
+      the old meaning). Breaking for every existing file with an unscoped line. Also refused: a
+      scope inside a key line's comment, non-ASCII whitespace, a mid-file BOM, invisible
+      format characters, look-alikes of `:` and `=`, and a key token that is not a 44-byte
+      Ed25519 public key (OpenSSH lines get their own message). `brace ops keypair` and the
+      scaffold always write the token; a scope word is accepted as a label at either scope.
+      Tests in `OpsKeysFinalReviewTest`, `CliOpsTest`; every fixture now writes `scope:control`.
 
 - [x] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
   - With the mode unset, startup succeeds unpinned and `originIsThisServer` falls back to
@@ -570,6 +592,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     overwrite them. F10: `Cookie` lines are joined with `"; "` on both paths and the WebSocket
     upgrade parses the session cookie as HTTP does (first occurrence of a name wins). Tests in
     `ProxyHeadersReviewFixesTest`.
+    - **Final review fixes.** M-A (regression from F8): a client's unbalanced quote
+      (`Forwarded: for="x`) swallowed the appending proxy's element, the selected value was not
+      an address, and the fallback returned the socket peer, the trusted proxy. `Forwarded`
+      elements are now split from the right, so a proxy's element is delimited by its own text,
+      and a trusted proxy's header that names no usable client yields `unknown`, never the
+      proxy's address (both header modes; a trusted peer sending no forwarding header at all is
+      still itself). `X-Forwarded-Host` must be a `host[:port]` or it is ignored. `req.ip()` is
+      canonical (RFC 5952, IPv4-mapped as IPv4, zone kept). Tests in
+      `ProxyHeadersFinalReviewTest`.
 
 - [x] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
   - `RenderedResponse.from(result)` is stored regardless of status. The key ignores undeclared
@@ -651,6 +682,23 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     is bisected, the parameter-count error is not a key problem, and a flush stops after 2 s.
     F12: documented why same-label limiters share buckets only in shared mode. Tests in
     `Ipv6PeerSocketTest`, `RateLimiterReviewFixesTest`, `RateLimiterFlushPostgresIT`.
+    - **Final review fixes.** The shared-mode eviction was rebuilt: everything an instance knows
+      about a key is one object in one table, so no second map can hold orphans (M-C:
+      `lastKnownGlobal` grew without bound under concurrency). M-B: an eviction never deletes a
+      `brace_counters` row (an instance with a stale view released a key the fleet had blocked);
+      an evicted key's buffered count is still flushed, and a key that returns has its fleet
+      count read on its first check (a Bloom filter of evicted keys decides which new keys pay
+      that round trip). L-F: the flush trigger is a count of requests buffered since the last
+      flush, never decremented by eviction, so it cannot go negative or stall. L-G: every flush
+      statement carries a JDBC query timeout for the rest of the 2 s budget. L-H: recency is a
+      per-limiter sequence, and a key counted since the last flush is evicted last. M-D: per-address
+      overflow buckets are evictable and bounded by `maxKeys` (not `maxKeys / 10`), and what a
+      saturated limiter does is a named option, `onSaturation(FAIL_CLOSED | FAIL_OPEN)`, default
+      fail closed, with the attack cost of each documented. The dev warning redacts the path.
+      Tests in `RateLimiterFinalReviewTest`, `RateLimiterFlushPostgresIT`. Residual, documented:
+      with per-process counting an evicted key restarts from zero; `brace_counters` rows are
+      bounded by time (one per key per window), not by the cap; a wait for a pooled connection
+      is not covered by the flush budget.
 
 - [x] **L7: Smaller gaps in template output**, `BraceHtmlOutput.java:87-88, 190-194, 226-229, 318-335, 367-370, 432-435`
   - **Template-written `javascript:` URL.** `<a href="javascript:go('${x}')">` with
@@ -721,6 +769,8 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     - The dot-segment 404 was thrown before the `Request` existed, so it skipped
       after-middleware and went out without the app's security headers. It is now answered
       after the request is built, with no route or mapping matched for it.
+    - **Final review fixes.** None of its own; the dot-segment 404 under a guarded static
+      mapping is now `no-store` (see M3).
 
 - [x] **L10: A `Route` whose access was never resolved is open, not closed**, `Route.java:27`, `BraceHandler.java:117-194, 351-352`
   - `access` starts as `List.of()`, and only `Brace.resolveAccess()` fills it. `BraceHandler` is
@@ -733,6 +783,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     access was unresolved) while the `Router`'s unsynchronised collections were mutated under
     them. The router is now unfrozen only after `server.stop()` returns. Verified by reading;
     reconfiguring a stopped app is still covered by `RouteAccessTest`.
+    - **Final review fixes** (`fix: Brace lifecycle is a single guarded state`). L-D: an app with
+      `.ops(...)` could not be restarted, or retried after a failed start (`POST /ops/auth is
+      registered twice`): `stop()` now removes the framework's routes. L-E: `stop()` racing
+      `start()` left a running server with an unfrozen router that no later `stop()` stopped,
+      and a second `start()` leaked the first server. `start()` and `stop()` now run under one
+      lock over an explicit state (new, starting, running, stopping, stopped): `start()` on a
+      starting or running app throws, a failed start tears down and leaves the app startable,
+      and `stop()` is idempotent and waits out a concurrent `start()`. Tests in
+      `BraceRestartTest`.
 
 - [x] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
   - **`followUp` injection.** `ops.env` from the committed `.brace` is spliced unvalidated into
@@ -868,6 +927,18 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     refused since are recorded and shown on `/ops/analytics` ("Row budget reached at HH:MM, N
     views not stored", through `esc()`) and in the JSON report (`rowBudget`). Totals stay honest
     (refused views under "Not counted: dropped"). Tests in `AnalyticsCapsTest`.
+  - **Final review fixes** (ops auth). L-B: the start-time floor did not stop a replay after a
+      restart when the client's clock ran ahead. L-C: it ran before the signature was verified
+      and refused clients whose clocks ran slightly behind. Now: with a database, accepted
+      nonces are recorded in `brace_counters` (fleet-wide, survives restarts; no migration) and
+      nothing is refused after a start; without one, or while it is down, sign-ins timestamped
+      earlier than 30 s after the start are refused, with a message naming the restart and the
+      clock (off in dev mode and the test harness). All replay checks follow the signature and
+      origin checks. The nonce cache evicts from an expiry-ordered queue, at most 64 entries a
+      call, instead of sweeping the map; each key's quota is sized so all quotas fit under the
+      cap. Tests in `OpsAuthFinalReviewTest`, `OpsNoncePostgresIT`. Residual, documented: with
+      no database, a request accepted by one live instance can be replayed against another
+      within its window.
 
 ## Documentation errors
 

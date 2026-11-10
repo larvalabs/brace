@@ -40,7 +40,7 @@ class OpsSharedSecretTest {
     static void start() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keys = tmp.resolve("authorized-keys");
-        Files.writeString(keys, keypair.publicKey() + " test-key\n");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test-key\n");
 
         appA = Brace.app().opsUnpinnedForTests().port(0).ops(keys.toString()).sessions(SHARED);
         appB = Brace.app().opsUnpinnedForTests().port(0).ops(keys.toString()).sessions(SHARED);

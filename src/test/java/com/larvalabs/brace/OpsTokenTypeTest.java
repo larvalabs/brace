@@ -32,7 +32,7 @@ class OpsTokenTypeTest {
         var key = OpsKeys.generateKeypair();
         kid = OpsKeys.fingerprint(key.publicKey());
         Path keys = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keys, key.publicKey() + " test\n");
+        Files.writeString(keys, key.publicKey() + " scope:control test\n");
         app = Brace.app().opsUnpinnedForTests().port(0).opsSecret(OPS_SECRET).ops(keys.toString()).cache(Brace.cache());
         app.after(SecurityHeaders.strict());
         // An app CORS policy that reflects any origin with credentials must not reach /ops.

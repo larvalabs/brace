@@ -48,7 +48,12 @@ class OpsAuthReplayHardeningTest {
         // before the restart, whose nonce this process cannot remember.
         var replay = h.auth(signed(Instant.now().minusSeconds(5)));
         assertEquals(401, replay.status());
-        assertTrue(String.valueOf(replay.body()).contains("before"), String.valueOf(replay.body()));
+        assertTrue(String.valueOf(replay.body()).contains("before the restart"), String.valueOf(replay.body()));
+        // Final review: with no database to remember nonces across the restart, the floor is 30 s
+        // after the start, not the start itself (a client clock running ahead put a captured
+        // request's timestamp after it). See OpsAuthFinalReviewTest.
+        assertEquals(401, h.auth(signed(Instant.now())).status());
+        h.setStartedAtForTest(System.currentTimeMillis() - 61_000);
         assertEquals(200, h.auth(signed(Instant.now())).status());
     }
 
@@ -81,13 +86,14 @@ class OpsAuthReplayHardeningTest {
     }
 
     @Test
-    void sweepsAreAmortizedNotRunOnEveryCall() {
+    void expiredEntriesLeaveFromTheHeadOfTheQueueNotByAFullSweep() {
+        // Final review: no call sweeps the whole map (the timed full sweep this test used to
+        // describe still ran inside the monitor on a refused call). Expired entries are taken
+        // from the head of an expiry-ordered queue, a bounded number per call.
         var cache = new OpsHandler.NonceCache(10, 1000, 1000);
         assertTrue(cache.checkAndRecord("a", "1", 5_000));
-        // Expired at 5_011, but a second call 1 ms later does not sweep again yet...
         assertTrue(cache.checkAndRecord("a", "2", 5_012));
-        assertEquals(2, cache.size(), "no full sweep on every call");
-        // ...the next sweep, a second on, evicts both.
+        assertEquals(1, cache.size(), "the expired head went when the next call arrived");
         assertTrue(cache.checkAndRecord("a", "3", 7_000));
         assertEquals(1, cache.size());
     }

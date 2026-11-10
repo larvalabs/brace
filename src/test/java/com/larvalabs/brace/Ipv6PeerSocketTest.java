@@ -83,7 +83,8 @@ class Ipv6PeerSocketTest {
 
     @Test
     void directIpv6ClientIpIsUnbracketed() throws Exception {
-        assertEquals("0:0:0:0:0:0:0:1", body(send(proxiedApp, "/ip")));
+        // L3 final review: and canonical (RFC 5952), not Jetty's 0:0:0:0:0:0:0:1.
+        assertEquals("::1", body(send(proxiedApp, "/ip")));
     }
 
     @Test
@@ -99,7 +100,7 @@ class Ipv6PeerSocketTest {
 
     @Test
     void directIpv6ClientIsBucketedOnItsSlash64() throws Exception {
-        assertEquals("0:0:0:0:0:0:0:1 0:0:0:0::/64", body(send(directApp, "/limited")));
+        assertEquals("::1 0:0:0:0::/64", body(send(directApp, "/limited")));
         body(send(directApp, "/limited"));
         assertTrue(send(directApp, "/limited").startsWith("HTTP/1.1 429"));
     }

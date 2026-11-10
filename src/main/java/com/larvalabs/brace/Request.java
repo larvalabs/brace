@@ -530,56 +530,84 @@ public class Request {
         this.forwardingChainCaptured = true;
     }
 
+    /** The sentinel {@link #ip()} returns when no client address can be determined. */
+    static final String UNKNOWN_IP = "unknown";
+
+    /** {@link #ip()}'s answer, resolved once per request. */
+    private String resolvedIp;
+
     /**
-     * The client's address: an IP literal, or {@code "unknown"} (L3 review F8: never anything
-     * else). The socket peer, unless it is a trusted proxy, in which case the rightmost untrusted
-     * entry of the one forwarding header {@link TrustedProxies} names. An entry that is not an
-     * address ({@code unknown}, {@code _hidden}, anything a non-appending proxy let a client put
-     * there) yields the socket address rather than being returned.
+     * The client's address: a canonical IP literal, or {@code "unknown"} (never anything else).
+     *
+     * <p><b>Form.</b> IPv4 is dotted decimal ({@code 203.0.113.9}). IPv6 is RFC 5952: lower-case,
+     * no leading zeros, the longest run of zero groups written {@code ::} ({@code 2001:db8::5},
+     * {@code ::1}), never bracketed and never with a port. An IPv4-mapped IPv6 address
+     * ({@code ::ffff:6.6.6.6}) is returned as the IPv4 address. A zone id is kept as written
+     * ({@code fe80::1%eth0}). So comparing {@code req.ip()} with a string written in that form is
+     * reliable, however the proxy or the socket layer spelled the address.
+     *
+     * <p><b>Which address.</b> The socket peer, unless the peer is a trusted proxy, in which case
+     * it is the rightmost untrusted entry of the one forwarding header {@link TrustedProxies}
+     * names. When a trusted proxy's header names no usable client (the selected entry is not an
+     * address: {@code unknown}, {@code _hidden}, a malformed element, an empty header, or the
+     * proxy sent only the forwarding header Brace was not told to read), the answer is
+     * {@code "unknown"}, never the proxy's own address: returning the proxy's address would let a
+     * client that can malform the header pass for the proxy in an address allowlist. Treat
+     * {@code "unknown"} as matching nothing (it is not an address, so
+     * {@link TrustedProxies#isTrusted} is false for it); {@code RateLimiter.perIp} counts every
+     * such request in one shared bucket. A trusted peer that sends no forwarding header at all
+     * (a health check from the proxy, a local process) is itself the client and is returned.
      */
     public String ip() {
         if (reads != null) reads.ip = true;
-        // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
-        if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            // L3: exactly one forwarding header is read, the one TrustedProxies names
-            // (X-Forwarded-For unless useForwardedHeader()); the other is ignored, so a client
-            // cannot supply its own address in the header the proxy doesn't overwrite.
-            var chain = forwardingChainCaptured ? forwardingChain : headers.get(trustedProxies.clientIpHeader());
-            if (chain != null && !chain.isBlank()) {
-                var result = trustedProxies.usesForwardedHeader()
-                    ? extractForwardedFor(chain)
-                    : rightmostUntrusted(chain.split(","));
-                if (result != null && TrustedProxies.parseLiteral(result) != null) return result;
-            } else {
-                warnIfOnlyTheOtherForwardingHeader();
-            }
-        }
+        if (resolvedIp == null) resolvedIp = resolveIp();
+        return resolvedIp;
+    }
 
-        // Default: use socket remote address
-        return remoteAddr != null && TrustedProxies.parseLiteral(remoteAddr) != null ? remoteAddr : "unknown";
+    private String resolveIp() {
+        String peer = TrustedProxies.canonical(remoteAddr);
+        if (peer == null) return UNKNOWN_IP;
+        // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
+        if (trustedProxies == null || !trustedProxies.isTrusted(remoteAddr)) return peer;
+        // L3: exactly one forwarding header is read, the one TrustedProxies names
+        // (X-Forwarded-For unless useForwardedHeader()); the other is ignored, so a client
+        // cannot supply its own address in the header the proxy doesn't overwrite.
+        var chain = forwardingChainCaptured ? forwardingChain : headers.get(trustedProxies.clientIpHeader());
+        if (chain == null) {
+            // Nothing in the header Brace reads. If the peer sent the other one it is proxying
+            // for someone Brace cannot identify; with neither, the peer speaks for itself.
+            return warnIfOnlyTheOtherForwardingHeader() ? UNKNOWN_IP : peer;
+        }
+        var selected = trustedProxies.usesForwardedHeader()
+            ? extractForwardedFor(chain)
+            : rightmostUntrusted(chain.split(","));
+        // L3 final review: the peer is a proxy and its header names no address. The proxy's own
+        // address is not the client's, so it is never the fallback.
+        String client = selected == null ? null : TrustedProxies.canonical(selected);
+        return client != null ? client : UNKNOWN_IP;
     }
 
     /**
      * L3 review F3: a trusted proxy sent the forwarding header Brace was not told to read, and not
      * the one it was. Typically a proxy that writes only RFC 7239 {@code Forwarded} while the app
-     * reads {@code X-Forwarded-For} (the default), so every client's address silently became the
-     * proxy's. Logged once per process.
+     * reads {@code X-Forwarded-For} (the default), so no client's address can be determined.
+     * Logged once per process. Returns true when the other header is present.
      */
-    private void warnIfOnlyTheOtherForwardingHeader() {
-        if (warnedForwardingHeader.get()) return;
+    private boolean warnIfOnlyTheOtherForwardingHeader() {
         boolean forwardedChosen = trustedProxies.usesForwardedHeader();
         String other = forwardedChosen ? "X-Forwarded-For" : "Forwarded";
         String otherValue = headers.get(other);
-        if (otherValue == null || otherValue.isBlank()) return;
+        if (otherValue == null || otherValue.isBlank()) return false;
         if (warnedForwardingHeader.compareAndSet(false, true)) {
             Log.warn("Trusted proxy " + remoteAddr + " sent " + other + " but not "
-                + trustedProxies.clientIpHeader() + ", the header req.ip() reads, so req.ip() is the proxy's "
-                + "address for every client. " + (forwardedChosen
+                + trustedProxies.clientIpHeader() + ", the header req.ip() reads, so req.ip() is \"unknown\" "
+                + "for every client. " + (forwardedChosen
                     ? "If the proxy writes X-Forwarded-For, drop useForwardedHeader() from app.trustedProxies(...)."
                     : "If the proxy writes RFC 7239 Forwarded, use app.trustedProxies(new TrustedProxies(...)"
                         + ".useForwardedHeader()).")
                 + " See docs/SECURITY.md, Trusted Proxies. Logged once.");
         }
+        return true;
     }
 
     /**
@@ -667,12 +695,18 @@ public class Request {
      * The {@code for=} value of each RFC 7239 element, in order, then the rightmost-untrusted walk.
      * L3 review F8: commas and semicolons inside a quoted-string are not separators, and a
      * backslash escapes the next character in one, so {@code for="a,b"} is one value (which is not
-     * an address, so {@link #ip()} falls back to the socket peer) rather than {@code "a} and
-     * {@code b"}. An element without {@code for=} contributes nothing.
+     * an address, so {@link #ip()} is {@code "unknown"}) rather than {@code "a} and {@code b"}.
+     * An element without {@code for=} contributes nothing.
+     *
+     * <p>Elements are split from the RIGHT ({@link #splitForwardedElements}; L3 final review):
+     * the element a trusted proxy appended is the end of the string and is well-formed, so read
+     * from that end it is delimited by its own text alone. Read from the left, a client's
+     * unbalanced quote ({@code for="x}) opened a quoted-string that ran through the proxy's comma
+     * and swallowed its element.
      */
     private String extractForwardedFor(String forwarded) {
         var forValues = new java.util.ArrayList<String>();
-        for (var element : splitForwarded(forwarded, ',')) {
+        for (var element : splitForwardedElements(forwarded)) {
             for (var param : splitForwarded(element, ';')) {
                 var trimmed = param.strip();
                 int eq = trimmed.indexOf('=');
@@ -683,6 +717,48 @@ public class Request {
         }
         if (forValues.isEmpty()) return null;
         return rightmostUntrusted(forValues.toArray(new String[0]));
+    }
+
+    /**
+     * The comma-separated elements of a {@code Forwarded} value, in wire order, found by scanning
+     * right to left. A {@code "} met from the right closes a quoted-string whose opening quote is
+     * the nearest unescaped {@code "} to its left; commas between the two are content. A
+     * {@code "} with no partner to its left (a client's unbalanced quote) is an ordinary
+     * character, so it spoils only the element it is in. Whatever a suffix of the string is
+     * (the elements trusted proxies appended), it splits the same way regardless of the text
+     * before it.
+     */
+    static List<String> splitForwardedElements(String s) {
+        var parts = new java.util.ArrayList<String>();
+        int end = s.length();
+        boolean noQuoteToTheLeft = false;
+        for (int i = s.length() - 1; i >= 0; i--) {
+            char c = s.charAt(i);
+            if (c == ',') {
+                parts.add(s.substring(i + 1, end));
+                end = i;
+            } else if (c == '"' && !noQuoteToTheLeft) {
+                int open = i - 1;
+                while (open >= 0 && !(s.charAt(open) == '"' && !escaped(s, open))) open--;
+                if (open >= 0) {
+                    i = open; // skip the quoted-string
+                } else {
+                    // A lone quote is just a character, and so is every quote left of it (none
+                    // of them has an unescaped quote to its left either): no rescans.
+                    noQuoteToTheLeft = true;
+                }
+            }
+        }
+        parts.add(s.substring(0, end));
+        java.util.Collections.reverse(parts);
+        return parts;
+    }
+
+    /** True when the character at {@code index} is preceded by an odd number of backslashes. */
+    private static boolean escaped(String s, int index) {
+        int backslashes = 0;
+        for (int i = index - 1; i >= 0 && s.charAt(i) == '\\'; i--) backslashes++;
+        return (backslashes & 1) == 1;
     }
 
     /** Split on {@code separator} outside quoted-strings (backslash escapes inside them). */

@@ -144,10 +144,18 @@ class StaticMappingReviewFixesTest {
     void anotherMethodDoesNotServeTheMappingsFileAroundARoute() throws Exception {
         for (String method : OTHER_METHODS) {
             var res = send(app, method, "/docs/payroll.pdf", cookie);
-            assertEquals(405, res.status(), method + "\n" + res.raw());
+            // M3 final review: the route at this path needs the admin role, and this caller is
+            // only logged in. It used to get "405, Allow: GET, HEAD", which told it the route's
+            // methods; now the route's own access answers, as it would for a GET.
+            assertEquals(403, res.status(), method + "\n" + res.raw());
             assertFalse(res.raw().contains("payroll-file-bytes"), method);
             assertFalse(res.raw().contains("payroll-via-route"), method);
-            assertEquals("GET, HEAD", res.header("Allow"), method);
+            assertNull(res.header("Allow"), method);
+            // A route whose access the caller passes still answers 405 with its methods.
+            var open = send(app, method.equals("POST") ? "PUT" : method, "/docs/upload", cookie);
+            assertEquals(405, open.status(), method + "\n" + open.raw());
+            assertEquals("POST", open.header("Allow"), method);
+            assertFalse(open.raw().contains("upload-file-bytes"), method);
         }
     }
 
