@@ -252,7 +252,8 @@ class RedactorTest {
         String redacted = Redactor.redactStackTrace(trace);
         assertFalse(redacted.contains(secret), "Caused by: message must be redacted");
         assertFalse(redacted.contains(other), "Suppressed: message must be redacted");
-        assertTrue(redacted.contains("Caused by: java.sql.SQLException: connect failed password=[redacted]"), redacted);
+        // password= is a sensitive name, so its value is replaced by name (upper case placeholder).
+        assertTrue(redacted.contains("Caused by: java.sql.SQLException: connect failed password=[REDACTED]"), redacted);
         assertTrue(redacted.contains("RuntimeException: outer"));
     }
 
@@ -365,7 +366,7 @@ class RedactorTest {
         Map.entry("Referer", "https://example.com/search?q=hello+world&page=2&id=12345&email=a@b.c&lang=en-US"),
         Map.entry("Referer", "https://example.com/items/550e8400-e29b-41d4-a716-446655440000/edit"),
         Map.entry("Referer", "https://cdn.example.com/assets/app.3f9a1c2b.js"),
-        Map.entry("Referer", "https://cdn.example.com/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css"),
+        // (main-<24 hex>.css is now redacted on purpose: contentHashesInFileNamesAreRedactedDeliberately)
         Map.entry("Referer", "https://example.com/docs/getting-started#installation"),
         Map.entry("Referer", "http://localhost:8080/"),
         Map.entry("Origin", "https://app.example.com"),
@@ -402,7 +403,7 @@ class RedactorTest {
             {"X-Api", "v1 " + RANDOM32, "v1 [redacted]"},
             {"Sec-WebSocket-Protocol", "bearer, " + JWT, "bearer, [redacted]"},
             {"X-Callback", "https://hooks.example.com/notify/" + HEX32, "https://hooks.example.com/notify/[redacted]"},
-            {"X-Callback", "see https://hooks.example.com/notify/" + HEX32, "see https:[redacted]"},
+            {"X-Callback", "see https://hooks.example.com/notify/" + HEX32, "see https://hooks.example.com/notify/[redacted]"},
             // A free-form header holding a bare path: a standard-base64 secret can start with '/',
             // so a path that is secret-shaped as a whole is replaced whole (as redactMessage does).
             {"X-Path", "/files/" + RANDOM32 + "/raw", "[redacted]"},
@@ -508,6 +509,157 @@ class RedactorTest {
         assertEquals("José", Redactor.lenientDecode("Jos%C3%A9"));
         assertEquals("�", Redactor.lenientDecode("%C3"));
         assertEquals("é 😀", Redactor.lenientDecode("é%20😀"));
+    }
+
+    // ---- Final review (2026-11): runs, URLs in messages, encoded and matrix path segments ----
+
+    /** A 24-character random token, the reviewer's T. */
+    static final String T = "Tt1aB2cD3eF4gH5iJ6kL7mN8";
+
+    @Test
+    void urlsInsideMessagesGoThroughTheUrlRedactor() {
+        // M3: every scheme://... in a message is redacted like a Referer: path segments, query,
+        // fragment, and any user:password@ (always masked, whatever its shape).
+        String[][] cases = {
+            {"Server returned HTTP response code: 500 for URL: https://api.partner.example/v1/reset/Uu1aB2cD3eF4gH5iJ6kL7mN8",
+                "Server returned HTTP response code: 500 for URL: https://api.partner.example/v1/reset/[redacted]"},
+            {"GET https://api.example.com/v1/items?api_key=Mm1aB2cD3eF4gH5iJ6kL7mN8&expand=1 failed",
+                "GET https://api.example.com/v1/items?api_key=[REDACTED]&expand=1 failed"},
+            {"Connection to postgres://dbuser:Ww1aB2cD3eF4gH5iJ6kL7@db.internal:5432/app refused",
+                "Connection to postgres://[REDACTED]@db.internal:5432/app refused"},
+            {"bad url jdbc:postgresql://db.internal:5432/app?user=app&password=hunter2",
+                "bad url jdbc:postgresql://db.internal:5432/app?user=app&password=[REDACTED]"},
+            {"redis://:hunter2@cache.internal:6379 unreachable", "redis://[REDACTED]@cache.internal:6379 unreachable"},
+            {"amqp://guest:guest@mq:5672/vhost", "amqp://[REDACTED]@mq:5672/vhost"},
+            {"smtp://mailer:pw@smtp.example.com:587 rejected AUTH", "smtp://[REDACTED]@smtp.example.com:587 rejected AUTH"},
+            {"NoSuchKey s3://bucket/exports/" + T + "/data.csv", "NoSuchKey s3://bucket/exports/[redacted]/data.csv"},
+            {"failed (see https://x.example/reset/" + T + ").", "failed (see https://x.example/reset/[redacted])."},
+            {"callback https://x.example/cb#access_token=abc&expires_in=3600",
+                "callback https://x.example/cb#access_token=[REDACTED]&expires_in=3600"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+            // and so in every message line of a stored stack trace
+            assertEquals("java.io.IOException: " + c[1] + "\n\tat a.B.c(B.java:1)\n",
+                Redactor.redactStackTrace("java.io.IOException: " + c[0] + "\n\tat a.B.c(B.java:1)\n"));
+        }
+    }
+
+    @Test
+    void aSecretRunIsRedactedWhateverPunctuationSurroundsIt() {
+        // M4: the shape test ran on whole delimiter-separated tokens, so one adjacent character
+        // ('.', '<', '~', '!') hid the token. Now each maximal run of the secret alphabet is tested,
+        // and a dotted token is tested label by label.
+        assertEquals("Rejected API key [redacted].", Redactor.redactMessage("Rejected API key " + T + "."));
+        assertEquals("<[redacted]>", Redactor.redactMessage("<" + T + ">"));
+        assertEquals("[redacted]~x", Redactor.redactHeaders(Map.of("X-Custom", T + "~x")).get("X-Custom"));
+        assertEquals("x=[REDACTED]", Redactor.redactQuery("x=" + T + "!"));
+        assertEquals("x=[REDACTED]", Redactor.redactQuery("x=" + T + ".json"));
+        assertEquals("next=[REDACTED]", Redactor.redactQuery("next=%252Freset%252F" + T));
+        assertEquals("/dl/[redacted].pdf", Redactor.redactPath("/dl/" + T + ".pdf"));
+        String sendgrid = "SG.Aa1bB2cC3dD4eE5fF6gG7.Hh7iI8jJ9kK0lL1mM2nN3oO4pP5qQ6rR7sS8tT9uU0vV1";
+        assertEquals("key SG.[redacted].[redacted] revoked", Redactor.redactMessage("key " + sendgrid + " revoked"));
+        assertEquals("SG.[redacted].[redacted]", Redactor.redactHeaders(Map.of("X-Key", sendgrid)).get("X-Key"));
+    }
+
+    @Test
+    void percentEncodedAndMatrixPathSecretsAreRedacted() {
+        // M5: a segment is tested raw and percent-decoded (up to three rounds), and ;name=value
+        // matrix parameters are redacted by name and by shape.
+        assertEquals("/reset/[redacted]", Redactor.redactPath("/reset/Xx1aB2cD3eF4%2BgH5iJ6kL7%3D%3D"));
+        assertEquals("/reset/[redacted]", Redactor.redactPath("/reset/Xx1aB2cD3eF4%252BgH5iJ6kL7"));
+        assertEquals("/reset;token=[REDACTED]", Redactor.redactPath("/reset;token=" + T));
+        assertEquals("/reset;token=[REDACTED]/confirm", Redactor.redactPath("/reset;token=abc/confirm"));
+        assertEquals("/app;jsessionid=[REDACTED]", Redactor.redactPath("/app;jsessionid=0123ABCD"));
+        assertEquals("/x;v=[redacted];page=2", Redactor.redactPath("/x;v=" + T + ";page=2"));
+        assertEquals("https://app.example.com/cart;jsessionid=[REDACTED]?step=2",
+            Redactor.redactHeaders(Map.of("Referer", "https://app.example.com/cart;jsessionid=0123ABCD?step=2")).get("Referer"));
+        for (String ok : List.of("/files/report%20final.pdf", "/users/Jos%C3%A9", "/a%2Fb/c", "/search;page=2",
+                "/posts/2024/11/hello-world", "/assets/app.3f9a1c2b.js", "/items/550e8400-e29b-41d4-a716-446655440000",
+                "/v1/users/42/orders/12345", "/%E2%9C%93/done")) {
+            assertEquals(ok, Redactor.redactPath(ok), ok);
+        }
+    }
+
+    @Test
+    void urlsAndCredentialsInsideOtherHeadersAreRedacted() {
+        // M6: Forwarded and Via are no longer kept verbatim; embedded URLs (absolute, <...>, after
+        // url= or uri=) go through redactUrl, and name=value pairs are tested by name.
+        String[][] cases = {
+            {"Link", "<https://app.example.com/reset?token=abc123>; rel=\"prev\"",
+                "<https://app.example.com/reset?token=[REDACTED]>; rel=\"prev\""},
+            {"Link", "</reset?token=abc123>; rel=\"next\"", "</reset?token=[REDACTED]>; rel=\"next\""},
+            {"Forwarded", "for=1.2.3.4;uri=\"/reset?token=hunter2pw\"", "for=1.2.3.4;uri=\"/reset?token=[REDACTED]\""},
+            {"Forwarded", "for=1.2.3.4;by=10.0.0.1;proto=https;uri=\"/reset/" + T + "\"",
+                "for=1.2.3.4;by=10.0.0.1;proto=https;uri=\"/reset/[redacted]\""},
+            {"Sec-WebSocket-Protocol", "base64url.bearer.authorization.k8s.io.Zx81kLm02PqR7sTuV4wXy9AbCd",
+                "base64url.bearer.authorization.k8s.io.[redacted]"},
+            {"Refresh", "0; url=https://app.example.com/reset?token=hunter2pw",
+                "0; url=https://app.example.com/reset?token=[REDACTED]"},
+            {"Refresh", "0; url=/reset?token=hunter2pw", "0; url=/reset?token=[REDACTED]"},
+            {"X-Upstream-Info", "user=bob password=hunter2Hdr", "user=bob password=[REDACTED]"},
+            {"X-Upstream-Info", "user=bob; password=\"hunter 2\"; realm=x", "user=bob; password=\"[REDACTED]\"; realm=x"},
+            {"Via", "1.1 proxy.example.com, 1.1 cache (" + T + ")", "1.1 proxy.example.com, 1.1 cache ([redacted])"},
+            // nit: the value boundary: a redacted value no longer swallows the next parameter name
+            {"X-Params", "a=" + T + "&b=2", "a=[redacted]&b=2"},
+            {"X-Params", "a=" + T + ";b=2", "a=[redacted];b=2"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[2], Redactor.redactHeaders(Map.of(c[0], c[1])).get(c[0]), c[0] + ": " + c[1]);
+        }
+    }
+
+    /** Header values the final-review rules must keep (in addition to HEADERS_THAT_SURVIVE). */
+    static final List<Map.Entry<String, String>> MORE_HEADERS_THAT_SURVIVE = List.of(
+        Map.entry("Forwarded", "for=\"[2001:db8:cafe::17]:4711\";by=203.0.113.43;proto=https"),
+        Map.entry("Forwarded", "for=192.0.2.60;proto=http;by=203.0.113.43, for=198.51.100.17"),
+        Map.entry("Via", "1.1 vegur"),
+        Map.entry("Via", "1.1 varnish (Varnish/6.0), 2.0 2f8c1e4a9b3d7f6e5a4c3b2a1f0e9d8c.cloudfront.net (CloudFront)"),
+        Map.entry("Link", "<https://cdn.example.com/app.3f9a1c2b.css>; rel=preload; as=style"),
+        Map.entry("X-Upstream-Info", "user=bob; realm=\"Example Realm\"; region=eu-west-1"),
+        Map.entry("X-Lb", "my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com"),
+        Map.entry("X-Error-Class", "com.amazonaws.services.s3.model.AmazonS3Exception"),
+        Map.entry("X-Note", "see https://example.com/docs/getting-started#install, then retry"),
+        Map.entry("X-Client-Path", "/var/app/releases/20241105/public"));
+
+    @Test
+    void moreOrdinaryHeadersSurvive() {
+        for (var h : MORE_HEADERS_THAT_SURVIVE) {
+            var out = Redactor.redactHeaders(Map.of(h.getKey(), h.getValue()));
+            assertEquals(h.getValue(), out.get(h.getKey()), h.getKey() + ": " + h.getValue());
+        }
+    }
+
+    /** Messages that must come back unchanged under the run rule. */
+    static final List<String> MESSAGES_THAT_SURVIVE = List.of(
+        "Caused by: com.amazonaws.services.s3.model.AmazonS3Exception: Access Denied",
+        "Unexpected end-of-input: com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+        "UnknownHostException: my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com",
+        "connect timed out to db.internal:5432 after 10000ms",
+        "Row 550e8400-e29b-41d4-a716-446655440000 was updated by another transaction",
+        "Version 4.12.0-beta.3+build.20241105 is not supported",
+        "File not found: /srv/app/uploads/2024/11/report-final.pdf",
+        "For input string: \"12345678901234567890\"",
+        "duplicate key value violates unique constraint \"users_email_key\"",
+        "Expected 3 arguments but got 2 (see https://example.com/docs/api#limits).",
+        "rate limited, 100% of quota used",
+        "Template app.3f9a1c2b.js not found");
+
+    @Test
+    void ordinaryMessagesSurvive() {
+        for (String m : MESSAGES_THAT_SURVIVE) {
+            assertEquals(m, Redactor.redactMessage(m), m);
+        }
+    }
+
+    @Test
+    void contentHashesInFileNamesAreRedactedDeliberately() {
+        // A content hash of 16+ characters in a file name cannot be told from a download token
+        // (/dl/<token>.pdf), so it is redacted; short fingerprints (Brace's own ?v=, app.3f9a1c2b.js)
+        // survive. The cost is cosmetic: an error record shows /assets/[redacted].css.
+        assertEquals("/assets/[redacted].css", Redactor.redactPath("/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css"));
+        assertEquals("https://cdn.example.com/assets/[redacted].css", Redactor.redactHeaders(
+            Map.of("Referer", "https://cdn.example.com/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css")).get("Referer"));
     }
 
     @Test

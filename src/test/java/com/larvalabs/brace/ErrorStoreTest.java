@@ -927,6 +927,73 @@ class ErrorStoreTest {
         }
     }
 
+    @Test
+    void finalReviewSecretsDoNotReachTheStoreOrTheLogs(@TempDir Path tmpDir) throws Exception {
+        // Final review (docs/2026-11-09-security-review-todos.md, M6 final review fixes): a token
+        // next to punctuation in the path (/dl/T.pdf), a percent-encoded path token, and a URL
+        // quoted in an exception message were stored verbatim and served on /ops/logs.
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + " scope:read\n");
+        String t = "Tt1aB2cD3eF4gH5iJ6kL7mN8";
+        String encoded = "Xx1aB2cD3eF4%2BgH5iJ6kL7%3D%3D";
+        String urlToken = "Uu1aB2cD3eF4gH5iJ6kL7mN8";
+        String dbPassword = "Ww1aB2cD3eF4gH5iJ6kL7";
+
+        app = Brace.app().opsUnpinnedForTests().port(0)
+            .database(new DatabaseFactory(
+                "jdbc:h2:mem:redactfinal" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+                List.of(Post.class)))
+            .ops(keysFile.toString());
+        app.get("/dl/{file}", req -> { throw new IllegalStateException("download failed"); });
+        app.get("/reset/{token}", req -> { throw new IllegalStateException("reset failed"); });
+        app.get("/fetch", req -> {
+            throw new IllegalStateException("upstream: Server returned HTTP response code: 500 for URL: "
+                + "https://api.partner.example/v1/reset/" + urlToken,
+                new java.sql.SQLException("Connection to postgres://dbuser:" + dbPassword + "@db.internal:5432/app refused"));
+        });
+
+        LogTap.clear();
+        app.start();
+        try {
+            port = app.actualPort();
+            for (String path : List.of("/dl/" + t + ".pdf", "/reset/" + encoded, "/fetch")) {
+                var resp = client.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + path)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+                assertEquals(500, resp.statusCode(), path);
+            }
+            app.errorStore().flush();
+
+            String token = authenticateOps(port, kp);
+            var listResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors"))
+                    .header("Authorization", "Bearer " + token).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            var list = Json.mapper().readTree(listResp.body());
+            var all = new StringBuilder();
+            for (var row : list.isArray() ? list : list.path("errors")) {
+                all.append(client.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/ops/errors/" + row.get("id").asText()))
+                        .header("Authorization", "Bearer " + token).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()).body()).append('\n');
+            }
+            String stored = all.toString();
+            assertTrue(stored.contains("download failed") && stored.contains("reset failed")
+                && stored.contains("upstream"), "all three errors stored: " + stored);
+            String logs = LogTap.snapshot().toString();
+            for (String secret : List.of(t, encoded, "Xx1aB2cD3eF4+gH5iJ6kL7", urlToken, dbPassword)) {
+                assertFalse(stored.contains(secret), "secret " + secret + " stored: " + stored);
+                assertFalse(logs.contains(secret), "secret " + secret + " logged: " + logs);
+            }
+            assertTrue(stored.contains("/dl/[redacted].pdf"), stored);
+            assertTrue(stored.contains("https://api.partner.example/v1/reset/[redacted]"), stored);
+            assertTrue(stored.contains("postgres://[REDACTED]@db.internal:5432/app"), stored);
+        } finally {
+            app.stop();
+        }
+    }
+
     /**
      * Minimal JSON string-field extractor — finds the value of the first occurrence
      * of {@code "fieldName":"<value>"} in the given JSON string. Returns null if the

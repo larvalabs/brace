@@ -27,29 +27,31 @@ import java.util.regex.Pattern;
  * their field name — covering URL path segments that carry reset/invite/API tokens
  * and exception messages that may contain credentials or SQL literals.
  *
- * <h3>Heuristic (path segments and message tokens)</h3>
- * A segment is redacted when <em>all</em> of these hold:
+ * <h3>Heuristic (the run rule)</h3>
+ * Text is scanned for maximal runs of {@code [A-Za-z0-9_\-+/.~$%]}, wherever they sit (next to a
+ * quote, a {@code <}, a trailing full stop). Within a run, each label between {@code . ~ $ %} is
+ * redacted when <em>all</em> of these hold:
  * <ol>
- *   <li>Length ≥ {@value #MIN_SECRET_LENGTH} characters.</li>
- *   <li>Every character is in the base64url-or-hex alphabet
- *       ({@code [A-Za-z0-9_\-+/=]}).</li>
+ *   <li>Length ≥ {@value #MIN_SECRET_LENGTH} characters (of {@code [A-Za-z0-9_\-+/]}).</li>
  *   <li>Contains at least one ASCII digit <em>and</em> at least one ASCII letter
  *       (rules out purely numeric IDs and purely alphabetic slugs).</li>
+ *   <li>It is not a standard UUID, and not an absolute path whose {@code /}-pieces are all short
+ *       and none mixes upper case, lower case and digits.</li>
  * </ol>
- * Exceptions kept visible (conservative):
- * <ul>
- *   <li>Standard UUIDs (8-4-4-4-12 hex with hyphens) — usually record identifiers
- *       needed for debugging, not bearer secrets. {@code redactPath} leaves them
- *       as-is; callers that need UUID redaction can do so explicitly.</li>
- *   <li>Purely numeric segments (page IDs, user IDs, order numbers).</li>
- *   <li>Short slugs and ordinary words (length &lt; {@value #MIN_SECRET_LENGTH}).</li>
- *   <li>Segments with characters outside the base64url-or-hex set (e.g. dots in
- *       file names, spaces in messages).</li>
- * </ul>
- * JWT-shaped tokens (two dots dividing three base64url parts where the outer parts
- * are long enough) and two-part {@code payload.signature} tokens (one dot, at least
- * {@value #TWO_PART_MIN} base64url characters on each side, mixed content: the ops
- * token's shape) are caught as special cases before the per-segment heuristic.
+ * So {@code T.}, {@code <T>}, {@code T~x}, {@code /dl/T.pdf} and {@code SG.x.y} lose T. A run
+ * holding {@code %} is also percent-decoded (up to {@value #DECODE_ROUNDS} rounds) and replaced
+ * whole when the decoded text holds anything to redact. Kept whole: a JWT or two-part
+ * {@code payload.signature} token is replaced whole (the ops token's shape: one dot, at least
+ * {@value #TWO_PART_MIN} base64url characters each side); a Java qualified name
+ * ({@code com.amazonaws.services.s3.model.AmazonS3Exception}) and a hostname of three or more
+ * labels ending in a common TLD are kept. Also kept: short words, numbers, UUIDs, dotted versions,
+ * and file names whose labels are short ({@code app.3f9a1c2b.js}). A file name with a 16+
+ * character hash label ({@code main-<24 hex>.css}) is redacted: it cannot be told from a token.
+ *
+ * <p>Free text also gets two structural passes first ({@link #redactText}): every
+ * {@code scheme://…} (and {@code </path?query>}, and a {@code /path} after {@code name=}) goes
+ * through {@link #redactUrl}, and a {@code name=value} pair with a sensitive name has its value
+ * replaced by {@link #PLACEHOLDER}.
  *
  * <p><strong>Error-store request capture</strong> combines both passes:
  * {@link #redactQuery} redacts by decoded parameter name and by value shape, and
@@ -109,12 +111,38 @@ public class Redactor {
     private static final Pattern JWT_SHAPE =
         Pattern.compile("[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]+\\.[A-Za-z0-9_\\-]{10,}");
 
+    /** Shape-based replacement (name-based is {@link #PLACEHOLDER}). */
+    private static final String SHAPE_PLACEHOLDER = "[redacted]";
+
     /**
-     * A candidate token in an exception message for value-shaped redaction: a run of
-     * characters between delimiters (whitespace, quotes, commas, colons, semicolons,
-     * equals, parentheses and brackets).
+     * Rounds of percent-decoding tried before a value is judged ({@code %252F} is {@code %2F} is
+     * {@code /}). Bounded so the work stays linear.
      */
-    private static final Pattern MESSAGE_TOKEN = Pattern.compile("[^\\s\"'`,;:=()\\[\\]{}]+");
+    static final int DECODE_ROUNDS = 3;
+
+    /**
+     * URL-inside-value nesting followed before the rest is replaced whole: a query value holding a
+     * URL whose query holds a URL... Bounded so recursion depth and work stay small.
+     */
+    private static final int MAX_DEPTH = 4;
+
+    /**
+     * First labels of a Java qualified name ({@code com.amazonaws.services.s3.model.AmazonS3Exception}):
+     * such a dotted name is kept whole, so a class name with a digit in a long label survives.
+     */
+    private static final Set<String> PACKAGE_ROOTS = Set.of(
+        "java", "javax", "jakarta", "jdk", "sun", "com", "org", "net", "io", "kotlin", "scala", "groovy",
+        "dev", "app", "edu", "gov", "ch", "de", "fr", "nl", "uk", "eu", "me", "co", "ai", "br", "au", "ca");
+
+    /**
+     * Last labels that make a dotted name of three or more labels a hostname, kept whole:
+     * {@code my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com} and a CloudFront {@code Via}.
+     */
+    private static final Set<String> HOST_TLDS = Set.of(
+        "com", "net", "org", "io", "dev", "app", "co", "ai", "cloud", "internal", "local", "localhost",
+        "lan", "home", "corp", "us", "uk", "de", "eu", "ca", "au", "fr", "jp", "nl", "ch", "se", "no", "es",
+        "it", "br", "in", "info", "biz", "me", "sh", "xyz", "site", "tech", "online", "edu", "gov", "mil",
+        "int", "arpa", "example", "test", "invalid");
 
     private Redactor() {}
 
@@ -127,6 +155,11 @@ public class Redactor {
             if (norm.contains(token)) return true;
         }
         return false;
+    }
+
+    /** The name rule for {@code name=value} pairs found in free text. */
+    private static boolean sensitiveName(String name, boolean strict) {
+        return !name.isEmpty() && isSensitive(name);
     }
 
     /**
@@ -183,7 +216,12 @@ public class Redactor {
      * literally, never thrown. A leading {@code ?} is not expected (pass the raw query).
      */
     public static String redactQuery(String query) {
+        return redactQuery(query, DECODE_ROUNDS, 0);
+    }
+
+    private static String redactQuery(String query, int rounds, int depth) {
         if (query == null || query.isEmpty()) return query;
+        if (depth > MAX_DEPTH) return SHAPE_PLACEHOLDER;
         var out = new StringBuilder(query.length());
         int start = 0;
         int len = query.length();
@@ -195,9 +233,9 @@ public class Redactor {
             int eq = indexOfAny(query, start, end, "=");
             if (eq == end) {
                 String part = query.substring(start, end);
-                out.append(isSecretValue(part) ? PLACEHOLDER : part);
+                out.append(isSecretValue(part, rounds, depth) ? PLACEHOLDER : part);
             } else if (isSensitive(lenientDecode(query.substring(start, eq)))
-                    || isSecretValue(query.substring(eq + 1, end))) {
+                    || isSecretValue(query.substring(eq + 1, end), rounds, depth)) {
                 out.append(query, start, eq + 1).append(PLACEHOLDER);
             } else {
                 out.append(query, start, end);
@@ -209,47 +247,352 @@ public class Redactor {
         return out.toString();
     }
 
-    /** A raw query value that holds a secret-shaped token, before or after percent-decoding. */
-    private static boolean isSecretValue(String raw) {
-        if (raw.length() < MIN_SECRET_LENGTH) return false;
-        if (containsSecretToken(raw)) return true;
-        String decoded = lenientDecode(raw);
-        return !decoded.equals(raw) && containsSecretToken(decoded);
-    }
-
     /**
-     * True when {@link #redactValue} would change {@code value}. Kept separate so a caller that
-     * replaces the whole value does not build the redacted copy.
+     * A raw query value that the free-form pass ({@link #redactText}) would change, as sent or
+     * after each of up to {@code rounds} rounds of percent-decoding: a secret-shaped run, a URL
+     * with something to redact ({@code next=https%3A…%3Ftoken%3D…}), or a sensitive
+     * {@code name=value} pair inside it.
      */
-    private static boolean containsSecretToken(String value) {
-        var matcher = MESSAGE_TOKEN.matcher(value);
-        while (matcher.find()) {
-            if (matcher.end() - matcher.start() < MIN_SECRET_LENGTH) continue;
-            if (isSecretToken(matcher.group())) return true;
+    private static boolean isSecretValue(String raw, int rounds, int depth) {
+        String r = raw;
+        for (int round = 0; ; round++) {
+            if (!redactText(r, true, 0, depth).equals(r)) return true;
+            if (round >= rounds) return false;
+            String d = lenientDecode(r);
+            if (d.equals(r)) return false;
+            r = d;
         }
-        return false;
+    }
+
+    // ---- The free-form pass: embedded URLs, name=value pairs, secret-shaped runs ----
+
+    /**
+     * Redact free text (an exception message, a header value, a path segment, a query value):
+     * <ol>
+     *   <li>every {@code scheme://…} (any scheme, {@code jdbc:postgresql://} included) and every
+     *       {@code </path?query>} goes through {@link #redactUrl};</li>
+     *   <li>in a {@code name=value} pair whose name is sensitive, the value (up to the next
+     *       {@code & ; ,}, whitespace or bracket, or the closing quote) becomes
+     *       {@link #PLACEHOLDER}; a value that is a {@code /path} goes through {@link #redactUrl};</li>
+     *   <li>every other maximal run of {@code [A-Za-z0-9_\-+/.~$%]} is tested by
+     *       {@link #redactChunk}: decoded, then label by label.</li>
+     * </ol>
+     * {@code strict} picks the name rule ({@link #isSensitive} for values in transit,
+     * {@link #isSensitiveField} for messages). {@code rounds} is the percent-decoding budget for
+     * runs; {@code depth} bounds URL-inside-URL recursion. Linear in the input for fixed bounds.
+     * Returns {@code s} itself when there is nothing to redact.
+     */
+    static String redactText(String s, boolean strict, int rounds, int depth) {
+        if (s == null || s.isEmpty()) return s;
+        int n = s.length();
+        StringBuilder out = null;
+        int copied = 0;
+        int i = 0;
+        while (i < n) {
+            char c = s.charAt(i);
+            String replacement = null;
+            int from = i;
+            int to = i + 1;
+            if (isAsciiLetter(c) && (i == 0 || !isSchemeChar(s.charAt(i - 1)))) {
+                int end = urlEnd(s, i);
+                if (end > i) {
+                    to = end;
+                    replacement = urlReplacement(s.substring(i, end), rounds, depth);
+                } else {
+                    to = chunkEnd(s, i);
+                    replacement = redactChunk(s, i, to, strict, rounds, depth);
+                }
+            } else if (c == '<' && i + 1 < n && s.charAt(i + 1) == '/') {
+                // <path?query> (a Link header): the path up to '>'.
+                from = i + 1;
+                to = valueEnd(s, from, "\"'<>");
+                replacement = urlReplacement(s.substring(from, to), rounds, depth);
+            } else if (c == '=') {
+                int vs = i + 1;
+                boolean quoted = vs < n && s.charAt(vs) == '"';
+                int inner = quoted ? vs + 1 : vs;
+                if (sensitiveName(nameBefore(s, i), strict)) {
+                    from = inner;
+                    to = quoted ? closingQuote(s, inner) : valueEnd(s, inner, "&;,\"'<>()[]{}|\\");
+                    if (to > from) replacement = PLACEHOLDER;
+                } else if (inner < n && s.charAt(inner) == '/') {
+                    from = inner;
+                    to = quoted ? closingQuote(s, inner) : valueEnd(s, inner, ";,\"'<>");
+                    replacement = urlReplacement(s.substring(from, to), rounds, depth);
+                }
+                if (replacement == null) {
+                    to = i + 1; // just the '='; the value is scanned as ordinary text
+                    from = i;
+                }
+            } else if (isChunkChar(c)) {
+                to = chunkEnd(s, i);
+                replacement = redactChunk(s, i, to, strict, rounds, depth);
+            }
+            if (replacement != null && !replacement.contentEquals(s.subSequence(from, to))) {
+                if (out == null) out = new StringBuilder(n);
+                out.append(s, copied, from).append(replacement);
+                copied = to;
+            }
+            i = Math.max(to, i + 1);
+        }
+        if (out == null) return s;
+        return out.append(s, copied, n).toString();
     }
 
     /**
-     * A message/header token that is secret-shaped as a whole, or that is a URL or path with a
-     * secret-shaped piece between {@code /}, {@code ?}, {@code &} and {@code #}. Both checks are
-     * needed: splitting on {@code /} alone would cut a standard-base64 secret into short pieces.
+     * A URL or path found inside free text, where the context ({@code scheme://}, {@code <…>},
+     * {@code uri=/…}) says it is one: {@link #redactUrl}, segment by segment.
      */
-    private static boolean isSecretToken(String token) {
-        if (isSecretShaped(token)) return true;
-        int len = token.length();
+    private static String urlReplacement(String url, int rounds, int depth) {
+        if (url.isEmpty()) return url;
+        if (depth >= MAX_DEPTH) return SHAPE_PLACEHOLDER;
+        return redactUrl(url, rounds, depth + 1);
+    }
+
+    private static boolean isAsciiLetter(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    private static boolean isAsciiDigit(char c) {
+        return c >= '0' && c <= '9';
+    }
+
+    /** Characters of a URL scheme, plus ':' so a double scheme ({@code jdbc:postgresql}) is one. */
+    private static boolean isSchemeChar(char c) {
+        return isAsciiLetter(c) || isAsciiDigit(c) || c == '+' || c == '-' || c == '.' || c == ':';
+    }
+
+    /**
+     * If a {@code scheme://} starts at {@code start}, the end of that URL in {@code s}: up to
+     * whitespace, a quote, {@code < > \ ^ { } |} or a control character, then without trailing
+     * sentence punctuation ({@code . , ; : ! ? ) ]}). Otherwise -1. Scans at most the scheme run
+     * plus the URL.
+     */
+    private static int urlEnd(String s, int start) {
+        int n = s.length();
+        int j = start;
+        while (j < n && isSchemeChar(s.charAt(j))) {
+            if (s.charAt(j) == ':' && s.startsWith("//", j + 1)) {
+                if (j == start) return -1;
+                int end = j + 3;
+                while (end < n && !endsUrl(s.charAt(end))) end++;
+                while (end > j + 3 && ".,;:!?)]".indexOf(s.charAt(end - 1)) >= 0) end--;
+                return end;
+            }
+            j++;
+        }
+        return -1;
+    }
+
+    private static boolean endsUrl(char c) {
+        return c <= ' ' || c == 0x7f || "\"'`<>\\^{}|".indexOf(c) >= 0;
+    }
+
+    /** End of a value starting at {@code from}: the first whitespace, control or {@code stops} character. */
+    private static int valueEnd(String s, int from, String stops) {
+        int i = from;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (c <= ' ' || c == 0x7f || stops.indexOf(c) >= 0) break;
+            i++;
+        }
+        return i;
+    }
+
+    /** Index of the {@code "} closing a quoted value whose content starts at {@code from}, or the end. */
+    private static int closingQuote(String s, int from) {
+        int q = s.indexOf('"', from);
+        return q < 0 ? s.length() : q;
+    }
+
+    /** The parameter name just before the {@code =} at {@code eq}: {@code [A-Za-z0-9_\-.\[\]%]}, percent-decoded. */
+    private static String nameBefore(String s, int eq) {
+        int i = eq;
+        while (i > 0) {
+            char c = s.charAt(i - 1);
+            if (!(isAsciiLetter(c) || isAsciiDigit(c) || c == '_' || c == '-' || c == '.' || c == '['
+                    || c == ']' || c == '%')) {
+                break;
+            }
+            i--;
+        }
+        return i == eq ? "" : lenientDecode(s.substring(i, eq));
+    }
+
+    /**
+     * A character of a candidate run: the secret alphabet {@code [A-Za-z0-9_\-+/]} plus the label
+     * separators {@code .}, {@code ~} and {@code $}, and {@code %} (the run is decoded). Not
+     * {@code =}: it separates a name from its value, and base64 padding is not secret.
+     */
+    private static boolean isChunkChar(char c) {
+        return isAsciiLetter(c) || isAsciiDigit(c) || c == '_' || c == '-' || c == '+' || c == '/'
+            || c == '.' || c == '~' || c == '$' || c == '%';
+    }
+
+    private static int chunkEnd(String s, int from) {
+        int i = from;
+        while (i < s.length() && isChunkChar(s.charAt(i))) i++;
+        return i;
+    }
+
+    /**
+     * The replacement for the run {@code s[from, to)}, or null to keep it. A run shorter than
+     * {@value #MIN_SECRET_LENGTH} is kept. Otherwise:
+     * <ol>
+     *   <li>if it holds {@code %} and {@code rounds > 0}, each percent-decoding round is checked
+     *       with {@link #redactText}; anything to redact replaces the whole run;</li>
+     *   <li>a JWT or two-part token (outer dots aside) is replaced whole;</li>
+     *   <li>a Java qualified name ({@code com.example.Foo2Bar}) or a hostname of three or more
+     *       labels ending in a common TLD is kept;</li>
+     *   <li>each label between {@code . ~ $ %} that {@link #isSecretLabel} is replaced, the
+     *       separators kept ({@code /dl/[redacted].pdf}).</li>
+     * </ol>
+     */
+    private static String redactChunk(String s, int from, int to, boolean strict, int rounds, int depth) {
+        if (to - from < MIN_SECRET_LENGTH) return null;
+        String chunk = s.substring(from, to);
+        if (rounds > 0 && chunk.indexOf('%') >= 0) {
+            if (depth >= MAX_DEPTH) return SHAPE_PLACEHOLDER;
+            String r = chunk;
+            for (int round = 0; round < rounds; round++) {
+                String d = percentDecode(r);
+                if (d.equals(r)) break;
+                if (!redactText(d, strict, 0, depth + 1).equals(d)) return SHAPE_PLACEHOLDER;
+                r = d;
+            }
+        }
+        int a = 0;
+        int b = chunk.length();
+        while (a < b && chunk.charAt(a) == '.') a++;
+        while (b > a && chunk.charAt(b - 1) == '.') b--;
+        String core = chunk.substring(a, b);
+        if (isJwt(core) || isTwoPart(core)) {
+            return chunk.substring(0, a) + SHAPE_PLACEHOLDER + chunk.substring(b);
+        }
+        if (isQualifiedName(core) || isHostname(core)) return null;
+        StringBuilder out = null;
+        int copied = 0;
         int start = 0;
-        for (int i = 0; i <= len; i++) {
-            char c = i < len ? token.charAt(i) : '/';
-            if (c == '/' || c == '?' || c == '&' || c == '#') {
-                boolean wholeToken = start == 0 && i == len; // already checked above
-                if (!wholeToken && i - start >= MIN_SECRET_LENGTH && isSecretShaped(token.substring(start, i))) {
-                    return true;
+        int len = chunk.length();
+        for (int k = 0; k <= len; k++) {
+            char c = k < len ? chunk.charAt(k) : '.';
+            if (c == '.' || c == '~' || c == '$' || c == '%') {
+                if (k - start >= MIN_SECRET_LENGTH && isSecretLabel(chunk, start, k)) {
+                    if (out == null) out = new StringBuilder(len);
+                    out.append(chunk, copied, start).append(SHAPE_PLACEHOLDER);
+                    copied = k;
                 }
+                start = k + 1;
+            }
+        }
+        if (out == null) return null;
+        return out.append(chunk, copied, len).toString();
+    }
+
+    /**
+     * A label ({@code [A-Za-z0-9_\-+/]}, no dots) that is secret-shaped: at least
+     * {@value #MIN_SECRET_LENGTH} characters with a digit and a letter, not a UUID, and not
+     * {@linkplain #isPathLike path-like}.
+     */
+    private static boolean isSecretLabel(String s, int from, int to) {
+        if (to - from < MIN_SECRET_LENGTH) return false;
+        if (to - from == 36 && UUID_SHAPE.matcher(s.substring(from, to)).matches()) return false;
+        if (!hasDigitAndLetter(s, from, to)) return false;
+        return !isPathLike(s, from, to);
+    }
+
+    /**
+     * An absolute file or URL path rather than a standard-base64 secret: it holds {@code /}, no
+     * {@code +}, and every {@code /}-piece is shorter than {@value #MIN_SECRET_LENGTH} and does not
+     * mix upper case, lower case and digits ({@code /var/app/releases/20241105} is a path;
+     * {@code aB3dE/fG7hI9jK1/mN2oP4qR} is not).
+     */
+    private static boolean isPathLike(String s, int from, int to) {
+        if (indexOfAny(s, from, to, "/") == to) return false;
+        int start = from;
+        for (int i = from; i <= to; i++) {
+            char c = i < to ? s.charAt(i) : '/';
+            if (c == '+') return false;
+            if (c == '/') {
+                if (i - start >= MIN_SECRET_LENGTH || mixesCaseAndDigits(s, start, i)) return false;
                 start = i + 1;
             }
         }
-        return false;
+        return true;
+    }
+
+    private static boolean mixesCaseAndDigits(String s, int from, int to) {
+        boolean upper = false, lower = false, digit = false;
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (c >= 'A' && c <= 'Z') upper = true;
+            else if (c >= 'a' && c <= 'z') lower = true;
+            else if (c >= '0' && c <= '9') digit = true;
+        }
+        return upper && lower && digit;
+    }
+
+    private static boolean isJwt(String v) {
+        int dots = 0;
+        for (int i = 0; i < v.length() && dots < 3; i++) if (v.charAt(i) == '.') dots++;
+        return dots == 2 && JWT_SHAPE.matcher(v).matches();
+    }
+
+    /** {@code payload.signature}: one dot, {@value #TWO_PART_MIN}+ base64url characters each side, a digit and a letter. */
+    private static boolean isTwoPart(String v) {
+        int dot = v.indexOf('.');
+        return dot >= TWO_PART_MIN && v.length() - dot - 1 >= TWO_PART_MIN
+            && v.indexOf('.', dot + 1) < 0
+            && isBase64Url(v, 0, dot) && isBase64Url(v, dot + 1, v.length())
+            && hasDigitAndLetter(v, 0, v.length());
+    }
+
+    /** {@code root.label.Label} with three or more Java-identifier labels and a known first label. */
+    private static boolean isQualifiedName(String v) {
+        int firstDot = v.indexOf('.');
+        if (firstDot < 0 || !PACKAGE_ROOTS.contains(v.substring(0, firstDot))) return false;
+        int labels = 0;
+        int start = 0;
+        for (int i = 0; i <= v.length(); i++) {
+            char c = i < v.length() ? v.charAt(i) : '.';
+            if (c == '.' || c == '$') {
+                if (i == start || isAsciiDigit(v.charAt(start))) return false;
+                labels++;
+                start = i + 1;
+            } else if (!(isAsciiLetter(c) || isAsciiDigit(c) || c == '_')) {
+                return false;
+            }
+        }
+        return labels >= 3;
+    }
+
+    /** A DNS name of three or more labels ({@code [A-Za-z0-9-]}, 1 to 63) whose last label is in {@link #HOST_TLDS}. */
+    private static boolean isHostname(String v) {
+        int lastDot = v.lastIndexOf('.');
+        if (lastDot < 0 || !HOST_TLDS.contains(v.substring(lastDot + 1).toLowerCase(Locale.ROOT))) return false;
+        int labels = 0;
+        int start = 0;
+        for (int i = 0; i <= v.length(); i++) {
+            char c = i < v.length() ? v.charAt(i) : '.';
+            if (c == '.') {
+                int len = i - start;
+                if (len == 0 || len > 63 || v.charAt(start) == '-' || v.charAt(i - 1) == '-') return false;
+                labels++;
+                start = i + 1;
+            } else if (!(isAsciiLetter(c) || isAsciiDigit(c) || c == '-')) {
+                return false;
+            }
+        }
+        return labels >= 3;
+    }
+
+    /**
+     * Percent-decode {@code s} keeping {@code +} (a base64 character in paths and free text) and
+     * any malformed escape literally. Linear; returns {@code s} itself when there is no {@code %}.
+     */
+    static String percentDecode(String s) {
+        if (s.indexOf('%') < 0) return s;
+        return lenientDecode(s.replace("+", "%2B"));
     }
 
     /**
@@ -303,16 +646,20 @@ public class Redactor {
      * the value-shaped pass would misfire on them (an ETag or a request id is a long hex string, a
      * multipart boundary is a long mixed token, a User-Agent can carry a build hash). Lowercase.
      * Also kept: every {@code sec-fetch-*} and {@code sec-ch-*} header. Not on this list on
-     * purpose: {@code Sec-WebSocket-Protocol}, which clients use to smuggle bearer tokens.
+     * purpose: {@code Sec-WebSocket-Protocol}, which clients use to smuggle bearer tokens, and
+     * {@code Forwarded} and {@code Via}, which a proxy fills from the request ({@code uri="/reset?token=…"}):
+     * they get the free-form pass, which keeps {@code for=}, {@code by=}, {@code proto=} and
+     * {@code host=} readable. Of the {@code X-Forwarded-*} family only the four listed here are
+     * kept; {@code X-Forwarded-Uri} is a URL header and the rest get the free-form pass.
      */
     private static final Set<String> VERBATIM_HEADERS = Set.of(
         "accept", "accept-charset", "accept-encoding", "accept-language", "cache-control",
         "connection", "content-encoding", "content-language", "content-length", "content-type",
         "dnt", "expect", "host", "http2-settings", "if-match", "if-modified-since", "if-none-match",
         "if-range", "if-unmodified-since", "keep-alive", "pragma", "priority", "range", "te",
-        "upgrade", "upgrade-insecure-requests", "user-agent", "via", "x-requested-with",
+        "upgrade", "upgrade-insecure-requests", "user-agent", "x-requested-with",
         // client address and proxy metadata
-        "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-port", "x-forwarded-proto",
+        "x-forwarded-for", "x-forwarded-host", "x-forwarded-port", "x-forwarded-proto",
         "x-real-ip", "cf-connecting-ip", "true-client-ip", "cf-ipcountry", "cf-visitor",
         // request ids and trace context: identifiers, needed to correlate the error with logs
         "x-request-id", "x-correlation-id", "request-id", "traceparent", "tracestate", "cf-ray",
@@ -368,39 +715,40 @@ public class Redactor {
      * Value-shaped redaction of a free-form value (a header). A value that is a single URL or
      * absolute path ({@code scheme://…} or {@code /…}, no whitespace) goes through
      * {@link #redactUrl}, unless it is secret-shaped as a whole (a standard-base64 secret can
-     * start with {@code /}). Otherwise it is redacted like {@link #redactMessage}, and a token
-     * that is a URL or path is also replaced when one of its {@code / ? & #}-delimited pieces is
-     * secret-shaped. Delimiters and everything else are kept; a value with nothing to redact is
-     * returned unchanged.
+     * start with {@code /}). Otherwise it gets the free-form pass with the strict name rule
+     * ({@link #redactText}): embedded URLs ({@code Link: <…>}, {@code Refresh: 0; url=…},
+     * {@code Forwarded: uri="…"}), sensitive {@code name=value} pairs, and secret-shaped runs.
+     * Delimiters and everything else are kept; a value with nothing to redact is returned
+     * unchanged.
      */
     static String redactValue(String value) {
+        return redactValue(value, DECODE_ROUNDS, 0);
+    }
+
+    private static String redactValue(String value, int rounds, int depth) {
         if (value == null || value.isEmpty()) return value;
         if (looksLikeUrl(value)) {
-            return isSecretShaped(value) ? "[redacted]" : redactUrl(value);
+            return isSecretShaped(value) ? SHAPE_PLACEHOLDER : redactUrl(value, rounds, depth);
         }
-        var matcher = MESSAGE_TOKEN.matcher(value);
-        StringBuilder out = null;
-        int copied = 0;
-        while (matcher.find()) {
-            if (matcher.end() - matcher.start() < MIN_SECRET_LENGTH) continue;
-            if (!isSecretToken(matcher.group())) continue;
-            if (out == null) out = new StringBuilder(value.length());
-            out.append(value, copied, matcher.start()).append("[redacted]");
-            copied = matcher.end();
-        }
-        if (out == null) return value;
-        return out.append(value, copied, value.length()).toString();
+        return redactText(value, true, rounds, depth);
     }
 
     /**
-     * Redact a URL or a path-plus-query (a {@code Referer}, an {@code X-Original-URL}): any
-     * {@code userinfo@} in the authority becomes {@link #PLACEHOLDER}, the path goes through
-     * {@link #redactPath}, the query and the fragment through {@link #redactQuery}. Scheme, host
-     * and port are kept. A value that is neither {@code scheme://…} nor {@code /…} (an
-     * {@code Origin: null}, garbage) goes through {@link #redactValue} instead; nothing throws.
+     * Redact a URL or a path-plus-query (a {@code Referer}, an {@code X-Original-URL}, a URL
+     * inside an exception message): any {@code userinfo@} in the authority becomes
+     * {@link #PLACEHOLDER} whatever its shape ({@code postgres://user:pw@host}), the path goes
+     * through {@link #redactPath}, the query and the fragment through {@link #redactQuery}.
+     * Scheme (a double scheme such as {@code jdbc:postgresql} included), host and port are kept.
+     * A value that is neither {@code scheme://…} nor {@code /…} (an {@code Origin: null},
+     * garbage) goes through {@link #redactValue} instead; nothing throws.
      */
     public static String redactUrl(String url) {
+        return redactUrl(url, DECODE_ROUNDS, 0);
+    }
+
+    private static String redactUrl(String url, int rounds, int depth) {
         if (url == null || url.isEmpty()) return url;
+        if (depth > MAX_DEPTH) return SHAPE_PLACEHOLDER;
         int len = url.length();
         var out = new StringBuilder(len);
         int pos;
@@ -409,7 +757,10 @@ public class Redactor {
             int authStart = sep + 3;
             int authEnd = indexOfAny(url, authStart, len, "/?#");
             out.append(url, 0, authStart);
-            int at = url.lastIndexOf('@', authEnd - 1);
+            int at = -1;
+            for (int i = authStart; i < authEnd; i++) {
+                if (url.charAt(i) == '@') at = i;
+            }
             if (at >= authStart) {
                 out.append(PLACEHOLDER).append(url, at, authEnd);
             } else {
@@ -419,18 +770,17 @@ public class Redactor {
         } else if (url.charAt(0) == '/') {
             pos = 0;
         } else {
-            return redactValue(url);
+            return redactValue(url, rounds, depth);
         }
         int hash = url.indexOf('#', pos);
         int fragStart = hash < 0 ? len : hash;
-        int q = url.indexOf('?', pos);
-        int pathEnd = q < 0 || q > fragStart ? fragStart : q;
-        out.append(redactPath(url.substring(pos, pathEnd)));
-        if (pathEnd < fragStart) {
-            out.append('?').append(redactQuery(url.substring(pathEnd + 1, fragStart)));
+        int q = indexOfAny(url, pos, fragStart, "?");
+        out.append(redactPath(url.substring(pos, q), rounds, depth));
+        if (q < fragStart) {
+            out.append('?').append(redactQuery(url.substring(q + 1, fragStart), rounds, depth));
         }
         if (fragStart < len) {
-            out.append('#').append(redactQuery(url.substring(fragStart + 1)));
+            out.append('#').append(redactQuery(url.substring(fragStart + 1), rounds, depth));
         }
         return out.toString();
     }
@@ -445,11 +795,11 @@ public class Redactor {
         return sep > 0 && isScheme(value, sep);
     }
 
+    /** {@code s[0, end)} is a URL scheme; {@code :} is allowed inside for a double scheme ({@code jdbc:postgresql}). */
     private static boolean isScheme(String s, int end) {
-        if (!Character.isLetter(s.charAt(0))) return false;
+        if (!isAsciiLetter(s.charAt(0))) return false;
         for (int i = 1; i < end; i++) {
-            char c = s.charAt(i);
-            if (!(c < 0x80 && (Character.isLetterOrDigit(c) || c == '+' || c == '-' || c == '.'))) return false;
+            if (!isSchemeChar(s.charAt(i))) return false;
         }
         return true;
     }
@@ -462,55 +812,78 @@ public class Redactor {
     }
 
     /**
-     * Redact high-entropy path segments in a URL path. Each {@code /}-delimited
-     * segment is tested with {@link #isSecretShaped(String)}; those that match are
-     * replaced with {@code [redacted]}. The leading {@code /} and segment separators
-     * are preserved.
+     * Redact secrets in a URL path. Each {@code /}-delimited segment gets the free-form pass with
+     * the strict name rule ({@link #redactText}): a secret-shaped run becomes {@code [redacted]}
+     * (a dotted segment label by label, so {@code T.pdf} is {@code [redacted].pdf}); a segment
+     * holding {@code %} is also tested after up to {@value #DECODE_ROUNDS} rounds of
+     * percent-decoding and replaced whole if the decoded text holds a secret; and a
+     * {@code ;name=value} matrix parameter is redacted by name ({@code ;jsessionid=},
+     * {@code ;token=} become {@code [REDACTED]}) or by shape. The leading {@code /} and segment
+     * separators are preserved. Paths whose segments are all short and hold no {@code =} are
+     * returned at once (this runs on every request's log line).
      *
      * <p>Examples:
      * <ul>
      *   <li>{@code /users/42/profile} → unchanged (numeric id, short slug)</li>
      *   <li>{@code /password-reset/a3f9Bc2d8eF1g4h5} → {@code /password-reset/[redacted]}</li>
      *   <li>{@code /api/eyJhbGci.payload.signature} → {@code /api/[redacted]} (JWT)</li>
+     *   <li>{@code /reset/Xx1a…%2BgH5…%3D%3D} → {@code /reset/[redacted]} (encoded)</li>
+     *   <li>{@code /reset;token=abc} → {@code /reset;token=[REDACTED]} (matrix)</li>
      *   <li>{@code /items/550e8400-e29b-41d4-a716-446655440000} → unchanged (UUID)</li>
      * </ul>
      */
     public static String redactPath(String path) {
+        return redactPath(path, DECODE_ROUNDS, 0);
+    }
+
+    private static String redactPath(String path, int rounds, int depth) {
         if (path == null || path.isEmpty()) return path;
-        String[] segments = path.split("/", -1);
-        var out = new StringBuilder(path.length());
-        for (int i = 0; i < segments.length; i++) {
-            if (i > 0) out.append('/');
-            String seg = segments[i];
-            out.append(isSecretShaped(seg) ? "[redacted]" : seg);
+        if (!mayHoldPathSecret(path)) return path;
+        if (depth > MAX_DEPTH) return SHAPE_PLACEHOLDER;
+        StringBuilder out = null;
+        int len = path.length();
+        int start = 0;
+        for (int i = 0; i <= len; i++) {
+            if (i < len && path.charAt(i) != '/') continue;
+            if (i > start) {
+                String seg = path.substring(start, i);
+                String redacted = redactText(seg, true, rounds, depth);
+                if (out != null || !redacted.equals(seg)) {
+                    if (out == null) out = new StringBuilder(len).append(path, 0, start);
+                    out.append(redacted);
+                }
+            }
+            if (out != null && i < len) out.append('/');
+            start = i + 1;
         }
-        return out.toString();
+        return out == null ? path : out.toString();
+    }
+
+    /** False when every segment is shorter than {@value #MIN_SECRET_LENGTH} and there is no {@code =}. */
+    private static boolean mayHoldPathSecret(String path) {
+        int segStart = 0;
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (c == '=') return true;
+            if (c == '/') segStart = i + 1;
+            else if (i - segStart + 1 >= MIN_SECRET_LENGTH) return true;
+        }
+        return false;
     }
 
     /**
-     * Redact high-entropy tokens embedded in an exception message. Each token between
-     * common delimiters (whitespace, quotes, punctuation) that looks like a secret
-     * (same heuristic as {@link #redactPath}) is replaced with {@code [redacted]} in
-     * place; everything else, delimiters included, is kept exactly as it was. A
+     * Redact secrets embedded in an exception message, in place; everything else, delimiters
+     * included, is kept exactly as it was. Every {@code scheme://…} in it goes through
+     * {@link #redactUrl} (userinfo, path, query, fragment); a {@code name=value} pair whose name
+     * is sensitive by {@link #isSensitiveField} has its value replaced by {@link #PLACEHOLDER};
+     * every other secret-shaped run becomes {@code [redacted]} (see {@link #redactText}). A
      * message with nothing to redact is returned unchanged.
      */
     public static String redactMessage(String message) {
         if (message == null || message.isEmpty()) return message;
         // Check for JWT at the whole-message level first (message may be just a token)
-        if (JWT_SHAPE.matcher(message).matches()) return PLACEHOLDER;
-        var matcher = MESSAGE_TOKEN.matcher(message);
-        StringBuilder out = null;
-        int copied = 0;
-        while (matcher.find()) {
-            // Length check first: most tokens are short words and never reach the regexes.
-            if (matcher.end() - matcher.start() < MIN_SECRET_LENGTH) continue;
-            if (!isSecretShaped(matcher.group())) continue;
-            if (out == null) out = new StringBuilder(message.length());
-            out.append(message, copied, matcher.start()).append("[redacted]");
-            copied = matcher.end();
-        }
-        if (out == null) return message;
-        return out.append(message, copied, message.length()).toString();
+        if (isJwt(message)) return PLACEHOLDER;
+        return redactText(message, false, DECODE_ROUNDS, 0);
     }
 
     /**
@@ -562,7 +935,12 @@ public class Redactor {
      *       a digit and a letter) → secret; any other dotted value → not a secret.</li>
      *   <li>All characters in base64url-or-hex alphabet.</li>
      *   <li>Contains at least one digit AND at least one letter.</li>
+     *   <li>Not a path: a value with {@code /} whose pieces are all short and none mixes upper
+     *       case, lower case and digits ({@code /var/app/releases/20241105}) is not a secret.</li>
      * </ol>
+     * This is the test for a value taken <em>as a whole</em>. Text is redacted run by run and
+     * label by label ({@link #redactText}), so {@code T.pdf} is caught there although it is not
+     * secret-shaped as a whole.
      */
     static boolean isSecretShaped(String value) {
         if (value == null || value.isEmpty()) return false;
@@ -571,23 +949,17 @@ public class Redactor {
         // always >= MIN_SECRET_LENGTH, so no UUID is ever rejected by the length test.
         if (value.length() < MIN_SECRET_LENGTH) return false;
         // UUIDs are identifiers, not secrets — leave them for debugging.
-        if (UUID_SHAPE.matcher(value).matches()) return false;
+        if (value.length() == 36 && UUID_SHAPE.matcher(value).matches()) return false;
         // JWT: header.payload.signature — always a secret regardless of char diversity.
-        if (JWT_SHAPE.matcher(value).matches()) return true;
+        if (isJwt(value)) return true;
         // Two-part base64url (payload.signature, the ops token's own shape; L13/M6): exactly one
         // dot, at least TWO_PART_MIN characters on each side, and mixed content like the rule
         // below. Hostnames and dotted file names never have two 20+ character labels.
-        int dot = value.indexOf('.');
-        if (dot >= 0) {
-            return dot >= TWO_PART_MIN && value.length() - dot - 1 >= TWO_PART_MIN
-                && value.indexOf('.', dot + 1) < 0
-                && isBase64Url(value, 0, dot) && isBase64Url(value, dot + 1, value.length())
-                && hasDigitAndLetter(value);
-        }
+        if (value.indexOf('.') >= 0) return isTwoPart(value);
         // Must consist entirely of base64url/hex characters.
         if (!SECRET_CHARS.matcher(value).matches()) return false;
         // Must have mixed content: at least one digit and at least one letter.
-        return hasDigitAndLetter(value);
+        return hasDigitAndLetter(value, 0, value.length()) && !isPathLike(value, 0, value.length());
     }
 
     /** Minimum length of each side of a two-part {@code payload.signature} token. */
@@ -603,10 +975,10 @@ public class Redactor {
         return true;
     }
 
-    private static boolean hasDigitAndLetter(String value) {
+    private static boolean hasDigitAndLetter(String value, int from, int to) {
         boolean hasDigit = false;
         boolean hasLetter = false;
-        for (int i = 0; i < value.length(); i++) {
+        for (int i = from; i < to; i++) {
             char c = value.charAt(i);
             if (c >= '0' && c <= '9') hasDigit = true;
             else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) hasLetter = true;
