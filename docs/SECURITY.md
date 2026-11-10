@@ -354,7 +354,12 @@ contexts where escaping alone doesn't stop script:
   substitution, which is valid in JavaScript strings, template literals and JSON, so JSON
   `hx-vals`/`hx-headers` keep working with quotes in the data. HTML escaping alone is undone by
   the browser before the code runs (`&#39;` is a quote again), and JTE's JavaScript escaping for
-  `on*` left `&` alone, so an entity in user data still closed the string.
+  `on*` left `&` alone, so an entity in user data still closed the string. When data is the whole
+  `hx-vals`/`hx-headers` value (`hx-vals='${json}'`) it is attribute-escaped instead, so JSON the
+  handler built stays intact. htmx evaluates such a value when it starts with `js:` or
+  `javascript:` after trimming (JavaScript's `trim()`, which strips U+00A0, U+FEFF and the other
+  Unicode spaces): if user data supplies any part of that prefix, in one `${...}` or several, the
+  value renders as `{}`. A `js:` the template wrote itself is kept.
 - **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup. Template
   markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
   `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.

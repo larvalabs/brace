@@ -700,7 +700,8 @@ of JTE's escaping, Brace's template output:
   JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and
   `hx-vals='{"q": "${q}"}'` stays valid JSON. When data is the whole `hx-vals`/`hx-headers` value
   (`hx-vals='${json}'`, JSON the handler built), it's attribute-escaped instead, so the JSON stays
-  intact; a whole value starting `js:` becomes `{}`. Still, these attributes are code: prefer passing
+  intact. If data supplies any of a leading `js:`/`javascript:` (which htmx evaluates), in one piece
+  or several and behind any Unicode whitespace, the whole value becomes `{}`. Still, these attributes are code: prefer passing
   user data as `hx-vals` JSON or `data-*` attributes over writing it into a handler. The same rules
   apply to data a `@template` call writes inside an attribute value.
 - `srcdoc`: user data is escaped twice, so it becomes text in the frame, never markup. Its content

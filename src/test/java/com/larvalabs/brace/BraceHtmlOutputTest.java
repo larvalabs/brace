@@ -387,6 +387,46 @@ class BraceHtmlOutputTest {
         }
     }
 
+    // --- L7 (2026-11): the js: guard on hx-vals / hx-headers ---
+
+    @Test
+    void dataCantMakeAnHxValsValueAnExpression() {
+        // htmx trims with JavaScript's trim(), which strips U+00A0, U+FEFF and the other Unicode
+        // spaces, then evaluates a value starting js: or javascript:.
+        for (String code : List.of("js:{x: alert(1)}", " js:{x: alert(1)}", "﻿javascript:alert(1)",
+                "   \tjs:alert(1)", " JS:alert(1)", "　js:alert(1)")) {
+            String html = both("xssHxVals", Map.of("a", code, "b", ""));
+            for (String id : List.of("v1", "v2", "v3", "v6")) assertEquals("{}", named(html, id, "hx-vals"), id + " <- " + code);
+            assertEquals("{}", named(html, "v4", "hx-headers"), code);
+            assertEquals("{}", named(html, "v5", "data-hx-vals"), code);
+        }
+        // The prefix assembled from more than one piece of data, or from template text and data.
+        for (var parts : List.of(List.of("js", ":alert(1)"), List.of("", "js:alert(1)"), List.of(" ", "js:alert(1)"),
+                List.of("j", "s:alert(1)"), List.of("javascript", ":alert(1)"))) {
+            String html = both("xssHxVals", Map.of("a", parts.get(0), "b", parts.get(1)));
+            assertEquals("{}", named(html, "v3", "hx-vals"), parts.toString());
+            assertEquals("{}", named(html, "v4", "hx-headers"), parts.toString());
+            assertEquals("{}", named(html, "v6", "hx-vals"), parts.toString());
+        }
+        assertEquals("{}", named(both("xssHxVals", Map.of("a", "", "b", "s:alert(1)")), "v7", "hx-headers"));
+    }
+
+    @Test
+    void hxValsTheTemplateWroteStillWork() throws Exception {
+        var mapper = Json.mapper();
+        String html = both("xssHxVals", Map.of("a", "js:alert(1)", "b", " js:x"));
+        // Data inside a JSON string is data, whatever it starts with.
+        assertEquals("js:alert(1)", mapper.readTree(named(html, "k2", "hx-vals")).get("q").asText());
+        assertEquals(" js:x", mapper.readTree(named(html, "k3", "hx-vals")).get("r").asText());
+        // A js: expression the template wrote keeps its (script-escaped) data.
+        html = both("xssHxVals", Map.of("a", "\"+alert(1)+\"", "b", ""));
+        assertEquals("js:{v: \"\\u0022+alert(1)+\\u0022\"}", named(html, "k1", "hx-vals"));
+        // Whole-value JSON the app built is kept intact, also with space around it in the data.
+        html = both("xssHxVals", Map.of("a", " {\"id\":42,\"n\":\"O'Brien\"} ", "b", ""));
+        assertEquals("O'Brien", mapper.readTree(named(html, "v1", "hx-vals")).get("n").asText());
+        assertEquals("not js", named(both("xssHxVals", Map.of("a", "not js", "b", ":x")), "v1", "hx-vals"));
+    }
+
     /**
      * Renders with static template text as pre-encoded bytes (how Brace runs, to a String and to
      * bytes) and as Strings (JTE's default), asserts all three agree, and returns the HTML.

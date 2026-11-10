@@ -378,11 +378,13 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private void emitHeldValue() {
         if (urlValue && !isSafeValue()) {
             Escape.htmlAttribute(BLOCKED_URL, target);
+        } else if (jsonValue && evaluatedBecauseOfUserData()) {
+            target.writeContent("{}"); // data made it a js: expression htmx would evaluate
         } else if (jsonValue && userWrites == 1 && valueRaw.length() == soleUser.length()) {
             // The whole value is one piece of data: JSON the app built (hx-vals='${json}').
             // escaping its quotes as JavaScript would break the JSON, so it's attribute-escaped instead (the
-            // browser decodes that back), unless it's a js: expression htmx would evaluate.
-            Escape.htmlAttribute(evaluated(soleUser) ? "{}" : soleUser, target);
+            // browser decodes that back).
+            Escape.htmlAttribute(soleUser, target);
         } else {
             target.writeContent(valueOut.toString());
         }
@@ -581,10 +583,33 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         return name.equals("hx-vals") || name.equals("hx-headers");
     }
 
-    /** A {@code js:}/{@code javascript:} value, which htmx evaluates as code. */
-    private static boolean evaluated(String value) {
-        String v = normalize(value).toLowerCase(Locale.ROOT);
-        return v.startsWith("js:") || v.startsWith("javascript:");
+    /**
+     * Whether the held {@code hx-vals}/{@code hx-headers} value starts with {@code js:} or
+     * {@code javascript:}, which htmx evaluates as code, and user data supplied any of that
+     * prefix. Judged on the whole value, however many pieces it was written in, after the
+     * trimming htmx does: JavaScript's {@code trim()}, which strips Unicode spaces too (L7). A
+     * prefix that is all template text ({@code hx-vals='js:{v: "${x}"}'}) is the template's choice.
+     */
+    private boolean evaluatedBecauseOfUserData() {
+        if (firstUserIndex < 0) return false;
+        int i = 0, length = valueRaw.length();
+        while (i < length && isJsSpace(valueRaw.charAt(i))) i++;
+        for (String prefix : EVALUATED_PREFIXES) {
+            if (valueRaw.length() - i >= prefix.length()
+                    && valueRaw.substring(i, i + prefix.length()).equalsIgnoreCase(prefix)) {
+                return firstUserIndex < i + prefix.length();
+            }
+        }
+        return false;
+    }
+
+    private static final String[] EVALUATED_PREFIXES = {"js:", "javascript:"};
+
+    /** What JavaScript's {@code String.prototype.trim} strips: WhiteSpace and LineTerminator. */
+    private static boolean isJsSpace(char c) {
+        return (c >= '\t' && c <= '\r') || c == ' ' || c == ' ' || c == ' '
+            || (c >= ' ' && c <= ' ') || c == ' ' || c == ' ' || c == ' '
+            || c == ' ' || c == '　' || c == '﻿';
     }
 
     private static boolean isScriptAttribute(String attribute) {
