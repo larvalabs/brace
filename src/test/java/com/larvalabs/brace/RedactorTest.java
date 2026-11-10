@@ -982,7 +982,11 @@ class RedactorTest {
             "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25",
             // verification pass: mid-run schemes, user info to the last '@', ';' parameters, names
             "1https://u:p@", "-https:/", "/https://", "x-jdbc:s://h;a=b", "postgres://a:b/c@", ";password=",
-            "@", "a://b:c/d@", "ab_cd-", "Ab3_", "2024q4-", "0x1/");
+            "@", "a://b:c/d@", "ab_cd-", "Ab3_", "2024q4-", "0x1/",
+            // second review: bracketed values with and without a closer, user info across a
+            // URL-ending character (the '@' look-ahead), parameter sections, frame-like lines
+            "token=[", "token={a}}", "token='a''", "password=(", "x=[", "a://b:c^", "a://b:c ", "a://b:1^",
+            "a://h;p=a/", "a://u:p;", "\n\tat a.B(", "\n at a.b(C.java:1) ~[", "aB/cD1/", "Ab/Cd/");
         long t0 = System.nanoTime();
         for (int size : List.of(64 * 1024, 1024 * 1024)) {
             for (String unit : units) {
@@ -1214,6 +1218,130 @@ class RedactorTest {
                 "GET /api/v2/users/12345/orders failed; see application/vnd.api+json")) {
             assertEquals(ok, Redactor.redactMessage(ok), ok);
         }
+    }
+
+    @Test
+    void aSensitiveValueInBracketsOrSingleQuotesIsRedactedToItsCloser() {
+        // M-3 (i): for a sensitive name, a value that opened with ' ( [ { < was skipped (the value
+        // scan stopped on the opener), so the SQL Server {braced} password form and a toString
+        // list of codes were kept.
+        String[][] cases = {
+            {"jdbc:sqlserver://db:1433;user=sa;password={hunter2};encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password={[REDACTED]};encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password={hun;ter2};encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password={[REDACTED]};encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=(hunter2);encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=([REDACTED]);encrypt=true"},
+            {"jdbc:sqlserver://h;password=\"hunter 2\";x=1", "jdbc:sqlserver://h;password=\"[REDACTED]\";x=1"},
+            {"jdbc:sqlserver://h;password='hunter 2';x=1", "jdbc:sqlserver://h;password='[REDACTED]';x=1"},
+            {"password='hunter2'", "password='[REDACTED]'"},
+            {"password='hunter 2' next", "password='[REDACTED]' next"},
+            {"password=(hunter2)", "password=([REDACTED])"},
+            {"password={hunter2}", "password={[REDACTED]}"},
+            {"password=<hunter2>", "password=<[REDACTED]>"},
+            {"password=[hunter2] ok", "password=[[REDACTED]] ok"},
+            {"User[id=1, backupCodes=[a1b2c-d3e4f, g5h6i-j7k8l]]", "User[id=1, backupCodes=[[REDACTED]]]"},
+            {"recovery_codes=[abcd-1234, efgh-5678]", "recovery_codes=[[REDACTED]]"},
+            // nesting of the same bracket, and the doubled closer that escapes one in {..} and '..'
+            {"password=(a(b)c) x", "password=([REDACTED]) x"},
+            {"password={a}}b};x=1", "password={[REDACTED]};x=1"},
+            {"password='it''s' x", "password='[REDACTED]' x"},
+            // no closer: to the end of the line, not beyond
+            {"password={hunter2 and more\nnext line", "password={[REDACTED]\nnext line"},
+            {"password=[a, b", "password=[[REDACTED]"},
+        };
+        for (String[] c : cases) {
+            String once = Redactor.redactMessage(c[0]);
+            assertEquals(c[1], once, c[0]);
+            assertEquals(once, Redactor.redactMessage(once), "redacting twice changes nothing: " + c[0]);
+        }
+        assertEquals("user=bob; password='[REDACTED]'; realm=x",
+            Redactor.redactHeaders(Map.of("X-Upstream-Info", "user=bob; password='hunter 2'; realm=x")).get("X-Upstream-Info"));
+        // Unchanged: an empty value, a value already redacted, and a pair that merely sits inside brackets.
+        for (String same : List.of("token=() token=[] token={} token='' token=<> ok", "password=[REDACTED] x",
+                "token=[redacted], next", "password=\"[REDACTED]\"", "id={42} name='bob' tags=[a, b]")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+        assertEquals("User(id=1, password=[REDACTED]) and Config{password=[REDACTED]} and [password=[REDACTED]]",
+            Redactor.redactMessage("User(id=1, password=hunter2) and Config{password=hunter2} and [password=hunter2]"));
+        // A URL that ends in a redacted value is the same URL the second time round.
+        String url = Redactor.redactMessage("Failed postgres://app@db/x?password=hunter2");
+        assertEquals("Failed postgres://[REDACTED]@db/x?password=[REDACTED]", url);
+        assertEquals(url, Redactor.redactMessage(url));
+    }
+
+    @Test
+    void userInfoWithACharacterThatEndsAUrlIsStillMasked() {
+        // M-3 (ii): the URL scan stopped at ^ { } | \ ` ' < > or a space inside a password, before
+        // the '@', so the URL had no user info to mask and the password stayed.
+        for (String odd : List.of("^", "{", "}", "|", "\\", "`", "'", "<", ">", "{ss}", "<ss>", "^^|")) {
+            String in = "Failed jdbcUrl=jdbc:postgresql://app:p" + odd + "ssw0rd@db/x now";
+            assertEquals("Failed jdbcUrl=jdbc:postgresql://[REDACTED]@db/x now", Redactor.redactMessage(in), in);
+        }
+        String[][] cases = {
+            // One space: masked when the next word holds the '@' and what follows ':' is no port.
+            {"Failed postgres://app:my pass@db/x", "Failed postgres://[REDACTED]@db/x"},
+            // Digits after ':' with a '/' before the '@' were taken for a port and a path.
+            {"Failed https://user:12345/678@host/x", "Failed https://[REDACTED]@host/x"},
+            {"Failed postgres://app:12345/678@db/x", "Failed postgres://[REDACTED]@db/x"},
+            {"Failed redis://:12345?6@cache:6379/0", "Failed redis://[REDACTED]@cache:6379/0"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        assertEquals("https://[REDACTED]@host/x", Redactor.redactUrl("https://user:12345/678@host/x"));
+        assertEquals("jdbc:postgresql://[REDACTED]@db/x", Redactor.redactUrl("jdbc:postgresql://app:p^ssw0rd@db/x"));
+        // Not user info: a host that is evidently a host (a dot, localhost, an IPv6 literal), no
+        // ':' at all, an '@' beyond whitespace, a URL in quotes next to an address.
+        for (String same : List.of(
+                "see https://example.com:8443/a{b}@c and https://example.com/a^b@c",
+                "see http://localhost:8080/@alice and http://[::1]:8080/@alice and http://10.0.0.1:8080/@alice",
+                "connect to postgres://db:5432 as bob@example.com failed",
+                "postgres://app:secret host unreachable, mail bob@example.com",
+                "<a href='https://example.com:8443/x'>bob@example.com</a>",
+                "{\"url\":\"http://api:8080/x\",\"email\":\"bob@example.com\"}",
+                "urls 'http://api:8080/x','bob@example.com'",
+                "mail bob@example.com about https://example.com/x then alice@example.com")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+    }
+
+    @Test
+    void aParameterSectionAfterTheHostCoversTheRestOfTheUrl() {
+        // M-3 (iii): only the text up to the first / ? # went through the name=value pass, so a
+        // password holding one of those lost its head only (password=[REDACTED]/def123).
+        String[][] cases = {
+            {"jdbc:sqlserver://db:1433;user=sa;password=abc/def123;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=abc?def123;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=abc#def123;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=a/b?c#d;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            // An '@' in a parameter value is not user info: the host stays, the value goes.
+            {"jdbc:sqlserver://db:1433;user=sa;password=p@ss;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db.internal:1433;user=sa;password=p@ss/w0rd;encrypt=true",
+                "jdbc:sqlserver://db.internal:1433;user=sa;password=[REDACTED];encrypt=true"},
+            // A ';' inside a user:password is still user info.
+            {"postgres://u:p;w@host/db refused", "postgres://[REDACTED]@host/db refused"},
+            {"postgres://us;er:hunter2@host/db refused", "postgres://[REDACTED]@host/db refused"},
+            {"postgres://u:p;x=1/w@host/db refused", "postgres://[REDACTED]@host/db refused"},
+            // The rest of such a URL is still redacted by name and by shape.
+            {"jdbc:sqlserver://db;databaseName=app/" + T + "?token=abc", "jdbc:sqlserver://db;databaseName=[redacted]?token=[REDACTED]"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        for (String same : List.of("jdbc:sqlserver://db:1433;databaseName=app/main;user=sa",
+                "jdbc:postgresql://db.internal:5432/app;ApplicationName=web",
+                "jdbc:h2:mem:redactfinal;DB_CLOSE_DELAY=-1")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+        // A space still ends an unquoted value (documented in docs/SECURITY.md).
+        assertEquals("jdbc:sqlserver://db:1433;user=sa;password=[REDACTED] def123;encrypt=true",
+            Redactor.redactMessage("jdbc:sqlserver://db:1433;user=sa;password=abc def123;encrypt=true"));
     }
 
     @Test

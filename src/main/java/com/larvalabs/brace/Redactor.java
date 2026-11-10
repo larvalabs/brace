@@ -435,9 +435,11 @@ public class Redactor {
      * <ol>
      *   <li>every {@code scheme://…} (any scheme, {@code jdbc:postgresql://} included) and every
      *       {@code </path?query>} goes through {@link #redactUrl};</li>
-     *   <li>in a {@code name=value} pair whose name is sensitive, the value (up to the next
-     *       {@code & ; ,}, whitespace or bracket, or the closing quote) becomes
-     *       {@link #PLACEHOLDER}; a value that is a {@code /path} goes through {@link #redactUrl};</li>
+     *   <li>in a {@code name=value} pair whose name is sensitive, the value becomes
+     *       {@link #PLACEHOLDER}: up to the next {@code & ; ,}, whitespace or bracket; or, when it
+     *       opens with {@code " ' ( [ { <}, up to the matching closer ({@code password={a;b}},
+     *       {@code codes=[a, b]}), the end of the line if there is none. A value that is a
+     *       {@code /path} goes through {@link #redactUrl};</li>
      *   <li>every other maximal run of {@code [A-Za-z0-9_\-+/.~$%]} is tested by
      *       {@link #redactChunk}: decoded, then label by label.</li>
      * </ol>
@@ -457,12 +459,14 @@ public class Redactor {
         while (i < n) {
             char c = s.charAt(i);
             String replacement = null;
+            boolean url = false;
             int from = i;
             int to = i + 1;
             if (isAsciiLetter(c) && (i == 0 || !isSchemeChar(s.charAt(i - 1)) || i == urlAt)) {
                 int end = urlEnd(s, i);
                 if (end > i) {
                     to = end;
+                    url = true;
                     replacement = urlReplacement(s.substring(i, end), rounds, depth);
                 } else {
                     to = chunkEnd(s, i);
@@ -477,18 +481,31 @@ public class Redactor {
                 // <path?query> (a Link header): the path up to '>'.
                 from = i + 1;
                 to = valueEnd(s, from, "\"'<>");
+                url = true;
                 replacement = urlReplacement(s.substring(from, to), rounds, depth);
             } else if (c == '=') {
                 int vs = i + 1;
                 boolean quoted = vs < n && s.charAt(vs) == '"';
                 int inner = quoted ? vs + 1 : vs;
                 if (sensitiveName(nameBefore(s, i), strict)) {
+                    char close = quoted || inner >= n ? 0 : closerFor(s.charAt(inner));
                     from = inner;
-                    to = quoted ? closingQuote(s, inner) : valueEnd(s, inner, "&;,\"'<>()[]{}|\\");
+                    if (quoted) {
+                        to = closingQuote(s, inner);
+                    } else if (close == 0) {
+                        to = valueEnd(s, inner, "&;,\"'<>()[]{}|\\");
+                    } else if (s.startsWith(PLACEHOLDER, inner) || s.startsWith(SHAPE_PLACEHOLDER, inner)) {
+                        to = inner; // already redacted: [REDACTED] is not a bracketed value
+                    } else {
+                        // '..', (..), [..], {..}, <..>: everything up to the matching closer
+                        from = inner + 1;
+                        to = closerIndex(s, from, s.charAt(inner), close);
+                    }
                     if (to > from) replacement = PLACEHOLDER;
                 } else if (inner < n && s.charAt(inner) == '/') {
                     from = inner;
                     to = quoted ? closingQuote(s, inner) : valueEnd(s, inner, ";,\"'<>");
+                    url = true;
                     replacement = urlReplacement(s.substring(from, to), rounds, depth);
                 }
                 if (replacement == null) {
@@ -501,6 +518,7 @@ public class Redactor {
                 int end = u == i ? urlEnd(s, i) : -1;
                 if (end > i) {
                     to = end; // jdbc:<subscheme>:// after a prefix ("-jdbc:sqlserver://")
+                    url = true;
                     replacement = urlReplacement(s.substring(i, to), rounds, depth);
                 } else {
                     if (u > i) {
@@ -516,9 +534,51 @@ public class Redactor {
                 copied = to;
             }
             i = Math.max(to, i + 1);
+            // A URL that ended on the '=' of a pair, because the value starts with a character
+            // that ends a URL (;password={..}, ;password="a b", ?token='..'): judge that pair
+            // now, as text. The '=' branch always moves past it, so this cannot loop.
+            if (url && to < n && to > from && s.charAt(to - 1) == '=') i = to - 1;
         }
         if (out == null) return s;
         return out.append(s, copied, n).toString();
+    }
+
+    /** The closer of a value that opens with {@code open}: {@code ' ( [ { <}; 0 for anything else. */
+    private static char closerFor(char open) {
+        switch (open) {
+            case '\'': return '\'';
+            case '(': return ')';
+            case '[': return ']';
+            case '{': return '}';
+            case '<': return '>';
+            default: return 0;
+        }
+    }
+
+    /**
+     * Index of the closer of a bracketed or single-quoted value whose content starts at
+     * {@code from}, or the end of the line when there is none (the rest of the line is then the
+     * value: better too much than the tail of a password). Brackets of the same kind nest. A
+     * doubled closer inside {@code {..}} or {@code '..'} is an escaped one, as SQL Server
+     * connection strings ({@code password={a}}b}}) and SQL literals ({@code 'it''s'}) write it.
+     */
+    private static int closerIndex(String s, int from, char open, char close) {
+        int n = s.length();
+        int depth = 1;
+        for (int i = from; i < n; i++) {
+            char c = s.charAt(i);
+            if (c == '\n' || c == '\r') return i;
+            if (c == close) {
+                if (depth == 1 && (close == '}' || close == '\'') && i > from && i + 1 < n && s.charAt(i + 1) == close) {
+                    i++;
+                } else if (--depth == 0) {
+                    return i;
+                }
+            } else if (c == open) {
+                depth++;
+            }
+        }
+        return n;
     }
 
     /**
@@ -547,8 +607,10 @@ public class Redactor {
     /**
      * If a {@code scheme://} starts at {@code start}, the end of that URL in {@code s}: up to
      * whitespace, a quote, {@code < > \ ^ { } |} or a control character, then without trailing
-     * sentence punctuation ({@code . , ; : ! ? ) ]}). Otherwise -1. Scans at most the scheme run
-     * plus the URL.
+     * sentence punctuation ({@code . , ; : ! ? ) ]}; the {@code ]} of a placeholder stays).
+     * Otherwise -1. One exception: such a character inside what can only be a password
+     * ({@link #userInfoResume}, {@code postgres://app:p^ss@db}) does not end the URL. Scans at
+     * most the scheme run, the URL and {@value #USERINFO_LOOKAHEAD} characters.
      */
     private static int urlEnd(String s, int start) {
         int n = s.length();
@@ -558,12 +620,113 @@ public class Redactor {
                 if (j == start) return -1;
                 int end = j + 3;
                 while (end < n && !endsUrl(s.charAt(end))) end++;
-                while (end > j + 3 && ".,;:!?)]".indexOf(s.charAt(end - 1)) >= 0) end--;
+                int at = end < n ? userInfoResume(s, j + 3, end) : -1;
+                if (at > end) {
+                    end = at;
+                    while (end < n && !endsUrl(s.charAt(end))) end++;
+                }
+                while (end > j + 3 && ".,;:!?)]".indexOf(s.charAt(end - 1)) >= 0) {
+                    if (s.charAt(end - 1) == ']' && (endsWithAt(s, end, PLACEHOLDER) || endsWithAt(s, end, SHAPE_PLACEHOLDER))) break;
+                    end--;
+                }
                 return end;
             }
             j++;
         }
         return -1;
+    }
+
+    private static boolean endsWithAt(String s, int end, String suffix) {
+        return end >= suffix.length() && s.startsWith(suffix, end - suffix.length());
+    }
+
+    /** How far past a URL-ending character the {@code @} of a {@code user:password@} is looked for. */
+    private static final int USERINFO_LOOKAHEAD = 256;
+
+    /**
+     * A URL scan stopped at {@code s[stop]} with only {@code s[authStart, stop)} of the authority
+     * read. If that text is the start of a {@code user:password} (it holds {@code :}, no
+     * {@code @}, no {@code / ? #}, and is not {@linkplain #hostKind evidently a host}) and an
+     * {@code @} follows before any whitespace, within {@value #USERINFO_LOOKAHEAD} characters,
+     * the stop character belongs to the password: returns the index of that {@code @}, where the
+     * scan resumes. Otherwise -1. A {@code "} always ends the URL (JSON puts one right after
+     * every URL). A space is passed only once, and only when what follows the {@code :} cannot
+     * be a port ({@code app:my pass@db}): then the {@code @} must be in the next word. Any other
+     * whitespace ends the URL.
+     */
+    private static int userInfoResume(String s, int authStart, int stop) {
+        char t = s.charAt(stop);
+        if (t == '"' || (t <= ' ' && t != ' ') || t == 0x7f) return -1;
+        boolean colon = false;
+        for (int i = authStart; i < stop; i++) {
+            char c = s.charAt(i);
+            if (c == '@' || c == '/' || c == '?' || c == '#') return -1;
+            if (c == ':') colon = true;
+        }
+        if (!colon) return -1;
+        int kind = hostKind(s, authStart, stop);
+        if (kind == HOST || (t == ' ' && kind != USERINFO)) return -1;
+        int limit = Math.min(s.length(), stop + 1 + USERINFO_LOOKAHEAD);
+        for (int i = stop + 1; i < limit; i++) {
+            char c = s.charAt(i);
+            if (c <= ' ' || c == 0x7f) return -1;
+            if (c == '@') return i;
+        }
+        return -1;
+    }
+
+    /** {@link #hostKind}: evidently a host or a host list; an {@code @} further on is not user info. */
+    private static final int HOST = 0;
+    /** {@link #hostKind}: one dotless {@code name:digits}; a host and port, or a user and a numeric password. */
+    private static final int AMBIGUOUS = 1;
+    /** {@link #hostKind}: not {@code host[:port]} at all ({@code user:pa}, {@code :pw}): the start of user info. */
+    private static final int USERINFO = 2;
+
+    /**
+     * What the text {@code s[from, to)} between {@code ://} and the first {@code / ? #} (cut at a
+     * {@code ;}, where connection parameters start) looks like, given that it holds {@code :} and
+     * no {@code @}. It is a comma-separated list of {@code host[:port]} (host: letters, digits,
+     * {@code . -}, starting with a letter or holding a dot, or a bracketed IPv6 literal; port: 1
+     * to 5 digits) or it is {@link #USERINFO}. Such a list is {@link #HOST} when it has two or
+     * more members ({@code h1:27017,h2:27017}) or its host holds a dot, is {@code localhost} or
+     * is an IPv6 literal; a single dotless {@code name:digits} ({@code db:5432},
+     * {@code user:12345}) is {@link #AMBIGUOUS}, and treated as user info when an {@code @}
+     * follows: redaction wins the tie.
+     */
+    private static int hostKind(String s, int from, int to) {
+        to = indexOfAny(s, from, to, ";");
+        int members = 0;
+        boolean evident = false;
+        int i = from;
+        while (true) {
+            int start = i;
+            if (i < to && s.charAt(i) == '[') {
+                i = indexOfAny(s, i, to, "]");
+                if (i == to) return USERINFO;
+                i++;
+                evident = true;
+            } else {
+                boolean dot = false;
+                while (i < to) {
+                    char c = s.charAt(i);
+                    if (c == '.') dot = true;
+                    else if (!(isAsciiLetter(c) || isAsciiDigit(c) || c == '-')) break;
+                    i++;
+                }
+                if (i == start || (!dot && !isAsciiLetter(s.charAt(start)))) return USERINFO;
+                if (dot || (i - start == 9 && s.regionMatches(true, start, "localhost", 0, 9))) evident = true;
+            }
+            if (i < to && s.charAt(i) == ':') {
+                int digits = ++i;
+                while (i < to && isAsciiDigit(s.charAt(i))) i++;
+                if (i == digits || i - digits > 5) return USERINFO;
+            }
+            members++;
+            if (i == to) break;
+            if (s.charAt(i) != ',') return USERINFO;
+            i++;
+        }
+        return members > 1 || evident ? HOST : AMBIGUOUS;
     }
 
     /**
@@ -1323,29 +1486,21 @@ public class Redactor {
             int authStart = sep + 3;
             int authEnd = indexOfAny(url, authStart, len, "/?#");
             out.append(url, 0, authStart);
-            int at = -1;
-            for (int i = authStart; i < authEnd; i++) {
-                if (url.charAt(i) == '@') at = i;
-            }
-            if (at < 0) {
-                // A password holding an unencoded '/', '?' or '#' (postgres://user:pa/ss@host): the
-                // user info runs to the last '@'.
-                int lastAt = url.lastIndexOf('@');
-                if (lastAt > authEnd && userInfoBeforeStop(url, sep, authStart, authEnd)) {
-                    at = lastAt;
-                    authEnd = indexOfAny(url, at, len, "/?#");
-                }
-            }
+            int at = userInfoEnd(url, sep, authStart, authEnd);
             int hostStart = authStart;
             if (at >= authStart) {
                 out.append(PLACEHOLDER);
                 hostStart = at;
+                if (at > authEnd) authEnd = indexOfAny(url, at, len, "/?#");
             }
-            // Parameters after the host (jdbc:sqlserver://host:1433;user=sa;password=…) get the
-            // name=value pass.
+            // Parameters after the host (jdbc:sqlserver://host:1433;user=sa;password=…): the
+            // rest of the URL gets the name=value pass, whole. Such a URL has no path or query
+            // to speak of, and a password there can hold '/', '?' or '#'.
             int semi = indexOfAny(url, hostStart, authEnd, ";");
             out.append(url, hostStart, semi);
-            if (semi < authEnd) out.append(redactText(url.substring(semi, authEnd), true, rounds, depth));
+            if (semi < authEnd) {
+                return out.append(redactText(url.substring(semi), true, rounds, depth)).toString();
+            }
             pos = authEnd;
         } else if (url.charAt(0) == '/') {
             pos = 0;
@@ -1366,22 +1521,44 @@ public class Redactor {
     }
 
     /**
-     * The text between {@code ://} and the first {@code / ? #} looks like the start of a
-     * {@code user:password} rather than a host: it holds {@code :}, and either the scheme is not a
-     * web scheme or what follows the {@code :} is not a numeric port. So
-     * {@code https://example.com:8443/users/@bob} and {@code s3://bucket/a@b.csv} keep their path.
+     * Index of the {@code @} that ends the user info of a URL, or -1 when it has none.
+     * {@code authEnd} is the first {@code / ? #} after {@code ://}.
+     * <ol>
+     *   <li>An {@code @} before that (and before any {@code ;}, where connection parameters
+     *       start): the last such one, as a URL parser would.</li>
+     *   <li>Otherwise an {@code @} further on, when the text before {@code authEnd} holds
+     *       {@code :} and can be the start of a {@code user:password} whose password holds an
+     *       unencoded {@code / ? # ;} ({@code postgres://user:pa/ss@host}): the last {@code @}
+     *       of the URL. Whether it can be is {@link #hostKind}'s call. {@link #USERINFO}
+     *       ({@code user:pa}, {@code :pw}): yes. {@link #AMBIGUOUS} ({@code user:12345}, which
+     *       is also what {@code db:5432} looks like): yes, unless parameters follow the port
+     *       ({@code db:1433;user=sa;password=p@ss}: the parameter pass redacts that value).
+     *       {@link #HOST}: no for a web scheme
+     *       ({@code https://example.com:8443/users/@bob}).</li>
+     * </ol>
      */
-    private static boolean userInfoBeforeStop(String url, int sep, int authStart, int authEnd) {
-        int colon = indexOfAny(url, authStart, authEnd, ":");
-        if (colon == authEnd) return false;
-        String scheme = url.substring(0, sep).toLowerCase(Locale.ROOT);
-        boolean web = scheme.equals("http") || scheme.equals("https") || scheme.equals("ws") || scheme.equals("wss");
-        if (!web) return true;
-        if (colon + 1 == authEnd) return true;
-        for (int i = colon + 1; i < authEnd; i++) {
-            if (!isAsciiDigit(url.charAt(i))) return true;
+    private static int userInfoEnd(String url, int sep, int authStart, int authEnd) {
+        int semi = indexOfAny(url, authStart, authEnd, ";");
+        if (semi < authEnd) {
+            // Parameters are name=value: a ';' with no '=' before the next '@' is part of the
+            // user info (postgres://us;er:pw@host), not the start of a parameter section.
+            int next = indexOfAny(url, semi, authEnd, "=@");
+            if (next == authEnd || url.charAt(next) == '@') semi = authEnd;
         }
-        return false;
+        int at = -1;
+        for (int i = authStart; i < semi; i++) {
+            if (url.charAt(i) == '@') at = i;
+        }
+        if (at >= 0) return at;
+        if (indexOfAny(url, authStart, semi, ":") == semi) return -1;
+        int kind = hostKind(url, authStart, semi);
+        if (kind == HOST) {
+            String scheme = url.substring(0, sep).toLowerCase(Locale.ROOT);
+            if (scheme.equals("http") || scheme.equals("https") || scheme.equals("ws") || scheme.equals("wss")) return -1;
+        }
+        if (kind != USERINFO && semi < authEnd) return -1;
+        int lastAt = url.lastIndexOf('@');
+        return lastAt > semi ? lastAt : -1;
     }
 
     /** {@code scheme://…} or {@code /…} with no whitespace: what {@link #redactUrl} parses. */
