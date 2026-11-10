@@ -97,9 +97,51 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         prepareUploadTempDir(tempDir);
     }
 
-    record StaticFileMapping(String urlPrefix, String directory, StaticFiles mode) {
+    /**
+     * A static mapping as the handler serves it. {@code access} is the mapping's resolved
+     * requirements (M3): empty for a mapping declared {@code .publicFiles()}, otherwise every
+     * entry must pass before a file is looked up. {@link Brace#start()} builds these only from
+     * mappings that declared one or the other.
+     */
+    record StaticFileMapping(String urlPrefix, String directory, StaticFiles mode, List<Access> access) {
+        StaticFileMapping {
+            access = List.copyOf(access);
+        }
+
+        /** A public mapping; for tests that build a handler directly. */
+        StaticFileMapping(String urlPrefix, String directory, StaticFiles mode) {
+            this(urlPrefix, directory, mode, List.of());
+        }
+
+        /** A public, trusted mapping; for tests that build a handler directly. */
         StaticFileMapping(String urlPrefix, String directory) {
-            this(urlPrefix, directory, StaticFiles.TRUSTED);
+            this(urlPrefix, directory, StaticFiles.TRUSTED, List.of());
+        }
+
+        boolean guarded() {
+            return !access.isEmpty();
+        }
+
+        /** {@code public}, or the requirement labels joined with {@code +}; as {@link Route#accessLabel}. */
+        String accessLabel() {
+            if (access.isEmpty()) return "public";
+            var labels = new ArrayList<String>();
+            for (Access a : access) labels.add(a.label());
+            return String.join(" + ", labels);
+        }
+
+        /** The mapping as a path pattern, for the banner and {@code /ops/routes}: {@code /assets/*}. */
+        String pattern() {
+            return urlPrefix.endsWith("/") ? urlPrefix + "*" : urlPrefix + "/*";
+        }
+
+        /** Whether {@code requestPath} is under this mapping's prefix, at a segment boundary (M1). */
+        boolean covers(String requestPath) {
+            if (!requestPath.startsWith(urlPrefix)) return false;
+            // "/filesX" is not under "/files". Matches Middleware's path patterns, so a guard on
+            // "/files/*" covers exactly what this serves.
+            return requestPath.length() == urlPrefix.length() || urlPrefix.endsWith("/")
+                || requestPath.charAt(urlPrefix.length()) == '/';
         }
     }
 
@@ -348,16 +390,30 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // guarded route are guarded the same way. A session-reading requirement builds the
             // session here, and it is the same instance session-aware middleware and the handler
             // get (the identity invariant below).
-            if (match != null) {
-                for (var access : match.route().access()) {
-                    if (access.usesSession() && session == null) {
-                        session = buildSession(headers, sessionCookieName);
-                    }
-                    Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
-                    if (rejected != null) {
-                        respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSpec, exchange);
-                        return true;
-                    }
+            //
+            // M3 (2026-11): with no route matched, the static mapping whose prefix covers the path
+            // is inside the same model. Its requirements are bound to the mapping object and run
+            // here, at the route position, before the path is decoded or the filesystem touched:
+            // every spelling that can reach the mapping's files goes through them, and a rejection
+            // is the same response whether or not the file exists. The bundled /__brace assets
+            // are not mappings and stay public.
+            StaticFileMapping staticMapping = match == null ? staticMappingFor(path) : null;
+            List<Access> requirements = match != null ? match.route().access()
+                : staticMapping != null ? staticMapping.access() : List.of();
+            if (staticMapping != null && staticMapping.guarded()) {
+                // Flagged before the first response can leave, so the rejection is covered too:
+                // nothing under a guarded mapping is sent with a "public" Cache-Control (see send()).
+                exchange.guardedStatic = true;
+                exchange.noMatchKey = STATIC_ROUTE_KEY;
+            }
+            for (var access : requirements) {
+                if (access.usesSession() && session == null) {
+                    session = buildSession(headers, sessionCookieName);
+                }
+                Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
+                if (rejected != null) {
+                    respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSpec, exchange);
+                    return true;
                 }
             }
 
@@ -388,7 +444,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // counters) — the write-back contract holds on these paths too via the
             // choke point, instead of silently dropping the mutation.
             if (match == null) {
-                Result staticResult = serveStaticFile(braceRequest);
+                Result staticResult = serveStaticFile(braceRequest, staticMapping);
                 if (staticResult != null) {
                     exchange.noMatchKey = STATIC_ROUTE_KEY;
                     respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSpec, exchange);
@@ -702,6 +758,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         Database db;
         /** Stats bucket when no route matched — {@link #STATIC_ROUTE_KEY} for a served file. */
         String noMatchKey = UNMATCHED_ROUTE_KEY;
+        /** M3: the request is under a static mapping with access requirements; see {@link #send}. */
+        boolean guardedStatic;
         /** Set once the response is recorded, so a second choke-point pass cannot double-count. */
         boolean recorded;
         /** Set when this request was already logged another way (the 500 path's http.error). */
@@ -895,6 +953,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // is laxer ('unsafe-inline') would weaken them, and a different one could break them.
         if (exchange.match != null && exchange.match.route().isFramework()) {
             OpsHandler.applySecurityHeaders(result);
+        }
+        // M3: nothing under an access-guarded static mapping may be stored by a shared cache: not
+        // the file, and not the rejection or 404 either. Here, after after-middleware, so an
+        // app-wide after(...) that marks every response "public" can't undo it.
+        if (exchange.guardedStatic) {
+            String cacheControl = result.header("Cache-Control");
+            if (cacheControl != null && PUBLIC_DIRECTIVE.matcher(cacheControl).find()) {
+                result.header("Cache-Control", PUBLIC_DIRECTIVE.matcher(cacheControl).replaceAll("private"));
+            }
         }
         attachSessionCookie(result, session, cookieSpec);
         attachSessionCookie(result, csrfOnlySession != null ? csrfOnlySession.peek() : null, cookieSpec);
@@ -1348,7 +1415,33 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             + "Make this a POST (or PUT/DELETE) route.");
     }
 
-    private Result serveStaticFile(Request request) {
+    /** True for the assets bundled in the jar and served at fixed {@code /__brace/} paths. */
+    private boolean isBundledAsset(String requestPath) {
+        return ("/__brace/csrf-htmx.js".equals(requestPath) && csrfHtmxJs != null)
+            || ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null)
+            || OPS_ASSETS.containsKey(requestPath);
+    }
+
+    /**
+     * The static mapping that serves {@code requestPath}, or null: the first (longest-prefix)
+     * mapping covering it. Null for a bundled asset, which is served ahead of any mapping and
+     * is always public. Chosen once per request, so the mapping whose access requirements ran
+     * is the mapping that serves (M3).
+     */
+    private StaticFileMapping staticMappingFor(String requestPath) {
+        if (staticFileMappings.isEmpty() || isBundledAsset(requestPath)) return null;
+        for (var mapping : staticFileMappings) {
+            if (mapping.covers(requestPath)) return mapping;
+        }
+        return null;
+    }
+
+    /**
+     * Serves a bundled asset, or a file from {@code mapping} (the result of
+     * {@link #staticMappingFor}, whose access requirements the caller has already run). Null
+     * when the path is neither.
+     */
+    private Result serveStaticFile(Request request, StaticFileMapping mapping) {
         String requestPath = request.path();
         if ("/__brace/csrf-htmx.js".equals(requestPath) && csrfHtmxJs != null) {
             String cacheControl = "public, max-age=0, must-revalidate";
@@ -1387,13 +1480,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 .header("ETag", opsAsset.etag())
                 .header("Cache-Control", cacheControl);
         }
-        for (var mapping : staticFileMappings) {
+        if (mapping != null) {
             String prefix = mapping.urlPrefix();
-            if (!requestPath.startsWith(prefix)) continue;
-            // Segment boundary (M1): "/filesX" is not under "/files". Matches Middleware's
-            // path patterns, so a guard on "/files/*" covers exactly what this serves.
-            if (requestPath.length() > prefix.length() && !prefix.endsWith("/")
-                    && requestPath.charAt(prefix.length()) != '/') continue;
 
             String relativePath = requestPath.substring(prefix.length());
             if (relativePath.startsWith("/")) {
@@ -1481,9 +1569,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Decoded URL path: Assets resolves it back to a file, so it has to see the same
             // name the lookup above did, or an encoded filename never matches its fingerprint.
             String decodedUrlPath = prefix + (prefix.endsWith("/") ? "" : "/") + relativePath;
-            boolean immutable = version != null && version.equals(Assets.currentVersion(decodedUrlPath));
-            String cacheControl = immutable
-                ? "public, max-age=31536000, immutable"
+            boolean immutable = !mapping.guarded() && version != null
+                && version.equals(Assets.currentVersion(decodedUrlPath));
+            // M3: a file behind access requirements is per-user. "private" keeps it out of shared
+            // caches; "no-cache" makes the browser revalidate each use, and the revalidation runs
+            // the guard again, so a copy isn't shown from cache after logout. That also rules out
+            // the immutable year, fingerprint or not.
+            String cacheControl = mapping.guarded() ? "private, no-cache"
+                : immutable ? "public, max-age=31536000, immutable"
                 : "public, max-age=0, must-revalidate";
 
             if (isNotModified(request, etag, mtime)) {

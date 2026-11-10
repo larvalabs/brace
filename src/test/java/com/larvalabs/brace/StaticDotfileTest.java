@@ -42,7 +42,7 @@ class StaticDotfileTest {
         Files.createDirectory(dir.resolve("sub").resolve(".well-known"));
         Files.writeString(dir.resolve("sub").resolve(".well-known").resolve("x"), SECRET);
 
-        app = Brace.test().start(a -> a.staticFiles("/assets", dir.toString()));
+        app = Brace.test().start(a -> a.staticFiles("/assets", dir.toString()).publicFiles());
     }
 
     @AfterAll

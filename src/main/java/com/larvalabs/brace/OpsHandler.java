@@ -109,6 +109,13 @@ public class OpsHandler {
     // WebSocket routes live outside the Router; /ops/routes lists them too.
     private volatile List<Route> webSocketRoutes = List.of();
 
+    // M3: static mappings are in the access model too; /ops/routes lists them with their access.
+    private volatile java.util.function.Supplier<List<BraceHandler.StaticFileMapping>> staticMappings = List::of;
+
+    void setStaticMappings(java.util.function.Supplier<List<BraceHandler.StaticFileMapping>> mappings) {
+        this.staticMappings = mappings;
+    }
+
     void setWebSocketRoutes(List<Route> routes) {
         this.webSocketRoutes = List.copyOf(routes);
     }
@@ -604,6 +611,14 @@ public class OpsHandler {
             r.put("pattern", route.pattern());
             if (route.name() != null) r.put("name", route.name());
             r.put("access", route.accessLabel());
+            routeList.add(r);
+        }
+        for (var mapping : staticMappings.get()) {
+            var r = new LinkedHashMap<String, Object>();
+            r.put("method", "STATIC");
+            r.put("pattern", mapping.pattern());
+            r.put("access", mapping.accessLabel());
+            if (mapping.mode() == StaticFiles.UNTRUSTED) r.put("mode", "untrusted");
             routeList.add(r);
         }
         return Json.of(routeList);

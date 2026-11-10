@@ -40,8 +40,8 @@ class StaticFilesTest {
         Files.writeString(otherDir.resolve("other.txt"), "other content");
 
         app = Brace.app().port(0)
-            .staticFiles("/assets", tempDir.toString())
-            .staticFiles("/files", otherDir.toString());
+            .staticFiles("/assets", tempDir.toString()).publicFiles()
+            .staticFiles("/files", otherDir.toString()).publicFiles();
 
         app.get("/hello", req -> Result.text("dynamic hello"));
 

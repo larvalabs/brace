@@ -40,7 +40,9 @@ public class Brace {
     private Access fallbackDefaultAccess = frameworkTestDefaultAccess;
     static volatile Access frameworkTestDefaultAccess;
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
-    private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
+    // M3: each mapping with its access declaration; resolved and checked by start().
+    private final List<StaticFilesConfig> staticFileMappings = new ArrayList<>();
+    private List<BraceHandler.StaticFileMapping> resolvedStaticMappings = List.of();
     private DatabaseFactory databaseFactory;
     private boolean ownsDatabaseFactory = true; // M4: stop() closes the pool unless told otherwise
     private String sessionSecret;
@@ -526,8 +528,12 @@ public class Brace {
         return this;
     }
 
-    /** Serves {@code directory} at {@code urlPrefix} as {@link StaticFiles#TRUSTED} files you shipped. */
-    public Brace staticFiles(String urlPrefix, String directory) {
+    /**
+     * Serves {@code directory} at {@code urlPrefix} as {@link StaticFiles#TRUSTED} files you
+     * shipped. Say who may fetch them on the returned config: {@code .publicFiles()} or
+     * {@code .access(...)}. {@link #start()} refuses a mapping that says neither.
+     */
+    public StaticFilesConfig staticFiles(String urlPrefix, String directory) {
         return staticFiles(urlPrefix, directory, StaticFiles.TRUSTED);
     }
 
@@ -535,23 +541,22 @@ public class Brace {
      * Serves {@code directory} at {@code urlPrefix}. Use {@link StaticFiles#UNTRUSTED} for any
      * directory users can write to (uploads), so nothing in it runs on the app's origin.
      *
+     * <p>A mapping is inside the access model, like a route: finish the call with
+     * {@code .publicFiles()} (served to everyone) or {@code .access(...)} (see
+     * {@link StaticFilesConfig}). {@link #start()} refuses to start while a mapping has neither,
+     * and {@link #defaultAccess(Access)} does not apply to mappings.
+     *
      * <p>When prefixes overlap, the longest one serves the request, whatever the registration
      * order. Throws {@link IllegalArgumentException} when an untrusted directory sits inside a
      * trusted one (or the reverse): its files would be reachable through the trusted mapping too.
      */
-    public Brace staticFiles(String urlPrefix, String directory, StaticFiles mode) {
+    public StaticFilesConfig staticFiles(String urlPrefix, String directory, StaticFiles mode) {
         java.util.Objects.requireNonNull(mode, "mode");
-        var added = new BraceHandler.StaticFileMapping(urlPrefix, directory, mode);
-        // Compared both as written and with symlinks resolved: a link (uploads -> public/uploads,
-        // current -> releases/42) puts the same directory under two paths.
-        var dir = java.nio.file.Path.of(directory).toAbsolutePath().normalize();
-        var realDir = BraceHandler.realPathOrNearest(dir);
+        router.requireNotStarted("Registering static mapping " + urlPrefix);
+        var added = new StaticFilesConfig(this, urlPrefix, directory, mode);
         for (var existing : staticFileMappings) {
             if (existing.mode() == mode) continue;
-            var other = java.nio.file.Path.of(existing.directory()).toAbsolutePath().normalize();
-            var realOther = BraceHandler.realPathOrNearest(other);
-            if (other.startsWith(dir) || dir.startsWith(other)
-                    || realOther.startsWith(realDir) || realDir.startsWith(realOther)) {
+            if (directoriesOverlap(directory, existing.directory())) {
                 var trusted = mode == StaticFiles.TRUSTED ? added : existing;
                 var untrusted = mode == StaticFiles.TRUSTED ? existing : added;
                 throw new IllegalArgumentException("Untrusted static directory " + untrusted.directory()
@@ -561,7 +566,21 @@ public class Brace {
             }
         }
         staticFileMappings.add(added);
-        return this;
+        return added;
+    }
+
+    /**
+     * Whether one directory is, or is inside, the other. Compared both as written and with
+     * symlinks resolved: a link (uploads -> public/uploads, current -> releases/42) puts the same
+     * directory under two paths.
+     */
+    private static boolean directoriesOverlap(String a, String b) {
+        var dir = java.nio.file.Path.of(a).toAbsolutePath().normalize();
+        var other = java.nio.file.Path.of(b).toAbsolutePath().normalize();
+        var realDir = BraceHandler.realPathOrNearest(dir);
+        var realOther = BraceHandler.realPathOrNearest(other);
+        return other.startsWith(dir) || dir.startsWith(other)
+            || realOther.startsWith(realDir) || realDir.startsWith(realOther);
     }
 
     public Brace maxUploadSize(String size) {
@@ -1251,6 +1270,7 @@ public class Brace {
             }
             opsHandler.setPinnedOrigins(opsOrigins);
             opsHandler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
+            opsHandler.setStaticMappings(() -> resolvedStaticMappings);
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on
@@ -1319,10 +1339,11 @@ public class Brace {
         // Longest prefix first, so "/assets/uploads" is reached even when "/assets" was registered
         // before it. Matching in registration order let the shorter prefix claim the request and
         // answer 404, leaving the more specific (typically untrusted) mapping unreachable.
-        var staticMappingsCopy = staticFileMappings.stream()
+        var staticMappingsCopy = resolveStaticAccess().stream()
             .sorted(java.util.Comparator.comparingInt(
                 (BraceHandler.StaticFileMapping m) -> m.urlPrefix().length()).reversed())
             .toList();
+        resolvedStaticMappings = staticMappingsCopy;
         Assets.init(staticMappingsCopy);
         // Adoption aid for named routes: once any route is named, report how many app
         // routes still aren't (framework /ops/* routes are excluded — apps can't name them).
@@ -1668,6 +1689,15 @@ public class Brace {
             System.out.printf("        %-6s %-32s %s%n", "WS", ws.route().pattern(), ws.route().accessLabel());
         }
         System.out.println("     }");
+        if (!resolvedStaticMappings.isEmpty()) {
+            // M3: each static mapping and who may fetch its files, like the routes above.
+            System.out.printf("     static (%d) {%n", resolvedStaticMappings.size());
+            for (var mapping : resolvedStaticMappings) {
+                System.out.printf("        %-6s %-32s %s%s%n", "STATIC", mapping.pattern(), mapping.accessLabel(),
+                    mapping.mode() == StaticFiles.UNTRUSTED ? "  untrusted" : "");
+            }
+            System.out.println("     }");
+        }
         System.out.println("  }");
     }
 
@@ -1905,6 +1935,56 @@ public class Brace {
         if (defaultAccess != null && defaultAccess.isNone()) {
             Log.info("defaultAccess(Access.none()): routes without their own requirement are public");
         }
+    }
+
+    /**
+     * M3 (2026-11): static mappings are inside deny-by-default. Each mapping's access is exactly
+     * what it declared: {@code .publicFiles()} or its {@code .access(...)} list. The app's
+     * default access is deliberately not applied (an inherited login would break the login
+     * page's own stylesheet), so a mapping that declared nothing is refused here, whatever the
+     * default is. Also refused: a guarded directory that a public mapping serves too.
+     */
+    private List<BraceHandler.StaticFileMapping> resolveStaticAccess() {
+        var undeclared = new ArrayList<StaticFilesConfig>();
+        for (var m : staticFileMappings) {
+            if (!m.isDeclared()) undeclared.add(m);
+        }
+        if (!undeclared.isEmpty()) {
+            var msg = new StringBuilder().append(undeclared.size())
+                .append(undeclared.size() == 1 ? " static mapping has" : " static mappings have")
+                .append(" no access declaration:");
+            for (var m : undeclared) {
+                msg.append("\n  ").append(m.urlPrefix()).append("  ->  ").append(m.directory());
+            }
+            msg.append("\nSay who may fetch each one: app.staticFiles(...).publicFiles() serves it to everyone, "
+                + "app.staticFiles(...).access(Access.session(\"userId\", \"/login\")) guards it. "
+                + "defaultAccess(...) does not apply to static mappings.");
+            throw new IllegalStateException(msg.toString());
+        }
+        var resolved = new ArrayList<BraceHandler.StaticFileMapping>();
+        for (var m : staticFileMappings) {
+            for (Access a : m.declaredAccess()) {
+                if (a.usesSession() && sessionSecret == null) {
+                    throw new IllegalStateException("Static mapping " + m.urlPrefix() + " has a session-reading "
+                        + "access requirement (Access.session or Access.check) but sessions are not enabled: "
+                        + "call .sessions(secret) before start(). Without it every request sees an empty "
+                        + "session, so the requirement rejects every request.");
+                }
+            }
+            if (!m.isPublicFiles()) {
+                for (var other : staticFileMappings) {
+                    if (other.isPublicFiles() && directoriesOverlap(m.directory(), other.directory())) {
+                        throw new IllegalStateException("Static mapping " + m.urlPrefix() + " (" + m.directory()
+                            + ") has access requirements, but its directory overlaps the public mapping "
+                            + other.urlPrefix() + " (" + other.directory() + "): the same files would be served "
+                            + "to everyone there. Keep guarded files in a directory no public mapping covers.");
+                    }
+                }
+            }
+            resolved.add(new BraceHandler.StaticFileMapping(m.urlPrefix(), m.directory(), m.mode(),
+                List.copyOf(m.declaredAccess())));
+        }
+        return resolved;
     }
 
     /**

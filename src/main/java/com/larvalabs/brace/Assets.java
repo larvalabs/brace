@@ -19,6 +19,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * Initialized automatically by {@link Brace#start()} from the registered
  * {@code app.staticFiles(...)} mappings.
+ *
+ * <p>This class only builds URLs; it never serves bytes. A file in a mapping with access
+ * requirements is fingerprinted like any other, but its response stays
+ * {@code private, no-cache}: the {@code ?v=} earns no long-lived caching there (M3).
  */
 public class Assets {
 

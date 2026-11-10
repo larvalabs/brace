@@ -22,7 +22,7 @@ class AssetsTest {
         var subDir = Files.createDirectory(tempDir.resolve("sub"));
         Files.writeString(subDir.resolve("nested.css"), ".x { }");
 
-        app = Brace.app().port(0).staticFiles("/assets", tempDir.toString());
+        app = Brace.app().port(0).staticFiles("/assets", tempDir.toString()).publicFiles();
         app.start();
     }
 

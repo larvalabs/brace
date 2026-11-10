@@ -224,7 +224,9 @@ public class App {
         // registered here rather than in main() so the tests run with the same headers.
         app.after(SecurityHeaders.strict());
         // public/ (the layout's stylesheet, images) at /public/...; the Dockerfile ships it.
-        app.staticFiles("/public", "public");
+        // .publicFiles() serves it to everyone. A static mapping must say that or .access(...);
+        // for files only some users may fetch: .access(Access.session("userId", "/login")).
+        app.staticFiles("/public", "public").publicFiles();
 
         // Every route needs an access requirement or .publicRoute(); start() refuses otherwise.
         // Once the app has a login, require it everywhere by default and mark the public pages:

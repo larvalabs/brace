@@ -36,7 +36,7 @@ class StaticPrefixBoundaryTest {
     @Test
     void prefixRequiresSegmentBoundary() throws Exception {
         var dir = dirWithPrivateSecret();
-        var app = Brace.app().port(0).staticFiles("/files", dir.toString());
+        var app = Brace.app().port(0).staticFiles("/files", dir.toString()).publicFiles();
         app.start();
         try {
             assertEquals(404, get(app, "/filesX").statusCode());
@@ -54,7 +54,7 @@ class StaticPrefixBoundaryTest {
     @Test
     void trailingSlashPrefixStillWorks() throws Exception {
         var dir = dirWithPrivateSecret();
-        var app = Brace.app().port(0).staticFiles("/files/", dir.toString());
+        var app = Brace.app().port(0).staticFiles("/files/", dir.toString()).publicFiles();
         app.start();
         try {
             assertEquals(200, get(app, "/files/a.txt").statusCode());
@@ -68,7 +68,7 @@ class StaticPrefixBoundaryTest {
     @Test
     void rootPrefixStillWorks() throws Exception {
         var dir = dirWithPrivateSecret();
-        var app = Brace.app().port(0).staticFiles("/", dir.toString());
+        var app = Brace.app().port(0).staticFiles("/", dir.toString()).publicFiles();
         app.start();
         try {
             assertEquals(200, get(app, "/a.txt").statusCode());

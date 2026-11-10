@@ -40,7 +40,7 @@ class StaticCanonicalPathTest {
         Files.createSymbolicLink(dir.resolve("latest"), Path.of("v2"));
         caseInsensitiveVolume = Files.exists(dir.resolve("PRIVATE"));
 
-        app = Brace.app().port(0).staticFiles("/files", dir.toString());
+        app = Brace.app().port(0).staticFiles("/files", dir.toString()).publicFiles();
         app.before("/files/private/*", req -> Result.forbidden("forbidden"));
         app.start();
     }
