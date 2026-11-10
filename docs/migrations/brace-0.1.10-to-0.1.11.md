@@ -1774,8 +1774,10 @@ No action needed unless noted.
   `req.queryInt`) used to make every later flush fail on Postgres, so `ops_errors` and
   regression alerts went silent until restart. NUL characters are replaced, type and route are
   clipped to 255 characters, each row is written under its own savepoint, and a row the database
-  keeps rejecting is retried once without its payload, then dropped after 5 flushes with a
-  rate-limited `error store:` warning. If you saw `ops_errors` stop updating, this was likely
+  rejects for its data is retried once without its payload (an existing row only gains the
+  count, its stored details are kept), then dropped after 5 flushes with a rate-limited
+  `error store:` warning. A read-only or out-of-resources database (a failover window) keeps
+  every pending error for later instead. If you saw `ops_errors` stop updating, this was likely
   why.
 - **More exception messages are redacted** before they reach `/ops/status` (a scheduled job's
   `lastError`), the uncaught-exception log event, `scheduled_jobs.error` and warning logs. Ops

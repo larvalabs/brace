@@ -345,6 +345,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     SQLState (57014 and the like) on a connection that still passes `isValid` counts against the
     row instead of retaining the batch; a rejected row is retried once with its payload stripped
     (fixed placeholder message) so the count and regression signal survive.
+  - **Final review fixes** (`fix(security): M5 final review fixes`). L9: only a data-class
+    rejection (22xxx, 23xxx, 54xxx) is retried stripped, and the stripped write only adds the
+    count to an existing row, so a lock timeout followed by a successful retry no longer
+    replaces stored details with the placeholder. L10: a server-wide SQLState (25006 read-only,
+    53xxx, 57P0x, 58xxx, 08xxx) aborts the flush and keeps the batch uncounted whatever
+    `isValid` says, and so does a batch of two or more rows all failing with one non-data
+    SQLState; a single poisoned row beside healthy ones is still counted and dropped. Unit tests
+    in `ErrorStoreTest`; `ErrorStorePostgresIT` gains a read-only transaction window
+    (`SET TRANSACTION READ ONLY`) and a real 55P03 lock timeout.
 
 - [x] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches

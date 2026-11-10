@@ -2153,18 +2153,33 @@ block the others:
   with the client-chosen HTTP method.
 - Each upsert in a flush runs under its own savepoint. A row the database rejects is rolled
   back alone, and the rest of the batch commits.
-- A rejected row is retried once, in the same flush, with its payload stripped: the message is
-  replaced by a fixed placeholder (`[details not stored: the database rejected this error
-  record]`, no request-derived text) and the stack trace, request detail, queries and headers
-  are left empty. The error kind's count and the regression notification survive. Only if that
-  retry is rejected too is the entry retried on later flushes, and dropped after 5 rejected
-  flushes.
-- A connection-level failure (database down, pool exhausted, failure to open the session or
-  begin the transaction) is not blamed on any entry. The whole batch is kept and retried,
-  bounded by the 1,000-kind pending buffer as before. A row error whose SQLState is in a
-  connection-level class (`08`, `53`, `57`, `40` or `25`) counts as a connection failure only
-  when the connection also fails `isValid`; on a live connection (for example `57014`, a
-  statement timeout on one huge row) it is a row rejection like any other.
+- A row rejected for its **data** (SQLState class `22` data exception, `23` integrity
+  constraint, `54` program limit) is retried once, in the same flush, with its payload
+  stripped: a new error kind is inserted with a fixed placeholder message (`[details not
+  stored: the database rejected this error record]`, no request-derived text) and an empty
+  stack trace, request detail, queries and headers; an error kind that already has a row only
+  gets its count and last-seen time updated, so its stored details are never replaced by the
+  placeholder. The count and the regression notification survive. Any other row rejection (a
+  lock timeout `55P03`, a statement timeout, an error without a SQLState) is not retried
+  stripped: the full record is retried on the next flush.
+- A rejected entry is retried on later flushes, and dropped after 5 rejected flushes.
+- Not blamed on any entry, so the whole batch is kept, uncounted, and retried, bounded by the
+  1,000-kind pending buffer:
+  - a connection-level failure (database down, pool exhausted, failure to open the session or
+    begin the transaction);
+  - a server-wide SQLState on any row, whether or not the connection still passes `isValid`:
+    `25006` (read-only transaction, as during a failover), class `53` (disk full, out of
+    memory, too many connections), `57P01` to `57P05` (shutdown), class `58` (system error),
+    class `08` (connection);
+  - a batch of two or more rows that **all** fail with the same SQLState that is not a data
+    error (a lock timeout on every row);
+  - another connection-classed SQLState (`40`, other `57`, other `25`) when the connection also
+    fails `isValid`.
+
+  On a live connection, a row error beside healthy rows (for example `57014`, a statement
+  timeout on one huge row) is a row rejection like any other, so a single poisoned row is still
+  isolated and eventually dropped. A lone row in its batch failing with such a state is counted
+  too.
 - Failures are logged at most once a minute, naming the exception class, SQLState and the error
   type of any dropped entry. Request-derived content (messages, paths, headers) is never logged.
 

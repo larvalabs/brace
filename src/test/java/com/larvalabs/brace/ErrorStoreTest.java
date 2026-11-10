@@ -316,6 +316,140 @@ class ErrorStoreTest {
         assertEquals(2, errorStore.list(null).get(0).get("occurrenceCount"));
     }
 
+    // --- Final review fixes (docs/2026-11-09-security-review-todos.md, M5) ---
+
+    @Test
+    void aTransientRowErrorIsNotRetriedStrippedAndNeverOverwritesStoredDetails() {
+        // L9: a 55P03 lock timeout on the first attempt, then the payload-stripped retry succeeded
+        // and overwrote the existing row's message, trace, detail and headers with the placeholder.
+        errorStore.record("LockedException", "first details", "GET /l", "first trace", "GET /l?a=1",
+            "{\"count\":1}", "{\"x-h\":\"first\"}");
+        errorStore.flush();
+        var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        errorStore.rowFault = (type, message) -> {
+            if ("LockedException".equals(type) && attempts.getAndIncrement() == 0) {
+                throw new java.sql.SQLException("canceling statement due to lock timeout", "55P03");
+            }
+        };
+        errorStore.record("LockedException", "second details", "GET /l", "second trace", "GET /l?a=2",
+            "{\"count\":2}", "{\"x-h\":\"second\"}");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        var locked = find("LockedException");
+        assertEquals("first details", locked.get("message"), "never overwritten with the placeholder");
+        assertEquals("first trace", locked.get("stackTrace"));
+        assertEquals("{\"x-h\":\"first\"}", locked.get("requestHeaders"));
+        assertEquals(1, locked.get("occurrenceCount"));
+
+        errorStore.flush(); // the lock is gone: the full payload lands
+        locked = find("LockedException");
+        assertEquals("second details", locked.get("message"));
+        assertEquals("second trace", locked.get("stackTrace"));
+        assertEquals(2, locked.get("occurrenceCount"));
+        errorStore.rowFault = null;
+    }
+
+    @Test
+    void aStrippedWriteOnlyCountsWhenTheRowExists() {
+        // L9: a data-class rejection (22001 value too long) is retried without its payload; when
+        // the kind already has a row, the retry adds the count and keeps the stored details.
+        errorStore.record("BigPayloadException", "stored details", "GET /big", "stored trace", "GET /big",
+            "{\"count\":1}", "{\"x-h\":\"stored\"}");
+        errorStore.flush();
+        errorStore.rowFault = (type, message) -> {
+            if ("BigPayloadException".equals(type) && !ErrorStore.STRIPPED_MESSAGE.equals(message)) {
+                throw new java.sql.SQLException("value too long", "22001");
+            }
+        };
+        errorStore.record("BigPayloadException", "x".repeat(100), "GET /big", "huge trace", "detail");
+        errorStore.flush();
+        var big = find("BigPayloadException");
+        assertEquals(2, big.get("occurrenceCount"), "the count survives");
+        assertEquals("stored details", big.get("message"), "existing details are kept, not replaced");
+        assertEquals("stored trace", big.get("stackTrace"));
+        assertEquals("{\"x-h\":\"stored\"}", big.get("requestHeaders"));
+        errorStore.rowFault = null;
+    }
+
+    @Test
+    void onlyDataClassRejectionsAreRetriedStripped() {
+        // A rejection with no SQLState, or a non-data one, is not retried without its payload:
+        // it is counted like any rejection and retried in full on the next flush.
+        var seenMessages = new java.util.ArrayList<String>();
+        errorStore.rowFault = (type, message) -> {
+            if ("Odd".equals(type)) {
+                seenMessages.add(message);
+                throw new java.sql.SQLException("driver said no");
+            }
+        };
+        errorStore.record("Odd", "payload", "GET /odd", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of("payload"), seenMessages, "no stripped retry");
+        assertEquals(List.of("Healthy"), types());
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals("payload", find("Odd").get("message"));
+    }
+
+    @Test
+    void aReadOnlyWindowKeepsEveryKindUncounted() {
+        // L10: SQLState 25006 (read-only transaction, e.g. during a failover) on a connection that
+        // still passes isValid counted against every row, so five flushes dropped every kind.
+        for (String state : List.of("25006", "53100", "53300", "57P01", "57P03", "58030")) {
+            errorStore.close();
+            cleanTable();
+            errorStore.rowFault = (type, message) -> {
+                throw new java.sql.SQLException("server-wide failure " + state, state);
+            };
+            errorStore.record("A", "a", "GET /a", "s", "req");
+            errorStore.record("B", "b", "GET /b", "s", "req");
+            for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+                errorStore.flush();
+            }
+            errorStore.record("Lone", "lone", "GET /lone", "s", "req");
+            errorStore.rowFault = null;
+            errorStore.flush();
+            assertEquals(List.of("A", "B", "Lone"), types(), "kept uncounted through the window: " + state);
+        }
+    }
+
+    @Test
+    void aSingleServerWideFailureIsNotBlamedOnALoneRow() {
+        // A one-kind batch in a read-only window is still not the row's fault.
+        errorStore.rowFault = (type, message) -> {
+            throw new java.sql.SQLException("cannot execute INSERT in a read-only transaction", "25006");
+        };
+        errorStore.record("Lone", "lone", "GET /lone", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(List.of("Lone"), types());
+    }
+
+    @Test
+    void everyRowFailingWithTheSameNonDataStateIsRetainedUncounted() {
+        // L10, generalized: when every row of a batch fails with one non-data SQLState (a lock
+        // timeout on all of them), it's not any row's fault.
+        errorStore.rowFault = (type, message) -> {
+            throw new java.sql.SQLException("canceling statement due to lock timeout", "55P03");
+        };
+        errorStore.record("A", "a", "GET /a", "s", "req");
+        errorStore.record("B", "b", "GET /b", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(List.of("A", "B"), types());
+    }
+
+    private static java.util.Map<String, Object> find(String type) {
+        return errorStore.list(null).stream().filter(e -> type.equals(e.get("errorType"))).findFirst().orElseThrow();
+    }
+
     private static void sql(String statement) {
         var db = new Database(dbFactory.openSession());
         db.beginTransaction();

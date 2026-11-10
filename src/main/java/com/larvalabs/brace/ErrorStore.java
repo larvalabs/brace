@@ -24,16 +24,20 @@ import java.util.*;
  * NUL characters (Postgres text cannot hold them, and pgjdbc rejects them client-side) and clips
  * {@code type} and {@code route} to their {@code VARCHAR(255)} columns. Each upsert runs under its
  * own savepoint, so a row the database rejects is rolled back alone while the rest of the batch
- * commits. A rejected row is retried once at once with its payload stripped (a fixed placeholder
- * message, no trace, detail or headers), so the kind's count and the regression signal survive;
- * if that is rejected too, the entry is retried on later flushes and dropped after
- * {@value #MAX_FLUSH_FAILURES} rejections. A connection-level failure (database down, pool
- * exhausted, or a connection-classed SQLState on a connection that then fails
- * {@code isValid}) is not the entry's fault: the whole batch is kept and retried, as before. A
- * connection-classed SQLState on a connection that is still valid (a statement timeout on one
- * huge row, a deadlock) counts as a row rejection. Failures are
- * logged at most once a minute, naming the exception class, SQLState and error type, never the
- * request-derived payload.
+ * commits. A row rejected for its data (SQLState class 22, 23 or 54) is retried once at once with
+ * its payload stripped (a fixed placeholder message, no trace, detail or headers), so the kind's
+ * count and the regression signal survive; that retry inserts the placeholder for a new kind but
+ * only adds the count to an existing row, never replacing its stored details. Any other row
+ * rejection (a lock timeout) is not retried stripped. A rejected entry is retried on later
+ * flushes and dropped after {@value #MAX_FLUSH_FAILURES} rejections. Not the entry's fault, so
+ * the whole batch is kept uncounted and retried, as for an outage: a connection-level failure
+ * (database down, pool exhausted, a connection-classed SQLState on a connection that then fails
+ * {@code isValid}); a server-wide SQLState ({@link #isServerWide}: 25006 read-only during a
+ * failover, 53xxx, 57P0x, 58xxx, 08xxx) on any row; and every row of a batch of two or more
+ * failing with the same non-data SQLState. A connection-classed SQLState on a connection that is
+ * still valid (a statement timeout on one huge row, a deadlock) beside healthy rows counts as a
+ * row rejection. Failures are logged at most once a minute, naming the exception class, SQLState
+ * and error type, never the request-derived payload.
  */
 public class ErrorStore {
 
@@ -75,6 +79,12 @@ public class ErrorStore {
         String queriesBefore;
         String requestHeaders;
         Instant lastSeen;
+        /**
+         * The payload-stripped retry of a row the database refused for its data: inserted with
+         * {@link #STRIPPED_MESSAGE}, but on an existing row only the count and last-seen time are
+         * updated, so the stored details are never replaced by the placeholder.
+         */
+        boolean strippedPayload;
 
         Pending(String type, String route, Instant firstSeen) {
             this.type = type;
@@ -89,6 +99,7 @@ public class ErrorStore {
             s.count = count;
             s.lastSeen = lastSeen;
             s.message = STRIPPED_MESSAGE;
+            s.strippedPayload = true;
             return s;
         }
     }
@@ -274,15 +285,19 @@ public class ErrorStore {
                     try {
                         outcome[i] = writeRow(connection, p, postgres);
                     } catch (RowRejected first) {
-                        // Retry once without the payload, so the kind's count and the regression
-                        // signal survive whatever in the message, trace or detail was refused.
+                        outcome[i] = REJECTED;
+                        rowErrors[i] = first.getCause();
+                        // Only a rejection of the DATA (22xxx, 23xxx, 54xxx) is retried without
+                        // the payload, so the count and the regression signal survive what was
+                        // refused. A transient error (a lock timeout) is retried in full on the
+                        // next flush instead (final review L9).
+                        if (!isDataError(first.getCause())) continue;
                         var stripped = p.stripped();
                         try {
                             outcome[i] = writeRow(connection, stripped, postgres);
                             batch.set(i, stripped);
                         } catch (RowRejected second) {
-                            outcome[i] = REJECTED;
-                            rowErrors[i] = first.getCause();
+                            // stays REJECTED with the first error
                         }
                     }
                 }
@@ -315,6 +330,20 @@ public class ErrorStore {
             }
         }
         if (!committed) {
+            return;
+        }
+
+        // Every row of a multi-row batch refused with the same non-data SQLState (a lock timeout
+        // on all of them, a statement timeout on all of them): that is the database's state, not
+        // any row's fault, so keep the batch uncounted, as for an outage (final review L10). A
+        // single poisoned row among healthy ones is still counted and eventually dropped.
+        String common = commonNonDataState(outcome, rowErrors);
+        if (common != null) {
+            for (var p : batch) {
+                mergeBack(p);
+            }
+            failedFlushes++;
+            lastFailure = describe(rowErrors[0]);
             return;
         }
 
@@ -373,10 +402,14 @@ public class ErrorStore {
 
     /**
      * Rolls back to {@code savepoint} after {@code e}, or rethrows {@code e} when the connection
-     * is gone. A connection-classed SQLState (08, 53, 57, 40, 25) is not trusted on its own: 57014
-     * is a statement timeout on one huge row, 40P01 a deadlock on one key. Only when the
-     * connection also fails its liveness check does the flush abort; otherwise the error is the
-     * row's (M5 review). The rollback itself throws if the connection is gone.
+     * is gone or the server cannot take any write. A server-wide SQLState
+     * ({@link #isServerWide}: 25006 read-only transaction, during a failover; 53xxx out of
+     * resources; 57P0x shutdown; 58xxx system error; 08xxx connection) aborts the flush whatever
+     * the connection's liveness, so the batch is kept uncounted (final review L10). Another
+     * connection-classed SQLState (40, 57014, other 25) is not trusted on its own: 57014 is a
+     * statement timeout on one huge row, 40P01 a deadlock on one key. Only when the connection
+     * also fails its liveness check does the flush abort; otherwise the error is the row's (M5
+     * review). The rollback itself throws if the connection is gone.
      */
     private void recoverOrAbort(java.sql.Connection connection, java.sql.Savepoint savepoint, Exception e)
             throws SQLException {
@@ -386,6 +419,7 @@ public class ErrorStore {
             if (e instanceof SQLException se) throw se;
             throw rollbackFailed;
         }
+        if (e instanceof SQLException se && isServerWide(se.getSQLState())) throw se;
         if (e instanceof SQLException se && isConnectionFailure(se)) {
             boolean alive;
             try {
@@ -442,6 +476,50 @@ public class ErrorStore {
         String state = e.getSQLState();
         return state != null && (state.startsWith("08") || state.startsWith("53")
             || state.startsWith("57") || state.startsWith("40") || state.startsWith("25"));
+    }
+
+    /**
+     * SQLStates that mean the server cannot take writes at all, never one row's fault: 25006
+     * (read-only transaction, e.g. a replica promoted mid-failover), class 53 (insufficient
+     * resources: disk full, out of memory, too many connections), 57P01 to 57P05 (shutdown,
+     * cannot connect now), class 58 (system error) and class 08 (connection exception).
+     */
+    static boolean isServerWide(String state) {
+        return state != null && (state.equals("25006") || state.startsWith("53") || state.startsWith("57P")
+            || state.startsWith("58") || state.startsWith("08"));
+    }
+
+    /**
+     * A rejection of the row's DATA, which a retry without the payload can get past: class 22
+     * (data exception: value too long, invalid encoding, NUL), 23 (integrity constraint: a check
+     * violation) and 54 (program limit exceeded: an index row too large).
+     */
+    static boolean isDataError(Throwable e) {
+        String state = sqlState(e);
+        return state != null && (state.startsWith("22") || state.startsWith("23") || state.startsWith("54"));
+    }
+
+    private static String sqlState(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    /**
+     * The SQLState every row of a batch of two or more was rejected with, when they all share one
+     * that is not a data error; otherwise null.
+     */
+    private static String commonNonDataState(byte[] outcome, Throwable[] rowErrors) {
+        if (outcome.length < 2) return null;
+        String common = null;
+        for (int i = 0; i < outcome.length; i++) {
+            if (outcome[i] != REJECTED || isDataError(rowErrors[i])) return null;
+            String state = sqlState(rowErrors[i]);
+            if (state == null || (common != null && !common.equals(state))) return null;
+            common = state;
+        }
+        return common;
     }
 
     /** Exception class and SQLState only: driver messages can echo the request-derived values. */
@@ -519,15 +597,19 @@ public class ErrorStore {
      * non-zero on one it updated — that's the new-vs-repeat signal the regression listener needs.
      */
     private static boolean upsertPostgres(java.sql.Connection connection, Pending p) throws SQLException {
+        // A payload-stripped retry only counts on an existing row (final review L9).
+        String update = p.strippedPayload
+            ? "occurrence_count = ops_errors.occurrence_count + EXCLUDED.occurrence_count, "
+                + "last_seen = EXCLUDED.last_seen "
+            : "occurrence_count = ops_errors.occurrence_count + EXCLUDED.occurrence_count, "
+                + "message = EXCLUDED.message, stack_trace = EXCLUDED.stack_trace, "
+                + "request_detail = EXCLUDED.request_detail, queries_before = EXCLUDED.queries_before, "
+                + "request_headers = EXCLUDED.request_headers, last_seen = EXCLUDED.last_seen ";
         try (var ps = connection.prepareStatement(
             "INSERT INTO ops_errors " +
             "(error_type, message, stack_trace, route, request_detail, queries_before, request_headers, first_seen, last_seen, occurrence_count) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-            "ON CONFLICT (error_type, route) WHERE resolved_at IS NULL DO UPDATE SET " +
-            "occurrence_count = ops_errors.occurrence_count + EXCLUDED.occurrence_count, " +
-            "message = EXCLUDED.message, stack_trace = EXCLUDED.stack_trace, " +
-            "request_detail = EXCLUDED.request_detail, queries_before = EXCLUDED.queries_before, " +
-            "request_headers = EXCLUDED.request_headers, last_seen = EXCLUDED.last_seen " +
+            "ON CONFLICT (error_type, route) WHERE resolved_at IS NULL DO UPDATE SET " + update +
             "RETURNING (xmax = 0) AS inserted")) {
             ps.setString(1, p.type);
             ps.setString(2, p.message);
@@ -568,6 +650,17 @@ public class ErrorStore {
             }
         }
 
+        if (id != null && p.strippedPayload) {
+            // A payload-stripped retry only counts on an existing row (final review L9).
+            try (var ps = connection.prepareStatement(
+                    "UPDATE ops_errors SET occurrence_count = ?, last_seen = ? WHERE id = ?")) {
+                ps.setLong(1, count + p.count);
+                ps.setTimestamp(2, Timestamp.from(p.lastSeen));
+                ps.setLong(3, id);
+                ps.executeUpdate();
+            }
+            return false;
+        }
         if (id != null) {
             try (var ps = connection.prepareStatement(
                     "UPDATE ops_errors SET occurrence_count = ?, message = ?, stack_trace = ?, request_detail = ?, queries_before = ?, request_headers = ?, last_seen = ? WHERE id = ?")) {
