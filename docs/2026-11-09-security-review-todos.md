@@ -984,6 +984,30 @@ Fixed in the commit of the finding named, or the closeout docs commit.
 - **Payload confidentiality on the WebSocket bus.** Payloads are signed, not encrypted; anyone
   who can `LISTEN` on the database and learns the channel name reads broadcasts. Acknowledged in
   the class doc.
+- **JTE 3.2.1 drops template text before a template's first comment.** In the shape documented
+  in `docs/SECURITY.md` (Cross-Site Scripting, "Comments in a script or style": the first comment comes
+  before the first `${...}` or `@if`, and the text from it to the next `${...}` has a `<`
+  directly followed by a letter with no `>` after it), JTE drops all the template text before
+  the comment, the `<script>` tag included. Brace escapes the data in the resulting stray tag
+  whole, so the result is a broken page, not an injection. An upstream bug; not reported
+  upstream yet.
+- **`brace logs` exits 0 after an HTTP error.** Without `--follow`, a non-200 response from
+  `/ops/logs` is printed as `HTTP <status>: ...` and the command still exits 0
+  (`CliCommands.renderLogsOnce` returns 0, which `logs` does not tell apart from "no entries"),
+  so a script or agent that checks the exit code reads a failure as success. `brace errors` and
+  `brace status` exit 2 in the same case.
+- **Test-suite port collisions.** Full-suite runs had one test fail now and then with a response
+  that did not come from Brace (a `404 page not found`, an MCP server's 401, a garbled status
+  line), passing on rerun. Reproduced on macOS: an app on `.port(0)` listens on the wildcard
+  address, the OS can hand it a port another local process holds on `127.0.0.1`, `start()`
+  succeeds, and the test's connection to `127.0.0.1` or `localhost` reaches the other process.
+  `Brace.test()` now binds `127.0.0.1`, which makes such a collision fail at `start()`; the
+  roughly 125 tests that call `Brace.app().port(0)` directly still bind the wildcard. The same
+  behaviour in production (a process binding `127.0.0.1:<app port>` with `SO_REUSEADDR` takes
+  the app's loopback traffic) is reported separately for a decision.
+- **`Result.headers()` exposes the mutable header map.** It returns the `TreeMap` itself, so
+  `result.headers().put(name, value)` bypasses `Result.header(...)`'s header-name validation
+  (`requireHeaderName`) and its routing of `Set-Cookie` into the separate cookie list.
 
 ### Raised during the fix phase, not done
 
@@ -1004,6 +1028,7 @@ either a hardening option, a limitation, or something that could not be verified
   it, and would also fix an existing non-security bug: JTE's script escapes (`\'`, `\-`) are not
   valid JSON, so a value with an apostrophe or hyphen breaks
   `<script type="application/json">` blocks. Not done because it changes all script-body output.
+  (Since done in the final review round: decision F5 in the fix plan.)
 - **Over-redaction by `isSecretShaped`.** A dated slug (`2024-black-friday-sale`), a dash-joined
   hex list, a hash of 16 or more hex characters, and a free-form header whose whole value is an
   absolute path containing a digit are redacted in error records, because they look like a

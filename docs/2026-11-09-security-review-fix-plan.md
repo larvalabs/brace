@@ -6,16 +6,16 @@ tracker: it holds each finding's checkbox, fix spec, tests and suggested model. 
 the open decisions, how the work is split across agents, the order it merges in, and what has to
 be true before it does.
 
-**Status (2026-11-10): fixes merged, closeout in progress.** All four tracks are fixed,
-independently reviewed, review-fixed and merged into the integration branch; M6 and the
-post-merge cleanups are done; the suite is green on the merged branch. Remaining: the tool
-reruns, the whole-branch review and its fixes, the merge gate (`mvn verify`, `tests/cli`) and
-the review record. H2's code has landed, but `MIN_TOOLCHAIN` itself is raised in the 0.1.11
-release commit, so H2 stays unticked until then.
+**Status (2026-11-10): all fix rounds merged.** All four tracks are fixed, independently
+reviewed, review-fixed and merged into the integration branch, and so are the whole-branch
+(final) review's fixes and the cleanups that followed them; `mvn test` is green on the merged
+branch. Remaining: a final verification pass, the merge gate (`mvn verify`, `tests/cli`) and the
+review record. H2's code has landed, but `MIN_TOOLCHAIN` itself is raised in the 0.1.11 release
+commit, so H2 stays unticked until then.
 
 Decisions D1 to D6 were settled on 2026-11-09: the recommended option in every case. Decisions A
-and B below were made during the fix phase on the reviewer's recommendation and are pending
-Matt's confirmation.
+and B below were made during the fix phase, and F1 to F7 during the final review round, on the
+reviewer's recommendation; all nine are pending Matt's confirmation.
 
 Two deviations from the conventions below: the integration branch is
 `claude/framework-security-review-7c9e30`, not `security-review-2026-11`; and migration-guide
@@ -58,6 +58,19 @@ confirmation**; either can be changed before release.
 |---|---|---|---|---|
 | A | M4 missing rate-limit key (refines D2) | A request with a missing key is limited in a bucket for its client IP (an IPv6 /64), with the limiter's own limit and window; `.exemptMissingKey()` opts out | One global missing-key bucket, as D2 was first implemented | With one global bucket, ordinary traffic locked everyone out: five `GET /login` page views from five IPs and a sixth visitor got 429. Per-IP keeps "no bypass" without that |
 | B | L6 key cap | At `maxKeys` a new key evicts the least recently used key that is under its limit; keys at their limit stay pinned; only when nothing can be evicted does a key use a per-IP overflow bucket, then a global one | One global overflow bucket for every key past the cap | A flood of about 111 fresh keys per second locked out every new login user. Evicting an under-limit key forfeits fewer than `maxRequests` attempts |
+
+Seven more were taken during the final review round. Each is **applied, pending Matt's
+confirmation**; the migration guide and `docs/SECURITY.md` describe them as applied.
+
+| # | Finding | Applied, pending Matt's confirmation |
+|---|---|---|
+| F1 | L1 authorized keys (refines D6) | Every `ops-authorized-keys` line must state `scope:read` or `scope:control`; a key line with no scope token fails startup (it used to mean control). `brace ops keypair` and `brace new` always write the token |
+| F2 | L3 client address | `req.ip()` returns `unknown` when a trusted proxy's forwarding header names no usable client (never the proxy's own address), and is canonical: RFC 5952 for IPv6, an IPv4-mapped address as IPv4 |
+| F3 | L6 saturated limiter | When a rate limiter's key table and per-address overflow table are both full of entries at their limit, a request for a new key fails closed by default (counted in one shared last-resort bucket with the limiter's limit, then 429); `.onSaturation(FAIL_OPEN)` lets such requests through uncounted |
+| F4 | L16 ops replay | Without a database (or while its nonce write fails), ops sign-ins whose timestamp is earlier than 30 s after the server started are refused, outside dev mode and the test harness; with one, accepted nonces are recorded in `brace_counters` |
+| F5 | H1 script bodies | All user data in a script body is written with `\uXXXX` escapes except ASCII letters, digits, `_`, `,` and non-ASCII characters (data inside a tag but outside a quoted value: every character) |
+| F6 | L4 page-cache eviction | A new Postgres framework migration, `V19__brace_cache_used_at.sql` (Postgres only), adds `brace_cache.used_at` |
+| F7 | M6 redaction | The shape rule redacts a 16+ character hash label in a file name (`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as `[redacted].css`), because it cannot be told from a download token |
 
 ## Working conventions
 
