@@ -206,9 +206,9 @@ public class CliAuth {
             String key = projectDir.toAbsolutePath().normalize() + "#" + cfg.env();
             String previous = known.get(key);
             if (previous != null && !previous.equals(origin)) {
-                System.err.println("warning: ops." + cfg.env() + ".url is now " + origin + "; you last logged in to "
+                System.err.println(CliOutput.sanitize("warning: ops." + cfg.env() + ".url is now " + origin + "; you last logged in to "
                     + previous + " from this project. If you didn't change it, check .brace and .brace.local "
-                    + "before going on: this login is signed for " + origin + " only.");
+                    + "before going on: this login is signed for " + origin + " only."));
             }
             if (!origin.equals(previous)) {
                 known.put(key, origin);

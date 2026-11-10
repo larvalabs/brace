@@ -38,11 +38,51 @@ public class CliOutput {
         }
     }
 
+    /**
+     * Neutralize terminal control characters in a string that came from a server or a config
+     * file before it reaches a human's terminal: C0 controls (except {@code \n} and {@code \t}),
+     * DEL and the C1 range U+0080 to U+009F become {@code ?}. Without this a hostile server can
+     * emit ESC/CSI/OSC sequences that rewrite earlier output or set the window title. JSON mode
+     * does not need it: Jackson escapes control characters.
+     */
+    public static String sanitize(String s) {
+        if (s == null) return null;
+        StringBuilder sb = null;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean bad = (c < 0x20 && c != '\n' && c != '\t') || c == 0x7f || (c >= 0x80 && c <= 0x9f);
+            if (bad && sb == null) sb = new StringBuilder(s.length()).append(s, 0, i);
+            if (sb != null) sb.append(bad ? '?' : c);
+        }
+        return sb == null ? s : sb.toString();
+    }
+
+    /** Human-mode {@code println} that sanitizes. Use for anything derived from a server or config. */
+    public static void println(String s) {
+        System.out.println(sanitize(s));
+    }
+
+    public static void println() {
+        System.out.println();
+    }
+
+    /** Human-mode {@code print} that sanitizes. */
+    public static void print(String s) {
+        System.out.print(sanitize(s));
+    }
+
+    /** Human-mode {@code printf} that sanitizes the formatted result. */
+    public static void printf(String format, Object... args) {
+        System.out.print(sanitize(String.format(format, args)));
+    }
+
     public static String table(List<String> headers, List<List<String>> rows) {
         return table(headers, rows, 200);
     }
 
     public static String table(List<String> headers, List<List<String>> rows, int maxWidth) {
+        headers = headers.stream().map(CliOutput::sanitize).toList();
+        rows = rows.stream().map(r -> r.stream().map(CliOutput::sanitize).toList()).toList();
         int cols = headers.size();
         int[] widths = new int[cols];
         for (int i = 0; i < cols; i++) widths[i] = headers.get(i).length();
@@ -98,14 +138,14 @@ public class CliOutput {
     }
 
     public static void printError(String message) {
-        System.err.println("✗ " + message);
+        System.err.println("✗ " + sanitize(message));
     }
 
     public static void printSuccess(String message) {
-        System.out.println("✓ " + message);
+        System.out.println("✓ " + sanitize(message));
     }
 
     public static void printInfo(String message) {
-        System.out.println("▸ " + message);
+        System.out.println("▸ " + sanitize(message));
     }
 }

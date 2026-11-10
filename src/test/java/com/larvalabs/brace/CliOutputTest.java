@@ -104,4 +104,66 @@ class CliOutputTest {
         assertEquals(CliOutput.Mode.JSON, CliOutput.modeFrom(true, true, false));
         assertEquals(CliOutput.Mode.HUMAN, CliOutput.modeFrom(false, false, true));
     }
+
+    private static String capture(Runnable r) {
+        var bout = new java.io.ByteArrayOutputStream();
+        var prev = System.out;
+        System.setOut(new java.io.PrintStream(bout));
+        try { r.run(); } finally { System.setOut(prev); }
+        return bout.toString();
+    }
+
+    private static final String ESC = "\u001b[2J\u001b[1A";
+    private static final String OSC = "\u001b]0;pwned\u0007";
+
+    @Test
+    void sanitizeReplacesControlCharactersButKeepsNewlineAndTab() {
+        assertEquals("a?[2J?]0;x?b\n\tc", CliOutput.sanitize("a\u001b[2J\u001b]0;x\u0007b\n\tc"));
+        assertEquals("a?b?c?d", CliOutput.sanitize("a\u007fb\u0085c\u009bd"));
+        assertEquals("cr?lf\n", CliOutput.sanitize("cr\rlf\n"));
+        assertEquals("plain ünïcode ✓", CliOutput.sanitize("plain ünïcode ✓"));
+        assertNull(CliOutput.sanitize(null));
+    }
+
+    @Test
+    void tableNeutralizesControlCharactersInCellsAndHeaders() {
+        String out = CliOutput.table(java.util.List.of("A" + ESC, "B"),
+            java.util.List.of(java.util.List.of("x" + OSC, "y")));
+        assertFalse(out.indexOf('\u001b') >= 0 || out.indexOf('\u0007') >= 0, out);
+    }
+
+    @Test
+    void printHelpersNeutralizeControlCharacters() {
+        String out = capture(() -> {
+            CliOutput.println("a" + ESC);
+            CliOutput.printf("%s|%d%n", OSC, 3);
+            CliOutput.print("p" + ESC);
+            CliOutput.printSuccess("ok" + OSC);
+            CliOutput.printInfo("info" + ESC);
+        });
+        assertFalse(out.indexOf('\u001b') >= 0 || out.indexOf('\u0007') >= 0, out);
+        assertTrue(out.contains("|3\n"));
+    }
+
+    @Test
+    void errorMessagesAreSanitizedButJsonKeepsDataEscaped() {
+        var err = new java.io.ByteArrayOutputStream();
+        var prev = System.err;
+        System.setErr(new java.io.PrintStream(err));
+        try { CliOutput.printError("bad" + ESC + OSC); } finally { System.setErr(prev); }
+        assertFalse(err.toString().indexOf('\u001b') >= 0, err.toString());
+
+        String json = CliOutput.json(java.util.Map.of("m", "x" + ESC));
+        assertTrue(json.toLowerCase().contains("\\u001b"), json);
+        assertFalse(json.indexOf('\u001b') >= 0, json);
+    }
+
+    @Test
+    void statusRenderingNeutralizesServerStrings() throws Exception {
+        var root = Json.mapper().readTree(
+            "{\"app\":{\"uptime\":\"1d" + "\\u001b[2K\\u001b]0;pwn\\u0007\",\"javaVersion\":\"21\\u009b\"},\"http\":{}}");
+        String out = capture(() -> CliCommands.renderStatus(root));
+        assertTrue(out.contains("1d?[2K?]0;pwn?"), out);
+        assertFalse(out.indexOf('\u001b') >= 0 || out.indexOf('\u0007') >= 0 || out.indexOf('\u009b') >= 0, out);
+    }
 }
