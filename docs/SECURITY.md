@@ -425,7 +425,7 @@ at startup.
 ### htmx
 
 `${csrfMeta}` renders `<meta name="csrf-token" content="…">` with a masked token, and the bundled
-`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it. The origin is checked when htmx sends the request, so a `htmx:configRequest` listener of the page's own that rewrites the path afterwards is covered too. An `X-CSRF-Token` value the page set itself for a deliberate cross-origin call (`hx-headers='{"X-CSRF-Token": "..."}'`, `htmx.ajax(..., {headers})`, an earlier listener) is captured first and still sent to that origin; a same-origin request gets the framework's token from the meta tag.
+`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it. The origin is checked when htmx sends the request, so a `htmx:configRequest` listener of the page's own that rewrites the path afterwards is covered too. A cross-origin htmx request never carries `X-CSRF-Token` from this helper, for any verb: a value already in the request's headers when the helper runs (`hx-headers` on the element or inherited from `<body>`, `htmx.ajax(..., {headers})`, an earlier listener), under any letter case, is removed. The helper cannot tell a third party's token from the app's own, and injected markup alone (`<base href>`) can turn a relative `hx-post` into a cross-origin request. A same-origin non-GET request carries the meta tag's token under exactly one header name; a same-origin GET keeps a value the page set itself. To send a chosen `X-CSRF-Token` to another origin, assign it in an `htmx:configRequest` listener added on `document` after the helper script is included.
 
 ### Exemptions
 
@@ -2548,10 +2548,12 @@ block the others:
   1,000-kind pending buffer:
   - a connection-level failure (database down, pool exhausted, failure to open the session or
     begin the transaction);
-  - a server-wide SQLState on any row, whether or not the connection still passes `isValid`:
-    `25006` (read-only transaction, as during a failover), class `53` (disk full, out of
-    memory, too many connections), `57P01` to `57P05` (shutdown), class `58` (system error),
-    class `08` (connection);
+  - a server-wide SQLState when no row of that flush could be written, whether or not the
+    connection still passes `isValid`: `25006` (read-only transaction, as during a failover),
+    class `53` (disk full, out of memory, too many connections), `57P01` to `57P05` (shutdown),
+    class `58` (system error), class `08` (connection). When another row of the same flush was
+    written, the server is taking writes, so the state counts against that row alone (dropped
+    after 5 such flushes) and the other rows commit;
   - another connection-classed SQLState (`40`, other `57`, other `25`) when the connection also
     fails `isValid`.
 
@@ -2563,8 +2565,19 @@ block the others:
   row), and so is a connection-classed error on a live connection (for example `57014`, a
   statement timeout on one huge row): a single poisoned row is still isolated and dropped after
   5, and kinds that always fail that way cannot fill the buffer and lock out a new kind.
+- The 1,000-kind cap covers everything the store holds: pending kinds plus the batch a flush is
+  writing. While a flush waits on an unreachable database, new kinds past the cap are dropped
+  (and counted in the "error storm" warning); the kinds buffered first, with their counts, are
+  kept.
+- In error kinds and in the `/ops/status` route stats, a request method outside GET, HEAD, POST,
+  PUT, PATCH, DELETE, OPTIONS, TRACE and CONNECT appears as `OTHER`, so a client cannot create
+  kinds or stats keys with made-up methods. The request log line and an error's request detail
+  keep the method as sent.
 - Failures are logged at most once a minute, naming the exception class, SQLState and the error
   type of any dropped entry. Request-derived content (messages, paths, headers) is never logged.
+  The warning distinguishes kinds dropped "after 5 rejected flushes" from kinds "the database
+  could not take through 65 failed flushes". A `RegressionListener` that throws loses only its
+  own notification, and an `Error` during a flush keeps the batch and the flusher thread.
 
 Before the 2026-11 security review (M5), one such request failed every later flush on
 Postgres, so nothing reached `ops_errors` and regression alerts stopped until restart.

@@ -869,7 +869,9 @@ CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests whe
   that is expected, and any rendered value validates.
 - **htmx:** put `${csrfMeta}` (declare `@param gg.jte.Content csrfMeta = null`) in the layout's
   `<head>` and load `<script src="/__brace/csrf-htmx.js"></script>` after htmx. Every non-GET
-  htmx request then carries the token; no per-element `hx-headers`.
+  same-origin htmx request then carries the token; no per-element `hx-headers`. The helper sends
+  no `X-CSRF-Token` to another origin, even one set in `hx-headers`; set it in a later
+  `htmx:configRequest` listener on `document` if a cross-origin call needs one.
 - **fetch:** declare `@param String csrfToken = null` and render
   `<meta name="csrf-token" content="${csrfToken}">` (or use `${csrfMeta}`), then send it in the
   `X-CSRF-Token` header with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;

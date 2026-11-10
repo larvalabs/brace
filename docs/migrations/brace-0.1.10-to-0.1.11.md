@@ -1928,11 +1928,13 @@ comment.
 
 **htmx CSRF helper.** `/__brace/csrf-htmx.js` now attaches `X-CSRF-Token` only to same-origin
 requests, judged on the path the request is sent to (after every `htmx:configRequest` listener
-has run). No change unless a page turned off htmx's `selfRequestsOnly` and posts cross-origin.
-A page that wants the token on a cross-origin request sets the header in its own
-`htmx:configRequest` listener. An `X-CSRF-Token` the page set itself for a cross-origin call
-(`hx-headers`, `htmx.ajax`'s `headers`) is still sent there; a same-origin request carries the
-page's own token.
+has run). No change unless a page posts cross-origin with htmx. An `X-CSRF-Token` the page put
+in `hx-headers` or `htmx.ajax`'s `headers` is not sent to another origin either, for any verb:
+it may be the app's own token inherited from `<body hx-headers>`, and injected markup
+(`<base href>`) can turn a relative `hx-post` into a cross-origin request. If a cross-origin
+call needs an `X-CSRF-Token`, assign it in an `htmx:configRequest` listener added on `document`
+after the helper script. A same-origin non-GET request carries the page's token under the single
+name `X-CSRF-Token`, whatever letter case `hx-headers` used.
 
 ## Breaking: page cache keys, bypasses and undeclared reads
 
@@ -2187,7 +2189,14 @@ No action needed unless noted.
   `error store:` warning. A read-only or out-of-resources database (a failover window) or an
   unreachable one keeps every pending error for later instead, for up to about two minutes (60
   flushes); past that the pending errors are counted as failed and dropped after 5 more flushes,
-  with the same warning. If you saw `ops_errors` stop updating, this was likely why.
+  with the same warning. The store holds at most 1,000 error kinds in memory, counting the
+  batch a flush is writing; new kinds past that are dropped and counted in the "error storm"
+  warning. If you saw `ops_errors` stop updating, this was likely why.
+- **Unknown request methods are grouped.** In error kinds (`ops_errors.route`, regression
+  notifications) and in the `/ops/status` route stats, a method outside GET, HEAD, POST, PUT,
+  PATCH, DELETE, OPTIONS, TRACE and CONNECT appears as `OTHER` (for example
+  `OTHER (unmatched)`), so a client cannot create kinds or stats keys with made-up methods. The
+  request log line and an error's request detail keep the method as sent.
 - **More exception messages are redacted** before they reach `/ops/status` (a scheduled job's
   `lastError`), the uncaught-exception log event, `scheduled_jobs.error` and warning logs. Ops
   bearer tokens (`payload.signature`) are recognised as secrets.
