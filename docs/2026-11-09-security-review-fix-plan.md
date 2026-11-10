@@ -7,7 +7,9 @@ the open decisions, how the work is split across agents, the order it merges in,
 be true before it does.
 
 **Status (2026-11-10): fix rounds, whole-branch review, verification pass and merge gate
-complete at `d8aa624`.** Matt confirmed every decision below on 2026-11-10. Outstanding:
+complete at `d8aa624`; a second review of the verification pass and of the migration guide, with
+its fixes, complete at `193c73b` (gate green).** Matt confirmed every decision below on
+2026-11-10. Outstanding:
 the tool reruns (SpotBugs, Semgrep, OSV; none was available offline) and the release-commit
 steps. H2's code has landed, but `MIN_TOOLCHAIN` itself is raised in the 0.1.11 release commit,
 so H2 stays unticked until then. The record is

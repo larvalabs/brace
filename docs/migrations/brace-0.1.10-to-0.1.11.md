@@ -2179,7 +2179,26 @@ No action needed unless noted.
   `sid`, `ticket` and `session` as a word of the name, and a name ending in `auth` (`X-Auth`),
   are sensitive too, so `?code=` and `?ticket=` are redacted while `zip_code` and `status_code`
   are kept. Structured log fields and route parameters are not affected by those short words: a
-  `Log.event` field named `code` and a route `/countries/{code}` are kept as they are.
+  `Log.event` field named `code` and a route `/countries/{code}` are kept as they are. Also
+  sensitive in query strings and headers: `onetimecode`, `one_time_code`, `twoFactorCode`, and,
+  as the last word of a name, `mfa`, `2fa`, `tfa`, `two_factor` and `verification` (so
+  `?verification=pending` shows as redacted).
+- **What else is redacted in messages and stack traces:** a sensitive value in brackets or
+  single quotes (`password={…}`, `codes=[…]`), URL passwords holding characters such as
+  `^ { } | \ ' < >`, URLs of any scheme inside a longer run of text, base64 secrets containing
+  `/`, two-group codes such as `ZAXVVMA5-LAHQRWYU`, a name with a 7 or 8 digit group that is not
+  a date (`test-user-12345678`), and a trace line that starts with `at ` but is not a stack
+  frame. Host lists keep their hosts, path and query
+  (`mongodb://h1:27017,h2:27017/db?authSource=a@b`).
+- **Not redacted, by design:** `{"password":"…"}` and `password: …` (only `name=value` is
+  matched by name), secrets made of ordinary words, and secrets under 16 characters under an
+  unknown name. See "Known limits" in `docs/SECURITY.md`. Do not put secrets in exception
+  messages.
+- **Redaction fails closed.** No `Redactor` method throws; on an internal error it returns
+  `[redaction failed]` (`Redactor.FAILED`) in place of the text, per line in a stack trace, per
+  header in `redactHeaders`, per value in `redact(Map)`. `redact(null)` and
+  `redactHeaders(null)` return an empty map. A request whose error could not be recorded still
+  gets the framework's 500 response.
 - **Hostile input can't stall the store.** A request carrying `%00` (`?page=1%00` reaching
   `req.queryInt`) used to make every later flush fail on Postgres, so `ops_errors` and
   regression alerts went silent until restart. NUL characters are replaced, type and route are

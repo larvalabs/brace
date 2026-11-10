@@ -71,6 +71,23 @@ that reproduced the finding.
 | Whole-branch review | Three areas (request path and ops; data and output; CLI, scaffold and docs samples); fixed as "final review fixes" | `79d9017` |
 | Verification pass | Two reviewers, scoped strictly to the final round's diff; fixed in a last pass | `d8aa624` |
 | Merge gate | `mvn clean verify` with the Postgres tier, `tests/cli` | `d8aa624` |
+| Second review of the verification pass | Two reviewers on the last pass's seven commits, three auditors on the migration guide; fixed as "second review fixes" | `193c73b` |
+| Merge gate, rerun | `mvn clean verify` with the Postgres tier | `193c73b` |
+
+The second review was commissioned because the verification pass's fixes had not been
+independently reviewed. It found, all introduced by that pass: a crash in the redactor that let a
+client hide a 500 from the error store and the log (`?x=jdbc:_x://h`; High); two reopened
+redaction leaks (an indented `at ...` message line, a base64 secret containing `/`); name-rule
+survival rates of up to 0.76% for two-group tokens; an error-store buffer bounded at 65,000 kinds
+instead of 1,000; and `csrf-htmx.js` sending a token inherited from `<body hx-headers>` to
+another origin under an injected `<base>`. It also found that a made-up HTTP method could mint
+error kinds and stats keys. All are fixed, each from a failing test; the redactor now cannot
+throw (`[redaction failed]`), a seeded fuzz test and a survival-rate test over 41 token shapes
+are in the suite, and `csrf-htmx.js` was rerun in Chromium (40 cases, old and new script). The
+guide audit produced about 45 corrections and a new "How to upgrade" section. The second
+review's own fixes have not been independently reviewed.
+
+Gate at `193c73b`: unit tier 2,451 tests, memory tier 2, Postgres tier 84, all green.
 
 Two deviations from the conventions in [`README.md`](README.md): the integration branch is
 `claude/framework-security-review-7c9e30`, and migration-guide entries were written at closeout,
