@@ -144,6 +144,61 @@ class PageCacheCapPostgresIT extends PostgresTestBase {
         }
     }
 
+    // ---- verification: V19 adds used_at without building an index under the ALTER's lock ----
+
+    /**
+     * V19 ran {@code ALTER TABLE ... ADD COLUMN} then {@code CREATE INDEX} in one transaction, so
+     * the ALTER's ACCESS EXCLUSIVE lock blocked every read and write of {@code brace_cache} (old
+     * instances in a rolling deploy included) for the whole index build. The trim does not need
+     * the index (see {@link #theTrimHoldsTheCapsWithoutAUsedAtIndex}), so V19 no longer builds it.
+     */
+    @Test
+    void v19BuildsNoIndex() throws Exception {
+        try (var c = connect(); var st = c.createStatement();
+             var rs = st.executeQuery("SELECT indexname FROM pg_indexes WHERE tablename = 'brace_cache' "
+                 + "AND indexdef LIKE '%used_at%'")) {
+            assertNull(rs.next() ? rs.getString(1) : null, "V19 must not build an index on used_at");
+        }
+    }
+
+    /**
+     * The page trim over a full table: 100,000 app rows plus 11,000 page rows, page cap 10,000.
+     * Without an index on used_at the page subquery is one scan of the table plus a top-N sort of
+     * the page rows; the trim already counts with full scans, so this adds one scan per trim
+     * (every trimEvery inserts), over a table the cap bounds. The {@code LIKE} prefix cannot use
+     * the primary key under a non-C collation, and with app rows older than the pages an index on
+     * used_at walked all of them too (measured: 7.5 ms with it, 8.5 ms without, for this query).
+     * Prints the plan and the time.
+     */
+    @Test
+    void theTrimHoldsTheCapsWithoutAUsedAtIndex() throws Exception {
+        try (var c = connect(); var st = c.createStatement()) {
+            st.execute("INSERT INTO brace_cache (cache_key, value, expires_at) "
+                + "SELECT 'app:' || g, '\\x00'::bytea, now() + interval '1 hour' FROM generate_series(1, 100000) g");
+            st.execute("INSERT INTO brace_cache (cache_key, value, expires_at, used_at) "
+                + "SELECT 'brace:page:GET:path:/p/' || g, '\\x00'::bytea, now() + interval '1 hour', "
+                + "now() - (g || ' seconds')::interval FROM generate_series(1, 11000) g");
+            st.execute("ANALYZE brace_cache");
+            try (var rs = st.executeQuery("EXPLAIN (ANALYZE, COSTS OFF) SELECT cache_key FROM brace_cache "
+                    + "WHERE cache_key LIKE 'brace:page:%' ESCAPE '\\' ORDER BY used_at ASC LIMIT 1000")) {
+                var plan = new StringBuilder();
+                while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                System.out.println("[V19 probe] page-trim subquery plan:\n" + plan);
+            }
+        }
+        var backend = new PostgresBackend(factory, 1_000_000, 10_000);
+        long start = System.nanoTime();
+        long removed = backend.trimToCap();
+        long ms = (System.nanoTime() - start) / 1_000_000;
+        System.out.println("[V19 probe] trimToCap over 111,000 rows removed " + removed + " in " + ms + " ms");
+        assertEquals(1_000, removed);
+        assertEquals(10_000, rows(" WHERE cache_key LIKE 'brace:page:%'"));
+        assertEquals(100_000, rows(" WHERE cache_key NOT LIKE 'brace:page:%'"), "app rows untouched");
+        // The oldest pages (largest g) went first.
+        assertEquals(0, rows(" WHERE cache_key = 'brace:page:GET:path:/p/11000'"));
+        assertEquals(1, rows(" WHERE cache_key = 'brace:page:GET:path:/p/1'"));
+    }
+
     private static String usedAt() throws Exception {
         try (var c = connect(); var st = c.createStatement();
              var rs = st.executeQuery("SELECT used_at::text FROM brace_cache WHERE cache_key LIKE 'brace:page:%'")) {

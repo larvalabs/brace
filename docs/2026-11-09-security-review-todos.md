@@ -668,6 +668,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       for `?page=2`. Links now read the path without recording it, and inside a page-cached
       handler (the cache marks the request in every mode) copy only the declared `vary` params.
       Tests in `PagedPageCacheTest`.
+      V19 (unreleased, so edited in place): it built `idx_brace_cache_used_at` in the same
+      transaction as the `ADD COLUMN`, holding the ALTER's ACCESS EXCLUSIVE lock on `brace_cache`
+      for the whole build on every app's first start with the new jar. The index is dropped from
+      V19 (lock file updated): the trim already seq-scans the cap-bounded table to count, the
+      `LIKE` prefix cannot use the primary key under a non-C collation, and with app rows older
+      than the pages the index walked all of them anyway (EXPLAIN ANALYZE on 100,000 app plus
+      11,000 page rows: 7.5 ms with the index, 8.5 ms without; `trimToCap` 29 ms vs 32 ms).
+      Unindexed, the `used_at` refresh can be a HOT update. Tests in `PageCacheCapPostgresIT`.
 
 - [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a

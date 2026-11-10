@@ -200,8 +200,10 @@ for example) are not covered. See "Response Compression" in `docs/SECURITY.md`.
 enables analytics, and stay empty unless it does. Nothing to do.
 
 The November 2026 review adds `V19__brace_cache_used_at.sql` on Postgres only: a `used_at` column
-and index on `brace_cache`, which the page cache trims by
-([§](#breaking-page-cache-keys-bypasses-and-undeclared-reads)). Also applied automatically.
+on `brace_cache`, which the page cache trims by
+([§](#breaking-page-cache-keys-bypasses-and-undeclared-reads)). Also applied automatically. It
+adds the column without rewriting the table and builds no index, so the brief table lock it
+takes is not held across an index build.
 
 ## Fix: `HEAD` requests reach `GET` routes
 
@@ -1843,8 +1845,8 @@ app.get("/feed", cache.wrap("10m", ctrl::feed).vary("page").varyHeader("HX-Targe
 - **Page entries are evicted least recently used first.** On Postgres, page rows are trimmed by
   `used_at` (last write, or last hit, recorded at most once a minute per row), not by expiry, so
   rows on a long-TTL route no longer push out every page of a short-TTL one. This adds framework
-  migration `V19__brace_cache_used_at.sql` (Postgres only: a `used_at` column and index on
-  `brace_cache`, added without a table rewrite; applied automatically). In memory, a full cache
+  migration `V19__brace_cache_used_at.sql` (Postgres only: a `used_at` column on `brace_cache`,
+  added without a table rewrite or an index build; applied automatically). In memory, a full cache
   evicts the page least recently hit, and a new page always displaces a cold page, so a flood
   of never-read pages no longer locks the hot ones out.
 - **Shared-backend reads through a supertype.** On `CacheBackend.postgres(...)`,
