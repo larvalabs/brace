@@ -1409,6 +1409,160 @@ class RedactorTest {
     }
 
     @Test
+    void tokensThatWereTakenForNamesAreRedacted() {
+        // L-1: the name rule kept two-group tokens (base32 8-8: 0.76%), long digit groups, any
+        // short 0x literal and any <digits>-g<hex>.
+        for (String v : List.of("ZAXVVMA5-LAHQRWYU", "OLRWUXXO_PYMGPED7", "htvmuprj-tsnyagi2", "90974875-ffaaadac",
+                "deadbeef-12345678", "mgfKoexw-QMA3Jiqr", "KEBIXAGP3-WIOIIWDWS", "nxwegyb0-cxejavwa",
+                "mtfohuyjhq-sybhnvezz1", "PPAGTWEDKI26-ADBNODTICPRD", "uhiyagpanv71_jsznymzluuzm",
+                "reset-code-48213977", "session-abcdefghijkl-12345678", "test-user-12345678",
+                "0x1234567890abcdef", "0xdeadbeefcafe1234", "0x00a3f9bc2d8ef14a", "12345678-gdeadbeefcafe",
+                "99999999-gabcdef012345", "1-gabcdef0123456789", "facade-decade-accede-12345678",
+                "UFVScbbyhUokwvd5", "breaPmuykrtiAkooTUT9", "RFG8TuduskKhdorfsdAqwt")) {
+            assertEquals("seen [redacted] here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+        // Still names: words a reader would say, short digit groups, dates, a lambda's address
+        // (zero-padded to 16 hex digits), a git describe suffix after a tag.
+        for (String v : List.of("V3__create_users_table", "quarterly-report-2024q4-final", "users_email_address_key1",
+                "notification_preferences_json2", "invoice-48213-final-v2", "ORD-2024-11-000482", "INV-20241105-000482",
+                "build-number-20241105", "report-20241105-final", "customer-orders-2024-11-05", "page-12345-of-99999",
+                "audit_log_entries_2024", "user_sessions_archive_2024q4", "CONSTRAINT_INDEX_4", "PARTIALLY_REFUNDED_V2",
+                "shippingAddressLine2", "Http2ConnectionHandlerImpl", "UTF8StreamJsonParser", "XMLHttpRequest2Handler",
+                "2024-black-friday-sale", "x86_64-linux-gnu", "ip-10-0-12-34-internal", "web-server-01-prod-east",
+                "0x0000000800c8a1b0", "0x000001f0a1047000", "05-1423-g3f9a1c2", "v1-1423-g3f9a1c2beef",
+                "shipping_address2", "customer-orders1", "password_hasher2", "background_worker_2",
+                "monkey_dragon_letmein_2024", "the-quick-brown-fox-jumps-2")) {
+            assertEquals("seen " + v + " here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+        for (String m : List.of("Version v0.1.11-rc.6-12-gabc1234 is not supported",
+                "Version 2024.11.05-1423-g3f9a1c2 is not supported",
+                "class com.example.Foo$$Lambda$142/0x0000000800c8a1b0 cannot be cast to class Bar")) {
+            assertEquals(m, Redactor.redactMessage(m), m);
+        }
+    }
+
+    /** One shape of random token for {@link #randomTokensOfEveryShapeAreRedacted}. */
+    record TokenShape(String name, String alphabet, int length, int group, String separator, String prefix, int maxKept) {}
+
+    static final String B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static final String B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    static final String B62 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    static final String HEX = "0123456789abcdef";
+    static final String B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    static final String B36 = "abcdefghijklmnopqrstuvwxyz0123456789";
+    static final String CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
+
+    /** Tokens sampled per shape. */
+    static final int SURVIVAL_SAMPLES = 100_000;
+
+    /**
+     * The measured ceiling for a shape judged by the name rule: at most 1 token in 10,000 kept
+     * whole or by half (the owner's accepted residual for the name-versus-secret heuristic).
+     */
+    static final int ONE_IN_TEN_THOUSAND = SURVIVAL_SAMPLES / 10_000;
+
+    @Test
+    void randomTokensOfEveryShapeAreRedacted() {
+        // L-1 and M-2: the survival statistics of the second review, seeded, in the repo. For each
+        // shape, 100,000 random tokens that hold a digit and a letter go through redactMessage;
+        // a token "survives" when half of it or more is still readable in one piece. Shapes the
+        // name rule judges must stay at or under 1 in 10,000. Standard base64 can read as a path
+        // of short pieces ("YGw/A0C3B/hJOQFgnBClnm"): those ceilings are what c136520, the last
+        // commit before the path and name rules, measured (with margin for the seed), so the
+        // rules cost no base64 secret.
+        List<TokenShape> shapes = List.of(
+            new TokenShape("base64 40 (AWS secret key)", B64, 40, 0, "", "", 3),
+            new TokenShape("base64 43 (32 bytes)", B64, 43, 0, "", "", 3),
+            new TokenShape("base64 22 (16 bytes)", B64, 22, 0, "", "", 120),
+            new TokenShape("base64 27 (20 bytes)", B64, 27, 0, "", "", 35),
+            new TokenShape("base64 86 (64 bytes)", B64, 86, 0, "", "", 3),
+            new TokenShape("base64 40 after /", B64, 40, 0, "", "/", 3),
+            new TokenShape("base64url 43", B64URL, 43, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base64url 22", B64URL, 22, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 32", B62, 32, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 20", B62, 20, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 16", B62, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 32", HEX, 32, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 16", HEX, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 40", HEX, 40, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 32", B32, 32, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 (TOTP secret)", B32, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 24", B36, 24, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 16", B36, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("crockford 26 (ULID-like)", CROCKFORD, 26, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 32 in 8s -", HEX, 32, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 24 in 6s -", HEX, 24, 6, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 16 in 4s -", HEX, 16, 4, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 16 in 8s -", HEX, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 20 in 10s _", HEX, 20, 10, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 24 in 12s -", HEX, 24, 12, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 20 in 5s -", B36, 20, 5, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 18 in 6s -", B36, 18, 6, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 16 in 8s -", B36, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 20 in 10s -", B36, 20, 10, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 24 in 12s _", B36, 24, 12, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 in 4s -", B32, 16, 4, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 20 in 5s -", B32, 20, 5, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 in 8s -", B32, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 in 8s _", B32, 16, 8, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 18 in 9s -", B32, 18, 9, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 24 in 12s -", B32, 24, 12, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("crockford 16 in 8s -", CROCKFORD, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 16 in 8s -", B62, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 24 in 12s -", B62, 24, 12, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 24 in 8s _", B62, 24, 8, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 21 in 7s -", B62, 21, 7, "-", "", ONE_IN_TEN_THOUSAND));
+        var rnd = new java.util.Random(7);
+        var over = new java.util.ArrayList<String>();
+        var sb = new StringBuilder();
+        for (TokenShape shape : shapes) {
+            int kept = 0;
+            String example = null;
+            for (int n = 0; n < SURVIVAL_SAMPLES; n++) {
+                sb.setLength(0);
+                sb.append(shape.prefix());
+                boolean digit = false;
+                boolean letter = false;
+                for (int k = 0; k < shape.length(); k++) {
+                    if (shape.group() > 0 && k > 0 && k % shape.group() == 0) sb.append(shape.separator());
+                    char c = shape.alphabet().charAt(rnd.nextInt(shape.alphabet().length()));
+                    if (c >= '0' && c <= '9') digit = true;
+                    else if (Character.isLetter(c)) letter = true;
+                    sb.append(c);
+                }
+                if (!digit || !letter) continue; // all letters or all digits: never a candidate
+                String token = sb.toString();
+                String out = Redactor.redactMessage("key " + token + " rejected");
+                if (out.equals("key [redacted] rejected")) continue; // the common case, cheaply
+                if (longestSurvivingPiece(token, out) * 2 >= token.length()) {
+                    kept++;
+                    if (example == null) example = token + " => " + out;
+                }
+            }
+            if (kept > shape.maxKept()) {
+                over.add(shape.name() + ": " + kept + " of " + SURVIVAL_SAMPLES + " kept (limit " + shape.maxKept()
+                    + "), e.g. " + example);
+            }
+        }
+        assertTrue(over.isEmpty(), String.join("\n", over));
+    }
+
+    /** Length of the longest piece of {@code token} still present in {@code out}. */
+    static int longestSurvivingPiece(String token, String out) {
+        if (out.contains(token)) return token.length();
+        int best = 0;
+        for (int i = 0; i < token.length(); i++) {
+            for (int j = token.length(); j > i + best; j--) {
+                if (out.contains(token.substring(i, j))) {
+                    best = j - i;
+                    break;
+                }
+            }
+        }
+        return best;
+    }
+
+    @Test
     void everyEntryPointFailsClosedWhenRedactionFailsInside() {
         // H-1: the redactor runs on error paths, so a bug inside it must cost one marker, never an
         // exception (the error being recorded would be lost) and never the raw input.

@@ -1003,8 +1003,18 @@ public class Redactor {
         return !isNameLike(s, from, to);
     }
 
-    /** Digits in a group of a name ({@code 20241105}, {@code 000482}); a longer group is an id or a token. */
-    private static final int NAME_DIGITS = 8;
+    /**
+     * Digits in a group of a name ({@code 48213}, {@code 000482}); a longer group is an id or a
+     * token ({@code reset-code-48213977}), unless it is eight digits that read as a date
+     * ({@code 20241105}).
+     */
+    private static final int NAME_DIGITS = 6;
+
+    /** Digits of the commit count in a {@code git describe} suffix ({@code -1423-g3f9a1c2}). */
+    private static final int GIT_COUNT_DIGITS = 5;
+
+    /** Letters from which a word of a name must {@linkplain #pairPenalty read like a word}. */
+    private static final int WORD_CHECK_LETTERS = 5;
 
     /**
      * A label made of ordinary words, so not secret-shaped although it is long and holds a digit:
@@ -1016,9 +1026,14 @@ public class Redactor {
      * <ul>
      *   <li>it holds only {@code [A-Za-z0-9_-]};</li>
      *   <li>it has two or more words, and at least one has three or more letters;</li>
-     *   <li>a digit group has at most {@value #NAME_DIGITS} digits on its own and at most
-     *       {@value #NAME_SUFFIX_DIGITS} after letters ({@code v2}, {@code V19}), and at most one
-     *       word in the label has both letters and digits;</li>
+     *   <li>every word of {@value #WORD_CHECK_LETTERS} or more letters {@linkplain #pairPenalty reads
+     *       like a word}: its letter pairs are ones English and identifiers use ({@code create},
+     *       {@code users}, {@code Handler}; not {@code ZAXVVMA}, {@code htvmuprj}). Without this
+     *       two random groups of letters ({@code ZAXVVMA5-LAHQRWYU}) were two "words";</li>
+     *   <li>a digit group has at most {@value #NAME_DIGITS} digits on its own (eight when they
+     *       read as a date, {@code 20241105}) and at most {@value #NAME_SUFFIX_DIGITS} after
+     *       letters ({@code v2}, {@code V19}), and at most one word in the label has both letters
+     *       and digits;</li>
      *   <li>a digit is followed directly by a letter (not at a camelCase boundary such as
      *       {@code Http2Connection}) at most once, and only inside a part of at most 8 characters
      *       ({@code 2024q4}): letters and digits interleaved within a long part
@@ -1029,15 +1044,23 @@ public class Redactor {
      *       ({@code get}) and one acronym of two to four capitals ({@code UTF}): random
      *       mixed-case text cuts into short words ({@code Ym}, {@code Hf7}, {@code Oz});</li>
      *   <li>it is not three or more parts of (nearly) one length, the shape of a grouped code
-     *       ({@code abcd5-efgh6-ijkl7}).</li>
+     *       ({@code abcd5-efgh6-ijkl7}); and two parts of (nearly) one length, seven or more
+     *       characters each, are a name only when their words pass a stricter word test
+     *       ({@code shipping_address2}; not {@code PZEEBRLL_HGZUZTU3}).</li>
      * </ul>
-     * Also a name: a {@code 0x} literal of at most 16 hex digits (a lambda's address), and a
-     * {@code git describe} suffix ({@code 1423-g3f9a1c2}: {@code g} plus 7 to 12 hex digits after
-     * a digit group). A single word ({@code deadbeefcafe1234}, a 40-hex SHA) is never a name.
+     * Also a name: a JVM address, {@code 0x} and 16 hex digits of which the first four are zero
+     * (a lambda's {@code 0x0000000800c8a1b0}; a random 64-bit value starts so once in 65,536), and
+     * a {@code git describe} suffix ({@code v1-1423-g3f9a1c2}: {@code g} plus 7 to 12 hex digits
+     * after a count of at most {@value #GIT_COUNT_DIGITS} digits that itself follows a tag part).
+     * A single word ({@code deadbeefcafe1234}, a 40-hex SHA) is never a name.
+     *
+     * <p>What this cannot tell from a name is a secret made of words: a passphrase such as
+     * {@code CorrectHorseBattery1} or {@code monkey_dragon_letmein_2024} is kept
+     * (docs/SECURITY.md, redaction limits).
      */
     static boolean isNameLike(String s, int from, int to) {
-        if (to - from > 2 && to - from <= 18 && s.charAt(from) == '0' && s.charAt(from + 1) == 'x'
-                && isHex(s, from + 2, to)) {
+        if (to - from == 18 && s.charAt(from) == '0' && s.charAt(from + 1) == 'x'
+                && s.startsWith("0000", from + 2) && isHex(s, from + 6, to)) {
             return true;
         }
         int words = 0;
@@ -1049,6 +1072,8 @@ public class Redactor {
         int minPart = Integer.MAX_VALUE;
         int maxPart = 0;
         boolean prevDigits = false;
+        boolean plainWords = true;
+        int prevLen = 0;
         int i = from;
         while (i < to) {
             char c = s.charAt(i);
@@ -1071,10 +1096,12 @@ public class Redactor {
             parts++;
             minPart = Math.min(minPart, partLen);
             maxPart = Math.max(maxPart, partLen);
-            if (prevDigits && partLen >= 8 && partLen <= 13 && s.charAt(i) == 'g' && isLowerHex(s, i + 1, end)) {
+            if (prevDigits && prevLen <= GIT_COUNT_DIGITS && parts >= 3 && partLen >= 8 && partLen <= 13
+                    && s.charAt(i) == 'g' && isLowerHex(s, i + 1, end)) {
                 words++; // git describe: <tag>-<n>-g<hash>
                 longWords++;
                 prevDigits = false;
+                prevLen = partLen;
                 i = end;
                 continue;
             }
@@ -1106,7 +1133,14 @@ public class Redactor {
                     j++;
                 }
                 if (j == wordStart) return false;
-                if (digits > (letters > 0 ? NAME_SUFFIX_DIGITS : NAME_DIGITS)) return false;
+                if (letters >= WORD_CHECK_LETTERS) {
+                    int unusual = pairPenalty(s, wordStart, wordStart + letters);
+                    if (unusual > (letters - 1) * 2 / 3) return false; // not a word: ZAXVVMA, htvmuprj
+                    if (unusual > (letters - 1) / 2) plainWords = false;
+                }
+                if (letters > 0 ? digits > NAME_SUFFIX_DIGITS : digits > NAME_DIGITS && !isDate(s, j - digits, j)) {
+                    return false;
+                }
                 if (letters > 0 && digits > 0 && ++digitWords > 1) return false;
                 if (camel) {
                     boolean capital = letters > 0 && s.charAt(wordStart) <= 'Z';
@@ -1129,15 +1163,89 @@ public class Redactor {
             words += partWords;
             if (partWords > 1) fragments += partFragments;
             prevDigits = digitsOnly;
+            prevLen = partLen;
             i = end;
         }
         // Three or more parts of (nearly) one length are a grouped code (abcd5-efgh6-ijkl7), not words.
         if (parts >= 3 && maxPart - minPart <= 1) return false;
+        // Two parts of (nearly) one length, seven or more characters each, are the shape of a
+        // two-group code (ZAXVVMA5-LAHQRWYU): a name only when its words pass the stricter budget.
+        if (parts == 2 && maxPart - minPart <= 1 && minPart >= 7 && !plainWords) return false;
         return words >= 2 && longWords >= 1 && fragments <= 1;
     }
 
     /** Digits after the letters of a word in a name ({@code v2}, {@code V19}, {@code sha256}). */
     private static final int NAME_SUFFIX_DIGITS = 3;
+
+    /** {@code s[from, to)} is eight digits that read as a date: {@code 19yymmdd} or {@code 20yymmdd}. */
+    private static boolean isDate(String s, int from, int to) {
+        if (to - from != 8) return false;
+        if (!(s.startsWith("19", from) || s.startsWith("20", from))) return false;
+        int month = (s.charAt(from + 4) - '0') * 10 + (s.charAt(from + 5) - '0');
+        int day = (s.charAt(from + 6) - '0') * 10 + (s.charAt(from + 7) - '0');
+        return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+    }
+
+    /**
+     * How usual each pair of adjacent letters is in words: row = first letter, column = second,
+     * {@code a} to {@code z}; 0 common, 1, 2, 3 rare. Ranked by weighted count over running
+     * English with technical vocabulary (the macOS man pages), the identifiers and prose of this
+     * repository, and a dictionary at a low weight, each word capped at 30 uses; the 200 most
+     * frequent pairs are class 0, the next 140 class 1, the next 120 class 2, the remaining 216
+     * class 3. Data, not a rule: it only has to make random letters score badly and words well.
+     */
+    private static final String[] LETTER_PAIRS = {
+        "20001102031000301000001102", // a
+        "01110222023012013001022312", // b
+        "02120230030022013010022313", // c
+        "01210212022111023002022313", // d
+        "01000001122000101000101012", // e
+        "03220023033033023111133313", // f
+        "03220311033111123012123323", // g
+        "02220333033112023121133313", // h
+        "00000002231000002000103130", // i
+        "13331333333333133323133333", // j
+        "12320332033231223212233323", // k
+        "02100122032012013200012303", // l
+        "01220323033112003312133313", // m
+        "01000002021111012100012312", // n
+        "10001102021000003000000112", // o
+        "02110220033022003000012313", // p
+        "33333333333233333323033333", // q
+        "01000112031000013000011303", // r
+        "02020120031011002200011303", // s
+        "02010120033011013000031203", // t
+        "00010113033000103000223233", // u
+        "03330333033332123323233333", // v
+        "03220331033231123112333333", // w
+        "13131233133323213321333123", // x
+        "13121323133111103211332323", // y
+        "13330333133333133323333333", // z
+    };
+
+    /** Penalty of a letter pair by its {@link #LETTER_PAIRS} class. */
+    private static final int[] PAIR_PENALTY = {0, 1, 2, 5};
+
+    /**
+     * How unlike a word the letters {@code s[from, to)} read: the sum of the penalties of their
+     * adjacent pairs ({@link #LETTER_PAIRS}). {@link #isNameLike} allows two thirds of a point
+     * per pair, so one unusual pair is forgiven and a run of them is not; and half a point per
+     * pair for a label shaped like a two-group code. Measured on this repository's identifiers,
+     * 0.45% of the uses of a word of five or more letters fail the first budget ({@code proxy},
+     * {@code nginx}, {@code jsonb}: a name holding one is redacted like any long token) and 1.1%
+     * the second; of uniformly random letters 5.3% of 8 and 2.1% of 12 pass the first, 3.3% and
+     * 0.9% the second. {@code RedactorTest.randomTokensOfEveryShapeAreRedacted} holds the
+     * resulting survival rates.
+     */
+    static int pairPenalty(String s, int from, int to) {
+        int penalty = 0;
+        for (int i = from + 1; i < to; i++) {
+            int a = (s.charAt(i - 1) | 0x20) - 'a';
+            int b = (s.charAt(i) | 0x20) - 'a';
+            penalty += PAIR_PENALTY[LETTER_PAIRS[a].charAt(b) - '0'];
+        }
+        return penalty;
+    }
 
     /** {@code s[from, to)} is 1 to 4 digits, one letter, then 1 or 2 digits: {@code 2024q4}, {@code 2024H1}. */
     private static boolean isQuarter(String s, int from, int to) {
