@@ -94,7 +94,8 @@ Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, 
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
-yourself.
+yourself. A stopped app without a database can be started again; one started with a database
+cannot (`start()` throws `IllegalStateException`): build a new `Brace` instead.
 
 ## Routing
 
@@ -932,7 +933,9 @@ the raw `req.path()`, a header, a cookie, `req.ip()`, the body) means the page s
 visitor is served to the next whatever they send; in dev mode Brace logs this once per route, and
 under `Brace.test()` the request fails with an `IllegalStateException`, so a test catches it. Use
 `req.pathParam(...)`, not `req.path()`, in a cached handler: one key covers several spellings of
-the raw path (`/p/!` and `/p/%21`).
+the raw path (`/p/!` and `/p/%21`). `Paged` links are fine in a cached handler
+(`cache.wrap("1h", req -> View.of("list", "rows", Paged.slice(all, req, 10))).vary("page")`): there
+they carry only the declared `vary` params, so an undeclared `?ref=` never reaches a stored page.
 
 Page-cache entries (keys starting `brace:page:`) never push out your own entries, and
 `set`/`getOrSet`/`delete` refuse an app key with that prefix (`IllegalArgumentException`);

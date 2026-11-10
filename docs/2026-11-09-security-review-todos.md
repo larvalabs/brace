@@ -601,6 +601,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       still itself). `X-Forwarded-Host` must be a `host[:port]` or it is ignored. `req.ip()` is
       canonical (RFC 5952, IPv4-mapped as IPv4, zone kept). Tests in
       `ProxyHeadersFinalReviewTest`.
+    - **Verification fixes.** The walk skipped an element that named no client: with a trusted
+      peer, `Forwarded: for=6.6.6.6` plus the proxy's `Forwarded: proto=https` line, `for=6.6.6.6,`
+      plus an empty line, and `X-Forwarded-For: 6.6.6.6` plus an empty `X-Forwarded-For:` line all
+      gave the client's own `6.6.6.6` (the XFF split also dropped a trailing empty entry). Walking
+      from the right, only trusted-proxy addresses are now stepped past; the first other entry
+      decides, and an empty one or a `Forwarded` element without `for=` is `unknown`. Three
+      `RequestIpTest` cases that expected a blank middle entry to be skipped now expect
+      `unknown`. Tests in `ForwardedRightmostElementTest`.
 
 - [x] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
   - `RenderedResponse.from(result)` is stored regardless of status. The key ignores undeclared
@@ -646,6 +654,28 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     - App `set`/`getOrSet`/`delete` on `brace:page:` throw `IllegalArgumentException`
       (`deletePrefix("brace:page:")`, tags and `clear()` still clear pages); `deletePrefix(null)`
       throws `IllegalArgumentException`.
+    - **Verification fixes.** The in-memory page clock (a regression from the CLOCK fix): a
+      `clear()` (`/ops/cache/clear`) during a page flood, or `clearTag`/`deletePrefix` mixed into
+      page traffic, left up to 997 of 1,000 pages off the clock, unevictable until their TTL, and
+      app entries were then evicted in their place. One `ReentrantLock` now guards the clock, the
+      page count and every insert or removal of a page key in the store (one remove path for
+      `clear`, tags, prefixes, expiry and deletes); eviction and compaction are mutually
+      exclusive; the hand rebuilds from the store if it ever finds pages counted but none on the
+      clock. App entries never take the lock. Tests in `PageClockConsistencyTest`.
+      `Paged` links (a regression from the raw-path check): `linkedTo` read `req.path()`, so the
+      documented `cache.wrap(...).vary("page")` example answered 500 under `Brace.test()`, and it
+      copied every query pair, so `?page=2&ref=evil.example` stored `ref=` in links later served
+      for `?page=2`. Links now read the path without recording it, and inside a page-cached
+      handler (the cache marks the request in every mode) copy only the declared `vary` params.
+      Tests in `PagedPageCacheTest`.
+      V19 (unreleased, so edited in place): it built `idx_brace_cache_used_at` in the same
+      transaction as the `ADD COLUMN`, holding the ALTER's ACCESS EXCLUSIVE lock on `brace_cache`
+      for the whole build on every app's first start with the new jar. The index is dropped from
+      V19 (lock file updated): the trim already seq-scans the cap-bounded table to count, the
+      `LIKE` prefix cannot use the primary key under a non-C collation, and with app rows older
+      than the pages the index walked all of them anyway (EXPLAIN ANALYZE on 100,000 app plus
+      11,000 page rows: 7.5 ms with the index, 8.5 ms without; `trimToCap` 29 ms vs 32 ms).
+      Unindexed, the `used_at` refresh can be a HOT update. Tests in `PageCacheCapPostgresIT`.
 
 - [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a
@@ -792,6 +822,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       starting or running app throws, a failed start tears down and leaves the app startable,
       and `stop()` is idempotent and waits out a concurrent `start()`. Tests in
       `BraceRestartTest`.
+    - **Verification fixes** (`fix: Brace restart with a database either works or says why`).
+      Restarting an app with a database failed inside `JobScheduler` (`RejectedExecutionException`
+      with `ownsDatabase(false)`, `EntityManagerFactory is closed` with a fresh factory). Rebinding
+      every component (owned pool, per-start framework jobs, a shared cache backend's factory) is
+      a larger change, so a second `start()` of an app started with a database now throws a clear
+      `IllegalStateException` up front; build a new `Brace`. Apps without a database still restart,
+      and the scheduler drops its terminated executor on `stop()`, so a job registered while
+      stopped runs after the next `start()`. Tests in `BraceRestartTest`.
 
 - [x] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
   - **`followUp` injection.** `ops.env` from the committed `.brace` is spliced unvalidated into
@@ -905,6 +943,16 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       requested type) naming `allowType`. A planted foreign class through `Object` still misses.
       Elements inside a container still come back as Jackson's natural types (unchanged). Tests
       in `CacheSerializationTest` (two `Cache` instances over one backend).
+    - **Verification fixes** (`fix: small cache and response nits from verification`). Only an
+      `IOException` from Jackson was a miss, so a `Collections$SingletonList` row with two
+      elements threw `IllegalArgumentException` out of `get`/`getOrSet`: any `RuntimeException`
+      is now a miss too, and so is a value that rebuilds as something other than the requested
+      type. `Collections$UnmodifiableSortedSet`/`SortedMap` read back unsorted (a
+      `ClassCastException` at the caller) and are off the allowlist; a test round-trips every
+      allowlisted container. Same commit, outside L15: `Result.headers().put` validates the name
+      (OpsHandler removes headers through the view, so it stays a live view rather than an
+      unmodifiable one), and a plain `GET`/`HEAD` of a socket path under a static mapping is 426
+      even when a `POST` route shares the path. Tests in `VerificationNitsTest`.
 
 - [x] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
   - The 20,000-row buffer per 10 s flush allows about 2,000 inserted rows per second, kept 35

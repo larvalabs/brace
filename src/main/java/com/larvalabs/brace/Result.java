@@ -462,10 +462,27 @@ public class Result {
     /** Sets a deferred {@link #materialize()} body as raw UTF-8 bytes (M6: the rendered-to-bytes path). */
     void setRenderedBytes(byte[] rendered) { this.rawBytes = rendered; }
     /**
-     * The response headers other than {@code Set-Cookie} (see {@link #setCookies()}). The live
-     * map: names are matched case-insensitively, and it iterates in case-insensitive name order.
+     * The response headers other than {@code Set-Cookie} (see {@link #setCookies()}). A live view:
+     * names are matched case-insensitively, and it iterates in case-insensitive name order. Reads
+     * and removals go straight through; {@code put} goes through {@link #header(String, String)},
+     * so a name that is not a valid header name throws {@code IllegalArgumentException} here too
+     * (verification fix: the raw map let {@code headers().put("X Bad", v)} skip the check).
      */
-    public Map<String, String> headers() { return headers; }
+    public Map<String, String> headers() { return headersView; }
+
+    private final Map<String, String> headersView = new java.util.AbstractMap<>() {
+        @Override public java.util.Set<Map.Entry<String, String>> entrySet() { return headers.entrySet(); }
+        @Override public int size() { return headers.size(); }
+        @Override public boolean containsKey(Object name) { return headers.containsKey(name); }
+        @Override public String get(Object name) { return headers.get(name); }
+        @Override public String remove(Object name) { return headers.remove(name); }
+        @Override public void clear() { headers.clear(); }
+        @Override public String put(String name, String value) {
+            String previous = name == null ? null : header(name);
+            header(name, value); // validates the name; Set-Cookie is appended to setCookies()
+            return previous;
+        }
+    };
 
     /** All {@code Set-Cookie} values for this response, in the order they were added. */
     public List<String> setCookies() { return setCookies; }

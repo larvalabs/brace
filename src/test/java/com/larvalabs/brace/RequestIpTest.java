@@ -255,11 +255,13 @@ public class RequestIpTest {
 
     @Test
     public void testIpXffEmbeddedBlankSegment() {
-        // "1.2.3.4,,10.0.0.5" — middle segment is blank; with 10/8 trusted, must return 1.2.3.4.
+        // "1.2.3.4,,10.0.0.5": walking from the right past the trusted 10.0.0.5, the next entry is
+        // blank, so the trusted hop named no client. L3 verification: "unknown", never a skip to
+        // the client-written 1.2.3.4 (this used to expect 1.2.3.4).
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", "1.2.3.4,,10.0.0.5");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("1.2.3.4", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
@@ -268,7 +270,7 @@ public class RequestIpTest {
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", "1.2.3.4,   ,10.0.0.5");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("1.2.3.4", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
@@ -291,13 +293,13 @@ public class RequestIpTest {
     }
 
     @Test
-    public void testIpForwardedBlankElementSkipped() {
-        // "for=1.2.3.4, , for=10.0.0.5" — blank element in the middle contributes no "for=";
-        // with 10/8 trusted the walk returns 1.2.3.4.
+    public void testIpForwardedBlankElementIsNotSkipped() {
+        // "for=1.2.3.4, , for=10.0.0.5" — past the trusted 10.0.0.5 the blank element names no
+        // client. L3 verification: "unknown" (this used to skip it and expect 1.2.3.4).
         var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var headers = Map.of("Forwarded", "for=1.2.3.4, , for=10.0.0.5");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("1.2.3.4", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     // -----------------------------------------------------------------------

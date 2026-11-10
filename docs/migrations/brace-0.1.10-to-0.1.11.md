@@ -200,8 +200,10 @@ for example) are not covered. See "Response Compression" in `docs/SECURITY.md`.
 enables analytics, and stay empty unless it does. Nothing to do.
 
 The November 2026 review adds `V19__brace_cache_used_at.sql` on Postgres only: a `used_at` column
-and index on `brace_cache`, which the page cache trims by
-([§](#breaking-page-cache-keys-bypasses-and-undeclared-reads)). Also applied automatically.
+on `brace_cache`, which the page cache trims by
+([§](#breaking-page-cache-keys-bypasses-and-undeclared-reads)). Also applied automatically. It
+adds the column without rewriting the table and builds no index, so the brief table lock it
+takes is not held across an index build.
 
 ## Fix: `HEAD` requests reach `GET` routes
 
@@ -1647,8 +1649,12 @@ Also changed:
   comes from a trusted proxy and the selected forwarding entry is not an address (`unknown`,
   `_hidden`, a malformed element), or the header is empty, or the proxy sent only the header
   Brace does not read, it returns `unknown`. 0.1.10 returned the entry as written, or the
-  proxy's own address. A trusted peer that sends no forwarding header at all is still returned
-  as itself, and an untrusted peer is always its socket address.
+  proxy's own address. The same holds when, walking from the right past trusted proxies, the
+  next entry is empty or a `Forwarded` element without `for=`: `Forwarded: for=6.6.6.6` plus
+  the proxy's `Forwarded: proto=https`, or `X-Forwarded-For: 6.6.6.6` plus an empty line, is
+  `unknown` (0.1.10 skipped the empty entry and returned the client-written `6.6.6.6`). A
+  trusted peer that sends no forwarding header at all is still returned as itself, and an
+  untrusted peer is always its socket address.
 
   ```java
   // before: a malformed header made req.ip() the proxy's address, which this admitted
@@ -1829,6 +1835,9 @@ app.get("/feed", cache.wrap("10m", ctrl::feed).vary("page").varyHeader("HX-Targe
   (production is unchanged). Declare the input with `.vary(...)`/`.varyHeader(...)`, or stop
   caching that route: a cached handler may depend only on its path parameters and what it
   declares. Reading the raw `req.path()` is reported the same way: use `req.pathParam(...)`.
+  `Paged` links are not reported: in a cached handler they copy only the declared `vary` params
+  (an undeclared `?ref=` is dropped from the links), so `Paged.slice(all, req, 10)` under
+  `cache.wrap(...).vary("page")` works as before.
 - **Postgres caps page rows separately** from the app's own entries:
   `CacheBackend.postgres(db, maxEntries, maxPageEntries)`, defaults 100,000 rows in all and
   10,000 pages. A flood of page entries can no longer evict `cache.set(...)` data; in memory, a
@@ -1836,8 +1845,8 @@ app.get("/feed", cache.wrap("10m", ctrl::feed).vary("page").varyHeader("HX-Targe
 - **Page entries are evicted least recently used first.** On Postgres, page rows are trimmed by
   `used_at` (last write, or last hit, recorded at most once a minute per row), not by expiry, so
   rows on a long-TTL route no longer push out every page of a short-TTL one. This adds framework
-  migration `V19__brace_cache_used_at.sql` (Postgres only: a `used_at` column and index on
-  `brace_cache`, added without a table rewrite; applied automatically). In memory, a full cache
+  migration `V19__brace_cache_used_at.sql` (Postgres only: a `used_at` column on `brace_cache`,
+  added without a table rewrite or an index build; applied automatically). In memory, a full cache
   evicts the page least recently hit, and a new page always displaces a cold page, so a flood
   of never-read pages no longer locks the hot ones out.
 - **Shared-backend reads through a supertype.** On `CacheBackend.postgres(...)`,
@@ -1903,7 +1912,11 @@ No action needed unless noted.
   result.header("X-Request-Id", id);
   ```
 
-  Only ASCII letter case is folded when names are compared.
+  Only ASCII letter case is folded when names are compared. `result.headers().put(name, value)`
+  is checked the same way (it used to skip the check), and a `Set-Cookie` put there is added to
+  `setCookies()`; reads and removals through `headers()` work as before.
+- **A plain `GET` or `HEAD` of a WebSocket path under a static mapping is `426 Upgrade Required`**
+  even when another method's route shares the path (it was a `405` naming `GET` in `Allow`).
 - **WebSocket paths are exact.** A socket registered with `app.ws("/ws", ...)` upgrades only for
   the raw path `/ws` (any query string). `/x/../ws`, `/%77s` and `/ws;x` get 404. The path is a
   literal, not a pattern.
@@ -1912,7 +1925,14 @@ No action needed unless noted.
   code that built a `BraceHandler` or `Router` by hand and relied on routes being open is not.
 - **`start()` after `stop()` can be stopped again.** The second `stop()` of a restarted app was
   a no-op that left the server running. An app with `.ops(...)` can now be restarted, and
-  retried after a failed start (both used to throw `POST /ops/auth is registered twice`).
+  retried after a failed start (both used to throw `POST /ops/auth is registered twice`). A job
+  registered with `every`/`daily` while the app is stopped runs after the next `start()` (it
+  threw `RejectedExecutionException`).
+- **An app started with a database cannot be restarted.** A second `start()` (after `stop()` or
+  after a failed start) throws `IllegalStateException` up front. It used to fail inside the job
+  scheduler (`RejectedExecutionException`, or `EntityManagerFactory is closed` when the app owned
+  its pool). Build a new `Brace` with `Brace.app()` instead; with `ownsDatabase(false)` it may
+  reuse the same `DatabaseFactory`.
 - **`start()` on an app that is already starting or running throws `IllegalStateException`.**
   It used to bring up a second server and lose track of the first. Call `stop()` first.
   `stop()` stays idempotent, and one that arrives while `start()` is still running now waits

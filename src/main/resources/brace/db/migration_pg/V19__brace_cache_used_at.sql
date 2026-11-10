@@ -5,6 +5,9 @@
 -- costs no write per hit); page rows are now trimmed least recently used first.
 --
 -- now() is STABLE, so Postgres 11+ adds the column without rewriting the table; existing rows get
--- the migration time.
+-- the migration time. No index on used_at: built here it would hold the ALTER's ACCESS EXCLUSIVE
+-- lock (every read and write of brace_cache, old instances in a rolling deploy included) for the
+-- whole build, and the trim does not need one: it already scans the table (bounded by the cap) to
+-- count, and sorts at most the page rows. Unindexed, a hit's used_at refresh (at most once a
+-- minute per row) can be a HOT update.
 ALTER TABLE brace_cache ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ NOT NULL DEFAULT now();
-CREATE INDEX IF NOT EXISTS idx_brace_cache_used_at ON brace_cache (used_at);

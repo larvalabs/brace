@@ -934,7 +934,8 @@ the proxy's), every line is read, in wire order, as one list.
 
 When the forwarding header is consulted, Brace uses **rightmost-untrusted** semantics: it walks
 the list from right to left, skips any entry whose address falls inside a trusted CIDR, and
-returns the first untrusted address. This is the correct algorithm because real proxies
+returns the first untrusted address (an empty entry or a `Forwarded` element without `for=`
+reached on the way ends the walk with `unknown`; see below). This is the correct algorithm because real proxies
 **append** the connecting client's address — the leftmost entries were written by the client and
 can be forged.
 
@@ -1004,6 +1005,11 @@ client:
 - the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
   identifier, a malformed element, or anything a client managed to put there);
 - the header is present but empty, or (for `Forwarded`) has no `for=`;
+- the entry the walk reaches first after the trusted proxies is empty, or (for `Forwarded`) an
+  element without `for=`. The walk only steps past entries that are trusted-proxy addresses, so
+  `Forwarded: for=6.6.6.6` followed by the proxy's own `Forwarded: proto=https` line, or
+  `X-Forwarded-For: 6.6.6.6` followed by an empty `X-Forwarded-For:` line, is `unknown`, never
+  the client-written `6.6.6.6`;
 - the proxy sent only the forwarding header Brace was not told to read (say only `Forwarded`
   while the app reads `X-Forwarded-For`). Brace also logs one warning naming
   `TrustedProxies.useForwardedHeader()`.
@@ -1203,7 +1209,9 @@ not recorded, and production checks nothing, so both are also covered structural
 never stored (it may be served an existing `GET` entry), and a request whose raw path is not in
 RFC 3986 normal form (an escaped unreserved character such as `/p/%62` for `/p/b`, lower-case hex,
 raw non-ASCII) is rendered but never stored, so a crafted spelling cannot choose the page served
-at the normal URL.
+at the normal URL. `Paged` links built in a cached handler are the exception that is safe by
+construction: they link back to the same route, and they copy only the declared `vary` params
+(in every mode), so `?ref=evil.example` on the first request is not in the stored links.
 
 Some inputs are refused outright rather than trusted to the handler: a request with
 `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or `HX-Prompt` is
@@ -1220,7 +1228,8 @@ Page entries are kept apart from the app's own cache entries (keys starting `bra
 (10,000 by default), are trimmed least recently used first (written, or hit, recorded at most once
 a minute per row) and are trimmed before app rows when the table is over its overall cap; in
 memory a full cache evicts the page least recently hit (an approximate LRU), and a new page never
-displaces an app entry. A client minting pages (any declared `vary` value or path parameter)
+displaces an app entry, including while `clear()`, a tag clear or a prefix delete runs during a
+page flood. A client minting pages (any declared `vary` value or path parameter)
 therefore churns only the page cache, and pages nobody reads again go before the hot ones, so a
 flood cannot lock the real pages out.
 
@@ -1234,10 +1243,15 @@ reach Jackson for an arbitrary class. A row is deserialized only when its class 
 - a class this process has itself stored;
 - a built-in JDK container or value (`ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`,
   `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `ArrayDeque`, the `List.of`/`Map.of`/
-  `Set.of` and `Collections.unmodifiable*`/`empty*`/`singleton*` classes, boxed primitives,
-  `String`, `BigDecimal`, `BigInteger`, `UUID`, the `java.time` value types, and arrays of
-  these), which Jackson rebuilds without running app code;
+  `Set.of` and `Collections.unmodifiable*`/`empty*`/`singleton*` classes except the sorted
+  unmodifiable wrappers, boxed primitives, `String`, `BigDecimal`, `BigInteger`, `UUID`, the
+  `java.time` value types, and arrays of these), which Jackson rebuilds without running app code;
 - or a class registered with `cache.allowType(...)`.
+
+A row whose body does not rebuild (Jackson throws, checked or not: a `SingletonList` row holding
+two elements), or rebuilds as something other than the type the caller asked for (an
+`unmodifiableSortedSet` comes back as a plain unmodifiable set), is a miss, never an exception
+from `get`/`getOrSet`.
 
 Anything else (an app class read through `Object`, an interface or a base class, or by
 `getOrSet`, on an instance that has not stored it) is treated as a miss and logged at WARN once

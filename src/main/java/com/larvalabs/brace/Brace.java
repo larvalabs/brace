@@ -1252,11 +1252,21 @@ public class Brace {
     private Lifecycle lifecycle = Lifecycle.NEW;
 
     /**
-     * Start the app. A new app, or one that has been stopped (or whose start failed), can be
-     * started; {@code start()} on an app that is starting or running throws
-     * {@link IllegalStateException} and leaves it as it is. If the start fails, everything it
-     * had brought up is stopped again before the exception propagates, and the app can be
-     * reconfigured and started again.
+     * True once a start() began with a database (verification fix). Guarded by
+     * {@link #lifecycleLock}. Such an app is not restartable: stop() closes the pool it owns,
+     * framework jobs (job pruning, ops metrics, analytics rollup) are registered per start, and a
+     * shared cache backend holds that start's factory. Rebinding all of it is a larger change, so
+     * a second start() refuses up front instead of failing somewhere inside.
+     */
+    private boolean startedWithDatabase;
+
+    /**
+     * Start the app. A new app can be started; {@code start()} on an app that is starting or
+     * running throws {@link IllegalStateException} and leaves it as it is. If the start fails,
+     * everything it had brought up is stopped again before the exception propagates. An app
+     * without a database that has been stopped (or whose start failed) can be reconfigured and
+     * started again. An app that was started with a {@link #database database} cannot: its second
+     * {@code start()} throws {@link IllegalStateException}; build a new {@code Brace} instead.
      */
     public void start() throws Exception {
         lifecycleLock.lock();
@@ -1266,6 +1276,14 @@ public class Brace {
                     + lifecycle.name().toLowerCase(java.util.Locale.ROOT) + ". Call stop() first to restart it; "
                     + "starting it again would leave the first server running with nothing to stop it.");
             }
+            if (startedWithDatabase) {
+                throw new IllegalStateException("start() was called again on an app that was started with a "
+                    + "database, and an app with a database cannot be restarted: stop() released its job "
+                    + "scheduler, job poller and (unless ownsDatabase(false)) its connection pool, and its "
+                    + "framework jobs and cache are bound to that start. Build a new Brace with Brace.app() "
+                    + "and a DatabaseFactory to start again.");
+            }
+            if (databaseFactory != null) startedWithDatabase = true;
             lifecycle = Lifecycle.STARTING;
             try {
                 startOrThrow();
@@ -1853,7 +1871,8 @@ public class Brace {
      * Stop the app and release what it holds. Idempotent, and safe to call from any thread at any
      * time: the shutdown hook and an explicit {@code stop()} may both call it, and a
      * {@code stop()} that arrives while {@code start()} is still running waits for it and then
-     * stops what it started. A stopped app can be reconfigured and started again.
+     * stops what it started. A stopped app without a database can be reconfigured and started
+     * again; one that was started with a database cannot (see {@link #start()}).
      */
     public void stop() throws Exception {
         lifecycleLock.lock();
