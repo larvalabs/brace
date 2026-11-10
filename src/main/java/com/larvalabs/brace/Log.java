@@ -151,6 +151,11 @@ public class Log {
     }
 
     static void error(String method, String path, Throwable error) {
+        error(method, path, error, error.getMessage());
+    }
+
+    /** {@code message} is the exception's message, already read by the caller (the getter can throw). */
+    static void error(String method, String path, Throwable error, String message) {
         if (!enabled(Level.ERROR)) return;
         var entry = new LinkedHashMap<String, Object>();
         entry.put("ts", Instant.now().toString());
@@ -161,7 +166,7 @@ public class Log {
         // embed bearer tokens or SQL literals and this entry goes to stdout + /ops/logs.
         entry.put("path", Redactor.redactPath(path));
         entry.put("error", error.getClass().getSimpleName());
-        entry.put("message", Redactor.redactMessage(error.getMessage()));
+        entry.put("message", Redactor.redactMessage(message));
         String at = appFrame(error);
         if (at != null) entry.put("at", at);
         println(entry);
