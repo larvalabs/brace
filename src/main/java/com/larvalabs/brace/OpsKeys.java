@@ -113,9 +113,29 @@ public class OpsKeys {
      * for that key can never exceed it (see {@code OpsHandler.auth}).
      */
     public static Map<String, OpsScope> loadAuthorizedKeys(String path) {
+        return loadAuthorizedKeys(path, false);
+    }
+
+    /**
+     * {@link #loadAuthorizedKeys(String)}; with {@code logKeys} each key's fingerprint and effective
+     * scope is logged ({@code ops.key}), including keys that fell back to CONTROL because their line
+     * has no scope token. Never logs the key itself.
+     *
+     * <p>L1 (2026-11 review): a malformed scope used to fall back to CONTROL silently, so a
+     * hand-written {@code scope:read-only} handed an agent a full-privilege key. Now a recognised
+     * scope is exactly {@code scope:read} or {@code scope:control}; an unrecognised value, a
+     * scope-like token in another form ({@code Scope:read}, a bare {@code scope:} left by
+     * {@code scope: read}, {@code scope=read}) or a bare {@code read}/{@code readonly}/{@code read-only}/
+     * {@code control} token fails startup with the line number (never the key). A key listed
+     * twice keeps the lower scope.
+     */
+    public static Map<String, OpsScope> loadAuthorizedKeys(String path, boolean logKeys) {
         try {
             var keys = new LinkedHashMap<String, OpsScope>();
+            var implicit = new java.util.HashSet<String>();
+            int lineNo = 0;
             for (String line : Files.readAllLines(Path.of(path))) {
+                lineNo++;
                 line = line.strip();
                 if (line.isEmpty() || line.startsWith("#")) continue;
                 String[] tokens = line.split("\\s+");
@@ -124,19 +144,52 @@ public class OpsKeys {
                 // Base64 never contains ':', so a leading "algo:" is unambiguously a prefix — strip
                 // it so a key file written by a buggy CLI still matches the raw base64 the client sends.
                 if (key.startsWith("ed25519:")) key = key.substring("ed25519:".length());
-                OpsScope scope = OpsScope.CONTROL;
+                OpsScope scope = null;
                 for (int i = 1; i < tokens.length; i++) {
-                    if (tokens[i].startsWith("scope:")) {
-                        scope = OpsScope.parse(tokens[i].substring("scope:".length()), OpsScope.CONTROL);
-                        break;
+                    String token = tokens[i];
+                    String lower = token.toLowerCase();
+                    if (token.startsWith("scope:") && token.length() > "scope:".length()) {
+                        OpsScope parsed = OpsScope.parseOrNull(token.substring("scope:".length()));
+                        if (parsed == null) {
+                            throw new IllegalStateException(badScope(path, lineNo,
+                                "unrecognized scope value"));
+                        }
+                        scope = scope == null ? parsed : scope.min(parsed);
+                    } else if (lower.startsWith("scope")
+                            || lower.equals("read") || lower.equals("readonly") || lower.equals("read-only")
+                            || lower.equals("control") || lower.equals("ro")) {
+                        throw new IllegalStateException(badScope(path, lineNo,
+                            "a token that looks like a mistyped scope"));
                     }
                 }
+                boolean explicit = scope != null;
+                if (scope == null) scope = OpsScope.CONTROL;
+                OpsScope existing = keys.get(key);
+                if (existing != null) {
+                    scope = scope.min(existing);
+                    Log.warn("ops authorized keys " + path + " line " + lineNo + ": key "
+                        + fingerprint(key) + " is listed more than once; keeping the lower scope ("
+                        + scope.wire() + ")");
+                }
                 keys.put(key, scope);
+                if (explicit) implicit.remove(key); else if (existing == null) implicit.add(key);
+            }
+            if (logKeys) {
+                for (var e : keys.entrySet()) {
+                    Log.info("ops.key", Map.of("kid", fingerprint(e.getKey()), "scope", e.getValue().wire(),
+                        "scopeSource", implicit.contains(e.getKey()) ? "default (no scope: token)" : "explicit"));
+                }
             }
             return keys;
         } catch (IOException e) {
             throw new RuntimeException("Failed to load authorized keys from: " + path, e);
         }
+    }
+
+    private static String badScope(String path, int lineNo, String what) {
+        return "Invalid ops authorized keys file " + path + ", line " + lineNo + ": " + what
+            + ". Use exactly scope:read or scope:control (lowercase, no space after the colon), or "
+            + "omit the token for control.";
     }
 
     /**

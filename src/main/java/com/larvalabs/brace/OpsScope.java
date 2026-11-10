@@ -39,4 +39,14 @@ public enum OpsScope {
             default -> fallback;
         };
     }
+
+    /** Parse exactly {@code read} or {@code control} (case-insensitive); null for anything else. */
+    public static OpsScope parseOrNull(String s) {
+        if (s == null) return null;
+        return switch (s.strip().toLowerCase()) {
+            case "read" -> READ;
+            case "control" -> CONTROL;
+            default -> null;
+        };
+    }
 }

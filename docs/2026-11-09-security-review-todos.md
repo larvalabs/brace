@@ -352,7 +352,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
 
 ## Low
 
-- [ ] **L1: An unrecognized `scope:` value silently becomes CONTROL**, `OpsKeys.java:121-134`, `OpsScope.java:34-41`
+- [x] **L1: An unrecognized `scope:` value silently becomes CONTROL**, `OpsKeys.java:121-134`, `OpsScope.java:34-41`
   - `OpsScope.parse(value, CONTROL)` falls back to CONTROL for anything it doesn't know, and a
     line with no `scope:` token is CONTROL. Probed: `scope:readonly`, `scope: read` (space),
     `Scope:read`, `read-only`, and a key listed twice (last wins) all yield CONTROL, with no log.

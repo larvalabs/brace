@@ -232,7 +232,9 @@ public class OpsHandler {
             // never mint a control token, so the grant is min(requested, ceiling). When
             // the client requests no scope, it gets the full ceiling.
             OpsScope ceiling = authorizedKeys.getOrDefault(auth.publicKey, OpsScope.CONTROL);
-            OpsScope requested = OpsScope.parse(auth.scope, ceiling);
+            // No scope requested -> the ceiling; a scope that is present but unrecognised -> READ.
+            OpsScope requested = auth.scope == null || auth.scope.isBlank()
+                ? ceiling : OpsScope.parse(auth.scope, OpsScope.READ);
             OpsScope granted = requested.min(ceiling);
             String kid = OpsKeys.fingerprint(auth.publicKey);
 

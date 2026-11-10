@@ -1240,7 +1240,7 @@ public class Brace {
         // Register ops endpoints if authorized keys are configured
         String tokenSecret = null;
         if (opsKeysPath != null) {
-            var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
+            var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath, true);
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             opsHandler.setAnalytics(analytics);

@@ -1415,6 +1415,14 @@ restarting or redeploying takes effect on its outstanding tokens immediately, al
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
 
+**Scope tokens in `ops-authorized-keys`.** A key line is the key, then optional tokens: exactly
+`scope:read` or `scope:control`, and free-text labels. A line with no scope token is `control`
+(backward compatible) and is logged as such at boot. Anything that looks like a mistyped scope
+(`scope:readonly`, `scope: read`, `Scope:read`, `scope=read`, a bare `read`, `read-only`,
+`control`) fails startup with the line number, because a silent fallback would hand an agent a
+full-privilege key. A key listed twice keeps the lower scope. Each key's fingerprint and scope
+is logged at boot (`ops.key`).
+
 ### Ops pages in the browser
 
 `/ops/dashboard` and `/ops/analytics` are cookie-only. Their htmx polling and the CONTROL

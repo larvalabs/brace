@@ -148,7 +148,10 @@ public class OpsToken {
             if (!n.hasNonNull("exp")) return null;
             long exp = n.get("exp").asLong();
             if (System.currentTimeMillis() / 1000 >= exp) return null;
-            OpsScope scope = OpsScope.parse(n.hasNonNull("scope") ? n.get("scope").asText() : null, OpsScope.CONTROL);
+            // A token minted before scoping existed has no scope claim: CONTROL. A claim that is
+            // present but unrecognised fails closed to READ, never to CONTROL.
+            OpsScope scope = n.hasNonNull("scope")
+                ? OpsScope.parse(n.get("scope").asText(), OpsScope.READ) : OpsScope.CONTROL;
             String kid = n.hasNonNull("kid") ? n.get("kid").asText() : null;
             Type type = n.hasNonNull("typ") ? Type.parse(n.get("typ").asText()) : null;
             return new Claims(exp, scope, kid, type);

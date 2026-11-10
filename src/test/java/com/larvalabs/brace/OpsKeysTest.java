@@ -83,6 +83,30 @@ class OpsKeysTest {
     }
 
     @Test
+    void malformedScopeTokensFailStartup(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        for (String bad : new String[] {"scope:readonly", "scope:read-only", "scope: read", "Scope:read",
+                "scope=read", "read-only", "readonly", "read", "control", "scope:"}) {
+            Path file = tmpDir.resolve("bad-" + Math.abs(bad.hashCode()));
+            Files.writeString(file, "# keys\n" + kp.publicKey() + " " + bad + " ci-agent\n");
+            var ex = assertThrows(IllegalStateException.class,
+                () -> OpsKeys.loadAuthorizedKeys(file.toString()), bad);
+            assertTrue(ex.getMessage().contains("line 2"), ex.getMessage());
+            assertFalse(ex.getMessage().contains(kp.publicKey()), "never echo key material");
+        }
+    }
+
+    @Test
+    void duplicateKeyKeepsLowerScope(@TempDir Path tmpDir) throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        Path file = tmpDir.resolve("dup");
+        Files.writeString(file, kp.publicKey() + " scope:read a\n" + kp.publicKey() + " b\n");
+        assertEquals(OpsScope.READ, OpsKeys.loadAuthorizedKeys(file.toString()).get(kp.publicKey()));
+        Files.writeString(file, kp.publicKey() + " b\n" + kp.publicKey() + " scope:read a\n");
+        assertEquals(OpsScope.READ, OpsKeys.loadAuthorizedKeys(file.toString()).get(kp.publicKey()));
+    }
+
+    @Test
     void fingerprintIsStableAndShort() {
         var kp = OpsKeys.generateKeypair();
         String fp1 = OpsKeys.fingerprint(kp.publicKey());
