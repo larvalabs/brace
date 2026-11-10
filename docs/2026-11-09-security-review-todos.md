@@ -148,6 +148,20 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** `tests/cli`: a pin of `0.1.10` is refused; `0.1.11-rc.1` is refused; `0.1.11` is
     accepted; `BRACE_ALLOW_OLD_TOOLCHAIN=1` still overrides; a pom with two pins is refused.
   - **Model: Opus 5.5.** Bash 3.2 constraints, and an off-by-one reopens the hole.
+  - **Status (Track B, first commit): partly landed; the floor value waits for the 0.1.11
+    release commit.**
+    - Landed: `version_lt` is SemVer-ordered (a prerelease, `-SNAPSHOT` included, is older than
+      its release; numeric parts compared as digit strings, so no overflow); the launcher's
+      bundled toolchain is exempt from the floor; `pinned_version` refuses a pom with more than
+      one `<brace.version>` element (comments, profiles, attributes and split tags counted);
+      the `AGENTS.md` release-checklist line; `tests/cli/test-pinned-version.sh` covers every
+      listed test against a launcher copy with the floor at 0.1.11, and passes with the shipped
+      value at either 0.1.8 or 0.1.11.
+    - Remaining: set `MIN_TOOLCHAIN="0.1.11"` in the release commit, then tick this box. Not
+      earlier: until 0.1.11 exists, a 0.1.11 floor refuses every 0.1.11 prerelease that is not
+      the bundled one, newer ones included (an rc.7 launcher would refuse a project pinned to
+      rc.8), and a local `mvn package` build, labelled 0.1.10, would refuse every rc-pinned
+      project.
 
 ## Medium
 
