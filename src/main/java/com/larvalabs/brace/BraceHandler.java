@@ -401,6 +401,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
             braceRequest = new Request(method, path, pathParams, queryParams, headers, bodySource, remoteAddr, trustedProxies);
             braceRequest.setRawQuery(rawQuery);
+            // L4 review F6: a page-cached handler's undeclared reads are reported in dev mode and
+            // tests, the same switch as the query-taint check.
+            braceRequest.setStrictInputChecks(strictQueryChecks);
             if (match != null) {
                 braceRequest.setRoute(match.route()); // the page cache keys on it (L4)
             }

@@ -564,8 +564,12 @@ cache.clearTag("simulation");                        // remove by tag
 app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
 app.get("/team/{id}", cache.wrap("30m", ctrl::team).tags("simulation"));
 app.get("/posts", cache.wrap("10m", ctrl::list).vary("page"));  // ?page= keys the cache; other params ignored
+app.get("/news", cache.wrap("10m", ctrl::news).varyHeader("Accept-Language"));  // headers key it only when declared
 cache.clearTag("simulation");  // invalidate all cached pages at once
 ```
+
+A cached handler must depend only on its path parameters and what it declares with `vary` /
+`varyHeader`: dev mode warns, and `Brace.test()` fails, when it reads anything else.
 
 The default cache is per-process. For a multi-server deploy, opt into a shared, durable,
 cross-server-consistent backend in one line — it reuses your Postgres database, no new infra:

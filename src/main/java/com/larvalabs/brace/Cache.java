@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -78,6 +79,19 @@ public class Cache {
      * insert; 512 keeps every stored key well clear of that on both backends.
      */
     static final int MAX_KEY_BYTES = 512;
+
+    /**
+     * Prefix of every key the page cache ({@link #wrap}) stores (L4 review F5). The backends treat
+     * keys with it as page entries: they are capped on their own and evicted before any other
+     * entry, so page-cache growth (cheap for a client to cause) never pushes out the app's own
+     * values. It survives hashing ({@link #storageKey} keeps a key's first characters). Use another
+     * prefix for the app's own keys.
+     */
+    static final String PAGE_KEY_PREFIX = "brace:page:";
+
+    static boolean isPageKey(String storedKey) {
+        return storedKey != null && storedKey.startsWith(PAGE_KEY_PREFIX);
+    }
 
     /** How much of a hashed key is kept readable in front of the digest, for prefix clears. */
     static final int RETAINED_PREFIX_CHARS = 128;
@@ -573,7 +587,13 @@ public class Cache {
          * ({@code ?utm_source=...}, {@code ?fbclid=...}, or deliberate {@code ?x=<random>} floods).
          * By default NOTHING varies — a cached route serves one entry per path regardless of query
          * string. If the page's content depends on a param ({@code ?page=}, {@code ?sort=}),
-         * declare it here or stale-wrong responses will be served for it.
+         * declare it here or stale-wrong responses will be served for it. A param given more than
+         * once ({@code ?t=a&t=b}) is keyed on all its values, in order (L4 review F6).
+         *
+         * <p>A cached handler must depend only on the route's path parameters and what it declares
+         * here and in {@link #varyHeader}. In dev mode and under {@code Brace.test()} a read of
+         * anything else through the {@code Request} is reported (logged once per route in dev
+         * mode, thrown in tests).
          */
         public CachedHandler vary(String... params) {
             this.vary = params.clone();
@@ -581,8 +601,45 @@ public class Cache {
             return this;
         }
 
+        /**
+         * Declares request headers that key the cache, as {@link #vary} does for query params: a
+         * page that differs by {@code Accept-Language}, or an htmx endpoint that answers per
+         * {@code HX-Target}. Names are case-insensitive; an absent header and an empty one are
+         * different keys. Declaring one of the headers that otherwise make a request bypass the
+         * cache ({@code Authorization}, {@code HX-Target}, {@code HX-Trigger},
+         * {@code HX-Trigger-Name}, {@code HX-Boosted}, {@code HX-Prompt}) keys on it instead.
+         * {@code HX-Request} is always part of the key.
+         */
+        public CachedHandler varyHeader(String... names) {
+            var sorted = new java.util.TreeSet<String>();
+            for (var name : names) sorted.add(name.toLowerCase(java.util.Locale.ROOT));
+            this.varyHeaders = sorted.toArray(new String[0]);
+            return this;
+        }
+
+        private String[] varyHeaders = new String[0];
+
+        /**
+         * Headers that make a request skip the cache, unless declared with {@link #varyHeader}
+         * (L4 review F6): credentials, and the htmx headers that say which element asked and how,
+         * which a handler commonly answers per value. Such a request is served by the handler and
+         * its response is not stored.
+         */
+        static final List<String> BYPASS_HEADERS = List.of(
+            "Authorization", "HX-Target", "HX-Trigger", "HX-Trigger-Name", "HX-Boosted", "HX-Prompt");
+
+        /** Reads the framework itself makes, or that the key already covers. */
+        private static final Set<String> ALWAYS_KEYED_HEADERS = Set.of("hx-request");
+
+        boolean warnedUndeclaredReads() { return !warnedReads.isEmpty(); }
+
         @Override
         public Result apply(Request request) {
+            // L4 review F6: a request carrying a per-request header the key does not cover is
+            // served by the handler and nothing is stored.
+            if (bypassesCache(request)) {
+                return handler.apply(request);
+            }
             // Cache the rendered response, not the Result object: a RenderedResponse is a
             // serializable snapshot, so a page rendered on one server can be replayed by any other
             // across a shared backend. RenderedResponse.from reads result.body(), which materializes a
@@ -592,7 +649,24 @@ public class Cache {
             var cached = cache.get(key, RenderedResponse.class);
             if (cached != null) return cached.toResult();
             var views = new ArrayList<View>();
-            var result = View.recordingViews(views, () -> handler.apply(request));
+            // L4 review F6: in dev mode and tests, record what the handler reads (nothing in production).
+            Request.InputReads reads = request.strictInputChecks() ? new Request.InputReads() : null;
+            Result result;
+            request.recordReads(reads);
+            try {
+                result = View.recordingViews(views, () -> handler.apply(request));
+                if (reads != null && !result.isStreaming()) result.rawBytes(); // run a deferred render while recording
+            } finally {
+                request.recordReads(null);
+            }
+            if (reads != null) reportUndeclaredReads(request, reads);
+            if (!result.setCookies().isEmpty()) {
+                // L4 review F6: the snapshot keeps headers but not Set-Cookie, so the cookie was
+                // dropped even from this response, and a per-visitor cookie must not be replayed
+                // anyway. Served uncached, intact.
+                warnSetCookie(request);
+                return result;
+            }
             if (result.status() < 200 || result.status() > 299) {
                 // L4: only a success is the page. An error, a redirect or a 304 depends on this
                 // request (a query param the key ignores, a missing record, a login bounce), and
@@ -627,12 +701,90 @@ public class Cache {
         private String pageKey(Request request) {
             // Vary on HX-Request: a handler may return a partial for htmx and a full page otherwise
             // (the Vary: HX-Request the framework sets), so the two must not share a cache entry.
-            var prefix = request.isHtmx() ? "page:hx:" : "page:";
+            var prefix = request.isHtmx() ? PAGE_KEY_PREFIX + "hx:" : PAGE_KEY_PREFIX;
             // A HEAD reaches a GET route's handler and its response differs only in the body the
             // framework drops on the way out, so it shares the GET's entry rather than storing a
             // second copy of the page.
             var method = request.method().equals("HEAD") ? "GET" : request.method();
-            return prefix + method + ":" + pathKey(request) + queryKey(request);
+            return prefix + method + ":" + pathKey(request) + queryKey(request) + headerKey(request);
+        }
+
+        private boolean bypassesCache(Request request) {
+            for (var name : BYPASS_HEADERS) {
+                if (request.hasHeader(name) && Arrays.binarySearch(varyHeaders, name.toLowerCase(java.util.Locale.ROOT)) < 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * The header component of the key: each {@link #varyHeader} in sorted order, present or
+         * absent distinguished. Starts with {@code '#'}, which {@link #percentEncode} never emits,
+         * so it cannot be confused with the path or query components.
+         */
+        private String headerKey(Request request) {
+            if (varyHeaders.length == 0) return "";
+            var sb = new StringBuilder();
+            for (var name : varyHeaders) {
+                var value = request.hasHeader(name) ? request.header(name) : null;
+                if (value == null) continue;
+                sb.append(sb.isEmpty() ? '#' : '&').append(percentEncode(name)).append('=').append(percentEncode(value));
+            }
+            return sb.toString();
+        }
+
+        // Routes (or request paths, for hand-built requests) already warned about, dev mode only.
+        private final Set<String> warnedReads = ConcurrentHashMap.newKeySet();
+        private final Set<String> warnedCookies = ConcurrentHashMap.newKeySet();
+
+        private static String routeLabel(Request request) {
+            var route = request.route();
+            return route != null ? route.method() + " " + route.pattern() : request.method() + " " + request.path();
+        }
+
+        /**
+         * L4 review F6: the handler read request input the cache key does not cover, so the page
+         * it stored for this key may be wrong (or attacker-chosen) for the next visitor. Dev mode
+         * logs it once per route; {@code Brace.test()} throws, so the test fails.
+         */
+        private void reportUndeclaredReads(Request request, Request.InputReads reads) {
+            var undeclared = new ArrayList<String>();
+            for (var name : reads.query) {
+                if (name.equals("*")) undeclared.add("the whole query string (queryParams(), url(), urlWith() or form())");
+                else if (Arrays.binarySearch(vary, name) < 0) undeclared.add("query param '" + name + "'");
+            }
+            for (var name : reads.headers) {
+                var lower = name.toLowerCase(java.util.Locale.ROOT);
+                if (!ALWAYS_KEYED_HEADERS.contains(lower) && Arrays.binarySearch(varyHeaders, lower) < 0) {
+                    undeclared.add("header '" + name + "'");
+                }
+            }
+            for (var name : reads.cookies) undeclared.add("cookie '" + name + "'");
+            if (reads.ip) undeclared.add("the client address (req.ip())");
+            if (reads.body) undeclared.add("the request body");
+            if (undeclared.isEmpty()) return;
+            var label = routeLabel(request);
+            var message = "Page-cached route " + label + " read " + String.join(", ", undeclared)
+                + ", which is not part of its cache key, so the page stored for one visitor is served to "
+                + "the next whatever they send. A cached handler may depend only on its path parameters and "
+                + "what it declares: .vary(\"param\") for a query param, .varyHeader(\"Name\") for a header. "
+                + "Anything else (cookies, the client address, the body) means the route should not be page cached.";
+            if (!"dev".equals(System.getProperty("brace.mode"))) {
+                throw new IllegalStateException(message + " (Thrown under Brace.test(); logged once per route in dev mode.)");
+            }
+            if (warnedReads.size() < 100 && warnedReads.add(label)) {
+                Log.warn(message + " Logged once per route.");
+            }
+        }
+
+        private void warnSetCookie(Request request) {
+            if (!"dev".equals(System.getProperty("brace.mode"))) return;
+            var label = routeLabel(request);
+            if (warnedCookies.size() < 100 && warnedCookies.add(label)) {
+                Log.warn("Page-cached route " + label + " set a cookie, so its response was not cached (a "
+                    + "cookie belongs to one visitor). Set cookies on an uncached route, or drop the cache wrapper.");
+            }
         }
 
         /**
@@ -661,16 +813,18 @@ public class Cache {
          * The query component of the cache key: declared {@link #vary} params only, in sorted
          * order, present-or-absent distinguished. Undeclared params never reach the key — the
          * request side must not control cache cardinality (H8: one full rendered page is stored
-         * per distinct key, so attacker-minted keys are a memory-exhaustion vector).
+         * per distinct key, so attacker-minted keys are a memory-exhaustion vector). A repeated
+         * param contributes every value in order (L4 review F6: keying on the last value let
+         * {@code ?t=evil&t=ok} fill the entry for {@code ?t=ok}).
          */
         private String queryKey(Request request) {
             if (vary.length == 0) return "";
             var sb = new StringBuilder();
             for (var param : vary) { // pre-sorted by vary()
-                var value = request.queryParam(param);
-                if (value == null) continue; // absent param: contributes nothing (≠ empty value)
-                sb.append(sb.isEmpty() ? '?' : '&');
-                sb.append(percentEncode(param)).append('=').append(percentEncode(value));
+                for (var value : request.queryValues(param)) { // absent param: contributes nothing
+                    sb.append(sb.isEmpty() ? '?' : '&');
+                    sb.append(percentEncode(param)).append('=').append(percentEncode(value));
+                }
             }
             return sb.toString();
         }

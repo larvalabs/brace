@@ -885,15 +885,31 @@ cache.clearTag("posts");  // invalidate all cached pages with this tag
 **Query params are ignored by default** — a cached route serves one entry per path. If the
 page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
 or the cache will serve the same entry for every value. Undeclared params never key the cache
-(so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
-entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size);
-the Postgres backend at 100,000 rows (expired first, then soonest-to-expire, rows without a TTL
-last; `CacheBackend.postgres(dbFactory, maxEntries)` to size).
+(so `?utm_source=...` junk can't mint entries). A param given twice (`?t=a&t=b`) keys on all its
+values. Headers key the cache only when declared: `.varyHeader("Accept-Language")`. A request
+carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or
+`HX-Prompt` bypasses the cache (served by the handler, nothing stored) unless that header is
+declared with `.varyHeader(...)`. A response that sets a cookie is never stored (and keeps its
+`Set-Cookie`).
+
+**A cached handler must depend only on its route's path parameters and its declared `vary` /
+`varyHeader` values.** Reading anything else through `Request` (another query param, `req.url()`,
+a header, a cookie, `req.ip()`, the body) means the page stored for one visitor is served to the
+next whatever they send; in dev mode Brace logs this once per route, and under `Brace.test()` the
+request fails with an `IllegalStateException`, so a test catches it.
+
+Page-cache entries (keys starting `brace:page:`; don't use that prefix for your own keys) never
+push out your own entries. The in-memory backend is capped at 10,000 entries (expired first, then
+page entries, then arbitrary ones; a new page entry only displaces another page entry;
+`CacheBackend.inMemory(maxEntries)` to size). The Postgres backend is capped at 100,000 rows, of
+which at most 10,000 page rows (expired first, then page rows, then soonest-to-expire, rows
+without a TTL last; `CacheBackend.postgres(dbFactory, maxEntries)` or
+`CacheBackend.postgres(dbFactory, maxEntries, maxPageEntries)` to size).
 
 **Only 2xx responses are stored.** An error, a redirect or a 304 is served uncached, so one bad
 request can't pin it for everyone. The key is the matched **route pattern plus its decoded path
 parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method, the `HX-Request`
-variant and the declared `vary` params.
+variant, and the declared `vary` params and `varyHeader` headers.
 
 **A cached page is shared by every visitor**, so it must not contain per-visitor content. A
 response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose

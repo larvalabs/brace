@@ -145,7 +145,7 @@ public class Request {
 
     public String method() { return method; }
     public String path() { return path; }
-    public Map<String, String> queryParams() { return queryParams; }
+    public Map<String, String> queryParams() { readQuery("*"); return queryParams; }
     public Map<String, String> pathParams() { return pathParams; }
 
     // Path parameter accessors
@@ -165,14 +165,17 @@ public class Request {
     // Query parameter accessors
 
     public String queryParam(String name) {
+        readQuery(name);
         return queryParams.get(name);
     }
 
     public String queryParam(String name, String defaultValue) {
+        readQuery(name);
         return queryParams.getOrDefault(name, defaultValue);
     }
 
     public int queryInt(String name) {
+        readQuery(name);
         return Integer.parseInt(queryParams.get(name));
     }
 
@@ -183,6 +186,7 @@ public class Request {
      * Use {@link #queryInt(String)} when an unparseable value should surface as an error.
      */
     public int queryInt(String name, int defaultValue) {
+        readQuery(name);
         var value = queryParams.get(name);
         if (value == null) return defaultValue;
         try {
@@ -193,6 +197,7 @@ public class Request {
     }
 
     public long queryLong(String name) {
+        readQuery(name);
         return Long.parseLong(queryParams.get(name));
     }
 
@@ -201,6 +206,7 @@ public class Request {
      * missing OR present but unparseable. See {@link #queryInt(String, int)}.
      */
     public long queryLong(String name, long defaultValue) {
+        readQuery(name);
         var value = queryParams.get(name);
         if (value == null) return defaultValue;
         try {
@@ -211,6 +217,7 @@ public class Request {
     }
 
     public boolean hasQueryParam(String name) {
+        readQuery(name);
         return queryParams.containsKey(name);
     }
 
@@ -221,6 +228,12 @@ public class Request {
      * {@link #queryParam(String)} (last value wins) is unchanged.
      */
     public List<String> queryParams(String name) {
+        readQuery(name);
+        return queryValues(name);
+    }
+
+    /** {@link #queryParams(String)} without recording the read, for the page cache's own key. */
+    List<String> queryValues(String name) {
         if (rawQuery == null) {
             // No raw query string available (e.g. a hand-constructed Request in a unit
             // test): fall back to the single-value map.
@@ -238,6 +251,7 @@ public class Request {
      * a link.
      */
     public String url() {
+        readQuery("*");
         var qs = new StringBuilder();
         for (var pair : queryPairs()) Url.appendPair(qs, pair[0], pair[1]);
         return qs.isEmpty() ? path : path + "?" + qs;
@@ -251,6 +265,7 @@ public class Request {
      * Values are re-encoded, so the result is safe to put in a link.
      */
     public String urlWith(String name, Object value) {
+        readQuery("*");
         var text = Url.format(value);
         var qs = new StringBuilder();
         boolean placed = false;
@@ -303,6 +318,7 @@ public class Request {
     public List<String> formParams(String name) {
         // Mirror parseFormBody's split rules: a pair without '=' is a bare key with an
         // empty value; a leading '=' means an empty-string key.
+        readBody();
         resolveBody();
         return valuesOf(body, name, false);
     }
@@ -392,10 +408,12 @@ public class Request {
     }
 
     public String header(String name) {
+        readHeader(name);
         return headers.get(name);
     }
 
     public boolean hasHeader(String name) {
+        readHeader(name);
         return headers.containsKey(name);
     }
 
@@ -418,9 +436,10 @@ public class Request {
         return "true".equals(header("HX-Request"));
     }
 
-    public String body() { resolveBody(); return body; }
+    public String body() { readBody(); resolveBody(); return body; }
 
     public UploadedFile file(String name) {
+        readBody();
         resolveBody();
         var files = uploadedFiles.get(name);
         if (files == null || files.isEmpty()) return null;
@@ -428,6 +447,7 @@ public class Request {
     }
 
     public List<UploadedFile> files(String name) {
+        readBody();
         resolveBody();
         return uploadedFiles.getOrDefault(name, List.of());
     }
@@ -455,7 +475,8 @@ public class Request {
     }
 
     public String cookie(String name) {
-        var cookieHeader = header("Cookie");
+        if (reads != null) reads.cookies.add(name);
+        var cookieHeader = headers.get("Cookie");
         if (cookieHeader == null) return null;
         for (var part : cookieHeader.split(";")) {
             var trimmed = part.trim();
@@ -517,6 +538,7 @@ public class Request {
      * there) yields the socket address rather than being returned.
      */
     public String ip() {
+        if (reads != null) reads.ip = true;
         // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
             // L3: exactly one forwarding header is read, the one TrustedProxies names
@@ -709,6 +731,7 @@ public class Request {
             return FormBinder.bind(type, parsedFormBody());
         }
         // Copy: the cached form map must not absorb query params, and may be immutable-empty.
+        readQuery("*");
         var params = new LinkedHashMap<>(parsedFormBody());
         for (var entry : queryParams.entrySet()) {
             params.putIfAbsent(entry.getKey(), entry.getValue());
@@ -767,12 +790,47 @@ public class Request {
      * need to mutate.
      */
     Map<String, String> parsedFormBody() {
+        readBody();
         if (formBodyParams == null) {
             resolveBody();
             formBodyParams = parseSingleValues(body, false);
         }
         return formBodyParams;
     }
+
+    /**
+     * Dev mode or {@code Brace.test()} (set by {@link BraceHandler}, as for the query-taint check):
+     * a page-cached handler's reads are recorded so an input outside the cache key is reported
+     * (L4 review F6). False in production, where nothing is recorded.
+     */
+    private boolean strictInputChecks;
+
+    void setStrictInputChecks(boolean strict) { this.strictInputChecks = strict; }
+
+    boolean strictInputChecks() { return strictInputChecks; }
+
+    /**
+     * The request inputs a handler read while {@link #recordReads} was on: query parameter names
+     * ({@code "*"} for the whole query), header names, cookie names, and whether it read the body
+     * or the client address. Only ever set in dev mode and tests.
+     */
+    static final class InputReads {
+        final java.util.Set<String> query = new java.util.LinkedHashSet<>();
+        final java.util.Set<String> headers = new java.util.TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        final java.util.Set<String> cookies = new java.util.LinkedHashSet<>();
+        boolean body;
+        boolean ip;
+    }
+
+    /** Non-null only while a page-cached handler runs in dev mode or a test; see {@link #strictInputChecks}. */
+    private InputReads reads;
+
+    /** Start recording reads into {@code into}, or stop with null. */
+    void recordReads(InputReads into) { this.reads = into; }
+
+    private void readQuery(String name) { if (reads != null) reads.query.add(name); }
+    private void readHeader(String name) { if (reads != null) reads.headers.add(name); }
+    private void readBody() { if (reads != null) reads.body = true; }
 
     void setStorage(Storage storage) {
         this.storage = storage;

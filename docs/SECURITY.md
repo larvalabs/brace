@@ -998,6 +998,31 @@ without a session cookie (see
 [Static mappings are covered too](#static-mappings-are-covered-too)). Access rejections are
 `no-store` everywhere (see [Access rejections are never cached](#access-rejections-are-never-cached)).
 
+### The page cache (`cache.wrap`)
+
+A page-cached route stores one rendered response per key and serves it to every visitor. The
+key is the route pattern, its decoded path parameters, the method, the `HX-Request` variant, and
+the query params and headers the route declares with `.vary(...)` and `.varyHeader(...)` (a param
+given twice keys on all its values). **A cached handler must depend only on those.** Anything else
+it reads (another query param, `req.url()`, a header such as `Accept-Language`, a cookie,
+`req.ip()`, the body) can differ between visitors, and whatever the first visitor sent is replayed
+to the rest for the TTL: `?msg=<b>PWNED</b>` on an undeclared param becomes everyone's page. In dev
+mode Brace logs such a read once per route, and under `Brace.test()` it throws, so a test of the
+route fails; production does no checking.
+
+Some inputs are refused outright rather than trusted to the handler: a request with
+`Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or `HX-Prompt` is
+served by the handler without reading or writing the cache, unless the route declares that
+header with `.varyHeader(...)`. A response that sets a cookie is never stored (it is returned with
+its `Set-Cookie` intact). Only 2xx responses are stored, and a response carrying the visitor's
+CSRF token or flash is not.
+
+Page entries are kept apart from the app's own cache entries (keys starting `brace:page:`): on
+Postgres they have their own row cap (10,000 by default) and are trimmed first when the table is
+over its overall cap; in memory they are evicted before any other entry, and a new page never
+displaces an app entry. A client minting pages (any declared `vary` value or path parameter)
+therefore churns only the page cache.
+
 ---
 
 ## File Uploads

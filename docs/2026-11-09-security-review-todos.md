@@ -431,6 +431,16 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Cache only 2xx; key on the route pattern plus decoded path parameters; give
     `PostgresBackend` a row cap.
   - **Model: Opus 5.5.**
+  - **Review fixes.** F5: the row cap covered the whole table, so a page flood evicted the app's
+    own entries (reviewer: 0 of 50 survived). Page keys now carry `brace:page:`; Postgres caps
+    page rows separately (default 10,000) and trims them first under the overall cap; in memory
+    page entries are evicted first and a new page never displaces an app entry (50 of 50
+    survive). F6: a declared `vary` param keys on all its values; `Authorization`, `HX-Target`,
+    `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` and `HX-Prompt` bypass the cache unless declared
+    with the new `varyHeader(...)`; in dev mode and `Brace.test()` the handler's reads through
+    `Request` are recorded and an undeclared query param, header, cookie, `ip()` or body read is
+    logged once per route (dev) or thrown (test); a response that sets a cookie is returned
+    intact and not stored. Tests in `PageCacheReviewFixesTest`, `PageCacheCapPostgresIT`.
 
 - [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a

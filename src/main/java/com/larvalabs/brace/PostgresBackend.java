@@ -31,8 +31,16 @@ class PostgresBackend implements CacheBackend {
      */
     static final int DEFAULT_MAX_ENTRIES = 100_000;
 
+    /**
+     * Default cap on page-cache rows (keys starting with {@link Cache#PAGE_KEY_PREFIX}), counted
+     * and trimmed on their own (L4 review F5): a client can mint page rows cheaply, and under one
+     * shared cap they pushed out the app's own {@code cache.set} entries.
+     */
+    static final int DEFAULT_MAX_PAGE_ENTRIES = 10_000;
+
     private final DatabaseFactory factory;
     private final int maxEntries;
+    private final int maxPageEntries;
     /** Inserts by this instance between two cap checks: a tenth of the cap, at most 1,000. */
     private final int trimEvery;
     private final AtomicInteger insertsSinceTrim = new AtomicInteger();
@@ -48,12 +56,20 @@ class PostgresBackend implements CacheBackend {
     }
 
     PostgresBackend(DatabaseFactory factory, int maxEntries) {
+        this(factory, maxEntries, Math.min(DEFAULT_MAX_PAGE_ENTRIES, maxEntries));
+    }
+
+    PostgresBackend(DatabaseFactory factory, int maxEntries, int maxPageEntries) {
         if (maxEntries < 1) {
             throw new IllegalArgumentException("maxEntries must be at least 1, got " + maxEntries);
         }
+        if (maxPageEntries < 0) {
+            throw new IllegalArgumentException("maxPageEntries must not be negative, got " + maxPageEntries);
+        }
         this.factory = factory;
         this.maxEntries = maxEntries;
-        this.trimEvery = Math.max(1, Math.min(1_000, maxEntries / 10));
+        this.maxPageEntries = maxPageEntries;
+        this.trimEvery = Math.max(1, Math.min(1_000, Math.min(maxEntries, Math.max(1, maxPageEntries)) / 10));
     }
 
     @Override
@@ -117,11 +133,14 @@ class PostgresBackend implements CacheBackend {
     }
 
     /**
-     * Hold {@code brace_cache} to {@link #maxEntries} value rows (L4): drop expired rows, then, if
-     * still over, the rows that expire soonest (rows with no expiry last). Checked every
-     * {@link #trimEvery} inserts by this instance and on every {@link #evictExpired()} sweep, so
-     * the table can overshoot by about one check interval per instance between checks. Uses the
-     * existing {@code expires_at} index; no schema change.
+     * Hold {@code brace_cache} to its caps (L4, L4 review F5): drop expired rows; hold page-cache
+     * rows ({@link Cache#PAGE_KEY_PREFIX}, hashed forms included, since a hashed key keeps its
+     * prefix) to {@link #maxPageEntries}; then hold the whole table to {@link #maxEntries},
+     * deleting page rows before any other. Within each group the rows that expire soonest go
+     * first (rows with no expiry last). So the app's own entries are only ever trimmed when they
+     * alone exceed {@link #maxEntries}, never because pages grew. Checked every {@link #trimEvery}
+     * inserts by this instance and on every {@link #evictExpired()} sweep, so the table can
+     * overshoot by about one check interval per instance between checks. No schema change.
      *
      * @return rows removed
      */
@@ -132,22 +151,46 @@ class PostgresBackend implements CacheBackend {
                     "DELETE FROM brace_cache WHERE expires_at IS NOT NULL AND expires_at < now()")) {
                 removed = ps.executeUpdate();
             }
-            long count;
-            try (var ps = conn.prepareStatement("SELECT count(*) FROM brace_cache");
-                 var rs = ps.executeQuery()) {
-                rs.next();
-                count = rs.getLong(1);
+            String pagePattern = escapeLike(Cache.PAGE_KEY_PREFIX) + "%";
+            long pages = count(conn, " WHERE cache_key LIKE ? ESCAPE '\\'", pagePattern);
+            if (pages > maxPageEntries) {
+                removed += deleteSoonestExpiring(conn, "cache_key LIKE ? ESCAPE '\\'", pagePattern, pages - maxPageEntries);
+                pages = maxPageEntries;
             }
-            if (count > maxEntries) {
-                try (var ps = conn.prepareStatement(
-                        "DELETE FROM brace_cache WHERE cache_key IN (" +
-                        "SELECT cache_key FROM brace_cache ORDER BY expires_at ASC NULLS LAST LIMIT ?)")) {
-                    ps.setLong(1, count - maxEntries);
-                    removed += ps.executeUpdate();
+            long total = count(conn, "", null);
+            if (total > maxEntries) {
+                long fromPages = Math.min(pages, total - maxEntries);
+                if (fromPages > 0) {
+                    removed += deleteSoonestExpiring(conn, "cache_key LIKE ? ESCAPE '\\'", pagePattern, fromPages);
+                }
+                if (total - fromPages > maxEntries) {
+                    removed += deleteSoonestExpiring(conn, "cache_key NOT LIKE ? ESCAPE '\\'", pagePattern,
+                        total - fromPages - maxEntries);
                 }
             }
             return removed;
         });
+    }
+
+    private static long count(java.sql.Connection conn, String where, String param) throws java.sql.SQLException {
+        try (var ps = conn.prepareStatement("SELECT count(*) FROM brace_cache" + where)) {
+            if (param != null) ps.setString(1, param);
+            try (var rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    private static long deleteSoonestExpiring(java.sql.Connection conn, String where, String param, long n)
+            throws java.sql.SQLException {
+        try (var ps = conn.prepareStatement(
+                "DELETE FROM brace_cache WHERE cache_key IN (SELECT cache_key FROM brace_cache WHERE " + where
+                    + " ORDER BY expires_at ASC NULLS LAST LIMIT ?)")) {
+            ps.setString(1, param);
+            ps.setLong(2, n);
+            return ps.executeUpdate();
+        }
     }
 
     @Override
