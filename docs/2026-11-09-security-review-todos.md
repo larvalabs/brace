@@ -453,7 +453,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Return 404 when any raw segment is exactly `.` or `..`.
   - **Model: Sonnet 5.5.**
 
-- [ ] **L10: A `Route` whose access was never resolved is open, not closed**, `Route.java:27`, `BraceHandler.java:117-194, 351-352`
+- [x] **L10: A `Route` whose access was never resolved is open, not closed**, `Route.java:27`, `BraceHandler.java:117-194, 351-352`
   - `access` starts as `List.of()`, and only `Brace.resolveAccess()` fills it. `BraceHandler` is
     public with public constructors, so a handler built without `Brace.start()` serves every
     route with no requirement.
