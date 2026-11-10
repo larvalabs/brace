@@ -508,6 +508,55 @@ class ErrorStoreTest {
         assertFalse(dropWarnings.get(0).contains("secret-payload"));
     }
 
+    @Test
+    void newKindsArrivingWhileAFlushWaitsOnADeadDatabaseDoNotGrowTheBufferPastTheCap() {
+        // Second review: flushBatch drained `pending`, then blocked opening a session. Meanwhile
+        // record() saw an empty map and admitted another MAX_PENDING_KINDS kinds, and the failed
+        // batch was merged back on top with no cap check: 1,000 more per flush, 65,000 held by
+        // the time the outage cap dropped the first ones.
+        var real = errorStore.flushSession;
+        int[] minted = {0};
+        int[] worst = {0};
+        errorStore.flushSession = () -> {
+            // What the request threads do while the flusher waits for a connection.
+            for (int i = 0; i < ErrorStore.MAX_PENDING_KINDS; i++) {
+                int n = minted[0]++;
+                errorStore.record("Storm" + n, "m", "GET /storm" + n, "s", "req");
+            }
+            // A kind that is in the batch being flushed recurs: a counter bump, never dropped.
+            errorStore.record("First", "again", "GET /first", "s", "req");
+            worst[0] = Math.max(worst[0], errorStore.bufferedKinds());
+            throw new org.hibernate.exception.JDBCConnectionException("Unable to acquire JDBC Connection",
+                new java.sql.SQLTransientConnectionException("Connection is not available", "08001"));
+        };
+        errorStore.record("First", "first", "GET /first", "s", "req");
+        int flushes = 8;
+        for (int i = 0; i < flushes; i++) {
+            errorStore.flush();
+            assertTrue(errorStore.pendingKinds() <= ErrorStore.MAX_PENDING_KINDS,
+                "after failed flush " + (i + 1) + ": " + errorStore.pendingKinds() + " kinds pending");
+        }
+        assertTrue(worst[0] <= ErrorStore.MAX_PENDING_KINDS,
+            "during a flush, pending plus in flight: " + worst[0] + " kinds");
+
+        errorStore.flushSession = real;
+        errorStore.flush();
+        var stored = errorStore.list(null, java.time.Instant.EPOCH);
+        assertEquals(ErrorStore.MAX_PENDING_KINDS, stored.size());
+        // The kinds buffered first are the ones kept: the oldest entry and its whole count survive.
+        var first = stored.stream().filter(e -> "First".equals(e.get("errorType"))).findFirst().orElseThrow();
+        assertEquals(1 + flushes, first.get("occurrenceCount"));
+        assertTrue(stored.stream().anyMatch(e -> "Storm0".equals(e.get("errorType"))));
+        assertFalse(stored.stream().anyMatch(e -> ("Storm" + ErrorStore.MAX_PENDING_KINDS).equals(e.get("errorType"))));
+        // Nothing is left in flight, so a new kind is admitted again.
+        assertEquals(0, errorStore.bufferedKinds());
+        errorStore.record("After", "a", "GET /after", "s", "req");
+        errorStore.flush();
+        assertTrue(errorStore.list(null, java.time.Instant.EPOCH).stream()
+            .anyMatch(e -> "After".equals(e.get("errorType"))));
+        assertEquals(0, errorStore.bufferedKinds());
+    }
+
     private static java.util.Map<String, Object> find(String type) {
         return errorStore.list(null).stream().filter(e -> type.equals(e.get("errorType"))).findFirst().orElseThrow();
     }

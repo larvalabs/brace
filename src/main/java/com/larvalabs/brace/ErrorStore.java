@@ -16,9 +16,16 @@ import java.util.*;
  * that healthy requests needed. Coalescing loses nothing the table keeps ({@code ops_errors} is
  * already one row per kind with a count and the latest payload); the costs are bounded and
  * deliberate: a crash drops at most one flush interval of counts, dashboards and regression
- * notifications lag by at most one interval, and past {@value #MAX_PENDING_KINDS} distinct pending
- * kinds new kinds are dropped (counted, warned on flush). Occurrences of already-pending kinds are
+ * notifications lag by at most one interval, and past {@value #MAX_PENDING_KINDS} distinct buffered
+ * kinds new kinds are dropped (counted, warned on flush). Occurrences of already-buffered kinds are
  * never dropped — they're a counter bump. Tests and shutdown call {@link #flush()} directly.
+ *
+ * <p>The cap covers everything the store holds: the pending map and the batch a flush has drained
+ * and not yet written or put back (security review 2026-11, second review of M5). A flush that
+ * waits on a dead database holds its batch for as long as the connection attempt takes; counting
+ * only the pending map let {@link #record} admit another full cap of kinds in that window, on
+ * every flush of an outage. The kinds buffered first are the ones kept: they carry the counts and
+ * first-seen times accumulated so far, and a flood of new kinds cannot push them out.
  *
  * <p>One bad entry cannot stall the store (security review 2026-11, M5). {@link #record} replaces
  * NUL characters (Postgres text cannot hold them, and pgjdbc rejects them client-side) and clips
@@ -120,6 +127,15 @@ public class ErrorStore {
     private volatile RegressionListener regressionListener;
     private final java.util.concurrent.ConcurrentHashMap<String, Pending> pending =
         new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * Keys of the batch a flush has drained from {@link #pending} and not yet settled (written,
+     * dropped or merged back). Changed only inside {@code pending.compute} for that key, as is
+     * {@link #bufferedKinds}, so the two stay consistent with the map under concurrent records.
+     */
+    private final Set<String> inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Distinct kinds held in {@link #pending} or {@link #inFlight}: what the cap bounds. */
+    private final java.util.concurrent.atomic.AtomicInteger bufferedKinds =
+        new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.LongAdder droppedKinds =
         new java.util.concurrent.atomic.LongAdder();
     private final Thread flusher;
@@ -207,14 +223,18 @@ public class ErrorStore {
         String cleanQueries = withoutNul(queriesBefore);
         String cleanHeaders = withoutNul(requestHeaders);
         var key = cleanType + '\u0000' + cleanRoute;
-        if (pending.size() >= MAX_PENDING_KINDS && !pending.containsKey(key)) {
+        // The cap counts the batch a flush is holding too; a kind in that batch is a known kind.
+        if (bufferedKinds.get() >= MAX_PENDING_KINDS && !pending.containsKey(key) && !inFlight.contains(key)) {
             droppedKinds.increment();
             return;
         }
         // Served on /ops/errors; the trace repeats the message (and every cause's) verbatim.
         String redactedTrace = Redactor.redactStackTrace(withoutNul(stackTrace));
         pending.compute(key, (k, p) -> {
-            if (p == null) p = new Pending(cleanType, cleanRoute, now);
+            if (p == null) {
+                p = new Pending(cleanType, cleanRoute, now);
+                if (!inFlight.contains(k)) bufferedKinds.incrementAndGet();
+            }
             p.count++;
             p.message = cleanMessage;
             p.stackTrace = redactedTrace;
@@ -273,10 +293,16 @@ public class ErrorStore {
 
     private void flushBatch() {
         // Drain a snapshot; records arriving during the flush re-create entries for the next one.
+        // A drained key stays counted in bufferedKinds (it moves to inFlight) until it is settled.
         var batch = new ArrayList<Pending>();
         for (var key : pending.keySet()) {
-            var p = pending.remove(key);
-            if (p != null) batch.add(p);
+            pending.compute(key, (k, p) -> {
+                if (p != null) {
+                    inFlight.add(k);
+                    batch.add(p);
+                }
+                return null;
+            });
         }
         if (batch.isEmpty()) {
             return;
@@ -356,9 +382,13 @@ public class ErrorStore {
             if (++p.failures >= MAX_FLUSH_FAILURES) {
                 droppedEntries++;
                 if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
+                settle(p);
             } else {
                 mergeBack(p);
             }
+        }
+        for (int i = 0; i < batch.size(); i++) {
+            if (outcome[i] != REJECTED) settle(batch.get(i));
         }
 
         // Notify the regression listener only after a successful commit, off the DB path.
@@ -519,6 +549,7 @@ public class ErrorStore {
             if (++p.uncounted > MAX_UNCOUNTED_RETENTIONS && ++p.failures >= MAX_FLUSH_FAILURES) {
                 droppedEntries++;
                 if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
+                settle(p);
             } else {
                 mergeBack(p);
             }
@@ -570,14 +601,40 @@ public class ErrorStore {
         droppedTypes.clear();
     }
 
+    /** Test hook: distinct kinds waiting in the pending map (not counting a batch being flushed). */
+    int pendingKinds() {
+        return pending.size();
+    }
+
+    /** Test hook: distinct kinds held in all, pending or in the batch being flushed. */
+    int bufferedKinds() {
+        return bufferedKinds.get();
+    }
+
     /** Test hook: lets the next flush write its failure summary without waiting out the interval. */
     synchronized void expireFailureLogWindow() {
         nextFailureLogNanos = System.nanoTime();
     }
 
-    /** Re-merge a failed-flush entry without clobbering anything newer that arrived meanwhile. */
+    /**
+     * A flushed entry leaves the store (written, or dropped): its key is no longer in flight, and
+     * no longer buffered unless the same kind was recorded again meanwhile.
+     */
+    private void settle(Pending done) {
+        pending.compute(done.type + '\u0000' + done.route, (k, p) -> {
+            if (inFlight.remove(k) && p == null) bufferedKinds.decrementAndGet();
+            return p;
+        });
+    }
+
+    /**
+     * Re-merge a failed-flush entry without clobbering anything newer that arrived meanwhile. The
+     * key moves from in flight back to pending, so the number of buffered kinds does not change:
+     * {@link #record} already counted the batch against the cap while it was in flight.
+     */
     private void mergeBack(Pending old) {
         pending.compute(old.type + '\u0000' + old.route, (k, p) -> {
+            inFlight.remove(k);
             if (p == null) return old;
             p.count += old.count; // keep p's payload — it's newer
             // Carry the rejection count, so a key the database always rejects is still dropped.
