@@ -1797,8 +1797,12 @@ app.analytics(Analytics.options()
 **Development checks**
 
 - **`QueryTaint`** (dev and test mode) now catches `Sort.of(...)` built from request text even
-  when whitespace, case or commas differ, and logs a one-time "unchecked, over cap" warning for
-  a request with more than 1,000 values or 64 KB in one source.
+  when whitespace, case or commas differ. Every path and query value is checked (no count cap).
+  **Breaking for tests:** a request whose form body has more than 1,000 values (or 1 MB of text)
+  cannot be fully checked, so under `Brace.test()` and in dev mode it throws
+  `IllegalArgumentException` when it reaches a where-fragment, raw query or `Sort.of(...)`;
+  production runs the query and logs an "over cap" warning once a minute per call site. Keep
+  forms posted in tests under that size.
 
 ## Security: CLI and launcher on an untrusted checkout
 

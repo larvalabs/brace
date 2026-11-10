@@ -211,12 +211,16 @@ What it does **not** catch:
   with `id` as the value is a tautology that returns every row, and isn't flagged, because
   flagging bare words everywhere would trip on ordinary code.
 - A value the handler transformed (trimmed, split into terms, re-cased) before concatenating it.
-- JSON bodies, headers and cookies; queries run outside a request (jobs, `withSession`); and,
-  past the first 1,000 values or 64 KB of each source (form body, query string, path
-  parameters; each has its own budget, so padding one cannot hide the others), the rest. In dev
-  and test modes the first such request logs a one-time "unchecked, over cap" warning.
+- JSON bodies, headers and cookies, and queries run outside a request (jobs, `withSession`).
   `Sort.of(...)` is checked against the string you passed as well as the normalized order, so
   `?sort=title%20desc` is caught even though it renders as `title DESC`.
+
+Every path parameter and query value is recorded (the request line is bounded at 8 KB, so there
+are never many). The form body is recorded up to 1,000 values or 1 MB of text; a request past
+that is *over cap* and cannot be fully checked. When such a request reaches a where-fragment, a
+raw query or a `Sort.of(...)`, the call throws in dev mode and `Brace.test()` (so padding a form
+cannot slip a payload past a test), and production runs the query and logs an "over cap" warning
+at most once a minute per call site.
 
 It can also fire on safe code: a hand-written allowlist (`switch (sort) { case "title" ->
 "title"; ... }` concatenated after `ORDER BY`) looks the same as the injection it replaces. Use

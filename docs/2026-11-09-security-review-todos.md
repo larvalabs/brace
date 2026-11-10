@@ -718,6 +718,16 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** `Sort.of` keeps and checks the original string; check form values first or log
     "unchecked, over cap"; apply `STORED_CLASSES` on both cache paths.
   - **Model: Sonnet 5.5.** Deferrable.
+  - **Final review fixes** (`fix(security): L15 final review fixes`).
+    - **QueryTaint.** The per-source cap was evaded by padding within one source:
+      `GET /q?` + `a=abc&` × 1000 + `sort=body` ran `ORDER BY body` with 200 under `Brace.test()`,
+      and production logged nothing. Path and query values now have no count cap (the request
+      line is bounded at 8 KB; a 64 KB character cap only bounds a hand-built `Request`); the form
+      body keeps 1,000 values / 1 MB. An over-cap request that reaches a where-fragment, raw query
+      or `Sort.of` now throws in dev mode and `Brace.test()`, and production logs once a minute per
+      call site. Tests: `QueryTaintTest.paddingTheQueryStringNoLongerHidesASortValue`,
+      `queryAndPathValuesHaveNoCountCap`, `anOverCapRequestThrowsInStrictModeWhenItReachesAQuery`,
+      `productionLogsOverCapOncePerCallSite`.
 
 - [x] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
   - The 20,000-row buffer per 10 s flush allows about 2,000 inserted rows per second, kept 35
