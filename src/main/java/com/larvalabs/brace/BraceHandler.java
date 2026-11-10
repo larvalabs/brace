@@ -123,9 +123,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         }
 
         /**
-         * Both public, or the same requirements in any order. Requirements are compared by
-         * identity: two {@code Access.session("userId", "/login")} calls are not known to be the
-         * same check, so they count as different (the fail-closed reading).
+         * Both public, or the same requirements in any order. Requirements are compared with
+         * {@link Access#equals}: two {@code Access.session("userId", "/login")} calls are equal,
+         * while a custom {@code Access.check(...)} or {@code Access.checkRequest(...)} is only
+         * equal to itself (the fail-closed reading for a lambda).
          */
         boolean sameAccessAs(StaticFileMapping other) {
             return access.containsAll(other.access) && other.access.containsAll(access);

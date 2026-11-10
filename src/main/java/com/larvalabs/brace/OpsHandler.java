@@ -1194,7 +1194,7 @@ public class OpsHandler {
 
     /**
      * Whether a v3 auth signature's origin names this server. With origins configured
-     * ({@code app.opsOrigins}, required in prod) it must be one of them, exactly: the request's
+     * ({@code app.opsOrigins}, required outside dev) it must be one of them, exactly: the request's
      * {@code Host} and {@code X-Forwarded-Host} play no part, since the client sending a relayed
      * signature can choose those. Without (dev, tests) its host must be the one the request was
      * addressed to; the port isn't compared, since behind a proxy the app listens on another.
