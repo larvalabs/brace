@@ -137,6 +137,42 @@ class HttpBodyTimeoutTest {
         assertTrue(elapsedMillis(start) < 3000, "took " + elapsedMillis(start) + "ms");
     }
 
+    // --- M8 review fixes: timeout(null), zero/negative, overflow ---
+
+    @Test
+    void timeoutNullOnABufferedFetchMeansTheDefaultDeadline() {
+        // Reproduction: a 1-byte/100ms drip under idleTimeout(500ms) never trips the idle
+        // timeout, and timeout(null) used to leave the buffered call with no deadline at all.
+        var later = new AtomicLong();
+        var http = Http.get(url("/drip")).trusted().timeout(null).idleTimeout(Duration.ofMillis(500));
+        http.wallClock = () -> System.currentTimeMillis() + later.get();
+        Thread.ofVirtual().start(() -> {
+            sleep(300);
+            later.set(Duration.ofSeconds(31).toMillis());
+        });
+        long start = System.nanoTime();
+        var e = assertThrows(Http.StreamTimeoutException.class, http::fetchBytes);
+        assertFalse(e.idle());
+        assertEquals(Duration.ofSeconds(30), e.limit());
+        assertTrue(elapsedMillis(start) < 3000, "took " + elapsedMillis(start) + "ms");
+    }
+
+    @Test
+    void zeroOrNegativeTimeoutIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> Http.get(url("/ok")).timeout(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> Http.get(url("/ok")).timeout(Duration.ofSeconds(-1)));
+    }
+
+    @Test
+    void aHugeTimeoutIsClampedNotAnArithmeticException() {
+        var forever = Duration.ofSeconds(Long.MAX_VALUE);
+        assertEquals("{\"n\":1}", Http.get(url("/ok")).trusted().timeout(forever).fetchString());
+        assertEquals("{\"n\":1}", Http.get(url("/ok")).trusted().idleTimeout(forever).fetchString());
+        try (var response = Http.get(url("/ok")).trusted().timeout(forever).idleTimeout(forever).stream()) {
+            assertEquals(200, response.status());
+        }
+    }
+
     // --- Unaffected: a normal body, large or small ---
 
     @Test

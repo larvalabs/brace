@@ -66,7 +66,7 @@ public class Http {
     private final String url;
     private final Map<String, String> headers = new LinkedHashMap<>();
     private HttpRequest.BodyPublisher bodyPublisher;
-    private Duration timeout = Duration.ofSeconds(30);
+    private Duration timeout = DEFAULT_TIMEOUT;
     private boolean timeoutSet;
     private Duration idleTimeout = Duration.ofSeconds(30);
     private boolean trusted;
@@ -98,16 +98,32 @@ public class Http {
      * calls it defaults to 30s; for {@link #stream()} and {@link #fetchEvents} to none, so a
      * long stream isn't cut off (an error body {@link #fetchEvents} reads is buffered, and gets the
      * 30s default too). When it passes, the connection is closed and
-     * {@link StreamTimeoutException} thrown. {@code null} removes it. Time the machine spends
-     * asleep counts.
+     * {@link StreamTimeoutException} thrown. Time the machine spends asleep counts.
+     *
+     * <p>{@code null} removes the deadline for {@link #stream()} and {@link #fetchEvents} only:
+     * a buffered {@code fetch*} call always has one, and {@code null} there means the 30s
+     * default. Zero or a negative duration throws {@link IllegalArgumentException}; a duration
+     * over {@value #MAX_TIMEOUT_DAYS} days is treated as {@value #MAX_TIMEOUT_DAYS} days.
      *
      * <p>Before the 2026-11 security review (M8) this bounded only the wait for the headers of a
      * {@code fetch*} call, so a server that sent headers and then stalled held the caller forever.
      */
     public Http timeout(Duration timeout) {
-        this.timeout = timeout;
+        if (timeout != null && (timeout.isZero() || timeout.isNegative())) {
+            throw new IllegalArgumentException("timeout must be positive (or null): " + timeout);
+        }
+        this.timeout = clamp(timeout);
         this.timeoutSet = true;
         return this;
+    }
+
+    /** The longest timeout honoured; longer ones are clamped so deadline arithmetic can't overflow. */
+    static final long MAX_TIMEOUT_DAYS = 365;
+    private static final Duration MAX_TIMEOUT = Duration.ofDays(MAX_TIMEOUT_DAYS);
+    private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
+
+    private static Duration clamp(Duration d) {
+        return d != null && d.compareTo(MAX_TIMEOUT) > 0 ? MAX_TIMEOUT : d;
     }
 
     /**
@@ -122,7 +138,7 @@ public class Http {
         if (idleTimeout != null && idleTimeout.isNegative()) {
             throw new IllegalArgumentException("idleTimeout must not be negative: " + idleTimeout);
         }
-        this.idleTimeout = idleTimeout == null || idleTimeout.isZero() ? null : idleTimeout;
+        this.idleTimeout = idleTimeout == null || idleTimeout.isZero() ? null : clamp(idleTimeout);
         return this;
     }
 
@@ -223,7 +239,8 @@ public class Http {
      * a caller asking for bytes has nowhere to put an error body. (L7 — the asymmetry is
      * deliberate but was previously undocumented.)
      *
-     * <p>Timeouts (M8): {@link #timeout} (default 30s) bounds the whole exchange, headers and body,
+     * <p>Timeouts (M8): {@link #timeout} (default 30s, also when set to {@code null}: only
+     * {@link #stream()} may run without a total deadline) bounds the whole exchange, headers and body,
      * and {@link #idleTimeout} (default 30s) each wait for the next bytes of the body. Either
      * closes the connection and throws {@link StreamTimeoutException}. Raise {@code timeout} for a
      * large download on a slow link.
@@ -267,9 +284,12 @@ public class Http {
         }
     }
 
-    /** The timeouts of a buffered read: {@link #timeout} as the deadline (default 30s), plus the idle timeout. */
+    /**
+     * The timeouts of a buffered read: {@link #timeout} as the deadline, plus the idle timeout.
+     * A buffered read always has a deadline: {@code timeout(null)} means the 30s default here.
+     */
     private Watchdog bufferedWatchdog() {
-        return new Watchdog(this, timeout, true);
+        return new Watchdog(this, timeout != null ? timeout : DEFAULT_TIMEOUT, true);
     }
 
     /** One blocking step of a call: send, or read the body. */

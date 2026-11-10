@@ -1109,7 +1109,9 @@ boolean ok = Arrays.stream(InetAddress.getAllByName(host)).allMatch(Http::isPubl
   whole exchange, headers **and body**, and `.idleTimeout()` (default 30s) each wait for more
   body bytes. Either throws `Http.StreamTimeoutException`. A server that sends headers and then
   stalls or drips can't hold the thread. Raise `.timeout(...)` for a big download on a slow
-  link or a slow API.
+  link or a slow API. A buffered call always has a deadline: `.timeout(null)` means the 30s
+  default there (only `stream()`/`fetchEvents` run without one); zero or negative throws
+  `IllegalArgumentException`; over 365 days is clamped to 365 days.
 - `Storage`, `WebhookNotifier` and raw `java.net.http` don't apply this check. Details, and the
   narrow DNS-rebinding window that remains, in `docs/SECURITY.md` ("Server-Side Request Forgery").
 

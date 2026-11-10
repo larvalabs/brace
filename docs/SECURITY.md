@@ -581,6 +581,11 @@ few dozen such requests would exhaust the pool. That was the case for buffered f
 `fetchEvents` reads on a non-2xx status gets the same 30s default, though the event stream
 itself has no deadline unless you set one.
 
+A buffered call cannot be configured out of its deadline: `.timeout(null)` removes the deadline
+only for `stream()` and `fetchEvents`, and means the 30s default for every `fetch*` call. Zero
+or a negative duration throws `IllegalArgumentException`, and a duration over 365 days (for
+example `Duration.ofSeconds(Long.MAX_VALUE)`) is clamped to 365 days rather than overflowing.
+
 ### DNS rebinding: what remains
 
 An attacker who controls a domain's DNS can answer with a public address when it's checked and a

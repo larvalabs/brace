@@ -338,6 +338,9 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** A stalling body fails within the idle timeout; a slow-drip body fails at the
     total deadline; a normal large body is unaffected.
   - **Model: Opus 5.5.** Watchdog concurrency.
+  - **Review fixes** (`fix(security): M8 review fixes`). `timeout(null)` means the 30s default
+    for buffered calls (only `stream()` may run without a deadline); zero or negative throws;
+    durations over 365 days are clamped instead of overflowing.
 
 - [x] **M9: STARTTLS is opportunistic**, `Mailer.java:134, 182-186`
   - **What's wrong.** For `smtp://` the mailer sets `mail.smtp.starttls.enable` but never
