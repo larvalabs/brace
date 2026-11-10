@@ -292,7 +292,7 @@ public final class Analytics {
                 try {
                     flush();
                 } catch (Exception e) {
-                    Log.warn("analytics flush failed: " + e);
+                    Log.warn("analytics flush failed: " + Redactor.redactMessage(String.valueOf(e)));
                 }
             }
         });
@@ -323,7 +323,7 @@ public final class Analytics {
                 tally(verdict.wire, today());
             }
         } catch (RuntimeException e) {
-            Log.debug("analytics.observe_failed", Map.of("error", String.valueOf(e)));
+            Log.debug("analytics.observe_failed", Map.of("error", Redactor.redactMessage(String.valueOf(e))));
         }
     }
 
@@ -536,7 +536,7 @@ public final class Analytics {
      * {@link #storedPath(String)}, which also redacts values that look like secrets.
      */
     static String storedPath(Route route, String rawPath) {
-        if (route.paramNames().stream().noneMatch(Redactor::isSensitive)) return storedPath(rawPath);
+        if (route.paramNames().stream().noneMatch(Redactor::isSensitiveField)) return storedPath(rawPath);
         var pattern = segments(route.pattern());
         var actual = segments(rawPath);
         // The route matched this path, so the segment counts agree; if they somehow don't,
@@ -545,7 +545,7 @@ public final class Analytics {
         var sb = new StringBuilder();
         for (int i = 0; i < pattern.size(); i++) {
             String p = pattern.get(i);
-            boolean sensitive = p.startsWith("{") && p.endsWith("}") && Redactor.isSensitive(p.substring(1, p.length() - 1));
+            boolean sensitive = p.startsWith("{") && p.endsWith("}") && Redactor.isSensitiveField(p.substring(1, p.length() - 1));
             sb.append('/').append(sensitive ? p : actual.get(i));
         }
         return storedPath(sb.isEmpty() ? "/" : sb.toString());

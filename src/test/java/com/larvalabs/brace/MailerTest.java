@@ -104,6 +104,26 @@ class MailerTest {
         assertEquals(java.util.List.of(), mailerWarnings(), "no credentials, or TLS: no warning");
     }
 
+    @Test
+    void aMalformedSmtpUrlNeverPutsThePasswordInAnException() {
+        // M9 final review: a password with ^, a space or | made new URI(smtpUrl) throw a
+        // URISyntaxException whose message is the whole URL, chained as the cause of the send
+        // failure: the SMTP password ended up in the stored stack trace. Now the URL is parsed
+        // once at construction and the error names the setting, never the input, with no cause.
+        for (String password : java.util.List.of("pa^ss", "pa ss", "pa|ss", "pa#ss")) {
+            String url = "smtp://mailer:" + password + "-hunter2secret@smtp.example.com:587";
+            var e = assertThrows(IllegalArgumentException.class, () -> new Mailer(url), password);
+            var trace = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(trace));
+            assertFalse(trace.toString().contains("hunter2secret"), trace.toString());
+            assertFalse(trace.toString().contains("mailer:"), trace.toString());
+            assertNull(e.getCause(), "the URISyntaxException is never chained");
+            assertTrue(e.getMessage().contains("smtp.url") && e.getMessage().contains("percent-encode"), e.getMessage());
+        }
+        // Percent-encoded, the same password is accepted.
+        assertNotNull(new Mailer("smtp://mailer:pa%5Ess%20x%7C@smtp.example.com:587"));
+    }
+
     private static java.util.List<String> mailerWarnings() {
         return LogTap.snapshot().stream()
             .filter(e -> "WARN".equals(e.fields().get("level")))

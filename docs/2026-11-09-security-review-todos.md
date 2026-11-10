@@ -345,6 +345,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     SQLState (57014 and the like) on a connection that still passes `isValid` counts against the
     row instead of retaining the batch; a rejected row is retried once with its payload stripped
     (fixed placeholder message) so the count and regression signal survive.
+  - **Final review fixes** (`fix(security): M5 final review fixes`). L9: only a data-class
+    rejection (22xxx, 23xxx, 54xxx) is retried stripped, and the stripped write only adds the
+    count to an existing row, so a lock timeout followed by a successful retry no longer
+    replaces stored details with the placeholder. L10: a server-wide SQLState (25006 read-only,
+    53xxx, 57P0x, 58xxx, 08xxx) aborts the flush and keeps the batch uncounted whatever
+    `isValid` says, and so does a batch of two or more rows all failing with one non-data
+    SQLState; a single poisoned row beside healthy ones is still counted and dropped. Unit tests
+    in `ErrorStoreTest`; `ErrorStorePostgresIT` gains a read-only transaction window
+    (`SET TRANSACTION READ ONLY`) and a real 55P03 lock timeout.
 
 - [x] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches
@@ -383,6 +392,20 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `authkey`, `nonce` as substrings; `code`, `sig`, `otp` as the whole normalized name only.
     Tables of must-survive and must-redact values in `RedactorTest`; end to end in
     `ErrorStoreTest.secretBearingHeadersAndQueryValuesAreRedactedInStoredError`.
+  - **Final review fixes** (`fix(security): M6 final review fixes: …`). One free-form pass
+    (`Redactor.redactText`) for messages, header values, path segments and query values:
+    every `scheme://…` (any scheme, `jdbc:postgresql://` too), `<…>` and `uri=/…` goes through
+    `redactUrl` (userinfo always masked), sensitive `name=value` pairs lose their value up to
+    the next delimiter (no longer the next name), and every run of `[A-Za-z0-9_\-+/.~$%]` is
+    tested label by label (16+, a digit and a letter, not a UUID or short path), decoded up to
+    3 rounds; Java qualified names and hostnames with a common TLD are kept. `redactPath` checks
+    decoded and `;matrix` segments. `Forwarded` and `Via` left the verbatim list. Names match by
+    segment (`auth_code`, `verificationCode`, `passcode`; in transit also `pin`, `sid`,
+    `ticket`, `session`, `X-Auth`), and the short words no longer hit log fields or route
+    params (`isSensitive` vs `isSensitiveField`). `redact(Map)` is bounded at 64 levels and
+    100,000 values. Cost: a 16+ character hash label in a file name is redacted; a short path
+    (`/var/app/releases/20241105`) is no longer. Tables in `RedactorTest`, end to end in
+    `ErrorStoreTest.finalReviewSecretsDoNotReachTheStoreOrTheLogs`.
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current
@@ -722,6 +745,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     output (`Cli*.java`, `ProjectGenerator`, `ClaudeMdGenerator`), messages of exceptions thrown
     to the caller rather than written to a sink (`Http.failed`, `EventStream`, `Request`), and
     `BraceHandler`'s `stats.recordError`, which `Stats` already redacts.
+  - **Final review fixes** (`fix(security): L13 final review fixes`). Wrapped in
+    `Redactor.redactMessage`: `Analytics` flush-failure warning and `analytics.observe_failed`
+    debug event, `WsRegistry` `ws-broadcast-send-failed`, `PostgresBackend` cache-trim debug
+    line. Still raw, in files owned by other fixes, to wrap after the merge: `BraceHandler`
+    after-middleware warning, request-resource release warning and upload temp sweep warning
+    (`"…" + e`), `Request` upload temp-file release warning; and on stderr only,
+    `Brace` shutdown error and `HealthCheck` failure.
 
 - [x] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`
   - **Verified (angus-mail 2.0.5).** `"a@b.c, victim@x.y"` passes `@Email` and parses to two

@@ -167,7 +167,7 @@ class PostgresBackend implements CacheBackend {
                 trimToCap();
             } catch (RuntimeException e) {
                 // The value is stored; a failed trim is retried on the next check or sweep.
-                Log.debug("cache: trimming brace_cache to its cap failed: " + e.getMessage());
+                Log.debug("cache: trimming brace_cache to its cap failed: " + Redactor.redactMessage(e.getMessage()));
             } finally {
                 trimming.set(false);
             }

@@ -2015,98 +2015,178 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
 
 ## Error Store Redaction
 
-Brace scrubs error records at capture time (before they reach the database or
-`/ops/errors`). Two redaction passes run inside `BraceHandler` at the point the
-exception is caught.
+Brace scrubs error records at capture time, before they reach the database or
+`/ops/errors`: `BraceHandler` redacts the request path, query string, headers,
+exception message and stack trace at the point the exception is caught, and
+`ErrorStore.record` redacts the stack trace again. Everything here is in
+`Redactor`.
 
-The same value-shaped pass also runs **in the log and stats sinks themselves**:
-`Log.request`/`Log.error` redact the request path (and the exception message)
-before the entry reaches stdout or the `/ops/logs` ring buffer, and `Stats`
-redacts route keys and error messages before they are served on `/ops/status`.
-A reset token in a URL path is therefore scrubbed on every request — including
-successful ones — not only when an exception is thrown.
+The same passes also run **in the log and stats sinks themselves**:
+`Log.request`/`Log.error` redact the request path and the exception message
+before the entry reaches stdout or the `/ops/logs` ring buffer, every `Log`
+entry's fields are redacted by name, `Stats` redacts route keys, error messages
+and stack traces before they are served on `/ops/status`, and analytics stores
+redacted paths. A reset token in a URL path is therefore scrubbed on every
+request, including successful ones, not only when an exception is thrown.
 
-### Name-based redaction (query params, request headers, log fields)
+Two placeholders tell the passes apart: `[REDACTED]` means the value was
+replaced because of its **name** (or it was URL user info), `[redacted]`
+because of its **shape**.
 
-Query-string parameters, request headers and log fields whose names look
-sensitive have their values replaced with `[REDACTED]`. Matching is on the
-normalized name (lowercased, hyphens and underscores stripped):
+### Name-based redaction
 
-- **Substring match** for `authorization`, `cookie`, `password`, `passwd`,
-  `pwd`, `secret`, `token`, `apikey`, `bearer`, `credential`, `privatekey`,
-  `accesskey`, `sessionid`, `csrf`, `jwt`, `assertion`, `signature`, `authkey`
-  and `nonce` (`Redactor.SENSITIVE`). This deliberately over-redacts: a field
-  named `token_count` is also redacted. `Cf-Access-Jwt-Assertion`,
-  `client_assertion`, `X-Amz-Signature` and `X-Auth-Key` are caught here.
-- **Whole-name match** for the short names `code`, `sig` and `otp`
-  (`Redactor.SENSITIVE_EXACT`): `?code=` (an OAuth authorization code),
-  `?sig=` (an Azure SAS signature) and `?otp=` are redacted, while `zip_code`,
-  `status_code`, `encode`, `postcode`, `barcode`, `signal`, `design` and
-  `footprint` are not. This applies to log fields too: a log field named
-  exactly `code` is redacted.
+There are two name rules, because a short word such as `code` is a credential
+in a query string but ordinary data in a log field.
 
-Query parameter names are percent-decoded before matching (`%74oken=` is
-`token=`); a malformed escape is kept literally, never an error.
+| Rule | Applies to |
+|---|---|
+| **In transit** (`Redactor.isSensitive`) | query parameter names (percent-decoded first: `%74oken=` is `token=`), request header names, and `name=value` pairs found inside header values, URLs and path segments (`;jsessionid=`) |
+| **Fields** (`Redactor.isSensitiveField`) | structured log fields (every `Log` entry, through `Redactor.redact`, nested maps and lists included), analytics route parameter names (`/reset/{token}` is stored as `/reset/{token}`), and `name=value` pairs inside exception messages |
+
+Both rules match:
+
+- **A substring** of the normalized name (lowercased, `-` and `_` removed):
+  `authorization`, `cookie`, `password`, `passwd`, `pwd`, `secret`, `token`,
+  `apikey`, `bearer`, `credential`, `privatekey`, `accesskey`, `sessionid`,
+  `csrf`, `jwt`, `assertion`, `signature`, `authkey`, `nonce`
+  (`Redactor.SENSITIVE`). This deliberately over-redacts: `token_count` is
+  redacted too.
+- **An auth-paired `code`.** The name is split into segments on `_ - . [ ]`
+  and other punctuation and at camelCase boundaries, ignoring a leading `X-`.
+  A `code` segment is sensitive next to one of `auth`, `authorization`,
+  `authentication`, `oauth`, `verification`, `verify`, `verifier`, `reset`,
+  `otp`, `totp`, `hotp`, `sms`, `mfa`, `2fa`, `tfa`, `pin`, `pass`,
+  `password`, `invite`, `invitation`, `access`, `login`, `signin`, `confirm`,
+  `confirmation`, `activation`, `activate`, `recovery`, `backup`, `security`,
+  `magic`, `device`, `unlock` (`Redactor.CODE_QUALIFIERS`), and so is one of
+  those words fused with `code` (`passcode`, `authcode`, `otpcode`).
+
+The in-transit rule also matches a name that is exactly `code` (an OAuth
+authorization code; `X-Code` too), a segment `sig`, `otp`, `pin`, `sid`,
+`ticket` or `session` (`Redactor.TRANSIT_WORDS`), and a name whose last
+segment is `auth` (`X-Auth`, `X-Upstream-Auth`). The field rule instead
+matches only a field named exactly `otp`.
+
+| Name | In transit | Field |
+|---|---|---|
+| `token`, `api_key`, `X-Auth-Token`, `password`, `session_id`, `client_assertion` | redacted | redacted |
+| `auth_code`, `verificationCode`, `reset_code`, `otp_code`, `pin_code`, `device_code`, `code_verifier`, `passcode` | redacted | redacted |
+| `code`, `X-Code` | redacted | kept (`code:"card_declined"`, `/countries/{code}`) |
+| `sig`, `pin`, `sid`, `ticket`, `session`, `user_session`, `account_sid`, `sms_otp`, `X-Auth`, `X-Upstream-Auth` | redacted | kept |
+| `otp` | redacted | redacted |
+| `zip_code`, `status_code`, `error_code`, `country_code`, `currency_code`, `postal_code`, `promo_code`, `code_challenge`, `user_code` | kept | kept |
+| `postcode`, `barcode`, `encode`, `codec`, `signal`, `design`, `sigma`, `pinned`, `sessions`, `sidebar`, `tickets`, `author`, `authority`, `auth_method`, `X-Auth-Request-User`, `state` | kept | kept |
+
+`state` (the OAuth CSRF value) and `promo_code` are deliberately not
+sensitive. A malformed percent-escape in a name is kept literally, never an
+error.
 
 ### Value-shaped redaction
 
-High-entropy tokens are detected by shape and replaced with `[redacted]`
-(or the whole query value with `[REDACTED]`), regardless of field name. The
-heuristic (`Redactor.isSecretShaped`) treats a segment or
-whitespace/punctuation-delimited token as a secret when **all** of these hold:
+Free text (an exception message, a header value, a path segment, a query
+value) is scanned left to right by `Redactor.redactText`, in three passes at
+once:
 
-1. Length ≥ 16 characters.
-2. Every character is in the base64url-or-hex alphabet (`[A-Za-z0-9_\-+/=]`).
-3. Contains at least one ASCII digit **and** at least one ASCII letter (rules
-   out purely numeric IDs and purely alphabetic slugs).
+1. **Embedded URLs.** Every `scheme://…` (any scheme: `https`, `postgres`,
+   `jdbc:postgresql`, `redis`, `amqp`, `smtp`, `s3`…), every `</path?query>`
+   (a `Link` header), and a `/path` value after `name=` (`Refresh: 0;
+   url=/reset?token=…`, `Forwarded: uri="/reset?token=…"`) goes through
+   `redactUrl`: any `user:password@` becomes `[REDACTED]` whatever its shape,
+   the path through `redactPath`, the query and fragment through
+   `redactQuery`; scheme, host and port are kept. A URL ends at whitespace, a
+   quote, `< > \ ^ { } |`, and loses trailing `. , ; : ! ? ) ]`.
+2. **`name=value` pairs.** When the name before `=` is sensitive (the
+   in-transit rule, or the field rule inside exception messages), the value
+   becomes `[REDACTED]`: up to the closing quote if it is quoted, otherwise up
+   to whitespace or one of `& ; , " ' < > ( ) [ ] { } | \`. The next parameter
+   is never swallowed.
+3. **The run rule.** Every other maximal run of `[A-Za-z0-9_\-+/.~$%]` is
+   tested wherever it sits (next to a quote, a `<`, a full stop):
+   - A run holding `%` is percent-decoded up to 3 rounds (`%252F` is `/`); if
+     any decoded round has something to redact by these same rules, the whole
+     run becomes `[redacted]`.
+   - A JWT (two dots, three base64url parts, the outer two at least 10
+     characters) or a two-part `payload.signature` token (one dot, at least 20
+     base64url characters each side, a digit and a letter: the ops bearer
+     token's own shape) becomes `[redacted]` whole.
+   - A Java qualified name (three or more identifier labels starting with a
+     common root such as `java`, `com`, `org`, `io`:
+     `com.amazonaws.services.s3.model.AmazonS3Exception`) and a hostname (three
+     or more DNS labels ending in a common TLD such as `com`, `net`, `io`,
+     `internal`, `local`) are kept whole.
+   - Otherwise each **label** between `. ~ $ %` is redacted when **all** of
+     these hold: it is at least **16** characters of `[A-Za-z0-9_\-+/]`; it
+     contains an ASCII digit **and** an ASCII letter; it is not a UUID
+     (`8-4-4-4-12` hex); and it is not a short path (a label with `/` whose
+     `/`-pieces are all under 16 characters and none mixes upper case, lower
+     case and digits, such as `/var/app/releases/20241105`). The separators
+     are kept: `T.` is `[redacted].`, `/dl/T.pdf` is `/dl/[redacted].pdf`,
+     `SG.x.y` is `SG.[redacted].[redacted]`, `T~x` is `[redacted]~x`.
 
-Two dotted shapes are caught as special cases: JWTs (two dots dividing three
-base64url parts, the outer two at least 10 characters) and two-part
-`payload.signature` tokens (one dot, at least 20 base64url characters on each
-side, a digit and a letter: the ops bearer token's own shape). Any other
-dotted value (a file name, a hostname, a version) is never secret-shaped.
+`=` is not part of a run (it separates a name from its value, and base64
+padding is not secret). Recursion through URL-inside-URL values stops at 4
+levels; deeper content becomes `[redacted]`. All of it is linear in the input:
+the review's worst cases (64 KB and 1 MB of `%`, `&`, dots, `%25`, `=`, nested
+URLs) are a test.
 
 Where it runs:
 
 | Where | How |
 |---|---|
-| Request path (error record, logs, stats) | `redactPath`: each `/`-segment |
-| Exception message and stack trace | `redactMessage` / `redactStackTrace`: each token |
-| Query string (error record `requestDetail`, stats) | `redactQuery`: a value whose raw or percent-decoded form contains a secret-shaped token, or is a URL/path with a secret-shaped `/ ? & #` piece (`?next=/reset/<token>`), becomes `[REDACTED]`; a bare `?<token>` part too |
-| URL-valued request headers (`Referer`, `Origin`, `Location`, `Content-Location`, `X-Original-URL`, `X-Forwarded-Uri`, `X-Rewrite-URL`, `HX-Current-URL`) | `redactUrl`: path through `redactPath`, query and fragment through `redactQuery`, any `userinfo@` replaced; scheme, host and port kept. A value that is not a URL gets the free-form pass |
-| Other request headers | `redactValue`: like `redactMessage`, and a URL or path token with a secret-shaped piece is replaced. A JWT in `X-Amzn-Oidc-Data` or `Sec-WebSocket-Protocol` is caught here |
-| Protocol-metadata headers | **kept verbatim**: `Accept*`, `Content-Type`, `Content-Length`, `Host`, `User-Agent`, `If-None-Match` and the other conditional headers, `X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `Via`, request ids and trace context (`X-Request-Id`, `X-Correlation-Id`, `traceparent`, `X-Amzn-Trace-Id`, `Cf-Ray`, B3), `Sec-Fetch-*`, `Sec-Ch-*`, the WebSocket key/version, and htmx's request headers (`Redactor.VERBATIM_HEADERS`). Their values are never a user's credential, and the shape rule would misfire on an ETag, a multipart boundary or a request id |
+| Request path (error record, logs, stats, analytics) | `redactPath`: each `/`-segment gets the free-form pass with the in-transit rule. A segment is also tested percent-decoded (up to 3 rounds), and a `;name=value` matrix parameter is redacted by name (`;jsessionid=`, `;token=` become `[REDACTED]`) or by shape. A path whose segments are all under 16 characters and that has no `=` is returned at once |
+| Exception message and stack trace | `redactMessage` / `redactStackTrace`: the free-form pass with the field rule for pairs. In a stack trace every message line (`Caused by:`, `Suppressed:`, multi-line messages) is redacted; frame lines (`\tat …`, `\t... N more`) are kept |
+| Query string (error record `requestDetail`, stats) | `redactQuery`: a part whose percent-decoded name is sensitive (in-transit rule), or whose value, as sent or after up to 3 rounds of decoding, has anything the free-form pass would redact (a secret-shaped run, a URL with something to redact such as `?next=https%3A…%3Ftoken%3D…`, a sensitive pair), becomes `name=[REDACTED]`; a bare `?<token>` part becomes `[REDACTED]` |
+| URL-valued request headers (`Referer`, `Origin`, `Location`, `Content-Location`, `X-Original-URL`, `X-Forwarded-Uri`, `X-Rewrite-URL`, `HX-Current-URL`) | `redactUrl`, as in pass 1. A value that is not a URL gets the free-form pass |
+| Other request headers, `Forwarded` and `Via` included | `redactValue`: a value that is one URL or path with no whitespace goes through `redactUrl` (or becomes `[redacted]` whole if it is secret-shaped as a whole, since a standard-base64 secret can start with `/`); anything else gets the free-form pass with the in-transit rule. `Forwarded: for=…;by=…;proto=…;host=…` stays readable while its `uri="…"` is redacted; a JWT in `X-Amzn-Oidc-Data` or `Sec-WebSocket-Protocol` (`base64url.bearer.authorization.k8s.io.<token>`) is caught |
+| Protocol-metadata headers | **kept verbatim**: `Accept`, `Accept-Charset`, `Accept-Encoding`, `Accept-Language`, `Cache-Control`, `Connection`, `Content-Encoding`, `Content-Language`, `Content-Length`, `Content-Type`, `DNT`, `Expect`, `Host`, `HTTP2-Settings`, the conditional headers (`If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range`), `Keep-Alive`, `Pragma`, `Priority`, `Range`, `TE`, `Upgrade`, `Upgrade-Insecure-Requests`, `User-Agent`, `X-Requested-With`; exactly four of the `X-Forwarded-*` family (`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Port`, `X-Forwarded-Proto`) plus `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP`, `CF-IPCountry`, `CF-Visitor`; request ids and trace context (`X-Request-Id`, `X-Correlation-Id`, `Request-Id`, `traceparent`, `tracestate`, `Cf-Ray`, `X-Amzn-Trace-Id`, `X-Cloud-Trace-Context`, B3); `Sec-Fetch-*`, `Sec-Ch-*`; the WebSocket key, version and extensions; htmx's request headers (`Redactor.VERBATIM_HEADERS`). Their values are never a user's credential, and the shape rule would misfire on an ETag, a multipart boundary or a request id. Any other `X-Forwarded-*` header gets the free-form pass |
+| Log fields | by name only (field rule), recursing into nested maps and lists. Nesting deeper than 64 levels, or past 100,000 copied values (a map that contains itself, a shared child under many keys), becomes `[nested too deep]` |
 
 The request headers are redacted by `Redactor.redactHeaders`, in that order:
-a sensitive name first, then the URL, verbatim or free-form rule.
+a sensitive name (in-transit rule) first, then the URL, verbatim or free-form
+rule.
 
 **What is intentionally kept visible:**
 
 | What | Why |
 |---|---|
 | UUIDs (`8-4-4-4-12` hex), anywhere | Usually record identifiers, not bearer secrets; needed for debugging. A request id that is not a UUID is kept only in the request-id headers above |
-| Purely numeric segments and values | Page IDs, order numbers, user IDs |
-| Short values (< 16 chars) | Route labels, action names, short hex such as a fingerprint `app.3f9a1c2b.js` (any dotted file name survives, whatever its hash length) |
-| Email addresses | PII, not a credential; `@` and `.` are outside the token alphabet |
+| Purely numeric values and runs | Page IDs, order numbers, user IDs |
+| Short labels (< 16 chars) | Route labels, action names, dotted versions (`4.12.0-beta.3+build.20241105`), file names whose labels are short (`app.3f9a1c2b.js`, Brace's own `?v=a1b2c3d4` fingerprint) |
+| Java qualified names, hostnames ending in a common TLD | `com.amazonaws.services.s3.model.AmazonS3Exception`, `my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com`, a CloudFront `Via` |
+| Short paths | `/srv/app/uploads/2024/11/report-final.pdf`, `/var/app/releases/20241105` (each piece short, none mixing upper case, lower case and digits) |
+| Email addresses | PII, not a credential; `@` is outside the run alphabet and each label is short |
 | Comma- or `#`-separated lists (`#ff0000,#00ff00`) | Each item is short |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
 
-What the shape rule cannot tell from a secret, and so redacts: a 16+ character
-run of letters, digits, `-` and `_` with both a digit and a letter, for example a
-dated slug `2024-black-friday-sale`, a dash-joined hex list
-`ff0000-00ff00-0000ff`, a 16+ character hex hash, or an absolute path with a
-digit in a free-form header (`/var/app/releases/20241105`). These look exactly
-like a grouped recovery code or a standard-base64 secret.
+**Known over-redaction.** What the rules cannot tell from a secret, and so
+redact:
 
-The same pass runs over stored **stack traces** (`Redactor.redactStackTrace`, at
-`Stats.recordError` and `ErrorStore.record`): every message line, including `Caused by:` and
-`Suppressed:` lines and multi-line messages, is redacted, and frame (`at …`) lines are kept
-as is. A message redacted on its own used to reappear verbatim in the trace.
+- A 16+ character label of letters, digits, `-`, `_`, `+` or `/` with both a
+  digit and a letter: a dated slug `2024-black-friday-sale`, a dash-joined hex
+  list `ff0000-00ff00-0000ff`, a 16+ character hex hash (a commit SHA in a
+  message). These look exactly like a grouped recovery code or a token.
+- **A content hash of 16 or more characters in a file name**:
+  `/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as
+  `/assets/[redacted].css`, and so is a bundler chunk such as
+  `ProductDetail-a1B2c3D4.js` (the label is 22 characters). Chosen
+  deliberately: such a name cannot be told from a download token in
+  `/dl/<token>.pdf`. The cost is cosmetic, in error records and logs only.
+- A dotted name that is neither a qualified Java name with a known root nor a
+  hostname ending in a listed TLD: a class name alone (`UTF8StreamJsonParser`),
+  a two-label host (`abcdef1234567890xyz.com`).
+- A `/`-joined value with a long or mixed-case-and-digit piece
+  (`/files/Ab3dE9fG/raw` as a whole header value), since a standard-base64
+  secret can contain `/`.
+- In transit, names that only look sensitive: `ticket_id`, `session_count`,
+  `pin=1`, `otp_enabled`, `sig_alg`, `account_sid` (an identifier), and any
+  name ending in `auth`. In exception messages, `token=…` or `password=…` text
+  that is not a credential.
 
-The heuristic is conservative by design. An over-eager redactor makes error
-records useless. If your application routes embed raw bearer tokens or reset
-secrets in path positions, consider moving them to opaque database-lookup keys
-so the route retains meaning even after redaction.
+If your application routes embed raw bearer tokens or reset secrets in path
+positions, consider moving them to opaque database-lookup keys so the route
+keeps its meaning after redaction. Exclude such routes from analytics with
+`.analytics(false)` when the parameter name does not say it is secret
+(`/invite/{code}`).
 
 ### One bad record cannot stall the store
 
@@ -2120,18 +2200,33 @@ block the others:
   with the client-chosen HTTP method.
 - Each upsert in a flush runs under its own savepoint. A row the database rejects is rolled
   back alone, and the rest of the batch commits.
-- A rejected row is retried once, in the same flush, with its payload stripped: the message is
-  replaced by a fixed placeholder (`[details not stored: the database rejected this error
-  record]`, no request-derived text) and the stack trace, request detail, queries and headers
-  are left empty. The error kind's count and the regression notification survive. Only if that
-  retry is rejected too is the entry retried on later flushes, and dropped after 5 rejected
-  flushes.
-- A connection-level failure (database down, pool exhausted, failure to open the session or
-  begin the transaction) is not blamed on any entry. The whole batch is kept and retried,
-  bounded by the 1,000-kind pending buffer as before. A row error whose SQLState is in a
-  connection-level class (`08`, `53`, `57`, `40` or `25`) counts as a connection failure only
-  when the connection also fails `isValid`; on a live connection (for example `57014`, a
-  statement timeout on one huge row) it is a row rejection like any other.
+- A row rejected for its **data** (SQLState class `22` data exception, `23` integrity
+  constraint, `54` program limit) is retried once, in the same flush, with its payload
+  stripped: a new error kind is inserted with a fixed placeholder message (`[details not
+  stored: the database rejected this error record]`, no request-derived text) and an empty
+  stack trace, request detail, queries and headers; an error kind that already has a row only
+  gets its count and last-seen time updated, so its stored details are never replaced by the
+  placeholder. The count and the regression notification survive. Any other row rejection (a
+  lock timeout `55P03`, a statement timeout, an error without a SQLState) is not retried
+  stripped: the full record is retried on the next flush.
+- A rejected entry is retried on later flushes, and dropped after 5 rejected flushes.
+- Not blamed on any entry, so the whole batch is kept, uncounted, and retried, bounded by the
+  1,000-kind pending buffer:
+  - a connection-level failure (database down, pool exhausted, failure to open the session or
+    begin the transaction);
+  - a server-wide SQLState on any row, whether or not the connection still passes `isValid`:
+    `25006` (read-only transaction, as during a failover), class `53` (disk full, out of
+    memory, too many connections), `57P01` to `57P05` (shutdown), class `58` (system error),
+    class `08` (connection);
+  - a batch of two or more rows that **all** fail with the same SQLState that is not a data
+    error (a lock timeout on every row);
+  - another connection-classed SQLState (`40`, other `57`, other `25`) when the connection also
+    fails `isValid`.
+
+  On a live connection, a row error beside healthy rows (for example `57014`, a statement
+  timeout on one huge row) is a row rejection like any other, so a single poisoned row is still
+  isolated and eventually dropped. A lone row in its batch failing with such a state is counted
+  too.
 - Failures are logged at most once a minute, naming the exception class, SQLState and the error
   type of any dropped entry. Request-derived content (messages, paths, headers) is never logged.
 
@@ -2163,6 +2258,12 @@ on an `smtp+plain://` URL are allowed but logged as a warning once, when the `Ma
 constructed (the host is named; the user and password never are), because without TLS the AUTH
 exchange is cleartext. The scheme is compared case-insensitively (`SMTPS://` is implicit TLS).
 Dev mode (no SMTP URL) only captures mail and is unaffected.
+
+The SMTP URL is parsed once, when the `Mailer` is constructed. A malformed one (a password with
+an unencoded `^`, space, `|` or `#`) throws `IllegalArgumentException` there, naming the
+`smtp.url` setting and asking for percent-encoding, but never including the URL or chaining the
+parser's exception: its message is the whole URL, password included, and used to reach the
+error store's stack trace as the cause of every failed send.
 
 `Mailer.to(...)` takes exactly one address and parses it strictly, so a recipient taken from a form
 cannot add recipients (`"a@b.c, victim@x.y"` throws). The same holds for `cc(...)`, the

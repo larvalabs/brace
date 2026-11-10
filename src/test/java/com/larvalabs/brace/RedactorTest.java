@@ -252,7 +252,8 @@ class RedactorTest {
         String redacted = Redactor.redactStackTrace(trace);
         assertFalse(redacted.contains(secret), "Caused by: message must be redacted");
         assertFalse(redacted.contains(other), "Suppressed: message must be redacted");
-        assertTrue(redacted.contains("Caused by: java.sql.SQLException: connect failed password=[redacted]"), redacted);
+        // password= is a sensitive name, so its value is replaced by name (upper case placeholder).
+        assertTrue(redacted.contains("Caused by: java.sql.SQLException: connect failed password=[REDACTED]"), redacted);
         assertTrue(redacted.contains("RuntimeException: outer"));
     }
 
@@ -365,7 +366,7 @@ class RedactorTest {
         Map.entry("Referer", "https://example.com/search?q=hello+world&page=2&id=12345&email=a@b.c&lang=en-US"),
         Map.entry("Referer", "https://example.com/items/550e8400-e29b-41d4-a716-446655440000/edit"),
         Map.entry("Referer", "https://cdn.example.com/assets/app.3f9a1c2b.js"),
-        Map.entry("Referer", "https://cdn.example.com/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css"),
+        // (main-<24 hex>.css is now redacted on purpose: contentHashesInFileNamesAreRedactedDeliberately)
         Map.entry("Referer", "https://example.com/docs/getting-started#installation"),
         Map.entry("Referer", "http://localhost:8080/"),
         Map.entry("Origin", "https://app.example.com"),
@@ -402,7 +403,7 @@ class RedactorTest {
             {"X-Api", "v1 " + RANDOM32, "v1 [redacted]"},
             {"Sec-WebSocket-Protocol", "bearer, " + JWT, "bearer, [redacted]"},
             {"X-Callback", "https://hooks.example.com/notify/" + HEX32, "https://hooks.example.com/notify/[redacted]"},
-            {"X-Callback", "see https://hooks.example.com/notify/" + HEX32, "see https:[redacted]"},
+            {"X-Callback", "see https://hooks.example.com/notify/" + HEX32, "see https://hooks.example.com/notify/[redacted]"},
             // A free-form header holding a bare path: a standard-base64 secret can start with '/',
             // so a path that is secret-shaped as a whole is replaced whole (as redactMessage does).
             {"X-Path", "/files/" + RANDOM32 + "/raw", "[redacted]"},
@@ -459,6 +460,11 @@ class RedactorTest {
         assertEquals("colors=[REDACTED]", Redactor.redactQuery("colors=ff0000-00ff00-0000ff"));
         assertEquals("hash=[REDACTED]", Redactor.redactQuery("hash=3f9a1c2b4d5e6f70"));
         assertEquals("/blog/[redacted]", Redactor.redactPath("/blog/2024-black-friday-sale"));
+        // Final review costs (documented in docs/SECURITY.md, "Known over-redaction").
+        assertEquals("/assets/[redacted].js", Redactor.redactPath("/assets/ProductDetail-a1B2c3D4.js"));
+        assertEquals("[redacted]", Redactor.redactHeaders(Map.of("X-Path", "/files/Ab3dE9fG/raw")).get("X-Path"));
+        assertEquals("[redacted] failed", Redactor.redactMessage("UTF8StreamJsonParser failed"));
+        assertEquals("ticket_id=[REDACTED]&sig_alg=[REDACTED]", Redactor.redactQuery("ticket_id=4521&sig_alg=hs256"));
         // An email is PII, not a credential: kept, as before.
         assertEquals("email=a%40b.c", Redactor.redactQuery("email=a%40b.c"));
     }
@@ -508,6 +514,327 @@ class RedactorTest {
         assertEquals("José", Redactor.lenientDecode("Jos%C3%A9"));
         assertEquals("�", Redactor.lenientDecode("%C3"));
         assertEquals("é 😀", Redactor.lenientDecode("é%20😀"));
+    }
+
+    // ---- Final review (2026-11): runs, URLs in messages, encoded and matrix path segments ----
+
+    /** A 24-character random token, the reviewer's T. */
+    static final String T = "Tt1aB2cD3eF4gH5iJ6kL7mN8";
+
+    @Test
+    void urlsInsideMessagesGoThroughTheUrlRedactor() {
+        // M3: every scheme://... in a message is redacted like a Referer: path segments, query,
+        // fragment, and any user:password@ (always masked, whatever its shape).
+        String[][] cases = {
+            {"Server returned HTTP response code: 500 for URL: https://api.partner.example/v1/reset/Uu1aB2cD3eF4gH5iJ6kL7mN8",
+                "Server returned HTTP response code: 500 for URL: https://api.partner.example/v1/reset/[redacted]"},
+            {"GET https://api.example.com/v1/items?api_key=Mm1aB2cD3eF4gH5iJ6kL7mN8&expand=1 failed",
+                "GET https://api.example.com/v1/items?api_key=[REDACTED]&expand=1 failed"},
+            {"Connection to postgres://dbuser:Ww1aB2cD3eF4gH5iJ6kL7@db.internal:5432/app refused",
+                "Connection to postgres://[REDACTED]@db.internal:5432/app refused"},
+            {"bad url jdbc:postgresql://db.internal:5432/app?user=app&password=hunter2",
+                "bad url jdbc:postgresql://db.internal:5432/app?user=app&password=[REDACTED]"},
+            {"redis://:hunter2@cache.internal:6379 unreachable", "redis://[REDACTED]@cache.internal:6379 unreachable"},
+            {"amqp://guest:guest@mq:5672/vhost", "amqp://[REDACTED]@mq:5672/vhost"},
+            {"smtp://mailer:pw@smtp.example.com:587 rejected AUTH", "smtp://[REDACTED]@smtp.example.com:587 rejected AUTH"},
+            {"NoSuchKey s3://bucket/exports/" + T + "/data.csv", "NoSuchKey s3://bucket/exports/[redacted]/data.csv"},
+            {"failed (see https://x.example/reset/" + T + ").", "failed (see https://x.example/reset/[redacted])."},
+            {"callback https://x.example/cb#access_token=abc&expires_in=3600",
+                "callback https://x.example/cb#access_token=[REDACTED]&expires_in=3600"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+            // and so in every message line of a stored stack trace
+            assertEquals("java.io.IOException: " + c[1] + "\n\tat a.B.c(B.java:1)\n",
+                Redactor.redactStackTrace("java.io.IOException: " + c[0] + "\n\tat a.B.c(B.java:1)\n"));
+        }
+    }
+
+    @Test
+    void aSecretRunIsRedactedWhateverPunctuationSurroundsIt() {
+        // M4: the shape test ran on whole delimiter-separated tokens, so one adjacent character
+        // ('.', '<', '~', '!') hid the token. Now each maximal run of the secret alphabet is tested,
+        // and a dotted token is tested label by label.
+        assertEquals("Rejected API key [redacted].", Redactor.redactMessage("Rejected API key " + T + "."));
+        assertEquals("<[redacted]>", Redactor.redactMessage("<" + T + ">"));
+        assertEquals("[redacted]~x", Redactor.redactHeaders(Map.of("X-Custom", T + "~x")).get("X-Custom"));
+        assertEquals("x=[REDACTED]", Redactor.redactQuery("x=" + T + "!"));
+        assertEquals("x=[REDACTED]", Redactor.redactQuery("x=" + T + ".json"));
+        assertEquals("next=[REDACTED]", Redactor.redactQuery("next=%252Freset%252F" + T));
+        assertEquals("/dl/[redacted].pdf", Redactor.redactPath("/dl/" + T + ".pdf"));
+        String sendgrid = "SG.Aa1bB2cC3dD4eE5fF6gG7.Hh7iI8jJ9kK0lL1mM2nN3oO4pP5qQ6rR7sS8tT9uU0vV1";
+        assertEquals("key SG.[redacted].[redacted] revoked", Redactor.redactMessage("key " + sendgrid + " revoked"));
+        assertEquals("SG.[redacted].[redacted]", Redactor.redactHeaders(Map.of("X-Key", sendgrid)).get("X-Key"));
+    }
+
+    @Test
+    void percentEncodedAndMatrixPathSecretsAreRedacted() {
+        // M5: a segment is tested raw and percent-decoded (up to three rounds), and ;name=value
+        // matrix parameters are redacted by name and by shape.
+        assertEquals("/reset/[redacted]", Redactor.redactPath("/reset/Xx1aB2cD3eF4%2BgH5iJ6kL7%3D%3D"));
+        assertEquals("/reset/[redacted]", Redactor.redactPath("/reset/Xx1aB2cD3eF4%252BgH5iJ6kL7"));
+        assertEquals("/reset;token=[REDACTED]", Redactor.redactPath("/reset;token=" + T));
+        assertEquals("/reset;token=[REDACTED]/confirm", Redactor.redactPath("/reset;token=abc/confirm"));
+        assertEquals("/app;jsessionid=[REDACTED]", Redactor.redactPath("/app;jsessionid=0123ABCD"));
+        assertEquals("/x;v=[redacted];page=2", Redactor.redactPath("/x;v=" + T + ";page=2"));
+        assertEquals("https://app.example.com/cart;jsessionid=[REDACTED]?step=2",
+            Redactor.redactHeaders(Map.of("Referer", "https://app.example.com/cart;jsessionid=0123ABCD?step=2")).get("Referer"));
+        for (String ok : List.of("/files/report%20final.pdf", "/users/Jos%C3%A9", "/a%2Fb/c", "/search;page=2",
+                "/posts/2024/11/hello-world", "/assets/app.3f9a1c2b.js", "/items/550e8400-e29b-41d4-a716-446655440000",
+                "/v1/users/42/orders/12345", "/%E2%9C%93/done")) {
+            assertEquals(ok, Redactor.redactPath(ok), ok);
+        }
+    }
+
+    @Test
+    void urlsAndCredentialsInsideOtherHeadersAreRedacted() {
+        // M6: Forwarded and Via are no longer kept verbatim; embedded URLs (absolute, <...>, after
+        // url= or uri=) go through redactUrl, and name=value pairs are tested by name.
+        String[][] cases = {
+            {"Link", "<https://app.example.com/reset?token=abc123>; rel=\"prev\"",
+                "<https://app.example.com/reset?token=[REDACTED]>; rel=\"prev\""},
+            {"Link", "</reset?token=abc123>; rel=\"next\"", "</reset?token=[REDACTED]>; rel=\"next\""},
+            {"Forwarded", "for=1.2.3.4;uri=\"/reset?token=hunter2pw\"", "for=1.2.3.4;uri=\"/reset?token=[REDACTED]\""},
+            {"Forwarded", "for=1.2.3.4;by=10.0.0.1;proto=https;uri=\"/reset/" + T + "\"",
+                "for=1.2.3.4;by=10.0.0.1;proto=https;uri=\"/reset/[redacted]\""},
+            {"Sec-WebSocket-Protocol", "base64url.bearer.authorization.k8s.io.Zx81kLm02PqR7sTuV4wXy9AbCd",
+                "base64url.bearer.authorization.k8s.io.[redacted]"},
+            {"Refresh", "0; url=https://app.example.com/reset?token=hunter2pw",
+                "0; url=https://app.example.com/reset?token=[REDACTED]"},
+            {"Refresh", "0; url=/reset?token=hunter2pw", "0; url=/reset?token=[REDACTED]"},
+            {"X-Upstream-Info", "user=bob password=hunter2Hdr", "user=bob password=[REDACTED]"},
+            {"X-Upstream-Info", "user=bob; password=\"hunter 2\"; realm=x", "user=bob; password=\"[REDACTED]\"; realm=x"},
+            {"Via", "1.1 proxy.example.com, 1.1 cache (" + T + ")", "1.1 proxy.example.com, 1.1 cache ([redacted])"},
+            // nit: the value boundary: a redacted value no longer swallows the next parameter name
+            {"X-Params", "a=" + T + "&b=2", "a=[redacted]&b=2"},
+            {"X-Params", "a=" + T + ";b=2", "a=[redacted];b=2"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[2], Redactor.redactHeaders(Map.of(c[0], c[1])).get(c[0]), c[0] + ": " + c[1]);
+        }
+    }
+
+    /** Header values the final-review rules must keep (in addition to HEADERS_THAT_SURVIVE). */
+    static final List<Map.Entry<String, String>> MORE_HEADERS_THAT_SURVIVE = List.of(
+        Map.entry("Forwarded", "for=\"[2001:db8:cafe::17]:4711\";by=203.0.113.43;proto=https"),
+        Map.entry("Forwarded", "for=192.0.2.60;proto=http;by=203.0.113.43, for=198.51.100.17"),
+        Map.entry("Via", "1.1 vegur"),
+        Map.entry("Via", "1.1 varnish (Varnish/6.0), 2.0 2f8c1e4a9b3d7f6e5a4c3b2a1f0e9d8c.cloudfront.net (CloudFront)"),
+        Map.entry("Link", "<https://cdn.example.com/app.3f9a1c2b.css>; rel=preload; as=style"),
+        Map.entry("X-Upstream-Info", "user=bob; realm=\"Example Realm\"; region=eu-west-1"),
+        Map.entry("X-Lb", "my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com"),
+        Map.entry("X-Error-Class", "com.amazonaws.services.s3.model.AmazonS3Exception"),
+        Map.entry("X-Note", "see https://example.com/docs/getting-started#install, then retry"),
+        Map.entry("X-Client-Path", "/var/app/releases/20241105/public"));
+
+    @Test
+    void moreOrdinaryHeadersSurvive() {
+        for (var h : MORE_HEADERS_THAT_SURVIVE) {
+            var out = Redactor.redactHeaders(Map.of(h.getKey(), h.getValue()));
+            assertEquals(h.getValue(), out.get(h.getKey()), h.getKey() + ": " + h.getValue());
+        }
+    }
+
+    /** Messages that must come back unchanged under the run rule. */
+    static final List<String> MESSAGES_THAT_SURVIVE = List.of(
+        "Caused by: com.amazonaws.services.s3.model.AmazonS3Exception: Access Denied",
+        "Unexpected end-of-input: com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+        "UnknownHostException: my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com",
+        "connect timed out to db.internal:5432 after 10000ms",
+        "Row 550e8400-e29b-41d4-a716-446655440000 was updated by another transaction",
+        "Version 4.12.0-beta.3+build.20241105 is not supported",
+        "File not found: /srv/app/uploads/2024/11/report-final.pdf",
+        "For input string: \"12345678901234567890\"",
+        "duplicate key value violates unique constraint \"users_email_key\"",
+        "Expected 3 arguments but got 2 (see https://example.com/docs/api#limits).",
+        "rate limited, 100% of quota used",
+        "Template app.3f9a1c2b.js not found");
+
+    @Test
+    void ordinaryMessagesSurvive() {
+        for (String m : MESSAGES_THAT_SURVIVE) {
+            assertEquals(m, Redactor.redactMessage(m), m);
+        }
+    }
+
+    @Test
+    void contentHashesInFileNamesAreRedactedDeliberately() {
+        // A content hash of 16+ characters in a file name cannot be told from a download token
+        // (/dl/<token>.pdf), so it is redacted; short fingerprints (Brace's own ?v=, app.3f9a1c2b.js)
+        // survive. The cost is cosmetic: an error record shows /assets/[redacted].css.
+        assertEquals("/assets/[redacted].css", Redactor.redactPath("/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css"));
+        assertEquals("https://cdn.example.com/assets/[redacted].css", Redactor.redactHeaders(
+            Map.of("Referer", "https://cdn.example.com/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css")).get("Referer"));
+    }
+
+    // ---- Final review (2026-11): name segments (L11) and the field rule (L12) ----
+
+    /** Names {@link Redactor#isSensitive} (query strings, headers, pairs in transit) must match. */
+    static final List<String> STRICT_NAMES_THAT_MATCH = List.of(
+        // whole-name and auth-paired "code"
+        "code", "Code", "X-Code", "verification_code", "verificationCode", "VerificationCode", "auth_code",
+        "authCode", "authcode", "reset_code", "resetCode", "otp_code", "sms_code", "mfa_code", "2fa_code",
+        "pin_code", "invite_code", "access_code", "login_code", "confirm_code", "confirmation_code",
+        "activation_code", "recovery_code", "backup_code", "security_code", "magic_code", "device_code",
+        "code_verifier", "user[auth_code]", "passcode", "pass_code", "Passcode",
+        // short words as a whole segment
+        "pin", "user_pin", "new-pin", "session", "user_session", "session_id", "sessionId", "sid", "account_sid",
+        "ticket", "service_ticket", "sig", "SIG", "url_sig", "otp", "sms_otp",
+        // auth as the last segment
+        "X-Auth", "X-Upstream-Auth", "Proxy-Auth", "basic_auth",
+        // the substring list (unchanged)
+        "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce");
+
+    /** Names {@link Redactor#isSensitive} must NOT match. */
+    static final List<String> STRICT_NAMES_THAT_DONT = List.of(
+        "zip_code", "zipcode", "status_code", "error_code", "country_code", "country-code", "currency_code",
+        "postal_code", "promo_code", "language_code", "exit_code", "http_code", "response_code", "product_code",
+        "code_challenge", "user_code", "postcode", "barcode", "encode", "codec", "signal", "design", "assign",
+        "sigma", "footprint", "hotpath", "otpauth_uri", "pinned", "is_pinned", "spin", "pinterest", "sessions",
+        "sidebar", "side", "tickets", "author", "authority", "auth_method", "auth_provider", "oauth_provider",
+        "X-Auth-Request-User", "state", "username", "count", "path", "monkey");
+
+    /** Names {@link Redactor#isSensitiveField} (log fields, route params) must match. */
+    static final List<String> FIELD_NAMES_THAT_MATCH = List.of(
+        "password", "token", "api_key", "secret", "csrf", "jwt", "sessionId", "session_id", "X-Auth-Token",
+        "auth_code", "verification_code", "verificationCode", "reset_code", "pin_code", "passcode", "otp",
+        "otp_code", "code_verifier", "device_code");
+
+    /** Names {@link Redactor#isSensitiveField} must NOT match: the short words that are ordinary data in logs and routes. */
+    static final List<String> FIELD_NAMES_THAT_DONT = List.of(
+        "code", "Code", "sig", "pin", "session", "sid", "ticket", "state", "X-Auth", "otp_enabled",
+        "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user");
+
+    @Test
+    void sensitiveNamesMatchBySegment() {
+        for (String n : STRICT_NAMES_THAT_MATCH) assertTrue(Redactor.isSensitive(n), "strict should match: " + n);
+        for (String n : STRICT_NAMES_THAT_DONT) assertFalse(Redactor.isSensitive(n), "strict should not match: " + n);
+        for (String n : FIELD_NAMES_THAT_MATCH) assertTrue(Redactor.isSensitiveField(n), "field should match: " + n);
+        for (String n : FIELD_NAMES_THAT_DONT) assertFalse(Redactor.isSensitiveField(n), "field should not match: " + n);
+    }
+
+    @Test
+    void shortSecretsUnderMissedNamesAreRedactedInTransit() {
+        // L11: short secrets under names the old list missed.
+        for (String name : List.of("verification_code", "auth_code", "reset_code", "passcode", "pin", "session",
+                "sid", "ticket")) {
+            assertEquals(name + "=[REDACTED]&page=2", Redactor.redactQuery(name + "=hunter2&page=2"), name);
+        }
+        assertEquals("[REDACTED]", Redactor.redactHeaders(Map.of("X-Auth", "hunter2pw")).get("X-Auth"));
+        assertEquals("[REDACTED]", Redactor.redactHeaders(Map.of("X-Upstream-Auth", "password=hunter2Hdr")).get("X-Upstream-Auth"));
+        // a short token nested in an encoded URL value
+        assertEquals("next=[REDACTED]",
+            Redactor.redactQuery("next=https%3A%2F%2Fapp.example.com%2Freset%3Ftoken%3Dhunter2pw"));
+        assertEquals("next=[REDACTED]", Redactor.redactQuery("next=%2Freset%3Fcode%3Dhunter2"));
+        // ordinary names and nested URLs survive
+        assertEquals("zip_code=94107&status_code=404&next=%2Fposts%3Fpage%3D2",
+            Redactor.redactQuery("zip_code=94107&status_code=404&next=%2Fposts%3Fpage%3D2"));
+    }
+
+    @Test
+    void logFieldsAndRouteParamsUseTheFieldRule() {
+        // L12: code/sig/pin/session/... are credentials in a query string, but ordinary data in a
+        // structured log field or a route parameter.
+        LogTap.clear();
+        Log.info("charge failed", Map.of("code", "card_declined", "auth_code", "hunter2", "session", "s-42"));
+        var entry = LogTap.snapshot().stream()
+            .filter(e -> "charge failed".equals(e.fields().get("message")))
+            .findFirst().orElseThrow();
+        assertEquals("card_declined", entry.fields().get("code"));
+        assertEquals("s-42", entry.fields().get("session"));
+        assertEquals(Redactor.PLACEHOLDER, entry.fields().get("auth_code"));
+        var countries = new Route("GET", "/countries/{code}", (Handler) r -> null, null);
+        assertEquals("/countries/US", Analytics.storedPath(countries, "/countries/US"));
+        var verify = new Route("GET", "/verify/{verification_code}", (Handler) r -> null, null);
+        assertEquals("/verify/{verification_code}", Analytics.storedPath(verify, "/verify/123456"));
+        var reset = new Route("GET", "/reset/{token}", (Handler) r -> null, null);
+        assertEquals("/reset/{token}", Analytics.storedPath(reset, "/reset/abc"));
+        // The strict rule still applies in transit.
+        assertEquals("code=[REDACTED]", Redactor.redactQuery("code=card_declined"));
+        // And messages use the field rule for name=value pairs.
+        assertEquals("charge failed code=card_declined password=[REDACTED]",
+            Redactor.redactMessage("charge failed code=card_declined password=hunter2"));
+    }
+
+    @Test
+    void deeplyNestedLogFieldsAreBoundedNotAStackOverflow() {
+        // nit: redact(Map) recursed once per level; 20,000 levels overflowed the stack.
+        Map<String, Object> deep = new java.util.HashMap<>();
+        Map<String, Object> cur = deep;
+        for (int i = 0; i < 20_000; i++) {
+            Map<String, Object> next = new java.util.HashMap<>();
+            cur.put("n", i % 2 == 0 ? next : List.of(next));
+            if (i % 2 != 0) cur.put("token", "x");
+            cur = next;
+        }
+        var out = Redactor.redact(deep);
+        Object level = out;
+        int depth = 0;
+        while (level instanceof Map<?, ?> m || level instanceof List<?>) {
+            if (level instanceof List<?> l) level = l.get(0);
+            else {
+                var map = (Map<?, ?>) level;
+                if (map.containsKey("token")) assertEquals(Redactor.PLACEHOLDER, map.get("token"));
+                level = map.get("n");
+            }
+            depth++;
+        }
+        assertEquals(Redactor.TOO_DEEP, level);
+        assertTrue(depth <= Redactor.MAX_NESTING + 1, "depth " + depth);
+        // A map that contains itself is cut off the same way.
+        Map<String, Object> self = new java.util.HashMap<>();
+        self.put("me", self);
+        self.put("again", self);
+        assertNotNull(Redactor.redact(self));
+        // A shared child under two keys at every level (2^40 paths) is bounded by the copy budget.
+        Map<String, Object> shared = Map.of("leaf", 1);
+        for (int i = 0; i < 40; i++) shared = Map.of("a", shared, "b", shared);
+        long t0 = System.nanoTime();
+        assertNotNull(Redactor.redact(shared));
+        assertTrue(System.nanoTime() - t0 < 5_000_000_000L);
+    }
+
+    @Test
+    void reviewerWorstCasesStayLinear() {
+        // Error path only, but attacker-sized. Each shape targets one scanner: percent runs,
+        // ampersands, dots, %25 (decode rounds), '=' pairs, '<'+'/' spans, scheme scans, nested
+        // URLs, quotes, name runs. 64 KB and 1 MB of each, through every entry point.
+        List<String> units = List.of("%", "&", ".", "%25", "=", "</", "a:", "x://", "a=/", "\"", "a=\"",
+            "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25");
+        long t0 = System.nanoTime();
+        for (int size : List.of(64 * 1024, 1024 * 1024)) {
+            for (String unit : units) {
+                String big = unit.repeat(size / unit.length());
+                Redactor.redactQuery(big);
+                Redactor.redactUrl("https://h/" + big);
+                Redactor.redactPath("/" + big);
+                Redactor.redactMessage(big);
+                Redactor.redactStackTrace("java.lang.RuntimeException: " + big + "\n\tat a.B(B.java:1)\n");
+                Redactor.redactHeaders(Map.of("X-Big", big, "Referer", "https://h/?" + big, "Forwarded", big));
+            }
+        }
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(ms < 20_000, "worst cases took " + ms + " ms");
+    }
+
+    @Test
+    void aWebSocketBroadcastFailureIsLoggedRedacted() {
+        // L13 final review: WsRegistry logged "error=" + e raw; the exception text reaches /ops/logs.
+        var registry = new WsRegistry(new InProcessMessageBus(), 1 << 20);
+        var ctx = new WsContext(null, null, registry) {
+            @Override
+            public void send(String message) {
+                throw new IllegalStateException("relay wss://bot:hunter2pw@relay.example/ws?token=abc rejected " + T);
+            }
+        };
+        registry.join("room", ctx);
+        LogTap.clear();
+        registry.broadcast("room", "hi");
+        String logs = LogTap.snapshot().toString();
+        assertTrue(logs.contains("ws-broadcast-send-failed"), logs);
+        for (String secret : List.of(T, "hunter2pw", "token=abc")) {
+            assertFalse(logs.contains(secret), secret + " logged: " + logs);
+        }
     }
 
     @Test

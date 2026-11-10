@@ -287,6 +287,90 @@ class ErrorStorePostgresIT extends PostgresTestBase {
         return errorStore.list(null).stream().map(e -> e.get("errorType")).sorted().toList();
     }
 
+    // --- Final review fixes (docs/2026-11-09-security-review-todos.md, M5) ---
+
+    /** A flush session whose transaction runs {@code statement} right after BEGIN (transaction-scoped, nothing leaks into the pool). */
+    private static java.util.function.Supplier<Database> sessionWith(String statement) {
+        return () -> new Database(factory.openSession()) {
+            @Override
+            public void beginTransaction() {
+                super.beginTransaction();
+                jdbc(connection -> {
+                    try (var st = connection.createStatement()) {
+                        st.execute(statement);
+                    }
+                });
+            }
+        };
+    }
+
+    @Test
+    void aReadOnlyTransactionWindowDropsNothing() {
+        // L10: during a failover the flush connection can land on a read-only server: every row
+        // fails with 25006 on a connection that still passes isValid. That counted against every
+        // row, so five flushes (10 s) dropped every pending kind.
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET TRANSACTION READ ONLY");
+        errorStore.record("A", "a", "GET /a", "s", "req");
+        errorStore.record("B", "b", "GET /b", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("Lone", "lone", "GET /lone", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of(), types(), "nothing can be written while read-only");
+
+        errorStore.flushSession = normal;
+        errorStore.flush();
+        assertEquals(List.of("A", "B", "Lone"), types(), "kept uncounted through the read-only window");
+    }
+
+    @Test
+    void aLockTimeoutNeverReplacesStoredDetailsWithThePlaceholder() throws Exception {
+        // L9: a 55P03 lock timeout on the first attempt used to be retried at once without the
+        // payload; when the lock was gone by then, the retry overwrote the existing row's message,
+        // trace, detail and headers with the placeholder.
+        errorStore.record("Locked", "first details", "GET /l", "first trace", "GET /l?a=1",
+            "{\"count\":1}", "{\"x-h\":\"first\"}");
+        errorStore.flush();
+
+        var locked = new java.util.concurrent.CountDownLatch(1);
+        var holder = Thread.startVirtualThread(() -> {
+            try (var c = connect()) {
+                c.setAutoCommit(false);
+                try (var st = c.createStatement()) {
+                    st.execute("SELECT id FROM ops_errors WHERE error_type = 'Locked' FOR UPDATE");
+                }
+                locked.countDown();
+                Thread.sleep(450); // past the first attempt's 300 ms lock_timeout, inside a retry's
+                c.commit();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        locked.await();
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET LOCAL lock_timeout = '300ms'");
+        errorStore.record("Locked", "second details", "GET /l", "second trace", "GET /l?a=2",
+            "{\"count\":2}", "{\"x-h\":\"second\"}");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        holder.join();
+
+        var row = errorStore.list(null).stream().filter(e -> "Locked".equals(e.get("errorType"))).findFirst().orElseThrow();
+        assertEquals("first details", row.get("message"), "the stored details are never replaced by the placeholder");
+        assertEquals("first trace", row.get("stackTrace"));
+        assertEquals("{\"x-h\":\"first\"}", row.get("requestHeaders"));
+        assertEquals(List.of("Healthy", "Locked"), types());
+
+        errorStore.flushSession = normal;
+        errorStore.flush(); // the lock is gone: the full payload lands, counted once
+        row = errorStore.list(null).stream().filter(e -> "Locked".equals(e.get("errorType"))).findFirst().orElseThrow();
+        assertEquals("second details", row.get("message"));
+        assertEquals("second trace", row.get("stackTrace"));
+        assertEquals(2, row.get("occurrenceCount"));
+    }
+
     @Test
     void concurrentDistinctRoutesEachGetTheirOwnRow() throws Exception {
         int routes = 40;
