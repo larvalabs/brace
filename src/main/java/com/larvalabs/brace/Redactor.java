@@ -67,6 +67,22 @@ public class Redactor {
 
     public static final String PLACEHOLDER = "[REDACTED]";
 
+    /**
+     * What a redaction returns when it failed internally. Every public method here fails closed:
+     * it never throws, and on an internal error it returns this marker (the map forms: this marker
+     * for each value concerned) instead of the text it was given. The callers sit on error paths
+     * (the 500 handler, the uncaught-exception handler, the job poller), where a throw would lose
+     * the error being recorded and unredacted text must not be the fallback.
+     */
+    public static final String FAILED = "[redaction failed]";
+
+    /**
+     * Test seam, never set outside tests: run at the start of the two cores every entry point
+     * reaches ({@link #redactText} and the name rule), so a test can make redaction fail inside
+     * and check what each entry point returns then.
+     */
+    static Runnable faultForTest;
+
     /** Normalized substrings that mark a field name as sensitive. */
     private static final Set<String> SENSITIVE = Set.of(
         "authorization", "cookie", "password", "passwd", "pwd", "secret",
@@ -179,7 +195,11 @@ public class Redactor {
      * {@code sessions}, {@code auth_method} and {@code X-Auth-Request-User} do not match.
      */
     public static boolean isSensitive(String name) {
-        return sensitiveName(name, true);
+        try {
+            return sensitiveName(name, true);
+        } catch (RuntimeException | StackOverflowError e) {
+            return true; // fail closed: a name that cannot be judged is treated as sensitive
+        }
     }
 
     /**
@@ -191,10 +211,15 @@ public class Redactor {
      * {@code sid}, {@code ticket}, {@code session}, {@code X-Auth}.
      */
     public static boolean isSensitiveField(String name) {
-        return sensitiveName(name, false);
+        try {
+            return sensitiveName(name, false);
+        } catch (RuntimeException | StackOverflowError e) {
+            return true; // fail closed
+        }
     }
 
-    private static boolean sensitiveName(String name, boolean strict) {
+    static boolean sensitiveName(String name, boolean strict) {
+        if (faultForTest != null) faultForTest.run();
         if (name == null || name.isEmpty()) return false;
         String norm = name.toLowerCase(Locale.ROOT).replace("-", "").replace("_", "");
         for (String token : SENSITIVE) {
@@ -262,10 +287,33 @@ public class Redactor {
     /**
      * Return a deep copy of {@code fields} (a structured log entry) with the values of keys that
      * are sensitive by the field rule ({@link #isSensitiveField}) replaced by {@link #PLACEHOLDER}.
-     * Recurses into nested maps and lists.
+     * Recurses into nested maps and lists. Never throws: {@code null} gives an empty map, and a
+     * map that cannot be copied (its iteration throws, a key is not a String) gives its keys with
+     * {@link #FAILED} for every value.
      */
     public static Map<String, Object> redact(Map<String, Object> fields) {
-        return redactMap(fields, 0, new int[1]);
+        if (fields == null) return new LinkedHashMap<>();
+        try {
+            return redactMap(fields, 0, new int[1]);
+        } catch (RuntimeException | StackOverflowError e) {
+            return failedCopy(fields);
+        }
+    }
+
+    /**
+     * The fail-closed result of a map form: every key of {@code map} with {@link #FAILED} as its
+     * value, or the single entry {@code redaction=[redaction failed]} when the keys cannot be read
+     * either.
+     */
+    private static Map<String, Object> failedCopy(Map<?, ?> map) {
+        var out = new LinkedHashMap<String, Object>();
+        try {
+            for (Object key : map.keySet()) out.put(String.valueOf(key), FAILED);
+        } catch (RuntimeException | StackOverflowError e) {
+            out.clear();
+            out.put("redaction", FAILED);
+        }
+        return out;
     }
 
     /**
@@ -280,7 +328,7 @@ public class Redactor {
             String key = e.getKey();
             Object value = e.getValue();
             budget[0]++;
-            if (isSensitiveField(key)) {
+            if (sensitiveName(key, false)) {
                 out.put(key, PLACEHOLDER);
             } else if (value instanceof Map<?, ?> || value instanceof List<?>) {
                 out.put(key, redactNested(value, depth + 1, budget));
@@ -320,10 +368,15 @@ public class Redactor {
      * </ul>
      * A part without {@code =} is replaced whole when it is secret-shaped. The raw (encoded)
      * name and every other part are kept exactly as sent. Malformed percent-escapes are kept
-     * literally, never thrown. A leading {@code ?} is not expected (pass the raw query).
+     * literally, never thrown. A leading {@code ?} is not expected (pass the raw query). On an
+     * internal error the whole result is {@link #FAILED}.
      */
     public static String redactQuery(String query) {
-        return redactQuery(query, DECODE_ROUNDS, 0);
+        try {
+            return redactQuery(query, DECODE_ROUNDS, 0);
+        } catch (RuntimeException | StackOverflowError e) {
+            return FAILED;
+        }
     }
 
     private static String redactQuery(String query, int rounds, int depth) {
@@ -341,7 +394,7 @@ public class Redactor {
             if (eq == end) {
                 String part = query.substring(start, end);
                 out.append(isSecretValue(part, rounds, depth) ? PLACEHOLDER : part);
-            } else if (isSensitive(lenientDecode(query.substring(start, eq)))
+            } else if (sensitiveName(lenientDecode(query.substring(start, eq)), true)
                     || isSecretValue(query.substring(eq + 1, end), rounds, depth)) {
                 out.append(query, start, eq + 1).append(PLACEHOLDER);
             } else {
@@ -390,6 +443,7 @@ public class Redactor {
      * Returns {@code s} itself when there is nothing to redact.
      */
     static String redactText(String s, boolean strict, int rounds, int depth) {
+        if (faultForTest != null) faultForTest.run();
         if (s == null || s.isEmpty()) return s;
         int n = s.length();
         StringBuilder out = null;
@@ -1070,31 +1124,43 @@ public class Redactor {
      *       JWT, two-part) becomes {@code [redacted]}, so {@code X-Amzn-Oidc-Data: eyJ…} is
      *       caught by shape.</li>
      * </ol>
-     * Non-string values are kept. Returns a new map in the same order.
+     * Non-string values are kept. Returns a new map in the same order. Never throws: a header
+     * whose redaction fails gets {@link #FAILED} as its value, {@code null} gives an empty map,
+     * and a map that cannot be read gives its keys with {@link #FAILED} for every value.
      */
     public static Map<String, Object> redactHeaders(Map<String, ?> headers) {
-        var out = new LinkedHashMap<String, Object>(headers.size());
-        for (var e : headers.entrySet()) {
-            String name = e.getKey();
-            Object value = e.getValue();
-            if (isSensitive(name)) {
-                out.put(name, PLACEHOLDER);
-            } else if (value instanceof String s && name != null) {
-                out.put(name, redactHeaderValue(name, s));
-            } else {
-                out.put(name, value);
+        if (headers == null) return new LinkedHashMap<>();
+        try {
+            var out = new LinkedHashMap<String, Object>(headers.size());
+            for (var e : headers.entrySet()) {
+                String name = e.getKey();
+                Object redacted;
+                try {
+                    redacted = redactHeader(name, e.getValue());
+                } catch (RuntimeException | StackOverflowError ex) {
+                    redacted = FAILED; // fail closed, header by header
+                }
+                out.put(name, redacted);
             }
+            return out;
+        } catch (RuntimeException | StackOverflowError e) {
+            return failedCopy(headers);
         }
-        return out;
+    }
+
+    private static Object redactHeader(String name, Object value) {
+        if (sensitiveName(name, true)) return PLACEHOLDER;
+        if (value instanceof String s && name != null) return redactHeaderValue(name, s);
+        return value;
     }
 
     private static String redactHeaderValue(String name, String value) {
         String lower = name.toLowerCase(Locale.ROOT);
-        if (URL_HEADERS.contains(lower)) return redactUrl(value);
+        if (URL_HEADERS.contains(lower)) return redactUrl(value, DECODE_ROUNDS, 0);
         if (VERBATIM_HEADERS.contains(lower) || lower.startsWith("sec-fetch-") || lower.startsWith("sec-ch-")) {
             return value;
         }
-        return redactValue(value);
+        return redactValue(value, DECODE_ROUNDS, 0);
     }
 
     /**
@@ -1108,7 +1174,11 @@ public class Redactor {
      * unchanged.
      */
     static String redactValue(String value) {
-        return redactValue(value, DECODE_ROUNDS, 0);
+        try {
+            return redactValue(value, DECODE_ROUNDS, 0);
+        } catch (RuntimeException | StackOverflowError e) {
+            return FAILED;
+        }
     }
 
     private static String redactValue(String value, int rounds, int depth) {
@@ -1126,10 +1196,15 @@ public class Redactor {
      * through {@link #redactPath}, the query and the fragment through {@link #redactQuery}.
      * Scheme (a double scheme such as {@code jdbc:postgresql} included), host and port are kept.
      * A value that is neither {@code scheme://…} nor {@code /…} (an {@code Origin: null},
-     * garbage) goes through {@link #redactValue} instead; nothing throws.
+     * garbage) goes through {@link #redactValue} instead; nothing throws ({@link #FAILED} on an
+     * internal error).
      */
     public static String redactUrl(String url) {
-        return redactUrl(url, DECODE_ROUNDS, 0);
+        try {
+            return redactUrl(url, DECODE_ROUNDS, 0);
+        } catch (RuntimeException | StackOverflowError e) {
+            return FAILED;
+        }
     }
 
     private static String redactUrl(String url, int rounds, int depth) {
@@ -1239,7 +1314,8 @@ public class Redactor {
      * {@code ;name=value} matrix parameter is redacted by name ({@code ;jsessionid=},
      * {@code ;token=} become {@code [REDACTED]}) or by shape. The leading {@code /} and segment
      * separators are preserved. Paths whose segments are all short and hold no {@code =} are
-     * returned at once (this runs on every request's log line).
+     * returned at once (this runs on every request's log line). Never throws: {@link #FAILED} on
+     * an internal error.
      *
      * <p>Examples:
      * <ul>
@@ -1252,7 +1328,11 @@ public class Redactor {
      * </ul>
      */
     public static String redactPath(String path) {
-        return redactPath(path, DECODE_ROUNDS, 0);
+        try {
+            return redactPath(path, DECODE_ROUNDS, 0);
+        } catch (RuntimeException | StackOverflowError e) {
+            return FAILED;
+        }
     }
 
     private static String redactPath(String path, int rounds, int depth) {
@@ -1296,13 +1376,18 @@ public class Redactor {
      * {@link #redactUrl} (userinfo, path, query, fragment); a {@code name=value} pair whose name
      * is sensitive by {@link #isSensitiveField} has its value replaced by {@link #PLACEHOLDER};
      * every other secret-shaped run becomes {@code [redacted]} (see {@link #redactText}). A
-     * message with nothing to redact is returned unchanged.
+     * message with nothing to redact is returned unchanged. Never throws: {@link #FAILED} on an
+     * internal error.
      */
     public static String redactMessage(String message) {
-        if (message == null || message.isEmpty()) return message;
-        // Check for JWT at the whole-message level first (message may be just a token)
-        if (isJwt(message)) return PLACEHOLDER;
-        return redactText(message, false, DECODE_ROUNDS, 0);
+        try {
+            if (message == null || message.isEmpty()) return message;
+            // Check for JWT at the whole-message level first (message may be just a token)
+            if (isJwt(message)) return PLACEHOLDER;
+            return redactText(message, false, DECODE_ROUNDS, 0);
+        } catch (RuntimeException | StackOverflowError e) {
+            return FAILED;
+        }
     }
 
     /**
@@ -1313,9 +1398,19 @@ public class Redactor {
      * except a frame line ({@code at ...} or {@code ... N more} after one or more tabs, so the
      * frames of a {@code Suppressed:} exception and its causes too) goes through
      * {@link #redactMessage}; frame lines and line endings are kept exactly as they were. A trace
-     * with nothing to redact is returned unchanged.
+     * with nothing to redact is returned unchanged. Never throws; a line whose redaction fails
+     * becomes {@link #FAILED}.
      */
     public static String redactStackTrace(String stackTrace) {
+        try {
+            return redactTrace(stackTrace);
+        } catch (RuntimeException | StackOverflowError e) {
+            return FAILED;
+        }
+    }
+
+    /** Line by line; {@link #redactMessage} fails closed per line, so a failure costs one line, not the frames. */
+    private static String redactTrace(String stackTrace) {
         if (stackTrace == null || stackTrace.isEmpty()) return stackTrace;
         int len = stackTrace.length();
         StringBuilder out = null;

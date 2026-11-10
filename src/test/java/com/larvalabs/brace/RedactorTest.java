@@ -1052,4 +1052,70 @@ class RedactorTest {
         assertEquals("-jdbc:sqlserver://db:1433;password=[REDACTED]",
             Redactor.redactMessage("-jdbc:sqlserver://db:1433;password=hunter2"));
     }
+
+    @Test
+    void everyEntryPointFailsClosedWhenRedactionFailsInside() {
+        // H-1: the redactor runs on error paths, so a bug inside it must cost one marker, never an
+        // exception (the error being recorded would be lost) and never the raw input.
+        String secret = "hunter2-" + HEX32;
+        String trace = "java.lang.RuntimeException: bad token " + secret + "\n\tat a.B.c(B.java:1)\n"
+            + "Caused by: java.lang.Error: again " + secret + "\n\t... 3 more\n";
+        var headers = new java.util.LinkedHashMap<String, Object>();
+        headers.put("X-Token-Holder", secret);
+        headers.put("Referer", "https://app.example.com/reset/" + secret);
+        headers.put("X-Count", 3);
+        Map<String, Object> fields = new java.util.LinkedHashMap<>();
+        fields.put("message", "login");
+        fields.put("password", secret);
+        Redactor.faultForTest = () -> { throw new IllegalStateException("injected"); };
+        try {
+            assertEquals(Redactor.FAILED, Redactor.redactMessage("bad token " + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactQuery("token=" + secret + "&page=2"));
+            assertEquals(Redactor.FAILED, Redactor.redactQuery("x=" + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactUrl("https://app.example.com/reset?t=" + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactPath("/reset/" + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactValue("v1 " + secret));
+            // A trace fails line by line, so its frames are kept.
+            assertEquals(Redactor.FAILED + "\n\tat a.B.c(B.java:1)\n" + Redactor.FAILED + "\n\t... 3 more\n",
+                Redactor.redactStackTrace(trace));
+            assertTrue(Redactor.isSensitive("page"), "a name that cannot be judged is treated as sensitive");
+            assertTrue(Redactor.isSensitiveField("page"));
+            var h = Redactor.redactHeaders(headers);
+            assertEquals(List.of("X-Token-Holder", "Referer", "X-Count"), List.copyOf(h.keySet()));
+            assertEquals(Redactor.FAILED, h.get("X-Token-Holder"));
+            assertEquals(Redactor.FAILED, h.get("Referer"));
+            assertEquals(Redactor.FAILED, h.get("X-Count"));
+            var f = Redactor.redact(fields);
+            assertEquals(List.of("message", "password"), List.copyOf(f.keySet()));
+            assertEquals(Redactor.FAILED, f.get("message"));
+            assertEquals(Redactor.FAILED, f.get("password"));
+        } finally {
+            Redactor.faultForTest = null;
+        }
+        // The seam is off again: ordinary results.
+        assertEquals("bad token [redacted]", Redactor.redactMessage("bad token " + HEX32));
+        assertFalse(Redactor.isSensitive("page"));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void mapFormsFailClosedOnAMapThatMisbehaves() {
+        // No seam needed here: a map whose iteration throws, a key that is not a String (a raw
+        // map from application code), and null.
+        Map<String, Object> throwing = new java.util.AbstractMap<>() {
+            @Override
+            public java.util.Set<Map.Entry<String, Object>> entrySet() {
+                throw new java.util.ConcurrentModificationException("mutated while logging");
+            }
+        };
+        assertEquals(Map.of("redaction", Redactor.FAILED), Redactor.redact(throwing));
+        assertEquals(Map.of("redaction", Redactor.FAILED), Redactor.redactHeaders(throwing));
+        Map raw = new java.util.LinkedHashMap();
+        raw.put(42, "hunter2-" + HEX32);
+        raw.put("ok", "fine");
+        assertEquals(Map.of("42", Redactor.FAILED, "ok", Redactor.FAILED), Redactor.redact((Map<String, Object>) raw));
+        assertEquals(Map.of("42", Redactor.FAILED, "ok", Redactor.FAILED), Redactor.redactHeaders((Map<String, ?>) raw));
+        assertEquals(Map.of(), Redactor.redact(null));
+        assertEquals(Map.of(), Redactor.redactHeaders(null));
+    }
 }
