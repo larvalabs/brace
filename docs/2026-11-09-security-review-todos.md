@@ -411,7 +411,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     overflow bucket.
   - **Model: Opus 5.5.**
 
-- [ ] **L7: Smaller gaps in template output**, `BraceHtmlOutput.java:87-88, 190-194, 226-229, 318-335, 367-370, 432-435`
+- [x] **L7: Smaller gaps in template output**, `BraceHtmlOutput.java:87-88, 190-194, 226-229, 318-335, 367-370, 432-435`
   - **Template-written `javascript:` URL.** `<a href="javascript:go('${x}')">` with
     `x=');alert(1);//` renders `&#39;);alert(1);//`, which the browser decodes and runs on
     click. Fix: when the template's scheme is `javascript` or `vbscript`, block the value or

@@ -702,13 +702,18 @@ of JTE's escaping, Brace's template output:
   (`hx-vals='${json}'`, JSON the handler built), it's attribute-escaped instead, so the JSON stays
   intact. If data supplies any of a leading `js:`/`javascript:` (which htmx evaluates), in one piece
   or several and behind any Unicode whitespace, the whole value becomes `{}`. Still, these attributes are code: prefer passing
-  user data as `hx-vals` JSON or `data-*` attributes over writing it into a handler. The same rules
-  apply to data a `@template` call writes inside an attribute value.
+  user data as `hx-vals` JSON or `data-*` attributes over writing it into a handler. The escaping
+  only protects data inside a quoted string (`onclick="go('${id}')"`); data that is the code itself
+  (`onclick="${js}"`, `hx-trigger="${trigger}"`, where `click[alert(1)]` is a valid trigger) runs.
 - `srcdoc`: user data is escaped twice, so it becomes text in the frame, never markup. Its content
   isn't URL-checked; for an HTML preview, sanitize the HTML, write it with
   `srcdoc="$unsafe{Html.escape(sanitized)}"`, and add `sandbox` to the iframe.
-- A `@template` call inside an attribute value renders its output in body context (JTE), without
-  attribute escaping or the URL check: pass values, not template calls, into attributes.
+- **CSS** (`<style>` bodies and `style=""`): characters other than letters, digits, spaces and
+  `# % . _ -` are written as CSS hex escapes, so data can't end its declaration or rule. Plain
+  values (`style="color: ${color}"`, `width: ${pct}%`) and data in a quoted CSS string
+  (`url("${image}")`) work; `style="${wholeDeclarationList}"` and `rgb(...)` as data don't.
+- The same rules apply to data a `@template` call or content block writes inside an attribute
+  value: the context comes from the HTML written so far, not from the template source.
 
 `$unsafe{...}` bypasses all of it. Outside templates, `Url.isSafe(url)` / `Url.safe(url)` apply
 the same URL rule (e.g. a URL returned in JSON for a client to put in an `href`).

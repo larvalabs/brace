@@ -39,6 +39,9 @@ import java.util.regex.Pattern;
  *       JTE's JavaScript escaping for {@code on*} left {@code &} alone, so {@code &#39;} in user
  *       data closed the string.</li>
  *   <li>{@code srcdoc}: user data is escaped twice, so it is text in the frame, not markup.</li>
+ *   <li><strong>CSS</strong> ({@code <style>} bodies and {@code style=""}): user data is written
+ *       with CSS hex escapes for everything but plain value characters, so it can't end its
+ *       declaration or rule. See {@link #escapeCss}.</li>
  * </ul>
  *
  * Where each {@code ${...}} lands is read from the output itself, by a small HTML tokenizer over
@@ -251,6 +254,11 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     /** Whether the output is in the body of a {@code <script>} element, in any letter case. */
     private boolean inScriptBody() {
         return (state == RAW || state == RAW_LT || state == RAW_END) && "script".equals(rawElement);
+    }
+
+    /** Whether the output is in the body of a {@code <style>} element, in any letter case. */
+    private boolean inStyleBody() {
+        return (state == RAW || state == RAW_LT || state == RAW_END) && "style".equals(rawElement);
     }
 
     /** Whether the output is inside a quoted attribute value of a start tag. */
@@ -483,6 +491,10 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             else writeAttributeData(currentTag(), currentAttribute(), value);
         } else if (inScriptBody() != jteScript) {
             target.writeContent(escapeScript(value));
+        } else if (inStyleBody() || (attributeName == null && "style".equals(tagName))) {
+            // L7: JTE HTML-escapes data in a <style> body, which keeps it in the element but not
+            // in its declaration. (The result is inert as body text too, if JTE alone says style.)
+            target.writeContent(escapeCss(value));
         } else if (tagName == null || attributeName == null) {
             super.writeUserContent(value); // JTE's escaping for a script body, or for body text
         } else {
@@ -502,6 +514,8 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             var once = new StringBuilder(value.length() + 16);
             Escape.htmlAttribute(value, new Appender(once));
             Escape.htmlAttribute(once.toString(), target);
+        } else if ("style".equals(attribute)) {
+            target.writeContent(escapeCss(value)); // nothing left in it for HTML escaping to do
         } else {
             Escape.htmlAttribute(value, target);
         }
@@ -677,6 +691,31 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             } else if (out != null) {
                 out.append(c);
             }
+        }
+        return out == null ? value : out.toString();
+    }
+
+    /**
+     * Escape for CSS, in a {@code <style>} body or a {@code style=""} attribute (L7): everything
+     * but letters, digits, spaces, {@code # % . _ -} and non-ASCII characters becomes a hex
+     * escape ({@code ;} is {@code \3b }). An escaped character is never syntax to a CSS parser,
+     * so data can't end its declaration or rule, open a function or a comment, or (having no
+     * {@code < > & " '} left) leave the style element or attribute. Inside a quoted CSS string
+     * the parser reads the original text back; outside one, a value with escaped characters is
+     * an odd identifier, and its declaration is dropped.
+     */
+    static String escapeCss(String value) {
+        StringBuilder out = null;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean plain = isAsciiAlphanumeric(c) || c == ' ' || c == '#' || c == '%' || c == '.'
+                || c == '_' || c == '-' || c >= 0xa0;
+            if (plain) {
+                if (out != null) out.append(c);
+                continue;
+            }
+            if (out == null) out = new StringBuilder(value.length() + 16).append(value, 0, i);
+            out.append('\\').append(Integer.toHexString(c == 0 ? 0xfffd : c)).append(' ');
         }
         return out == null ? value : out.toString();
     }

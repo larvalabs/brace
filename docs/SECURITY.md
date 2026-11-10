@@ -353,7 +353,12 @@ contexts where escaping alone doesn't stop script:
   `hx-vals`, `hx-vars`, `hx-headers`, `hx-request` and `hx-trigger`. User data is escaped with
   `\uXXXX` sequences for every character that can end a string or start markup or a template
   substitution, which is valid in JavaScript strings, template literals and JSON, so JSON
-  `hx-vals`/`hx-headers` keep working with quotes in the data. HTML escaping alone is undone by
+  `hx-vals`/`hx-headers` keep working with quotes in the data. This protects data written
+  **inside a quoted string** in the attribute's code (`onclick="go('${id}')"`,
+  `hx-trigger="click[check('${id}')]"`). It does nothing for data that is the code itself:
+  `onclick="${handler}"`, `onclick="go(${id})"` or `hx-trigger="${trigger}"` run whatever the
+  value says (`click[alert(1)]` is a valid trigger with a filter expression, and has no character
+  that needs escaping). Never put user data there outside a quoted string. HTML escaping alone is undone by
   the browser before the code runs (`&#39;` is a quote again), and JTE's JavaScript escaping for
   `on*` left `&` alone, so an entity in user data still closed the string. When data is the whole
   `hx-vals`/`hx-headers` value (`hx-vals='${json}'`) it is attribute-escaped instead, so JSON the
@@ -364,9 +369,23 @@ contexts where escaping alone doesn't stop script:
 - **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup. Template
   markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
   `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.
+- **`<script>` bodies.** JavaScript-escaped (JTE), for a `<script>` tag written in any letter
+  case. As in a script attribute, that protects data inside a quoted string
+  (`var name = "${name}";`), not data written as code.
+- **CSS.** In a `<style>` body and in a `style=""` attribute, every character of user data other
+  than letters, digits, spaces, `# % . _ -` and non-ASCII characters is written as a CSS hex
+  escape (`;` becomes `\3b `). An escaped character is never CSS syntax, so data can't close its
+  declaration or rule and add a selector (the usual way to leak a hidden field's value under a
+  policy that allows inline styles), and can't open `url(...)`. Plain values (`red`, `#ff0000`,
+  `50%`, `12px solid`) are unchanged, and data inside a quoted CSS string
+  (`content: "${label}"`, `url("${image}")`) reads back as written. A value that needs CSS
+  syntax of its own, `rgb(1, 2, 3)` or a whole declaration list in `style="${styles}"`, no longer
+  works as data: build it from plain values in the template. Not covered: user data used as a
+  selector or property *name* can still be any identifier.
 
-Not covered: a `@template` call inside an attribute value renders in body context (JTE's
-behavior), so its output gets neither attribute escaping nor the URL check.
+Brace decides the context from the HTML it has written so far, not only from where the `${...}`
+sits in the template source, so the rules above also apply to data a `@template` call or a
+content block writes inside an attribute value (JTE alone escapes that as body text).
 
 Both the hot-reload and precompiled render paths use this output. `$unsafe{...}` bypasses it, as
 does `Result.html(...)`, which is a raw sink.
