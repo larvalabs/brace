@@ -37,6 +37,10 @@ public class OpsKeys {
      */
     public static Keypair readKeyFile(String path) {
         try {
+            // A path from a committed config may name a FIFO or a device: refuse before reading.
+            if (Files.exists(Path.of(path)) && (!Files.isRegularFile(Path.of(path)) || Files.size(Path.of(path)) > 64 * 1024)) {
+                throw new RuntimeException("Key file must be a regular file of at most 64 KB: " + path);
+            }
             var lines = Files.readAllLines(Path.of(path)).stream()
                 .map(String::strip)
                 .filter(l -> !l.isEmpty() && !l.startsWith("#"))

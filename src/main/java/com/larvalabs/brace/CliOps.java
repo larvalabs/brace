@@ -232,7 +232,7 @@ public class CliOps {
             // Exchange bearer for single-use login token
             var loginResponse = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.url() + "/ops/auth/login-token"))
+                    .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/auth/login-token"))
                     .POST(HttpRequest.BodyPublishers.noBody()));
 
             if (loginResponse.statusCode() != 200) {
@@ -249,7 +249,7 @@ public class CliOps {
                 CliOutput.printError("Server returned a malformed login token; refusing to open it.");
                 return 1;
             }
-            String dashboardUrl = cfg.url() + "/ops/auth/exchange?token=" + loginToken
+            String dashboardUrl = CliAuth.baseUrl(cfg) + "/ops/auth/exchange?token=" + loginToken
                 + (CliCommands.hasFlag(args, "--analytics") ? "&next=analytics" : "");
             if (!dashboardUrl.startsWith("http://") && !dashboardUrl.startsWith("https://")) {
                 CliOutput.printError("Refusing to open a non-http(s) dashboard URL: " + dashboardUrl);

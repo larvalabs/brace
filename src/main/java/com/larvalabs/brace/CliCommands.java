@@ -22,7 +22,7 @@ public class CliCommands {
             return errorDetail(cfg, projectDir, args[0], mode);
         }
 
-        String url = cfg.url() + "/ops/errors";
+        String url = CliAuth.baseUrl(cfg) + "/ops/errors";
         var params = new ArrayList<String>();
         String since = parseFlag(args, "--since");
         if (since != null) params.add("since=" + parseDuration(since));
@@ -55,7 +55,7 @@ public class CliCommands {
     private static int errorDetail(CliConfig cfg, Path projectDir, String id, CliOutput.Mode mode) throws Exception {
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/errors/" + id))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/errors/" + id))
                 .header("Accept", "application/json")
                 .GET());
 
@@ -140,7 +140,7 @@ public class CliCommands {
         boolean follow = hasFlag(args, "-f") || hasFlag(args, "--follow");
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
 
-        String baseUrl = cfg.url() + "/ops/logs";
+        String baseUrl = CliAuth.baseUrl(cfg) + "/ops/logs";
         StringBuilder query = new StringBuilder();
         if (since != null) {
             Instant cutoff = parseDuration(since);
@@ -216,7 +216,7 @@ public class CliCommands {
 
     public static int status(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
-        String url = cfg.url() + "/ops/status" + statusQuery(args);
+        String url = CliAuth.baseUrl(cfg) + "/ops/status" + statusQuery(args);
 
         HttpResponse<String> response;
         try {
@@ -394,7 +394,7 @@ public class CliCommands {
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/cache"))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/cache"))
                 .header("Accept", "application/json")
                 .GET());
 
@@ -433,7 +433,7 @@ public class CliCommands {
         try {
             response = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.url() + "/ops/analytics/data?range=" + range))
+                    .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/analytics/data?range=" + range))
                     .header("Accept", "application/json")
                     .GET());
         } catch (Exception e) {
@@ -506,7 +506,7 @@ public class CliCommands {
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/cache/clear"))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/cache/clear"))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody()));
 
@@ -561,7 +561,7 @@ public class CliCommands {
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/errors/" + id + "/resolve"))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/errors/" + id + "/resolve"))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody()));
 

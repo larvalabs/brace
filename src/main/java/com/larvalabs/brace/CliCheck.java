@@ -31,7 +31,7 @@ public class CliCheck {
         // Fetch all three endpoints
         JsonNode status, errors, logs;
         try {
-            status = fetchJson(cfg, projectDir, cfg.url() + "/ops/status");
+            status = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/status");
         } catch (Exception e) {
             if (mode == CliOutput.Mode.JSON) {
                 var result = new CheckResult(false, "App unreachable: " + e.getMessage(), List.of(
@@ -45,19 +45,19 @@ public class CliCheck {
         }
 
         try {
-            errors = fetchJson(cfg, projectDir, cfg.url() + "/ops/errors");
+            errors = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/errors");
         } catch (Exception e) {
             errors = Json.mapper().valueToTree(List.of());
         }
 
         try {
             Instant since = Instant.now().minusSeconds(thresholds.logWindowMinutes() * 60L);
-            logs = fetchJson(cfg, projectDir, cfg.url() + "/ops/logs?level=warn&since_ts=" + since.toString());
+            logs = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/logs?level=warn&since_ts=" + since.toString());
         } catch (Exception e) {
             logs = Json.mapper().valueToTree(List.of());
         }
 
-        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(cfg.url())));
+        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(CliAuth.baseUrl(cfg))));
 
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(result));

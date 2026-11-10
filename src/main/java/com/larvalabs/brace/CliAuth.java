@@ -9,7 +9,6 @@ import java.util.Map;
 
 public class CliAuth {
 
-    private static final HttpClient http = HttpClient.newHttpClient();
     private static final int DEFAULT_TTL_SECONDS = 3600;
 
     private CliAuth() {}
@@ -55,15 +54,11 @@ public class CliAuth {
     public static HttpResponse<String> sendAuthenticated(
             CliConfig cfg, Path projectDir, HttpRequest.Builder builder) throws Exception {
         String token = bearer(cfg, projectDir);
-        var response = http.send(
-            builder.copy().header("Authorization", "Bearer " + token).build(),
-            HttpResponse.BodyHandlers.ofString());
+        var response = CliHttp.send(builder.copy().header("Authorization", "Bearer " + token));
         if (response.statusCode() == 401) {
             clearCache(projectDir);
             token = bearer(cfg, projectDir);
-            response = http.send(
-                builder.copy().header("Authorization", "Bearer " + token).build(),
-                HttpResponse.BodyHandlers.ofString());
+            response = CliHttp.send(builder.copy().header("Authorization", "Bearer " + token));
         }
         return response;
     }
@@ -109,13 +104,11 @@ public class CliAuth {
     }
 
     private static HttpResponse<String> postAuth(CliConfig cfg, Map<String, ?> body) throws Exception {
-        return http.send(
+        return CliHttp.send(
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/auth"))
+                .uri(URI.create(baseUrl(cfg) + "/ops/auth"))
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(Json.mapper().writeValueAsString(body)))
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
+                .POST(HttpRequest.BodyPublishers.ofString(Json.mapper().writeValueAsString(body))));
     }
 
     private static String cacheToken(Path file, String origin, HttpResponse<String> response) throws Exception {
@@ -160,6 +153,15 @@ public class CliAuth {
     static Path userBraceDir() {
         String override = System.getProperty("brace.user.dir");
         return override != null ? Path.of(override) : Path.of(System.getProperty("user.home"), ".brace");
+    }
+
+    /**
+     * The server's normalised origin, with no trailing slash: what request URLs are built from
+     * ({@code baseUrl(cfg) + "/ops/..."}). {@code cfg.url()} as typed may end in a slash, which
+     * would make {@code //ops/auth}.
+     */
+    static String baseUrl(CliConfig cfg) {
+        return originOf(cfg);
     }
 
     static String originOf(CliConfig cfg) {
@@ -220,9 +222,29 @@ public class CliAuth {
         }
     }
 
+    /** The most a key file the CLI reads may hold: a key file is a few hundred bytes. */
+    static final long MAX_KEY_FILE_BYTES = 64 * 1024;
+
+    /**
+     * A path from {@code .brace} may name a FIFO (reading it blocks forever, sending nothing) or
+     * a device such as {@code /dev/zero} (reading it fills the heap). Require a regular file of
+     * at most 64 KB before reading. Symbolic links are followed on purpose: a key file that is a
+     * link into the user's home is legitimate, and what counts is what it points at.
+     */
+    static void requireSmallRegularFile(Path file, String what) throws java.io.IOException {
+        if (!Files.isRegularFile(file)) {
+            throw new RuntimeException(what + " must be a regular file, not a pipe, device or directory: " + file);
+        }
+        if (Files.size(file) > MAX_KEY_FILE_BYTES) {
+            throw new RuntimeException(what + " is too large to be a key file (over "
+                + (MAX_KEY_FILE_BYTES / 1024) + " KB): " + file);
+        }
+    }
+
     private static OpsKeys.Keypair loadKeypair(CliConfig cfg) throws Exception {
         Path keyFile = Path.of(cfg.keyPath());
         if (Files.exists(keyFile)) {
+            requireSmallRegularFile(keyFile, "ops.key");
             return OpsKeys.readKeyFile(cfg.keyPath());
         }
         String envKey = System.getenv("OPS_PRIVATE_KEY");
@@ -235,6 +257,7 @@ public class CliAuth {
             throw new RuntimeException("Cannot match OPS_PRIVATE_KEY without "
                 + cfg.authorizedKeysPath());
         }
+        requireSmallRegularFile(authPath, "ops.authorizedKeys");
         var authorizedKeys = OpsKeys.loadAuthorizedKeys(authPath.toString());
         var testSig = OpsKeys.sign("test", envKey);
         for (var pub : authorizedKeys.keySet()) {
