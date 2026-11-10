@@ -22,12 +22,26 @@ public class Cli {
         String cmd = args[0];
         String[] rest = Arrays.copyOfRange(args, 1, args.length);
 
+        System.exit(guarded(() -> dispatch(cwd, cmd, rest)));
+    }
+
+    /**
+     * Runs a command and turns whatever it throws into a short message and exit code 1, never a
+     * raw stack trace. An {@link Error} such as {@code OutOfMemoryError} (a hostile response can
+     * try for one) is reported too, but {@code ThreadDeath} is rethrown: it is control flow, not
+     * a failure of the command.
+     */
+    static int guarded(java.util.concurrent.Callable<Integer> command) {
         try {
-            int code = dispatch(cwd, cmd, rest);
-            System.exit(code);
+            return command.call();
         } catch (Exception e) {
-            CliOutput.printError(e.getMessage() != null ? e.getMessage() : e.toString());
-            System.exit(1);
+            CliOutput.printError(CliOutput.excerpt(e.getMessage() != null ? e.getMessage() : e.toString()));
+            return 1;
+        } catch (Error e) {
+            if (e.getClass().getName().equals("java.lang.ThreadDeath")) throw e;
+            CliOutput.printError("brace failed: " + e.getClass().getSimpleName()
+                + (e instanceof OutOfMemoryError ? " (a response or file was too large to handle)" : ""));
+            return 1;
         }
     }
 

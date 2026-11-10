@@ -263,13 +263,18 @@ public class CliCheck {
 
     static Check checkHttp5xx(JsonNode status) {
         var codes = status.path("http").path("statusCodes");
-        int total5xx = 0;
-        int totalRequests = 0;
+        long total5xx = 0;
+        long totalRequests = 0;
         var it = codes.fields();
         while (it.hasNext()) {
             var entry = it.next();
-            int code = Integer.parseInt(entry.getKey());
-            int count = entry.getValue().asInt(0);
+            int code;
+            try {
+                code = Integer.parseInt(entry.getKey());
+            } catch (NumberFormatException notAStatusCode) {
+                continue;   // a key the server made up: not a status code, so not counted
+            }
+            long count = entry.getValue().asLong(0);
             totalRequests += count;
             if (code >= 500) total5xx += count;
         }
