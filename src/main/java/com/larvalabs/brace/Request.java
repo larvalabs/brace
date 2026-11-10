@@ -605,7 +605,7 @@ public class Request {
         }
         var selected = trustedProxies.usesForwardedHeader()
             ? extractForwardedFor(chain)
-            : rightmostUntrusted(chain.split(","));
+            : rightmostUntrusted(chain.split(",", -1)); // -1: keep a trailing empty entry (L3 verification)
         // L3 final review: the peer is a proxy and its header names no address. The proxy's own
         // address is not the client's, so it is never the fallback.
         String client = selected == null ? null : TrustedProxies.canonical(selected);
@@ -642,10 +642,11 @@ public class Request {
      * (fully internal infrastructure chain), return the leftmost non-blank entry to preserve
      * the original client address.
      *
-     * <p>Blank/whitespace-only entries are skipped in both directions. If the array is empty or
-     * contains only blank entries, {@code null} is returned so callers fall back to the socket
-     * remote address — this prevents returning an empty string and prevents an
-     * {@link ArrayIndexOutOfBoundsException} on a header value of exactly {@code ","}.
+     * <p>Only an entry that is a trusted proxy's address is walked past (L3 verification). A blank
+     * (or {@code null}: a {@code Forwarded} element without {@code for=}) entry reached first is
+     * the trusted proxy's statement that it names no client, so the walk stops and returns
+     * {@code null} ({@code "unknown"}); it never skips to an earlier entry, which the client may
+     * have written. An empty array also returns {@code null}.
      *
      * <p>Port suffixes are stripped before trust evaluation:
      * <ul>
@@ -655,24 +656,17 @@ public class Request {
      * </ul>
      */
     private String rightmostUntrusted(String[] entries) {
-        // Right-to-left: skip blank segments; return the first untrusted non-blank entry.
+        // Right-to-left: walk past trusted proxies only; the first entry that is not one decides.
         for (int i = entries.length - 1; i >= 0; i--) {
-            var trimmed = entries[i].trim();
-            if (trimmed.isEmpty()) continue;
+            var trimmed = entries[i] == null ? "" : entries[i].trim();
+            if (trimmed.isEmpty()) return null; // names no client: unknown, never an earlier entry
             var addr = stripPort(trimmed);
             if (!trustedProxies.isTrusted(addr)) {
                 return addr;
             }
         }
-        // All non-blank entries are trusted (fully internal chain) — return the leftmost non-blank.
-        for (int i = 0; i < entries.length; i++) {
-            var trimmed = entries[i].trim();
-            if (!trimmed.isEmpty()) {
-                return stripPort(trimmed);
-            }
-        }
-        // No non-blank entries at all — signal to the caller to fall back to remoteAddr.
-        return null;
+        // Every entry is trusted (fully internal chain): the leftmost is the original client.
+        return entries.length == 0 ? null : stripPort(entries[0].trim());
     }
 
     /**
@@ -721,7 +715,9 @@ public class Request {
      * L3 review F8: commas and semicolons inside a quoted-string are not separators, and a
      * backslash escapes the next character in one, so {@code for="a,b"} is one value (which is not
      * an address, so {@link #ip()} is {@code "unknown"}) rather than {@code "a} and {@code b"}.
-     * An element without {@code for=} contributes nothing.
+     * An element without {@code for=} (or an empty one) names no client: reached in the walk it
+     * makes the answer {@code "unknown"} (L3 verification), so a proxy's {@code proto=https}
+     * element can no longer be skipped to reach a client-written {@code for=}.
      *
      * <p>Elements are split from the RIGHT ({@link #splitForwardedElements}; L3 final review):
      * the element a trusted proxy appended is the end of the string and is well-formed, so read
@@ -732,15 +728,16 @@ public class Request {
     private String extractForwardedFor(String forwarded) {
         var forValues = new java.util.ArrayList<String>();
         for (var element : splitForwardedElements(forwarded)) {
+            String forValue = null; // no for= in this element
             for (var param : splitForwarded(element, ';')) {
                 var trimmed = param.strip();
                 int eq = trimmed.indexOf('=');
                 if (eq < 0 || !trimmed.substring(0, eq).strip().equalsIgnoreCase("for")) continue;
-                forValues.add(unquote(trimmed.substring(eq + 1).strip()));
+                forValue = unquote(trimmed.substring(eq + 1).strip());
                 break; // only one "for=" per list-element
             }
+            forValues.add(forValue);
         }
-        if (forValues.isEmpty()) return null;
         return rightmostUntrusted(forValues.toArray(new String[0]));
     }
 

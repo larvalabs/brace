@@ -934,7 +934,8 @@ the proxy's), every line is read, in wire order, as one list.
 
 When the forwarding header is consulted, Brace uses **rightmost-untrusted** semantics: it walks
 the list from right to left, skips any entry whose address falls inside a trusted CIDR, and
-returns the first untrusted address. This is the correct algorithm because real proxies
+returns the first untrusted address (an empty entry or a `Forwarded` element without `for=`
+reached on the way ends the walk with `unknown`; see below). This is the correct algorithm because real proxies
 **append** the connecting client's address — the leftmost entries were written by the client and
 can be forged.
 
@@ -1004,6 +1005,11 @@ client:
 - the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
   identifier, a malformed element, or anything a client managed to put there);
 - the header is present but empty, or (for `Forwarded`) has no `for=`;
+- the entry the walk reaches first after the trusted proxies is empty, or (for `Forwarded`) an
+  element without `for=`. The walk only steps past entries that are trusted-proxy addresses, so
+  `Forwarded: for=6.6.6.6` followed by the proxy's own `Forwarded: proto=https` line, or
+  `X-Forwarded-For: 6.6.6.6` followed by an empty `X-Forwarded-For:` line, is `unknown`, never
+  the client-written `6.6.6.6`;
 - the proxy sent only the forwarding header Brace was not told to read (say only `Forwarded`
   while the app reads `X-Forwarded-For`). Brace also logs one warning naming
   `TrustedProxies.useForwardedHeader()`.

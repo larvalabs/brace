@@ -601,6 +601,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       still itself). `X-Forwarded-Host` must be a `host[:port]` or it is ignored. `req.ip()` is
       canonical (RFC 5952, IPv4-mapped as IPv4, zone kept). Tests in
       `ProxyHeadersFinalReviewTest`.
+    - **Verification fixes.** The walk skipped an element that named no client: with a trusted
+      peer, `Forwarded: for=6.6.6.6` plus the proxy's `Forwarded: proto=https` line, `for=6.6.6.6,`
+      plus an empty line, and `X-Forwarded-For: 6.6.6.6` plus an empty `X-Forwarded-For:` line all
+      gave the client's own `6.6.6.6` (the XFF split also dropped a trailing empty entry). Walking
+      from the right, only trusted-proxy addresses are now stepped past; the first other entry
+      decides, and an empty one or a `Forwarded` element without `for=` is `unknown`. Three
+      `RequestIpTest` cases that expected a blank middle entry to be skipped now expect
+      `unknown`. Tests in `ForwardedRightmostElementTest`.
 
 - [x] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
   - `RenderedResponse.from(result)` is stored regardless of status. The key ignores undeclared

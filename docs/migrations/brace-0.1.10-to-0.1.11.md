@@ -1647,8 +1647,12 @@ Also changed:
   comes from a trusted proxy and the selected forwarding entry is not an address (`unknown`,
   `_hidden`, a malformed element), or the header is empty, or the proxy sent only the header
   Brace does not read, it returns `unknown`. 0.1.10 returned the entry as written, or the
-  proxy's own address. A trusted peer that sends no forwarding header at all is still returned
-  as itself, and an untrusted peer is always its socket address.
+  proxy's own address. The same holds when, walking from the right past trusted proxies, the
+  next entry is empty or a `Forwarded` element without `for=`: `Forwarded: for=6.6.6.6` plus
+  the proxy's `Forwarded: proto=https`, or `X-Forwarded-For: 6.6.6.6` plus an empty line, is
+  `unknown` (0.1.10 skipped the empty entry and returned the client-written `6.6.6.6`). A
+  trusted peer that sends no forwarding header at all is still returned as itself, and an
+  untrusted peer is always its socket address.
 
   ```java
   // before: a malformed header made req.ip() the proxy's address, which this admitted
