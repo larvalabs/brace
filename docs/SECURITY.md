@@ -1552,7 +1552,12 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
   the parameter.
 - **Bounded growth.** Only matched routes returning HTML are counted, so a scanner requesting
   random URLs produces 404s, not rows. The in-memory buffer is capped at 20,000 views; beyond that
-  views are dropped and tallied. Every stored string is length-capped, and every value the page
+  views are dropped and tallied. Two more caps bound table growth against a client that sends
+  browser-looking requests in a loop: one visitor (host, IP, user agent) adds at most 30 rows per
+  10-second flush window (`maxViewsPerVisitorPerFlush`), and an instance inserts at most 500,000
+  rows a day (`dailyRowBudget`, one warning when it is reached). Views over either cap are not
+  stored but are tallied as `dropped`, which the dashboard and `notCounted` show, so a capped day
+  reads as capped rather than silently low. Every stored string is length-capped, and every value the page
   renders is HTML-escaped.
 - **The "don't count" cookie.** `POST /ops/analytics/ignore` sets `__brace_analytics_ignore=1`
   (HttpOnly, `SameSite=Lax`, `Path=/`, `Secure` except on localhost). It carries no credential;

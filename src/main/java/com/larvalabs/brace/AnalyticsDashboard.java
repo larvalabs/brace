@@ -33,7 +33,7 @@ final class AnalyticsDashboard {
         "background", new String[] {"Background fetches", "Sec-Fetch-Mode other than navigate"},
         "prefetch", new String[] {"Prefetches", "Sec-Purpose: prefetch"},
         "excluded", new String[] {"Excluded", "configured paths or IPs, or the don't-count cookie"},
-        "dropped", new String[] {"Dropped", "buffer full: database slow or unreachable"});
+        "dropped", new String[] {"Dropped", "buffer full, or a per-visitor or daily row cap was hit"});
 
     static String html(Analytics.Report r, String metric, boolean ignored) {
         var sb = new StringBuilder(16_384);

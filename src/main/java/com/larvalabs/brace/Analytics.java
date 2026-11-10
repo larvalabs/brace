@@ -70,6 +70,11 @@ public final class Analytics {
      */
     static final int DEFAULT_RETENTION_DAYS = 35;
 
+    /** One person rarely loads more than a few pages in 10 seconds; 30 leaves room for a fast clicker. */
+    static final int DEFAULT_VIEWS_PER_VISITOR = 30;
+    /** ~75 MB of rows a day at 150 bytes; ten times the 50,000 views a day the sizing guide assumes. */
+    static final long DEFAULT_DAILY_ROW_BUDGET = 500_000;
+
     /** Configuration for {@code app.analytics(...)}. */
     public static final class Options {
         private ZoneId zone = ZoneOffset.UTC;
@@ -79,6 +84,8 @@ public final class Analytics {
         private Duration rawRetention = Duration.ofDays(DEFAULT_RETENTION_DAYS);
         private boolean strictNavigation;
         private int bufferLimit = 20_000;
+        private int maxViewsPerVisitor = DEFAULT_VIEWS_PER_VISITOR;
+        private long dailyRowBudget = DEFAULT_DAILY_ROW_BUDGET;
 
         private Options() {}
 
@@ -128,6 +135,28 @@ public final class Analytics {
          */
         public Options strictNavigation(boolean strict) {
             this.strictNavigation = strict;
+            return this;
+        }
+
+        /**
+         * Most page views one visitor (same host, IP and user agent) can add as rows in a single
+         * flush window (10 seconds). Further views in the window are counted under "Not counted:
+         * dropped" instead of stored, so one client cannot fill the table at request rate. Default
+         * {@value #DEFAULT_VIEWS_PER_VISITOR}; {@code 0} or less turns the cap off.
+         */
+        public Options maxViewsPerVisitorPerFlush(int views) {
+            this.maxViewsPerVisitor = views;
+            return this;
+        }
+
+        /**
+         * Most page-view rows this instance inserts per day (in the analytics timezone). Views
+         * past it are counted under "Not counted: dropped" and a warning is logged once that day.
+         * Default {@value #DEFAULT_DAILY_ROW_BUDGET}; {@code 0} or less turns it off. In a fleet
+         * each instance has its own budget, and a restart resets it.
+         */
+        public Options dailyRowBudget(long rows) {
+            this.dailyRowBudget = rows;
             return this;
         }
 
@@ -317,9 +346,14 @@ public final class Analytics {
             tally("dropped", day);
             return;
         }
-        warnIfProxied(req);
         String ua = req.header("User-Agent");
         String host = normalizeHost(req.host());
+        if (overCaps(host, req.ip(), ua, day)) {
+            buffered.decrementAndGet();
+            tally("dropped", day);
+            return;
+        }
+        warnIfProxied(req);
         String path = route.analytics() == Track.ROUTE ? route.pattern() : storedPath(route, req.path());
         String country = null;
         if (options.countryHeader != null && req.fromTrustedProxy()) {
@@ -328,6 +362,48 @@ public final class Analytics {
         buffer.add(new Event(now, day, local.getHour(), host, req.ip(), ua, path,
             source(req, host), UserAgents.device(ua, req.header("Sec-CH-UA-Mobile")),
             UserAgents.browser(ua), UserAgents.os(ua, req.header("Sec-CH-UA-Platform")), country));
+    }
+
+    private record VisitorKey(String host, String ip, String ua) {}
+
+    // Views buffered per visitor since the last flush; cleared by flush(). Bounded by the buffer
+    // limit, as every entry stands for at least one buffered event.
+    private final ConcurrentHashMap<VisitorKey, AtomicInteger> windowViews = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<LocalDate, java.util.concurrent.atomic.AtomicLong> dayRows = new ConcurrentHashMap<>();
+    private volatile LocalDate budgetWarnedFor;
+
+    /**
+     * L16: whether this view may not become a row. A per-visitor cap per flush window, then a daily
+     * row budget. A refused view is tallied as "dropped" by the caller, so reports show it as not
+     * counted rather than silently undercounting. The visitor key is the inputs of the stored
+     * visitor hash (the hash itself needs the day's salt, which is only read at flush).
+     */
+    private boolean overCaps(String host, String ip, String ua, LocalDate day) {
+        long budget = options.dailyRowBudget;
+        java.util.concurrent.atomic.AtomicLong used = null;
+        if (budget > 0) {
+            if (dayRows.size() > 3) dayRows.keySet().removeIf(d -> d.isBefore(day.minusDays(1)));
+            used = dayRows.computeIfAbsent(day, d -> new java.util.concurrent.atomic.AtomicLong());
+            // Checked before the visitor map is touched, so a flood of distinct visitors after the
+            // budget is spent cannot grow that map either.
+            if (used.get() >= budget) {
+                if (!day.equals(budgetWarnedFor)) {
+                    budgetWarnedFor = day;
+                    Log.warn("Analytics reached its daily budget of " + budget + " page-view rows; further views today "
+                        + "are counted under \"Not counted: dropped\" and not stored. Raise it with "
+                        + "Analytics.options().dailyRowBudget(...) if this traffic is real.");
+                }
+                return true;
+            }
+        }
+        int perVisitor = options.maxViewsPerVisitor;
+        if (perVisitor > 0
+                && windowViews.computeIfAbsent(new VisitorKey(host, ip, ua), k -> new AtomicInteger())
+                    .incrementAndGet() > perVisitor) {
+            return true;
+        }
+        if (used != null) used.incrementAndGet();
+        return false;
     }
 
     /**
@@ -439,6 +515,7 @@ public final class Analytics {
      * periodic, shutdown and test-triggered flushes can't interleave. Returns the views written.
      */
     synchronized int flush() {
+        windowViews.clear(); // the per-visitor cap is per flush window (L16)
         var events = new ArrayList<Event>();
         Event e;
         while ((e = buffer.poll()) != null) {

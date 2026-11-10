@@ -1339,7 +1339,9 @@ app.analytics(Analytics.options()
     .exclude("/admin/*")                          // exact path or trailing /* prefix
     .excludeIps("203.0.113.0/24")                 // never counted
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
-    .rawRetention("35d"));                       // raw rows only; daily summaries are kept
+    .rawRetention("35d")                         // raw rows only; daily summaries are kept
+    .maxViewsPerVisitorPerFlush(30)              // row cap per visitor per 10 s; over it is "Not counted: dropped"
+    .dailyRowBudget(500_000));                   // rows per instance per day; 0 turns a cap off
 
 app.get("/invite/{code}", ctrl::invite).analytics(false);      // URL carries a secret the name doesn't reveal
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}
