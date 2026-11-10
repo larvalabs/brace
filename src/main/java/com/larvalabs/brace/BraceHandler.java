@@ -806,7 +806,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // An error kind is (type, route PATTERN), like the stats keys (H1): keyed by the
             // concrete path, every /users/{id} a client tried was a new kind and a new regression
             // notification. The concrete (redacted) path is still in requestInfo below.
-            String routeInfo = errorMethod + " " + routeKey(exchange.match);
+            // The method is folded to a fixed list (methodKey) for the same reason: it is the
+            // client's to choose, and an unmatched request can reach here through a throwing
+            // global before-middleware. requestInfo keeps the method as sent.
+            String routeInfo = methodKey(errorMethod) + " " + routeKey(exchange.match);
             // Redact query params before the request detail is stored in the error record and
             // served over /ops/errors: by decoded name (?token=…, ?%74oken=…, ?code=…) and by
             // value shape (a JWT or 32-char token under any name; M6).
@@ -875,6 +878,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     private static String routeKey(RouteMatch match) {
         return match != null ? match.route().pattern() : UNMATCHED_ROUTE_KEY;
+    }
+
+    /** Key for any request method outside {@link #methodKey}'s fixed list. */
+    static final String OTHER_METHOD = "OTHER";
+
+    /**
+     * The request method as it may appear in a stats key or an error kind: one of the nine
+     * standard methods, or {@link #OTHER_METHOD} (security review 2026-11, second review of M5).
+     *
+     * <p>The method is the client's to choose and Jetty passes any token through, so it is as
+     * unbounded as the path is. Keyed raw, {@code ZZ0 /x}, {@code ZZ1 /x}, ... each minted a
+     * permanent entry in the never-reset stats map, and, where a 500 can be had without matching
+     * a route (a throwing global before-middleware), a new error kind and a new regression
+     * notification per request. Routes are only ever registered under GET, POST, PUT and DELETE
+     * (HEAD is answered by the GET route), so nothing a route can match is folded. The request
+     * log and an error record's request detail keep the method as it was sent.
+     */
+    static String methodKey(String method) {
+        if (method == null) return OTHER_METHOD;
+        return switch (method) {
+            case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT" -> method;
+            default -> OTHER_METHOD;
+        };
     }
 
     /** Stats bucket for requests that matched no route — see {@link #routeKey}. */
@@ -978,7 +1004,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         int qc = exchange.db != null ? exchange.db.queryCount() : 0;
         long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
         String key = exchange.match != null ? routeKey(exchange.match) : exchange.noMatchKey;
-        stats.recordRequestPattern(exchange.method, key, status, durationUs, qc, qu);
+        // methodKey: a made-up method must not mint a permanent stats key. The log keeps it as sent.
+        stats.recordRequestPattern(methodKey(exchange.method), key, status, durationUs, qc, qu);
         if (!exchange.logged) {
             Log.request(exchange.method, exchange.path, status, durationUs, qc, qu);
         }

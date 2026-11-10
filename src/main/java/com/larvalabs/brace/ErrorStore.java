@@ -16,9 +16,16 @@ import java.util.*;
  * that healthy requests needed. Coalescing loses nothing the table keeps ({@code ops_errors} is
  * already one row per kind with a count and the latest payload); the costs are bounded and
  * deliberate: a crash drops at most one flush interval of counts, dashboards and regression
- * notifications lag by at most one interval, and past {@value #MAX_PENDING_KINDS} distinct pending
- * kinds new kinds are dropped (counted, warned on flush). Occurrences of already-pending kinds are
+ * notifications lag by at most one interval, and past {@value #MAX_PENDING_KINDS} distinct buffered
+ * kinds new kinds are dropped (counted, warned on flush). Occurrences of already-buffered kinds are
  * never dropped — they're a counter bump. Tests and shutdown call {@link #flush()} directly.
+ *
+ * <p>The cap covers everything the store holds: the pending map and the batch a flush has drained
+ * and not yet written or put back (security review 2026-11, second review of M5). A flush that
+ * waits on a dead database holds its batch for as long as the connection attempt takes; counting
+ * only the pending map let {@link #record} admit another full cap of kinds in that window, on
+ * every flush of an outage. The kinds buffered first are the ones kept: they carry the counts and
+ * first-seen times accumulated so far, and a flood of new kinds cannot push them out.
  *
  * <p>One bad entry cannot stall the store (security review 2026-11, M5). {@link #record} replaces
  * NUL characters (Postgres text cannot hold them, and pgjdbc rejects them client-side) and clips
@@ -33,13 +40,17 @@ import java.util.*;
  * the whole batch is kept uncounted and retried, as for an outage: a connection-level failure
  * (database down, pool exhausted, the session cannot be opened or begun, a connection-classed
  * SQLState on a connection that then fails {@code isValid}) and a server-wide SQLState
- * ({@link #isServerWide}: 25006 read-only during a failover, 53xxx, 57P0x, 58xxx, 08xxx) on any
- * row. That retention is capped at {@value #MAX_UNCOUNTED_RETENTIONS} consecutive flushes per
+ * ({@link #isServerWide}: 25006 read-only during a failover, 53xxx, 57P0x, 58xxx, 08xxx) when no
+ * row of that flush could be written. When another row of the same flush was written, the server
+ * is taking writes, so such a state is that row's own (one oversized row drawing 53100 or 53200)
+ * and counts against it alone, instead of starving the rows beside it. That retention is capped at {@value #MAX_UNCOUNTED_RETENTIONS} consecutive flushes per
  * entry (about two minutes), after which each failed flush counts like a row rejection. Any other
  * rejection counts, even when every row of the batch got it (a lock timeout on all of them), and
  * so does a connection-classed SQLState on a connection that is still valid (a statement timeout
  * on one huge row, a deadlock). Failures are logged at most once a minute, naming the exception
- * class, SQLState and error type, never the request-derived payload.
+ * class, SQLState and error type, never the request-derived payload. A {@link RegressionListener}
+ * that throws costs only its own notification (counted in the same warning), and an
+ * {@link Error} during a flush keeps the batch and the flusher thread like any failed flush.
  */
 public class ErrorStore {
 
@@ -103,10 +114,16 @@ public class ErrorStore {
             this.firstSeen = firstSeen;
         }
 
-        /** Same kind, count and times; the payload replaced by {@link #STRIPPED_MESSAGE}. */
+        /**
+         * Same kind, count, times and failure counters; the payload replaced by
+         * {@link #STRIPPED_MESSAGE}. The copy lives for one flush only: it is written and
+         * reported to the listener, and never put back in the pending map (a flush that fails
+         * keeps the entry it was made from), so {@link #record} never refreshes one.
+         */
         Pending stripped() {
             var s = new Pending(type, route, firstSeen);
             s.failures = failures;
+            s.uncounted = uncounted;
             s.count = count;
             s.lastSeen = lastSeen;
             s.message = STRIPPED_MESSAGE;
@@ -120,6 +137,15 @@ public class ErrorStore {
     private volatile RegressionListener regressionListener;
     private final java.util.concurrent.ConcurrentHashMap<String, Pending> pending =
         new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * Keys of the batch a flush has drained from {@link #pending} and not yet settled (written,
+     * dropped or merged back). Changed only inside {@code pending.compute} for that key, as is
+     * {@link #bufferedKinds}, so the two stay consistent with the map under concurrent records.
+     */
+    private final Set<String> inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Distinct kinds held in {@link #pending} or {@link #inFlight}: what the cap bounds. */
+    private final java.util.concurrent.atomic.AtomicInteger bufferedKinds =
+        new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.LongAdder droppedKinds =
         new java.util.concurrent.atomic.LongAdder();
     private final Thread flusher;
@@ -146,7 +172,12 @@ public class ErrorStore {
     private long failedFlushes;
     private long droppedEntries;
     private final Set<String> droppedTypes = new LinkedHashSet<>();
+    /** Entries dropped because no flush could be written for too long, not because they were rejected. */
+    private long outageDroppedEntries;
+    private final Set<String> outageDroppedTypes = new LinkedHashSet<>();
     private String lastFailure;
+    private long listenerFailures;
+    private String lastListenerFailure;
 
     public ErrorStore(DatabaseFactory databaseFactory, int maxErrors) {
         this.databaseFactory = databaseFactory;
@@ -161,8 +192,17 @@ public class ErrorStore {
                 }
                 try {
                     flush();
-                } catch (Exception e) {
-                    // Never let the flusher die; the next interval retries.
+                } catch (Throwable e) {
+                    // Never let the flusher die; the next interval retries. That includes an
+                    // Error, an OutOfMemoryError among them: flushBatch has already put the batch
+                    // back, a JVM that should not outlive one is run with -XX:+ExitOnOutOfMemoryError,
+                    // and in one that carries on, a dead flusher would mean no error is persisted
+                    // and no regression is reported until restart, with nothing to show for it.
+                    try {
+                        Log.warn("error store: flush failed with " + e.getClass().getName() + ", retrying next interval");
+                    } catch (Throwable ignored) {
+                        // Logging allocates; if that fails too there is nothing left to do here.
+                    }
                 }
             }
         });
@@ -207,14 +247,18 @@ public class ErrorStore {
         String cleanQueries = withoutNul(queriesBefore);
         String cleanHeaders = withoutNul(requestHeaders);
         var key = cleanType + '\u0000' + cleanRoute;
-        if (pending.size() >= MAX_PENDING_KINDS && !pending.containsKey(key)) {
+        // The cap counts the batch a flush is holding too; a kind in that batch is a known kind.
+        if (bufferedKinds.get() >= MAX_PENDING_KINDS && !pending.containsKey(key) && !inFlight.contains(key)) {
             droppedKinds.increment();
             return;
         }
         // Served on /ops/errors; the trace repeats the message (and every cause's) verbatim.
         String redactedTrace = Redactor.redactStackTrace(withoutNul(stackTrace));
         pending.compute(key, (k, p) -> {
-            if (p == null) p = new Pending(cleanType, cleanRoute, now);
+            if (p == null) {
+                p = new Pending(cleanType, cleanRoute, now);
+                if (!inFlight.contains(k)) bufferedKinds.incrementAndGet();
+            }
             p.count++;
             p.message = cleanMessage;
             p.stackTrace = redactedTrace;
@@ -273,17 +317,29 @@ public class ErrorStore {
 
     private void flushBatch() {
         // Drain a snapshot; records arriving during the flush re-create entries for the next one.
+        // A drained key stays counted in bufferedKinds (it moves to inFlight) until it is settled.
         var batch = new ArrayList<Pending>();
         for (var key : pending.keySet()) {
-            var p = pending.remove(key);
-            if (p != null) batch.add(p);
+            pending.compute(key, (k, p) -> {
+                if (p != null) {
+                    inFlight.add(k);
+                    batch.add(p);
+                }
+                return null;
+            });
         }
         if (batch.isEmpty()) {
             return;
         }
 
+        // The entries as drained. batch.set() below swaps in a payload-stripped copy where that is
+        // what got written; if the flush then fails, these (with their payloads) are what is kept.
+        var drained = new ArrayList<>(batch);
         var outcome = new byte[batch.size()];
         var rowErrors = new Throwable[batch.size()];
+        // Rows written in this flush, and the first server-wide SQLState a row drew, if any.
+        int[] written = {0};
+        Throwable[] serverWide = {null};
         boolean postgres = databaseFactory.isPostgres();
         boolean committed = false;
         Database db = null;
@@ -295,9 +351,13 @@ public class ErrorStore {
                     var p = batch.get(i);
                     try {
                         outcome[i] = writeRow(connection, p, postgres);
+                        written[0]++;
                     } catch (RowRejected first) {
                         outcome[i] = REJECTED;
                         rowErrors[i] = first.getCause();
+                        if (serverWide[0] == null && isServerWide(sqlState(first.getCause()))) {
+                            serverWide[0] = first.getCause();
+                        }
                         // Only a rejection of the DATA (22xxx, 23xxx, 54xxx) is retried without
                         // the payload, so the count and the regression signal survive what was
                         // refused. A transient error (a lock timeout) is retried in full on the
@@ -307,16 +367,31 @@ public class ErrorStore {
                         try {
                             outcome[i] = writeRow(connection, stripped, postgres);
                             batch.set(i, stripped);
+                            written[0]++;
                         } catch (RowRejected second) {
                             // stays REJECTED with the first error
                         }
                     }
                 }
+                // A server-wide SQLState (read-only, out of resources, shutting down) is the
+                // database's, not a row's, when nothing in this flush could be written: abort,
+                // so the whole batch is kept uncounted. When another row was written, the server
+                // is taking writes and the state is that row's own (one oversized row drawing
+                // 53100 or 53200), so it is counted below like any rejection. Decided after the
+                // loop, not at the failing row, so the order of the batch does not matter: before
+                // this, one such row aborted every flush and starved the healthy rows beside it
+                // for as long as it stayed buffered (second review).
+                if (serverWide[0] != null && written[0] == 0) {
+                    throw new FlushAborted(serverWide[0]);
+                }
                 prune(connection);
             });
             db.commitTransaction();
             committed = true;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Throwable, not Exception: an Error here (a NoClassDefFoundError out of a driver, an
+            // OutOfMemoryError building a statement) must not lose the drained batch, nor leave
+            // its keys counted as in flight for good.
             if (db != null) {
                 try {
                     db.rollbackTransaction();
@@ -327,9 +402,12 @@ public class ErrorStore {
             // DB unavailable (the storm case): put the batch back so counts keep accumulating —
             // bounded by kind cardinality, not error rate — and retry next interval, up to the
             // MAX_UNCOUNTED_RETENTIONS cap.
-            retainUncounted(batch);
+            retainUncounted(drained);
             failedFlushes++;
-            lastFailure = describe(e);
+            lastFailure = describe(e instanceof FlushAborted ? e.getCause() : e);
+            // The batch is safe; a VirtualMachineError is still the caller's to see. The flusher
+            // thread logs it and carries on (see the constructor).
+            if (e instanceof VirtualMachineError vme) throw vme;
         } finally {
             if (db != null) {
                 try {
@@ -344,7 +422,8 @@ public class ErrorStore {
         }
 
         // Rows the database rejected: retry a few times, then give up on that entry. A server-wide
-        // SQLState never gets here (it aborts the flush, above); every other rejection counts,
+        // SQLState gets here only beside a row that was written (with none written it aborts the
+        // flush, above); every other rejection counts,
         // even when every row of the batch got the same one (a lock timeout on all of them): kept
         // uncounted, two rows that always fail that way were retried forever (verification pass).
         for (int i = 0; i < batch.size(); i++) {
@@ -356,9 +435,13 @@ public class ErrorStore {
             if (++p.failures >= MAX_FLUSH_FAILURES) {
                 droppedEntries++;
                 if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
+                settle(p);
             } else {
                 mergeBack(p);
             }
+        }
+        for (int i = 0; i < batch.size(); i++) {
+            if (outcome[i] != REJECTED) settle(batch.get(i));
         }
 
         // Notify the regression listener only after a successful commit, off the DB path.
@@ -366,9 +449,25 @@ public class ErrorStore {
         if (listener != null) {
             for (int i = 0; i < batch.size(); i++) {
                 var p = batch.get(i);
-                if (outcome[i] == INSERTED) listener.onNew(p.type, p.route, p.message, p.firstSeen);
-                else if (outcome[i] == UPDATED) listener.onRepeat(p.type, p.route, p.count);
+                // Per row: a listener that throws for one kind must not cost the rest of the
+                // batch its notifications, nor fail a flush whose rows are already committed.
+                try {
+                    if (outcome[i] == INSERTED) listener.onNew(p.type, p.route, p.message, p.firstSeen);
+                    else if (outcome[i] == UPDATED) listener.onRepeat(p.type, p.route, p.count);
+                } catch (VirtualMachineError e) {
+                    throw e;
+                } catch (Throwable e) {
+                    listenerFailures++;
+                    lastListenerFailure = describe(e);
+                }
             }
+        }
+    }
+
+    /** No row could be written and one drew a server-wide SQLState (the cause): nothing commits. */
+    private static final class FlushAborted extends RuntimeException {
+        FlushAborted(Throwable cause) {
+            super(null, cause, false, false);
         }
     }
 
@@ -402,14 +501,16 @@ public class ErrorStore {
 
     /**
      * Rolls back to {@code savepoint} after {@code e}, or rethrows {@code e} when the connection
-     * is gone or the server cannot take any write. A server-wide SQLState
-     * ({@link #isServerWide}: 25006 read-only transaction, during a failover; 53xxx out of
-     * resources; 57P0x shutdown; 58xxx system error; 08xxx connection) aborts the flush whatever
-     * the connection's liveness, so the batch is kept uncounted (final review L10). Another
-     * connection-classed SQLState (40, 57014, other 25) is not trusted on its own: 57014 is a
-     * statement timeout on one huge row, 40P01 a deadlock on one key. Only when the connection
-     * also fails its liveness check does the flush abort; otherwise the error is the row's (M5
-     * review). The rollback itself throws if the connection is gone.
+     * is gone. A connection-classed SQLState (08, 53, 57, 40, 25) is not trusted on its own:
+     * 57014 is a statement timeout on one huge row, 40P01 a deadlock on one key. Only when the
+     * connection also fails its liveness check does the flush abort here; otherwise the error is
+     * handed back as the row's (M5 review). The rollback itself throws if the connection is gone.
+     *
+     * <p>A server-wide SQLState ({@link #isServerWide}: 25006 read-only transaction, during a
+     * failover; 53xxx out of resources; 57P0x shutdown; 58xxx system error; 08xxx connection) on
+     * a connection that is still usable is handed back too. {@code flushBatch} aborts the flush
+     * for it when no row of the flush could be written, so the batch is kept uncounted (final
+     * review L10), and counts it against the row when another row was (second review).
      */
     private void recoverOrAbort(java.sql.Connection connection, java.sql.Savepoint savepoint, Exception e)
             throws SQLException {
@@ -419,7 +520,6 @@ public class ErrorStore {
             if (e instanceof SQLException se) throw se;
             throw rollbackFailed;
         }
-        if (e instanceof SQLException se && isServerWide(se.getSQLState())) throw se;
         if (e instanceof SQLException se && isConnectionFailure(se)) {
             boolean alive;
             try {
@@ -517,8 +617,9 @@ public class ErrorStore {
     private void retainUncounted(List<Pending> batch) {
         for (var p : batch) {
             if (++p.uncounted > MAX_UNCOUNTED_RETENTIONS && ++p.failures >= MAX_FLUSH_FAILURES) {
-                droppedEntries++;
-                if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
+                outageDroppedEntries++;
+                if (outageDroppedTypes.size() < 5) outageDroppedTypes.add(forLog(p.type));
+                settle(p);
             } else {
                 mergeBack(p);
             }
@@ -547,27 +648,55 @@ public class ErrorStore {
 
     /** At most one warning per {@link #FAILURE_LOG_INTERVAL_NANOS}, summarising what failed since the last. */
     private void logFailures() {
-        if (rejectedRows == 0 && failedFlushes == 0 && droppedEntries == 0) return;
+        boolean notPersisted = rejectedRows > 0 || failedFlushes > 0 || droppedEntries > 0 || outageDroppedEntries > 0;
+        if (!notPersisted && listenerFailures == 0) return;
         long now = System.nanoTime();
         if (now - nextFailureLogNanos < 0) return;
         nextFailureLogNanos = now + FAILURE_LOG_INTERVAL_NANOS;
-        var msg = new StringBuilder("error store: could not persist errors");
-        if (failedFlushes > 0) {
-            msg.append("; ").append(failedFlushes).append(" flush(es) failed, entries kept for retry");
+        var msg = new StringBuilder("error store: ");
+        if (notPersisted) {
+            msg.append("could not persist errors");
+            if (failedFlushes > 0) {
+                msg.append("; ").append(failedFlushes).append(" flush(es) failed, entries kept for retry");
+            }
+            if (rejectedRows > 0) {
+                msg.append("; database rejected ").append(rejectedRows).append(" row write(s)");
+            }
+            if (droppedEntries > 0) {
+                msg.append("; dropped ").append(droppedEntries).append(" error kind(s) after ")
+                    .append(MAX_FLUSH_FAILURES).append(" rejected flushes: ").append(String.join(", ", droppedTypes));
+            }
+            if (outageDroppedEntries > 0) {
+                msg.append("; dropped ").append(outageDroppedEntries)
+                    .append(" error kind(s) the database could not take through ")
+                    .append(MAX_UNCOUNTED_RETENTIONS + MAX_FLUSH_FAILURES).append(" failed flushes: ")
+                    .append(String.join(", ", outageDroppedTypes));
+            }
+            msg.append("; last failure: ").append(lastFailure);
         }
-        if (rejectedRows > 0) {
-            msg.append("; database rejected ").append(rejectedRows).append(" row write(s)");
+        if (listenerFailures > 0) {
+            // Exception class only, like the rest: its message can carry the error's payload.
+            msg.append(notPersisted ? "; " : "").append("regression listener threw for ").append(listenerFailures)
+                .append(" notification(s), the errors themselves are stored; last: ").append(lastListenerFailure);
         }
-        if (droppedEntries > 0) {
-            msg.append("; dropped ").append(droppedEntries).append(" error kind(s) after ")
-                .append(MAX_FLUSH_FAILURES).append(" rejected flushes: ").append(String.join(", ", droppedTypes));
-        }
-        msg.append("; last failure: ").append(lastFailure);
         Log.warn(msg.toString());
         rejectedRows = 0;
         failedFlushes = 0;
         droppedEntries = 0;
         droppedTypes.clear();
+        outageDroppedEntries = 0;
+        outageDroppedTypes.clear();
+        listenerFailures = 0;
+    }
+
+    /** Test hook: distinct kinds waiting in the pending map (not counting a batch being flushed). */
+    int pendingKinds() {
+        return pending.size();
+    }
+
+    /** Test hook: distinct kinds held in all, pending or in the batch being flushed. */
+    int bufferedKinds() {
+        return bufferedKinds.get();
     }
 
     /** Test hook: lets the next flush write its failure summary without waiting out the interval. */
@@ -575,9 +704,25 @@ public class ErrorStore {
         nextFailureLogNanos = System.nanoTime();
     }
 
-    /** Re-merge a failed-flush entry without clobbering anything newer that arrived meanwhile. */
+    /**
+     * A flushed entry leaves the store (written, or dropped): its key is no longer in flight, and
+     * no longer buffered unless the same kind was recorded again meanwhile.
+     */
+    private void settle(Pending done) {
+        pending.compute(done.type + '\u0000' + done.route, (k, p) -> {
+            if (inFlight.remove(k) && p == null) bufferedKinds.decrementAndGet();
+            return p;
+        });
+    }
+
+    /**
+     * Re-merge a failed-flush entry without clobbering anything newer that arrived meanwhile. The
+     * key moves from in flight back to pending, so the number of buffered kinds does not change:
+     * {@link #record} already counted the batch against the cap while it was in flight.
+     */
     private void mergeBack(Pending old) {
         pending.compute(old.type + '\u0000' + old.route, (k, p) -> {
+            inFlight.remove(k);
             if (p == null) return old;
             p.count += old.count; // keep p's payload — it's newer
             // Carry the rejection count, so a key the database always rejects is still dropped.
