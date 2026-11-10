@@ -99,18 +99,17 @@ public class Cache {
      */
     static String storageKey(String key) {
         if (key == null) return null;
-        if (!hasControlCharacter(key) && !key.contains(HASHED_KEY_MARKER) && !exceedsKeyBytes(key)) {
+        if (!hasControlCharacter(key) && !hasUnpairedSurrogate(key) && !key.contains(HASHED_KEY_MARKER)
+                && !exceedsKeyBytes(key)) {
             return key;
         }
         return key.substring(0, retainedLength(key)) + HASHED_KEY_MARKER + sha256Hex(key);
     }
 
     /**
-     * The prefix {@link #deletePrefix} sends to the backend. A key starting with {@code prefix} is
-     * stored either raw (so it still starts with it) or hashed, keeping its characters up to its
-     * first control character, its first marker, or {@link #RETAINED_PREFIX_CHARS}; a prefix that
-     * reaches any of those is cut there too. A cut prefix can clear more than was asked, never
-     * less: a cache miss, never a stale entry.
+     * The part of {@code prefix} a hashed key starting with it keeps readable: {@code prefix} cut
+     * at its first control character, unpaired surrogate or {@link #HASHED_KEY_MARKER}, or at
+     * {@link #RETAINED_PREFIX_CHARS} characters. Equal to {@code prefix} when nothing had to be cut.
      */
     static String storagePrefix(String prefix) {
         if (prefix == null) return null;
@@ -122,14 +121,39 @@ public class Cache {
     }
 
     /**
+     * True if {@code s} has a surrogate that is not half of a pair (L5 review F11). pgjdbc sends
+     * one as {@code ?}, so two such keys that differ only there were one row on Postgres.
+     */
+    static boolean hasUnpairedSurrogate(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                if (i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) {
+                    i++;
+                    continue;
+                }
+                return true;
+            }
+            if (Character.isLowSurrogate(c)) return true;
+        }
+        return false;
+    }
+
+    /**
      * Length of the part of {@code s} kept in front of a digest: up to its first control
-     * character, its first {@link #HASHED_KEY_MARKER}, or {@link #RETAINED_PREFIX_CHARS} characters,
-     * whichever comes first, never splitting a surrogate pair.
+     * character, its first unpaired surrogate, its first {@link #HASHED_KEY_MARKER}, or
+     * {@link #RETAINED_PREFIX_CHARS} characters, whichever comes first, never splitting a
+     * surrogate pair.
      */
     private static int retainedLength(String s) {
         int limit = Math.min(s.length(), RETAINED_PREFIX_CHARS);
         for (int i = 0; i < limit; i++) {
-            if (Character.isISOControl(s.charAt(i))) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) {
+                i++; // a pair; a cut between its halves is moved back below
+                continue;
+            }
+            if (Character.isISOControl(c) || Character.isSurrogate(c)) {
                 limit = i;
                 break;
             }
@@ -169,10 +193,27 @@ public class Cache {
     private static String sha256Hex(String s) {
         try {
             var digest = java.security.MessageDigest.getInstance("SHA-256");
-            return java.util.HexFormat.of().formatHex(digest.digest(s.getBytes(StandardCharsets.UTF_8)));
+            return java.util.HexFormat.of().formatHex(digest.digest(digestInput(s)));
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new AssertionError("SHA-256 not available", e);
         }
+    }
+
+    /**
+     * The bytes a key is hashed from: its UTF-8 encoding, which is injective for well-formed text.
+     * UTF-8 encoding replaces an unpaired surrogate with {@code ?} (so {@code "a\uD800"} and
+     * {@code "a\uD801"} would hash alike), so such a key is hashed from a 0xFF byte, which never
+     * occurs in UTF-8, followed by its UTF-16 code units (L5 review F11).
+     */
+    static byte[] digestInput(String s) {
+        if (!hasUnpairedSurrogate(s)) return s.getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[1 + 2 * s.length()];
+        out[0] = (byte) 0xFF;
+        for (int i = 0; i < s.length(); i++) {
+            out[1 + 2 * i] = (byte) (s.charAt(i) >>> 8);
+            out[2 + 2 * i] = (byte) s.charAt(i);
+        }
+        return out;
     }
 
     private static String[] storageTags(String[] tags) {
@@ -264,12 +305,42 @@ public class Cache {
     }
 
     /**
-     * Delete every entry whose key starts with {@code prefix}. A prefix longer than
-     * {@value #RETAINED_PREFIX_CHARS} characters, or containing a control character, also clears
-     * other keys that share its first part (see {@link #storagePrefix}).
+     * Delete every entry whose key starts with {@code prefix}.
+     *
+     * <p>A key that is stored hashed (one with a control character, an unpaired surrogate or
+     * {@link #HASHED_KEY_MARKER}, or over {@value #MAX_KEY_BYTES} UTF-8 bytes) keeps only its
+     * first characters readable, so a prefix that reaches past them cannot be matched exactly.
+     * For such a prefix (one with any of those characters, or longer than
+     * {@value #RETAINED_PREFIX_CHARS} characters) this deletes the keys stored as-is that start
+     * with the whole prefix, and the hashed keys whose readable part is exactly the prefix's
+     * readable part, which every hashed key starting with the prefix has (L5 review F7). What can
+     * still be cleared beyond the prefix: hashed keys that share that readable part without
+     * continuing the prefix. For example {@code deletePrefix("search:\u0001")} also clears
+     * {@code "search:\u0002"} and {@code "search:#sha256:x"}, never {@code "search:alpha"}; a
+     * 200-character prefix also clears hashed keys that share its first 128 characters. A prefix
+     * that ends in the first half of a surrogate pair clears every key starting with the rest of
+     * it. Over-deletion is a cache miss, never a stale entry.
      */
     public void deletePrefix(String prefix) {
-        backend.deletePrefix(storagePrefix(prefix));
+        if (prefix == null) {
+            backend.deletePrefix(null);
+            return;
+        }
+        if (!prefix.isEmpty() && Character.isHighSurrogate(prefix.charAt(prefix.length() - 1))) {
+            // A key can complete the pair, so its stored form may hold a character the prefix
+            // cannot express (pgjdbc would send the lone half as "?"): clear by the rest.
+            deletePrefix(prefix.substring(0, prefix.length() - 1));
+            return;
+        }
+        String readable = storagePrefix(prefix);
+        if (readable.length() == prefix.length()) {
+            backend.deletePrefix(prefix); // matches plain keys and hashed ones' readable parts alike
+            return;
+        }
+        backend.deletePrefix(readable + HASHED_KEY_MARKER);
+        if (!hasControlCharacter(prefix) && !hasUnpairedSurrogate(prefix) && !prefix.contains(HASHED_KEY_MARKER)) {
+            backend.deletePrefix(prefix); // cut only for length: keys stored as-is may still start with it
+        }
     }
 
     public void clear() {

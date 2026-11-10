@@ -642,14 +642,16 @@ public class RateLimiter {
         if (rawKey.isEmpty()) {
             return null;
         }
-        if (rawKey.length() <= MAX_KEY_LENGTH && !hasControlCharacter(rawKey)) {
+        if (rawKey.length() <= MAX_KEY_LENGTH && !hasControlCharacter(rawKey) && !Cache.hasUnpairedSurrogate(rawKey)) {
             return rawKey;
         }
         // Replace long keys, and keys with a control character (L5: a NUL is refused by pgjdbc and
-        // failed the whole shared-counter batch), with their SHA-256 hex digest (64 chars, fixed).
+        // failed the whole shared-counter batch) or an unpaired surrogate (L5 review F11: pgjdbc
+        // sends it as "?", so two such keys shared a row), with their SHA-256 hex digest (64
+        // chars, fixed). Cache.digestInput hashes a lone surrogate injectively.
         try {
             var digest = MessageDigest.getInstance("SHA-256");
-            var hash = digest.digest(rawKey.getBytes(StandardCharsets.UTF_8));
+            var hash = digest.digest(Cache.digestInput(rawKey));
             return HexFormat.of().formatHex(hash);
         } catch (NoSuchAlgorithmException e) {
             // SHA-256 is mandatory in every Java SE implementation — unreachable.

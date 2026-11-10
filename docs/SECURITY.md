@@ -1478,8 +1478,20 @@ Cache keys get the same treatment in the `Cache` facade, on both backends: a key
 character, or longer than 512 UTF-8 bytes (a page path or `vary` value near the 8 KB URI limit
 exceeds Postgres's index row limit), is stored as its first characters (up to 128, stopping at a
 control character) followed by a SHA-256 digest of the whole key. This is invisible to callers;
-tags still invalidate the entry, and `deletePrefix` still reaches it through the kept prefix (a
-prefix longer than 128 characters is cut to 128, so it may clear a little more than asked).
+tags still invalidate the entry, and `deletePrefix` still reaches it through the kept prefix.
+
+A key (rate-limit or cache) with an **unpaired surrogate** is hashed too, from an encoding that
+keeps it distinct: pgjdbc sends a lone surrogate as `?`, so `"a\uD800"` and `"a\uD801"` were one
+row on Postgres.
+
+`deletePrefix` with a prefix that reaches past what a hashed key keeps readable (one containing a
+control character, an unpaired surrogate or `#sha256:`, or longer than 128 characters) deletes the
+keys stored as-is that start with the whole prefix, plus the hashed keys whose readable part is
+exactly the prefix's readable part (every hashed key that starts with the prefix has that). So
+`deletePrefix("search:\u0001")` and `deletePrefix("search:#sha256:")` no longer clear
+`search:alpha` (they used to clear all of `search:`), but they do clear other hashed keys that
+share the readable part, such as `search:\u0002`; a 200-character prefix clears hashed keys that
+share its first 128 characters. Over-deletion is a cache miss, never a stale entry.
 
 ### Trusted proxies and IP spoofing
 

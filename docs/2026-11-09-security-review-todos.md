@@ -443,6 +443,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Hash any key containing a control character (both classes); hash cache keys over
     about 512 bytes; on a failed counter batch, retry per key and discard the one that fails.
   - **Model: Opus 5.5.** Same Postgres-IT caveat as M5.
+  - **Review fixes.** F7: `deletePrefix("search:#sha256:")` and `deletePrefix("search:\u0001")`
+    deleted `search:alpha`. A prefix that had to be cut now deletes plain keys starting with the
+    whole prefix plus hashed keys whose readable part is exactly the cut prefix; the Javadoc
+    states the over-deletion that remains. F11: a rate-limit or cache key with an unpaired
+    surrogate is hashed (from 0xFF plus its UTF-16 units, so lone surrogates stay distinct);
+    pgjdbc had sent them as `?`. Tests in `CacheKeyReviewFixesTest`,
+    `CacheKeyReviewFixesPostgresIT`.
 
 - [x] **L6: Rate-limiter state has no cap on distinct keys; `perIp` buckets full IPv6 addresses**, `RateLimiter.java:82, 96-98, 116-121, 256, 311-313`
   - Each distinct key holds map entries and a `brace_counters` row for the whole window. A
