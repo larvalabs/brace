@@ -859,7 +859,12 @@ class RedactorTest {
         // the substring list (unchanged)
         "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce",
         // verification pass: totp alone, and the plural "codes" next to an auth word
-        "totp", "TOTP", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
+        "totp", "TOTP", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes",
+        // second review (L-4): one-time and second-factor names
+        "onetimecode", "one_time_code", "onetime_code", "oneTimeCode", "OneTimeCode", "two_factor", "twoFactor",
+        "two-factor", "two_factor_code", "twoFactorCode", "twofactorcode", "2fa", "2FA", "user_2fa", "2FA_CODE",
+        "2fa_codes", "mfa", "MFA", "X-MFA", "tfa", "multi_factor", "second_factor", "verification",
+        "email_verification", "Verification");
 
     /** Names {@link Redactor#isSensitive} must NOT match. */
     static final List<String> STRICT_NAMES_THAT_DONT = List.of(
@@ -869,20 +874,30 @@ class RedactorTest {
         "sigma", "footprint", "hotpath", "otpauth_uri", "pinned", "is_pinned", "spin", "pinterest", "sessions",
         "sidebar", "side", "tickets", "author", "authority", "auth_method", "auth_provider", "oauth_provider",
         "X-Auth-Request-User", "state", "username", "count", "path", "monkey",
-        "zip_codes", "status_codes", "country_codes", "error_codes", "barcodes");
+        "zip_codes", "status_codes", "country_codes", "error_codes", "barcodes",
+        // second review (L-4): the new words count only where they name the value itself
+        "two_factor_enabled", "twoFactorEnabled", "mfa_enabled", "mfa_method", "2fa_required", "verification_status",
+        "verification_url", "factor", "scale_factor", "load_factor", "one_time", "onetime", "time", "timecode",
+        "first_time_code", "one_code_time");
 
     /** Names {@link Redactor#isSensitiveField} (log fields, route params) must match. */
     static final List<String> FIELD_NAMES_THAT_MATCH = List.of(
         "password", "token", "api_key", "secret", "csrf", "jwt", "sessionId", "session_id", "X-Auth-Token",
         "auth_code", "verification_code", "verificationCode", "reset_code", "pin_code", "passcode", "otp",
         "otp_code", "code_verifier", "device_code",
-        "totp", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
+        "totp", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes",
+        // second review (L-4): only the forms paired with "code"
+        "onetimecode", "one_time_code", "onetime_code", "oneTimeCode", "two_factor_code", "twoFactorCode",
+        "twofactorcode", "2fa_code", "2FA_CODE", "mfa_code", "mfa_codes");
 
     /** Names {@link Redactor#isSensitiveField} must NOT match: the short words that are ordinary data in logs and routes. */
     static final List<String> FIELD_NAMES_THAT_DONT = List.of(
         "code", "Code", "sig", "pin", "session", "sid", "ticket", "state", "X-Auth", "otp_enabled",
         "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user",
-        "codes", "zip_codes", "status_codes", "totp_enabled");
+        "codes", "zip_codes", "status_codes", "totp_enabled",
+        // second review (L-4): plain words stay ordinary data in a log field or a route parameter
+        "mfa", "2fa", "tfa", "two_factor", "twoFactor", "verification", "email_verification", "mfa_enabled",
+        "two_factor_enabled", "factor", "onetime", "one_time", "first_time_code");
 
     @Test
     void sensitiveNamesMatchBySegment() {
@@ -1560,6 +1575,21 @@ class RedactorTest {
             }
         }
         return best;
+    }
+
+    @Test
+    void oneTimeAndSecondFactorValuesAreRedactedInTransit() {
+        // L-4: six-digit codes under names the transit rule did not know.
+        for (String name : List.of("onetimecode", "one_time_code", "onetime_code", "two_factor", "twoFactorCode",
+                "2fa", "2FA", "mfa", "verification")) {
+            assertEquals(name + "=[REDACTED]&page=2", Redactor.redactQuery(name + "=123456&page=2"), name);
+        }
+        assertEquals("[REDACTED]", Redactor.redactHeaders(Map.of("X-MFA", "123456")).get("X-MFA"));
+        assertEquals("two_factor_enabled=1&mfa_enabled=1&verification_status=ok&factor=2",
+            Redactor.redactQuery("two_factor_enabled=1&mfa_enabled=1&verification_status=ok&factor=2"));
+        // In a message (the field rule) only the forms paired with "code" count.
+        assertEquals("mfa=on verification=pending two_factor=on one_time_code=[REDACTED] twoFactorCode=[REDACTED]",
+            Redactor.redactMessage("mfa=on verification=pending two_factor=on one_time_code=123456 twoFactorCode=123456"));
     }
 
     @Test

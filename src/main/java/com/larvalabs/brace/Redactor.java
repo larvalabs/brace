@@ -98,15 +98,29 @@ public class Redactor {
 
     /**
      * Name segments that make a {@code code} segment a credential ({@code auth_code},
-     * {@code verificationCode}, {@code otpcode}, {@code passcode}, {@code code_verifier}). A
-     * {@code code} next to anything else ({@code zip_code}, {@code status_code},
-     * {@code country_code}, {@code promo_code}, {@code code_challenge}) is ordinary data.
+     * {@code verificationCode}, {@code otpcode}, {@code passcode}, {@code code_verifier},
+     * {@code onetimecode}). A {@code code} next to anything else ({@code zip_code},
+     * {@code status_code}, {@code country_code}, {@code promo_code}, {@code code_challenge}) is
+     * ordinary data. Two pairs of segments qualify as well: {@code one} + {@code time}
+     * ({@code one_time_code}) and a {@link #FACTOR_COUNTS count} + {@code factor}
+     * ({@code twoFactorCode}).
      */
     private static final Set<String> CODE_QUALIFIERS = Set.of(
         "auth", "authorization", "authentication", "oauth", "verification", "verify", "verifier", "reset",
         "otp", "totp", "hotp", "sms", "mfa", "2fa", "tfa", "pin", "pass", "password", "invite", "invitation",
         "access", "login", "signin", "confirm", "confirmation", "activation", "activate", "recovery",
-        "backup", "security", "magic", "device", "unlock");
+        "backup", "security", "magic", "device", "unlock", "onetime", "twofactor");
+
+    /** Segments that make a following {@code factor} a second factor: {@code two_factor}, {@code multi_factor}. */
+    private static final Set<String> FACTOR_COUNTS = Set.of("two", "2", "multi", "second");
+
+    /**
+     * Words that are a credential in transit when they end a name, so name the value itself
+     * ({@code X-Auth}, {@code ?mfa=}, {@code ?2fa=}, {@code email_verification}), but not when
+     * something follows ({@code auth_method}, {@code mfa_enabled}, {@code verification_status}).
+     * Matched by {@link #isSensitive} only, like {@link #TRANSIT_WORDS}.
+     */
+    private static final Set<String> TRANSIT_LAST_WORDS = Set.of("auth", "mfa", "2fa", "tfa", "verification", "twofactor");
 
     /**
      * Short words that are credentials in transit (query strings, headers) when they are a whole
@@ -193,10 +207,13 @@ public class Redactor {
      *   <li>a segment is one of {@link #TRANSIT_WORDS} ({@code sig}, {@code otp}, {@code totp},
      *       {@code pin}, {@code sid}, {@code ticket}, {@code session}); or</li>
      *   <li>the whole name is {@code code} (an OAuth authorization code), or its last segment is
-     *       {@code auth} ({@code X-Auth}, {@code X-Upstream-Auth}).</li>
+     *       one of {@link #TRANSIT_LAST_WORDS} ({@code X-Auth}, {@code X-Upstream-Auth},
+     *       {@code mfa}, {@code 2fa}, {@code verification}) or a second factor
+     *       ({@code two_factor}, {@code multi_factor}).</li>
      * </ul>
      * {@code zip_code}, {@code status_code}, {@code postcode}, {@code signal}, {@code pinned},
-     * {@code sessions}, {@code auth_method} and {@code X-Auth-Request-User} do not match.
+     * {@code sessions}, {@code auth_method}, {@code mfa_enabled}, {@code two_factor_enabled},
+     * {@code verification_status} and {@code X-Auth-Request-User} do not match.
      */
     public static boolean isSensitive(String name) {
         try {
@@ -212,7 +229,9 @@ public class Redactor {
      * and the auth-paired {@code code}/{@code codes} rule of {@link #isSensitive}, plus a field
      * named exactly {@code otp} or {@code totp}, but not the short words that are ordinary data there: a field
      * {@code code:"card_declined"}, a route {@code /countries/{code}}, {@code sig}, {@code pin},
-     * {@code sid}, {@code ticket}, {@code session}, {@code X-Auth}.
+     * {@code sid}, {@code ticket}, {@code session}, {@code X-Auth}, {@code mfa}, {@code 2fa},
+     * {@code two_factor}, {@code verification} (the forms paired with {@code code} do match:
+     * {@code one_time_code}, {@code twoFactorCode}, {@code mfa_code}).
      */
     public static boolean isSensitiveField(String name) {
         try {
@@ -234,22 +253,30 @@ public class Redactor {
         int first = segs.size() > 1 && segs.get(0).equals("x") ? 1 : 0;
         boolean code = false;
         boolean qualifier = false;
+        String seg = "";
+        boolean secondFactor = false;
         for (int i = first; i < segs.size(); i++) {
-            String seg = segs.get(i);
+            String prev = i > first ? segs.get(i - 1) : "";
+            seg = segs.get(i);
+            if (seg.equals("fa") && prev.equals("2")) seg = "2fa"; // "2FA" splits at the digit
             // The plural is paired like the singular: backup_codes, recovery_codes, passcodes.
             int stem = seg.endsWith("codes") ? seg.length() - 5 : seg.endsWith("code") ? seg.length() - 4 : -1;
             if (stem == 0) {
                 code = true;
             } else if (stem > 0 && CODE_QUALIFIERS.contains(seg.substring(0, stem))) {
-                return true; // passcode, authcode, otpcode
+                return true; // passcode, authcode, otpcode, onetimecode
             }
-            if (CODE_QUALIFIERS.contains(seg)) qualifier = true;
+            secondFactor = seg.equals("factor") && FACTOR_COUNTS.contains(prev);
+            if (CODE_QUALIFIERS.contains(seg) || secondFactor || (seg.equals("time") && prev.equals("one"))) {
+                qualifier = true; // also one_time_code, two_factor_code
+            }
             if (strict && TRANSIT_WORDS.contains(seg)) return true;
         }
         if (code && qualifier) return true;
         boolean single = segs.size() - first == 1;
-        if (!strict) return single && (segs.get(first).equals("otp") || segs.get(first).equals("totp"));
-        return (single && segs.get(first).equals("code")) || segs.get(segs.size() - 1).equals("auth");
+        if (!strict) return single && (seg.equals("otp") || seg.equals("totp"));
+        // seg is the last segment here: the words that name the value when they end the name
+        return (single && seg.equals("code")) || TRANSIT_LAST_WORDS.contains(seg) || secondFactor;
     }
 
     /**
