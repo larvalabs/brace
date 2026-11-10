@@ -848,11 +848,13 @@ public class Cache {
             Request.InputReads reads = request.strictInputChecks() ? new Request.InputReads() : null;
             Result result;
             request.recordReads(reads);
+            request.setPageCacheVary(vary); // Paged links keep only declared params (L4 verification)
             try {
                 result = View.recordingViews(views, () -> handler.apply(request));
                 if (reads != null && !result.isStreaming()) result.rawBytes(); // run a deferred render while recording
             } finally {
                 request.recordReads(null);
+                request.setPageCacheVary(null);
             }
             if (reads != null) reportUndeclaredReads(request, reads);
             if (!result.setCookies().isEmpty()) {

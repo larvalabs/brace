@@ -150,6 +150,24 @@ public class Request {
      * decoded path parameters, not this string (L4).
      */
     public String path() { readRawPath(); return path; }
+
+    /**
+     * {@link #path()} without recording the read, for {@link Paged} links back to this same route
+     * (L4 verification). A page is stored only for a raw path in normal form (Cache), so a link
+     * built from it names the same page.
+     */
+    String pathForLinks() { return path; }
+
+    /**
+     * The query params the page-cache key declares (sorted), while a page-cached handler runs, in
+     * every mode; null otherwise. {@link Paged} copies only these into its links there, so a cached
+     * page never embeds request input its key does not cover (L4 verification).
+     */
+    private String[] pageCacheVary;
+
+    void setPageCacheVary(String[] sortedVary) { this.pageCacheVary = sortedVary; }
+
+    String[] pageCacheVary() { return pageCacheVary; }
     public Map<String, String> queryParams() { readQuery("*"); return queryParams; }
     public Map<String, String> pathParams() { return pathParams; }
 

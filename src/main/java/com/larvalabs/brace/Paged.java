@@ -16,7 +16,8 @@ import java.util.function.Function;
  * URL with only {@code page} changed, so active filters and sort order carry over with no extra
  * code; page 1 leaves the parameter out, so the first page has one URL. A {@code Paged} built
  * from a {@code Request} records that URL when it is created, so templates call
- * {@link #links()}, {@link #prevUrl()} and {@link #nextUrl()} with no arguments.
+ * {@link #links()}, {@link #prevUrl()} and {@link #nextUrl()} with no arguments. Under the page
+ * cache the links carry only the params the route declares with {@code .vary(...)}.
  * <p>
  * Serializes to JSON as {@code {items, page, perPage, totalCount, totalPages}}.
  */
@@ -77,13 +78,22 @@ public final class Paged<T> {
         return of(all.subList(from, Math.min(all.size(), from + perPage)), p, perPage, all.size());
     }
 
-    /** A copy whose links are built from {@code req}'s URL. */
+    /**
+     * A copy whose links are built from {@code req}'s URL. Inside a page-cached handler
+     * ({@code cache.wrap(...)}) the links keep only the query params the route declares with
+     * {@code .vary(...)}: a cached page is served to every visitor, so it must not embed another
+     * param a client sent ({@code ?ref=...}).
+     */
     public Paged<T> linkedTo(Request req) {
+        var declared = req.pageCacheVary(); // sorted; null outside a page-cached handler
         var pairs = new ArrayList<String[]>();
         for (var pair : req.queryPairs()) {
-            if (!pair[0].equals(PARAM)) pairs.add(pair);
+            if (pair[0].equals(PARAM)) continue;
+            if (declared != null && java.util.Arrays.binarySearch(declared, pair[0]) < 0) continue;
+            pairs.add(pair);
         }
-        return new Paged<>(items, page, perPage, totalCount, req.path(), List.copyOf(pairs));
+        // The path is only used to link back to this route, so reading it is not a page-cache input.
+        return new Paged<>(items, page, perPage, totalCount, req.pathForLinks(), List.copyOf(pairs));
     }
 
     /**

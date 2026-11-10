@@ -654,6 +654,12 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       `clear`, tags, prefixes, expiry and deletes); eviction and compaction are mutually
       exclusive; the hand rebuilds from the store if it ever finds pages counted but none on the
       clock. App entries never take the lock. Tests in `PageClockConsistencyTest`.
+      `Paged` links (a regression from the raw-path check): `linkedTo` read `req.path()`, so the
+      documented `cache.wrap(...).vary("page")` example answered 500 under `Brace.test()`, and it
+      copied every query pair, so `?page=2&ref=evil.example` stored `ref=` in links later served
+      for `?page=2`. Links now read the path without recording it, and inside a page-cached
+      handler (the cache marks the request in every mode) copy only the declared `vary` params.
+      Tests in `PagedPageCacheTest`.
 
 - [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a
