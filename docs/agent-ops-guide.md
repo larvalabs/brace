@@ -453,6 +453,9 @@ green.
 - **Rotate your own key:** `rm ops-private.key && brace ops keypair`, then redeploy.
   Because the label is stable (`email@host`), the new public key *replaces* your existing
   line in `ops-authorized-keys` in place — no orphaned, still-trusted key left behind.
+  That includes a line written before 0.1.11 with no scope token. The new line gets
+  `scope:control` unless you pass `--read-only` again: rotate a read-only key with
+  `brace ops keypair --read-only --label <its label>`.
 - **Add another developer:** they run `brace ops keypair` on their own machine. Their
   distinct `email@host` label gets its own line; committing it never clobbers anyone
   else's entry. Commit the updated `ops-authorized-keys` and deploy so servers accept
@@ -542,12 +545,20 @@ Rules the server enforces:
   is refused with `401 This request was signed for <origin>…`. The origin is just
   `scheme://host[:port]`: no user info, path, query or fragment.
 
-**Replay caveat (per-instance, best-effort):** the seen-nonce set is held in
-memory on each server instance — ops works without shared fleet state, so it
-cannot be fleet-global. Behind a load balancer, a captured auth request could
-still be replayed against a *different* instance within the ±30s window. Keep
-`/ops/*` behind HTTPS (the protocol assumes the request body is not observable
-in transit); see `docs/SECURITY.md` → "Ops Endpoints".
+**Replay protection depends on the database.** Every instance remembers the
+nonces it accepted. With a database (`app.database(...)`) each accepted nonce
+is also recorded in the shared `brace_counters` table, so a sign-in request is
+refused by every instance and after any restart or deploy once one server has
+accepted it. Without a database (or while it is unreachable) the memory is
+per instance: outside dev mode, a server refuses sign-ins whose timestamp is
+earlier than 30 seconds after it started (a 401 that names the restart; retry
+within a minute), and behind a load balancer a captured request accepted by one live
+instance can still be replayed against a *different* one within its ±30 s
+window. In both modes, a signed request that no server has accepted (never
+delivered, or refused because its timestamp was too far ahead) stays good once
+until its timestamp is 30 seconds old. Keep `/ops/*` behind HTTPS (the protocol
+assumes the request body is not observable in transit); see `docs/SECURITY.md`
+→ "Ops Endpoints" ("Replay suppression").
 
 **Protocols v1 and v2 are removed.** v1 (no `v`, signature over the timestamp
 alone) was removed in 0.1.8; v2 (no origin) in 0.1.11. Either gets a 401 naming
@@ -664,28 +675,40 @@ Retention is **count-based, not time-based** for both errors and logs — nothin
 dropped purely because it got old. If you need durable logs, capture stdout from the
 process itself.
 
-## Redaction in error records
+## Redaction in error records and logs
 
-Error records are scrubbed before storage — the data you see via `brace errors`
-or `/ops/errors` has already been cleaned. Two passes run at capture time:
+Error records are scrubbed before storage, and the same passes run in the log and
+stats sinks: what you see via `brace errors`, `/ops/errors`, `brace logs`,
+`/ops/logs` and `/ops/status` has already been cleaned (request paths, query
+strings, headers, exception messages and stack traces). `[REDACTED]` means a value
+was replaced because of its **name**, `[redacted]` because of its **shape**.
 
-**Name-based (query params and headers):** fields whose name looks sensitive
-(`token`, `password`, `authorization`, `cookie`, `secret`, `api-key`, etc.) have
-their values replaced with `[REDACTED]`. This is a deliberate over-redact — a
-field named `token_count` is also redacted.
+**Name-based:** a query parameter, header, log field or `name=value` pair whose name
+looks sensitive (`token`, `password`, `authorization`, `cookie`, `secret`,
+`apikey`, `nonce`, an auth-paired `code` such as `reset_code`, etc.) has its value
+replaced with `[REDACTED]`. This is a deliberate over-redact: a field named
+`token_count` is also redacted. Query parameters and headers use a slightly wider
+rule than log fields (a bare `code` or `session` is redacted in a URL, kept as a
+log field).
 
-**Value-shaped (path segments and exception message tokens):** high-entropy
-tokens are detected by their shape and replaced with `[redacted]`, regardless of
-field name. A segment or whitespace-delimited token is redacted when it is 16+
-characters long, consists entirely of base64url/hex characters, and contains at
-least one digit and at least one letter. JWTs (two-dot three-part base64url
-tokens) are also caught.
+**Value-shaped:** URLs inside text keep their scheme, host and port while their
+user info, path and query are redacted; any other run of letters, digits and
+`_ - + / . ~ $ %` is checked label by label (split at `. ~ $ %`), and a label
+of 16+ characters that has both a digit and a letter becomes `[redacted]`,
+whatever field it is in. JWTs and `payload.signature` tokens are caught whole,
+and percent-encoded runs are checked decoded too.
 
 What remains visible (intentionally):
 - **UUIDs** (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) — these are usually record
   identifiers, not secrets, and are needed for debugging.
-- **Numeric IDs** and **short slugs** (below the 16-char threshold).
+- **Numeric IDs**, **short labels** (below 16 characters), Java class names,
+  hostnames, short file paths and email addresses.
 - Exception message text that does not contain high-entropy tokens.
+
+Over-redacted by design: a 16+ character content hash in a file name
+(`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` becomes `[redacted].css`) and other long
+slugs that mix digits and letters (`2024-black-friday-sale`), because they cannot
+be told from a token.
 
 If your app routes carry user-supplied secrets in path positions, prefer opaque
 non-entropic route parameters (e.g. a lookup key in a database rather than a raw

@@ -1495,10 +1495,11 @@ app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/
   partial swaps are rejected and tallied; boosted (`HX-Boosted`) navigations count. `/ops/*`, static files, JSON
   and errors are never candidates.
 - **Paths:** the concrete path (`/posts/hello-world`), decoded and redacted, without query
-  string. A parameter whose name is sensitive by the error-redaction rule (`Redactor.isSensitive`:
-  token, secret, password, apikey, credential, ...) keeps its placeholder, so `/reset/abc123` is
-  stored as `/reset/{token}`. Long random-looking segments become `[redacted]`. Use
-  `.analytics(false)` for other secret-bearing URLs (`/invite/{code}`, magic links).
+  string. A parameter whose name is sensitive by the field rule of error redaction
+  (`Redactor.isSensitiveField`: token, secret, password, apikey, credential, ...) keeps its
+  placeholder, so `/reset/abc123` is stored as `/reset/{token}`. Long random-looking segments
+  become `[redacted]`. Use `.analytics(false)` for other secret-bearing URLs (`/invite/{code}`,
+  magic links: a parameter named just `code` is not sensitive by that rule).
 - **Visitors:** a hash of a daily random salt + host + IP + UA; counted once per day, so a
   multi-day range sums daily visitors. Behind a proxy, configure `trustedProxies(...)` or every
   visitor looks like the proxy (a warning is logged when that's detected).

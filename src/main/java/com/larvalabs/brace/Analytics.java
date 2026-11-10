@@ -530,7 +530,7 @@ public final class Analytics {
 
     /**
      * The path to record for a view of {@code route}. A parameter whose <em>name</em> marks it as
-     * sensitive ({@link Redactor#isSensitive}: token, secret, password, apikey, ...) keeps its
+     * sensitive ({@link Redactor#isSensitiveField}: token, secret, password, apikey, ...) keeps its
      * placeholder, so {@code /reset/abc123} is stored as {@code /reset/{token}}: those views are
      * still counted, grouped together, and the value is never written. Other segments go through
      * {@link #storedPath(String)}, which also redacts values that look like secrets.

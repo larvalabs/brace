@@ -2014,6 +2014,15 @@ caller without an authorized key learns nothing from them, and a request no serv
 once within its 30 seconds. HTTPS is what keeps an attacker from observing a request in the first
 place; see the recommendations below. The old v1 and v2 protocols are removed (see above).
 
+**Residual: a future-dated request no server has accepted.** The timestamp may be up to 30 s
+ahead of the server's clock, and a request is good until its timestamp is 30 s old, so a request
+signed by a client whose clock runs fast stays presentable for up to a minute after it was made.
+One dated further ahead is refused as stale without its nonce being recorded, so it becomes
+acceptable once the server's clock catches up to within 30 s of it. Either can be presented once,
+by whoever holds it, when it is within the window; the replay guarantee above covers only requests
+a server has accepted. It requires capturing a request that was never delivered, or one refused
+for its timestamp, which HTTPS prevents.
+
 **Key revocation.** Tokens are bound to the key that minted them. At startup the server takes
 the fingerprints of the keys in `ops-authorized-keys` and rejects any bearer token, ops session
 cookie or login token whose `kid` is not among them, or that has no `kid`, and caps every
