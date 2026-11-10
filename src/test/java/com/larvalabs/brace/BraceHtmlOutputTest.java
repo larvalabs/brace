@@ -412,6 +412,13 @@ class BraceHtmlOutputTest {
     }
 
     @Test
+    void scriptEscapingRoundTrips() {
+        for (String s : List.of("", "plain", "\\", "\\u0041", "a\tb\n\"'`$&<>  \\\\u0022", "\\u00zz", "end\\")) {
+            assertEquals(s, BraceHtmlOutput.unescapeScript(BraceHtmlOutput.escapeScript(s)), s);
+        }
+    }
+
+    @Test
     void hxValsTheTemplateWroteStillWork() throws Exception {
         var mapper = Json.mapper();
         String html = both("xssHxVals", Map.of("a", "js:alert(1)", "b", " js:x"));
@@ -425,6 +432,191 @@ class BraceHtmlOutputTest {
         html = both("xssHxVals", Map.of("a", " {\"id\":42,\"n\":\"O'Brien\"} ", "b", ""));
         assertEquals("O'Brien", mapper.readTree(named(html, "v1", "hx-vals")).get("n").asText());
         assertEquals("not js", named(both("xssHxVals", Map.of("a", "not js", "b", ":x")), "v1", "hx-vals"));
+    }
+
+    // --- L7 (2026-11): which value is held, and what the template's prefix really is ---
+
+    @Test
+    void theHeldValueIsTheOneTheTagIsReallyIn() {
+        // An earlier attribute whose text looks like `name = quote` used to be taken for the open
+        // value, and the real href was then judged one ${...} at a time: "javascript" and
+        // "%0aalert(1)" are each harmless alone.
+        String html = both("xssSplit", Map.of("x", "javascript", "y", "%0aalert(1)"));
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        assertTrue(html.contains("<a id=\"s1\" title=\"x a = 'b\" href=\"" + blocked + "\">"), html);
+        assertTrue(html.contains("<a id=\"s2\" data-note='say \"href=' href=\"" + blocked + "\">"), html);
+        assertTrue(html.contains("<a id=\"s3\" title=\"1 > 0\" href=\"" + blocked + "\">"), html);
+        assertTrue(html.contains("<a id=\"s4\" class=\"c\"href=\"" + blocked + "\">"), html);
+        assertTrue(html.contains("<a id=\"s7\" href = \"" + blocked + "\">"), html);
+        assertTrue(html.contains("<a id=\"s8\" title=\"a\" data-x=\"b = '\" href='" + blocked + "'>"), html);
+        assertTrue(html.contains("<p id=\"s9\">a href=\"javascript://%0aalert(1)\"</p>"), html); // body text
+        html = both("xssSplit", Map.of("x", "javascript", "y", "alert(1)"));
+        assertTrue(html.contains("<img id=\"s5\" alt=\"it's a = \" src=\"" + blocked + "\">"), html);
+
+        html = both("xssSplit", Map.of("x", "https", "y", "example.com/a?b=1"));
+        assertTrue(html.contains("<a id=\"s1\" title=\"x a = 'b\" href=\"https://example.com/a?b=1\">"), html);
+        assertTrue(html.contains("<a id=\"s2\" data-note='say \"href=' href=\"https://example.com/a?b=1\">"), html);
+        assertTrue(html.contains("<a id=\"s3\" title=\"1 > 0\" href=\"https://example.com/a?b=1\">"), html);
+        assertTrue(html.contains("<a id=\"s4\" class=\"c\"href=\"https://example.com/a?b=1\">"), html);
+        assertTrue(html.contains("<img id=\"s5\" alt=\"it's a = \" src=\"https:example.com/a?b=1\">"), html);
+        assertTrue(html.contains("<a id=\"s7\" href = \"https://example.com/a?b=1\">"), html);
+        assertTrue(html.contains("<a id=\"s8\" title=\"a\" data-x=\"b = '\" href='https://example.com/a?b=1'>"), html);
+    }
+
+    @Test
+    void aTemplateCallAfterDataInTheSameAttributeIsStillInTheAttribute() {
+        // title="${y} @template...": once ${y} was written the value was no longer tracked, and
+        // the call's output got body escaping, which leaves quotes alone.
+        for (String quote : List.of("\"", "'")) {
+            String x = "x" + quote + " onmouseover=" + quote + "alert(1)";
+            String html = both("xssSplit", Map.of("x", x, "y", "t"));
+            assertFalse(Pattern.compile("<[^>]*\\sonmouseover=[\"']").matcher(html).find(), html);
+            assertEquals("t " + x, named(html, "s6", "title"));
+        }
+    }
+
+    @Test
+    void characterReferencesInTheTemplatesPrefixAreRead() {
+        // href="&#32;${x}": the browser sees a space, not a '#', so x still chooses the scheme.
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        for (String x : List.of("javascript:alert(1)", "JAVASCRIPT:alert(1)", "data:text/html,x")) {
+            String html = both("xssSplit", Map.of("x", x, "y", "32"));
+            for (String id : List.of("e1", "e2", "e3", "e5", "e6")) assertEquals(blocked, attr(html, id), id + " <- " + x);
+            assertEquals(blocked, attr(html, "e4"), "a script URL spelled with references is one");
+            // Kept: the template's text, references decoded, settles the scheme or the path.
+            assertEquals("/search?a=1&b=" + x, named(html, "k1", "href"));
+            assertEquals("/search?a=1&b=" + x, named(html, "k2", "href"));
+            assertEquals("/users/" + x, named(html, "k3", "href"));
+            assertTrue(html.contains("<a id=\"k3\" href=\"&#47;users/"), html);
+            assertTrue(html.contains("<a id=\"k4\" href=\"mailto&colon;"), html);
+            // An unknown reference is some non-ASCII character: no scheme can follow it.
+            assertTrue(html.contains("<a id=\"k5\" href=\"&copy;" + x.replace("<", "&lt;") + "\">"), html);
+        }
+        String html = both("xssSplit", Map.of("x", "/ok?a=b", "y", "32"));
+        for (String id : List.of("e1", "e2", "e3", "e5", "e6")) assertTrue(attr(html, id).endsWith("/ok?a=b"), id);
+        // The data completes a reference the template started: &# + "106" + ; + "avascript:..."
+        html = both("xssSplit", Map.of("x", "avascript:alert(1)", "y", "106"));
+        assertEquals(blocked, attr(html, "e5"));
+
+        // And for the hx-vals js: prefix.
+        assertEquals("{}", named(both("xssSplit", Map.of("x", "s:alert(1)", "y", "")), "h1", "hx-vals"));
+        html = both("xssSplit", Map.of("x", "js:alert(1)", "y", ""));
+        assertEquals("{}", named(html, "h2", "hx-vals"));
+        assertEquals("{}", named(html, "h3", "hx-vals"));
+    }
+
+    @Test
+    void characterReferenceDecoding() {
+        assertEquals(" javascript:x", BraceHtmlOutput.decodeReferences("&#32;javascript&colon;x"));
+        assertEquals("j\tA\n", BraceHtmlOutput.decodeReferences("&#x6A;&Tab;&#65&NewLine;"));
+        assertEquals("a&b=1&c", BraceHtmlOutput.decodeReferences("a&b=1&amp;c"));
+        assertEquals("<>\"'&", BraceHtmlOutput.decodeReferences("&lt;&gt;&quot;&#39;&amp;"));
+        // Without a semicolon a named reference isn't one before '=' or a letter or digit.
+        assertEquals("?a&lt=1&ltx&<", BraceHtmlOutput.decodeReferences("?a&lt=1&ltx&&lt"));
+        assertEquals("���", BraceHtmlOutput.decodeReferences("&#0;&#xD800;&#x110000;"));
+        assertEquals("&;&#;&#x;& &", BraceHtmlOutput.decodeReferences("&;&#;&#x;& &"));
+        assertEquals("�x", BraceHtmlOutput.decodeReferences("&copy;x"));
+        assertEquals("plain", BraceHtmlOutput.decodeReferences("plain"));
+    }
+
+    // --- the tokenizer, driven directly ---
+
+    /** Template text, or (with a tag) a ${...} and the context JTE reports for it. */
+    record Part(String text, String tag, String attribute) {
+        static Part text(String text) { return new Part(text, null, null); }
+        static Part data(String tag, String attribute, String value) { return new Part(value, tag, attribute); }
+    }
+
+    /** Writes the parts as JTE would, template text in chunks of {@code chunk} characters (0: whole). */
+    private static String drive(List<Part> parts, int chunk, boolean binary) {
+        var out = new gg.jte.output.StringOutput();
+        var html = new BraceHtmlOutput(out);
+        for (Part part : parts) {
+            if (part.tag() != null) {
+                html.setContext(part.tag(), part.attribute());
+                html.writeUserContent(part.text());
+                if (part.attribute() != null) html.setContext(part.tag(), null);
+                continue;
+            }
+            int step = chunk == 0 ? Math.max(1, part.text().length()) : chunk;
+            for (int i = 0; i < part.text().length(); i += step) {
+                String piece = part.text().substring(i, Math.min(part.text().length(), i + step));
+                if (binary) html.writeBinaryContent(piece.getBytes(StandardCharsets.UTF_8));
+                else html.writeContent(piece);
+            }
+        }
+        html.finish();
+        return out.toString();
+    }
+
+    /** The output, the same however the template text is cut up and whichever way it is written. */
+    private static String driven(Part... parts) {
+        String whole = drive(List.of(parts), 0, false);
+        for (int chunk : new int[] {0, 1, 2, 3, 7}) {
+            assertEquals(whole, drive(List.of(parts), chunk, false), "String chunks of " + chunk);
+            assertEquals(whole, drive(List.of(parts), chunk, true), "byte chunks of " + chunk);
+        }
+        return whole;
+    }
+
+    @Test
+    void theOutputDoesntDependOnWhereTemplateTextIsCut() {
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        assertEquals("<a class=\"x\" href=\"" + blocked + "\">x</a><script>var a = \"\\\\\";</script>"
+                + "<p title='it&#39;s'>&lt;i&gt;</p>",
+            driven(Part.text("<a class=\"x\" href=\""), Part.data("a", "href", "javascript:alert(1)"),
+                Part.text("\">x</a><script>var a = \""), Part.data("script", null, "\\"),
+                Part.text("\";</script><p title='"), Part.data("p", "title", "it's"), Part.text("'>"),
+                Part.data("p", null, "<i>"), Part.text("</p>")));
+
+        // '<' and quotes in a script, an end tag with a space, then a real attribute.
+        assertEquals("<SCRIPT>if (a < b && c > d) x = '\\'';</SCRIPT ><a href='/ok'>",
+            driven(Part.text("<SCRIPT>if (a < b && c > d) x = '"), Part.data("SCRIPT", null, "'"),
+                Part.text("';</SCRIPT ><a href='"), Part.data("a", "href", "/ok"), Part.text("'>")));
+
+        // "</scripty" and "</style" don't end a script; a comment's text isn't markup.
+        assertEquals("<script>a = '</scripty>' + \"</style>\\\\\";</script><!-- <a href=\"&lt;\"> --><a href=\"" + blocked + "\">",
+            driven(Part.text("<script>a = '</scripty>' + \"</style>"), Part.data("script", null, "\\"),
+                Part.text("\";</script><!-- <a href=\""), Part.data("html", null, "<"),
+                Part.text("\"> --><a href=\""), Part.data("a", "href", "javascript:x"), Part.text("\">")));
+
+        // "<!-->" is a whole comment; '>' inside a quoted value doesn't end the tag.
+        assertEquals("<!--><i title=\"a > b\" data-x='\"' href=\"" + blocked + "\">",
+            driven(Part.text("<!--><i title=\"a > b\" data-x='\"' href=\""), Part.data("i", "href", "JaVaScRiPt:x"), Part.text("\">")));
+
+        // Unquoted values and attributes without one; then a held one. A tag's own end tag has no values.
+        assertEquals("<input disabled value=a/b title = \"&#34;\" src=\"" + blocked + "\"></p title=\"&#34;\">",
+            driven(Part.text("<input disabled value=a/b title = \""), Part.data("input", "title", "\""),
+                Part.text("\" src=\""), Part.data("input", "src", "data:text/html,x"),
+                Part.text("\"></p title=\""), Part.data("p", "title", "\""), Part.text("\">")));
+
+        // Body text that looks like an attribute, and "1 < 2".
+        assertEquals("<p>1 < 2, href=\"&lt;x&gt;\"</p>",
+            driven(Part.text("<p>1 < 2, href=\""), Part.data("p", null, "<x>"), Part.text("\"</p>")));
+    }
+
+    @Test
+    void whereTheOutputIsDecidesNotWhereJteSaysItIs() {
+        // JTE reports body text for a @template call's output, wherever the call was written.
+        assertEquals("<a title=\"x&#34; onmouseover=&#34;alert(1)\">",
+            driven(Part.text("<a title=\""), Part.data("html", null, "x\" onmouseover=\"alert(1)"), Part.text("\">")));
+        assertEquals("<a title=\"t x&#34;y\">",
+            driven(Part.text("<a title=\""), Part.data("a", "title", "t"), Part.text(" "),
+                Part.data("html", null, "x\"y"), Part.text("\">")));
+        assertEquals("<set to=\"" + BraceHtmlOutput.BLOCKED_URL + "\">",
+            driven(Part.text("<set to=\""), Part.data("html", null, "javascript:x"), Part.text("\">")));
+        assertEquals("<p to=\"javascript:x\">",   // "to" is a URL only on <set> and <animate>
+            driven(Part.text("<p to=\""), Part.data("html", null, "javascript:x"), Part.text("\">")));
+        assertEquals("<b onclick=\"go('\\u0027')\">",
+            driven(Part.text("<b onclick=\"go('"), Part.data("html", null, "'"), Part.text("')\">")));
+        // JTE and the output disagree about a script: inert as script, attribute and body text.
+        assertEquals("<script>a('\\u0027\\u003c\\\\')</script>",
+            driven(Part.text("<script>a('"), Part.data("html", null, "'<\\"), Part.text("')</script>")));
+        assertEquals("<script>a('<b title=\"\\u0027\\u0022\">')</script>",
+            driven(Part.text("<script>a('<b title=\""), Part.data("b", "title", "'\""), Part.text("\">')</script>")));
+        assertEquals("<p>\\u0027\\u003c</p><a title=\"\\u0022\" href=\"\\u0022\">",
+            driven(Part.text("<p>"), Part.data("script", null, "'<"), Part.text("</p><a title=\""),
+                Part.data("script", null, "\""), Part.text("\" href=\""), Part.data("script", null, "\""), Part.text("\">")));
     }
 
     /**

@@ -339,7 +339,8 @@ contexts where escaping alone doesn't stop script:
   tabs, newlines and leading control characters before reading the scheme, so
   `java\tscript:` is a script URL too. Also `to`/`from`/`by`/`values` on SVG `<set>` and
   `<animate>`, which can set an `href`. The whole value, template text and every `${...}`, is
-  held until its closing quote and normalized the same way. If the template's own text fixed the
+  held until its closing quote and normalized the same way, with character references decoded
+  (`href="&#32;${url}"` starts with a space, not with a fragment). If the template's own text fixed the
   scheme or made the URL relative (`href="mailto:${email}"`, `href="/users/${id}"`), it's kept;
   if user data decides the scheme (`href="${url}"`, `href="${a}${b}"`, `href="${scheme}://${host}"`)
   only `http`, `https`, `mailto` and `tel` pass, plus raster `data:image/` URLs (png, jpeg, gif,
