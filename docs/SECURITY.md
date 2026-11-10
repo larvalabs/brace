@@ -2095,7 +2095,10 @@ KEY scope:control [label words...] [# comment]. ...
 
 `brace ops keypair` always writes the token (`scope:control`, or `scope:read` with
 `--read-only`), as does the file `brace new` generates. A key listed twice keeps the lower
-scope. Each key's fingerprint and scope is logged at boot (`ops.key`). A token whose payload has
+scope. A key must be written in its one canonical base64 spelling, as `brace ops keypair` prints
+it: a spelling the decoder also accepts (missing `=` padding, or a last character that differs
+only in bits the decoding ignores) fails startup, because keys are matched as text and a second
+spelling would be a second entry with its own scope. Each key's fingerprint and scope is logged at boot (`ops.key`). A token whose payload has
 no scope claim, or one the server does not recognise, is treated as `read`, as is an
 unrecognised `scope` requested at `/ops/auth`.
 
