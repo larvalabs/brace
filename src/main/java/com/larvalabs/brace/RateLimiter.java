@@ -136,7 +136,11 @@ public class RateLimiter {
      * for its whole window, so without a cap a client that can mint keys (a rotating source
      * address, a made-up username) grows the state without bound. A limiter holds at most
      * {@code maxKeys} keys plus {@code maxKeys + 1} overflow buckets; what happens at the cap is
-     * described on {@link #perKey}. Change per limiter with {@code maxKeys(int)}.
+     * described on {@link #perKey}. Change per limiter with {@code maxKeys(int)}. Counting
+     * everything, a limiter holds at most those tracked entries, a flush queue of
+     * {@link #dirtyBound()} ({@code 2 × maxKeys + 10,016}) entries on Postgres, the per-process
+     * fallback tables after a shared-counter error (another {@code 2 × maxKeys + 1}), and two
+     * evicted-key filter generations of 4 bytes per {@code maxKeys} each.
      */
     static final int DEFAULT_MAX_KEYS = 100_000;
 
@@ -652,7 +656,8 @@ public class RateLimiter {
      *
      * <p><strong>Memory is bounded, and a flood has a defined outcome.</strong> A limiter tracks at
      * most {@code maxKeys} keys (default {@value #DEFAULT_MAX_KEYS}), {@code maxKeys} per-address
-     * overflow buckets and one last-resort bucket. With the table full, a new key replaces a tracked
+     * overflow buckets and one last-resort bucket (the flush queue and the fallback tables have
+     * bounds of the same order; see {@link #DEFAULT_MAX_KEYS}). With the table full, a new key replaces a tracked
      * key that is under its limit (least recently used of a small sample); keys at their limit are
      * kept until their windows end, so a blocked key stays blocked. With shared (Postgres) counters
      * forgetting a key loses nothing fleet-wide: its row is kept and its buffered count is still
@@ -664,7 +669,9 @@ public class RateLimiter {
      * the limiter's next batched flush, the same lag as for any key: a key the fleet has blocked
      * is admitted by this instance at most one flush batch ({@code limit / 10} requests by
      * default) before it is refused, plus requests that arrive while another thread's flush is
-     * running, outages aside. With per-process counting the
+     * running, outages aside. The exception is an instance whose key table is full of keys at
+     * their limit: there an untracked key, a fleet-blocked one included, is counted in its client
+     * address's overflow bucket (below) rather than refused as a key. With per-process counting the
      * forgotten key restarts from zero, so a client that keeps the table turning over (about
      * {@code maxKeys / 16} fresh-key requests per turn) buys fewer than the limit in extra attempts
      * at one key each turn. When only keys at their limit are found, a new key is counted against

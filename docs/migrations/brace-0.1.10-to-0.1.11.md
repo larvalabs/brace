@@ -1424,7 +1424,9 @@ Also changed:
   per-address overflow buckets. At the cap a new key takes the place of the least recently used
   key that is under its limit; keys at their limit are kept until their window ends. On Postgres
   a forgotten key keeps its fleet count (its row is never deleted early, and the count is read
-  again when the key returns); with per-process counting it restarts from zero. When nothing
+  again when the key returns, up to 50 such reads a second per limiter; past that it arrives with
+  the next batched flush, so a key the fleet has blocked is refused within one flush batch); with
+  per-process counting it restarts from zero. When nothing
   can be replaced a new key is counted against its client address.
 - **A saturated limiter fails closed by default.** When the key table and the per-address
   buckets are all at their limit (for `perKey(…, 5, "15m")` at the default cap, a sustained
@@ -1591,8 +1593,9 @@ Edit the file, commit it and deploy it with the upgrade. While you are there, ch
 
 `brace ops keypair` from 0.1.11 writes `scope:control` or (with `--read-only`) `scope:read` on
 every entry, keeps an existing entry's scope when it replaces it (see "CLI and launcher on an
-untrusted checkout" below), and accepts `read`, `control` and similar words as plain labels. Also: an ops token
-whose payload has no scope claim, or an unrecognised one, is now `read`, not `control`.
+untrusted checkout" below), and accepts `read`, `control` and similar words as plain labels.
+Also: an ops token whose payload has no scope claim, or an unrecognised one, is now `read`, not
+`control`.
 
 ## Breaking: `Http` timeouts cover the response body
 
