@@ -446,7 +446,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `new URL(event.detail.path, location.href).origin === location.origin`.
   - **Model: Haiku 5.5.**
 
-- [ ] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
+- [x] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
   - **Verified (scratch server).** `GET /items/../y` on `/items/{a}/{b}` gives `a=..`. A handler
     resolving a path from parameters serves a sibling directory, and a proxy that normalizes
     dot segments for its own ACLs but forwards the raw URI sees a different path than Brace.

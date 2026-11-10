@@ -315,6 +315,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String method = exchange.method;
             String path = exchange.path;
 
+            // L9: a raw "." or ".." segment is never a route, a path-parameter value or a static
+            // path. Answered before the router so no spelling of it reaches a handler (a
+            // handler building a file path from a parameter would walk out of its directory, and
+            // a proxy that normalizes dot segments for its own rules sees a different path than
+            // Brace does). Only an exact "." / ".." segment: "..foo" and ".well-known" are fine.
+            // Percent-encoded forms (%2e%2e) are not segments here and Jetty refuses them itself.
+            if (Router.hasDotSegment(path)) throw new NotFoundException();
+
             // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
             String rawQuery = jettyRequest.getHttpURI().getQuery();
             Map<String, String> queryParams = parseQuery(rawQuery);

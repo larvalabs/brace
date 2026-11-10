@@ -147,6 +147,23 @@ public class Router {
         return null;
     }
 
+    /** True if some {@code /}-separated segment of the raw path is exactly {@code .} or {@code ..}. */
+    static boolean hasDotSegment(String path) {
+        int len = path.length();
+        int start = 0;
+        while (start <= len) {
+            int end = path.indexOf('/', start);
+            if (end < 0) end = len;
+            int n = end - start;
+            if ((n == 1 && path.charAt(start) == '.')
+                    || (n == 2 && path.charAt(start) == '.' && path.charAt(start + 1) == '.')) {
+                return true;
+            }
+            start = end + 1;
+        }
+        return false;
+    }
+
     /** Drop trailing slashes, keeping at least "/" — {@code "/a//"} and {@code "/a/"} → {@code "/a"}. */
     static String stripTrailingSlashes(String path) {
         int end = path.length();
