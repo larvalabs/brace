@@ -697,9 +697,12 @@ class BraceHtmlOutputTest {
             "</svg>", "<set to=\"", "&colon;", "\n", "<div", "</div>", " src=\"", "</a>", "<p>", "js:", "</Script\t>", " srcdoc='", "<!",
             "?", "<a", " href='", "\f", "<textarea>", "</", "<img", "<script", "<script href=\"/a.js\"/>", "<style/>", "/>", "<math>",
             "</math>", "<foreignObject>", "</foreignObject>", "<title>", "</title>", "<desc>", "<mi>", "</p>", "<![CDATA[", "]]>", "]",
-            "-", "--", "!", "<!--<script>", "</script ", "<g>", "</g>", "<annotation-xml>", "<SCRIPT/>", "<br/>", "scr", "ipt"};
+            "-", "--", "!", "<!--<script>", "</script ", "<g>", "</g>", "<annotation-xml>", "<SCRIPT/>", "<br/>", "scr", "ipt",
+            // Final review: tags a script body opens with "<" and a letter, and <font> with and without its breakout attributes.
+            "a<b", "0<i ? \"", "if (a<b && ok) { log(\"", "<svg><script>", "<font", " color", " size=1", " face='x'", "; i<n; i++) { s = '"};
         String[] values = {"javascript:alert(1)", "\"", "'", ">", "<", "</script>", "-->", " x=y ", "&#58;", "js:alert(1)", "\\", "a", "",
-            "é", ";", ":", "script:alert(1)", "java", "/ok", "</style>", "`${1}`", "\t", " js:1", "58;", "<!--", "<script>", "]]>", "/", "!", "-"};
+            "é", ";", ":", "script:alert(1)", "java", "/ok", "</style>", "`${1}`", "\t", " js:1", "58;", "<!--", "<script>", "]]>", "/", "!", "-",
+            "x on=1 y", "hidden", "{\"a\":1}"};
         String[][] contexts = {{null, null}, {"script", null}, {"a", "href"}, {"div", "title"}, {"style", null}, {"div", "onclick"},
             {"p", null}, {"div", "hx-request"}, {"div", "style"}};
         var random = new java.util.Random(42);
@@ -722,6 +725,42 @@ class BraceHtmlOutputTest {
                 assertEquals(whole, drive(parts, chunk, false), () -> "String chunks: " + parts);
                 assertEquals(whole, drive(parts, chunk, true), () -> "byte chunks: " + parts);
             }
+        }
+    }
+
+    @Test
+    void scriptBodiesWithTagsOpenedByLessThanRenderTheSameHoweverCutAndCarryNoRawData() {
+        // Final review: script bodies in HTML and in <svg>/<math>, with "a<b" and "0<i ?" in
+        // them (tags, to a browser reading the body as markup), strings in all three quote
+        // styles, and whatever else leaves the tokenizer in an odd place. Data written where JTE
+        // reports a script body is escaped for a script wherever the tokenizer is, so the " onx="
+        // every value carries never reaches the output with its space and "=".
+        String[] fragments = {"<svg>", "<svg><script>", "<script>", "</script>", "</svg>", "var n = 0<i ? \"", "\" : \"\";",
+            "if (a<b && ok) { log(\"", "\"); }", "for (var i = 0; i<n; i++) { s = '", "'; }", "t = `", "`;", "a<b", " ", "=", "\"", "'", ">", "<",
+            "</", "/", "<math><annotation-xml>", "<font id=f>", "<font size=1>", "<![CDATA[", "]]>", "<!--", "-->", "<style>", "</style>",
+            "x<y{", "}", "<p>", "<a href=\"", " c=", "<b ", "\n", "<script href=\"/a.js\"/>", " hx-vals='", "<i", "u = ", "k=", "<title>", "</p>"};
+        String[] values = {"x onx=1 y", "\" onx=1 x=\"", "' onx=1 '", "a onx=1/>", "</script> onx=1", "` onx=1 ${1}", "javascript: onx=1", "\\ onx=1"};
+        var random = new java.util.Random(2026);
+        for (int n = 0; n < 4000; n++) {
+            var parts = new java.util.ArrayList<Part>();
+            var text = new StringBuilder();
+            for (int i = 3 + random.nextInt(20); i > 0; i--) {
+                if (random.nextInt(5) > 0) {
+                    text.append(fragments[random.nextInt(fragments.length)]);
+                    continue;
+                }
+                if (text.length() > 0) parts.add(Part.text(text.toString()));
+                text.setLength(0);
+                parts.add(Part.data("script", null, values[random.nextInt(values.length)]));
+            }
+            if (text.length() > 0) parts.add(Part.text(text.toString()));
+            String whole = drive(parts, 0, false);
+            for (int chunk : new int[] {1, 2, 5}) {
+                assertEquals(whole, drive(parts, chunk, false), () -> "String chunks: " + parts);
+                assertEquals(whole, drive(parts, chunk, true), () -> "byte chunks: " + parts);
+            }
+            assertFalse(whole.contains(" onx="), () -> whole + " from " + parts);
+            assertFalse(whole.contains("onx=1"), () -> whole + " from " + parts);
         }
     }
 

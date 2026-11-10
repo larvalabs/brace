@@ -1,7 +1,9 @@
 #! Regression corpus for BraceHtmlOutput, read by BraceHtmlCorpusTest. From the probes of the
 #! independent review of the H1/L7 fixes (2026-11 security review): the review findings F1 to F5
 #! and the "Checked and cleared: Template attributes" list in
-#! docs/2026-11-09-security-review-todos.md.
+#! docs/2026-11-09-security-review-todos.md. The sections from "Final review" on are the
+#! reproductions of the final whole-branch review (M1, L1 to L3 and the JTE comment oddity) and
+#! the cases it found holding.
 #!
 #! ### name          a template; lines up to the next "---" or "###" are its source. A name that
 #!                   starts with "_" is a helper for @template calls and is written as is; the
@@ -327,6 +329,43 @@ x/;alert(1);/
 --- expect
 <table><svg><desc><td></td></desc><script>var a = "\u0022\u003balert\u00281\u0029\u002f\u002f", b = "ok";</script></svg></table>
 <table><svg><desc><td></td></desc><script>var a = "\\", b = "\u003balert\u00281\u0029\u002f\u002f";</script></svg></table>
+#! Cases the final review checked and found holding, pinned with the new escaping.
+### svg-script-regex-with-a-url-attribute
+<svg><script>var a = "${x}"; var re = /<a href="${y}"/;</script></svg>
+--- values
+x||javascript:alert(1)
+x||/ok
+--- expect
+<svg><script>var a = "x"; var re = /<a href="about:invalid#blocked"/;</script></svg>
+<svg><script>var a = "x"; var re = /<a href="\u002fok"/;</script></svg>
+### svg-cdata-then-link-and-script
+<svg><![CDATA[ <script> ]]><a href="${x}">l</a><script>var a = "${y}";</script></svg>
+--- values
+javascript:alert(1)||";alert(1)//
+--- expect
+<svg><![CDATA[ <script> ]]><a href="about:invalid#blocked">l</a><script>var a = "\u0022\u003balert\u00281\u0029\u002f\u002f";</script></svg>
+### unsafe-content-inside-a-held-value
+<a href="/p/${x}$unsafe{y}">l</a>|<a href="$unsafe{y}${x}">l</a>|<div hx-vals='$unsafe{y}${x}'></div>|<a href="${x}$unsafe{y}">k</a>
+--- values
+X||UNSAFE
+javascript||:alert(1)
+:alert(1)||javascript
+:alert(1)||js
+--- expect
+<a href="/p/XUNSAFE">l</a>|<a href="UNSAFEX">l</a>|<div hx-vals='UNSAFEX'></div>|<a href="XUNSAFE">k</a>
+<a href="/p/javascript:alert(1)">l</a>|<a href=":alert(1)javascript">l</a>|<div hx-vals=':alert(1)javascript'></div>|<a href="about:invalid#blocked">k</a>
+<a href="/p/:alert(1)javascript">l</a>|<a href="about:invalid#blocked">l</a>|<div hx-vals='{}'></div>|<a href=":alert(1)javascript">k</a>
+<a href="/p/:alert(1)js">l</a>|<a href="about:invalid#blocked">l</a>|<div hx-vals='{}'></div>|<a href=":alert(1)js">k</a>
+### url-in-two-pieces-held
+<a href="${x}${y}">l</a>
+--- values
+j||avascript:alert(1)
+javascript||:alert(1)
+/a||/b
+--- expect
+<a href="about:invalid#blocked">l</a>
+<a href="about:invalid#blocked">l</a>
+<a href="/a/b">l</a>
 #! <font> ends foreign content only with a color, face or size attribute: an SVG font doesn't, so
 #! the self-closing <script/> after it is complete and the rest of the page is read as it is.
 ### svg-font-without-color-face-size-is-foreign
@@ -472,6 +511,31 @@ x style=display:block onfocus=alert(1) autofocus y
  style=
 onfocus=
  autofocus
+### m1-jte-drops-the-text-before-a-first-comment-cdata
+<svg><script>// <![CDATA[
+if (a<b && c) { log("${x}"); }
+// ]]></script></svg>
+--- values
+ok
+x style=display:block onfocus=alert(1) "<i>
+--- expect
+{{NL}}if (a<b && c) { log("\u006f\u006b"); }{{NL}}</script></svg>
+*
+--- forbid
+ style=
+onfocus=
+<i>
+#! With a ${...} before the comment nothing is dropped; JTE still strips the comments themselves
+#! ("//" to the end of the line and "/* */" in a script, "/* */" in a style, "<!-- -->" in markup).
+### jte-strips-comments
+<p>${y}</p><svg><script>// <![CDATA[
+if (a<b && c) { log("${x}"); }
+// ]]></script></svg><script>var u = "http://x"; // trailing
+var a = "${x}"; /* block */ var b = 1;</script><style>/* c */ a{color:${x}}</style><div><!-- c --><p>${x}</p></div>
+--- values
+ok||Y
+--- expect
+<p>Y</p><svg><script>{{NL}}if (a<b && c) { log("\u006f\u006b"); }{{NL}}</script></svg><script>var u = "http://x"; {{NL}}var a = "ok";  var b = 1;</script><style> a{color:ok}</style><div><p>ok</p></div>
 ### m1-jte-drops-the-text-before-a-first-block-comment
 <script>/* c */ for (i=0;i<n;i++) { log("${x}"); }</script>
 --- values
