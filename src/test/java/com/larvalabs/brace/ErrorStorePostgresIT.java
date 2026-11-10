@@ -204,27 +204,87 @@ class ErrorStorePostgresIT extends PostgresTestBase {
         }
         try {
             errorStore.record("A", "fine", "GET /a", "s", "req");
-            errorStore.record("B", "POISON", "GET /b", "s", "req");
+            errorStore.record("B", "POISON", "GET /b", "s POISON", "req POISON");
             errorStore.record("C", "fine", "GET /c", "s", "req");
             errorStore.flush();
 
-            var types = errorStore.list(null).stream().map(e -> e.get("errorType")).sorted().toList();
-            assertEquals(List.of("A", "C"), types);
-
-            // The rejected entry is retried, then dropped after MAX_FLUSH_FAILURES flushes.
-            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
-                errorStore.flush();
-            }
-            try (var c = connect(); var st = c.createStatement()) {
-                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT it_poison");
-            }
-            errorStore.flush();
-            assertEquals(2, errorStore.list(null).size(), "the poisoned entry was dropped, not retried forever");
+            var errors = errorStore.list(null);
+            var types = errors.stream().map(e -> e.get("errorType")).sorted().toList();
+            assertEquals(List.of("A", "B", "C"), types, "B is kept by the payload-stripped retry");
+            var b = errors.stream().filter(e -> "B".equals(e.get("errorType"))).findFirst().orElseThrow();
+            assertEquals(ErrorStore.STRIPPED_MESSAGE, b.get("message"));
+            assertEquals(null, b.get("stackTrace"));
+            assertEquals(null, b.get("requestDetail"));
         } finally {
             try (var c = connect(); var st = c.createStatement()) {
                 st.execute("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS it_poison");
             }
         }
+    }
+
+    @Test
+    void aKindTheServerAlwaysRejectsIsDroppedAfterMaxFlushFailures() throws Exception {
+        // On error_type, which the stripped retry keeps, so both attempts are refused.
+        try (var c = connect(); var st = c.createStatement()) {
+            st.execute("ALTER TABLE ops_errors ADD CONSTRAINT it_poison_type CHECK (error_type <> 'B')");
+        }
+        try {
+            errorStore.record("A", "fine", "GET /a", "s", "req");
+            errorStore.record("B", "fine", "GET /b", "s", "req");
+            errorStore.flush();
+            assertEquals(List.of("A"), types());
+
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT it_poison_type");
+            }
+            errorStore.flush();
+            assertEquals(List.of("A"), types(), "the poisoned entry was dropped, not retried forever");
+        } finally {
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS it_poison_type");
+            }
+        }
+    }
+
+    @Test
+    void aServerSideStatementTimeoutOnOneRowIsARowRejectionNotAStall() throws Exception {
+        // 57014 (query_canceled, e.g. statement_timeout on a huge row) is in a class the store
+        // treats as connection-level. The connection is still fine, so it must count against the
+        // row: before the review fix it aborted the flush and retained the batch, uncounted, forever.
+        try (var c = connect(); var st = c.createStatement()) {
+            st.execute("CREATE OR REPLACE FUNCTION it_cancel_huge() RETURNS trigger AS $$ BEGIN "
+                + "IF NEW.error_type = 'Huge' THEN RAISE EXCEPTION 'canceling statement due to statement timeout' "
+                + "USING ERRCODE = '57014'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql");
+            st.execute("CREATE TRIGGER it_cancel_huge BEFORE INSERT OR UPDATE ON ops_errors "
+                + "FOR EACH ROW EXECUTE FUNCTION it_cancel_huge()");
+        }
+        try {
+            errorStore.record("Huge", "x".repeat(10_000), "GET /huge", "s", "req");
+            errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "the healthy kind commits on the same connection");
+
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("DROP TRIGGER it_cancel_huge ON ops_errors");
+            }
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "counted and dropped, not retained forever");
+        } finally {
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("DROP TRIGGER IF EXISTS it_cancel_huge ON ops_errors");
+                st.execute("DROP FUNCTION IF EXISTS it_cancel_huge()");
+            }
+        }
+    }
+
+    private List<Object> types() {
+        return errorStore.list(null).stream().map(e -> e.get("errorType")).sorted().toList();
     }
 
     @Test

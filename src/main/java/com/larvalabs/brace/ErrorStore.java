@@ -24,9 +24,14 @@ import java.util.*;
  * NUL characters (Postgres text cannot hold them, and pgjdbc rejects them client-side) and clips
  * {@code type} and {@code route} to their {@code VARCHAR(255)} columns. Each upsert runs under its
  * own savepoint, so a row the database rejects is rolled back alone while the rest of the batch
- * commits; a rejected entry is retried on later flushes and dropped after
+ * commits. A rejected row is retried once at once with its payload stripped (a fixed placeholder
+ * message, no trace, detail or headers), so the kind's count and the regression signal survive;
+ * if that is rejected too, the entry is retried on later flushes and dropped after
  * {@value #MAX_FLUSH_FAILURES} rejections. A connection-level failure (database down, pool
- * exhausted) is not the entry's fault: the whole batch is kept and retried, as before. Failures are
+ * exhausted, or a connection-classed SQLState on a connection that then fails
+ * {@code isValid}) is not the entry's fault: the whole batch is kept and retried, as before. A
+ * connection-classed SQLState on a connection that is still valid (a statement timeout on one
+ * huge row, a deadlock) counts as a row rejection. Failures are
  * logged at most once a minute, naming the exception class, SQLState and error type, never the
  * request-derived payload.
  */
@@ -50,6 +55,11 @@ public class ErrorStore {
     /** Width of the {@code error_type} and {@code route} columns ({@code VARCHAR(255)}). */
     static final int MAX_KEY_LENGTH = 255;
     static final long FAILURE_LOG_INTERVAL_NANOS = 60_000_000_000L;
+    /**
+     * Stored in place of the message when the database rejected the full record and the retry
+     * without its payload succeeded. Fixed text: it must never carry request-derived content.
+     */
+    static final String STRIPPED_MESSAGE = "[details not stored: the database rejected this error record]";
 
     /** One coalesced error kind awaiting flush: occurrence count + the latest payload. */
     private static final class Pending {
@@ -71,6 +81,16 @@ public class ErrorStore {
             this.route = route;
             this.firstSeen = firstSeen;
         }
+
+        /** Same kind, count and times; the payload replaced by {@link #STRIPPED_MESSAGE}. */
+        Pending stripped() {
+            var s = new Pending(type, route, firstSeen);
+            s.failures = failures;
+            s.count = count;
+            s.lastSeen = lastSeen;
+            s.message = STRIPPED_MESSAGE;
+            return s;
+        }
     }
 
     private final DatabaseFactory databaseFactory;
@@ -84,6 +104,19 @@ public class ErrorStore {
 
     /** Opens the flush session. A seam for tests that simulate an unreachable database. */
     volatile java.util.function.Supplier<Database> flushSession;
+
+    /** Test seam: runs before each row write; throwing simulates the database rejecting that row. */
+    interface RowFault {
+        void check(String type, String message) throws SQLException;
+    }
+
+    /** Test seam: whether the flush connection is still usable after a connection-classed error. */
+    interface ConnectionCheck {
+        boolean alive(java.sql.Connection connection) throws SQLException;
+    }
+
+    volatile RowFault rowFault;
+    volatile ConnectionCheck connectionCheck = connection -> connection.isValid(1);
 
     // Failure accounting for the rate-limited log line. Guarded by flush()'s monitor.
     private long nextFailureLogNanos = System.nanoTime();
@@ -238,18 +271,19 @@ public class ErrorStore {
             db.jdbc(connection -> {
                 for (int i = 0; i < batch.size(); i++) {
                     var p = batch.get(i);
-                    var savepoint = connection.setSavepoint();
                     try {
-                        outcome[i] = (postgres ? upsertPostgres(connection, p) : upsertH2(connection, p))
-                            ? INSERTED : UPDATED;
-                        connection.releaseSavepoint(savepoint);
-                    } catch (SQLException | RuntimeException e) {
-                        // The connection itself failing is not this row's fault: abort the flush.
-                        if (e instanceof SQLException se && isConnectionFailure(se)) throw se;
-                        // Throws if the connection is gone, which also aborts the whole flush.
-                        connection.rollback(savepoint);
-                        outcome[i] = REJECTED;
-                        rowErrors[i] = e;
+                        outcome[i] = writeRow(connection, p, postgres);
+                    } catch (RowRejected first) {
+                        // Retry once without the payload, so the kind's count and the regression
+                        // signal survive whatever in the message, trace or detail was refused.
+                        var stripped = p.stripped();
+                        try {
+                            outcome[i] = writeRow(connection, stripped, postgres);
+                            batch.set(i, stripped);
+                        } catch (RowRejected second) {
+                            outcome[i] = REJECTED;
+                            rowErrors[i] = first.getCause();
+                        }
                     }
                 }
                 prune(connection);
@@ -309,6 +343,60 @@ public class ErrorStore {
         }
     }
 
+    /** The database refused this row; the connection is still usable. Wraps the row's error. */
+    private static final class RowRejected extends Exception {
+        RowRejected(Throwable cause) {
+            super(null, cause, false, false);
+        }
+    }
+
+    /**
+     * Writes one entry under its own savepoint. Throws {@link RowRejected} when the database
+     * refused the row and the connection is still usable (the savepoint is rolled back), and the
+     * original {@link SQLException} when the connection is gone, which aborts the whole flush and
+     * keeps the batch without counting against any entry.
+     */
+    private byte writeRow(java.sql.Connection connection, Pending p, boolean postgres)
+            throws SQLException, RowRejected {
+        var savepoint = connection.setSavepoint();
+        try {
+            var fault = rowFault;
+            if (fault != null) fault.check(p.type, p.message);
+            byte result = (postgres ? upsertPostgres(connection, p) : upsertH2(connection, p)) ? INSERTED : UPDATED;
+            connection.releaseSavepoint(savepoint);
+            return result;
+        } catch (SQLException | RuntimeException e) {
+            recoverOrAbort(connection, savepoint, e);
+            throw new RowRejected(e);
+        }
+    }
+
+    /**
+     * Rolls back to {@code savepoint} after {@code e}, or rethrows {@code e} when the connection
+     * is gone. A connection-classed SQLState (08, 53, 57, 40, 25) is not trusted on its own: 57014
+     * is a statement timeout on one huge row, 40P01 a deadlock on one key. Only when the
+     * connection also fails its liveness check does the flush abort; otherwise the error is the
+     * row's (M5 review). The rollback itself throws if the connection is gone.
+     */
+    private void recoverOrAbort(java.sql.Connection connection, java.sql.Savepoint savepoint, Exception e)
+            throws SQLException {
+        try {
+            connection.rollback(savepoint);
+        } catch (SQLException rollbackFailed) {
+            if (e instanceof SQLException se) throw se;
+            throw rollbackFailed;
+        }
+        if (e instanceof SQLException se && isConnectionFailure(se)) {
+            boolean alive;
+            try {
+                alive = connectionCheck.alive(connection);
+            } catch (SQLException | RuntimeException checkFailed) {
+                alive = false;
+            }
+            if (!alive) throw se;
+        }
+    }
+
     /** Prune if over limit — once per flush, not per occurrence. Best effort under a savepoint. */
     private void prune(java.sql.Connection connection) throws SQLException {
         var savepoint = connection.setSavepoint();
@@ -332,9 +420,8 @@ public class ErrorStore {
             }
             connection.releaseSavepoint(savepoint);
         } catch (SQLException e) {
-            if (isConnectionFailure(e)) throw e;
-            // Keep the upserts; the next flush prunes again.
-            connection.rollback(savepoint);
+            // Keep the upserts; the next flush prunes again. Aborts only if the connection is gone.
+            recoverOrAbort(connection, savepoint, e);
             lastFailure = describe(e);
             rejectedRows++;
         }

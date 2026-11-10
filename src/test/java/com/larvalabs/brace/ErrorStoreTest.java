@@ -138,7 +138,8 @@ class ErrorStoreTest {
     @Test
     void anEntryTheDatabaseKeepsRejectingIsDroppedAndLoggedOthersCommit() {
         // A CHECK constraint stands in for any row-level rejection that sanitizing doesn't foresee.
-        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check CHECK (message NOT LIKE '%POISON%')");
+        // It is on error_type, which the payload-stripped retry keeps, so the retry fails too.
+        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check CHECK (error_type NOT LIKE '%Poison%')");
         LogTap.clear();
         try {
             errorStore.record("PoisonException", "POISON secret-payload", "GET /p", "s", "req");
@@ -167,7 +168,7 @@ class ErrorStoreTest {
 
     @Test
     void dropIsLoggedWhenTheWindowAllows() {
-        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check2 CHECK (message NOT LIKE '%POISON%')");
+        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check2 CHECK (error_type NOT LIKE '%Poison%')");
         LogTap.clear();
         try {
             errorStore.record("PoisonException", "POISON", "GET /p", "s", "req");
@@ -227,6 +228,92 @@ class ErrorStoreTest {
         assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "22001")), "value too long");
         assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "23514")), "check violation");
         assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x")));
+    }
+
+    // --- M5 review fixes ---
+
+    @Test
+    void aRetainedClassRowErrorOnALiveConnectionIsARowRejection() {
+        // 57014 (statement_timeout on a huge row) is in a "connection-level" SQLState class, but
+        // the connection is fine: it must count against the entry, not abort and retain the batch
+        // forever (the original stall). The fault fires on the stripped retry too.
+        errorStore.rowFault = (type, message) -> {
+            if ("HugeRowException".equals(type)) {
+                throw new java.sql.SQLException("canceling statement due to statement timeout", "57014");
+            }
+        };
+        errorStore.record("HugeRowException", "x".repeat(1000), "GET /huge", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types(), "the healthy kind commits despite its neighbour");
+
+        for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types(), "dropped after MAX_FLUSH_FAILURES, not retained forever");
+    }
+
+    @Test
+    void aConnectionClassedErrorOnADeadConnectionRetainsTheBatchUncounted() {
+        errorStore.rowFault = (type, message) -> {
+            throw new java.sql.SQLException("An I/O error occurred while sending to the backend", "08006");
+        };
+        errorStore.connectionCheck = connection -> false;
+        errorStore.record("RuntimeException", "first", "GET /down", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        assertEquals(List.of(), types(), "nothing commits while the connection is dead");
+
+        errorStore.rowFault = null;
+        errorStore.connectionCheck = connection -> connection.isValid(1);
+        errorStore.flush();
+        assertEquals(List.of("Healthy", "RuntimeException"), types(), "kept, not counted or dropped");
+    }
+
+    @Test
+    void aRejectedRowIsRetriedOnceWithoutItsPayload() {
+        // e.g. a value the database refuses in the message, trace or request detail. The kind's
+        // count and the regression signal must survive; the payload is replaced by fixed text.
+        var seen = new java.util.ArrayList<String>();
+        errorStore.setRegressionListener(new ErrorStore.RegressionListener() {
+            public void onNew(String type, String route, String message, java.time.Instant firstSeen) {
+                seen.add(type + ": " + message);
+            }
+            public void onRepeat(String type, String route, long count) { }
+        });
+        errorStore.rowFault = (type, message) -> {
+            if ("BigPayloadException".equals(type) && !ErrorStore.STRIPPED_MESSAGE.equals(message)) {
+                throw new java.sql.SQLException("value too long", "22001");
+            }
+        };
+        errorStore.record("BigPayloadException", "request text token=abc", "GET /big",
+            "trace with request text", "GET /big?q=request-text", "{\"count\":1}", "{\"x-h\":\"request-text\"}");
+        errorStore.record("BigPayloadException", "request text again", "GET /big", "trace", "detail");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(1, errors.size(), errors.toString());
+        var err = errors.get(0);
+        assertEquals("BigPayloadException", err.get("errorType"));
+        assertEquals("GET /big", err.get("route"));
+        assertEquals(2, err.get("occurrenceCount"), "the count survives");
+        assertEquals(ErrorStore.STRIPPED_MESSAGE, err.get("message"));
+        assertNull(err.get("stackTrace"));
+        assertNull(err.get("requestDetail"));
+        assertNull(err.get("queriesBefore"));
+        assertNull(err.get("requestHeaders"));
+        assertEquals(List.of("BigPayloadException: " + ErrorStore.STRIPPED_MESSAGE), seen,
+            "the regression signal fires, with the placeholder rather than the rejected payload");
+        assertFalse(ErrorStore.STRIPPED_MESSAGE.contains("request"), "fixed text only");
+
+        // Nothing left pending: a later flush with the fault gone adds nothing.
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(2, errorStore.list(null).get(0).get("occurrenceCount"));
     }
 
     private static void sql(String statement) {

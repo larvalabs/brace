@@ -266,6 +266,10 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     kinds in the same batch are stored. A unit test that a permanently failing entry is dropped
     and logged.
   - **Model: Opus 5.5.**
+  - **Review fixes** (`fix(security): M5 review fixes`). A row error in a connection-classed
+    SQLState (57014 and the like) on a connection that still passes `isValid` counts against the
+    row instead of retaining the batch; a rejected row is retried once with its payload stripped
+    (fixed placeholder message) so the count and regression signal survive.
 
 - [ ] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches
