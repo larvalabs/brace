@@ -13,18 +13,19 @@ public record CliConfig(String url, String keyPath, String authorizedKeysPath, S
     private static final String DEFAULT_AUTH_KEYS = "ops-authorized-keys";
     private static final String DEFAULT_ENV = "local";
 
-    /** Env names end up in commands agents are told to run and in config keys, so keep them boring. */
-    private static final java.util.regex.Pattern ENV_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_-]{1,32}");
+    /**
+     * Env names end up in commands agents are told to run ({@code brace logs --env <name> ...})
+     * and in config keys, so keep them boring. The first character is a letter or digit: a
+     * leading {@code -} would make the name an option of that command ({@code --env --url}).
+     */
+    private static final java.util.regex.Pattern ENV_NAME =
+        java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,31}");
 
     /** Quote a rejected value for an error message without echoing control characters or a huge string. */
     private static String describe(String s) {
-        var sb = new StringBuilder("\"");
-        for (int i = 0; i < s.length() && i < 40; i++) {
-            char c = s.charAt(i);
-            sb.append(Character.isISOControl(c) ? '?' : c);
-        }
-        if (s.length() > 40) sb.append("...");
-        return sb.append('"').toString();
+        int end = Math.min(s.length(), 40);
+        if (end < s.length() && Character.isHighSurrogate(s.charAt(end - 1))) end--;
+        return "\"" + CliOutput.sanitizeLine(s.substring(0, end)) + (end < s.length() ? "..." : "") + "\"";
     }
 
     public static CliConfig load(Path projectDir, String[] cliArgs) throws IOException {
@@ -64,7 +65,8 @@ public record CliConfig(String url, String keyPath, String authorizedKeysPath, S
 
         if (!ENV_NAME.matcher(env).matches()) {
             throw new IOException("Invalid env name " + describe(env) + ": use 1 to 32 letters, digits, "
-                + "'_' or '-' (from " + (envFlag != null ? "--env" : "ops.env in .brace") + ").");
+                + "'_' or '-', starting with a letter or digit (from "
+                + (envFlag != null ? "--env" : "ops.env in .brace") + ").");
         }
 
         String url;

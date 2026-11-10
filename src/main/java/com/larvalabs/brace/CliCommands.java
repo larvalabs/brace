@@ -94,13 +94,18 @@ public class CliCommands {
         printTextSection("Stack trace", e.path("stackTrace"));
     }
 
+    /**
+     * Server text that is multi-line by nature (a stack trace, request headers). It stays
+     * multi-line, but every line carries the block's {@code "  | "} gutter and goes through
+     * {@code sanitizeLine}, so none of it can pass for a line of the CLI's own.
+     */
     private static void printTextSection(String title, JsonNode value) {
         if (value.isMissingNode() || value.isNull()) return;
         String text = value.asText("");
         if (text.isBlank()) return;
         CliOutput.println();
         CliOutput.println(title + ":");
-        for (var line : text.split("\n")) CliOutput.println("  " + line);
+        for (var line : text.split("\\R")) CliOutput.println("  | " + line.replace("\t", "    "));
     }
 
     private static void renderErrorsTable(JsonNode errors) {
@@ -117,9 +122,11 @@ public class CliCommands {
                 e.path("route").asText(""),
                 e.path("message").asText("")));
         }
-        CliOutput.println(CliOutput.table(
+        // print, not println: the table's line breaks are its own (cells are one line each).
+        CliOutput.print(CliOutput.table(
             List.of("ID", "COUNT", "LAST SEEN", "ROUTE", "MESSAGE"),
             rows, 120));
+        CliOutput.println();
     }
 
     // ---------- brace logs ----------
@@ -453,8 +460,10 @@ public class CliCommands {
 
     static String renderAnalytics(JsonNode r) {
         var sb = new StringBuilder();
-        sb.append(r.path("from").asText()).append(" – ").append(r.path("to").asText())
-          .append("  (").append(r.path("timezone").asText()).append(")\n\n");
+        // Server values go in through sanitizeLine (or table): the report's line breaks are its own.
+        sb.append(CliOutput.sanitizeLine(r.path("from").asText())).append(" – ")
+          .append(CliOutput.sanitizeLine(r.path("to").asText()))
+          .append("  (").append(CliOutput.sanitizeLine(r.path("timezone").asText())).append(")\n\n");
         long v = r.path("visitors").asLong(), pv = r.path("pageviews").asLong();
         sb.append(String.format("Visitors %,d   Pageviews %,d   Views/visit %.2f   Now %,d%n%n",
             v, pv, v == 0 ? 0.0 : (double) pv / v, r.path("live").asLong()));
@@ -468,7 +477,9 @@ public class CliCommands {
         for (var it = r.path("notCounted").fields(); it.hasNext(); ) {
             var e = it.next();
             total += e.getValue().asLong();
-            if (e.getValue().asLong() > 0) parts.add(e.getKey() + " " + String.format("%,d", e.getValue().asLong()));
+            if (e.getValue().asLong() > 0) {
+                parts.add(CliOutput.sanitizeLine(e.getKey()) + " " + String.format("%,d", e.getValue().asLong()));
+            }
         }
         sb.append(String.format("Not counted: %,d", total));
         if (!parts.isEmpty()) sb.append(" (").append(String.join(", ", parts)).append(')');
@@ -510,10 +521,30 @@ public class CliCommands {
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
         if (mode == CliOutput.Mode.JSON) {
-            System.out.println(response.body());
-        } else {
-            CliOutput.printSuccess("cache cleared");
+            return printJsonBody(response);
         }
+        CliOutput.printSuccess("cache cleared");
+        return 0;
+    }
+
+    /**
+     * JSON mode for a command whose server reply is passed on: parse it and print it
+     * re-serialized (compact, control characters escaped by Jackson), never the raw body, which
+     * a hostile server could fill with terminal escape sequences (L11). A body that isn't JSON
+     * gets the same one-line error, and exit code, as an HTTP error status.
+     */
+    private static int printJsonBody(HttpResponse<String> response) {
+        JsonNode body;
+        try {
+            body = Json.mapper().readTree(response.body());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            body = null;
+        }
+        if (body == null || body.isMissingNode()) {
+            CliOutput.printError("HTTP " + response.statusCode() + " but the response is not JSON: " + response.body());
+            return 2;
+        }
+        System.out.println(CliOutput.json(body));
         return 0;
     }
 
@@ -544,10 +575,9 @@ public class CliCommands {
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
         if (mode == CliOutput.Mode.JSON) {
-            System.out.println(response.body());
-        } else {
-            CliOutput.printSuccess("resolved error " + id);
+            return printJsonBody(response);
         }
+        CliOutput.printSuccess("resolved error " + id);
         return 0;
     }
 

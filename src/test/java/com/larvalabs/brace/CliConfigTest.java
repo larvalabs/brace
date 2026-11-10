@@ -127,15 +127,41 @@ class CliConfigTest {
     void rejectsInvalidEnvFlagAndDoesNotEchoControlChars() {
         var e = assertThrows(java.io.IOException.class,
             () -> CliConfig.load(tmp, new String[]{"--env", "a\u001b]0;pwn\u0007", "--json"}));
+        assertTrue(e.getMessage().contains("Invalid env name"), e.getMessage());
         assertTrue(e.getMessage().chars().noneMatch(c -> c < 0x20 || c == 0x7f), e.getMessage());
     }
 
     @Test
     void rejectsOverlongAndEmptyEnv() throws Exception {
-        assertThrows(java.io.IOException.class,
-            () -> CliConfig.load(tmp, new String[]{"--env", "a".repeat(33), "--json"}));
-        assertThrows(java.io.IOException.class,
+        // The ops.<env>.url keys exist, so only the name check can refuse these.
+        String overlong = "a".repeat(33);
+        Files.writeString(tmp.resolve(".brace"), "ops." + overlong + ".url=http://a\nops..url=http://a\n");
+        var e = assertThrows(java.io.IOException.class,
+            () -> CliConfig.load(tmp, new String[]{"--env", overlong, "--json"}));
+        assertTrue(e.getMessage().contains("Invalid env name"), e.getMessage());
+        e = assertThrows(java.io.IOException.class,
             () -> CliConfig.load(tmp, new String[]{"--env", "", "--json"}));
+        assertTrue(e.getMessage().contains("Invalid env name"), e.getMessage());
+        // 32 characters is still fine.
+        String longest = "a".repeat(32);
+        Files.writeString(tmp.resolve(".brace"), "ops." + longest + ".url=http://a\n");
+        assertEquals(longest, CliConfig.load(tmp, new String[]{"--env", longest}).env());
+    }
+
+    @Test
+    void rejectsEnvNamesThatStartWithADash() throws Exception {
+        // An env name is spliced into follow-up commands (`brace logs --env <name> ...`), so a
+        // leading '-' would turn it into an option of the command an agent is told to run.
+        Files.writeString(tmp.resolve(".brace"), "ops.env=--url\nops.--url.url=http://a\n");
+        var e = assertThrows(java.io.IOException.class, () -> CliConfig.load(tmp, new String[]{}));
+        assertTrue(e.getMessage().contains("Invalid env name"), e.getMessage());
+
+        Files.writeString(tmp.resolve(".brace"), "ops.-x.url=http://a\nops._x.url=http://a\n");
+        e = assertThrows(java.io.IOException.class, () -> CliConfig.load(tmp, new String[]{"--env", "-x"}));
+        assertTrue(e.getMessage().contains("Invalid env name"), e.getMessage());
+        // '-' and '_' are still fine after the first character; '_' can't start one either.
+        e = assertThrows(java.io.IOException.class, () -> CliConfig.load(tmp, new String[]{"--env", "_x"}));
+        assertTrue(e.getMessage().contains("Invalid env name"), e.getMessage());
     }
 
     @Test
