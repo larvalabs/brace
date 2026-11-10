@@ -367,7 +367,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Decision D6. Require `opsOrigins` unless the mode is `dev` or the test harness.
   - **Model: Sonnet 5.5.**
 
-- [ ] **L3: `req.ip()` prefers client-sent `X-Forwarded-For` over the proxy's `Forwarded`; repeated header lines are last-wins**, `Request.java:493-507`, `BraceHandler.java:283-286`, `Brace.java:1369`
+- [x] **L3: `req.ip()` prefers client-sent `X-Forwarded-For` over the proxy's `Forwarded`; repeated header lines are last-wins**, `Request.java:493-507`, `BraceHandler.java:283-286`, `Brace.java:1369`
   - `X-Forwarded-For` is checked first and `Forwarded` only when it is absent. The comment says
     Jetty joins repeated headers with ", "; the header map is built with `put`, so the last
     line wins.
@@ -524,7 +524,7 @@ Fixed in the commit of the finding named, or the closeout docs commit.
 
 - [x] `docs/SECURITY.md:1208-1209`: the `"(none)"` bucket claim (M4).
 - [x] `docs/SECURITY.md:1187, 1190`: `before("/api", …)` limits only the literal `/api` (M4).
-- [ ] `docs/SECURITY.md:707-716`: recommends `::ffff:10.0.0.0/104`, which throws at startup
+- [x] `docs/SECURITY.md:707-716`: recommends `::ffff:10.0.0.0/104`, which throws at startup
   ("Prefix length must be 0..32"); the mapped form already matches the IPv4 CIDR. Remove it.
 - [ ] `docs/SECURITY.md:1389`: says ops auth v1 "is accepted for one release"; it is removed.
 - [ ] `docs/SECURITY.md:348-354` and the `@template` "Not covered" note (L7).

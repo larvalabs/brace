@@ -380,6 +380,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (match != null) {
                 braceRequest.setRoute(match.route()); // the page cache keys on it (L4)
             }
+            if (trustedProxies != null) {
+                // L3: req.ip() needs every line of the forwarding header, not the last one.
+                braceRequest.setForwardingChain(
+                    joinedFieldValues(jettyRequest.getHeaders(), trustedProxies.clientIpHeader()));
+            }
             if (storage != null) {
                 braceRequest.setStorage(storage);
             }
@@ -1709,6 +1714,26 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             return sessionOptions.maxAge().getSeconds();
         }
         return 0;
+    }
+
+    /**
+     * Every instance of header {@code name}, in wire order, joined with {@code ","} (a list
+     * header's lines are one comma-separated list, RFC 9110 5.3), or null if there is none (L3).
+     * Used for the forwarding header, where the single-value request header map would keep only
+     * the last line.
+     */
+    static String joinedFieldValues(org.eclipse.jetty.http.HttpFields fields, String name) {
+        StringBuilder joined = null;
+        for (var field : fields) {
+            if (field.is(name)) {
+                if (joined == null) {
+                    joined = new StringBuilder(field.getValue() == null ? "" : field.getValue());
+                } else {
+                    joined.append(',').append(field.getValue() == null ? "" : field.getValue());
+                }
+            }
+        }
+        return joined == null ? null : joined.toString();
     }
 
     /**

@@ -723,13 +723,32 @@ because Cloudflare itself appends the true connecting address to `X-Forwarded-Fo
 ### Behavior
 
 - **Without configuration:** `req.ip()` uses socket remote address only (ignores headers)
-- **With configuration:** `req.ip()` parses `X-Forwarded-For` / `Forwarded` **only if** the immediate peer is trusted
+- **With configuration:** `req.ip()` parses the forwarding header **only if** the immediate peer is trusted
 
-When forwarding headers are consulted, Brace uses **rightmost-untrusted** semantics: it walks
-the `X-Forwarded-For` list from right to left, skips any entry whose address falls inside a
-trusted CIDR, and returns the first untrusted address. This is the correct algorithm because
-real proxies **append** the connecting client's address — the leftmost entries were written by
-the client and can be forged.
+**One forwarding header, chosen explicitly.** Brace reads the client address chain from exactly
+one header: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` (its `for=` parameters) when
+you opt in. The other header is ignored. Reading both was a spoofing hole: a proxy that sets one
+of them usually passes a client-sent copy of the other through untouched, so a client behind a
+`Forwarded`-only proxy could send `X-Forwarded-For: 6.6.6.6` and become `6.6.6.6`.
+
+```java
+app.trustedProxies("10.0.0.5");                                           // X-Forwarded-For
+app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());  // Forwarded
+```
+
+Choose the header your outermost trusted proxy writes. nginx (`$proxy_add_x_forwarded_for`),
+Caddy, Traefik, Cloudflare and the common cloud load balancers write `X-Forwarded-For`. If
+your proxy writes only `Forwarded`, opt in, and if it might pass a client's `X-Forwarded-For`
+through, that header is now harmless.
+
+If the header arrives on several lines (two proxies that each add a line, or a client line plus
+the proxy's), every line is read, in wire order, as one list.
+
+When the forwarding header is consulted, Brace uses **rightmost-untrusted** semantics: it walks
+the list from right to left, skips any entry whose address falls inside a trusted CIDR, and
+returns the first untrusted address. This is the correct algorithm because real proxies
+**append** the connecting client's address — the leftmost entries were written by the client and
+can be forged.
 
 Examples:
 
@@ -740,21 +759,21 @@ Examples:
 | `client, 10.0.0.2, 10.0.0.1` | `10.0.0.0/8` | `client` (both proxies trusted) |
 | `10.0.0.1, 10.0.0.2` | `10.0.0.0/8` | `10.0.0.1` (all trusted → leftmost) |
 
-**Dual-stack / representation mismatch.** `TrustedProxies` matches addresses by binary value
-after resolution, but it **fails closed** when the address family differs — a CIDR expressed as
-an IPv4 address does not match the IPv6-mapped form `::ffff:a.b.c.d`, and `127.0.0.1` does not
-match `::1` on a dual-stack bind. If your proxy can connect over both IPv4 and IPv6, list both
-representations explicitly:
+**Dual-stack.** `TrustedProxies` matches addresses by binary value and never resolves names. An
+IPv4 CIDR also matches the IPv4-mapped IPv6 form of its addresses (`10.0.0.0/8` matches
+`::ffff:10.1.2.3`), so no extra entry is needed for a proxy seen through a dual-stack socket. IPv4
+and IPv6 loopback are different addresses, though: `127.0.0.1` does not match `::1`. If your proxy
+can connect over either, list both:
 
 ```java
 app.trustedProxies("127.0.0.1", "::1");
-app.trustedProxies("10.0.0.0/8", "::ffff:10.0.0.0/104");  // if proxies may use IPv6-mapped addresses
 ```
 
 ### Supported Headers
 
-- `X-Forwarded-For` (most common)
-- `Forwarded` (RFC 7239) — elements correctly split on `,`, parameters on `;`
+- `X-Forwarded-For` (the default client-address header)
+- `Forwarded` (RFC 7239), instead of `X-Forwarded-For`, with `useForwardedHeader()`: elements
+  split on `,`, parameters on `;`
 - `X-Forwarded-Proto` — the original scheme, for the session cookie's `Secure` attribute
 - `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision and the
   WebSocket `Origin` check (leftmost entry)

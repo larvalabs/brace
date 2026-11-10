@@ -1285,7 +1285,7 @@ app Dokploy routes joins that network, so on a host shared with apps you don't t
 Traefik's own (fixed) address instead. The scaffold reads the value from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
 without being trusted, Brace logs a one-time warning naming its address.
 
-Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
+Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries (or lines), Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples. Exactly one forwarding header is read: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` with `app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader())`; the other is ignored, so a client can't supply its address in the header your proxy doesn't overwrite. An IPv4 CIDR also matches the IPv4-mapped form (`::ffff:10.1.2.3`); list `::1` separately from `127.0.0.1`.
 
 For apps behind Cloudflare, `TrustedProxies.cloudflare()` is pre-loaded with Cloudflare's published egress ranges:
 

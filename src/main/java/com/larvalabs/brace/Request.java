@@ -486,24 +486,33 @@ public class Request {
         return trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr);
     }
 
+    /**
+     * Every wire instance of the configured forwarding header ({@link TrustedProxies#clientIpHeader}),
+     * joined with {@code ","} in wire order, captured when the framework builds the request (L3).
+     * {@link #headers} keeps one value per name (the last line), which let a client's line and the
+     * proxy's line race; the address chain needs all of them. Null when not captured (a hand-built
+     * Request), in which case {@link #ip()} falls back to the single-value header.
+     */
+    private String forwardingChain;
+    private boolean forwardingChainCaptured;
+
+    void setForwardingChain(String joinedValues) {
+        this.forwardingChain = joinedValues;
+        this.forwardingChainCaptured = true;
+    }
+
     public String ip() {
         // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            // Check X-Forwarded-For first (most common).
-            // NOTE: Request.headers is a single-value map (TreeMap, case-insensitive), so multiple
-            // X-Forwarded-For header instances from the wire are not visible here — only the value
-            // as concatenated by Jetty (which joins multi-occurrence headers with ", ") is available.
-            var forwarded = header("X-Forwarded-For");
-            if (forwarded != null && !forwarded.isEmpty()) {
-                var result = rightmostUntrusted(forwarded.split(","));
+            // L3: exactly one forwarding header is read, the one TrustedProxies names
+            // (X-Forwarded-For unless useForwardedHeader()); the other is ignored, so a client
+            // cannot supply its own address in the header the proxy doesn't overwrite.
+            var chain = forwardingChainCaptured ? forwardingChain : header(trustedProxies.clientIpHeader());
+            if (chain != null && !chain.isEmpty()) {
+                var result = trustedProxies.usesForwardedHeader()
+                    ? extractForwardedFor(chain)
+                    : rightmostUntrusted(chain.split(","));
                 if (result != null) return result;
-            }
-
-            // Check Forwarded header (RFC 7239)
-            var forwardedRfc = header("Forwarded");
-            if (forwardedRfc != null && !forwardedRfc.isEmpty()) {
-                var forPart = extractForwardedFor(forwardedRfc);
-                if (forPart != null) return forPart;
             }
         }
 

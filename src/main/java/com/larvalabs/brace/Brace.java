@@ -1391,6 +1391,10 @@ public class Brace {
                         var request = new Request("GET", wsPath, Map.of(),
                             Request.parseSingleValues(upgradeRequest.getHttpURI().getQuery(), true),
                             headers, "", Map.of(), remoteAddr, wsTrustedProxies);
+                        if (wsTrustedProxies != null) {
+                            request.setForwardingChain(BraceHandler.joinedFieldValues(
+                                upgradeRequest.getHeaders(), wsTrustedProxies.clientIpHeader())); // L3
+                        }
                         for (var before : wsBefore) {
                             Result early = before.apply(request);
                             if (early != null) return declineUpgrade(upgradeRequest, upgradeResponse, callback, early.status());

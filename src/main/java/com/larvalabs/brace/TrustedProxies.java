@@ -77,6 +77,13 @@ public class TrustedProxies {
     /** CIDRs from constructors and {@link #plus} — retained as strings so ranges can be rebuilt. */
     private final List<String> staticCidrs = new ArrayList<>();
 
+    /**
+     * Which header carries the client address chain (L3). Exactly one is read; the other is
+     * ignored, because a proxy that sets one usually passes a client-sent copy of the other
+     * straight through. {@code X-Forwarded-For} unless {@link #useForwardedHeader()} was called.
+     */
+    private volatile boolean useForwarded;
+
     private final boolean cloudflarePreset;
     /** Set by {@link #autoRefresh()}; {@code Brace.start()} resumes refreshing when it is. */
     private volatile boolean refreshRequested;
@@ -131,6 +138,34 @@ public class TrustedProxies {
         staticCidrs.addAll(List.of(cidrs));
         ranges = buildRanges();
         return this;
+    }
+
+    /**
+     * Read the client address from the RFC 7239 {@code Forwarded} header ({@code for=}) instead of
+     * {@code X-Forwarded-For}. Brace reads exactly one of the two, {@code X-Forwarded-For} by
+     * default, and ignores the other: a proxy that writes one typically passes a client-sent copy
+     * of the other through untouched, so reading both lets the client pick its own address. Call
+     * this only when your proxy sets {@code Forwarded} (and you have checked it does not also
+     * forward the client's {@code X-Forwarded-For}, which is then ignored). Fluent; returns
+     * {@code this}.
+     *
+     * <pre>{@code
+     * app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());
+     * }</pre>
+     */
+    public TrustedProxies useForwardedHeader() {
+        this.useForwarded = true;
+        return this;
+    }
+
+    /** The one header {@link Request#ip()} reads the client chain from. */
+    String clientIpHeader() {
+        return useForwarded ? "Forwarded" : "X-Forwarded-For";
+    }
+
+    /** True when the chain is RFC 7239 {@code Forwarded} rather than {@code X-Forwarded-For}. */
+    boolean usesForwardedHeader() {
+        return useForwarded;
     }
 
     /**
