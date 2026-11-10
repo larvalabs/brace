@@ -54,6 +54,53 @@ class SessionRevocationTest {
         assertThrows(IllegalArgumentException.class, () -> SessionOptions.of(CURRENT).previousSecrets("short"));
     }
 
+    @Test
+    void placeholderPreviousSecretRefusedAtStartup() {
+        String placeholder = "CHANGE-ME-to-a-random-string-at-least-32-chars";
+        var app = Brace.app();
+        assertThrows(IllegalArgumentException.class,
+            () -> app.sessions(SessionOptions.of(CURRENT).previousSecrets(placeholder)));
+    }
+
+    @Test
+    void previousSecretCookieWithoutAbsIsRejected() {
+        String forged = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (System.currentTimeMillis() / 1000 + 3600) + "\"}");
+        var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
+        assertNull(Session.fromCookie(forged, CURRENT, options.previousSecrets()).get("userId"));
+    }
+
+    @Test
+    void previousSecretCookieWithDistantAbsIsRejected() {
+        long now = System.currentTimeMillis() / 1000;
+        String forged = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
+            + (now + 3L * 365 * 86400) + "\"}");
+        var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
+        assertNull(Session.fromCookie(forged, CURRENT, options.previousSecrets()).get("userId"));
+    }
+
+    @Test
+    void currentSecretCookieWithoutAbsKeepsWorking() {
+        String c = sealRaw(CURRENT, "{\"userId\":\"1\",\"_exp\":\"" + (System.currentTimeMillis() / 1000 + 3600) + "\"}");
+        assertEquals("1", Session.fromCookie(c, CURRENT, SessionOptions.of(CURRENT).previousSecrets(OLD).previousSecrets()).get("userId"));
+    }
+
+    static String sealRaw(String secret, String json) {
+        try {
+            var key = Session.getCachedKey(secret);
+            byte[] nonce = new byte[12];
+            new java.security.SecureRandom().nextBytes(nonce);
+            var cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, nonce));
+            byte[] ct = cipher.doFinal(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            byte[] combined = new byte[nonce.length + ct.length];
+            System.arraycopy(nonce, 0, combined, 0, nonce.length);
+            System.arraycopy(ct, 0, combined, nonce.length, ct.length);
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(combined);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     // --- validator ---
 
     @Test

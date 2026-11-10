@@ -267,6 +267,10 @@ public class Brace {
 
     public Brace sessions(SessionOptions options) {
         validateSecret(options.secret(), "session");
+        // M7: a previous secret that is the public scaffold placeholder (or leaked) forges cookies.
+        for (String previous : options.previousSecrets()) {
+            validateSecret(previous, "previous session");
+        }
         this.sessionSecret = options.secret();
         this.sessionOptions = options;
         return this;

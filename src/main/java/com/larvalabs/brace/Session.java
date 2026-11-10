@@ -317,10 +317,20 @@ public class Session {
     static Session fromCookie(String cookie, String secret, java.util.List<String> previousSecrets) {
         Session session = decrypt(cookie, secret);
         if (session != null) return session;
+        long maxAbsolute = previousSecrets instanceof SessionOptions.PreviousSecrets p
+            ? p.maxAbsoluteSeconds() : DEFAULT_ABSOLUTE_MAX_AGE_SECONDS;
         for (String previous : previousSecrets) {
             session = decrypt(cookie, previous);
             if (session != null) {
-                if (!session.data.isEmpty()) session.modified = true;
+                if (session.data.isEmpty()) return session;
+                // M7: a cookie sealed with a retired secret is only honoured while it carries a
+                // bounded _abs. One forged with a leaked or public secret (no _abs, or one pushed
+                // far out) would otherwise be re-sealed under the current secret indefinitely.
+                long now = System.currentTimeMillis() / 1000;
+                if (session.absoluteDeadline <= 0 || session.absoluteDeadline > now + maxAbsolute) {
+                    return new Session();
+                }
+                session.modified = true;
                 return session;
             }
         }

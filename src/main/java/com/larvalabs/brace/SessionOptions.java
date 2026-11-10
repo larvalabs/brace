@@ -164,8 +164,37 @@ public class SessionOptions {
         return this;
     }
 
+    /**
+     * The previous secrets. The returned list also knows the longest lifetime a cookie sealed
+     * with one of them may claim ({@link Session#fromCookie}'s M7 bound), so the caller needs no
+     * second argument.
+     */
     public java.util.List<String> previousSecrets() {
-        return previousSecrets;
+        return new PreviousSecrets(previousSecrets, this);
+    }
+
+    /** Longest absolute lifetime, in seconds, a cookie opened with a previous secret may carry. */
+    long maxPreviousAbsoluteSeconds() {
+        if (absoluteMaxAge != null && absoluteMaxAge.getSeconds() > 0) return absoluteMaxAge.getSeconds();
+        long horizon = maxAge != null && maxAge.getSeconds() > 0
+            ? maxAge.getSeconds() : Session.DEFAULT_MAX_AGE_SECONDS;
+        return Math.max(Session.DEFAULT_ABSOLUTE_MAX_AGE_SECONDS, horizon);
+    }
+
+    /** Read-only list of previous secrets that carries the lifetime bound for {@link Session}. */
+    static final class PreviousSecrets extends java.util.AbstractList<String> {
+        private final java.util.List<String> secrets;
+        private final SessionOptions options;
+
+        PreviousSecrets(java.util.List<String> secrets, SessionOptions options) {
+            this.secrets = secrets;
+            this.options = options;
+        }
+
+        @Override public String get(int index) { return secrets.get(index); }
+        @Override public int size() { return secrets.size(); }
+
+        long maxAbsoluteSeconds() { return options.maxPreviousAbsoluteSeconds(); }
     }
 
     /** Cookie Path; must start with {@code /} and contain no {@code ;} or control characters. */

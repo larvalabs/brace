@@ -762,7 +762,8 @@ app.sessionValidator(s -> !s.has("userId") || Objects.equals(s.get("sessionVersi
 
 **Rotating the secret:** `SessionOptions.of(newSecret).previousSecrets(oldSecret)` keeps old
 cookies working and re-seals them with the new secret; drop the old one after the absolute
-lifetime. On Postgres with WebSockets, instances on different secrets don't share broadcasts
+lifetime. Never list a public or leaked secret (including the `brace new` placeholder, which startup
+refuses) as previous; a previous-secret cookie without `_abs` is rejected. On Postgres with WebSockets, instances on different secrets don't share broadcasts
 until all are rotated (the bus key derives from the current secret).
 
 ```java

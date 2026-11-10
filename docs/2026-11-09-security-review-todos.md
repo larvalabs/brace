@@ -294,7 +294,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     unredacted (false positives are the risk here).
   - **Model: Opus 5.5.**
 
-- [ ] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
+- [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current
     secret only. `previousSecrets` checks length alone, and the shipped placeholder
     `CHANGE-ME-to-a-random-string-at-least-32-chars` is 46 characters. `Session.fromCookie`
