@@ -232,7 +232,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     the query.
   - **Model: Opus 5.5.** Two breaking semantics plus docs and a migration entry.
 
-- [ ] **M5: One request containing `%00` stops error persistence and regression alerts on Postgres**, `ErrorStore.java:100-133, 141-204, 228-256`, `BraceHandler.java:586-626`, `Request.java:158-207, 289, 326-330`
+- [x] **M5: One request containing `%00` stops error persistence and regression alerts on Postgres**, `ErrorStore.java:100-133, 141-204, 228-256`, `BraceHandler.java:586-626`, `Request.java:158-207, 289, 326-330`
+  - **Confirmed on Postgres 16 (fix commit).** `ErrorStorePostgresIT` against the unfixed code:
+    a batch holding one entry with a NUL stored zero rows, including the healthy kind beside it.
+    An over-long `type` or `route` (over 255 characters; the route starts with the client's
+    HTTP method) failed the batch the same way, so that second trigger is real at the store
+    level. Whether Jetty lets such a method through is still not traced. The fix replaces NUL
+    with U+FFFD rather than deleting it: the message arrives already redacted, and deleting
+    would join two short tokens into one secret-shaped one.
   - **What's wrong.**
     - `Request.scanPairs` decodes with `URLDecoder.decode`, so `%00` becomes `\u0000` in query
       and form values. The typed accessors (`queryInt`, `queryLong`, `formInt`, …) are bare

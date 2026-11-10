@@ -1588,6 +1588,28 @@ records useless. If your application routes embed raw bearer tokens or reset
 secrets in path positions, consider moving them to opaque database-lookup keys
 so the route retains meaning even after redaction.
 
+### One bad record cannot stall the store
+
+Error records carry client-controlled text, so `ErrorStore` makes sure no single record can
+block the others:
+
+- `ErrorStore.record` replaces NUL characters with U+FFFD. A request such as `?page=1%00` puts a
+  NUL in a `NumberFormatException` message, and Postgres text cannot hold one. Replacing it
+  instead of deleting it keeps already-redacted tokens from being joined into one secret-shaped
+  token. The error type and route are clipped to their 255-character columns; the route starts
+  with the client-chosen HTTP method.
+- Each upsert in a flush runs under its own savepoint. A row the database rejects is rolled
+  back alone, and the rest of the batch commits. A rejected entry is retried and dropped after 5
+  rejected flushes.
+- A connection-level failure (database down, pool exhausted, SQLState class `08`, `53`, `57`,
+  `40` or `25`) is not blamed on any entry. The whole batch is kept and retried, bounded by the
+  1,000-kind pending buffer as before.
+- Failures are logged at most once a minute, naming the exception class, SQLState and the error
+  type of any dropped entry. Request-derived content (messages, paths, headers) is never logged.
+
+Before the 2026-11 security review (M5), one such request failed every later flush on
+Postgres, so nothing reached `ops_errors` and regression alerts stopped until restart.
+
 ---
 
 ## Secrets Management

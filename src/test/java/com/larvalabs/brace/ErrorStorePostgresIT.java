@@ -9,7 +9,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link ErrorStore} on real Postgres — the Tier 2a {@code INSERT ... ON CONFLICT DO UPDATE}
@@ -142,6 +144,86 @@ class ErrorStorePostgresIT extends PostgresTestBase {
              var rs = st.executeQuery("SELECT COUNT(*) FROM ops_errors WHERE route = 'GET /hot'")) {
             rs.next();
             assertEquals(1, rs.getInt(1), "exactly one physical row for the hot key");
+        }
+    }
+
+    // --- M5 (2026-11 review): one poisoned entry must not stall the store ---
+
+    @Test
+    void nulBytesAreStrippedAndDoNotPoisonTheBatch() {
+        // `GET /x?page=1%00` + req.queryInt("page") puts a NUL in the NumberFormatException
+        // message and stack trace. pgjdbc rejects a NUL in a string parameter client-side, which
+        // used to fail the whole flush, merge it back, and fail every later flush the same way.
+        String nul = "\u0000";
+        errorStore.record("NumberFormatException", "For input string: \"1" + nul + "\"",
+                "GET /x", "java.lang.NumberFormatException: For input string: \"1" + nul + "\"\n\tat X.y(X.java:1)\n",
+                "GET /x?page=1" + nul, "{\"count\":0}", "{\"user-agent\":\"a" + nul + "b\"}");
+        errorStore.record("IllegalStateException", "healthy", "GET /healthy", "stack", "GET /healthy");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(2, errors.size(), "both kinds in the batch must be stored: " + errors);
+        var poisoned = errors.stream().filter(e -> "NumberFormatException".equals(e.get("errorType")))
+                .findFirst().orElseThrow();
+        // Replaced with U+FFFD, not deleted: deleting would join already-redacted tokens.
+        assertEquals("For input string: \"1�\"", poisoned.get("message"));
+        assertEquals("GET /x?page=1�", poisoned.get("requestDetail"));
+        assertEquals("{\"user-agent\":\"a�b\"}", poisoned.get("requestHeaders"));
+        assertFalse(((String) poisoned.get("stackTrace")).contains(nul));
+
+        // And the store keeps working afterwards.
+        errorStore.record("LaterException", "later", "GET /later", "stack", "req");
+        errorStore.flush();
+        assertEquals(3, errorStore.list(null).size());
+    }
+
+    @Test
+    void overlongTypeAndRouteAreClippedToTheColumnWidth() {
+        // route is "METHOD /pattern"; the method is client-chosen, and both columns are VARCHAR(255).
+        String longMethod = "X".repeat(400);
+        errorStore.record("E".repeat(300), "m", longMethod + " /r", "s", "req");
+        errorStore.record("Healthy", "m", "GET /ok", "s", "req");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(2, errors.size(), "an over-long kind must not fail the batch: " + errors);
+        for (var e : errors) {
+            assertTrue(((String) e.get("errorType")).length() <= 255);
+            assertTrue(((String) e.get("route")).length() <= 255);
+        }
+    }
+
+    @Test
+    void aRowThePostgresServerRejectsDoesNotAbortTheOthers() throws Exception {
+        // A server-side error aborts the whole Postgres transaction ("current transaction is
+        // aborted, commands ignored until end of transaction block"), so isolating a row needs a
+        // savepoint, not just a catch. A CHECK constraint stands in for any row-specific rejection
+        // sanitizing doesn't foresee.
+        try (var c = connect(); var st = c.createStatement()) {
+            st.execute("ALTER TABLE ops_errors ADD CONSTRAINT it_poison CHECK (message NOT LIKE '%POISON%')");
+        }
+        try {
+            errorStore.record("A", "fine", "GET /a", "s", "req");
+            errorStore.record("B", "POISON", "GET /b", "s", "req");
+            errorStore.record("C", "fine", "GET /c", "s", "req");
+            errorStore.flush();
+
+            var types = errorStore.list(null).stream().map(e -> e.get("errorType")).sorted().toList();
+            assertEquals(List.of("A", "C"), types);
+
+            // The rejected entry is retried, then dropped after MAX_FLUSH_FAILURES flushes.
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT it_poison");
+            }
+            errorStore.flush();
+            assertEquals(2, errorStore.list(null).size(), "the poisoned entry was dropped, not retried forever");
+        } finally {
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS it_poison");
+            }
         }
     }
 
