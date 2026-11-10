@@ -715,8 +715,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // concrete path, every /users/{id} a client tried was a new kind and a new regression
             // notification. The concrete (redacted) path is still in requestInfo below.
             String routeInfo = errorMethod + " " + routeKey(exchange.match);
-            // Redact sensitive query params (?token=…, ?password=…) before the request detail
-            // is stored in the error record and served over /ops/errors.
+            // Redact query params before the request detail is stored in the error record and
+            // served over /ops/errors: by decoded name (?token=…, ?%74oken=…, ?code=…) and by
+            // value shape (a JWT or 32-char token under any name; M6).
             String requestInfo = errorMethod + " " + redactedPath
                 + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
             int qc = exchange.db != null ? exchange.db.queryCount() : 0;
@@ -2097,8 +2098,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     /**
      * Snapshot the request headers as a redacted JSON object for the error record.
-     * Sensitive headers (authorization, cookie, …) are replaced with [REDACTED] by the
-     * Redactor. Returns null if there are no headers or serialization fails.
+     * {@link Redactor#redactHeaders}: sensitive names (authorization, cookie, …) become
+     * [REDACTED]; URL-valued headers (Referer, Origin, X-Original-URL, …) have their path and
+     * query redacted; other free-form values get the value-shaped pass (JWTs, high-entropy
+     * tokens, M6). Returns null if there are no headers or serialization fails.
      */
     private static String captureRedactedHeaders(org.eclipse.jetty.server.Request request) {
         try {
@@ -2107,7 +2110,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 headers.put(field.getName(), field.getValue());
             }
             if (headers.isEmpty()) return null;
-            return Json.mapper().writeValueAsString(Redactor.redact(headers));
+            return Json.mapper().writeValueAsString(Redactor.redactHeaders(headers));
         } catch (Exception e) {
             return null;
         }

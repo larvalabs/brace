@@ -346,7 +346,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     row instead of retaining the batch; a rejected row is retried once with its payload stripped
     (fixed placeholder message) so the count and regression signal survive.
 
-- [ ] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
+- [x] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches
     header names. `redactQuery` matches parameter names, without URL-decoding them. The
     value-shaped pass (`isSecretShaped`, the JWT shape) runs on the path and the exception
@@ -372,6 +372,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** Each probe case above; a set of ordinary headers and queries that must survive
     unredacted (false positives are the risk here).
   - **Model: Opus 5.5.**
+  - **Done** (`fix(security): M6 value-shaped redaction for error-store headers and query
+    strings`). `Redactor.redactHeaders`: sensitive name, then URL-valued headers (`Referer`,
+    `Origin`, `Location`, `Content-Location`, `X-Original-URL`, `X-Forwarded-Uri`,
+    `X-Rewrite-URL`, `HX-Current-URL`) through `redactUrl` (path, query, fragment, userinfo),
+    protocol-metadata headers kept verbatim (`Accept*`, `Content-Type`, `User-Agent`, ETags,
+    `X-Forwarded-*`, request ids and trace context, `Sec-Fetch-*`/`Sec-Ch-*`), everything else
+    through the value-shaped pass. `redactQuery` decodes names leniently and redacts values by
+    shape (raw and decoded, nested URLs included). New names: `jwt`, `assertion`, `signature`,
+    `authkey`, `nonce` as substrings; `code`, `sig`, `otp` as the whole normalized name only.
+    Tables of must-survive and must-redact values in `RedactorTest`; end to end in
+    `ErrorStoreTest.secretBearingHeadersAndQueryValuesAreRedactedInStoredError`.
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current
@@ -654,7 +665,9 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - Done in Track D: `redactMessage` applied at `JobScheduler` `lastError` and warn sites, the
     uncaught-exception event and stats record in `Brace.java`, `Mailer`, `MailerNotifier`,
     `WebhookNotifier`, `RateLimiter` (one-line wraps), `RegressionTracker`, `TrustedProxies`.
-    The two-part base64url token shape in `isSecretShaped` is done under M6 (`Redactor.java`).
+    The two-part base64url token shape in `isSecretShaped` is done under M6 (`Redactor.java`):
+    one dot, at least 20 base64url characters on each side, a digit and a letter, so an ops
+    bearer token in an exception message, header or query value is now `[redacted]`.
   - **Model: Sonnet 5.5.**
   - **Review fixes** (`fix(security): L13 review fixes`). Also wrapped: `PostgresMessageBus` log
     events, `Storage` `s3.delete.error` (now null-safe), `JobPoller`'s stored

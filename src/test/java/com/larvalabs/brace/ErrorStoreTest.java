@@ -843,6 +843,90 @@ class ErrorStoreTest {
         }
     }
 
+    @Test
+    void secretBearingHeadersAndQueryValuesAreRedactedInStoredError(@TempDir Path tmpDir) throws Exception {
+        // M6 (docs/2026-11-09-security-review-todos.md): headers and query strings were redacted
+        // by NAME only, so a reset token in a Referer, a JWT in an identity-proxy header and an
+        // OAuth code in ?code= reached /ops/errors verbatim, readable with a scope:read key.
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + " scope:read\n");
+
+        String resetToken = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String pathToken = "Zx81kLm02PqR7sTuV4wXy9AbCd";
+        String jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyLTQyIiwiZXhwIjoxOTk5OTk5OTk5fQ.c2lnbmF0dXJlLWJ5dGVzLWhlcmUtMTIzNDU2";
+        String oauthCode = "4/0AX4XfWhq8Lp3mN7vB2cD9eF1gH5jK";
+        String requestId = "550e8400-e29b-41d4-a716-446655440000";
+
+        app = Brace.app().opsUnpinnedForTests().port(0)
+            .database(new DatabaseFactory(
+                "jdbc:h2:mem:redacthdrs" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+                List.of(Post.class)))
+            .ops(keysFile.toString());
+        app.get("/reset/submit", req -> { throw new IllegalStateException("reset failed"); });
+        app.get("/oauth/callback", req -> { throw new IllegalStateException("exchange failed"); });
+
+        app.start();
+        try {
+            port = app.actualPort();
+            var resetResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/reset/submit"))
+                    .header("Referer", "https://app.example.com/reset?token=" + resetToken + "&lang=en")
+                    .header("Origin", "https://app.example.com")
+                    .header("X-Original-URL", "/reset/" + pathToken + "/confirm")
+                    .header("Cf-Access-Jwt-Assertion", jwt)
+                    .header("X-Amzn-Oidc-Data", jwt)
+                    .header("X-Auth-Key", "k3y-" + resetToken)
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .header("X-Request-Id", requestId)
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(500, resetResp.statusCode());
+            var oauthResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/oauth/callback?code="
+                        + java.net.URLEncoder.encode(oauthCode, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&state=xyz&%74oken=abc&page=2"))
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(500, oauthResp.statusCode());
+            app.errorStore().flush();
+
+            String token = authenticateOps(port, kp);
+            var listResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors"))
+                    .header("Authorization", "Bearer " + token).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, listResp.statusCode());
+            var list = Json.mapper().readTree(listResp.body());
+            var all = new StringBuilder();
+            for (var row : list.isArray() ? list : list.path("errors")) {
+                var detail = client.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/ops/errors/" + row.get("id").asText()))
+                        .header("Authorization", "Bearer " + token).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+                assertEquals(200, detail.statusCode());
+                all.append(detail.body()).append('\n');
+            }
+            String stored = all.toString();
+            assertTrue(stored.contains("reset failed") && stored.contains("exchange failed"),
+                "both errors stored: " + stored);
+            for (String secret : List.of(resetToken, pathToken, jwt, oauthCode,
+                    java.net.URLEncoder.encode(oauthCode, java.nio.charset.StandardCharsets.UTF_8))) {
+                assertFalse(stored.contains(secret), "secret " + secret + " leaked into: " + stored);
+            }
+            assertFalse(stored.contains("%74oken=abc"), "percent-encoded name must be decoded: " + stored);
+            // Ordinary values survive.
+            assertTrue(stored.contains("app.example.com/reset?token=[REDACTED]&lang=en"), stored);
+            assertTrue(stored.contains("/reset/[redacted]/confirm"), stored);
+            assertTrue(stored.contains("en-US,en;q=0.9"), stored);
+            assertTrue(stored.contains(requestId), stored);
+            assertTrue(stored.contains("state=xyz"), stored);
+            assertTrue(stored.contains("page=2"), stored);
+        } finally {
+            app.stop();
+        }
+    }
+
     /**
      * Minimal JSON string-field extractor — finds the value of the first occurrence
      * of {@code "fieldName":"<value>"} in the given JSON string. Returns null if the

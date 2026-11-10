@@ -1979,38 +1979,77 @@ redacts route keys and error messages before they are served on `/ops/status`.
 A reset token in a URL path is therefore scrubbed on every request — including
 successful ones — not only when an exception is thrown.
 
-### Name-based redaction (query params and request headers)
+### Name-based redaction (query params, request headers, log fields)
 
-Query-string parameters and request headers whose names look sensitive
-(`token`, `password`, `authorization`, `cookie`, `secret`, `api-key`, and
-several others — see `Redactor.SENSITIVE`) have their values replaced with
-`[REDACTED]`. Matching is on the normalized name (lowercased, hyphens and
-underscores stripped), so it deliberately over-redacts: a field named
-`token_count` is also redacted.
+Query-string parameters, request headers and log fields whose names look
+sensitive have their values replaced with `[REDACTED]`. Matching is on the
+normalized name (lowercased, hyphens and underscores stripped):
 
-### Value-shaped redaction (path segments and exception message tokens)
+- **Substring match** for `authorization`, `cookie`, `password`, `passwd`,
+  `pwd`, `secret`, `token`, `apikey`, `bearer`, `credential`, `privatekey`,
+  `accesskey`, `sessionid`, `csrf`, `jwt`, `assertion`, `signature`, `authkey`
+  and `nonce` (`Redactor.SENSITIVE`). This deliberately over-redacts: a field
+  named `token_count` is also redacted. `Cf-Access-Jwt-Assertion`,
+  `client_assertion`, `X-Amz-Signature` and `X-Auth-Key` are caught here.
+- **Whole-name match** for the short names `code`, `sig` and `otp`
+  (`Redactor.SENSITIVE_EXACT`): `?code=` (an OAuth authorization code),
+  `?sig=` (an Azure SAS signature) and `?otp=` are redacted, while `zip_code`,
+  `status_code`, `encode`, `postcode`, `barcode`, `signal`, `design` and
+  `footprint` are not. This applies to log fields too: a log field named
+  exactly `code` is redacted.
 
-High-entropy tokens are detected by shape and replaced with `[redacted]`,
-regardless of field name. The heuristic (applied in `Redactor.redactPath` and
-`Redactor.redactMessage`) treats a segment or whitespace/punctuation-delimited
-token as a secret when **all** of these hold:
+Query parameter names are percent-decoded before matching (`%74oken=` is
+`token=`); a malformed escape is kept literally, never an error.
+
+### Value-shaped redaction
+
+High-entropy tokens are detected by shape and replaced with `[redacted]`
+(or the whole query value with `[REDACTED]`), regardless of field name. The
+heuristic (`Redactor.isSecretShaped`) treats a segment or
+whitespace/punctuation-delimited token as a secret when **all** of these hold:
 
 1. Length ≥ 16 characters.
 2. Every character is in the base64url-or-hex alphabet (`[A-Za-z0-9_\-+/=]`).
 3. Contains at least one ASCII digit **and** at least one ASCII letter (rules
    out purely numeric IDs and purely alphabetic slugs).
 
-JWTs (two dots dividing three base64url parts) are also caught as a special
-case.
+Two dotted shapes are caught as special cases: JWTs (two dots dividing three
+base64url parts, the outer two at least 10 characters) and two-part
+`payload.signature` tokens (one dot, at least 20 base64url characters on each
+side, a digit and a letter: the ops bearer token's own shape). Any other
+dotted value (a file name, a hostname, a version) is never secret-shaped.
+
+Where it runs:
+
+| Where | How |
+|---|---|
+| Request path (error record, logs, stats) | `redactPath`: each `/`-segment |
+| Exception message and stack trace | `redactMessage` / `redactStackTrace`: each token |
+| Query string (error record `requestDetail`, stats) | `redactQuery`: a value whose raw or percent-decoded form contains a secret-shaped token, or is a URL/path with a secret-shaped `/ ? & #` piece (`?next=/reset/<token>`), becomes `[REDACTED]`; a bare `?<token>` part too |
+| URL-valued request headers (`Referer`, `Origin`, `Location`, `Content-Location`, `X-Original-URL`, `X-Forwarded-Uri`, `X-Rewrite-URL`, `HX-Current-URL`) | `redactUrl`: path through `redactPath`, query and fragment through `redactQuery`, any `userinfo@` replaced; scheme, host and port kept. A value that is not a URL gets the free-form pass |
+| Other request headers | `redactValue`: like `redactMessage`, and a URL or path token with a secret-shaped piece is replaced. A JWT in `X-Amzn-Oidc-Data` or `Sec-WebSocket-Protocol` is caught here |
+| Protocol-metadata headers | **kept verbatim**: `Accept*`, `Content-Type`, `Content-Length`, `Host`, `User-Agent`, `If-None-Match` and the other conditional headers, `X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `Via`, request ids and trace context (`X-Request-Id`, `X-Correlation-Id`, `traceparent`, `X-Amzn-Trace-Id`, `Cf-Ray`, B3), `Sec-Fetch-*`, `Sec-Ch-*`, the WebSocket key/version, and htmx's request headers (`Redactor.VERBATIM_HEADERS`). Their values are never a user's credential, and the shape rule would misfire on an ETag, a multipart boundary or a request id |
+
+The request headers are redacted by `Redactor.redactHeaders`, in that order:
+a sensitive name first, then the URL, verbatim or free-form rule.
 
 **What is intentionally kept visible:**
 
 | What | Why |
 |---|---|
-| UUIDs (`8-4-4-4-12` hex) | Usually record identifiers, not bearer secrets; needed for debugging |
-| Purely numeric segments | Page IDs, order numbers, user IDs |
-| Short slugs (< 16 chars) | Route labels, action names |
+| UUIDs (`8-4-4-4-12` hex), anywhere | Usually record identifiers, not bearer secrets; needed for debugging. A request id that is not a UUID is kept only in the request-id headers above |
+| Purely numeric segments and values | Page IDs, order numbers, user IDs |
+| Short values (< 16 chars) | Route labels, action names, short hex such as a fingerprint `app.3f9a1c2b.js` (any dotted file name survives, whatever its hash length) |
+| Email addresses | PII, not a credential; `@` and `.` are outside the token alphabet |
+| Comma- or `#`-separated lists (`#ff0000,#00ff00`) | Each item is short |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
+
+What the shape rule cannot tell from a secret, and so redacts: a 16+ character
+run of letters, digits, `-` and `_` with both a digit and a letter, for example a
+dated slug `2024-black-friday-sale`, a dash-joined hex list
+`ff0000-00ff00-0000ff`, a 16+ character hex hash, or an absolute path with a
+digit in a free-form header (`/var/app/releases/20241105`). These look exactly
+like a grouped recovery code or a standard-base64 secret.
 
 The same pass runs over stored **stack traces** (`Redactor.redactStackTrace`, at
 `Stats.recordError` and `ErrorStore.record`): every message line, including `Caused by:` and
