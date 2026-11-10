@@ -2212,6 +2212,12 @@ constructed (the host is named; the user and password never are), because withou
 exchange is cleartext. The scheme is compared case-insensitively (`SMTPS://` is implicit TLS).
 Dev mode (no SMTP URL) only captures mail and is unaffected.
 
+The SMTP URL is parsed once, when the `Mailer` is constructed. A malformed one (a password with
+an unencoded `^`, space, `|` or `#`) throws `IllegalArgumentException` there, naming the
+`smtp.url` setting and asking for percent-encoding, but never including the URL or chaining the
+parser's exception: its message is the whole URL, password included, and used to reach the
+error store's stack trace as the cause of every failed send.
+
 `Mailer.to(...)` takes exactly one address and parses it strictly, so a recipient taken from a form
 cannot add recipients (`"a@b.c, victim@x.y"` throws). The same holds for `cc(...)`, the
 per-message `from(...)`, and `Mailer.from(...)`/`Mailer.replyTo(...)` (checked when configured).

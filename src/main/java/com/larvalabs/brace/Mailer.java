@@ -31,9 +31,43 @@ public class Mailer {
     private final LongAdder sentCount = new LongAdder();
     private final LongAdder failCount = new LongAdder();
 
+    /** {@link #smtpUrl} parsed once at construction; null in dev capture mode. */
+    private final java.net.URI smtpUri;
+
+    /**
+     * @throws IllegalArgumentException if {@code smtpUrl} is not a parseable URL with a host. The
+     *     message names the setting, never the URL (it carries the SMTP password).
+     */
     public Mailer(String smtpUrl) {
         this.smtpUrl = smtpUrl;
-        warnIfCleartextCredentials(smtpUrl);
+        this.smtpUri = smtpUrl == null ? null : parseSmtpUrl(smtpUrl);
+        warnIfCleartextCredentials(smtpUri);
+    }
+
+    /**
+     * Parses the SMTP URL once (M9 final review). A password containing {@code ^}, a space or
+     * {@code |} made {@code new URI(...)} throw a {@code URISyntaxException} whose message is the
+     * whole URL, and it was chained as the cause of every send failure, so the password reached the
+     * stored stack trace. The exception thrown here neither includes the input nor chains the
+     * original.
+     */
+    static java.net.URI parseSmtpUrl(String smtpUrl) {
+        java.net.URI url;
+        try {
+            url = new java.net.URI(smtpUrl);
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalArgumentException("Mailer: the SMTP URL (the smtp.url setting passed to "
+                + "new Mailer(...)) is malformed. If the user name or password contains reserved "
+                + "characters, percent-encode them (^ as %5E, a space as %20, | as %7C, # as %23, "
+                + "@ as %40, / as %2F, : as %3A).");
+        }
+        if (url.getHost() == null) {
+            throw new IllegalArgumentException("Mailer: the SMTP URL (the smtp.url setting passed to "
+                + "new Mailer(...)) has no valid host. A # / ? or @ in the password must be "
+                + "percent-encoded (# as %23, / as %2F, ? as %3F, @ as %40), and a host name cannot "
+                + "contain _.");
+        }
+        return url;
     }
 
     /**
@@ -41,18 +75,13 @@ public class Mailer {
      * offer STARTTLS the AUTH exchange (the password) goes in cleartext. Allowed, for a trusted
      * local relay, but said out loud once at construction. Never logs the user info.
      */
-    private static void warnIfCleartextCredentials(String smtpUrl) {
-        if (smtpUrl == null) return;
-        try {
-            var url = new java.net.URI(smtpUrl);
-            if ("smtp+plain".equals(lowerScheme(url)) && url.getRawUserInfo() != null) {
-                Log.warn("Mailer: credentials are configured on an smtp+plain:// URL (host "
-                    + url.getHost() + "), which does not require TLS: if the relay does not offer "
-                    + "STARTTLS, the SMTP password is sent in cleartext. Use smtp:// (STARTTLS "
-                    + "required) or smtps:// unless the relay is local and trusted.");
-            }
-        } catch (java.net.URISyntaxException e) {
-            // Reported when a send parses it.
+    private static void warnIfCleartextCredentials(java.net.URI url) {
+        if (url == null) return;
+        if ("smtp+plain".equals(lowerScheme(url)) && url.getRawUserInfo() != null) {
+            Log.warn("Mailer: credentials are configured on an smtp+plain:// URL (host "
+                + url.getHost() + "), which does not require TLS: if the relay does not offer "
+                + "STARTTLS, the SMTP password is sent in cleartext. Use smtp:// (STARTTLS "
+                + "required) or smtps:// unless the relay is local and trusted.");
         }
     }
 
@@ -184,8 +213,8 @@ public class Mailer {
 
     private void sendSmtp(EmailBuilder email, String from) {
         try {
-            // Parse smtpUrl: smtp://, smtps:// or smtp+plain:// (user:pass@host:port)
-            var url = new java.net.URI(smtpUrl);
+            // smtp://, smtps:// or smtp+plain:// (user:pass@host:port), parsed at construction
+            var url = smtpUri;
             var host = url.getHost();
             var port = url.getPort() > 0 ? url.getPort() : 587;
             var scheme = lowerScheme(url); // "smtp", "smtps" or "smtp+plain"

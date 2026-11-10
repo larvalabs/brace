@@ -1449,6 +1449,13 @@ smtp.url=smtp+plain://localhost:25
 Credentials on an `smtp+plain://` URL log a startup warning, since they can travel in
 cleartext. Dev-mode capture (no SMTP URL) is unaffected.
 
+**A malformed SMTP URL fails at startup.** `new Mailer(url)` now parses the URL and throws
+`IllegalArgumentException` if it is malformed or has no host; before, every send failed and the
+parser's error, which quotes the whole URL with its password, was stored in the error's stack
+trace. If it throws, percent-encode the reserved characters in the password (`^` as `%5E`, a
+space as `%20`, `|` as `%7C`, `#` as `%23`, `@` as `%40`). The error message never includes the
+URL.
+
 **One address per field.** `"a@b.c, victim@x.y"` passed `@Email`, and `Mailer.to(...)` expanded
 it to two recipients. Now:
 
