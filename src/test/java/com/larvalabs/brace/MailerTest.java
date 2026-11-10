@@ -107,6 +107,24 @@ class MailerTest {
     }
 
     @Test
+    void toRejectsRecipientLists() {
+        var mailer = new Mailer(null);
+        for (String bad : new String[] {"a@b.c, victim@x.y", "a@b.c;victim@x.y", "a@b.c\r\nBcc: v@x.y"}) {
+            assertThrows(IllegalArgumentException.class,
+                () -> mailer.to(bad).subject("s").text("t").send(), bad);
+        }
+        assertEquals(0, mailer.sentCount());
+        mailer.to("Name <ok@example.com>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
+    void singleAddressIsNotExpandedToTwoRecipients() {
+        assertThrows(IllegalArgumentException.class, () -> Mailer.singleAddress("a@b.c, victim@x.y"));
+        assertEquals("a@b.c", Mailer.singleAddress("a@b.c").getAddress());
+    }
+
+    @Test
     void ccSupport() {
         var mailer = new Mailer(null);
 

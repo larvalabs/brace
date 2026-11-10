@@ -500,7 +500,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     The two-part base64url token shape in `isSecretShaped` is done under M6 (`Redactor.java`).
   - **Model: Sonnet 5.5.**
 
-- [ ] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`
+- [x] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`
   - **Verified (angus-mail 2.0.5).** `"a@b.c, victim@x.y"` passes `@Email` and parses to two
     recipients. Confirms the 2026-10 "Not confirmed" item.
   - **Fix.** `@Email` rejects `,`, `;`, `<`, `>`, whitespace and control characters; the

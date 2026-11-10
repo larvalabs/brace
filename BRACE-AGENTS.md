@@ -992,6 +992,8 @@ SMTP timeouts are bounded by default — 10s connect, 30s per read/write — so 
 the send instead of hanging the caller forever. Override with `.connectTimeout(Duration)` and
 `.timeout(Duration)` for a slow relay or large attachments.
 
+`to(...)` takes exactly one address (a list, `;` or a control character throws `IllegalArgumentException`), and `@Email` rejects `,` `;` `<` `>` whitespace and control characters.
+
 `sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
 `smtp://` requires STARTTLS: if the relay does not offer it, the send fails rather than falling back to
 cleartext (a network attacker could otherwise strip the offer and read the SMTP password and mail). `smtps://`

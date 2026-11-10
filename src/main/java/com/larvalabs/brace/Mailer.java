@@ -83,8 +83,27 @@ public class Mailer {
         });
     }
 
+    /**
+     * {@code to(...)} takes exactly one address (L14). {@code InternetAddress.parse} expands a
+     * comma-separated list, so an address taken from a form field could add recipients; strict
+     * single-address parsing rejects lists, groups and control characters instead.
+     */
+    static jakarta.mail.internet.InternetAddress singleAddress(String to) {
+        try {
+            if (to == null) throw new IllegalArgumentException("recipient is required");
+            var address = new jakarta.mail.internet.InternetAddress(to, true);
+            if (to.indexOf(',') >= 0 || to.indexOf(';') >= 0) {
+                throw new IllegalArgumentException("to(...) takes a single address");
+            }
+            return address;
+        } catch (jakarta.mail.internet.AddressException e) {
+            throw new IllegalArgumentException("to(...) takes a single valid address", e);
+        }
+    }
+
     void send(EmailBuilder email) {
         var from = email.from != null ? email.from : defaultFrom;
+        singleAddress(email.to);
 
         if (smtpUrl == null) {
             // Dev mode: capture instead of sending, bounded drop-oldest. Capture is dev-only —
@@ -146,7 +165,7 @@ public class Mailer {
             var message = new jakarta.mail.internet.MimeMessage(session);
             if (from != null) message.setFrom(new jakarta.mail.internet.InternetAddress(from));
             message.setRecipients(jakarta.mail.Message.RecipientType.TO,
-                jakarta.mail.internet.InternetAddress.parse(email.to));
+                new jakarta.mail.Address[] {singleAddress(email.to)});
             if (email.cc != null) {
                 message.setRecipients(jakarta.mail.Message.RecipientType.CC,
                     jakarta.mail.internet.InternetAddress.parse(email.cc));

@@ -1648,6 +1648,10 @@ local relay that cannot do TLS (a sidecar on localhost) opts out explicitly with
 `smtp+plain://localhost:25`, which uses STARTTLS when offered but never requires it. Dev mode
 (no SMTP URL) only captures mail and is unaffected.
 
+`Mailer.to(...)` takes exactly one address and parses it strictly, so a recipient taken from a form
+cannot add recipients (`"a@b.c, victim@x.y"` throws). `@Email` likewise rejects `,` `;` `<` `>`,
+whitespace and control characters.
+
 ## Secrets Management
 
 ### Secret Quality
