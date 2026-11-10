@@ -1915,7 +1915,14 @@ No action needed unless noted.
   code that built a `BraceHandler` or `Router` by hand and relied on routes being open is not.
 - **`start()` after `stop()` can be stopped again.** The second `stop()` of a restarted app was
   a no-op that left the server running. An app with `.ops(...)` can now be restarted, and
-  retried after a failed start (both used to throw `POST /ops/auth is registered twice`).
+  retried after a failed start (both used to throw `POST /ops/auth is registered twice`). A job
+  registered with `every`/`daily` while the app is stopped runs after the next `start()` (it
+  threw `RejectedExecutionException`).
+- **An app started with a database cannot be restarted.** A second `start()` (after `stop()` or
+  after a failed start) throws `IllegalStateException` up front. It used to fail inside the job
+  scheduler (`RejectedExecutionException`, or `EntityManagerFactory is closed` when the app owned
+  its pool). Build a new `Brace` with `Brace.app()` instead; with `ownsDatabase(false)` it may
+  reuse the same `DatabaseFactory`.
 - **`start()` on an app that is already starting or running throws `IllegalStateException`.**
   It used to bring up a second server and lose track of the first. Call `stop()` first.
   `stop()` stays idempotent, and one that arrives while `start()` is still running now waits

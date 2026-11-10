@@ -806,6 +806,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       starting or running app throws, a failed start tears down and leaves the app startable,
       and `stop()` is idempotent and waits out a concurrent `start()`. Tests in
       `BraceRestartTest`.
+    - **Verification fixes** (`fix: Brace restart with a database either works or says why`).
+      Restarting an app with a database failed inside `JobScheduler` (`RejectedExecutionException`
+      with `ownsDatabase(false)`, `EntityManagerFactory is closed` with a fresh factory). Rebinding
+      every component (owned pool, per-start framework jobs, a shared cache backend's factory) is
+      a larger change, so a second `start()` of an app started with a database now throws a clear
+      `IllegalStateException` up front; build a new `Brace`. Apps without a database still restart,
+      and the scheduler drops its terminated executor on `stop()`, so a job registered while
+      stopped runs after the next `start()`. Tests in `BraceRestartTest`.
 
 - [x] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
   - **`followUp` injection.** `ops.env` from the committed `.brace` is spliced unvalidated into

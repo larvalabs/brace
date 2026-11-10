@@ -188,6 +188,76 @@ class BraceRestartTest {
         assertFalse(accepts(port));
     }
 
+    // ---- Verification (lifecycle): restart with a database either works or says why ----
+
+    private static DatabaseFactory h2() {
+        return new DatabaseFactory("jdbc:h2:mem:restart" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+            java.util.List.of());
+    }
+
+    private static Brace dbApp(java.nio.file.Path dir, DatabaseFactory db) throws Exception {
+        var app = opsApp(dir).sessions("brace-restart-test-session-secret-at-least-32-chars").database(db);
+        app.before(RateLimiter.perIp(1000, "1m"));
+        return app;
+    }
+
+    private static void assertRestartRefused(Brace app) {
+        var e = assertThrows(IllegalStateException.class, app::start);
+        assertTrue(e.getMessage().contains("cannot be restarted") && e.getMessage().contains("new Brace"),
+            e.getMessage());
+        assertNull(app.shutdownHook(), "a refused restart registers nothing");
+        assertDoesNotThrow(app::stop, "and the app stays cleanly stopped");
+    }
+
+    /** Was: IllegalStateException "EntityManagerFactory is closed" from JobScheduler.seedRunRow. */
+    @Test
+    void restartingAnAppThatOwnsItsDatabaseSaysWhy(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        var app = dbApp(dir, h2());
+        app.start();
+        assertEquals(200, status(app.actualPort(), "/"));
+        app.stop();
+        app.database(h2()); // even with a fresh factory
+        assertRestartRefused(app);
+    }
+
+    /** Was: RejectedExecutionException from JobScheduler.scheduleDaily. */
+    @Test
+    void restartingAnAppThatBorrowsItsDatabaseSaysWhy(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        var db = h2();
+        try {
+            var app = dbApp(dir, db).ownsDatabase(false);
+            app.start();
+            assertEquals(200, status(app.actualPort(), "/"));
+            app.stop();
+            assertRestartRefused(app);
+            // A new Brace on the same (still open) factory is the supported path.
+            var fresh = dbApp(dir, db).ownsDatabase(false);
+            fresh.start();
+            assertEquals(200, status(fresh.actualPort(), "/"));
+            fresh.stop();
+        } finally {
+            db.close();
+        }
+    }
+
+    /** Was: RejectedExecutionException, since the stopped scheduler's executor was kept. */
+    @Test
+    void aJobRegisteredWhileStoppedRunsAfterTheRestart() throws Exception {
+        var app = Brace.app().opsUnpinnedForTests().port(0).banner(false);
+        app.get("/", req -> Result.text("up"));
+        app.start();
+        app.stop();
+        var ran = new java.util.concurrent.CountDownLatch(1);
+        assertDoesNotThrow(() -> app.every("1s", "registered-while-stopped", (db, ctx) -> ran.countDown()));
+        assertDoesNotThrow(() -> app.daily("03:00", "daily-while-stopped", (db, ctx) -> {}));
+        app.start();
+        try {
+            assertTrue(ran.await(5, java.util.concurrent.TimeUnit.SECONDS), "the job runs on the new executor");
+        } finally {
+            app.stop();
+        }
+    }
+
     private static int status(int port, String path) throws Exception {
         var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + path)).build();
         return java.net.http.HttpClient.newHttpClient()

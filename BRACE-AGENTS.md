@@ -94,7 +94,8 @@ Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, 
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
-yourself.
+yourself. A stopped app without a database can be started again; one started with a database
+cannot (`start()` throws `IllegalStateException`): build a new `Brace` instead.
 
 ## Routing
 
