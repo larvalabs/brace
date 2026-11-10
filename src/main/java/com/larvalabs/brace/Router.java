@@ -41,6 +41,19 @@ public class Router {
 
     void unfreeze() { frozen = false; }
 
+    /**
+     * Remove every route the framework registered ({@link Route#isFramework()}). Called by
+     * {@code Brace.stop()} once the server has stopped: {@code start()} registers them afresh,
+     * bound to that start's handlers, so left in place a second start is a duplicate
+     * registration. App routes are untouched.
+     */
+    void removeFrameworkRoutes() {
+        routes.removeIf(Route::isFramework);
+        staticRoutes.values().removeIf(Route::isFramework);
+        dynamicRoutes.values().forEach(list -> list.removeIf(Route::isFramework));
+        namedRoutes.values().removeIf(Route::isFramework);
+    }
+
     /** Throws if the app is running: routes and their access are fixed at start(). */
     void requireNotStarted(String what) {
         if (frozen) {

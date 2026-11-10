@@ -1817,7 +1817,12 @@ No action needed unless noted.
   `Brace.start()` has resolved it. Apps started with `start()` or `Brace.test()` are unaffected;
   code that built a `BraceHandler` or `Router` by hand and relied on routes being open is not.
 - **`start()` after `stop()` can be stopped again.** The second `stop()` of a restarted app was
-  a no-op that left the server running.
+  a no-op that left the server running. An app with `.ops(...)` can now be restarted, and
+  retried after a failed start (both used to throw `POST /ops/auth is registered twice`).
+- **`start()` on an app that is already starting or running throws `IllegalStateException`.**
+  It used to bring up a second server and lose track of the first. Call `stop()` first.
+  `stop()` stays idempotent, and one that arrives while `start()` is still running now waits
+  for it and stops what it started.
 
 ## Security: sessions, error store, analytics and ops auth
 

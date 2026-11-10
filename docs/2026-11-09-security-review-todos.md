@@ -694,6 +694,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     access was unresolved) while the `Router`'s unsynchronised collections were mutated under
     them. The router is now unfrozen only after `server.stop()` returns. Verified by reading;
     reconfiguring a stopped app is still covered by `RouteAccessTest`.
+    - **Final review fixes** (`fix: Brace lifecycle is a single guarded state`). L-D: an app with
+      `.ops(...)` could not be restarted, or retried after a failed start (`POST /ops/auth is
+      registered twice`): `stop()` now removes the framework's routes. L-E: `stop()` racing
+      `start()` left a running server with an unfrozen router that no later `stop()` stopped,
+      and a second `start()` leaked the first server. `start()` and `stop()` now run under one
+      lock over an explicit state (new, starting, running, stopping, stopped): `start()` on a
+      starting or running app throws, a failed start tears down and leaves the app startable,
+      and `stop()` is idempotent and waits out a concurrent `start()`. Tests in
+      `BraceRestartTest`.
 
 - [x] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
   - **`followUp` injection.** `ops.env` from the committed `.brace` is spliced unvalidated into

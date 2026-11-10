@@ -93,7 +93,8 @@ public class Brace {
     private java.time.Duration jobPollInterval = JobPoller.DEFAULT_POLL_INTERVAL;
     private Runnable enqueueHook;
     private volatile Thread shutdownHook;
-    private final java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean();
+    /** The no-database stats snapshot timer of the current start, or null. */
+    private java.util.Timer statsSnapshotTimer;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
@@ -1238,24 +1239,54 @@ public class Brace {
         return false;
     }
 
+    /**
+     * Where the app is in its life. Every transition happens under {@link #lifecycleLock}, so
+     * {@code start()} and {@code stop()} never interleave (final review: a {@code stop()} that
+     * raced a {@code start()} saw "nothing to stop", and the server that start() then brought up
+     * was one no later stop() would stop).
+     */
+    private enum Lifecycle { NEW, STARTING, RUNNING, STOPPING, STOPPED }
+
+    private final java.util.concurrent.locks.ReentrantLock lifecycleLock = new java.util.concurrent.locks.ReentrantLock();
+    /** Guarded by {@link #lifecycleLock}. */
+    private Lifecycle lifecycle = Lifecycle.NEW;
+
+    /**
+     * Start the app. A new app, or one that has been stopped (or whose start failed), can be
+     * started; {@code start()} on an app that is starting or running throws
+     * {@link IllegalStateException} and leaves it as it is. If the start fails, everything it
+     * had brought up is stopped again before the exception propagates, and the app can be
+     * reconfigured and started again.
+     */
     public void start() throws Exception {
-        // A stopped app can be started again (tests, a reconfigure-and-restart). Re-arm stop():
-        // left set, the next stop() (and the cleanup stop() below) returned at once, so Jetty
-        // kept serving, the shutdown hook stayed registered and the router stayed frozen.
-        stopped.set(false);
+        lifecycleLock.lock();
         try {
-            startOrThrow();
-        } catch (Throwable t) {
-            // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
-            // failed start can't leave threads that keep the JVM alive with no server: main()
-            // would exit with a stack trace while the process stays up. stop() is idempotent
-            // and copes with components that never started.
-            try {
-                stop();
-            } catch (Throwable cleanup) {
-                t.addSuppressed(cleanup);
+            if (lifecycle != Lifecycle.NEW && lifecycle != Lifecycle.STOPPED) {
+                throw new IllegalStateException("start() was called on an app that is already "
+                    + lifecycle.name().toLowerCase(java.util.Locale.ROOT) + ". Call stop() first to restart it; "
+                    + "starting it again would leave the first server running with nothing to stop it.");
             }
-            throw t;
+            lifecycle = Lifecycle.STARTING;
+            try {
+                startOrThrow();
+                lifecycle = Lifecycle.RUNNING;
+            } catch (Throwable t) {
+                // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
+                // failed start can't leave threads that keep the JVM alive with no server: main()
+                // would exit with a stack trace while the process stays up. The teardown copes
+                // with components that never started, and leaves the app startable again.
+                lifecycle = Lifecycle.STOPPING;
+                try {
+                    stopOrThrow();
+                } catch (Throwable cleanup) {
+                    t.addSuppressed(cleanup);
+                } finally {
+                    lifecycle = Lifecycle.STOPPED;
+                }
+                throw t;
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
     }
 
@@ -1633,6 +1664,7 @@ public class Brace {
         // Snapshot stats for dashboard sparklines (even without a database)
         if (opsKeysPath != null && databaseFactory == null) {
             var snapshotTimer = new java.util.Timer("brace-stats-snapshot", true);
+            statsSnapshotTimer = snapshotTimer; // cancelled by stop(), so a restart doesn't stack timers
             snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
                 @Override public void run() { stats.snapshot(); }
             }, 60_000, 60_000);
@@ -1817,18 +1849,39 @@ public class Brace {
         ClaudeMdGenerator.write(projectName, path);
     }
 
+    /**
+     * Stop the app and release what it holds. Idempotent, and safe to call from any thread at any
+     * time: the shutdown hook and an explicit {@code stop()} may both call it, and a
+     * {@code stop()} that arrives while {@code start()} is still running waits for it and then
+     * stops what it started. A stopped app can be reconfigured and started again.
+     */
     public void stop() throws Exception {
-        // Idempotent: the shutdown hook and an explicit stop() (or an app's own hook) may both call it.
-        if (!stopped.compareAndSet(false, true)) {
-            return;
+        lifecycleLock.lock();
+        try {
+            // STOPPED: already done. STARTING or STOPPING here means this thread is inside
+            // start() or stop() already (the lock is reentrant): that call does the teardown.
+            if (lifecycle != Lifecycle.NEW && lifecycle != Lifecycle.RUNNING) {
+                return;
+            }
+            lifecycle = Lifecycle.STOPPING;
+            try {
+                stopOrThrow();
+            } finally {
+                lifecycle = Lifecycle.STOPPED;
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
+    }
+
+    private void stopOrThrow() throws Exception {
         var hook = shutdownHook;
         shutdownHook = null;
         if (hook != null && Thread.currentThread() != hook) {
             try {
                 Runtime.getRuntime().removeShutdownHook(hook);
             } catch (IllegalStateException alreadyShuttingDown) {
-                // The JVM is exiting and our hook is queued to run; it will find stopped == true.
+                // The JVM is exiting and our hook is queued to run; it will find the app stopped.
             }
         }
         if (enqueueHook != null) {
@@ -1867,6 +1920,14 @@ public class Brace {
         // mutated the Router's plain collections under the request threads reading them. If
         // server.stop() throws, the router stays frozen.
         router.unfreeze();
+        // The framework's own routes (/ops/*) are registered by start(), bound to that start's
+        // OpsHandler. Take them out again, or the next start() (a restart, or a retry after a
+        // failed bind) fails with "POST /ops/auth is registered twice" (final review).
+        router.removeFrameworkRoutes();
+        if (statsSnapshotTimer != null) {
+            statsSnapshotTimer.cancel();
+            statsSnapshotTimer = null;
+        }
         if (wsRegistry != null) {
             wsRegistry.close();
         }
