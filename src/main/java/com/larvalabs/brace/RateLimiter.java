@@ -265,6 +265,8 @@ public class RateLimiter {
         final AtomicLong pending = new AtomicLong();
         /** In {@link #dirty}; set by the request that enqueues it, cleared by the flush that polls it. */
         final AtomicBoolean queued = new AtomicBoolean();
+        /** A request is reading this key's fleet count ({@code readFleetCount}); no monitor is held across it. */
+        final AtomicBoolean reading = new AtomicBoolean();
         /** The fleet count as of this key's last write, or -1 when this instance has not written or read it yet. */
         final AtomicLong fleetCount = new AtomicLong(-1);
         /**
@@ -1044,7 +1046,7 @@ public class RateLimiter {
         // learning it at the next flush. Otherwise, or past this second's read budget (L6
         // verification), the count waits in the buffer for a flush.
         boolean written = tracked.fleetCount.get() < 0 && mayHaveBeenEvicted(tracked.counterKey, nowMillis)
-            && takeFleetRead(nowMillis) && readFleetCount(tracked, counters, nowMillis);
+            && readFleetCount(tracked, counters, nowMillis);
         if (!written) {
             unflushed.incrementAndGet();
             enqueue(tracked);
@@ -1093,9 +1095,12 @@ public class RateLimiter {
      * Write this key's buffered count now, on its own, and take the fleet count the database
      * returns: one round trip that both counts this request fleet-wide and tells this instance
      * where the key stands. Used for a key that may have been evicted earlier in its window.
-     * Requests for the same key wait for each other here rather than each judging the key blind.
-     * On a database error the count goes back in the buffer and the key is judged on what this
-     * instance has, as during any outage.
+     * One request per key reads at a time; a request that finds a read in progress does not wait
+     * for it but is buffered and judged on what this instance has, like any request between
+     * flushes (L6 verification: a monitor held across the database call pinned the virtual
+     * thread's carrier on JDK 21, so a slow database starved unrelated requests). On a database
+     * error the count goes back in the buffer and the key is judged on what this instance has, as
+     * during any outage.
      *
      * @return true when the buffered count was written (or dropped as unstorable), so the caller
      *         has nothing left to queue for the next flush
@@ -1104,9 +1109,15 @@ public class RateLimiter {
         if (nowMillis < flushCooldownUntilMillis) {
             return false;
         }
-        synchronized (sk) {
+        if (!sk.reading.compareAndSet(false, true)) {
+            return false; // another request for this key is reading it
+        }
+        try {
             if (sk.fleetCount.get() >= 0) {
                 return false; // another request for this key just read it
+            }
+            if (!takeFleetRead(nowMillis)) {
+                return false; // this second's reads are used up: wait for the next flush
             }
             long delta = sk.pending.getAndSet(0);
             if (delta <= 0) {
@@ -1130,6 +1141,8 @@ public class RateLimiter {
                     + Redactor.redactMessage(e.getMessage()));
                 return false;
             }
+        } finally {
+            sk.reading.set(false);
         }
     }
 
