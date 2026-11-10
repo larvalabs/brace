@@ -471,14 +471,14 @@ contexts where escaping alone doesn't stop script:
   markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
   `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.
 - **`<script>` bodies.** JavaScript-escaped (JTE), for a `<script>` tag written in any letter
-  case, with `<`, `>` and `&` written as `<`, `>` and `&` on top, so data can
+  case, with `<`, `>` and `&` written as `\u003c`, `\u003e` and `\u0026` on top, so data can
   never read as markup whatever the browser makes of the script. As in a script attribute, that
   protects data **inside a quoted string** (`var name = "${name}";`, a template literal, a regex
   literal). Data outside a string is not supported: `var n = ${count};` runs whatever the value
   says, and a value with `<`, `>` or `&` in it is now a syntax error there. Pass numbers and
   objects as JSON in a string or a `data-*` attribute and parse them. Things to know:
   - *Data blocks.* `<script type="application/json">{"name": "${name}"}</script>` gets the same
-    escaping. `<` is valid JSON and reads back as `<`. JTE's escapes for `'`, `-`, `` ` ``
+    escaping. `\u003c` is valid JSON and reads back as `<`. JTE's escapes for `'`, `-`, `` ` ``
     and `$` (`\'`, `\-`) are not valid JSON, so a value containing one of those fails to parse:
     for a JSON block, serialize the whole object in the handler and write it into a `data-*`
     attribute, or fetch it. Markup in a `<script type="text/template">` block is not escaped as
@@ -1790,9 +1790,9 @@ each server instance, never fleet-wide — ops deliberately works without shared
 database required), so behind a load balancer a captured auth request remains replayable against
 a *different* instance until the ±30s timestamp window closes. This residual window is accepted;
 the mitigations are HTTPS (an attacker should never observe the request body) plus the
-recommendations below. The deprecated v1 protocol (signature over the timestamp alone, no
-nonce — replayable as-is within the window) is accepted for one release with a logged
-deprecation warning and will then be rejected; see the 0.1.6 → 0.1.7 migration guide.
+recommendations below. A captured request also cannot be replayed against an instance that
+started after it was signed: auth requests timestamped before the process started are refused.
+The old v1 and v2 protocols are removed (see above).
 
 **Key revocation.** Tokens are bound to the key that minted them. At startup the server takes
 the fingerprints of the keys in `ops-authorized-keys` and rejects any bearer token, ops session

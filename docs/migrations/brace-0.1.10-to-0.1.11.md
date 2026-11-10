@@ -1,7 +1,10 @@
 # Migrating from Brace 0.1.10 → 0.1.11
 
-This release carries the fixes from the 2026-10 security review, several of which are
-**breaking**. Rows marked breaking in the index need a code change. It also adds opt-in
+This release carries the fixes from the 2026-10 security review and from the 2026-11 review
+that followed it, several of which are **breaking**. Rows marked breaking in the index need a
+code change. The 2026-11 rows are grouped at the end of the index; if you already upgraded to a
+0.1.11 release candidate, those are the ones that are new to you (start at
+[Security review, November 2026](#security-review-november-2026)). It also adds opt-in
 server-side analytics, gzips responses by default, masks the CSRF token rendered into pages, and
 `HEAD` requests now reach `GET` routes instead of returning 404.
 
@@ -49,6 +52,19 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Whole-branch review follow-ups: duplicate routes refused; bad percent-encoding is a 400; ops `no-store`; CLI token cache in `~/.brace`; launcher refuses toolchains older than 0.1.8 | security, **breaking** for apps registering one route twice | remove the duplicate registration `start()` names | [§](#security-whole-branch-review-follow-ups) |
 | `brace dev` ships the H2 driver for the scaffold's dev database | fix | none; `brace dev` on a project pinned to this version just works | [§](#fix-brace-dev-ships-the-h2-driver) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
+| **2026-11 review:** every `staticFiles(...)` mapping declares `.publicFiles()` or `.access(...)`; `start()` refuses one that doesn't; mapping directories must exist; overlapping directories need the same access; a prefix registers once | security, **breaking** | add `.publicFiles()` to asset mappings and `.access(...)` to private ones | [§](#breaking-static-mappings-declare-their-access) |
+| **2026-11 review:** static files are served only at their canonical URL, and only to `GET` and `HEAD` | security, **breaking** for links whose case differs from the file on disk, percent-encode `~`, or end in `/` | fix those links; serve `POST`/`OPTIONS` on a static path from a route | [§](#breaking-static-files-are-served-only-at-their-canonical-url-to-get-and-head) |
+| **2026-11 review:** `RateLimiter.perKey` limits a request with a missing key (per client IP); distinct keys are capped; `perIp` groups IPv6 by /64 | security, **breaking** for limiters whose key can be absent | apply a login limiter to the `POST` only, or add `.exemptMissingKey()` | [§](#breaking-rate-limiter-keys) |
+| **2026-11 review:** `req.form()` ignores the query string on `POST`/`PUT`/`PATCH`/`DELETE` | security, **breaking** | send form fields in the body | [§](#breaking-reqform-ignores-the-query-string-on-mutating-methods) |
+| **2026-11 review:** `smtp://` requires STARTTLS (`smtp+plain://` opts out); `to`/`cc`/`from`/`replyTo` take one address each; `replyTo` is now applied | security, **breaking** for plain relays and comma-separated recipients | use `smtp+plain://` for a relay without TLS; send one message per recipient | [§](#breaking-smtp-requires-starttls-mail-addresses-are-single) |
+| **2026-11 review:** `opsOrigins` required whenever ops is on outside dev mode; `ops-authorized-keys` format is strict | security, **breaking** for deployments with no `brace.mode` and for keys files with scope typos | set `BRACE_OPS_ORIGINS`; write scopes exactly `scope:read` or `scope:control` | [§](#breaking-ops-origins-required-outside-dev-authorized-keys-format) |
+| **2026-11 review:** `Http.timeout(...)` bounds the whole buffered exchange, body included; `idleTimeout(...)` applies to `fetch*` | security, **breaking** for buffered calls that take over 30 s | add `.timeout(Duration...)` to slow downloads and slow APIs | [§](#breaking-http-timeouts-cover-the-response-body) |
+| **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; IPv6 addresses are unbracketed | security, **breaking** behind a proxy that sends only `Forwarded` | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host` | [§](#breaking-proxy-headers-and-reqip) |
+| **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are JavaScript-escaped again; `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"` | move the data to `data-*` attributes; pass CSS values, not CSS syntax | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
+| **2026-11 review:** page cache stores only 2xx, keys on the route, bypasses on `Authorization` and htmx targeting headers; `Brace.test()` throws when a cached handler reads undeclared input | security, **breaking** for tests of cached handlers that read undeclared input | declare inputs with `.vary(...)`/`.varyHeader(...)`, or stop caching the route | [§](#breaking-page-cache-keys-bypasses-and-undeclared-reads) |
+| **2026-11 review:** access rejections and guarded static responses are never shared-cacheable; `Result` header names are case-insensitive; dot segments are 404; WebSocket paths are exact | security | none, unless code relied on two spellings of a header name being two headers, or on `result.headers()` order | [§](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable) |
+| **2026-11 review:** previous session secrets are validated and lifetime-bounded; `/ops/errors` redacts by value shape; the error store survives hostile input; analytics row caps; ops auth start-time floor | security | none, unless a previous secret was a placeholder, or a log field is named exactly `code` | [§](#security-sessions-error-store-analytics-and-ops-auth) |
+| **2026-11 review:** CLI: env names and key labels validated, project files never written through a symlink, terminal control characters escaped; launcher: one `<brace.version>` per pom, prereleases ordered before their release, toolchain floor raised to 0.1.11 with the release | security, **breaking** for env names with other characters and for projects pinned below 0.1.11 once it ships | rename such env keys; raise `<brace.version>` to `0.1.11` | [§](#security-cli-and-launcher-on-an-untrusted-checkout) |
 
 ## New: server-side page-view analytics
 
@@ -633,6 +649,11 @@ app.sessionValidator(s -> !s.has("userId")
 app.sessions(SessionOptions.of(newSecret).previousSecrets(oldSecret));
 ```
 
+Only list a previous secret that was strong and stayed private. A placeholder (the scaffold's
+`CHANGE-ME-...`) or a leaked secret must not be listed: anyone who knows it can seal a session
+with it for as long as it is listed, and `start()` now refuses a placeholder there. See
+[sessions, error store, analytics and ops auth](#security-sessions-error-store-analytics-and-ops-auth).
+
 ## Breaking: request data in a query string throws in dev and tests
 
 The where-fragment and raw-query methods run their string as written, and the docs showed
@@ -1205,9 +1226,632 @@ A final review of the whole 0.1.11 security work found these. Only the first can
   cloned repo controls `target/` (a committed symlink there aimed the write). Expect one fresh
   login per project. Secret files (`application.conf` from `brace new` included, now owner-only)
   are written to a new file and moved into place, never through an existing link.
-- **Launcher:** a project pin older than 0.1.8 is refused, since a pull request could pin an old
-  release to bring back a CLI bug fixed since (`BRACE_ALLOW_OLD_TOOLCHAIN=1` overrides). A pin
-  older than the launcher itself runs, with a note.
+- **Launcher:** a project pin older than the launcher's toolchain floor is refused, since a pull
+  request could pin an old release to bring back a CLI bug fixed since
+  (`BRACE_ALLOW_OLD_TOOLCHAIN=1` overrides). The floor was 0.1.8 in the release candidates and is
+  0.1.11 as of the release; see
+  [CLI and launcher on an untrusted checkout](#security-cli-and-launcher-on-an-untrusted-checkout).
+  A pin older than the launcher itself, but at or above the floor, runs with a note.
+
+## Security review, November 2026
+
+A second full security review ran against 0.1.11-rc.6 (findings in
+`docs/2026-11-09-security-review-todos.md`). Its fixes ship in 0.1.11 and are described in the
+sections from here to [Fix: `brace dev` ships the H2 driver](#fix-brace-dev-ships-the-h2-driver).
+If you are upgrading from 0.1.10, they are simply part of this release. If you are upgrading from
+a 0.1.11 release candidate, these sections are everything that changed since.
+
+The changes most apps need to act on:
+
+1. Every `staticFiles(...)` call declares `.publicFiles()` or `.access(...)`
+   ([§](#breaking-static-mappings-declare-their-access)).
+2. A `RateLimiter.perKey(...)` on a login path should apply to the `POST` only
+   ([§](#breaking-rate-limiter-keys)).
+3. Ops needs `BRACE_OPS_ORIGINS` (or `.opsOrigins(...)`) in every mode but dev
+   ([§](#breaking-ops-origins-required-outside-dev-authorized-keys-format)).
+4. Raise `<brace.version>` to `0.1.11` itself once it is out: the launcher then refuses older
+   pins, release candidates included
+   ([§](#security-cli-and-launcher-on-an-untrusted-checkout)).
+
+## Breaking: static mappings declare their access
+
+`app.staticFiles(...)` mappings are now part of the access model. Until now every mapping was
+public whatever the app's `defaultAccess(...)` was, so an upload directory served with
+`staticFiles` in an app that requires login was readable without one. Every mapping now says who
+may fetch its files, and `start()` (so also `Brace.test()`) refuses to start while one doesn't:
+
+```
+IllegalStateException: 1 static mapping has no access declaration:
+  /assets  ->  public
+Say who may fetch each one: app.staticFiles(...).publicFiles() serves it to everyone, app.staticFiles(...).access(Access.session("userId", "/login")) guards it. defaultAccess(...) does not apply to static mappings.
+```
+
+`staticFiles(...)` now returns a `StaticFilesConfig` instead of the app. Its two methods,
+`.publicFiles()` and `.access(Access, Access...)`, return the app, so a builder chain continues
+after the declaration. A chain that called another builder method directly after
+`staticFiles(...)` no longer compiles until you add one.
+
+Before:
+
+```java
+var app = Brace.app()
+    .staticFiles("/assets", "public")
+    .maxUploadSize("10MB");
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);
+```
+
+After:
+
+```java
+var app = Brace.app()
+    .staticFiles("/assets", "public").publicFiles()          // CSS, JS, images: everyone
+    .maxUploadSize("10MB");
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));              // logged-in users only
+```
+
+A project generated by `brace new` has `app.staticFiles("/public", "public");` in `App.routes`:
+change it to `app.staticFiles("/public", "public").publicFiles();`.
+
+What to know:
+
+- **`defaultAccess(...)` does not apply to mappings** (nor does `defaultAccess(Access.none())`).
+  A mapping's access is exactly what `.access(...)` lists, and all listed requirements must pass.
+  Inheriting a login default would put the login in front of the login page's own CSS.
+- **The requirements run before the file is looked up**, with the same session the rest of the
+  request uses. A rejected request gets the same response whether or not the file exists.
+  `Access.session` answers a page request with a 302 to the login URL, htmx and JSON with 401.
+- **A session-reading requirement** (`Access.session`, `Access.check`) on a mapping needs
+  `.sessions(...)`, as on a route.
+- **Mapping directories must exist at start.** `start()` throws if a `staticFiles` directory is
+  not an existing directory. Create upload directories at deploy time or before `start()`.
+- **Overlapping directories need the same access.** `start()` throws when two mappings'
+  directories are the same, nested, or linked by a symlink, and their access differs: the same
+  files would be reachable under the weaker one. `Access.session(...)`, `Access.none()` and
+  `Access.insteadOfDefault(...)` compare by value, so two identical `Access.session("userId",
+  "/login")` calls count as the same; custom `Access.check(...)` lambdas compare by identity, so
+  pass the same object to both mappings. Otherwise give each mapping its own directory.
+- **A URL prefix registers once.** A second `staticFiles` call with the same prefix throws
+  (`/files` and `/files/` are the same prefix). Calling `staticFiles(...)` after `start()` also
+  throws; it used to be silently ignored.
+- **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
+  `app.get("/docs/payroll.pdf", ...)`, the mapping never serves `/docs/payroll.pdf` under any
+  method; a request the route doesn't handle gets a 405. `start()` logs a warning listing routes
+  under a mapping's prefix (not for a mapping at `/`). For a per-file decision (the file's
+  owner), serve the file from a route: `db.findOwnedOr404(...)`, then
+  `Result.fileUnder(dir, name).untrusted()`.
+- **Guarded files are never shared-cacheable.** See
+  [access rejections and guarded responses](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable).
+- A path guard such as `before("/uploads/*", ...)` is no longer needed for a mapping and can be
+  replaced by `.access(...)`.
+- The bundled `/__brace/*` assets need no declaration. The startup banner and `/ops/routes`
+  (entries with `"method":"STATIC"`) list each mapping with its access.
+
+## Breaking: static files are served only at their canonical URL, to GET and HEAD
+
+Path guards and proxy rules match the request path as sent, while static serving decoded it
+first, so another spelling of the same file could skip a guard. A static mapping now returns 404
+for anything but the file's own URL:
+
+- **The prefix must end at a path segment.** With `staticFiles("/files", dir)`, `/filesX` and
+  `/filesprivate/a` no longer reach the directory (they were served as `/files/X`).
+  `Assets.url(...)` follows the same rule.
+- **A percent-escape of an unreserved character** (`A-Z a-z 0-9 - . _ ~`) is a 404:
+  `/files/%70rivate/x`, `/files/a%7Eb.txt`. Write those characters literally. Java's `URLEncoder`
+  turns `~` into `%7E`; `Url.to(...)` and browsers do not. `%20`, UTF-8 bytes and reserved
+  characters such as `%26` and `%40` still work.
+- **A name that differs from the name stored on disk** is a 404: `/files/Logo.PNG` for
+  `logo.png` on macOS or Windows, or a decomposed-Unicode spelling of an accented name. A link
+  whose letter case was wrong worked on a case-insensitive development machine and now fails
+  there too, as it always did on Linux.
+- **A trailing slash or an empty segment** is a 404: `/assets/app.css/`, `/assets/v2//app.js`.
+- **Only `GET` and `HEAD` are served.** Any other method on a path under a mapping gets `405`
+  with `Allow: GET, HEAD`, after the mapping's access check. The bundled `/__brace/*` assets do
+  the same. If you relied on `OPTIONS` or `POST` reaching a static file, serve that path from a
+  route.
+
+Symlinks inside the served directory still work. Write path guards for static paths in
+unreserved characters only, or better, use `.access(...)` on the mapping.
+
+Related, for routes: a request whose path has a segment that is exactly `.` or `..`
+(`/items/../y`) now gets 404 and never reaches a handler; `/items/{a}/{b}` could previously
+receive `a=".."`. Segments like `..foo`, `a..b` and `.well-known` are unchanged.
+
+## Breaking: rate limiter keys
+
+**A missing key is limited, per client IP.** A `RateLimiter.perKey(...)` request whose key is
+null or blank used to skip the limiter entirely (the docs said otherwise), so a client could
+leave the key out, and on a login form put the username in the query string where the limiter
+did not look. Such a request is now counted in a bucket for its client IP (an IPv6 /64), with
+the limiter's own limit and window, exactly as `perIp` would count it.
+
+The formerly documented login setup keeps working but now also counts page views:
+
+```java
+// Before: every GET /login has no email. It used to pass unlimited; now each visitor IP gets
+// 5 keyless requests per 15 minutes, page views included, and then a 429 on the login page.
+app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
+```
+
+Apply the limiter to the submission only, and normalize the identity:
+
+```java
+// After
+var loginLimit = RateLimiter.perKey(req -> {
+    var email = req.formParam("email");
+    return email == null ? null : email.strip().toLowerCase(Locale.ROOT);
+}, 5, "15m");
+app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
+```
+
+Dev mode logs a warning once when a key limiter counts a keyless `GET` or `HEAD`. Where a
+missing key really means "nothing to limit here" and those requests are bounded another way,
+opt out:
+
+```java
+app.before("/api/*", RateLimiter.perIp(300, "1m"));
+app.before("/api/*", RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h").exemptMissingKey());
+```
+
+Also changed:
+
+- **Keys are stripped of surrounding whitespace.** Case is not folded (tokens are
+  case-sensitive), so lower-case usernames and emails in the extractor, as above.
+- **`before("/api", ...)` matches only the literal `/api`.** The docs showed it for a whole API;
+  use `/api/*`.
+- **Distinct keys are capped per limiter** (default 100,000; `.maxKeys(n)` on `perIp(...)` and
+  `perKey(...)`). At the cap a new key takes the place of the least recently used key that is
+  under its limit; keys at their limit are kept until their window ends, and only when nothing
+  can be replaced does a key fall back to a per-IP overflow bucket, then a global one.
+- **`perIp` groups IPv6 clients by /64**, so rotating addresses inside one allocation no longer
+  resets the count. Clients that share a /64 share a budget.
+- **Keys with control characters or unpaired surrogates are hashed.** One such key used to stop
+  every other key's count from reaching Postgres. Invisible to callers.
+- `perKey(...)` and `perIp(...)` now return `RateLimiter.PerKeyLimit` and
+  `RateLimiter.PerIpCheck` (both are a `Middleware.Before`, so `app.before(path, ...)` compiles
+  unchanged; code compiled against 0.1.10 must be recompiled).
+
+## Breaking: `req.form()` ignores the query string on mutating methods
+
+`req.form(Type.class)` filled fields missing from the body from the query string, while
+`req.formParam(...)` read the body only, so a middleware and the handler could see different
+values for one field.
+
+Before: `POST /posts?title=x` with no `title` in the body bound `title = "x"`.
+
+After: `title` is null (and fails `@Required`). On `POST`, `PUT`, `PATCH` and `DELETE`,
+`req.form()` binds the body only. `GET` and `HEAD` forms still bind from the query string.
+
+```html
+<%-- before: a field carried in the action URL --%>
+<form method="post" action="/posts?category=${category}">
+
+<%-- after: send it in the body --%>
+<form method="post" action="/posts">
+  <input type="hidden" name="category" value="${category}">
+```
+
+## Breaking: `smtp://` requires STARTTLS; mail addresses are single
+
+**STARTTLS is required.** `smtp://user:pass@relay:587` used STARTTLS only if the relay offered
+it; a network attacker could strip the offer and read the SMTP password and every message. Now
+`smtp://` fails the send when the relay does not offer STARTTLS. `smtps://` (implicit TLS) is
+unchanged, and schemes are case-insensitive. A local relay without TLS opts out explicitly:
+
+```properties
+# before
+smtp.url=smtp://localhost:25
+
+# after: uses STARTTLS if offered, never requires it
+smtp.url=smtp+plain://localhost:25
+```
+
+Credentials on an `smtp+plain://` URL log a startup warning, since they can travel in
+cleartext. Dev-mode capture (no SMTP URL) is unaffected.
+
+**One address per field.** `"a@b.c, victim@x.y"` passed `@Email`, and `Mailer.to(...)` expanded
+it to two recipients. Now:
+
+- `@Email` rejects `,`, `;`, `<`, `>`, whitespace and control characters.
+- `to(...)`, `cc(...)`, the per-message `from(...)`, `Mailer.from(...)` and
+  `Mailer.replyTo(...)` each take exactly one address. A list, a group (`g: a@b.c;`), a route
+  address or a control character throws `IllegalArgumentException` (`Mailer.from` and
+  `replyTo` throw when configured, the per-message ones at `send()`, dev capture included). A
+  quoted display name with a comma (`"Doe, J" <a@b.c>`) is one address and is accepted.
+
+```java
+// before
+mail.to("a@example.com, b@example.com").subject("Hi").text("...").send();
+
+// after: one message per recipient
+for (var to : List.of("a@example.com", "b@example.com")) {
+    mail.to(to).subject("Hi").text("...").send();
+}
+```
+
+- **`MailerNotifier` still takes several recipients**: the comma-separated string form, varargs
+  (`new MailerNotifier(mailer, "a@x.com", "b@x.com")`) or a `List<String>`. Each is validated at
+  construction, so an invalid address fails at startup, and each gets its own message.
+- **`Mailer.replyTo(...)` now sets `Reply-To`.** It was stored and never applied.
+
+## Breaking: ops origins required outside dev; authorized-keys format
+
+**`opsOrigins` is required unless `brace.mode=dev`.** Only `brace.mode=prod` required
+`app.opsOrigins(...)`, so a deployment started with no mode ran unpinned, and the ops login
+then compared against the `Host` header, which a client talking to the app directly chooses.
+Now `start()` throws when ops is on with no origins in any mode but dev (and the test harness):
+
+```
+IllegalStateException: Ops is on outside dev mode without app.opsOrigins("https://your-app") (or BRACE_OPS_ORIGINS): ...
+```
+
+```sh
+# set it in the environment
+BRACE_OPS_ORIGINS=https://app.example.com
+```
+
+```java
+// or in code
+app.ops("ops-authorized-keys").opsOrigins("https://app.example.com");
+```
+
+A generated project already reads `OPS_ORIGINS` in its compose file and pins `ops.origins` in
+dev. Test code that starts a real `Brace.app()` with ops should use `Brace.test()` or run with
+`-Dbrace.mode=dev`.
+
+**The `ops-authorized-keys` format is strict.** A mistyped scope silently meant full control
+(`KEY scope:read-only ci-agent` loaded as a control key). The format is now:
+
+```
+KEY [scope:read|scope:control] [label words...] [# comment]
+```
+
+- After the key, any token containing `:` or `=` must be exactly `scope:read` or
+  `scope:control` (the value is case-insensitive), at most once per line. Anything else fails
+  startup with the file and line number: `scope: read`, `Scope:read`, `--scope=read`,
+  `role:read`, `scpoe:read`, `scope:read-only`.
+- A lone `read`, `ro`, `readonly`, `read-only` or `control` as the only token after the key
+  fails startup, with a message saying to write `scope:read`.
+- Every other token is label text. `#` at the start of a line or after whitespace starts a
+  comment. A leading byte-order mark is ignored.
+- No scope token still means control, and is logged at boot along with each key's fingerprint
+  and scope. A key listed twice keeps the lower scope.
+
+Check your file before deploying: a line that loaded as control by accident now stops the
+server from starting. Files written by `brace ops keypair` are unaffected. Also: an ops token
+whose payload has no scope claim, or an unrecognised one, is now `read`, not `control`.
+
+## Breaking: `Http` timeouts cover the response body
+
+`fetch()`, `fetchString()`, `fetchJson()` and `fetchBytes()` applied `.timeout(...)` only to the
+wait for response headers, so a server that sent headers and then stalled held the calling
+thread, and its database connection, indefinitely. Now:
+
+- `.timeout(...)` (default 30 s) is the deadline for the whole buffered exchange, headers and
+  body.
+- `.idleTimeout(...)` (default 30 s) bounds each wait for more body bytes. It does not count the
+  wait for headers.
+- Either throws `Http.StreamTimeoutException` (a `RuntimeException`). A header timeout on
+  `fetch*` throws it too, where it used to throw the generic "HTTP request failed". The message
+  starts "HTTP request timed out" (it was "HTTP stream timed out").
+- `timeout(null)` on a buffered call means the 30 s default, not "no deadline"; only `stream()`
+  and `fetchEvents` run without a total deadline. A zero or negative duration throws
+  `IllegalArgumentException`, and anything over 365 days is treated as 365 days.
+
+```java
+// before: a large download, or a slow API, finished however long the body took
+byte[] file = Http.get(bigFileUrl).fetchBytes();
+
+// after: raise the deadline for anything that legitimately takes over 30 s end to end
+byte[] file = Http.get(bigFileUrl).timeout(Duration.ofMinutes(5)).fetchBytes();
+```
+
+## Breaking: proxy headers and `req.ip()`
+
+**One forwarding header, chosen explicitly.** `req.ip()` read `X-Forwarded-For` and fell back to
+RFC 7239 `Forwarded`, so behind a proxy that set only `Forwarded` and passed `X-Forwarded-For`
+through, a client chose its own IP. It now reads `X-Forwarded-For` only, unless told otherwise:
+
+```java
+// before: X-Forwarded-For, else Forwarded
+app.trustedProxies("10.0.0.5");
+
+// after, behind a proxy that sets RFC 7239 Forwarded
+app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());
+```
+
+A trusted proxy that sends only the header Brace is not reading logs a one-time warning naming
+`useForwardedHeader()`. If you see every visitor with the proxy's IP after upgrading, this is
+why.
+
+Also changed:
+
+- **Repeated header lines are read as one list**, in order. The last line used to win.
+- **`X-Forwarded-Proto` and `X-Forwarded-Host` use the rightmost entry** across all lines, the
+  one the nearest proxy added (it was the leftmost). Make sure your proxy sets (overwrites)
+  these headers; nginx `proxy_set_header`, Traefik and Caddy do.
+- **`req.ip()` is always an IP literal.** When the selected forwarding entry is not an address
+  (`unknown`, `_hidden`, anything else) it returns the socket address.
+- **IPv6 addresses are unbracketed.** `req.ip()` for a direct IPv6 client is
+  `0:0:0:0:0:0:0:1`, where 0.1.10 returned `[0:0:0:0:0:0:0:1]`. Update code or stored data that
+  compares against the bracketed form.
+- **Repeated `Cookie` lines are joined**, and the first occurrence of a name wins, on HTTP and
+  WebSocket alike.
+- **Remove any `::ffff:…/104` entry from `trustedProxies`.** Earlier docs recommended it for
+  dual-stack hosts; it throws at startup, and an IPv4 CIDR already matches the IPv4-mapped form.
+
+## Breaking: template output in scripts, script URLs, CSS and htmx values
+
+Most templates need no change. Check for the first two patterns.
+
+**1. Data in a `javascript:` URL is blocked.** A `javascript:` (or `vbscript:`) URL that
+contains any `${...}` renders as `about:invalid#blocked`: the browser undoes HTML escaping and
+percent-encoding before running the code, so no escaping is safe there.
+
+```html
+<%-- before --%>
+<a href="javascript:openItem('${item.id}')">Open</a>
+
+<%-- after: the value in a data attribute, the code in a script file --%>
+<a href="#" class="open-item" data-id="${item.id}">Open</a>
+```
+
+```js
+document.querySelectorAll('.open-item').forEach(a =>
+  a.addEventListener('click', e => { e.preventDefault(); openItem(a.dataset.id); }));
+```
+
+**2. Data in CSS is CSS-escaped.** In a `<style>` body and in a `style=""` attribute, every
+character of `${...}` other than letters, digits, spaces, `# % . _ -` and non-ASCII is written
+as a CSS hex escape, so data can't end its declaration or rule. Plain values (`red`, `#ff0000`,
+`50%`, `12px solid`) and data inside a quoted CSS string are unchanged. A value that carries CSS
+syntax of its own no longer works; email templates with inline styles are the likely place.
+
+```html
+<%-- before --%>
+<div style="${card.inlineStyle}">             <%-- "color: red; width: 50%" --%>
+<div style="color: ${card.rgb}">              <%-- "rgb(200, 0, 0)" --%>
+<div style="background-image: url(${card.image})">
+
+<%-- after --%>
+<div style="color: ${card.color}; width: ${card.widthPercent}%">
+<div style="color: ${card.hex}">              <%-- "#c80000" --%>
+<div style="background-image: url('${card.image}')">   <%-- quoted: the URL reads back intact --%>
+```
+
+If the whole style string is trusted, server-built text, write it with `$unsafe{...}`.
+
+**3. `<script>` bodies are JavaScript-escaped again.** `<script>var name = "${name}";</script>`
+was attribute-escaped by mistake in the 0.1.11 release candidates (an HTML entity for a quote,
+and no backslash or newline escaping). Data there is JavaScript-escaped as documented, and `<`,
+`>` and `&` are additionally written as `\uXXXX` escapes, which a JavaScript string, template
+literal or regex literal reads back unchanged. Data must sit inside a quoted string: `var n =
+${count};` was never supported and now fails loudly when the value contains those characters.
+Remove any workaround that decoded entities in a script.
+
+**4. `<script src="..."/>` is not self-closing in HTML.** A browser reads everything up to the
+next `</script>` as the script body, and Brace now reads it the same way, so `${...}` after it
+is script-escaped. Write `<script src="..."></script>`. Inside `<svg>`, `<script href="..."/>`
+is a complete element.
+
+**5. `hx-vals`, `hx-headers` and `hx-request`.** If `${...}` supplies any part of a leading
+`js:` or `javascript:` (after any whitespace, U+00A0 and U+FEFF included), in one piece or
+several, the whole value renders as `{}`. Before, only a value that was exactly one `${...}`
+was checked, and `hx-request` was not checked at all. A `js:` prefix written in the template
+still works, and so does JSON the handler built:
+
+```html
+<div hx-vals='js:{q: "${query}"}'>   <%-- unchanged --%>
+<div hx-vals='${json}'>              <%-- unchanged --%>
+```
+
+Also changed, with no action expected: character references in a URL attribute's own text are
+decoded before the scheme check (`href="&#32;${url}"` no longer exempts `url`); `<Script>` in any
+letter case is a script; data a `@template` call or content block writes inside an attribute is
+escaped for that attribute even after another `${...}` in the same value; scripts wrapped in
+`<!-- -->` that contain `<script` are followed the way a browser follows them; and data in a
+script inside `<svg>` or `<math>` has its quotes written as `\uXXXX` escapes too.
+
+**htmx CSRF helper.** `/__brace/csrf-htmx.js` now attaches `X-CSRF-Token` only to same-origin
+requests. No change unless a page turned off htmx's `selfRequestsOnly` and posts cross-origin.
+
+## Breaking: page cache keys, bypasses and undeclared reads
+
+`cache.wrap(...)` stored whatever the handler returned, under a key built from the raw path, so
+one crafted request could pin an error page, or a page chosen by an undeclared input, for every
+visitor.
+
+- **Only 2xx responses are stored.** Anything else is served uncached.
+- **The key is the route pattern plus the decoded path parameters** (plus method, the
+  `HX-Request` variant and declared `vary` params), so `/posts/hello` and `/posts/hell%6f` share
+  one entry. A repeated `vary` param keys on all its values. Page keys now start with
+  `brace:page:`; don't use that prefix for your own keys. Existing page entries are simply
+  missed once after the upgrade.
+- **Requests carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`,
+  `HX-Boosted` or `HX-Prompt` bypass the cache** unless the handler declares the header:
+
+```java
+// before: the fragment rendered for one HX-Target was served to every htmx client
+app.get("/feed", cache.wrap("10m", ctrl::feed));
+
+// after: declare what the handler depends on
+app.get("/feed", cache.wrap("10m", ctrl::feed).vary("page").varyHeader("HX-Target"));
+```
+
+- **A response that sets a cookie is not cached**, and now keeps its `Set-Cookie` (it was
+  dropped).
+- **Breaking for tests: undeclared reads throw under `Brace.test()`.** A cached handler that
+  reads a query param, header or cookie it didn't declare, or `req.ip()`, `req.url()` or the
+  body, throws `IllegalStateException` in tests and logs once per route in dev mode
+  (production is unchanged). Declare the input with `.vary(...)`/`.varyHeader(...)`, or stop
+  caching that route: a cached handler may depend only on its path parameters and what it
+  declares.
+- **Postgres caps page rows separately** from the app's own entries:
+  `CacheBackend.postgres(db, maxEntries, maxPageEntries)`, defaults 100,000 rows in all and
+  10,000 pages. A flood of page entries can no longer evict `cache.set(...)` data; in memory, a
+  new page is not stored when the cache is full of app entries.
+- **`cache.get(key, type)`** returns a miss when the stored class is not `type` itself or a
+  class this process has stored. Using `Object` or an interface as `type` now only reads classes
+  this JVM wrote.
+- **`deletePrefix`** with a prefix containing a control character, `#sha256:`, or over 128
+  characters no longer clears unrelated keys that share its start. Cache keys with control
+  characters, or over 512 bytes, are stored hashed; invisible to callers.
+
+## Security: access rejections and guarded responses are never shared-cacheable
+
+No action needed unless noted.
+
+- **Access rejections are `Cache-Control: no-store`**, on routes and mappings, with
+  `Vary: Accept, HX-Request`. An app-wide `after(...)` that set `Cache-Control: public` used to
+  mark the 302-to-login cacheable, so a shared cache could serve it to logged-in users.
+- **Under a mapping with `.access(...)`** a served file is `Cache-Control: private, no-cache`
+  (no `immutable`, even with an `Assets.url` fingerprint) and every other response (rejection,
+  404, 405, 416) is `no-store`. On these responses `Cache-Control`, `Expires`, `Pragma`,
+  `CDN-Cache-Control`, `Surrogate-Control`, `Cloudflare-CDN-Cache-Control` and
+  `Vercel-CDN-Cache-Control` set by a handler or `after(...)` are removed. Public mappings cache
+  as before.
+- **A response carrying the session cookie is always `private`.** If its `Cache-Control` has
+  neither `private` nor `no-store`, `private` is added (`max-age=600` becomes
+  `private, max-age=600`); `public` is still rewritten to `private`.
+- **Dev mode warns once** when a route with an access requirement answers
+  `Cache-Control: public` or `s-maxage`.
+- **`Result` header names are case-insensitive.** `result.header("cache-control", v)` now
+  replaces `Cache-Control` instead of adding a second entry, and `result.header("Cache-Control")`
+  reads either spelling. `result.headers()` iterates in case-insensitive name order, not
+  insertion order. Code that relied on two spellings being two headers, or on the order, must
+  change.
+- **WebSocket paths are exact.** A socket registered with `app.ws("/ws", ...)` upgrades only for
+  the raw path `/ws` (any query string). `/x/../ws`, `/%77s` and `/ws;x` get 404. The path is a
+  literal, not a pattern.
+- **A route whose access was never resolved answers 500.** `Route.access()` throws until
+  `Brace.start()` has resolved it. Apps started with `start()` or `Brace.test()` are unaffected;
+  code that built a `BraceHandler` or `Router` by hand and relied on routes being open is not.
+- **`start()` after `stop()` can be stopped again.** The second `stop()` of a restarted app was
+  a no-op that left the server running.
+
+## Security: sessions, error store, analytics and ops auth
+
+No action needed unless noted.
+
+**Sessions**
+
+- **Previous secrets are validated like the current one.** `previousSecrets(...)` checked only
+  length, so the public scaffold placeholder was accepted, and anyone can seal a cookie with a
+  public secret. A placeholder or weak previous secret now fails `start()` (dev mode exempt).
+  **Never list a public or leaked secret as previous**: while it is listed, it can mint
+  sessions. If you are replacing a placeholder or a compromised secret, change the secret and
+  accept the one-time logout.
+- **A cookie opened with a previous secret must carry its absolute deadline**, no further out
+  than `absoluteMaxAge` (or the larger of 30 days and `maxAge`). Otherwise that user signs in
+  again once.
+- **`app.sessions(options)` copies the options.** Configure `SessionOptions` fully before the
+  call; later changes to the object are ignored.
+
+**Error store and `/ops/errors`**
+
+- **Redaction by value shape.** Stored error records redacted request headers and query strings
+  by name only. Now a `Referer` carrying `?token=…` or `/reset/<token>`, a JWT in any header,
+  an OAuth `?code=`, a percent-encoded `?%74oken=`, or a 32-character random value under any
+  parameter name shows as `[REDACTED]`. Protocol headers (`Accept*`, `Content-Type`,
+  `User-Agent`, ETags, `X-Forwarded-*`, request ids, trace context) are kept.
+- **New sensitive names:** `jwt`, `assertion`, `signature`, `authkey`, `nonce` (anywhere in a
+  name) and `code`, `sig`, `otp` (as the whole name only, so `zip_code` and `status_code` are
+  kept). **This applies to structured log fields too:** a `Log.event` field named exactly `code`
+  is now redacted; rename it (`error_code`) if you need it in logs.
+- **Hostile input can't stall the store.** A request carrying `%00` (`?page=1%00` reaching
+  `req.queryInt`) used to make every later flush fail on Postgres, so `ops_errors` and
+  regression alerts went silent until restart. NUL characters are replaced, type and route are
+  clipped to 255 characters, each row is written under its own savepoint, and a row the database
+  keeps rejecting is retried once without its payload, then dropped after 5 flushes with a
+  rate-limited `error store:` warning. If you saw `ops_errors` stop updating, this was likely
+  why.
+- **More exception messages are redacted** before they reach `/ops/status` (a scheduled job's
+  `lastError`), the uncaught-exception log event, `scheduled_jobs.error` and warning logs. Ops
+  bearer tokens (`payload.signature`) are recognised as secrets.
+- **Regression webhooks** wrap type, route and message in inline code and neutralise mentions
+  and link syntax, for Slack and Mattermost; the message is truncated to 500 characters.
+
+**Analytics**
+
+- **Row growth is capped.** At most 30 rows per visitor per 10-second flush window, and 500,000
+  rows per instance per day. Views over a cap are counted under "Not counted" on the dashboard
+  instead of being stored, so a capped day reads as capped. A site above about 500,000 views a
+  day, or with many people behind one IP and user agent, should raise them:
+
+```java
+app.analytics(Analytics.options()
+    .maxViewsPerVisitorPerFlush(100)   // 0 turns the cap off
+    .dailyRowBudget(5_000_000));       // 0 turns the budget off
+```
+
+**Ops auth**
+
+- **A signed login request timestamped before the server started is refused**, so a captured
+  request can't be replayed after a deploy. A CLI whose clock runs a few seconds ahead of the
+  server can see one 401 right after a deploy; retrying works.
+- **Each key has its own nonce quota**, so one key holder can't exhaust the replay cache and
+  block other operators' logins.
+
+**Development checks**
+
+- **`QueryTaint`** (dev and test mode) now catches `Sort.of(...)` built from request text even
+  when whitespace, case or commas differ, and logs a one-time "unchecked, over cap" warning for
+  a request with more than 1,000 values or 64 KB in one source.
+
+## Security: CLI and launcher on an untrusted checkout
+
+`brace status`, `check`, `errors` and the other read-only commands are meant to be safe to run
+in a repository you just cloned. These close the ways a committed file could make them unsafe.
+
+- **Breaking: env names are validated.** `ops.env` in `.brace` or `.brace.local`, and `--env`,
+  must match `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`. An unvalidated name was spliced into the
+  follow-up commands `brace check` prints for agents to run. Rename env keys that contain
+  other characters (dots, spaces) or start with `-` or `_`:
+
+```properties
+# before
+ops.env=prod.eu
+ops.prod.eu.url=https://eu.example.com
+
+# after
+ops.env=prod-eu
+ops.prod-eu.url=https://eu.example.com
+```
+
+- **`brace ops keypair --label` validates the label.** A label containing `:` or `=`, starting
+  with `#`, or a lone `read`/`ro`/`readonly`/`read-only`/`control` without `--read-only`, is
+  refused before any key is generated: it would have produced a keys-file line the server
+  refuses.
+- **Project files are never written through a symlink.** `brace agents-md`, `brace init` and
+  `brace ops keypair` refuse to write `BRACE-AGENTS.md`, `BRACE-OPS.md`, `.brace`,
+  `.brace.local`, `.gitignore` or `ops-authorized-keys` when that path is a symbolic link, a
+  dangling one included. Replace the link with a regular file if you want the CLI to manage it.
+- **Terminal control characters are escaped in human output.** Server and config text is
+  printed with control, bidi and invisible characters shown as visible escapes (`\x1b`), and a
+  server value can no longer start a line of its own. `brace errors <id>` prints each line of
+  its request, headers, queries and stack-trace sections behind a `  | ` gutter (it was a plain
+  indent). `--json` output goes through the JSON serializer; `cache clear --json` and
+  `resolve --json` now print re-serialized JSON, and exit 2 on a body that isn't JSON.
+- **One `<brace.version>` per `pom.xml`.** A pom with more than one `<brace.version>` element
+  is refused, commented-out copies and copies in profiles included, so the toolchain the
+  launcher picks is the version Maven builds. Keep exactly one.
+- **Prereleases sort before their release.** `0.1.11-rc.5` is older than `0.1.11`, and `rc.10`
+  is newer than `rc.2`. The toolchain bundled with the launcher itself is always allowed.
+- **Breaking, with the 0.1.11 release: the launcher's toolchain floor becomes `0.1.11`.** A
+  project pinned to `0.1.10` or earlier, or to any `0.1.11` prerelease (`0.1.11-rc.1` to
+  `rc.6`), is then refused: those CLIs write the ops token cache through a symlink a cloned repo
+  can commit in `target/`. Release-candidate launchers still use the 0.1.8 floor; the value is
+  raised in the release itself. Upgrade the pin:
+
+```xml
+<!-- before -->
+<brace.version>0.1.11-rc.6</brace.version>
+<!-- after -->
+<brace.version>0.1.11</brace.version>
+```
+
+  `BRACE_ALLOW_OLD_TOOLCHAIN=1` still runs an older pin anyway. A pin older than the launcher
+  but at or above the floor runs, with a note.
 
 ## Fix: `brace dev` ships the H2 driver
 

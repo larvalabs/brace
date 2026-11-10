@@ -14,7 +14,8 @@ import java.util.Base64;
 
 /**
  * Short-lived HMAC-SHA256 signed token for ops endpoint authentication.
- * Format: base64url(json).base64url(hmac) — same as Brace session cookies.
+ * Format: base64url(json).base64url(hmac). Signed, not encrypted (unlike Brace session cookies,
+ * which are AES-GCM sealed).
  *
  * <p>The payload carries {@code exp} (expiry, epoch seconds), an optional
  * {@code scope} ({@link OpsScope}; {@code READ} when absent or unrecognised), and an

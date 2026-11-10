@@ -733,11 +733,16 @@ Fixed in the commit of the finding named, or the closeout docs commit.
 - [x] `docs/SECURITY.md:1187, 1190`: `before("/api", …)` limits only the literal `/api` (M4).
 - [x] `docs/SECURITY.md:707-716`: recommends `::ffff:10.0.0.0/104`, which throws at startup
   ("Prefix length must be 0..32"); the mapped form already matches the IPv4 CIDR. Remove it.
-- [ ] `docs/SECURITY.md:1389`: says ops auth v1 "is accepted for one release"; it is removed.
-- [ ] `docs/SECURITY.md:348-354` and the `@template` "Not covered" note (L7).
-- [ ] Stale comments: `Brace.java:1804-1805` (dashboard "embeds a live bearer token"),
+- [x] `docs/SECURITY.md:1389`: says ops auth v1 "is accepted for one release"; it is removed.
+  (Closeout docs commit.)
+- [x] `docs/SECURITY.md:348-354` and the `@template` "Not covered" note (L7).
+- [x] Stale comments: `Brace.java:1804-1805` (dashboard "embeds a live bearer token"),
   `OpsToken` class doc ("same as Brace session cookies"), `Session.java:382-383` (legacy cookies
   without `_exp`), `Request.java:493-495` (Jetty joins repeated headers), `RateLimiter.java:477`.
+  (The last two in Track C; the first three in the closeout docs commit.)
+- [x] Found at closeout: three sentences in `docs/SECURITY.md` and `BRACE-AGENTS.md` about
+  script-body escaping had lost their `\uXXXX` escapes when written and read "`<` written as
+  `<`". Restored.
 
 ## Not confirmed
 
@@ -764,6 +769,46 @@ Fixed in the commit of the finding named, or the closeout docs commit.
 - **Payload confidentiality on the WebSocket bus.** Payloads are signed, not encrypted; anyone
   who can `LISTEN` on the database and learns the channel name reads broadcasts. Acknowledged in
   the class doc.
+
+### Raised during the fix phase, not done
+
+These came out of the fixes and their independent reviews. None is a known bypass; each is
+either a hardening option, a limitation, or something that could not be verified.
+
+- **Build commands on a hostile checkout.** `brace compile` and `brace test` create and write
+  `target/classes` and `target/test-classes` through a committed `target` symlink
+  (`BuildCommands.java`), and print compiler and test output raw. Those commands run the
+  project's own code by design, so this was left out of L11. Not verified by running.
+- **Template tokenizer: `<title>` and `<textarea>`.** Their bodies are read as markup, because
+  `<title>` inside `<svg>` really is markup. JTE refuses unbalanced tags there, which limits the
+  effect to `@raw`/`$unsafe` text; the cost is at worst attribute-escaping data in text that
+  looks like a tag.
+- **Full `\uXXXX` escaping for every script body.** In SVG the tokenizer does not model, a
+  script body with a template-written `a<b` before a string could still let a quote end a
+  pseudo-attribute. Writing all script-body data with `\uXXXX` escapes for quotes too would close
+  it, and would also fix an existing non-security bug: JTE's script escapes (`\'`, `\-`) are not
+  valid JSON, so a value with an apostrophe or hyphen breaks
+  `<script type="application/json">` blocks. Not done because it changes all script-body output.
+- **Over-redaction by `isSecretShaped`.** A dated slug (`2024-black-friday-sale`), a dash-joined
+  hex list, a hash of 16 or more hex characters, and a free-form header whose whole value is an
+  absolute path containing a digit are redacted in error records, because they look like a
+  grouped recovery code or a secret. Unchanged by M6 and documented in `docs/SECURITY.md`;
+  narrowing it means changing the rule for paths and logs too.
+- **Rate-limiter flush on the request thread.** The shared-counter flush still runs on the
+  request thread that wins it. It is now chunked, bisects on a bad key and stops after 2 s, but
+  it was not moved off-thread because the same request reads the result for its own decision.
+- **A test JVM hang inside `Brace.stop()`.** One fix agent saw `CliCheckTest` hang in Jetty's
+  `server.stop()`; it could not be reproduced in 800 iterations of the same scenario. The
+  likelier cause is a server left running by a test (the `stopped` flag bug, now fixed, did
+  that). Several unrelated test classes also failed once and passed on rerun while four suites
+  ran on one machine; a serial run on the merged branch was clean.
+- **`csrf-htmx.js` was not executed in a browser.** L8's test checks the script's text only.
+- **Page-cache poisoning by inputs the framework cannot see.** The dev and test check flags
+  undeclared reads through `Request`; a handler that depends on global state or reads the raw
+  Jetty request is not detected.
+- **`deletePrefix` over-deletion.** For a prefix that has to be cut (control character, the hash
+  marker, over 128 characters) some unrelated hashed keys sharing the cut prefix are still
+  cleared. Stated in the Javadoc.
 
 ## Checked and cleared
 

@@ -752,7 +752,7 @@ of JTE's escaping, Brace's template output:
   `# % . _ -` are written as CSS hex escapes, so data can't end its declaration or rule. Plain
   values (`style="color: ${color}"`, `width: ${pct}%`) and data in a quoted CSS string
   (`url("${image}")`) work; `style="${wholeDeclarationList}"` and `rgb(...)` as data don't.
-- **`<script>` bodies**: JTE's JavaScript escaping plus `<`/`>`/`&` for `< > &`. Put
+- **`<script>` bodies**: JTE's JavaScript escaping plus `\u003c`/`\u003e`/`\u0026` for `< > &`. Put
   data only inside a quoted string (`var name = "${name}";`); `var n = ${count};` is code, not
   data. Write `<script src="/app.js"></script>`, never `<script src="/app.js"/>`: HTML has no
   self-closing script, and the browser swallows the page up to the next `</script>` (it is a

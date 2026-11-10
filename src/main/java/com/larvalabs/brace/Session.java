@@ -399,10 +399,9 @@ public class Session {
             //   regardless of the client-side Max-Age hint).
             // - Present and in the future → strip _exp so it is never visible via get/has/keys, then
             //   keep the data.
-            // - Absent (legacy ≤0.1.6 cookie) → accepted for this release; re-minted with _exp on the
-            //   next write. A future release will reject expiry-less cookies (see migration guide).
-            // M10: a cookie without _exp (minted by 0.1.6 or earlier) is no longer accepted; every
-            // cookie since 0.1.7 carries one. A missing, malformed or past _exp is an empty session.
+            // - Absent → reject (M10): a cookie without _exp (minted by 0.1.6 or earlier) is no longer
+            //   accepted; every cookie since 0.1.7 carries one. A missing, malformed or past _exp is
+            //   an empty session.
             long now = System.currentTimeMillis() / 1000;
             String exp = session.data.remove(EXPIRY_KEY);
             try {

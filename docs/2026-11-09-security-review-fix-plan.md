@@ -6,8 +6,21 @@ tracker: it holds each finding's checkbox, fix spec, tests and suggested model. 
 the open decisions, how the work is split across agents, the order it merges in, and what has to
 be true before it does.
 
-**Status: not started.** Decisions D1 to D6 were settled on 2026-11-09: the recommended option
-in every case.
+**Status (2026-11-10): fixes merged, closeout in progress.** All four tracks are fixed,
+independently reviewed, review-fixed and merged into the integration branch; M6 and the
+post-merge cleanups are done; the suite is green on the merged branch. Remaining: the tool
+reruns, the whole-branch review and its fixes, the merge gate (`mvn verify`, `tests/cli`) and
+the review record. H2's code has landed, but `MIN_TOOLCHAIN` itself is raised in the 0.1.11
+release commit, so H2 stays unticked until then.
+
+Decisions D1 to D6 were settled on 2026-11-09: the recommended option in every case. Decisions A
+and B below were made during the fix phase on the reviewer's recommendation and are pending
+Matt's confirmation.
+
+Two deviations from the conventions below: the integration branch is
+`claude/framework-security-review-7c9e30`, not `security-review-2026-11`; and migration-guide
+entries were written at closeout in one commit, not per fix commit, because four parallel
+tracks appending to one guide would have conflicted on every merge.
 
 ## Goal
 
@@ -36,6 +49,15 @@ the todos doc match.
 
 A consequence of D5: once the floor is `0.1.11`, a project pinned to `0.1.10` or an
 early rc cannot use the launcher without the override until it upgrades.
+
+Two more decisions came out of the independent review of Track C. Both refine how an earlier
+decision was first implemented. **Applied on the reviewer's recommendation, pending Matt's
+confirmation**; either can be changed before release.
+
+| # | Finding | Applied | Alternative considered | Why |
+|---|---|---|---|---|
+| A | M4 missing rate-limit key (refines D2) | A request with a missing key is limited in a bucket for its client IP (an IPv6 /64), with the limiter's own limit and window; `.exemptMissingKey()` opts out | One global missing-key bucket, as D2 was first implemented | With one global bucket, ordinary traffic locked everyone out: five `GET /login` page views from five IPs and a sixth visitor got 429. Per-IP keeps "no bypass" without that |
+| B | L6 key cap | At `maxKeys` a new key evicts the least recently used key that is under its limit; keys at their limit stay pinned; only when nothing can be evicted does a key use a per-IP overflow bucket, then a global one | One global overflow bucket for every key past the cap | A flood of about 111 fresh keys per second locked out every new login user. Evicting an under-limit key forfeits fewer than `maxRequests` attempts |
 
 ## Working conventions
 
@@ -173,22 +195,37 @@ In order of urgency:
 
 ## Breaking changes
 
-Collected for the migration guide.
+As written into `docs/migrations/brace-0.1.10-to-0.1.11.md` (sections from "Security review,
+November 2026" on). That guide is the reference; this table is the checklist it was built from.
 
 | Change | Decision | What an app does |
 |---|---|---|
 | A static mapping needs an access or a public marker | D1 | Add one to each `staticFiles(...)` call |
-| A missing rate-limit key is limited | D2 | Opt in to the exemption where a null key means "not yet identified" |
+| A missing rate-limit key is limited, per client IP | D2, A | Apply a login limiter to the POST only; `.exemptMissingKey()` where a null key means "nothing to limit" |
+| Distinct rate-limit keys are capped (evicting under-limit keys); `perIp` groups IPv6 by /64; keys are stripped | L6, B | None expected; `.maxKeys(n)` to tune |
 | `req.form()` ignores query-string values on mutating methods | D3 | Send form fields in the body |
-| `smtp://` requires STARTTLS | D4 | Use the plain opt-out for a local relay |
-| Projects pinned below `0.1.11` need an override to use the launcher | D5 | Upgrade the pin |
-| Unknown `scope:` fails startup; `opsOrigins` required outside dev | D6 | Fix the key file; set `BRACE_OPS_ORIGINS` |
-| A percent-encoded unreserved character in a static path is a 404 | M2 | None expected; browsers don't send these |
+| `smtp://` requires STARTTLS | D4 | `smtp+plain://` for a local relay |
+| `to`/`cc`/`from`/`replyTo` take one address; `@Email` rejects separators; `replyTo` is now applied | L14 | One message per recipient |
+| Projects pinned below `0.1.11` need an override to use the launcher, from the release on | D5 | Upgrade the pin |
+| A pom with more than one `<brace.version>` is refused | H2 | Keep exactly one |
+| CLI env names must match `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`; `brace ops keypair` validates labels; project files are not written through symlinks | L11, L1 | Rename env keys; replace symlinked files |
+| Strict `ops-authorized-keys` grammar; `opsOrigins` required outside dev; a token with no scope claim is `read` | D6 | Fix the key file; set `BRACE_OPS_ORIGINS` |
+| `Http.timeout(...)` bounds the whole buffered exchange; `timeout(null)` means 30 s for `fetch*` | M8 | Add `.timeout(...)` to calls that take over 30 s |
+| `req.ip()` reads only the chosen forwarding header; rightmost `X-Forwarded-Proto`/`Host`; unbracketed IPv6 | L3, L6 review | `.useForwardedHeader()` behind a Forwarded-only proxy |
+| Data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; `<script src/>` is read as an open script | L7, H1 review | Use `data-*` attributes; pass CSS values, not syntax; write `<script src></script>` |
+| A percent-encoded unreserved character in a static path is a 404; so is a case or Unicode variant of the stored name | M2 | Fix links whose spelling differs from the file |
 | A static file requested with a trailing slash or an empty segment is a 404 | M2 review | None expected; link to the file's own URL |
-| Page cache stores only 2xx | L4 | None expected |
+| Page cache stores only 2xx, keys on the route (`brace:page:` prefix), bypasses on `Authorization` and htmx targeting headers, and does not cache a response that sets a cookie | L4, L4 review | Declare inputs with `.vary(...)`/`.varyHeader(...)` |
+| Under `Brace.test()` a cached handler that reads undeclared input throws | L4 review | Declare the input or stop caching the route |
+| The Postgres cache caps page rows separately (`CacheBackend.postgres(db, maxEntries, maxPageEntries)`) | L4 review | None expected |
+| `cache.get(key, type)` misses on an unregistered subtype | L15 | Read with the concrete type |
+| A previous session secret that is a placeholder fails `start()`; previous-secret cookies need a bounded `_abs`; `sessions(options)` copies the options | M7 | Don't list public or leaked secrets; configure options before the call |
+| A log field named exactly `code`, `sig` or `otp` is redacted; `/ops/errors` redacts by value shape | M6 | Rename such log fields |
+| Analytics rows are capped per visitor and per day | L16 | Raise the caps on high-traffic sites |
+| A literal `.` or `..` path segment is a 404; WebSocket paths are exact | L9, L9 review | None expected |
 | A static mapping answers 405 to methods other than GET and HEAD, and never serves a path a route pattern matches | M3 review | Serve anything that takes another method from a route |
 | A static mapping's directory must exist at `start()` | M3 review | Create it at deploy time or before `start()` |
-| Mappings on overlapping directories need the same access; a prefix is registered once | M3 review | Separate the directories, or pass the same `Access` objects |
+| Mappings on overlapping directories need the same access; a prefix is registered once | M3 review | Separate the directories, or give both mappings equal access (built-in kinds compare by value; custom checks by identity) |
 | Under a guarded mapping, and on any access rejection, caching headers from the app are replaced (`private, no-cache` for the file, `no-store` otherwise) | M3 review | None expected |
 | `Result` header names are case-insensitive; `headers()` iterates in name order | M3 review | None expected; don't rely on two spellings being two headers |
 | A response carrying the session cookie gets `private` added to an explicit `Cache-Control` without `private`/`no-store` | M3 review | None expected |

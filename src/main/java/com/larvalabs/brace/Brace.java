@@ -1911,9 +1911,9 @@ public class Brace {
     /**
      * Wrap an ops handler so its response is never stored by a cache (M4).
      *
-     * <p>Ops responses carry credentials and operational detail: {@code /ops/dashboard} embeds a
-     * live bearer token in the page HTML (on the polling div and each action button), and the
-     * others expose error messages, stack traces, and log lines. Only {@code /ops/auth/exchange}
+     * <p>Ops responses carry operational detail: error messages, stack traces and log lines, and
+     * the auth endpoints return tokens. (The dashboard page itself no longer embeds a bearer
+     * token; it is cookie-only since 0.1.11.) Only {@code /ops/auth/exchange}
      * used to say {@code no-store} — because its token is in the URL — which left every other
      * endpoint relying on the caller's credential channel to suppress caching.
      *
