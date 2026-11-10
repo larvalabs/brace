@@ -126,7 +126,7 @@ public class Request {
         try {
             cleanup.close();
         } catch (Throwable t) {
-            Log.warn("failed to release upload temp files: " + t);
+            Log.warn("failed to release upload temp files: " + Redactor.redactMessage(t.toString()));
         }
     }
 

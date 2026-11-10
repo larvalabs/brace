@@ -1959,7 +1959,7 @@ public class Brace {
         try {
             stop();
         } catch (Exception e) {
-            System.err.println("Brace shutdown error: " + e);
+            System.err.println("Brace shutdown error: " + Redactor.redactMessage(e.toString()));
         }
     }
 

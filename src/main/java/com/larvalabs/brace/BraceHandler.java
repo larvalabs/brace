@@ -1088,7 +1088,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 try {
                     result = after.apply(req, result);
                 } catch (Exception e) {
-                    Log.warn("after-middleware threw while decorating an error response: " + e);
+                    Log.warn("after-middleware threw while decorating an error response: " + Redactor.redactMessage(e.toString()));
                 }
             }
         }
@@ -1310,7 +1310,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 closeQuietly(onWritten);
                 Log.event("response.stream.failed", Map.of(
                     "status", result.status(),
-                    "error", String.valueOf(t)));
+                    "error", Redactor.redactMessage(String.valueOf(t))));
             });
         // Callback.from(Runnable, Consumer) builds a callback whose completion does NOT propagate,
         // so chain the real one explicitly: release our resources first, then complete the request.
@@ -1382,7 +1382,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         try {
             closeable.close();
         } catch (Throwable t) {
-            Log.warn("failed to release request resources after response: " + t);
+            Log.warn("failed to release request resources after response: " + Redactor.redactMessage(t.toString()));
         }
     }
 
@@ -2550,7 +2550,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
         } catch (Exception e) {
-            Log.warn("upload temp sweep failed for " + dir + ": " + e);
+            Log.warn("upload temp sweep failed for " + dir + ": " + Redactor.redactMessage(e.toString()));
             return;
         }
         if (swept > 0) {
