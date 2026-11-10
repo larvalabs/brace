@@ -23,12 +23,34 @@ public class WebhookNotifier implements Notifier {
         this.url = url;
     }
 
+    /** Longest exception message posted (L12). */
+    static final int MAX_MESSAGE_CHARS = 500;
+
+    /**
+     * Slack and Mattermost parse {@code <!channel>} and {@code <https://evil|View incident>} in
+     * incoming-webhook text, so every interpolated field is escaped ({@code & < >}) and the
+     * message is bounded: a web user who controls part of an exception message can otherwise
+     * phish or spam the ops channel (L12).
+     */
+    static String formatText(RegressionTracker.Regression r) {
+        String message = r.message();
+        if (message != null && message.length() > MAX_MESSAGE_CHARS) {
+            message = message.substring(0, MAX_MESSAGE_CHARS) + "…";
+        }
+        return "🚨 New error since startup: " + escape(r.type()) + " @ " + escape(r.route())
+            + (message != null ? " — " + escape(message) : "")
+            + " (first seen " + escape(String.valueOf(r.firstSeen())) + ")";
+    }
+
+    static String escape(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
     @Override
     public void notifyRegression(RegressionTracker.Regression r) {
         if (url == null || url.isEmpty()) return;
-        String text = "🚨 New error since startup: " + r.type() + " @ " + r.route()
-            + (r.message() != null ? " — " + r.message() : "")
-            + " (first seen " + r.firstSeen() + ")";
+        String text = formatText(r);
         Thread.startVirtualThread(() -> {
             try {
                 String body = Json.mapper().writeValueAsString(Map.of("text", text));

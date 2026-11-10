@@ -482,7 +482,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     helper that refuses a symlink target or writes by temp file and move, as `SecretFiles` does.
   - **Model: Sonnet 5.5.** Three commits.
 
-- [ ] **L12: `WebhookNotifier` posts exception text as Slack markup, unbounded**, `WebhookNotifier.java:29-34`
+- [x] **L12: `WebhookNotifier` posts exception text as Slack markup, unbounded**, `WebhookNotifier.java:29-34`
   - The message is redacted but otherwise raw; Slack and Mattermost parse `<!channel>` and
     `<https://evil|View incident>`. A web user who triggers a new error kind with input in the
     message can phish or spam the ops channel.
