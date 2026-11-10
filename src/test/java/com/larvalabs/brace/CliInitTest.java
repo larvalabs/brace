@@ -117,7 +117,7 @@ class CliInitTest {
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
-        var app = Brace.app().port(0).ops(keysFile.toString());
+        var app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         app.start();
         try {
             Files.writeString(tmp.resolve(".brace"),
@@ -143,7 +143,7 @@ class CliInitTest {
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
-        var app = Brace.app().port(0)
+        var app = Brace.app().opsUnpinnedForTests().port(0)
             .sessions("init-csrf-test-secret-at-least-32-characters")
             .ops(keysFile.toString());
         app.start();
@@ -195,7 +195,7 @@ class CliInitTest {
         Path serverKeysFile = tmp.resolve("server-keys");
         Files.writeString(serverKeysFile, serverKey.publicKey() + " server-only\n");
 
-        var app = Brace.app().port(0).ops(serverKeysFile.toString());
+        var app = Brace.app().opsUnpinnedForTests().port(0).ops(serverKeysFile.toString());
         app.start();
         try {
             Files.writeString(tmp.resolve(".brace"),
@@ -228,7 +228,7 @@ class CliInitTest {
         Files.writeString(tmp.resolve("ops-private.key"),
             clientKey.privateKey() + "\n" + clientKey.publicKey() + "\n");
 
-        var app = Brace.app().port(0).ops(keysFile.toString());
+        var app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         app.start();
         try {
             Files.writeString(tmp.resolve(".brace"),

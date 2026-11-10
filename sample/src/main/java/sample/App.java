@@ -5,7 +5,9 @@ import java.util.Map;
 
 public class App {
     public static void main(String[] args) throws Exception {
-        var app = Brace.app().port(8080).ops("ops-authorized-keys");
+        var app = Brace.app().port(8080).ops("ops-authorized-keys")
+            // Ops needs its public origin outside dev mode; change it (or set BRACE_OPS_ORIGINS) when deployed.
+            .opsOrigins("http://localhost:8080");
 
         // Every route needs an access requirement or .publicRoute(); start() refuses otherwise.
         app.get("/", req -> Result.text("Welcome to Brace!")).publicRoute();

@@ -42,8 +42,8 @@ class OpsSharedSecretTest {
         Path keys = tmp.resolve("authorized-keys");
         Files.writeString(keys, keypair.publicKey() + " test-key\n");
 
-        appA = Brace.app().port(0).ops(keys.toString()).sessions(SHARED);
-        appB = Brace.app().port(0).ops(keys.toString()).sessions(SHARED);
+        appA = Brace.app().opsUnpinnedForTests().port(0).ops(keys.toString()).sessions(SHARED);
+        appB = Brace.app().opsUnpinnedForTests().port(0).ops(keys.toString()).sessions(SHARED);
         appA.start();
         appB.start();
         portA = appA.actualPort();

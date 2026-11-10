@@ -1315,7 +1315,7 @@ all-lowercase-letters) log a warning but are allowed. Use 32+ random characters.
 
 Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`, plus
 `app.opsOrigins("https://your-app")` (or `BRACE_OPS_ORIGINS`), the public origin CLI logins are
-signed for, which prod mode requires; scaffold config with
+signed for, which every mode except `dev` (and tests) requires when ops is on; scaffold config with
 `brace init`, keys with `brace ops keypair`. In `ops-authorized-keys` a scope is exactly `scope:read` or `scope:control`; a mistyped one (`scope:readonly`, `scope: read`, bare `read-only`) fails startup, a duplicate key keeps the lower scope, no token means control. **Operating in production?** Start with
 `brace check --env prod --json` — not `brace status`. The full ops reference — auth keys and
 scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, storage/retention —

@@ -33,7 +33,7 @@ class OpsCsrfTest {
         Files.writeString(keysFile, keypair.publicKey() + " test\n");
 
         // Sessions enabled is the trigger for the original bug.
-        app = Brace.app()
+        app = Brace.app().opsUnpinnedForTests()
             .port(0)
             .sessions("ops-csrf-test-secret-at-least-32-characters")
             .ops(keysFile.toString());

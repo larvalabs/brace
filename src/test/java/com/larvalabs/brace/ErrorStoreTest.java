@@ -538,7 +538,7 @@ class ErrorStoreTest {
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile, kp.publicKey() + "\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -581,7 +581,7 @@ class ErrorStoreTest {
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile, kp.publicKey() + "\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opsresolvedb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -651,7 +651,7 @@ class ErrorStoreTest {
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile, kp.publicKey() + "\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsauthdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -684,7 +684,7 @@ class ErrorStoreTest {
         // A 32-char hex-like secret that should trigger value-shaped redaction
         String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:redacttest" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))

@@ -34,7 +34,7 @@ class OpsNoStoreTest {
         Path keysFile = tmp.resolve("authorized-keys");
         Files.writeString(keysFile, keypair.publicKey() + " test\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .sessions("ops-nostore-secret-at-least-32-characters")
             .ops(keysFile.toString());
         app.start();

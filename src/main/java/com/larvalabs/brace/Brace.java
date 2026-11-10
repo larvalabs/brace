@@ -28,6 +28,8 @@ public class Brace {
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     // Started by Brace.test(): request data in a query string throws instead of logging (H3).
     private boolean testHarness;
+    /** Test-only: skip the L2 "ops needs opsOrigins" startup check for apps built outside {@code Brace.test()}. */
+    private boolean opsOriginsOptional;
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
     private SessionValidator sessionValidator;
     // H1 access model: the requirement every route gets unless it is marked .publicRoute().
@@ -96,6 +98,12 @@ public class Brace {
     private TrustedProxies trustedProxies;
     private int regressionsWarmupSeconds = 30;
     private final List<Notifier> regressionNotifiers = new ArrayList<>();
+
+    /** Package-private for tests that start a real server with ops on and no pinned origin. */
+    Brace opsUnpinnedForTests() {
+        this.opsOriginsOptional = true;
+        return this;
+    }
 
     public static Brace app() {
         JulLogging.init();
@@ -678,10 +686,10 @@ public class Brace {
      * The public origin(s) of this app ({@code "https://app.example.com"}), the only ones an ops
      * CLI login may be signed for (M14). The {@code brace} CLI signs the server's origin into its
      * login, so a signature collected by another server (a {@code .brace} pointing elsewhere) is
-     * refused here. Required in prod mode when ops is on; also read from the
+     * refused here. Required whenever ops is on, except in dev mode and the test harness; also read from the
      * {@code BRACE_OPS_ORIGINS} environment variable when not set in code. Each argument may be a
      * comma-separated list; null and blank entries are skipped (an unset config key).
-     * Without it (dev, tests) the origin's host must match the request's {@code Host}, which a
+     * Without it (dev mode, tests) the origin's host must match the request's {@code Host}, which a
      * client can choose on a directly exposed app, so it's no defense there.
      */
     public Brace opsOrigins(String... origins) {
@@ -1247,8 +1255,12 @@ public class Brace {
             if (opsOrigins.isEmpty() && System.getenv("BRACE_OPS_ORIGINS") != null) {
                 opsOrigins(System.getenv("BRACE_OPS_ORIGINS"));
             }
-            if (opsOrigins.isEmpty() && "prod".equals(System.getProperty("brace.mode"))) {
-                throw new IllegalStateException("Ops is on in prod mode without app.opsOrigins(\"https://your-app\") "
+            // L2: required everywhere except dev and the test harness, matching validateSecret:
+            // deployments launched with no brace.mode at all (old scaffold Dockerfiles) are real
+            // deployments, and an unpinned origin falls back to the Host header a client can choose.
+            if (opsOrigins.isEmpty() && !testHarness && !opsOriginsOptional
+                    && !"dev".equals(System.getProperty("brace.mode"))) {
+                throw new IllegalStateException("Ops is on outside dev mode without app.opsOrigins(\"https://your-app\") "
                     + "(or BRACE_OPS_ORIGINS): the ops CLI login is bound to the server's origin, and without "
                     + "it configured the server can only compare against the Host header, which a client "
                     + "talking to the app directly can choose.");

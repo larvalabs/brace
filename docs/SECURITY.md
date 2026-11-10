@@ -1344,8 +1344,9 @@ signature only for an origin listed with `app.opsOrigins("https://app.example.co
 `BRACE_OPS_ORIGINS` environment variable, comma-separated), compared exactly: scheme, host and
 port. The request's `Host` and `X-Forwarded-Host` play no part, because the client relaying a
 signature chooses those: an app reachable directly, or a proxy that passes a client's
-`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Prod
-mode refuses to start with ops on and no origin configured. In dev and tests, with none set, the
+`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Every
+mode except `dev` (including an unset `brace.mode`, as in older scaffold Dockerfiles) refuses to
+start with ops on and no origin configured. In dev mode and the test harness, with none set, the
 origin's host must match the request's host instead, which is no defense against a client that
 can reach the app directly.
 

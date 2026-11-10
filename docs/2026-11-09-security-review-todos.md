@@ -363,7 +363,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     fingerprint and scope at boot.
   - **Model: Sonnet 5.5.**
 
-- [ ] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
+- [x] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
   - With the mode unset, startup succeeds unpinned and `originIsThisServer` falls back to
     comparing the signed host with `req.host()`, which the `opsOrigins` Javadoc calls "no
     defense". `validateSecret` already refuses "everywhere except dev" because old scaffold

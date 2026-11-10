@@ -39,7 +39,7 @@ class OpsScopeIntegrationTest {
         var db = new DatabaseFactory(
             "jdbc:h2:mem:scopedb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null, List.of());
 
-        app = Brace.app().port(0).ops(keysFile.toString()).cache(cache).database(db);
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString()).cache(cache).database(db);
         app.get("/boom", req -> { throw new RuntimeException("scope test error"); });
         app.start();
         port = app.actualPort();
