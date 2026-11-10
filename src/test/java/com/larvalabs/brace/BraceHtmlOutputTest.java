@@ -344,6 +344,30 @@ class BraceHtmlOutputTest {
         both("xssContentCaller", Map.of("name", "<Ann>"));
     }
 
+    // --- L7 (2026-11): <Script> ---
+
+    @Test
+    void aScriptTagInAnyCaseIsAScript() {
+        // JTE compares the tag name to "script" exactly, so <Script> got body escaping, which
+        // leaves quotes and backslashes alone.
+        for (String x : SCRIPT_VALUES) {
+            String html = both("xssScriptCase", Map.of("x", x));
+            String e = js(x);
+            assertTrue(html.contains("<Script id=\"m1\">foo('" + e + "')</Script>"), html);
+            assertTrue(html.contains("<sCRIPT id=\"m2\">var a = \"" + e + "\";</sCRIPT>"), html);
+            assertTrue(html.contains("<script id=\"m4\">baz('" + e + "')</script>"), html);
+            // After the end tag, in any case, it is body text again.
+            assertTrue(html.contains("<p id=\"after\">" + Html.escape(x).replace("&quot;", "\"").replace("&#39;", "'") + "</p>"), html);
+        }
+        String html = both("xssScriptCase", Map.of("x", "');alert(1);//"));
+        assertTrue(html.contains("<Script id=\"m1\">foo('\\');alert(1);\\/\\/')</Script>"), html);
+        // A @template call inside <Script> (JTE allows it there, and reports its output as body
+        // text): escaped so that it is safe in a script string as well.
+        assertTrue(html.contains("<Script id=\"m3\">bar('\\u0027);alert(1);//')</Script>"), html);
+        html = both("xssScriptCase", Map.of("x", "\\"));
+        assertTrue(html.contains("<Script id=\"m3\">bar('\\\\')</Script>"), html);
+    }
+
     /**
      * Renders with static template text as pre-encoded bytes (how Brace runs, to a String and to
      * bytes) and as Strings (JTE's default), asserts all three agree, and returns the HTML.

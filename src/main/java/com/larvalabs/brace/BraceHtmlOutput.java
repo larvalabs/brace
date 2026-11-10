@@ -84,6 +84,8 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
     @Override
     public void setContext(String tagName, String attributeName) {
+        // L7: lower-cased, because JTE compares the tag to "script" exactly and <Script> is one.
+        if (tagName != null) tagName = tagName.toLowerCase(Locale.ROOT);
         super.setContext(tagName, attributeName);
         this.tagName = tagName;
         this.attributeName = attributeName == null ? null : attributeName.toLowerCase(Locale.ROOT);
@@ -234,6 +236,11 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             step((char) (b[i] & 0xff), i);
             i++;
         }
+    }
+
+    /** Whether the output is in the body of a {@code <script>} element, in any letter case. */
+    private boolean inScriptBody() {
+        return (state == RAW || state == RAW_LT || state == RAW_END) && "script".equals(rawElement);
     }
 
     /** Whether the text just scanned ends in a quoted attribute value it opened, on a start tag. */
@@ -403,7 +410,13 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             return;
         }
         if (tagName == null || attributeName == null) {
-            super.writeUserContent(value);
+            if (inScriptBody() == "script".equals(tagName)) {
+                super.writeUserContent(value); // JTE's escaping for a script body, or for body text
+            } else {
+                // JTE and the output disagree about being in a script: a @template call inside
+                // <Script>, which JTE reads as an ordinary element. Escaped to be inert in both.
+                target.writeContent(escapeScript(value));
+            }
             return;
         }
         if (valueAttribute != null) emitHeldValue();
