@@ -752,12 +752,20 @@ of JTE's escaping, Brace's template output:
   `# % . _ -` are written as CSS hex escapes, so data can't end its declaration or rule. Plain
   values (`style="color: ${color}"`, `width: ${pct}%`) and data in a quoted CSS string
   (`url("${image}")`) work; `style="${wholeDeclarationList}"` and `rgb(...)` as data don't.
-- **`<script>` bodies**: JTE's JavaScript escaping plus `\u003c`/`\u003e`/`\u0026` for `< > &`. Put
-  data only inside a quoted string (`var name = "${name}";`); `var n = ${count};` is code, not
-  data. Write `<script src="/app.js"></script>`, never `<script src="/app.js"/>`: HTML has no
-  self-closing script, and the browser swallows the page up to the next `</script>` (it is a
-  complete element only inside `<svg>`). For a JSON data block, serialize in the handler and put it
-  in a `data-*` attribute: values with `'` or `-` don't survive `<script type="application/json">`.
+- **`<script>` bodies**: everything in the data but ASCII letters, digits, `_`, `,` and non-ASCII
+  characters is written as `\uXXXX` (`O'Brien` renders as `O\u0027Brien`). A JavaScript string,
+  a template literal, a regex literal and `JSON.parse` all read the original value back, so
+  `<script type="application/json">{"name": "${name}"}</script>` works with any value; only the
+  page source looks different. Put data only inside a quoted string (`var name = "${name}";`):
+  `var n = ${count};` is code, not data, and breaks on anything but letters and digits (`1.5`,
+  `-3`); write `Number("${count}")`. Write `<script src="/app.js"></script>`, never
+  `<script src="/app.js"/>`: HTML has no self-closing script, and the browser swallows the page up
+  to the next `</script>` (it is a complete element only inside `<svg>`). In a script inside
+  `<svg>`, `a<b` opens a tag to the browser; data that lands in one outside a quoted value has
+  every character escaped (the script still reads it back). JTE strips `//` and `/* */` comments
+  from scripts, and JTE 3.2.1 drops the template text before a template's first comment when
+  that comment sits in a script ahead of code like `i<n` (no spaces) and the first `${...}`: if a
+  page loses its top, write `i < n` or move the comment (see `docs/SECURITY.md`).
 - The same rules apply to data a `@template` call or content block writes inside an attribute
   value: the context comes from the HTML written so far, not from the template source.
 

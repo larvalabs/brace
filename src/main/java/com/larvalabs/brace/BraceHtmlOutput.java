@@ -1096,7 +1096,9 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
      * still a quote to HTML.
      *
      * <p>It protects data inside a string or regex literal. Outside one, anything escaped is a
-     * syntax error ({@code var n = ${count}} works for digits only).
+     * syntax error ({@code var n = ${count}} works for letters and digits only, so not for
+     * {@code 1.5} or {@code -3}). Nor does it suit a script block that is neither JavaScript nor
+     * JSON ({@code type="text/template"}): the escapes show up in it as text.
      */
     static String escapeScriptData(String value) {
         StringBuilder out = null;

@@ -60,7 +60,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | **2026-11 review:** `opsOrigins` required whenever ops is on outside dev mode; `ops-authorized-keys` format is strict | security, **breaking** for deployments with no `brace.mode` and for keys files with scope typos | set `BRACE_OPS_ORIGINS`; write scopes exactly `scope:read` or `scope:control` | [§](#breaking-ops-origins-required-outside-dev-authorized-keys-format) |
 | **2026-11 review:** `Http.timeout(...)` bounds the whole buffered exchange, body included; `idleTimeout(...)` applies to `fetch*` | security, **breaking** for buffered calls that take over 30 s | add `.timeout(Duration...)` to slow downloads and slow APIs | [§](#breaking-http-timeouts-cover-the-response-body) |
 | **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; IPv6 addresses are unbracketed | security, **breaking** behind a proxy that sends only `Forwarded` | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host` | [§](#breaking-proxy-headers-and-reqip) |
-| **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are JavaScript-escaped again; `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"` | move the data to `data-*` attributes; pass CSS values, not CSS syntax | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
+| **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are escaped for JavaScript again, as `\uXXXX` (same value, different page source); `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"`, and for tests that string-match rendered script source | move the data to `data-*` attributes; pass CSS values, not CSS syntax; assert on values, not on script source | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
 | **2026-11 review:** page cache stores only 2xx, keys on the route, bypasses on `Authorization` and htmx targeting headers; `Brace.test()` throws when a cached handler reads undeclared input | security, **breaking** for tests of cached handlers that read undeclared input | declare inputs with `.vary(...)`/`.varyHeader(...)`, or stop caching the route | [§](#breaking-page-cache-keys-bypasses-and-undeclared-reads) |
 | **2026-11 review:** access rejections and guarded static responses are never shared-cacheable; `Result` header names are case-insensitive; dot segments are 404; WebSocket paths are exact | security | none, unless code relied on two spellings of a header name being two headers, or on `result.headers()` order | [§](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable) |
 | **2026-11 review:** previous session secrets are validated and lifetime-bounded; `/ops/errors` redacts by value shape; the error store survives hostile input; analytics row caps; ops auth start-time floor | security | none, unless a previous secret was a placeholder, or a log field is named exactly `code` | [§](#security-sessions-error-store-analytics-and-ops-auth) |
@@ -1621,13 +1621,40 @@ syntax of its own no longer works; email templates with inline styles are the li
 
 If the whole style string is trusted, server-built text, write it with `$unsafe{...}`.
 
-**3. `<script>` bodies are JavaScript-escaped again.** `<script>var name = "${name}";</script>`
-was attribute-escaped by mistake in the 0.1.11 release candidates (an HTML entity for a quote,
-and no backslash or newline escaping). Data there is JavaScript-escaped as documented, and `<`,
-`>` and `&` are additionally written as `\uXXXX` escapes, which a JavaScript string, template
-literal or regex literal reads back unchanged. Data must sit inside a quoted string: `var n =
-${count};` was never supported and now fails loudly when the value contains those characters.
-Remove any workaround that decoded entities in a script.
+**3. `<script>` bodies are escaped for JavaScript again, and the rendered text is different.**
+`<script>var name = "${name}";</script>` was attribute-escaped by mistake in the 0.1.11 release
+candidates (an HTML entity for a quote, and no backslash or newline escaping). Data there is now
+written with a `\uXXXX` escape for every character other than ASCII letters, digits, `_`, `,`
+and non-ASCII characters, in HTML and SVG scripts alike. The runtime value is the same: a
+JavaScript string, a template literal and `JSON.parse` read the original text back, and a regex
+literal matches it literally. Only the page source changes:
+
+```html
+<%-- template, unchanged --%>
+<script>var name = "${user.name}";</script>
+
+<%-- rendered by 0.1.10 --%>
+<script>var name = "O\'Brien";</script>
+
+<%-- rendered now: the same string to JavaScript --%>
+<script>var name = "O\u0027Brien";</script>
+```
+
+- Anything that string-matches rendered script source needs updating: a test that asserts
+  `var title = "Hello World"` in the HTML (it is now `"Hello\u0020World"`), a snapshot, a
+  scraper. Assert on the value the script sees, or on the escaped form.
+- `<script type="application/json">{"name": "${name}"}</script>` now parses for any value.
+  Before, the `\'` and `\-` that were written for an apostrophe and a hyphen made `JSON.parse`
+  fail. A workaround that moved such data to a `data-*` attribute can stay or go.
+- Data must sit inside a quoted string. `var n = ${count};` was never supported: it still works
+  for letters and digits and is now a syntax error for anything else, `1.5` and `-3` included.
+  Write `Number("${count}")`.
+- A regex literal with data in it (`/^${prefix}/`) now matches the data literally. To use data
+  as a pattern, build it: `new RegExp("${pattern}")`.
+- A script block that is neither JavaScript nor JSON (`<script type="text/template">`, a
+  client-side template) shows the escapes as text. Data there was already backslash-escaped
+  before; put such markup in a `<template>` element, where `${...}` is escaped as HTML.
+- Remove any workaround that decoded entities in a script.
 
 **4. `<script src="..."/>` is not self-closing in HTML.** A browser reads everything up to the
 next `</script>` as the script body, and Brace now reads it the same way, so `${...}` after it
@@ -1649,11 +1676,24 @@ Also changed, with no action expected: character references in a URL attribute's
 decoded before the scheme check (`href="&#32;${url}"` no longer exempts `url`); `<Script>` in any
 letter case is a script; data a `@template` call or content block writes inside an attribute is
 escaped for that attribute even after another `${...}` in the same value; scripts wrapped in
-`<!-- -->` that contain `<script` are followed the way a browser follows them; and data in a
-script inside `<svg>` or `<math>` has its quotes written as `\uXXXX` escapes too.
+`<!-- -->` that contain `<script` are followed the way a browser follows them; in a script or
+style inside `<svg>` or `<math>`, where `a<b` opens a tag to the browser, data that lands in
+that tag outside a quoted value has every character written as an escape (the script reads the
+same value back); and an `hx-vals`, `hx-headers` or `hx-request` value that Brace's reading of
+the page is not inside of (malformed SVG before it, for example) renders as `{}`.
+
+One thing to know about JTE while checking pages: JTE 3.2.1 drops the template text before a
+template's first comment when that comment sits in a script ahead of the first `${...}` and of
+code such as `i<n` (a `<` directly followed by a letter). The `<script>` tag goes with it and
+the script's source shows as page text. That is not new in this release, and data in such a
+page is escaped so that it stays text, but if a page loses its top, write `i < n` or move the
+comment.
 
 **htmx CSRF helper.** `/__brace/csrf-htmx.js` now attaches `X-CSRF-Token` only to same-origin
-requests. No change unless a page turned off htmx's `selfRequestsOnly` and posts cross-origin.
+requests, judged on the path the request is sent to (after every `htmx:configRequest` listener
+has run). No change unless a page turned off htmx's `selfRequestsOnly` and posts cross-origin.
+A page that wants the token on a cross-origin request sets the header in its own
+`htmx:configRequest` listener.
 
 ## Breaking: page cache keys, bypasses and undeclared reads
 
