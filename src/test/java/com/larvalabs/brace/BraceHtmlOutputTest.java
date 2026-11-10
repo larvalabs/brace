@@ -751,6 +751,56 @@ class BraceHtmlOutputTest {
             driven(Part.text("<svg><script>var t = '<a href=\""), link, Part.text("\">';</script><a href=\""), link, Part.text("\">")));
     }
 
+    // --- H1 review (F2): scripts wrapped in <!-- --> ---
+    //
+    // After "<!--" and then "<script" in a script body, the browser is in the double-escaped
+    // state, where the first "</script>" doesn't end the element. JTE ends the script there, and
+    // so did the tokenizer: the two agreed on "body text" for what is still script.
+
+    @Test
+    void aCommentWrappedScriptEndsWhereTheBrowserEndsIt() {
+        String html = both("xssScriptComment", Map.of("x", "');alert(1);//", "y", "\";alert(1);//"));
+        assertTrue(html.contains("var b = \"\\u0022;alert(1);//\"; foo('\\u0027);alert(1);//');\n//-->\n</script>"), html);
+        assertTrue(html.contains("<p id=\"after1\">');alert(1);//</p><a id=\"l1\" href=\"&#39;);alert(1);//\">"), html);
+        assertTrue(html.contains("<script id=\"w2\"><!--<script>var a=\"" + js("');alert(1);//")
+            + "\";</script>var b=\"\\u0022;alert(1);//\";--></script><a id=\"l2\" href=\"&#39;);alert(1);//\">"), html);
+        assertTrue(html.contains("<script id=\"w3\"><!-- var c = \"" + js("');alert(1);//") + "\"; --></script>"
+            + "<p id=\"after3\">');alert(1);//</p>"), html);
+        assertTrue(html.contains("<script id=\"w4\">var s = \"<!--\", d = \"" + js("');alert(1);//") + "\";</script>"
+            + "<p id=\"after4\">');alert(1);//</p>"), html);
+
+        String x = "</script><img src=x onerror=alert(1)>";
+        html = both("xssScriptComment", Map.of("x", x, "y", "\\"));
+        assertTrue(html.contains("var b = \"\\\\\"; foo('\\u003c/script\\u003e\\u003cimg src=x onerror=alert(1)\\u003e');"), html);
+        assertTrue(html.contains("<p id=\"after1\">" + text(x) + "</p>"), html);
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(both("xssScriptComment", Map.of("x", "javascript:alert(1)", "y", "")), "l1"));
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(both("xssScriptComment", Map.of("x", "javascript:alert(1)", "y", "")), "l2"));
+    }
+
+    @Test
+    void scriptDataEscapedStates() {
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        Part link = Part.data("a", "href", "javascript:alert(1)"), text = Part.data("p", null, "<'");
+        // Still in the script after this: body text from JTE's side is escaped as script.
+        for (String script : List.of("<script><!--<script></script>", "<script><!--<SCRIPT\n></script >", "<script><!-- <script/></Script/",
+                "<script><!--<script>x</script><script ></script\t>", "<script>\n<!--\ndocument.write(\"<script src='/x.js'></script>\");\n",
+                "<script><!-- --!><script></script>", "<script><!--<script></script>-- >", "<script><!--<script><!--</script>",
+                "<script><!--<script></script><script><!-- ", "<script><!--<script>-></script>")) {
+            assertEquals(script + "\\u003c\\u0027--></script><a href=\"" + blocked + "\">", driven(Part.text(script), text,
+                Part.text("--></script><a href=\""), link, Part.text("\">")), script);
+        }
+        // And out of it after this.
+        for (String script : List.of("<script><!--<script></script></script>", "<script><!--<script>--></script>",
+                "<script><!--></script>", "<script><!---></script>", "<script><!-- <scriptx></script>", "<script><!-- <scrip></script>",
+                "<script>a = \"<script>\";</script>", "<script><!- -<script></script>", "<script><!--<script></scriptx></script></script>",
+                "<script><!--<script></script>--></script>", "<script><!--<script>---></script>", "<script><!-- </script>",
+                "<script><!--<script>--><!--</script>", "<style><!--<script></style>", "<script><!--<<script></script></script >",
+                "<script><!--<script<script></script></script>", "<script><!--<script></script x=\"</script>\">")) {
+            assertEquals(script + "&lt;'<a href=\"" + blocked + "\">", driven(Part.text(script), text,
+                Part.text("<a href=\""), link, Part.text("\">")), script);
+        }
+    }
+
     @Test
     void disagreementWithJteResolvesToTheStricterReading() {
         String blocked = BraceHtmlOutput.BLOCKED_URL;

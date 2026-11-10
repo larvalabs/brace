@@ -222,7 +222,8 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         ATTR_NAME = 5, AFTER_ATTR_NAME = 6, BEFORE_VALUE = 7, VALUE_QUOTED = 8, VALUE_UNQUOTED = 9,
         RAW = 10, RAW_LT = 11, RAW_END = 12, MARKUP = 13, MARKUP_DASH = 14, COMMENT = 15,
         COMMENT_DASH = 16, COMMENT_DASH_DASH = 17, COMMENT_BANG = 18, BOGUS = 19,
-        CDATA_OPEN = 20, CDATA = 21, CDATA_BRACKET = 22, CDATA_BRACKETS = 23;
+        CDATA_OPEN = 20, CDATA = 21, CDATA_BRACKET = 22, CDATA_BRACKETS = 23,
+        RAW_BANG = 24, RAW_BANG_DASH = 25, RAW_OPEN = 26;
     private static final int MAX_NAME = 64;
     private static final int MAX_OPEN = 256;
 
@@ -248,7 +249,9 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private String tagString, attrString;                  // those as Strings, made when asked for
     private char quote;                                    // in VALUE_QUOTED: the quote that closes it
     private String rawElement;                             // in RAW*: the element whose body this is
-    private int rawMatched;                                // in RAW_END: characters of its name matched; in CDATA_OPEN: of "CDATA["
+    private int rawMatched;                                // in RAW_END, RAW_OPEN: characters of its name matched; in CDATA_OPEN: of "CDATA["
+    private int scriptEscape;                              // in a script body: 0 script data, 1 escaped, 2 double-escaped (see raw)
+    private int dashes;                                    // in RAW with scriptEscape > 0: the '-' just read, up to 2
     private int valueStart;                                // see scan
     // Elements open inside the outermost <svg>/<math>, lower-cased, outermost first; empty in
     // plain HTML content. Inside an integration point only what matters is added: a nested
@@ -264,7 +267,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         valueStart = -1;
         int i = begin;
         while (i < end) {
-            if (state == DATA || state == RAW) { // most of a page: nothing happens before a '<'
+            if (state == DATA || (state == RAW && scriptEscape == 0)) { // most of a page: nothing happens before a '<'
                 i = s.indexOf('<', i);
                 if (i < 0 || i >= end) return;
             }
@@ -278,7 +281,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         valueStart = -1;
         int i = 0, end = b.length;
         while (i < end) {
-            if (state == DATA || state == RAW) {
+            if (state == DATA || (state == RAW && scriptEscape == 0)) {
                 while (i < end && b[i] != '<') i++;
                 if (i == end) return;
             }
@@ -304,7 +307,8 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     private boolean inRawText() {
-        return state == RAW || state == RAW_LT || state == RAW_END;
+        return state == RAW || state == RAW_LT || state == RAW_END || state == RAW_BANG || state == RAW_BANG_DASH
+            || state == RAW_OPEN;
     }
 
     /** Whether the output is inside {@code <svg>} or {@code <math>} and not in an integration point. */
@@ -394,26 +398,58 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
                 if (isSpace(c)) state = BEFORE_ATTR;
                 else if (c == '>') closeTag(false);
             }
-            case RAW -> { if (c == '<') state = RAW_LT; }
+            case RAW -> raw(c);
             case RAW_LT -> {
                 if (c == '/') {
                     state = RAW_END;
                     rawMatched = 0;
-                } else if (c != '<') {
+                } else if (c == '!' && scriptEscape == 0 && "script".equals(rawElement)) {
+                    state = RAW_BANG;
+                } else if (scriptEscape == 1 && lower(c) == 's') {
+                    state = RAW_OPEN;
+                    rawMatched = 1;
+                } else {
+                    rawAgain(c);
+                }
+            }
+            case RAW_BANG -> { if (c == '-') state = RAW_BANG_DASH; else rawAgain(c); }
+            case RAW_BANG_DASH -> {
+                if (c == '-') {
                     state = RAW;
+                    scriptEscape = 1;
+                    dashes = 2; // "<!-->" is over already
+                } else {
+                    rawAgain(c);
+                }
+            }
+            case RAW_OPEN -> { // "<script" in the escaped state
+                if (rawMatched < rawElement.length()) {
+                    if (lower(c) == rawElement.charAt(rawMatched)) rawMatched++;
+                    else rawAgain(c);
+                } else if (isSpace(c) || c == '/' || c == '>') {
+                    state = RAW;
+                    scriptEscape = 2;
+                } else {
+                    rawAgain(c); // <scripty
                 }
             }
             case RAW_END -> {
                 if (rawMatched < rawElement.length()) {
                     if (lower(c) == rawElement.charAt(rawMatched)) rawMatched++;
-                    else state = c == '<' ? RAW_LT : RAW;
-                } else if (c == '>') {
-                    state = DATA;
-                } else if (isSpace(c) || c == '/') {
-                    endTag = true; // </script ...>: read to its '>' like any other tag
-                    state = BEFORE_ATTR;
+                    else rawAgain(c);
+                } else if (!isSpace(c) && c != '/' && c != '>') {
+                    rawAgain(c); // </scripty: still the body
+                } else if (scriptEscape == 2) {
+                    state = RAW; // the </script> of the inner "<script": not the end of the element
+                    scriptEscape = 1;
                 } else {
-                    state = c == '<' ? RAW_LT : RAW; // </scripty: still the body
+                    scriptEscape = 0;
+                    if (c == '>') {
+                        state = DATA;
+                    } else {
+                        endTag = true; // </script ...>: read to its '>' like any other tag
+                        state = BEFORE_ATTR;
+                    }
                 }
             }
             case MARKUP -> {
@@ -461,6 +497,36 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         attrString = null;
     }
 
+    // The body of a <script> or <style> in HTML content. A <style> ends at its end tag and that is
+    // all. A <script> has the HTML tokenizer's "escaped" states as well (H1 review, F2), kept in
+    // scriptEscape: "<!--" enters the escaped state (1), "<script" followed by a space, '/' or
+    // '>' in it enters the double-escaped state (2), where "</script" followed by one of those
+    // returns to the escaped state and does NOT end the element, and "-->" in either returns to
+    // plain script data (0). "</script" then ends the element from 0 or 1. So in
+    //   <script><!-- document.write("<script src=x></script>"); var a = "${a}"; //--></script>
+    // ${a} is still in the script, though JTE, which ends a script at the first </script>, says
+    // it isn't; the two disagree and the data is escaped for a script.
+
+    private void raw(char c) {
+        if (c == '<') {
+            state = RAW_LT;
+            dashes = 0;
+        } else if (scriptEscape > 0) {
+            if (c == '-') {
+                if (dashes < 2) dashes++;
+            } else {
+                if (c == '>' && dashes == 2) scriptEscape = 0; // "-->"
+                dashes = 0;
+            }
+        }
+    }
+
+    /** A character that didn't continue what the body was in the middle of matching. */
+    private void rawAgain(char c) {
+        state = RAW;
+        raw(c);
+    }
+
     private void tagSlash() {
         state = BEFORE_ATTR;
         slash = true;
@@ -486,6 +552,8 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             if (name.contentEquals(tag)) {
                 state = RAW; // "/>" or not: HTML has no self-closing <script/>
                 rawElement = name;
+                scriptEscape = 0;
+                dashes = 0;
                 return;
             }
         }
