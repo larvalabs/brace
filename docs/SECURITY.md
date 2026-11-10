@@ -48,15 +48,26 @@ app.group("/admin", Access.check((req, s) ->
 Requirements are bound to the `Route` object at `start()`, not matched against the request
 path, so a guard and a route can't disagree about a path: `/admin/x/`, `/admin/%78` and
 `HEAD /admin/x` reach the same route and run the same requirements. They run after plain
-`before(...)` middleware (so a rate limiter sheds load first) and before the request body is
-read, so an unauthenticated client can't make the app buffer a body. Rejections go through the
-normal response path, so security headers and session write-back apply.
+`before(...)` middleware (so a rate limiter sheds load first) and before the framework reads
+the request body for the handler and for CSRF. The framework itself never buffers a body for a
+request an access requirement rejects. **The body is read earlier only if a plain `before(...)`
+asks for it**: `req.body()`, `req.formParam(...)`, `req.form(...)` and `req.file(...)` read it
+on first use, and a plain `before` runs ahead of access. The login limiter shown under Rate
+Limiting does exactly that (`req.formParam("username")`), so on that path an unauthenticated
+client's body is read, up to the upload limit, before any access requirement runs; that is the
+limiter's job there, since the login route is public. Keep body-reading `before(...)` middleware
+to the paths that need it. Rejections go through the normal response path, so security headers
+and session write-back apply.
 
 A request whose raw path has a segment that is exactly `.` or `..` (`/items/../y`, `/one/.`)
-is a 404 before any route, mapping, middleware or guard sees it: no handler receives `..` as a
+is answered 404 without being matched against any route or static mapping, and without any
+`before(...)` middleware, access requirement or handler running: no handler receives `..` as a
 path parameter, and a proxy that resolves dot segments for its own rules can't be made to
-disagree with Brace about which route is being called. The 404 passes through
-after-middleware, so it carries the app's security headers like any other 404.
+disagree with Brace about which route is being called. After-middleware does run for that 404,
+as for any other, so it carries the app's security headers. When the path, as written or with
+its dot segments resolved, falls under a guarded static mapping (`/docs/./report.txt`,
+`/x/../docs/report.txt`), the 404 is also sent `Cache-Control: no-store`, whatever an
+`after(...)` set.
 
 Plain `before(...)` middleware never counts as access. The previous model —
 `requireSession("/admin/*", …)` path-pattern guards — is removed.
@@ -92,18 +103,28 @@ app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
   for every method, so every spelling that reaches the mapping's files is guarded, and a
   rejected request gets the same response whether or not the file exists.
 - **A mapping serves `GET` and `HEAD` only.** Any other method on a path under a mapping
-  (`POST`, `OPTIONS`, an unknown method) gets `405` with `Allow: GET, HEAD`, after the mapping's
-  access has run, so an anonymous request to a guarded mapping still gets the rejection. The
+  (`POST`, `OPTIONS`, an unknown method) gets `405` with `Allow: GET, HEAD`. The 405 comes after
+  the mapping's access has run, so an anonymous request to a guarded mapping still gets the
+  rejection, and after session-aware `before(...)` middleware, which may answer first. The
   bundled `/__brace/*` assets answer other methods with `405` too.
 - **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
   `app.get("/docs/payroll.pdf", ...)`, the route answers `GET` (and `HEAD`) with its own access,
-  and the mapping never serves `/docs/payroll.pdf` under any method: a request the route does
-  not handle gets `405` with the route's methods in `Allow`, after the mapping's access. (Before
-  this, `POST /docs/payroll.pdf` skipped the route and was served the file by the mapping.)
-  `start()` logs a warning naming each mapping that has routes under its prefix, because every
-  other file in that directory is still served under the mapping's access alone; a mapping at
-  `/` is not warned about. Outside a mapping, a path that only matches a route under another
-  method is a `404`, as before.
+  and the mapping never serves `/docs/payroll.pdf` under any method. (Before this,
+  `POST /docs/payroll.pdf` skipped the route and was served the file by the mapping.) A request
+  for that path under a method the route does not handle is answered in this order: the
+  mapping's access; session-aware `before(...)`; then **the access of every route that owns the
+  path**, so a caller the route would refuse gets that same rejection (a login redirect, a 403)
+  and learns nothing more; and only then `405` with the routes' methods in `Allow`.
+- **A WebSocket route owns its path too.** With `app.ws("/docs/live", ...)` under that mapping,
+  a plain (non-upgrade) request for `/docs/live` is never served a file named `live`: it gets
+  the socket route's access check, then `426 Upgrade Required` for `GET`/`HEAD` or `405` with
+  `Allow: GET` for another method.
+- `start()` logs a warning naming each mapping that has routes (WebSocket routes included)
+  under its prefix, because every other file in that directory is still served under the
+  mapping's access alone; a mapping at `/` is not warned about. Outside a mapping, a path that
+  only matches a route under another method is a `404`, as before.
+- **A mapping's prefix must start with `/`.** `staticFiles("assets", dir)` throws at
+  registration; it used to start and never serve (and `""` behaved as `/`).
 - Nothing under a guarded mapping can be stored by a shared cache. A served file (200, 206, 304)
   is sent `Cache-Control: private, no-cache`, and a `?v=` fingerprint earns no `immutable`
   there. Every other response under the mapping (the access rejection, a 404, 405 or 416, an
@@ -1099,7 +1120,10 @@ Any response Brace attaches a session `Set-Cookie` to is sent `private`. With no
 `Cache-Control` it gets `Cache-Control: private`. With one set by the handler or an
 after-middleware, `public` is rewritten to `private`, and `private` is added in front when the
 value has neither `private` nor `no-store` (`max-age=600` becomes `private, max-age=600`; so
-does `s-maxage=600`, which a shared cache then ignores); the other directives are kept. A
+does `s-maxage=600`, which a shared cache then ignores); the other directives are kept. The
+value is parsed into directives, so only a bare `private` or `no-store` directive counts: one
+of those words inside a quoted argument (`x="no-store"`, `no-cache="private"`) or the qualified
+form `private="set-cookie"` does not, and `private` is still added. A
 response carrying a session cookie is per-user by definition — without this it is
 *heuristically cacheable*, or explicitly storable, and a shared cache (e.g. an nginx recipe that
 force-caches everything under `/static/`) would replay user A's cookie to every user.
@@ -1107,7 +1131,12 @@ force-caches everything under `/static/`) would replay user A's cookie to every 
 Response header names are case-insensitive in `Result`: `res.header("cache-control", ...)` and
 `res.header("Cache-Control", ...)` are the same header, and the second write replaces the
 first. (Before 0.1.11 they were two entries; Brace checked one spelling and the other reached
-the wire, so a lowercase `cache-control: public` rode out with the session cookie.) Brace does
+the wire, so a lowercase `cache-control: public` rode out with the session cookie.) Only ASCII
+letter case is folded, and `res.header(name, value)` throws `IllegalArgumentException` for a
+name that is not an HTTP token (empty, or with a space, a colon, a control character or any
+non-ASCII character), so a look-alike name (a Unicode hyphen in `Cache-Control`, the Kelvin
+sign U+212A for `K`) is refused instead of reaching the wire or standing in for the real
+header. Brace does
 not strip `CDN-Cache-Control`, `Surrogate-Control` or `Expires` from a cookie-carrying response
 outside a guarded static mapping or an access rejection, so don't set those app-wide on
 responses that can carry a session.

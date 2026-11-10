@@ -601,6 +601,13 @@ public class Brace {
      */
     public StaticFilesConfig staticFiles(String urlPrefix, String directory, StaticFiles mode) {
         java.util.Objects.requireNonNull(mode, "mode");
+        // M3 final review: a prefix with no leading slash never matched a request path, so the
+        // mapping started and silently served nothing ("" behaved as "/").
+        if (urlPrefix == null || !urlPrefix.startsWith("/")) {
+            throw new IllegalArgumentException("Static mapping prefix " + (urlPrefix == null ? "null" : "\"" + urlPrefix + "\"")
+                + " must start with \"/\": it is matched against the request path, e.g. "
+                + "staticFiles(\"/assets\", \"public\"). Use \"/\" to serve a directory at the root.");
+        }
         router.requireNotStarted("Registering static mapping " + urlPrefix);
         var added = new StaticFilesConfig(this, urlPrefix, directory, mode);
         for (var existing : staticFileMappings) {
@@ -1445,6 +1452,7 @@ public class Brace {
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
+        handler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
         handler.setAnalytics(analytics);
         handler.setSessionValidator(sessionValidator);
         handler.setStrictQueryChecks(testHarness || "dev".equals(System.getProperty("brace.mode")));
@@ -2133,6 +2141,12 @@ public class Brace {
                     under.add(route.method() + " " + route.pattern());
                 }
             }
+            // A WebSocket route owns its path under a mapping too (M3 final review).
+            for (var ws : wsRoutes.values()) {
+                if (mapping.covers(ws.route().pattern())) {
+                    under.add("WS " + ws.route().pattern());
+                }
+            }
             if (under.isEmpty()) continue;
             int shown = Math.min(5, under.size());
             Log.warn("Static mapping " + mapping.pattern() + " (" + mapping.directory() + ", "
@@ -2140,7 +2154,8 @@ public class Brace {
                 + " under its prefix: " + String.join(", ", under.subList(0, shown))
                 + (under.size() > shown ? " and " + (under.size() - shown) + " more" : "")
                 + ". A route answers its path for its own methods, with its own access, and the mapping "
-                + "never serves a path a route pattern matches (other methods get 405). Every other file in "
+                + "never serves a path a route pattern matches (another method gets the route's access "
+                + "check, then 405; a plain request for a WebSocket path gets 426). Every other file in "
                 + "the directory is served under the mapping's access alone.");
         }
     }

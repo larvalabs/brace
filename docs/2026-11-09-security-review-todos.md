@@ -273,6 +273,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       overlapping directories were refused with a confusing message. The built-in kinds
       (session, none, `insteadOfDefault`) now have value equality; custom checks and the ops
       requirement stay identity; the message says so. Tests in `StaticMappingReviewFixesTest`.
+    - **Final review fixes.** L-I: the dot-segment 404 for a path that falls under a guarded
+      mapping (as written or with its dot segments resolved) is `no-store`. A WebSocket route
+      owns its path under a mapping (a plain request for it was served the mapping's file); it
+      is listed in the startup warning. A path a route owns, requested under another method,
+      runs every owning route's access before the 405, so `Allow` is not shown to a caller the
+      route refuses (a socket path answers 426 to a plain GET). `Cache-Control` is parsed into
+      directives, quoted-string aware, by one helper used wherever it is read or rewritten
+      (`x="no-store"` no longer counts as `no-store`). `Result.header(name, value)` requires an
+      RFC 9110 token and names compare by ASCII case only. A mapping prefix must start with `/`.
+      Docs: what "before the body is read" covers, where the static 405 sits, and the
+      dot-segment 404 and after-middleware. Tests in `StaticMappingFinalReviewTest`.
 
 - [x] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
   - **What's wrong.**
@@ -669,6 +680,8 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     - The dot-segment 404 was thrown before the `Request` existed, so it skipped
       after-middleware and went out without the app's security headers. It is now answered
       after the request is built, with no route or mapping matched for it.
+    - **Final review fixes.** None of its own; the dot-segment 404 under a guarded static
+      mapping is now `no-store` (see M3).
 
 - [x] **L10: A `Route` whose access was never resolved is open, not closed**, `Route.java:27`, `BraceHandler.java:117-194, 351-352`
   - `access` starts as `List.of()`, and only `Brace.resolveAccess()` fills it. `BraceHandler` is

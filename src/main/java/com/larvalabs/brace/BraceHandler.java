@@ -158,6 +158,49 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         this.beforeSessionMiddleware = middleware;
     }
 
+    /**
+     * The app's WebSocket routes (method {@code WS}, a literal path, access resolved). They live
+     * outside the {@link Router}, and an upgrade never reaches this handler, but a plain request
+     * for a socket's path does: under a static mapping that path belongs to the socket route,
+     * not to a file of the same name (M3 final review). Set by {@link Brace} before start.
+     */
+    private List<Route> webSocketRoutes = List.of();
+
+    void setWebSocketRoutes(List<Route> routes) {
+        this.webSocketRoutes = List.copyOf(routes);
+    }
+
+    /**
+     * Every route that owns {@code path} whatever the request's method: the {@link Router}'s
+     * routes whose pattern matches it, and a WebSocket route registered at it. Asked only after
+     * no route matched the request's own method.
+     */
+    private List<Route> routesOwning(String path) {
+        List<Route> owners = router.routesMatching(path);
+        if (webSocketRoutes.isEmpty()) return owners;
+        String canonical = path.length() > 1 && path.endsWith("/") ? Router.stripTrailingSlashes(path) : path;
+        List<Route> all = null;
+        for (Route ws : webSocketRoutes) {
+            if (ws.pattern().equals(path) || ws.pattern().equals(canonical)) {
+                if (all == null) all = new ArrayList<>(owners);
+                all.add(ws);
+            }
+        }
+        return all == null ? owners : all;
+    }
+
+    /**
+     * True when a guarded mapping's prefix covers {@code rawPath} as written or with its dot
+     * segments resolved; see where {@code guardedStatic} is set.
+     */
+    private boolean underGuardedMapping(String rawPath) {
+        String resolved = Router.resolveDotSegments(rawPath);
+        for (var mapping : staticFileMappings) {
+            if (mapping.guarded() && (mapping.covers(rawPath) || mapping.covers(resolved))) return true;
+        }
+        return false;
+    }
+
     /** Page-view analytics, or null when the app didn't enable it. Set by {@link Brace} before start. */
     private Analytics analytics;
 
@@ -339,8 +382,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // flagged here, before anything below can answer (a malformed query's 400, a
             // before() short-circuit, the rejection itself), so every response under it gets the
             // no-shared-cache headers in send(). Un-flagged below if a route matches instead.
+            //
+            // M3 final review: a dot-segment path is matched against no mapping and serves
+            // nothing, but its 404 is still a response under a guarded prefix when the path, as
+            // written or with its dot segments resolved, falls under one ("/docs/./report.txt",
+            // "/x/../docs/report.txt"). An app-wide after(...) setting "public" made that 404
+            // shared-cacheable at the guarded file's URL as a normalizing cache keys it.
             StaticFileMapping coveringMapping = dotSegment ? null : staticMappingFor(path);
-            exchange.guardedStatic = coveringMapping != null && coveringMapping.guarded();
+            exchange.guardedStatic = dotSegment ? underGuardedMapping(path)
+                : coveringMapping != null && coveringMapping.guarded();
 
             // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
             String rawQuery = jettyRequest.getHttpURI().getQuery();
@@ -495,14 +545,53 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     // passed the mapping's weaker access by changing the method. The mapping's
                     // access has already run, so an anonymous caller got its uniform rejection
                     // and learns nothing from the 405.
-                    List<String> routeMethods = staticMapping != null ? router.methodsMatching(path) : List.of();
+                    //
+                    // M3 final review: a WebSocket route owns its path the same way (a plain,
+                    // non-upgrade GET of it used to be served the mapping's file), and the 405's
+                    // Allow header names the owning routes' methods, which is information about
+                    // routes the caller may not be allowed to see. So each route that owns the
+                    // path runs its own access first: a caller it refuses gets that rejection,
+                    // exactly as if the route had matched, and only a caller every owner admits
+                    // is told which methods exist.
+                    List<Route> owners = staticMapping != null ? routesOwning(path) : List.of();
+                    for (Route owner : owners) {
+                        for (var access : owner.access()) {
+                            if (access.usesSession() && session == null) {
+                                session = buildSession(headers, sessionCookieName);
+                            }
+                            Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
+                            if (rejected != null) {
+                                exchange.accessRejected = true;
+                                exchange.noMatchKey = STATIC_ROUTE_KEY;
+                                respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSpec, exchange);
+                                return true;
+                            }
+                        }
+                    }
                     // And a mapping (or a bundled asset) serves GET and HEAD, nothing else.
                     boolean readMethod = "GET".equals(method) || "HEAD".equals(method);
-                    if (!routeMethods.isEmpty() || !readMethod) {
+                    if (!owners.isEmpty() || !readMethod) {
                         exchange.noMatchKey = STATIC_ROUTE_KEY;
-                        Result notAllowed = Result.error(405, "Method Not Allowed")
-                            .header("Allow", routeMethods.isEmpty() ? "GET, HEAD" : String.join(", ", routeMethods));
-                        respond(braceRequest, notAllowed, response, callback, session, csrfOnlySession, cookieSpec, exchange);
+                        var routeMethods = new java.util.LinkedHashSet<String>();
+                        boolean webSocketOnly = !owners.isEmpty();
+                        for (Route owner : owners) {
+                            if (owner.method().equals("WS")) {
+                                routeMethods.add("GET");
+                            } else {
+                                webSocketOnly = false;
+                                routeMethods.add(owner.method());
+                                if (owner.method().equals("GET")) routeMethods.add("HEAD");
+                            }
+                        }
+                        Result refused;
+                        if (webSocketOnly && readMethod) {
+                            // The path is a socket: a plain request for it is asked to upgrade.
+                            refused = Result.error(426, "Upgrade Required").header("Upgrade", "websocket");
+                        } else {
+                            refused = Result.error(405, "Method Not Allowed")
+                                .header("Allow", routeMethods.isEmpty() ? "GET, HEAD" : String.join(", ", routeMethods));
+                        }
+                        respond(braceRequest, refused, response, callback, session, csrfOnlySession, cookieSpec, exchange);
                         return true;
                     }
                 }
@@ -2004,12 +2093,83 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return true;
     }
 
-    private static final java.util.regex.Pattern PUBLIC_DIRECTIVE =
-        java.util.regex.Pattern.compile("(?i)(?<![-\\w])public(?![-\\w])");
-    private static final java.util.regex.Pattern PRIVATE_OR_NO_STORE =
-        java.util.regex.Pattern.compile("(?i)(?<![-\\w])(private|no-store)(?![-\\w])");
-    private static final java.util.regex.Pattern S_MAXAGE_DIRECTIVE =
-        java.util.regex.Pattern.compile("(?i)(?<![-\\w])s-maxage(?![-\\w])");
+    /**
+     * One directive of a {@code Cache-Control} value: its name in lower case, whether it has an
+     * argument ({@code max-age=60}, {@code private="set-cookie"}), and its text as written.
+     */
+    record CacheDirective(String name, boolean hasArgument, String text) {}
+
+    /**
+     * The directives of a {@code Cache-Control} value (RFC 9111 5.2), split on commas that are not
+     * inside a quoted-string (a backslash escapes the next character in one). This is the one
+     * reader of {@code Cache-Control} in the framework (M3 final review): word-matching the
+     * header's text took {@code x="no-store"} for {@code no-store} and {@code no-cache="private"}
+     * for {@code private}, so such a response went out with a session cookie and nothing keeping
+     * it from a shared cache. An unterminated quoted-string runs to the end of the value: nothing
+     * inside it is a directive. Empty list elements are skipped.
+     */
+    static List<CacheDirective> cacheDirectives(String cacheControl) {
+        var directives = new ArrayList<CacheDirective>();
+        if (cacheControl == null) return directives;
+        int start = 0;
+        boolean quoted = false;
+        for (int i = 0; i <= cacheControl.length(); i++) {
+            char c = i < cacheControl.length() ? cacheControl.charAt(i) : ',';
+            if (i < cacheControl.length()) {
+                if (quoted && c == '\\') {
+                    i++;
+                    continue;
+                }
+                if (c == '"') {
+                    quoted = !quoted;
+                    continue;
+                }
+                if (c != ',' || quoted) continue;
+            }
+            String text = cacheControl.substring(start, Math.min(i, cacheControl.length())).strip();
+            start = i + 1;
+            if (text.isEmpty()) continue;
+            int eq = text.indexOf('=');
+            int quote = text.indexOf('"');
+            boolean hasArgument = eq >= 0 && (quote < 0 || eq < quote);
+            String name = (hasArgument ? text.substring(0, eq) : text).strip().toLowerCase(java.util.Locale.ROOT);
+            directives.add(new CacheDirective(name, hasArgument, text));
+        }
+        return directives;
+    }
+
+    /** The directive names of a {@code Cache-Control} value, lower-cased, in order. */
+    static List<String> cacheDirectiveNames(String cacheControl) {
+        return cacheDirectives(cacheControl).stream().map(CacheDirective::name).toList();
+    }
+
+    /** True if {@code directives} has the bare directive {@code name} (no argument). */
+    private static boolean hasBareDirective(List<CacheDirective> directives, String name) {
+        for (var d : directives) {
+            if (!d.hasArgument() && d.name().equals(name)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * {@code cacheControl} made safe for a response that carries a session cookie: {@code public}
+     * is dropped, and {@code private} is put first unless the value already has a bare
+     * {@code private} or {@code no-store}. Every other directive is kept as written.
+     * {@code private="field"} does not count: it withholds only the named field from a shared
+     * cache, and not every cache honors it.
+     */
+    static String privateCacheControl(String cacheControl) {
+        var directives = cacheDirectives(cacheControl);
+        boolean hadPublic = directives.removeIf(d -> !d.hasArgument() && d.name().equals("public"));
+        boolean alreadyPrivate = hasBareDirective(directives, "private") || hasBareDirective(directives, "no-store");
+        if (!hadPublic && alreadyPrivate) return cacheControl;
+        var out = new StringBuilder(alreadyPrivate ? "" : "private");
+        for (var d : directives) {
+            if (out.length() > 0) out.append(", ");
+            out.append(d.text());
+        }
+        return out.toString();
+    }
 
     /**
      * Every response header that tells a browser, a proxy or a CDN it may store a response.
@@ -2019,7 +2179,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     private static final Set<String> SHARED_CACHE_HEADERS = sharedCacheHeaders();
 
     private static Set<String> sharedCacheHeaders() {
-        var names = new java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER);
+        var names = new java.util.TreeSet<String>(Result.ASCII_CASE_INSENSITIVE);
         names.addAll(List.of("Cache-Control", "Expires", "Pragma", "CDN-Cache-Control",
             "Surrogate-Control", "Cloudflare-CDN-Cache-Control", "Vercel-CDN-Cache-Control"));
         return java.util.Collections.unmodifiableSet(names);
@@ -2040,7 +2200,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         if (route.isFramework() || !route.isGuarded()) return;
         String cacheControl = result.header("Cache-Control");
         if (cacheControl == null) return;
-        if (!PUBLIC_DIRECTIVE.matcher(cacheControl).find() && !S_MAXAGE_DIRECTIVE.matcher(cacheControl).find()) return;
+        var names = cacheDirectiveNames(cacheControl);
+        if (!names.contains("public") && !names.contains("s-maxage")) return;
         String key = route.method() + " " + route.pattern();
         if (!warnedPublicGuarded.add(key)) return;
         Log.warn(key + " has access requirements (" + route.accessLabel() + ") but its response was sent "
@@ -2074,15 +2235,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // used to be a second map entry that this lookup missed and the wire sent).
         // "public" is not the only way in: "s-maxage=600", or a bare "max-age=600", also lets a
         // shared cache store the response, so "private" is added whenever the value has neither
-        // "private" nor "no-store". The handler's other directives are kept.
+        // "private" nor "no-store". The handler's other directives are kept. The value is parsed
+        // into directives (M3 final review), so a quoted argument that contains one of those
+        // words is not taken for the directive.
         String cacheControl = result.header("Cache-Control");
-        if (cacheControl == null || cacheControl.isBlank()) {
-            result.header("Cache-Control", "private");
-        } else {
-            String rewritten = PUBLIC_DIRECTIVE.matcher(cacheControl).replaceAll("private");
-            if (!PRIVATE_OR_NO_STORE.matcher(rewritten).find()) rewritten = "private, " + rewritten;
-            if (!rewritten.equals(cacheControl)) result.header("Cache-Control", rewritten);
-        }
+        String rewritten = privateCacheControl(cacheControl);
+        if (!rewritten.equals(cacheControl)) result.header("Cache-Control", rewritten);
     }
 
     private String parseCookieValue(String cookieHeader, String name) {

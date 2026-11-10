@@ -1316,10 +1316,24 @@ What to know:
   throws; it used to be silently ignored.
 - **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
   `app.get("/docs/payroll.pdf", ...)`, the mapping never serves `/docs/payroll.pdf` under any
-  method; a request the route doesn't handle gets a 405. `start()` logs a warning listing routes
-  under a mapping's prefix (not for a mapping at `/`). For a per-file decision (the file's
-  owner), serve the file from a route: `db.findOwnedOr404(...)`, then
-  `Result.fileUnder(dir, name).untrusted()`.
+  method. A request for it under a method the route doesn't handle runs the route's access
+  first, so a caller the route would refuse gets that rejection; a caller it admits gets a 405
+  with the route's methods in `Allow`. An `app.ws(...)` socket under the prefix owns its path
+  the same way (a plain request for it gets 426, never a file of that name). `start()` logs a
+  warning listing routes and sockets under a mapping's prefix (not for a mapping at `/`). For a
+  per-file decision (the file's owner), serve the file from a route:
+  `db.findOwnedOr404(...)`, then `Result.fileUnder(dir, name).untrusted()`.
+- **The prefix must start with `/`.** `staticFiles("assets", dir)` and `staticFiles("", dir)`
+  now throw `IllegalArgumentException` at registration; the first used to start and serve
+  nothing.
+
+  ```java
+  // before: started, and every request for these files was a 404
+  app.staticFiles("assets", "public").publicFiles();
+
+  // after
+  app.staticFiles("/assets", "public").publicFiles();
+  ```
 - **Guarded files are never shared-cacheable.** See
   [access rejections and guarded responses](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable).
 - A path guard such as `before("/uploads/*", ...)` is no longer needed for a mapping and can be
@@ -1773,7 +1787,9 @@ No action needed unless noted.
   as before.
 - **A response carrying the session cookie is always `private`.** If its `Cache-Control` has
   neither `private` nor `no-store`, `private` is added (`max-age=600` becomes
-  `private, max-age=600`); `public` is still rewritten to `private`.
+  `private, max-age=600`); `public` is still rewritten to `private`. The header is parsed, so
+  those words inside a quoted argument (`x="no-store"`) do not count as the directive.
+- **A dot-segment 404 under a guarded mapping is `no-store`** too (`/docs/./report.txt`).
 - **Dev mode warns once** when a route with an access requirement answers
   `Cache-Control: public` or `s-maxage`.
 - **`Result` header names are case-insensitive.** `result.header("cache-control", v)` now
@@ -1781,6 +1797,19 @@ No action needed unless noted.
   reads either spelling. `result.headers()` iterates in case-insensitive name order, not
   insertion order. Code that relied on two spellings being two headers, or on the order, must
   change.
+- **`Result.header(name, value)` validates the name.** It must be an HTTP token: ASCII letters,
+  digits and ``!#$%&'*+-.^_`|~``. An empty name, or one with a space, a colon or a non-ASCII
+  character, throws `IllegalArgumentException` where it used to reach the wire:
+
+  ```java
+  // before: sent a malformed header line
+  result.header("X Request Id", id);
+
+  // after: throws; use a token
+  result.header("X-Request-Id", id);
+  ```
+
+  Only ASCII letter case is folded when names are compared.
 - **WebSocket paths are exact.** A socket registered with `app.ws("/ws", ...)` upgrades only for
   the raw path `/ws` (any query string). `/x/../ws`, `/%77s` and `/ws;x` get 404. The path is a
   literal, not a pattern.

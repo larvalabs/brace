@@ -155,8 +155,24 @@ public class Router {
      * non-empty answer means "a route owns this path, under another method".
      */
     List<String> methodsMatching(String path) {
-        String canonical = path.length() > 1 && path.endsWith("/") ? stripTrailingSlashes(path) : path;
         var methods = new java.util.LinkedHashSet<String>();
+        for (var route : routesMatching(path)) {
+            methods.add(route.method());
+            if (route.method().equals("GET")) methods.add("HEAD");
+        }
+        return List.copyOf(methods);
+    }
+
+    /**
+     * The routes whose pattern matches {@code path}, one per method (the one {@link #match} would
+     * pick for that method), in registration order; see {@link #methodsMatching}. Their access
+     * requirements are what decides who may learn that the path exists under another method
+     * (M3 final review).
+     */
+    List<Route> routesMatching(String path) {
+        String canonical = path.length() > 1 && path.endsWith("/") ? stripTrailingSlashes(path) : path;
+        var methods = new java.util.HashSet<String>();
+        var matching = new ArrayList<Route>();
         for (var route : routes) {
             if (methods.contains(route.method())) continue;
             boolean matches = route.isStatic()
@@ -164,9 +180,34 @@ public class Router {
                 : route.match(path) != null || (canonical != path && route.match(canonical) != null);
             if (!matches) continue;
             methods.add(route.method());
-            if (route.method().equals("GET")) methods.add("HEAD");
+            matching.add(route);
         }
-        return List.copyOf(methods);
+        return matching;
+    }
+
+    /**
+     * {@code path} with its {@code .} and {@code ..} segments resolved as a URL normalizer would
+     * (RFC 3986 5.2.4): {@code /x/../docs/./a} is {@code /docs/a}. A {@code ..} at the root stays
+     * at the root. Used only to ask which mapping a dot-segment path would land under; such a
+     * path is never served.
+     */
+    static String resolveDotSegments(String path) {
+        var out = new java.util.ArrayDeque<String>();
+        String[] segments = path.split("/", -1);
+        for (int i = 0; i < segments.length; i++) {
+            String segment = segments[i];
+            boolean last = i == segments.length - 1;
+            if (segment.equals(".")) {
+                if (last) out.addLast("");
+            } else if (segment.equals("..")) {
+                if (out.size() > 1) out.removeLast();
+                if (last) out.addLast("");
+            } else {
+                out.addLast(segment);
+            }
+        }
+        String resolved = String.join("/", out);
+        return resolved.startsWith("/") ? resolved : "/" + resolved;
     }
 
     /** True if some {@code /}-separated segment of the raw path is exactly {@code .} or {@code ..}. */

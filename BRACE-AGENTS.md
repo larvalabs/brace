@@ -226,7 +226,9 @@ app.postDb("/billing/refund", billing::refund)
   inside a group that has a requirement, fails `start()`: register public pages outside the
   restricted group.
 - They run after plain `before(...)` middleware (rate limiters shed load first) and before the
-  body is read and CSRF is checked. A session-reading requirement sees the same `Session` the
+  framework reads the body for the handler and CSRF is checked. (A plain `before` that itself
+  calls `req.body()`/`formParam`/`form` reads the body first, e.g. a login limiter keyed on a
+  form field.) A session-reading requirement sees the same `Session` the
   handler gets, and needs `.sessions(...)` (`start()` throws without it).
 - They are bound to the route, so `/x/`, percent-encoded and `HEAD` requests to a guarded route
   are guarded the same way. WebSocket routes work the same: `app.ws(...).publicRoute()`.
@@ -250,9 +252,12 @@ app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
   whether or not the file exists. A served file is `Cache-Control: private, no-cache`; every
   other response under a guarded mapping (rejection, 404, 405) is `no-store`, and caching
   headers set by an `after(...)` are removed there.
-- A mapping serves `GET`/`HEAD` only; other methods get `405`. A route registered under a
-  mapping's prefix owns its path: the mapping never serves it, under any method (`start()`
-  logs a warning listing such routes).
+- A mapping serves `GET`/`HEAD` only; other methods get `405`. A route (or `app.ws(...)`
+  socket) registered under a mapping's prefix owns its path: the mapping never serves it, under
+  any method. A request for it under another method runs that route's access first (a caller it
+  refuses gets the same rejection), then gets `405` (`426` for a plain request to a socket
+  path). `start()` logs a warning listing such routes. The prefix must start with `/`
+  (`staticFiles("assets", dir)` throws).
 - `start()` throws if a mapping's directory doesn't exist, or if two mappings' directories
   overlap (same, nested, or via a symlink) with different access: pass the same `Access`
   objects to both if they should match. Registering the same prefix twice throws.
@@ -474,8 +479,10 @@ result.cookie("t", "v", 3600, true, true, "Lax", "/admin")  // ...plus an explic
 `Set-Cookie` is the one repeatable header: multiple `result.cookie(...)` calls all reach the
 wire (and your app cookies are never clobbered by the framework session cookie). Every other
 header is single-value — setting it again replaces the prior value. Header names are
-case-insensitive: `result.header("cache-control", ...)` replaces `Cache-Control`, and
-`result.header("Cache-Control")` reads either spelling. A response that carries the session
+case-insensitive (ASCII case): `result.header("cache-control", ...)` replaces `Cache-Control`, and
+`result.header("Cache-Control")` reads either spelling. A name must be an HTTP token (ASCII
+letters, digits and ``!#$%&'*+-.^_`|~``): `result.header("X A", v)` or an empty or non-ASCII
+name throws `IllegalArgumentException`. A response that carries the session
 cookie is always sent `Cache-Control: private` (added to whatever the handler set, unless it
 already says `private` or `no-store`).
 
