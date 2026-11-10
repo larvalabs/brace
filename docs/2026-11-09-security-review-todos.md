@@ -73,7 +73,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
 
 ## High
 
-- [ ] **H1: User data in `<script>var a = "${x}"</script>` gets HTML escaping, not JavaScript escaping**, `BraceHtmlOutput.java:61-62, 90, 137-152, 217-220, 247-268, 274-278`
+- [x] **H1: User data in `<script>var a = "${x}"</script>` gets HTML escaping, not JavaScript escaping**, `BraceHtmlOutput.java:61-62, 90, 137-152, 217-220, 247-268, 274-278`
   - **What's wrong.**
     - `OPENS_VALUE` (`\s(name)\s*=\s*"[^"]*$`) is matched against all static template text, not
       only text inside a tag. JavaScript such as `var a = "`, `const name = '` or `let u = "`

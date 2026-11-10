@@ -113,8 +113,14 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     public void writeBinaryContent(byte[] value) {
         // Template text pre-encoded as UTF-8: passed through untouched unless it's inside, or
         // opens, an attribute value, which needs it as text.
-        if (valueAttribute == null && !mayOpenValue(value)) {
-            super.writeBinaryContent(value);
+        if (valueAttribute == null) {
+            scan(value);
+            if (!endsInStartTagValue()) {
+                super.writeBinaryContent(value);
+                return;
+            }
+            String text = new String(value, StandardCharsets.UTF_8);
+            place(text, 0, text.length());
             return;
         }
         String text = new String(value, StandardCharsets.UTF_8);
@@ -122,6 +128,12 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     private void writeStatic(String s, int begin, int end) {
+        scan(s, begin, end);
+        place(s, begin, end);
+    }
+
+    /** Writes template text {@link #scan} has already read, closing and opening held values. */
+    private void place(String s, int begin, int end) {
         if (valueAttribute != null) {
             int close = s.indexOf(valueQuote, begin);
             if (close < 0 || close >= end) {
@@ -134,7 +146,10 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             emitHeldValue();
             begin = close;
         }
-        Matcher m = mayOpenValue(s, begin, end) ? OPENS_VALUE.matcher(s).region(begin, end) : null;
+        // H1: a value is held only when the text ends inside a quoted attribute value of a start
+        // tag. Text that merely looks like one (`var a = "` in a script, `a = "5` in a paragraph)
+        // never opens a hold.
+        Matcher m = endsInStartTagValue() ? OPENS_VALUE.matcher(s).region(begin, end) : null;
         if (m == null || !m.find()) {
             super.writeContent(s, begin, end);
             return;
@@ -152,35 +167,204 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         soleUser = null;
     }
 
+    // --- where the output is ---
+    //
+    // A tokenizer over the template's own text (and anything else written as trusted markup:
+    // $unsafe{...}, content blocks), following the HTML parsing rules closely enough to know
+    // whether the next ${...} lands in body text, inside a tag, inside a quoted attribute value,
+    // or in the body of a raw-text element (<script>, <style>, <textarea>, <title>), where
+    // markup isn't parsed and nothing is an attribute.
+    //
+    // H1 (2026-11 security review). A held attribute value NEVER opens inside a raw-text element
+    // or in body text: it opens only when template text ends in the state VALUE_QUOTED of a start
+    // tag. Before this, the end of each text chunk was matched against a pattern on its own, so
+    // `<script>var a = "${x}"` held a "value" named `a` and gave x attribute escaping in the
+    // middle of a script. The decision rests on this class's own reading of the output, not on
+    // the tag JTE reports with setContext: JTE's context says where the *template source* is,
+    // which isn't where the output is when a @template call renders inside an attribute value.
+    //
+    // User data never changes the state: it is escaped so that it can't close a tag, a quoted
+    // value or a raw-text element.
+
+    private static final int DATA = 0, LT = 1, END_TAG_OPEN = 2, TAG_NAME = 3, BEFORE_ATTR = 4,
+        ATTR_NAME = 5, AFTER_ATTR_NAME = 6, BEFORE_VALUE = 7, VALUE_QUOTED = 8, VALUE_UNQUOTED = 9,
+        RAW = 10, RAW_LT = 11, RAW_END = 12, MARKUP = 13, MARKUP_DASH = 14, COMMENT = 15,
+        COMMENT_DASH = 16, COMMENT_DASH_DASH = 17, BOGUS = 18;
+    private static final int MAX_NAME = 64;
+
+    // Elements whose body is text up to their own end tag.
+    private static final String[] RAW_TEXT = {"script", "style", "textarea", "title"};
+
+    private int state = DATA;
+    private boolean endTag;                                // the tag being read is </name ...>
+    private final StringBuilder tag = new StringBuilder(); // its name, lower-cased
+    private final StringBuilder attr = new StringBuilder(); // the attribute being read, lower-cased
+    private char quote;                                    // in VALUE_QUOTED: the quote that closes it
+    private String rawElement;                             // in RAW*: the element whose body this is
+    private int rawMatched;                                // in RAW_END: characters of its name matched
+    private int valueStart;                                // see scan
+
     /**
-     * A cheap test that template text might end inside an attribute value: a quote after '=',
-     * back to the tag's start. Other quotes are passed over, since a value can hold the other
-     * kind ({@code onclick="go('}); {@link #OPENS_VALUE} makes the real decision.
+     * Advances the tokenizer over template text. Afterwards {@code valueStart} is the index in
+     * this text where the quoted value still open at its end began, or -1 if the text doesn't end
+     * in a value it opened.
      */
-    private static boolean mayOpenValue(byte[] b) {
-        for (int i = b.length - 1; i > 0; i--) {
-            byte c = b[i];
-            if (c == '"' || c == '\'') {
-                int j = i - 1;
-                while (j >= 0 && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r')) j--;
-                if (j >= 0 && b[j] == '=') return true;
+    private void scan(String s, int begin, int end) {
+        valueStart = -1;
+        int i = begin;
+        while (i < end) {
+            if (state == DATA || state == RAW) { // most of a page: nothing happens before a '<'
+                i = s.indexOf('<', i);
+                if (i < 0 || i >= end) return;
             }
-            if (c == '>' || c == '<') return false;
+            step(s.charAt(i), i);
+            i++;
         }
-        return false;
     }
 
-    private static boolean mayOpenValue(String s, int begin, int end) {
-        for (int i = end - 1; i > begin; i--) {
-            char c = s.charAt(i);
-            if (c == '"' || c == '\'') {
-                int j = i - 1;
-                while (j >= begin && Character.isWhitespace(s.charAt(j))) j--;
-                if (j >= begin && s.charAt(j) == '=') return true;
+    /** The same over UTF-8 bytes: every character that matters is ASCII, so no decoding. */
+    private void scan(byte[] b) {
+        valueStart = -1;
+        int i = 0, end = b.length;
+        while (i < end) {
+            if (state == DATA || state == RAW) {
+                while (i < end && b[i] != '<') i++;
+                if (i == end) return;
             }
-            if (c == '>' || c == '<') return false;
+            step((char) (b[i] & 0xff), i);
+            i++;
         }
-        return false;
+    }
+
+    /** Whether the text just scanned ends in a quoted attribute value it opened, on a start tag. */
+    private boolean endsInStartTagValue() {
+        return valueStart >= 0 && !endTag;
+    }
+
+    private void step(char c, int index) {
+        switch (state) {
+            case DATA -> { if (c == '<') state = LT; }
+            case LT -> {
+                if (isAsciiLetter(c)) startTagName(c, false);
+                else if (c == '/') state = END_TAG_OPEN;
+                else if (c == '!') state = MARKUP;
+                else if (c == '?') state = BOGUS;
+                else if (c != '<') state = DATA;
+            }
+            case END_TAG_OPEN -> {
+                if (isAsciiLetter(c)) startTagName(c, true);
+                else state = c == '>' ? DATA : BOGUS;
+            }
+            case TAG_NAME -> {
+                if (isSpace(c) || c == '/') state = BEFORE_ATTR;
+                else if (c == '>') closeTag();
+                else appendName(tag, c);
+            }
+            case BEFORE_ATTR -> {
+                if (c == '>') closeTag();
+                else if (!isSpace(c) && c != '/') startAttribute(c);
+            }
+            case ATTR_NAME -> {
+                if (isSpace(c)) state = AFTER_ATTR_NAME;
+                else if (c == '/') state = BEFORE_ATTR;
+                else if (c == '=') state = BEFORE_VALUE;
+                else if (c == '>') closeTag();
+                else appendName(attr, c);
+            }
+            case AFTER_ATTR_NAME -> {
+                if (c == '=') state = BEFORE_VALUE;
+                else if (c == '/') state = BEFORE_ATTR;
+                else if (c == '>') closeTag();
+                else if (!isSpace(c)) startAttribute(c);
+            }
+            case BEFORE_VALUE -> {
+                if (c == '"' || c == '\'') {
+                    state = VALUE_QUOTED;
+                    quote = c;
+                    valueStart = index + 1;
+                } else if (c == '>') {
+                    closeTag();
+                } else if (!isSpace(c)) {
+                    state = VALUE_UNQUOTED;
+                }
+            }
+            case VALUE_QUOTED -> {
+                if (c == quote) {
+                    state = BEFORE_ATTR;
+                    valueStart = -1;
+                }
+            }
+            case VALUE_UNQUOTED -> {
+                if (isSpace(c)) state = BEFORE_ATTR;
+                else if (c == '>') closeTag();
+            }
+            case RAW -> { if (c == '<') state = RAW_LT; }
+            case RAW_LT -> {
+                if (c == '/') {
+                    state = RAW_END;
+                    rawMatched = 0;
+                } else if (c != '<') {
+                    state = RAW;
+                }
+            }
+            case RAW_END -> {
+                if (rawMatched < rawElement.length()) {
+                    if (lower(c) == rawElement.charAt(rawMatched)) rawMatched++;
+                    else state = c == '<' ? RAW_LT : RAW;
+                } else if (c == '>') {
+                    state = DATA;
+                } else if (isSpace(c) || c == '/') {
+                    endTag = true; // </script ...>: read to its '>' like any other tag
+                    state = BEFORE_ATTR;
+                } else {
+                    state = c == '<' ? RAW_LT : RAW; // </scripty: still the body
+                }
+            }
+            case MARKUP -> state = c == '-' ? MARKUP_DASH : c == '>' ? DATA : BOGUS;
+            case MARKUP_DASH -> state = c == '-' ? COMMENT : c == '>' ? DATA : BOGUS;
+            case COMMENT -> { if (c == '-') state = COMMENT_DASH; }
+            case COMMENT_DASH -> state = c == '-' ? COMMENT_DASH_DASH : COMMENT;
+            case COMMENT_DASH_DASH -> { if (c == '>') state = DATA; else if (c != '-') state = COMMENT; }
+            case BOGUS -> { if (c == '>') state = DATA; }
+            default -> throw new IllegalStateException("tokenizer state " + state);
+        }
+    }
+
+    private void startTagName(char c, boolean end) {
+        state = TAG_NAME;
+        endTag = end;
+        tag.setLength(0);
+        tag.append(lower(c));
+    }
+
+    private void startAttribute(char c) {
+        state = ATTR_NAME;
+        attr.setLength(0);
+        attr.append(lower(c));
+    }
+
+    private void closeTag() {
+        state = DATA;
+        if (endTag) return;
+        for (String name : RAW_TEXT) {
+            if (name.contentEquals(tag)) {
+                state = RAW;
+                rawElement = name;
+                return;
+            }
+        }
+    }
+
+    private static void appendName(StringBuilder name, char c) {
+        if (name.length() < MAX_NAME) name.append(lower(c));
+    }
+
+    private static char lower(char c) {
+        return c >= 'A' && c <= 'Z' ? (char) (c + 32) : c;
+    }
+
+    private static boolean isSpace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
     }
 
     /** Write the held value, replaced first if it's a URL that user data made unsafe. */

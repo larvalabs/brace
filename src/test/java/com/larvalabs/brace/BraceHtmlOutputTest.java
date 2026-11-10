@@ -22,9 +22,16 @@ class BraceHtmlOutputTest {
 
     static final List<String> URL_IDS = List.of("a", "img", "iframe", "form", "btn", "hxget", "dhxpost", "xlink");
 
+    // The same templates compiled with static text as Strings (JTE's default), which reaches the
+    // output through writeContent, not writeBinaryContent.
+    static gg.jte.TemplateEngine stringEngine;
+    @TempDir static Path stringClasses;
+
     @BeforeAll
     static void setup() {
         engine = new TemplateEngine(VIEWS);
+        stringEngine = gg.jte.TemplateEngine.create(
+            new gg.jte.resolve.DirectoryCodeResolver(Path.of(VIEWS)), stringClasses, gg.jte.ContentType.Html);
     }
 
     // --- M4: URL attributes ---
@@ -272,6 +279,91 @@ class BraceHtmlOutputTest {
         var params = Map.<String, Object>of("u", "java\tscript:alert(1)");
         assertEquals(engine.render("xssAttrs", params),
             new String(engine.renderToBytes("xssAttrs", params), StandardCharsets.UTF_8));
+    }
+
+    // --- H1 (2026-11 security review): script bodies ---
+    //
+    // JavaScript such as `var a = "` looks like the start of an attribute value. A value was held
+    // for it, and the data then got attribute escaping (no backslash or newline escaping) in the
+    // middle of a script.
+
+    static final List<String> SCRIPT_VALUES = List.of("\\", "\"", "'", "a\nb", "a\r\nb",
+        "</script><script>alert(1)</script>", "a'b\"c\\d", "<!--", "&#39;", "plain");
+
+    @Test
+    void scriptBodiesAreJavaScriptEscaped() {
+        for (String x : SCRIPT_VALUES) {
+            String html = both("xssScript", Map.of("x", x, "y", "Y"));
+            String e = js(x);
+            assertTrue(html.contains("<script id=\"s1\">var a = \"" + e + "\";</script>"), html);
+            assertTrue(html.contains("<script id=\"s2\">const name = '" + e + "';</script>"), html);
+            assertTrue(html.contains("<script id=\"s3\">var a = \"" + e + "\", b = \"Y\";</script>"), html);
+            assertTrue(html.contains("<script id=\"s4\">foo(\"" + e + "\");</script>"), html);
+            // Variables named like URL attributes: no URL check in a script.
+            assertTrue(html.contains("<script id=\"s5\">let src = \"" + e + "\", href = 'Y';</script>"), html);
+            assertTrue(html.contains("<script id=\"s6\">var q = '" + e + "', r = 'Y';</script>"), html);
+            // The second value on the line, too.
+            html = both("xssScript", Map.of("x", "X", "y", x));
+            assertTrue(html.contains("<script id=\"s3\">var a = \"X\", b = \"" + e + "\";</script>"), html);
+            assertTrue(html.contains("<script id=\"s5\">let src = \"X\", href = '" + e + "';</script>"), html);
+            assertTrue(html.contains("<script id=\"s6\">var q = 'X', r = '" + e + "';</script>"), html);
+        }
+    }
+
+    @Test
+    void aBackslashCantSwallowTheClosingQuoteInAScript() {
+        // The exploit: "\" ate the first string's closing quote, and the second value was code.
+        String html = both("xssScript", Map.of("x", "\\", "y", ";alert(1)//"));
+        assertTrue(html.contains("<script id=\"s3\">var a = \"\\\\\", b = \";alert(1)\\/\\/\";</script>"), html);
+        assertTrue(html.contains("<p id=\"body\">it's a = \"5</p><script id=\"s6\">var q = '\\\\', r = ';alert(1)\\/\\/';</script>"), html);
+        html = both("xssScript", Map.of("x", "javascript:alert(1)", "y", "data:text/html,x"));
+        assertFalse(html.contains("<script id=\"s5\">let src = \"" + BraceHtmlOutput.BLOCKED_URL), html);
+        assertTrue(html.contains("<script id=\"s5\">let src = \"javascript:alert(1)\", href = 'data:text\\/html,x';</script>"), html);
+    }
+
+    @Test
+    void bodyTextThatLooksLikeAnAttributeIsBodyText() {
+        String html = both("xssScript", Map.of("x", "<b>\"hi\"</b>", "y", "it's"));
+        assertTrue(html.contains("<p id=\"text\">a = \"&lt;b&gt;\"hi\"&lt;/b&gt;\" and b = 'it's'</p>"), html);
+    }
+
+    @Test
+    void attributesAroundScriptsAreUnchanged() {
+        String html = both("xssScript", Map.of("x", "javascript:alert(1)", "y", "\"><i>"));
+        assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(html, "after"));
+        assertTrue(html.contains("<a id=\"after\" href=\"" + BraceHtmlOutput.BLOCKED_URL + "\" title=\"&#34;>&lt;i>\">x</a>"), html);
+        html = both("xssScript", Map.of("x", "');alert(1)//", "y", "/ok"));
+        assertEquals("go('\\u0027);alert(1)//')", named(html, "click", "onclick"));
+        // And the templates the other tests use render the same in both static-content modes.
+        for (String u : List.of("javascript:alert(1)", "/ok", "');alert(1)//", "&#39;x", "{\"a\":1}")) {
+            both("xssAttrs", Map.of("u", u));
+            both("xssCalleeCaller", Map.of("u", u));
+            both("xssCombos", Map.of("a", "", "b", u, "n", 3));
+            both("xssCombos", Map.of("a", "javascript", "b", u, "n", 3));
+        }
+        both("xssContentCaller", Map.of("name", "<Ann>"));
+    }
+
+    /**
+     * Renders with static template text as pre-encoded bytes (how Brace runs, to a String and to
+     * bytes) and as Strings (JTE's default), asserts all three agree, and returns the HTML.
+     */
+    private static String both(String template, Map<String, Object> params) {
+        String binary = engine.render(template, params);
+        assertEquals(binary, new String(engine.renderToBytes(template, params), StandardCharsets.UTF_8), template);
+        var out = new gg.jte.output.StringOutput();
+        var html = new BraceHtmlOutput(out);
+        stringEngine.render(template + ".jte", params, html);
+        html.finish();
+        assertEquals(binary, out.toString(), template + ": String and binary static content differ");
+        return binary;
+    }
+
+    /** JTE's escaping for a script body. */
+    private static String js(String value) {
+        var out = new gg.jte.output.StringOutput();
+        gg.jte.html.escape.Escape.javaScriptBlock(value, out);
+        return out.toString();
     }
 
     // --- helpers ---
