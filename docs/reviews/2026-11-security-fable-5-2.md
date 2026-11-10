@@ -185,7 +185,7 @@ Settled by Matt on 2026-11-09, the recommended option in each case:
 | D6 | An unknown `scope:` fails startup; `opsOrigins` is required everywhere except dev. |
 
 Applied during the review rounds, on reviewers' recommendations or as the fail-closed choice,
-and **pending Matt's confirmation**. Any can be changed before release.
+and **confirmed by Matt on 2026-11-10**.
 
 | Decision | Why |
 |---|---|
@@ -256,7 +256,6 @@ mvn -DskipTests compile com.github.spotbugs:spotbugs-maven-plugin:spotbugs -Dspo
 - **H2's last step.** Set `MIN_TOOLCHAIN="0.1.11"` in `bin/brace` in the 0.1.11 release commit
   (the release checklist in `AGENTS.md` now says so), then tick H2. Not earlier: until 0.1.11
   exists, that floor refuses every `0.1.11` prerelease that is not the bundled one.
-- **Pending decisions** above need Matt's confirmation before the tag.
 - **Wildcard bind (Low, new, not fixed).** On macOS an unprivileged local process can bind
   `127.0.0.1:<app port>` and take the loopback traffic of a wildcard-bound app; `start()` does
   not detect an existing conflict. Linux normally refuses the bind. `.host("127.0.0.1")` is the

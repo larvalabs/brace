@@ -7,7 +7,7 @@ the open decisions, how the work is split across agents, the order it merges in,
 be true before it does.
 
 **Status (2026-11-10): fix rounds, whole-branch review, verification pass and merge gate
-complete at `d8aa624`.** Awaiting Matt's confirmation of the pending decisions below. Outstanding:
+complete at `d8aa624`.** Matt confirmed every decision below on 2026-11-10. Outstanding:
 the tool reruns (SpotBugs, Semgrep, OSV; none was available offline) and the release-commit
 steps. H2's code has landed, but `MIN_TOOLCHAIN` itself is raised in the 0.1.11 release commit,
 so H2 stays unticked until then. The record is
@@ -15,8 +15,8 @@ so H2 stays unticked until then. The record is
 
 Decisions D1 to D6 were settled on 2026-11-09: the recommended option in every case. Decisions A
 and B below were made during the fix phase, F1 to F7 during the final review round, and V1 to V3
-during the verification pass, on the reviewer's recommendation or as the fail-closed choice; all
-twelve are pending Matt's confirmation.
+during the verification pass, on the reviewer's recommendation or as the fail-closed choice. Matt
+confirmed all twelve as applied on 2026-11-10 (V3 refines F2, so they were put to him as eleven).
 
 Two deviations from the conventions below: the integration branch is
 `claude/framework-security-review-7c9e30`, not `security-review-2026-11`; and migration-guide
@@ -52,18 +52,18 @@ A consequence of D5: once the floor is `0.1.11`, a project pinned to `0.1.10` or
 early rc cannot use the launcher without the override until it upgrades.
 
 Two more decisions came out of the independent review of Track C. Both refine how an earlier
-decision was first implemented. **Applied on the reviewer's recommendation, pending Matt's
-confirmation**; either can be changed before release.
+decision was first implemented. **Applied on the reviewer's recommendation; confirmed by Matt on
+2026-11-10.**
 
 | # | Finding | Applied | Alternative considered | Why |
 |---|---|---|---|---|
 | A | M4 missing rate-limit key (refines D2) | A request with a missing key is limited in a bucket for its client IP (an IPv6 /64), with the limiter's own limit and window; `.exemptMissingKey()` opts out | One global missing-key bucket, as D2 was first implemented | With one global bucket, ordinary traffic locked everyone out: five `GET /login` page views from five IPs and a sixth visitor got 429. Per-IP keeps "no bypass" without that |
 | B | L6 key cap | At `maxKeys` a new key evicts the least recently used key that is under its limit; keys at their limit stay pinned; only when nothing can be evicted does a key use a per-IP overflow bucket, then a global one | One global overflow bucket for every key past the cap | A flood of about 111 fresh keys per second locked out every new login user. Evicting an under-limit key forfeits fewer than `maxRequests` attempts |
 
-Seven more were taken during the final review round. Each is **applied, pending Matt's
-confirmation**; the migration guide and `docs/SECURITY.md` describe them as applied.
+Seven more were taken during the final review round. Each is **applied, and confirmed by Matt on
+2026-11-10**; the migration guide and `docs/SECURITY.md` describe them as applied.
 
-| # | Finding | Applied, pending Matt's confirmation |
+| # | Finding | Applied and confirmed |
 |---|---|---|
 | F1 | L1 authorized keys (refines D6) | Every `ops-authorized-keys` line must state `scope:read` or `scope:control`; a key line with no scope token fails startup (it used to mean control). `brace ops keypair` and `brace new` always write the token |
 | F2 | L3 client address | `req.ip()` returns `unknown` when a trusted proxy's forwarding header names no usable client (never the proxy's own address), and is canonical: RFC 5952 for IPv6, an IPv4-mapped address as IPv4 |
@@ -73,9 +73,10 @@ confirmation**; the migration guide and `docs/SECURITY.md` describe them as appl
 | F6 | L4 page-cache eviction | A new Postgres framework migration, `V19__brace_cache_used_at.sql` (Postgres only), adds `brace_cache.used_at`. The verification pass removed its index (it did not help the trim and held a table lock during the build), so it adds the column only |
 | F7 | M6 redaction | The shape rule redacts a 16+ character hash label in a file name (`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as `[redacted].css`), because it cannot be told from a download token. The verification pass added a name-versus-secret heuristic (`Redactor.isNameLike`) so names made of words survive; measured residual: a base62 token of 16 characters reads as a name about 1 in 10,000 times, none at 32 or more |
 
-Three more were taken in the verification pass. Each is **applied, pending Matt's confirmation**.
+Three more were taken in the verification pass. Each is **applied, and confirmed by Matt on
+2026-11-10**.
 
-| # | Finding | Applied, pending Matt's confirmation |
+| # | Finding | Applied and confirmed |
 |---|---|---|
 | V1 | L1 key rotation | `brace ops keypair --label X` keeps the existing entry's scope unless `--control` or `--read-only` is given, prints `scope changed: read -> control` when it changes, and refuses an old-format line with no scope until a flag is given |
 | V2 | L10 lifecycle | An app started with a database cannot be restarted: a second `start()` throws ("Build a new Brace"). Apps without a database can restart |
