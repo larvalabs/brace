@@ -374,7 +374,8 @@ Different developers get different labels, so they never clobber each other's en
 Ops auth uses Ed25519 keypairs. Two files matter:
 
 - **`ops-authorized-keys`** — committed. Public keys allowed to authenticate, one per
-  line as `<base64-pubkey> [scope:read|scope:control] <label>`. Loaded by
+  line as `<base64-pubkey> scope:read|scope:control <label>` (the scope token is
+  required). Loaded by
   `app.ops("ops-authorized-keys")` — this is the allow-list the *server* checks.
 - **`ops-private.key`** — gitignored, per-developer. Three lines: a comment, the base64
   private key, and the matching public key. Path is recorded in `.brace.local` as
@@ -388,17 +389,20 @@ Each authorized key has a **scope ceiling** that caps every token it can mint. T
 - **`control`** — everything `read` can do, plus mutating endpoints: `cache/clear`,
   `errors/{id}/resolve`. `control` implies `read`.
 
-A line with no `scope:` marker defaults to `control` (backward compatible). Mark a key
-read-only by adding `scope:read`:
+Every key line states its scope. **A line with no `scope:` token stops the server from
+starting** (until 0.1.11 such a line meant `control`; add `scope:control` to keep that):
 
 ```
-<base64-pubkey>  scope:read  oncall-agent   # read-only CI key
+<base64-pubkey>  scope:control  alice@laptop
+<base64-pubkey>  scope:read     oncall-agent   # read-only CI key
 ```
 
-Any token with `:` or `=` must be exactly `scope:read` or `scope:control` (at most once), or
-the server refuses to start; other words are label text, and `#` after whitespace starts a
-comment. A lone `read`/`ro`/`control` after the key also fails: write `scope:read`. The full
-grammar is in `docs/SECURITY.md` (Ops Endpoints).
+Exactly one token must be `scope:read` or `scope:control`; any other token with `:` or `=`
+(`scope: read`, `scope=read`, `role:read`, `scope:read-only`, a second scope token) also stops
+startup. Every other word is label text, including `read`, `ro` and `control`: with the scope
+stated, a label is only a label. `#` at the start of a line or after whitespace starts a
+comment, and a comment on a key line may not contain `scope:`. The full grammar is in
+`docs/SECURITY.md` (Ops Endpoints).
 
 `POST /ops/auth` caps the minted token at the key's ceiling, so a `scope:read` key
 **cannot** obtain a control token even if it requests one — escalation is impossible by
@@ -457,8 +461,8 @@ green.
   `brace ops whoami` — `grep -F "$(sed -n '3p' ops-private.key)" ops-authorized-keys` is
   the manual check.
 - **Registering a coworker's existing public key:** there is no CLI for this today;
-  append the line to `ops-authorized-keys` by hand (raw base64 public key, optional
-  `scope:read` marker, then the label).
+  append the line to `ops-authorized-keys` by hand: the raw base64 public key, then
+  `scope:control` (or `scope:read` for a read-only key), then the label.
 
 ## Credential channels
 

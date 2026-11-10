@@ -224,7 +224,11 @@ public class CliInit {
                 + "(3) server returned a framework-level error before the auth handler ran "
                 + "(check the response body shown above).");
         } else if (myPub != null) {
-            actions.add("Add to server's ops-authorized-keys: " + myPub + "  <label>");
+            // The exact line the server accepts: it refuses to start on a key line with no scope
+            // token (L1 final review), so a bare `KEY <label>` would break the next deploy.
+            actions.add("Add this line to the server's ops-authorized-keys (write scope:read instead of"
+                + " scope:control for a key that should only read status, logs and errors): "
+                + CliOps.keysFileLine(myPub, CliOps.defaultLabel(projectDir), false));
         } else {
             actions.add("Add your public key to server's ops-authorized-keys");
         }

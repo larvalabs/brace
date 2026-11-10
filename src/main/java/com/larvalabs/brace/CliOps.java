@@ -68,7 +68,7 @@ public class CliOps {
         // scope token, so that no line means CONTROL by omission). A read-only key is
         // `scope:read`: the server caps any token it mints at READ, so it can pull
         // status/errors/logs but never hit a control endpoint. Hand that to an autonomous agent.
-        String entry = kp.publicKey() + "  " + (readOnly ? "scope:read" : "scope:control") + "  " + label;
+        String entry = keysFileLine(kp.publicKey(), label, readOnly);
         boolean replaced = false;
         try {
             if (Files.exists(file)) {
@@ -102,6 +102,15 @@ public class CliOps {
             + " the entry for \"" + label + "\" in ops-authorized-keys.");
         System.out.println("Commit ops-authorized-keys and deploy it to authorize this key on the server.");
         return 0;
+    }
+
+    /**
+     * The {@code ops-authorized-keys} line for a public key, in the form the server requires
+     * ({@code KEY scope:read|scope:control LABEL}): every line the CLI writes or tells the user to
+     * add comes from here, so none can omit the scope token the server refuses to start without.
+     */
+    static String keysFileLine(String publicKey, String label, boolean readOnly) {
+        return publicKey + "  " + (readOnly ? "scope:read" : "scope:control") + "  " + label;
     }
 
     /**
