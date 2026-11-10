@@ -529,7 +529,7 @@ public class CliCommands {
 
     /**
      * JSON mode for a command whose server reply is passed on: parse it and print it
-     * re-serialized (compact, control characters escaped by Jackson), never the raw body, which
+     * re-serialized (compact, unsafe characters escaped by {@link CliOutput#json}), never the raw body, which
      * a hostile server could fill with terminal escape sequences (L11). A body that isn't JSON
      * gets the same one-line error, and exit code, as an HTTP error status.
      */
