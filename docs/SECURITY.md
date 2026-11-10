@@ -1722,10 +1722,19 @@ limiter is not tracking is handled in this order:
 **What forgetting a key costs.** It differs by mode:
 
 - *Postgres (shared counters).* Nothing is lost fleet-wide. The key's `brace_counters` row is
-  never deleted by an eviction, a count the instance had buffered for it is still written at the
-  next flush, and when the key comes back the instance reads the fleet count before judging the
-  request. A key the fleet has blocked stays blocked whichever instance sees it next.
-  (Counts buffered but unwritten can be lost only while database writes are failing.)
+  never deleted by an eviction, and a count the instance had buffered for it is still written at
+  the next flush. When the key comes back, the instance reads its fleet count with one
+  single-row statement before judging the request, provided two things hold: the instance still
+  recognises the key as one it evicted (a pair of rotating Bloom filters remembers at least the
+  last `max(2,048, min(maxKeys, 1,048,576))` keys it evicted, with under 1% false positives
+  however long the window), and the limiter has made fewer than 50 such reads in the current
+  second. Otherwise the key is counted as new and its fleet count arrives with the limiter's next
+  batched flush, the same lag every key has: **a key the fleet has blocked is admitted by that
+  instance at most one flush batch (`limit / 10` requests by default, see
+  `rateLimitBatchDivisor`) before it is refused**, plus any requests that arrive while another
+  thread's flush is still running, and from then on it stays blocked there. The read budget is what keeps a flood of fresh keys from
+  putting a database round trip on every request. (Counts buffered but unwritten can be lost
+  only while database writes are failing, and during an outage every instance counts on its own.)
 - *Per-process counting (no shared database).* The forgotten key's count so far, fewer than
   `limit`, is gone: if it returns it starts again from zero. A client that wants extra attempts
   at one key must therefore fill the table with fresh keys and keep it turning over; with the
