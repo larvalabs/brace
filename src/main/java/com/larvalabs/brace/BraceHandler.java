@@ -1960,8 +1960,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * socket can't carry a session a request couldn't.
      */
     Session decodeSession(String cookieValue) {
-        List<String> previous = sessionOptions != null ? sessionOptions.previousSecrets() : List.of();
-        Session session = Session.fromCookie(cookieValue, sessionSecret, previous);
+        // M7: the previous secrets always travel with their lifetime bound.
+        Session session = sessionOptions != null
+            ? Session.fromCookie(cookieValue, sessionSecret,
+                sessionOptions.previousSecrets(), sessionOptions.maxPreviousAbsoluteSeconds())
+            : Session.fromCookie(cookieValue, sessionSecret);
         if (sessionValidator != null && !session.isEmpty() && !sessionValidator.isValid(session)) {
             return Session.invalidated();
         }

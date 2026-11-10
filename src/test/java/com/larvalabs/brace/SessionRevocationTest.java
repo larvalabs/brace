@@ -23,11 +23,11 @@ class SessionRevocationTest {
     @Test
     void cookieSealedWithAPreviousSecretOpensAndIsResealed() {
         String old = Session.of("userId", "5").toCookie(OLD);
-        var session = Session.fromCookie(old, CURRENT, SessionOptions.of(CURRENT).previousSecrets(OLD).previousSecrets());
+        var session = open(old, SessionOptions.of(CURRENT).previousSecrets(OLD));
         assertEquals("5", session.get("userId"));
         assertTrue(session.isModified(), "re-sealed with the current secret on this response");
         // Not opened without the previous secret listed.
-        assertNull(Session.fromCookie(old, CURRENT, SessionOptions.of(CURRENT).previousSecrets()).get("userId"));
+        assertNull(open(old, SessionOptions.of(CURRENT)).get("userId"));
     }
 
     @Test
@@ -66,7 +66,7 @@ class SessionRevocationTest {
     void previousSecretCookieWithoutAbsIsRejected() {
         String forged = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (System.currentTimeMillis() / 1000 + 3600) + "\"}");
         var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
-        assertNull(Session.fromCookie(forged, CURRENT, options.previousSecrets()).get("userId"));
+        assertNull(open(forged, options).get("userId"));
     }
 
     @Test
@@ -75,13 +75,13 @@ class SessionRevocationTest {
         String forged = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
             + (now + 3L * 365 * 86400) + "\"}");
         var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
-        assertNull(Session.fromCookie(forged, CURRENT, options.previousSecrets()).get("userId"));
+        assertNull(open(forged, options).get("userId"));
     }
 
     @Test
     void currentSecretCookieWithoutAbsKeepsWorking() {
         String c = sealRaw(CURRENT, "{\"userId\":\"1\",\"_exp\":\"" + (System.currentTimeMillis() / 1000 + 3600) + "\"}");
-        assertEquals("1", Session.fromCookie(c, CURRENT, SessionOptions.of(CURRENT).previousSecrets(OLD).previousSecrets()).get("userId"));
+        assertEquals("1", open(c, SessionOptions.of(CURRENT).previousSecrets(OLD)).get("userId"));
     }
 
     // --- M7 review fixes ---
@@ -94,7 +94,7 @@ class SessionRevocationTest {
         String forged = sealRaw(OLD, "{\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
             + (now + 100L * 365 * 86400) + "\"}");
         var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
-        var session = Session.fromCookie(forged, CURRENT, options.previousSecrets());
+        var session = open(forged, options);
         session.set("userId", "1");
         String resealed = session.toCookie(CURRENT);
         long abs = Long.parseLong(openRaw(CURRENT, resealed).replaceAll(".*\"_abs\":\"(\\d+)\".*", "$1"));
@@ -104,15 +104,36 @@ class SessionRevocationTest {
 
     @Test
     void previousSecretsWithoutTheConfiguredBoundAreNotHonoured() {
-        // The bound travels with SessionOptions.previousSecrets(); a copied (plain) list loses it.
-        // That must fail closed: no previous-secret cookie opens, even one with a modest _abs.
+        // The bound is an explicit argument next to the previous secrets. Without a usable one
+        // (zero or negative) it must fail closed: no previous-secret cookie opens, even one with
+        // a modest _abs.
         long now = System.currentTimeMillis() / 1000;
         String cookie = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
             + (now + 3600) + "\"}");
         var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
-        assertEquals("1", Session.fromCookie(cookie, CURRENT, options.previousSecrets()).get("userId"));
-        assertNull(Session.fromCookie(cookie, CURRENT, List.copyOf(options.previousSecrets())).get("userId"));
-        assertNull(Session.fromCookie(cookie, CURRENT, List.of(OLD)).get("userId"));
+        assertEquals("1", open(cookie, options).get("userId"));
+        assertNull(Session.fromCookie(cookie, CURRENT, List.copyOf(options.previousSecrets()), 0).get("userId"));
+        assertNull(Session.fromCookie(cookie, CURRENT, List.of(OLD), -1).get("userId"));
+        // The current-secret-only form never tries a previous secret.
+        assertNull(Session.fromCookie(cookie, CURRENT).get("userId"));
+    }
+
+    @Test
+    void noFromCookieOverloadTakesPreviousSecretsWithoutTheBound() {
+        // Fail closed by construction: every fromCookie that accepts previous secrets also takes
+        // the lifetime bound, so a caller cannot forget it.
+        for (var m : Session.class.getDeclaredMethods()) {
+            if (!m.getName().equals("fromCookie")) continue;
+            var params = List.of(m.getParameterTypes());
+            if (params.contains(List.class) || params.contains(java.util.Collection.class)) {
+                assertEquals(List.of(String.class, String.class, List.class, long.class), params, m.toString());
+            }
+        }
+    }
+
+    /** Opens a cookie the way {@code BraceHandler.decodeSession} does for these options. */
+    private static Session open(String cookie, SessionOptions options) {
+        return Session.fromCookie(cookie, CURRENT, options.previousSecrets(), options.maxPreviousAbsoluteSeconds());
     }
 
     @Test

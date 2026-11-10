@@ -164,43 +164,21 @@ public class SessionOptions {
         return this;
     }
 
-    /**
-     * The previous secrets. The returned list also knows the longest lifetime a cookie sealed
-     * with one of them may claim ({@link Session#fromCookie}'s M7 bound), so the caller needs no
-     * second argument.
-     */
+    /** The previous secrets (immutable). */
     public java.util.List<String> previousSecrets() {
-        return new PreviousSecrets(previousSecrets, maxPreviousAbsoluteSeconds());
+        return previousSecrets;
     }
 
-    /** Longest absolute lifetime, in seconds, a cookie opened with a previous secret may carry. */
+    /**
+     * Longest absolute lifetime, in seconds, a cookie opened with a previous secret may carry: the
+     * M7 bound that {@link Session#fromCookie(String, String, java.util.List, long)} requires
+     * alongside the previous secrets.
+     */
     long maxPreviousAbsoluteSeconds() {
         if (absoluteMaxAge != null && absoluteMaxAge.getSeconds() > 0) return absoluteMaxAge.getSeconds();
         long horizon = maxAge != null && maxAge.getSeconds() > 0
             ? maxAge.getSeconds() : Session.DEFAULT_MAX_AGE_SECONDS;
         return Math.max(Session.DEFAULT_ABSOLUTE_MAX_AGE_SECONDS, horizon);
-    }
-
-    /**
-     * Read-only list of previous secrets that carries the lifetime bound for {@link Session}.
-     * The bound rides on the list type because {@code BraceHandler} could not change in the
-     * 2026-11 review; {@link Session#fromCookie(String, String, java.util.List)} honours no
-     * previous-secret cookie when handed any other list (fail closed).
-     */
-    // TODO(security-review-2026-11): pass the bound explicitly once BraceHandler can change.
-    static final class PreviousSecrets extends java.util.AbstractList<String> {
-        private final java.util.List<String> secrets;
-        private final long maxAbsoluteSeconds;
-
-        PreviousSecrets(java.util.List<String> secrets, long maxAbsoluteSeconds) {
-            this.secrets = secrets;
-            this.maxAbsoluteSeconds = maxAbsoluteSeconds;
-        }
-
-        @Override public String get(int index) { return secrets.get(index); }
-        @Override public int size() { return secrets.size(); }
-
-        long maxAbsoluteSeconds() { return maxAbsoluteSeconds; }
     }
 
     /**

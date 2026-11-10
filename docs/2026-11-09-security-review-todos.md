@@ -411,6 +411,12 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `start()` re-validates; a previous-secrets list without the bound (copied) honours no
     previous-secret cookie. The bound still rides on the `PreviousSecrets` list type, with a
     TODO, because `BraceHandler.java` could not change.
+  - **Follow-up** (`refactor(security): M7 pass the previous-secret lifetime bound explicitly`).
+    `Session.fromCookie(cookie, secret, previousSecrets, maxPreviousAbsoluteSeconds)` takes the
+    bound as a required argument (no overload accepts previous secrets without it; a bound that is
+    not positive honours no previous-secret cookie). `BraceHandler.decodeSession`, shared with the
+    WebSocket upgrade, passes `SessionOptions.maxPreviousAbsoluteSeconds()`. The `PreviousSecrets`
+    list subclass and the TODOs are gone; `SessionOptions.previousSecrets()` is a plain list.
 
 - [x] **M8: Buffered `Http.fetch*` has no timeout on the response body**, `Http.java:197, 224-230, 253-261, 315-329`
   - **What's wrong.** `fetch()`, `fetchString()`, `fetchJson()`, `fetchBytes()` and the

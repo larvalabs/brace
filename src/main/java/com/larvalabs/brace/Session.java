@@ -313,16 +313,20 @@ public class Session {
      * (M10's {@link SessionOptions#previousSecrets}), so the secret can be rotated without logging
      * everyone out. A session opened with an old secret is marked modified, so this response
      * re-seals it with the current one.
+     *
+     * <p>{@code maxPreviousAbsoluteSeconds} is the longest absolute lifetime a cookie opened with a
+     * previous secret may still claim ({@link SessionOptions#maxPreviousAbsoluteSeconds}, M7). It
+     * is a required argument on purpose: there is no overload that takes previous secrets without
+     * it, and a bound that is not positive honours no previous-secret cookie (fail closed).
      */
-    static Session fromCookie(String cookie, String secret, java.util.List<String> previousSecrets) {
+    static Session fromCookie(String cookie, String secret, java.util.List<String> previousSecrets,
+                              long maxPreviousAbsoluteSeconds) {
         Session session = decrypt(cookie, secret);
         if (session != null) return session;
-        // M7: the lifetime bound travels with the list (SessionOptions.previousSecrets()). A list
-        // without it (copied, or built by hand) gives no way to bound _abs, so no cookie sealed
-        // with a previous secret is honoured: fail closed rather than guess a default lifetime.
-        // TODO(security-review-2026-11): pass the bound explicitly once BraceHandler can change.
-        if (!(previousSecrets instanceof SessionOptions.PreviousSecrets bounded)) return new Session();
-        long maxAbsolute = bounded.maxAbsoluteSeconds();
+        // M7: without a bound there is no way to limit _abs, so no cookie sealed with a previous
+        // secret is honoured: fail closed rather than guess a default lifetime.
+        if (maxPreviousAbsoluteSeconds <= 0) return new Session();
+        long maxAbsolute = maxPreviousAbsoluteSeconds;
         for (String previous : previousSecrets) {
             session = decrypt(cookie, previous);
             if (session != null) {
