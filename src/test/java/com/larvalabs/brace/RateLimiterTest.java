@@ -474,6 +474,74 @@ class RateLimiterTest {
             "the counts buffered during the outage were kept and flushed once it ended");
     }
 
+    // ---- L6: IPv6 /64 bucketing; a cap on distinct keys ----
+
+    @Test
+    void ipBucketKeysIpv6OnItsSlash64() {
+        assertEquals(RateLimiter.ipBucket("2001:db8:1:2:3:4:5:6"), RateLimiter.ipBucket("2001:db8:1:2:ffff::1"));
+        assertEquals("2001:db8:1:2::/64", RateLimiter.ipBucket("2001:0db8:0001:0002:aaaa:bbbb:cccc:dddd"));
+        assertNotEquals(RateLimiter.ipBucket("2001:db8:1:2::1"), RateLimiter.ipBucket("2001:db8:1:3::1"));
+        // IPv4 and IPv4-mapped IPv6 are one client, keyed on the full IPv4 address.
+        assertEquals("203.0.113.7", RateLimiter.ipBucket("203.0.113.7"));
+        assertEquals("203.0.113.7", RateLimiter.ipBucket("::ffff:203.0.113.7"));
+        assertNotEquals(RateLimiter.ipBucket("203.0.113.7"), RateLimiter.ipBucket("203.0.113.8"));
+        // Not an address literal: used as is, and never resolved.
+        assertEquals("unknown", RateLimiter.ipBucket("unknown"));
+        assertEquals("zz:not-an-address", RateLimiter.ipBucket("zz:not-an-address"));
+        assertEquals("example.com", RateLimiter.ipBucket("example.com"));
+    }
+
+    @Test
+    void perIpRotatingWithinASlash64SharesOneBucket() {
+        var limiter = RateLimiter.perIp(2, "1m");
+        assertNull(limiter.handle(fakeRequest("2001:db8:aa:bb::1")));
+        assertNull(limiter.handle(fakeRequest("2001:db8:aa:bb::2")));
+        var blocked = limiter.handle(fakeRequest("2001:db8:aa:bb:dead:beef:0:3"));
+        assertNotNull(blocked, "a client rotating source addresses inside its /64 is one client");
+        assertEquals(429, blocked.status());
+        assertNull(limiter.handle(fakeRequest("2001:db8:aa:bc::1")), "the next /64 is someone else");
+    }
+
+    @Test
+    void distinctKeysPastTheCapShareOneOverflowBucket() {
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1m").maxKeys(3);
+        for (var user : new String[]{"a", "b", "c"}) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-User", user)));
+        }
+        // Past the cap: d, e, f are new keys and fold into one overflow bucket of 2.
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "d")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "e")));
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "f")),
+            "a key flood is throttled as one bucket");
+        // Existing identities keep their own counts: a has used 1 of 2.
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "existing key keeps its own budget");
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "a")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "b")));
+        assertEquals(4, limiter.windowCount(), "state stays bounded: 3 keys + overflow");
+    }
+
+    @Test
+    void sharedModeAlsoCapsDistinctKeys() {
+        var counters = new CountingCounters();
+        RateLimiter.useSharedBackend(counters);
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1m").maxKeys(2); // flush every request
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "b")));
+        for (int i = 0; i < 2; i++) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-User", "flood-" + i)));
+        }
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "flood-99")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "a keeps its own budget");
+        assertTrue(counters.store.size() <= 3, "shared counter rows bounded: " + counters.store.keySet());
+    }
+
+    @Test
+    void defaultKeyCapIsGenerousAndValidated() {
+        assertEquals(100_000, RateLimiter.DEFAULT_MAX_KEYS);
+        assertThrows(IllegalArgumentException.class, () -> RateLimiter.perKey(req -> "k", 1, "1m").maxKeys(0));
+        assertThrows(IllegalArgumentException.class, () -> RateLimiter.perIp(1, "1m").maxKeys(-1));
+    }
+
     // Integration test with a real Brace app
 
     static Brace app;

@@ -404,7 +404,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     about 512 bytes; on a failed counter batch, retry per key and discard the one that fails.
   - **Model: Opus 5.5.** Same Postgres-IT caveat as M5.
 
-- [ ] **L6: Rate-limiter state has no cap on distinct keys; `perIp` buckets full IPv6 addresses**, `RateLimiter.java:82, 96-98, 116-121, 256, 311-313`
+- [x] **L6: Rate-limiter state has no cap on distinct keys; `perIp` buckets full IPv6 addresses**, `RateLimiter.java:82, 96-98, 116-121, 256, 311-313`
   - Each distinct key holds map entries and a `brace_counters` row for the whole window. A
     client with a routed IPv6 /64 rotates source addresses and never trips `perIp`.
   - **Fix.** Key IPv6 on its /64; cap distinct keys per limiter and fold the excess into one

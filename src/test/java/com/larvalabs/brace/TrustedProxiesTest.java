@@ -256,4 +256,18 @@ public class TrustedProxiesTest {
     public void testAutoRefreshOnlyOnCloudflarePreset() {
         assertThrows(IllegalStateException.class, () -> new TrustedProxies("10.0.0.0/8").autoRefresh());
     }
+
+    @Test
+    public void parseLiteralNeverHandsANameToTheResolver() {
+        // A colon made isIpLiteral say "IPv6 candidate", but InetAddress only parses a literal that
+        // starts with a hex digit or ':'; anything else went to DNS.
+        assertNull(TrustedProxies.parseLiteral("zz:1"));
+        assertNull(TrustedProxies.parseLiteral("localhost:8080"));
+        assertNull(TrustedProxies.parseLiteral("example.com"));
+        assertNull(TrustedProxies.parseLiteral("::1 "));
+        assertNotNull(TrustedProxies.parseLiteral("::1"));
+        assertNotNull(TrustedProxies.parseLiteral("2001:db8::1"));
+        assertNotNull(TrustedProxies.parseLiteral("10.1.2.3"));
+        assertFalse(new TrustedProxies("0.0.0.0/0").isTrusted("zz:1"));
+    }
 }

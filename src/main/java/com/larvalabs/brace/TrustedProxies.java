@@ -321,17 +321,38 @@ public class TrustedProxies {
      * DoS and DNS side-channel attacks from attacker-controlled forwarding headers.
      */
     public boolean isTrusted(String ip) {
-        if (ip == null || ip.isEmpty()) return false;
         // Reject non-literal input before touching InetAddress — never do DNS on hot path.
-        if (!isIpLiteral(ip)) return false;
-        try {
-            var addr = InetAddress.getByName(ip);
-            for (var range : ranges) {
-                if (range.contains(addr)) return true;
+        var addr = parseLiteral(ip);
+        if (addr == null) return false;
+        for (var range : ranges) {
+            if (range.contains(addr)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Parse an IPv4 or IPv6 address literal, or return null; never resolves a name. An IPv6
+     * candidate must consist of hex digits, {@code :} and {@code .} (plus an optional
+     * {@code %zone}): {@link InetAddress#getByName} only parses a string as a literal when it
+     * starts with a hex digit or {@code :}, and sends anything else (say {@code "zz:1"}, which has
+     * a colon) to the resolver. An IPv4-mapped IPv6 literal parses to its IPv4 address.
+     */
+    static InetAddress parseLiteral(String s) {
+        if (s == null || s.isEmpty() || !isIpLiteral(s)) return null;
+        if (s.indexOf(':') >= 0) {
+            int zone = s.indexOf('%');
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                boolean ok = zone >= 0 && i > zone
+                    ? Character.isLetterOrDigit(c) && c < 0x80 || c == '_' || c == '.' || c == '-'
+                    : i == zone || Character.digit(c, 16) >= 0 && c < 0x80 || c == ':' || c == '.';
+                if (!ok) return null;
             }
-            return false;
+        }
+        try {
+            return InetAddress.getByName(s);
         } catch (UnknownHostException e) {
-            return false;
+            return null;
         }
     }
 

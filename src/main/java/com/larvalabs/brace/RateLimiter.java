@@ -104,6 +104,28 @@ public class RateLimiter {
     // = the window-end millis it stays blocked until; cleared once the window rolls.
     private final ConcurrentHashMap<String, Long> blockedUntil = new ConcurrentHashMap<>();
 
+    /**
+     * Default cap on the distinct keys one limiter tracks at a time (L6). Each key holds map entries
+     * (and, on Postgres, a {@code brace_counters} row) for its whole window, so without a cap a
+     * client that can mint keys (a rotating source address, a made-up username) grows the state
+     * without bound. Past the cap, new keys share {@link #OVERFLOW_KEY}. Change per limiter with
+     * {@code maxKeys(int)}.
+     */
+    static final int DEFAULT_MAX_KEYS = 100_000;
+
+    /**
+     * Bucket for new keys once a limiter tracks {@link #maxKeys} of them. Like {@link #MISSING_KEY}
+     * it starts with a space, which no normalized key can, so a client cannot address it directly.
+     * A key flood is therefore throttled as one client while existing keys keep their own counts.
+     */
+    static final String OVERFLOW_KEY = " (overflow)";
+
+    /** Minimum gap between two "key cap reached" warnings from one limiter. */
+    private static final long OVERFLOW_WARN_INTERVAL_MILLIS = 60_000;
+
+    private volatile int maxKeys = DEFAULT_MAX_KEYS;
+    private final AtomicLong lastOverflowWarnMillis = new AtomicLong();
+
     private RateLimiter(int maxRequests, Duration windowDuration, Function<Request, String> keyExtractor, String label) {
         this.maxRequests = maxRequests;
         this.windowDuration = windowDuration;
@@ -113,13 +135,41 @@ public class RateLimiter {
         synchronized (ALL) { ALL.add(this); }
     }
 
-    public static Middleware.Before perIp(int maxRequests, String duration) {
+    /**
+     * Rate-limit requests by client address, {@code req.ip()} (configure
+     * {@code app.trustedProxies(...)} behind a proxy). An IPv6 client is keyed on its /64, the
+     * smallest block a site is normally assigned, so rotating through the addresses of one /64
+     * does not mint fresh budgets (L6); an IPv4 client, including one seen as an IPv4-mapped IPv6
+     * address, is keyed on its full address.
+     */
+    public static PerIpCheck perIp(int maxRequests, String duration) {
         var limiter = new RateLimiter(maxRequests, Cache.parseTtl(duration),
             req -> {
                 var ip = req.ip();
-                return ip != null ? ip : "unknown";
+                return ip != null ? ipBucket(ip) : "unknown";
             }, "perIp(" + maxRequests + "/" + duration + ")");
         return new PerIpCheck(limiter);
+    }
+
+    /**
+     * The per-IP bucket for an address from {@code req.ip()}: an IPv6 address's /64 network
+     * ({@code 2001:db8:1:2::/64}), an IPv4 or IPv4-mapped address as dotted IPv4. Parsed without
+     * DNS; a value that is not an address literal is returned unchanged.
+     */
+    static String ipBucket(String ip) {
+        var addr = TrustedProxies.parseLiteral(ip);
+        if (addr == null) {
+            return ip;
+        }
+        if (addr instanceof java.net.Inet4Address) {
+            return addr.getHostAddress();
+        }
+        byte[] bytes = addr.getAddress();
+        var sb = new StringBuilder(24);
+        for (int i = 0; i < 8; i += 2) {
+            sb.append(Integer.toHexString(((bytes[i] & 0xFF) << 8) | (bytes[i + 1] & 0xFF))).append(':');
+        }
+        return sb.append(":/64").toString();
     }
 
     /**
@@ -127,17 +177,54 @@ public class RateLimiter {
      * {@code Brace.start()} can spot an IP-keyed limiter registered without
      * {@code app.trustedProxies(...)} and warn about proxy-IP bucketing.
      */
-    static final class PerIpCheck implements Middleware.Before {
+    public static final class PerIpCheck implements Middleware.Before {
         private final RateLimiter limiter;
 
         private PerIpCheck(RateLimiter limiter) {
             this.limiter = limiter;
         }
 
+        /**
+         * Track at most {@code maxKeys} distinct clients at a time (default
+         * {@value RateLimiter#DEFAULT_MAX_KEYS}); past that, new clients share one overflow
+         * bucket until windows expire.
+         *
+         * @return this middleware, for registration
+         */
+        public PerIpCheck maxKeys(int maxKeys) {
+            limiter.setMaxKeys(maxKeys);
+            return this;
+        }
+
         @Override
         public Result handle(Request req) {
             return limiter.check(req);
         }
+    }
+
+    private void setMaxKeys(int maxKeys) {
+        if (maxKeys < 1) {
+            throw new IllegalArgumentException("maxKeys must be at least 1, got " + maxKeys);
+        }
+        this.maxKeys = maxKeys;
+    }
+
+    /**
+     * {@code key}, or {@link #OVERFLOW_KEY} when it is new and {@code tracked} already holds
+     * {@link #maxKeys} keys. The size check is not atomic with the insert that follows, so under
+     * concurrency the cap can be overshot by a few entries; it bounds growth, not an exact count.
+     */
+    private String admit(String key, String trackedKey, java.util.Map<String, ?> tracked) {
+        if (tracked.size() < maxKeys || tracked.containsKey(trackedKey)) {
+            return key;
+        }
+        long now = System.currentTimeMillis();
+        long last = lastOverflowWarnMillis.get();
+        if (now - last >= OVERFLOW_WARN_INTERVAL_MILLIS && lastOverflowWarnMillis.compareAndSet(last, now)) {
+            Log.warn("rate-limiter: " + label + " is tracking its maximum of " + maxKeys
+                + " keys; new keys share one overflow bucket until windows expire");
+        }
+        return OVERFLOW_KEY;
     }
 
     /**
@@ -199,6 +286,24 @@ public class RateLimiter {
         public PerKeyLimit exemptMissingKey() {
             limiter.exemptMissingKey = true;
             return this;
+        }
+
+        /**
+         * Track at most {@code maxKeys} distinct keys at a time (default
+         * {@value RateLimiter#DEFAULT_MAX_KEYS}); past that, new keys share one overflow bucket
+         * until windows expire, so a client inventing keys is throttled as one client and keys
+         * already tracked keep their own counts.
+         *
+         * @return this middleware, for registration
+         */
+        public PerKeyLimit maxKeys(int maxKeys) {
+            limiter.setMaxKeys(maxKeys);
+            return this;
+        }
+
+        // Visible for testing
+        int windowCount() {
+            return limiter.windowCount();
         }
 
         @Override
@@ -326,6 +431,7 @@ public class RateLimiter {
     /** Per-process fixed-window count (default; single-process apps, H2, no database). */
     private Result checkLocal(String key) {
         var now = Instant.now();
+        key = admit(key, key, windows);
         var window = windows.compute(key, (k, existing) -> {
             if (existing == null || existing.expired(now)) {
                 return new Window(now, 1);
@@ -365,6 +471,12 @@ public class RateLimiter {
         // identical type/limit/window on different paths would share a budget — name them apart if
         // that matters; uncommon, and the failure mode is conservative.)
         String counterKey = "rl:" + label + ":" + key + ":" + slot;
+        // L6: cap distinct keys. windowEndByKey holds every key this instance tracks for the shared
+        // path; pending, lastKnownGlobal and blockedUntil hold only keys it holds too (bar a brief
+        // race with expiry, which the next flush or sweep clears), so capping it caps them all.
+        if (OVERFLOW_KEY.equals(admit(key, counterKey, windowEndByKey))) {
+            counterKey = "rl:" + label + ":" + OVERFLOW_KEY + ":" + slot;
+        }
 
         // Negative cache: a key already over the limit for this window is rejected locally — no DB
         // call, no buffering. Fixed-window counts are monotonic within a slot, so once a key is over
@@ -598,7 +710,9 @@ public class RateLimiter {
         // M17: drop batched-counter state for windows that have rolled. Without traffic a flush
         // never runs, so keys for an expired window would otherwise sit in the maps until the next
         // flush. Negative-cache entries self-clear on access, but a blocked key with no further
-        // traffic is reaped here too. Bounded anyway (≤ flushThreshold buffered), this just trims.
+        // traffic is reaped here too. Flushing zeroes a key's pending count but keeps its entries
+        // until the window rolls, so the number of keys is bounded by maxKeys (L6), not by the
+        // flush batch; this sweep is what frees them once their windows end.
         long nowMillis = now.toEpochMilli();
         windowEndByKey.entrySet().removeIf(entry -> {
             if (entry.getValue() > nowMillis) {

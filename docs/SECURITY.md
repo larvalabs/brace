@@ -1321,6 +1321,17 @@ normalized before use:
 The cap is applied before any prefix or window-slot decoration, so it holds equally in
 per-process and shared (Postgres) modes.
 
+**`perIp` keys an IPv6 client on its /64.** A site is normally given at least a /64, so one client
+can rotate through billions of source addresses; keying each address separately would give it a
+fresh budget per request. IPv4 clients (and IPv4-mapped IPv6 addresses such as `::ffff:203.0.113.7`)
+are keyed on the full address. Clients that share a /64 share a budget.
+
+**Distinct keys are capped per limiter** (default 100,000). Each key holds memory, and on Postgres
+a `brace_counters` row, for its whole window. Once a limiter tracks that many keys, new keys share
+one overflow bucket until windows expire and a warning is logged (at most once a minute): a client
+inventing keys is throttled as one client, while keys already tracked keep their own counts. Raise
+or lower it per limiter with `.maxKeys(n)`, e.g. `RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+
 Cache keys get the same treatment in the `Cache` facade, on both backends: a key with a control
 character, or longer than 512 UTF-8 bytes (a page path or `vary` value near the 8 KB URI limit
 exceeds Postgres's index row limit), is stored as its first characters (up to 128, stopping at a
