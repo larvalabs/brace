@@ -156,52 +156,16 @@ public class OpsKeys {
             int lineNo = 0;
             for (String line : Files.readAllLines(Path.of(path))) {
                 lineNo++;
-                // A leading UTF-8 byte-order mark (Windows editors) would otherwise stick to the
-                // first key, which then silently never matches.
-                if (lineNo == 1 && line.startsWith("﻿")) line = line.substring(1);
-                String content = stripComment(line);
-                if (content.isBlank()) continue; // blank or comment-only: free text
-                String confusing = confusingCharacter(line);
-                if (confusing != null) {
-                    throw new IllegalStateException(invalid(path, lineNo, confusing));
+                KeyLine parsed;
+                try {
+                    parsed = parseLine(line, lineNo == 1, false);
+                } catch (LineProblem p) {
+                    throw new IllegalStateException(p.formatHint ? invalid(path, lineNo, p.getMessage())
+                        : "Invalid ops authorized keys file " + path + ", line " + lineNo + ": " + p.getMessage());
                 }
-                String comment = line.substring(content.length()).toLowerCase(java.util.Locale.ROOT);
-                if (comment.matches(".*scope\\s*[:=].*")) {
-                    throw new IllegalStateException(invalid(path, lineNo, "the comment contains a scope, "
-                        + "which is ignored there; put scope:read or scope:control before the '#'"));
-                }
-                String[] tokens = content.strip().split("\\s+");
-                String key = tokens[0];
-                // Tolerate a legacy "ed25519:" type prefix written by older `brace ops keypair`.
-                // Base64 never contains ':', so a leading "algo:" is unambiguously a prefix — strip
-                // it so a key file written by a buggy CLI still matches the raw base64 the client sends.
-                if (key.startsWith("ed25519:")) key = key.substring("ed25519:".length());
-                String keyProblem = keyProblem(tokens);
-                if (keyProblem != null) {
-                    throw new IllegalStateException("Invalid ops authorized keys file " + path + ", line "
-                        + lineNo + ": " + keyProblem);
-                }
-                OpsScope scope = null;
-                for (int i = 1; i < tokens.length; i++) {
-                    String token = tokens[i];
-                    if (token.indexOf(':') < 0 && token.indexOf('=') < 0) continue; // label text
-                    OpsScope parsed = token.startsWith("scope:")
-                        ? OpsScope.parseOrNull(token.substring("scope:".length())) : null;
-                    if (parsed == null) {
-                        throw new IllegalStateException(invalid(path, lineNo,
-                            "a token with ':' or '=' that is not scope:read or scope:control"));
-                    }
-                    if (scope != null) {
-                        throw new IllegalStateException(invalid(path, lineNo, "more than one scope token"));
-                    }
-                    scope = parsed;
-                }
-                if (scope == null) {
-                    throw new IllegalStateException(invalid(path, lineNo, "the line has no scope. Every key line "
-                        + "must say scope:read (status, logs and errors only) or scope:control (everything). "
-                        + "A line without one used to mean control: add scope:control to keep that, or "
-                        + "scope:read if the key was meant to be read-only"));
-                }
+                if (parsed == null) continue; // blank or comment-only: free text
+                String key = parsed.key();
+                OpsScope scope = parsed.scope();
                 OpsScope existing = keys.get(key);
                 if (existing != null) {
                     scope = scope.min(existing);
@@ -220,6 +184,96 @@ public class OpsKeys {
         } catch (IOException e) {
             throw new RuntimeException("Failed to load authorized keys from: " + path, e);
         }
+    }
+
+    /**
+     * One key line of an authorized-keys file: the public key (any legacy {@code ed25519:}
+     * prefix removed), its scope, and its label words joined by single spaces ({@code ""} when
+     * there are none). {@code scope} is null only from a lenient parse of a line without one.
+     */
+    record KeyLine(String key, OpsScope scope, String label) {}
+
+    /** Why a key line is refused; {@code formatHint}: the message gets the format summary appended. */
+    static final class LineProblem extends RuntimeException {
+        final boolean formatHint;
+
+        LineProblem(String message, boolean formatHint) {
+            super(message, null, false, false);
+            this.formatHint = formatHint;
+        }
+    }
+
+    /**
+     * Parse one line of an authorized-keys file: the single implementation of the grammar
+     * {@link #loadAuthorizedKeys(String)} documents, shared with {@code brace ops keypair}.
+     * Returns null for a blank or comment-only line. {@code firstLine}: a leading byte-order mark
+     * is dropped (Windows editors write one, and it would otherwise stick to the first key).
+     *
+     * <p>Strict ({@code lenient} false, the server): every rule applies and a violation throws
+     * {@link LineProblem}. Lenient (the CLI matching an existing entry by label to replace it):
+     * nothing is refused, so a line the server would now reject, above all one with no scope
+     * token written before 0.1.11, still yields its label and can be replaced; any token starting
+     * {@code scope:} is taken as the scope, never as label text, and {@code scope} is null when
+     * the line has none or it is not a valid one. A rotation that missed an old entry for its
+     * label would leave that key trusted, so the lenient reading must not be stricter than the
+     * server's about where the label is.
+     */
+    static KeyLine parseLine(String line, boolean firstLine, boolean lenient) {
+        if (firstLine && line.startsWith("﻿")) line = line.substring(1);
+        String content = stripComment(line);
+        if (content.isBlank()) return null;
+        if (!lenient) {
+            String confusing = confusingCharacter(line);
+            if (confusing != null) throw new LineProblem(confusing, true);
+            String comment = line.substring(content.length()).toLowerCase(java.util.Locale.ROOT);
+            if (comment.matches(".*scope\\s*[:=].*")) {
+                throw new LineProblem("the comment contains a scope, which is ignored there; "
+                    + "put scope:read or scope:control before the '#'", true);
+            }
+        }
+        String[] tokens = content.strip().split("\\s+");
+        String key = tokens[0];
+        // Tolerate a legacy "ed25519:" type prefix written by older `brace ops keypair`.
+        // Base64 never contains ':', so a leading "algo:" is unambiguously a prefix — strip
+        // it so a key file written by a buggy CLI still matches the raw base64 the client sends.
+        if (key.startsWith("ed25519:")) key = key.substring("ed25519:".length());
+        if (!lenient) {
+            String keyProblem = keyProblem(tokens);
+            if (keyProblem != null) throw new LineProblem(keyProblem, false);
+        }
+        OpsScope scope = null;
+        boolean scopeSeen = false;
+        var label = new java.util.ArrayList<String>();
+        for (int i = 1; i < tokens.length; i++) {
+            String token = tokens[i];
+            if (lenient) {
+                if (!token.startsWith("scope:")) {
+                    label.add(token);
+                } else if (!scopeSeen) {
+                    scope = OpsScope.parseOrNull(token.substring("scope:".length()));
+                    scopeSeen = true;
+                }
+                continue;
+            }
+            if (token.indexOf(':') < 0 && token.indexOf('=') < 0) { // label text
+                label.add(token);
+                continue;
+            }
+            OpsScope parsed = token.startsWith("scope:")
+                ? OpsScope.parseOrNull(token.substring("scope:".length())) : null;
+            if (parsed == null) {
+                throw new LineProblem("a token with ':' or '=' that is not scope:read or scope:control", true);
+            }
+            if (scope != null) throw new LineProblem("more than one scope token", true);
+            scope = parsed;
+        }
+        if (scope == null && !lenient) {
+            throw new LineProblem("the line has no scope. Every key line "
+                + "must say scope:read (status, logs and errors only) or scope:control (everything). "
+                + "A line without one used to mean control: add scope:control to keep that, or "
+                + "scope:read if the key was meant to be read-only", true);
+        }
+        return new KeyLine(key, scope, String.join(" ", label));
     }
 
     private static String invalid(String path, int lineNo, String what) {

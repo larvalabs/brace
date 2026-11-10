@@ -245,4 +245,26 @@ class OpsKeysTest {
         assertNotEquals(kp1.publicKey(), kp2.publicKey());
         assertNotEquals(kp1.privateKey(), kp2.privateKey());
     }
+
+    /**
+     * L1 follow-up: one line parser serves the server (strict) and `brace ops keypair`'s rotation
+     * matching (lenient). Lenient reads a pre-0.1.11 line with no scope token, which strict refuses.
+     */
+    @Test
+    void sharedLineParserStrictAndLenient() {
+        String pub = OpsKeys.generateKeypair().publicKey();
+        var strict = OpsKeys.parseLine(pub + "  ci agent  scope:read  # note", false, false);
+        assertEquals(new OpsKeys.KeyLine(pub, OpsScope.READ, "ci agent"), strict);
+        assertNull(OpsKeys.parseLine("   # only a comment", false, false));
+        assertNull(OpsKeys.parseLine("\uFEFF", true, false));
+
+        assertThrows(OpsKeys.LineProblem.class, () -> OpsKeys.parseLine(pub + " ci-agent", false, false));
+        var lenient = OpsKeys.parseLine(pub + " ci-agent", false, true);
+        assertEquals("ci-agent", lenient.label());
+        assertNull(lenient.scope());
+
+        // Lenient never takes a scope: token as label text, valid or not.
+        assertEquals("ci", OpsKeys.parseLine("OLDKEY scope:read-only ci", false, true).label());
+        assertEquals(OpsScope.CONTROL, OpsKeys.parseLine("\uFEFFOLDKEY ci scope:control", true, true).scope());
+    }
 }

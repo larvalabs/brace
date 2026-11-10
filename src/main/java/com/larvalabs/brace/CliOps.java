@@ -74,7 +74,11 @@ public class CliOps {
             if (Files.exists(file)) {
                 var lines = new ArrayList<>(Files.readAllLines(file));
                 for (int i = 0; i < lines.size(); i++) {
-                    if (label.equals(labelOfServerGrammar(lines.get(i), i == 0))) {
+                    // The server's own line parser, lenient: an entry written before every line
+                    // had to state its scope (no scope token) must still be found and replaced,
+                    // or the rotated-out key would stay trusted.
+                    var existing = OpsKeys.parseLine(lines.get(i), i == 0, true);
+                    if (existing != null && label.equals(existing.label())) {
                         if (replaced) {
                             lines.remove(i--);   // a second entry for the label: its key must not stay trusted either
                         } else {
@@ -217,33 +221,6 @@ public class CliOps {
             }
         }
         return out.toString();
-    }
-
-    /**
-     * The label of an authorized-keys line, or null for a blank or comment-only line, parsed with
-     * the same rules as the server's {@code OpsKeys.loadAuthorizedKeys}: a {@code #} at the start
-     * of the line or after whitespace starts a comment that runs to the end of the line; the first
-     * token is the key; a {@code scope:...} token is the scope wherever it stands; the remaining
-     * tokens are the label. A rotation that missed an existing entry for its label left the old
-     * key trusted, so this must not be stricter than the server. (These rules are duplicated from
-     * {@code OpsKeys}; they should be shared in one helper.)
-     */
-    private static String labelOfServerGrammar(String line, boolean firstLine) {
-        if (firstLine && line.startsWith("﻿")) line = line.substring(1);   // the server drops a leading BOM
-        for (int i = 0; i < line.length(); i++) {
-            if (line.charAt(i) == '#' && (i == 0 || Character.isWhitespace(line.charAt(i - 1)))) {
-                line = line.substring(0, i);
-                break;
-            }
-        }
-        line = line.strip();
-        if (line.isEmpty()) return null;
-        String[] tokens = line.split("\\s+");
-        var label = new ArrayList<String>();
-        for (int i = 1; i < tokens.length; i++) {
-            if (!tokens[i].startsWith("scope:")) label.add(tokens[i]);
-        }
-        return String.join(" ", label);
     }
 
     public static int dashboard(Path projectDir, String[] args) {
