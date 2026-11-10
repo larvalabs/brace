@@ -1221,6 +1221,10 @@ public class Brace {
     }
 
     public void start() throws Exception {
+        // A stopped app can be started again (tests, a reconfigure-and-restart). Re-arm stop():
+        // left set, the next stop() (and the cleanup stop() below) returned at once, so Jetty
+        // kept serving, the shutdown hook stayed registered and the router stayed frozen.
+        stopped.set(false);
         try {
             startOrThrow();
         } catch (Throwable t) {
