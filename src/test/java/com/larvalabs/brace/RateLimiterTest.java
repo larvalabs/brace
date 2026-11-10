@@ -106,7 +106,7 @@ class RateLimiterTest {
     // ---- M4 / D2: a missing key is limited by default; the exemption is opt-in ----
 
     /**
-     * Null key → counted in one shared missing-key bucket (M4). Before the fix a request without
+     * Null key → counted in the client address's missing-key bucket (M4). Before the fix a request without
      * the key header skipped the limiter entirely, so the documented API limiter
      * {@code perKey(req -> req.header("Authorization"), …)} admitted unlimited anonymous traffic.
      */
@@ -121,7 +121,7 @@ class RateLimiterTest {
         assertEquals(429, blocked.status());
     }
 
-    /** Blank and null keys share the one missing-key bucket. */
+    /** Blank and null keys from one address share its missing-key bucket. */
     @Test
     void blankAndNullKeysShareOneBucket() {
         var calls = new AtomicInteger();
@@ -464,7 +464,9 @@ class RateLimiterTest {
     void outageRestoresCountsRatherThanDiscardingThem() throws Exception {
         var counters = new PickyCounters();
         RateLimiter.useSharedBackend(counters);
-        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1m");
+        // A day-long window: the sleep below must not cross a window boundary (with "1m" it did
+        // whenever it straddled a minute, and the old slot's counts were rightly dropped).
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1d");
         var alice = fakeRequestWithHeader("X-User", "alice");
 
         counters.outage = true;

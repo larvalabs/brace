@@ -33,7 +33,7 @@ class RateLimiterReviewFixesTest {
      */
     @Test
     void newKeyGetsItsOwnBudgetAfterAFloodOfUnderLimitKeys() {
-        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 3, "1m").maxKeys(1000);
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 3, "1d").maxKeys(1000);
         for (int i = 0; i < 1020; i++) {
             limiter.handle(from("198.51.100.1", "flood-" + i));
         }
@@ -47,7 +47,7 @@ class RateLimiterReviewFixesTest {
     @Test
     void sharedModeAlsoEvictsUnderLimitKeys() {
         RateLimiter.useSharedBackend(new RateLimiterTest.CountingCounters());
-        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 3, "1m").maxKeys(1000);
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 3, "1d").maxKeys(1000);
         for (int i = 0; i < 1020; i++) {
             limiter.handle(from("198.51.100.1", "flood-" + i));
         }
@@ -61,7 +61,7 @@ class RateLimiterReviewFixesTest {
     void blockedKeysSurviveAFlood() {
         for (boolean shared : new boolean[]{false, true}) {
             if (shared) RateLimiter.useSharedBackend(new RateLimiterTest.CountingCounters());
-            var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1m").maxKeys(100);
+            var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1d").maxKeys(100);
             var victim = from("203.0.113.9", "victim");
             assertNull(limiter.handle(victim));
             assertNull(limiter.handle(victim));
@@ -78,7 +78,7 @@ class RateLimiterReviewFixesTest {
     void tableFullOfBlockedKeysSendsNewKeysToAPerIpOverflow() {
         for (boolean shared : new boolean[]{false, true}) {
             if (shared) RateLimiter.useSharedBackend(new RateLimiterTest.CountingCounters());
-            var limiter = RateLimiter.perKey(req -> req.header("X-User"), 1, "1m").maxKeys(10);
+            var limiter = RateLimiter.perKey(req -> req.header("X-User"), 1, "1d").maxKeys(10);
             for (int i = 0; i < 10; i++) {
                 limiter.handle(from("198.51.100.1", "blocked-" + i));
                 assertNotNull(limiter.handle(from("198.51.100.1", "blocked-" + i)));
@@ -87,6 +87,87 @@ class RateLimiterReviewFixesTest {
             assertNotNull(limiter.handle(from("203.0.113.1", "new-2")), "A's overflow bucket is used up");
             assertNull(limiter.handle(from("203.0.113.2", "new-3")), "B has its own overflow bucket (shared=" + shared + ")");
         }
+    }
+
+    // ---- M4 decision A: a missing key is counted per client address, not in one global bucket ----
+
+    private static Request get(String ip, String method) {
+        return new Request(method, "/login", Map.of(), Map.of(), Map.of(), null, Map.of(), ip, null);
+    }
+
+    /**
+     * The previously documented {@code app.before("/login", perKey(req -> req.formParam("email"),
+     * 5, "15m"))} counted every {@code GET /login} in one global bucket: five page views from five
+     * addresses locked the sixth visitor out with no attacker involved.
+     */
+    @Test
+    void keylessRequestsFromDifferentAddressesDoNotLockEachOtherOut() {
+        for (boolean shared : new boolean[]{false, true}) {
+            if (shared) RateLimiter.useSharedBackend(new RateLimiterTest.CountingCounters());
+            var limiter = RateLimiter.perKey(req -> req.header("X-Email"), 5, "15m");
+            for (int i = 1; i <= 5; i++) {
+                assertNull(limiter.handle(get("203.0.113." + i, "GET")));
+            }
+            assertNull(limiter.handle(get("203.0.113.6", "GET")), "a sixth visitor is not locked out (shared=" + shared + ")");
+        }
+    }
+
+    @Test
+    void oneAddressIsStillLimitedAfterLimitKeylessRequests() {
+        for (boolean shared : new boolean[]{false, true}) {
+            if (shared) RateLimiter.useSharedBackend(new RateLimiterTest.CountingCounters());
+            var limiter = RateLimiter.perKey(req -> req.header("X-Email"), 3, "15m");
+            for (int i = 0; i < 3; i++) {
+                assertNull(limiter.handle(get("203.0.113.7", "POST")));
+            }
+            var blocked = limiter.handle(get("203.0.113.7", "POST"));
+            assertNotNull(blocked, "keyless requests are limited per address, not exempt (shared=" + shared + ")");
+            assertEquals(429, blocked.status());
+            // An IPv6 client rotating inside its /64 is one address here too.
+            for (int i = 0; i < 3; i++) {
+                assertNull(limiter.handle(get("2001:db8:5:6::" + (i + 1), "POST")));
+            }
+            assertNotNull(limiter.handle(get("2001:db8:5:6::99", "POST")));
+        }
+    }
+
+    @Test
+    void clientSentLiteralCannotReachAnotherAddressesMissingKeyBucket() {
+        var victimIp = "203.0.113.9";
+        for (var literal : new String[]{"(none):" + victimIp, " (none):" + victimIp,
+                RateLimiter.MISSING_KEY + ":" + victimIp, "(none)", RateLimiter.MISSING_KEY}) {
+            var limiter = RateLimiter.perKey(req -> req.header("X-User"), 1, "1d");
+            var attacker = from("198.51.100.1", literal);
+            assertNull(limiter.handle(attacker));
+            assertNotNull(limiter.handle(attacker));
+            assertNull(limiter.handle(get(victimIp, "POST")), "'" + literal + "' did not drain the victim's bucket");
+            assertNotNull(limiter.handle(get(victimIp, "POST")));
+        }
+    }
+
+    @Test
+    void devModeWarnsOnceAboutAKeylessGet() {
+        var previous = System.getProperty("brace.mode");
+        System.setProperty("brace.mode", "dev");
+        try {
+            var postOnly = RateLimiter.perKey(req -> req.header("X-Email"), 5, "15m");
+            postOnly.handle(get("203.0.113.1", "POST"));
+            assertFalse(postOnly.warnedKeylessRead(), "a keyless POST is what the limiter is for");
+            var onGet = RateLimiter.perKey(req -> req.header("X-Email"), 5, "15m");
+            onGet.handle(get("203.0.113.1", "GET"));
+            assertTrue(onGet.warnedKeylessRead());
+            var onHead = RateLimiter.perKey(req -> req.header("X-Email"), 5, "15m");
+            onHead.handle(get("203.0.113.1", "HEAD"));
+            assertTrue(onHead.warnedKeylessRead());
+            var exempt = RateLimiter.perKey(req -> req.header("X-Email"), 5, "15m").exemptMissingKey();
+            exempt.handle(get("203.0.113.1", "GET"));
+            assertFalse(exempt.warnedKeylessRead(), "an exempt missing key is not counted");
+        } finally {
+            if (previous == null) System.clearProperty("brace.mode"); else System.setProperty("brace.mode", previous);
+        }
+        var prod = RateLimiter.perKey(req -> req.header("X-Email"), 5, "15m");
+        prod.handle(get("203.0.113.1", "GET"));
+        assertFalse(prod.warnedKeylessRead(), "dev mode only");
     }
 
     // ---- L6 F4: an oversized counter batch ----
@@ -119,7 +200,7 @@ class RateLimiterReviewFixesTest {
     private static RateLimiter.PerKeyLimit pendingKeysThenRecover(RecordingCounters counters, int keys,
                                                                  String poison) throws Exception {
         RateLimiter.useSharedBackend(counters);
-        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 100, "1m");
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 100, "1d");
         counters.outage = true;
         for (int i = 0; i < keys; i++) {
             limiter.handle(from("198.51.100.1", i == keys / 2 && poison != null ? poison : "user-" + i));

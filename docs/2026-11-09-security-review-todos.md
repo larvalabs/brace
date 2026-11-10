@@ -256,6 +256,12 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     ignores a query-string value for a field absent from the body; GET forms still bind from
     the query.
   - **Model: Opus 5.5.** Two breaking semantics plus docs and a migration entry.
+  - **Review fixes.** Decision A: the one global missing-key bucket let ordinary traffic lock
+    everyone out (five keyless `GET /login` views from five addresses and the sixth visitor got
+    429). A missing key is now counted in a per-address bucket (`" (none):" + ipBucket(ip)`, out
+    of a client key's reach) with the limiter's limit and window, so keyless traffic is limited
+    exactly as `perIp` would; `.exemptMissingKey()` is unchanged. Dev mode warns once per limiter
+    when it counts a keyless GET/HEAD. Tests in `RateLimiterReviewFixesTest`.
 
 - [ ] **M5: One request containing `%00` stops error persistence and regression alerts on Postgres**, `ErrorStore.java:100-133, 141-204, 228-256`, `BraceHandler.java:586-626`, `Request.java:158-207, 289, 326-330`
   - **What's wrong.**

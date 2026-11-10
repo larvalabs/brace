@@ -1261,10 +1261,13 @@ var loginLimit = RateLimiter.perKey(req -> {
 app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
 ```
 
-**A null or blank key is limited, not skipped:** every request without a key shares one
-missing-key bucket, so leaving the key out is not a bypass. That is why the login limiter above
-runs only for the POST: on `GET /login` (no email) every page view would drain the shared bucket.
-Opt out only where requests without a key are bounded some other way:
+**A null or blank key is limited, not skipped:** a request without a key is counted in a
+missing-key bucket for its client IP (an IPv6 /64), with the limiter's limit and window, so
+leaving the key out is not a bypass and one client's keyless requests never lock out another.
+That is why the login limiter above runs only for the POST: on `GET /login` (no email) every page
+view would use up one of that visitor's `limit` keyless requests (dev mode warns once when a key
+limiter counts a keyless GET or HEAD). Opt out only where requests without a key are bounded some
+other way:
 `RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h").exemptMissingKey()` behind a
 `perIp` limiter. Keys are stripped of surrounding whitespace but **not case-folded** (tokens are
 case-sensitive): lower-case usernames and emails in the extractor. Key on what the handler uses:

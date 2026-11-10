@@ -428,14 +428,18 @@ public class RateLimiter {
      * (a username, an email address), normalize it in the extractor so {@code Alice} and
      * {@code alice} share one bucket.
      *
-     * <p><strong>A null or blank key is limited, not skipped</strong> (M4): every such request
-     * counts against one shared missing-key bucket, so a client cannot bypass the limiter by
-     * leaving the key out. When a missing key genuinely means "nothing to count" and must pass
-     * through, opt in with {@link PerKeyLimit#exemptMissingKey()}.
+     * <p><strong>A null or blank key is limited, not skipped</strong> (M4): such a request counts
+     * against a missing-key bucket for its client address ({@code ipBucket(req.ip())}, so an IPv6
+     * client's /64), with this limiter's limit and window, exactly as {@link #perIp} would count it.
+     * A client cannot bypass the limiter by leaving the key out, and keyless requests from one
+     * address cannot lock out another. When a missing key genuinely means "nothing to count" and
+     * must pass through, opt in with {@link PerKeyLimit#exemptMissingKey()}.
      *
      * <p>Example: rate-limit login submissions per account. The limiter runs only for the POST,
-     * so viewing the login page is not counted; a submission without a username shares the
-     * missing-key bucket.
+     * so viewing the login page is not counted (registered for every method, each page view
+     * would use up one of the visitor's keyless requests; dev mode warns once when a key limiter
+     * counts a keyless GET or HEAD). A submission without a username is counted against its
+     * address's missing-key bucket.
      *
      * <pre>{@code
      * var loginLimit = RateLimiter.perKey(req -> {
@@ -464,7 +468,7 @@ public class RateLimiter {
 
         /**
          * Let a request whose key is null or blank through without counting it, instead of
-         * counting it in the shared missing-key bucket (the default). Use it only where a client
+         * counting it in its address's missing-key bucket (the default). Use it only where a client
          * gains nothing by omitting the key, typically because another limiter already bounds
          * the requests that lack one:
          *
@@ -499,6 +503,11 @@ public class RateLimiter {
             return limiter.windowCount();
         }
 
+        // Visible for testing
+        boolean warnedKeylessRead() {
+            return limiter.warnedKeylessRead.get();
+        }
+
         @Override
         public Result handle(Request req) {
             return limiter.check(req);
@@ -506,14 +515,47 @@ public class RateLimiter {
     }
 
     /**
-     * Bucket key for a null or blank extractor result. It starts with a space, and
-     * {@link #normalizeKey} strips every key it returns and hashes to hex, so no client-sent key
-     * (not even the literal {@code " (none)"}) can land in, drain, or ride on this bucket.
+     * Prefix of the bucket keys for a null or blank extractor result ({@link #missingKeyBucket}).
+     * It starts with a space, and {@link #normalizeKey} strips every key it returns and hashes to
+     * hex, so no client-sent key (not even the literal {@code " (none):<address>"}) can land in,
+     * drain, or ride on one of these buckets.
      */
     static final String MISSING_KEY = " (none)";
 
     /** Set by {@link PerKeyLimit#exemptMissingKey()}: skip, rather than count, a missing key. */
     private volatile boolean exemptMissingKey;
+
+    /** The dev-mode "keyless GET/HEAD counted" warning has been logged (once per limiter). */
+    private final AtomicBoolean warnedKeylessRead = new AtomicBoolean();
+
+    /**
+     * The bucket for a request with no key (M4 review): {@link #MISSING_KEY}, {@code ":"}, and the
+     * client's {@link #ipBucket}. Starts with a space like {@link #MISSING_KEY}, so no client-sent
+     * key (which {@link #normalizeKey} strips) can name it, for its own address or another's.
+     */
+    static String missingKeyBucket(Request req) {
+        var ip = req == null ? null : req.ip();
+        return MISSING_KEY + ":" + (ip != null ? ipBucket(ip) : "unknown");
+    }
+
+    /**
+     * Dev mode, once per limiter: a key limiter just counted a keyless GET or HEAD, which is usually
+     * a page view of the form the limiter guards (a {@code GET /login} with no email). Each such
+     * view uses up the visitor's keyless budget; limiting only the POST is almost always what was
+     * meant.
+     */
+    private void warnIfKeylessRead(Request req) {
+        if (warnedKeylessRead.get() || req == null) return;
+        var method = req.method();
+        if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) return;
+        if (!"dev".equals(System.getProperty("brace.mode"))) return;
+        if (warnedKeylessRead.compareAndSet(false, true)) {
+            Log.warn("rate-limiter: " + label + " counted a " + method.toUpperCase(java.util.Locale.ROOT) + " "
+                + req.path() + " that has no key, so each view of that page uses up one of the visitor's "
+                + "keyless requests. Limit only the submission: app.before(\"/login\", req -> "
+                + "\"POST\".equals(req.method()) ? limiter.handle(req) : null). Logged once per limiter, in dev mode.");
+        }
+    }
 
     /**
      * Install the shared cluster-wide counter backend. Called by {@code Brace.start()} when the app
@@ -544,13 +586,17 @@ public class RateLimiter {
         // brace_counters rows / local map entries with huge key strings.
         var key = normalizeKey(keyExtractor.apply(req));
 
-        // M4: a null or blank key is counted in one shared bucket rather than skipping the limiter
-        // (leaving the key out was a bypass). The exemption is an explicit opt-in.
+        // M4: a null or blank key is counted rather than skipping the limiter (leaving the key out
+        // was a bypass). The exemption is an explicit opt-in. M4 review (decision A): counted per
+        // client address, not in one global bucket: every keyless page view from anyone drained
+        // that bucket and locked out the next visitor. A keyless client is limited exactly as
+        // perIp would limit it, with this limiter's limit and window.
         if (key == null) {
             if (exemptMissingKey) {
                 return null;
             }
-            key = MISSING_KEY;
+            warnIfKeylessRead(req);
+            key = missingKeyBucket(req);
         }
 
         var counters = sharedCounters;

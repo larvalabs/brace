@@ -81,7 +81,7 @@ class RateLimiterFlushPostgresIT extends PostgresTestBase {
     private static RateLimiter.PerKeyLimit pendingThenRecover(InstrumentedCounters counters, int keys, boolean poison)
             throws Exception {
         RateLimiter.useSharedBackend(counters);
-        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 100, "1m");
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 100, "1d");
         counters.outage = true;
         for (int i = 0; i < keys; i++) {
             limiter.handle(from(poison && i == keys / 2 ? "poison" : "user-" + i));
@@ -113,7 +113,7 @@ class RateLimiterFlushPostgresIT extends PostgresTestBase {
     @Test
     void evictedKeysRowsAreDeleted() throws Exception {
         RateLimiter.useSharedBackend(new Counters(dbFactory));
-        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1m").maxKeys(10); // flush every request
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1d").maxKeys(10); // flush every request
         for (int i = 0; i < 200; i++) {
             assertNull(limiter.handle(from("flood-" + i)));
         }

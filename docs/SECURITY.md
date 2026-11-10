@@ -1363,7 +1363,7 @@ Protect endpoints from abuse with rate limiting:
 // Per-IP rate limiting (`/api/*`: the bare `/api` pattern matches only the literal path /api)
 app.before("/api/*", RateLimiter.perIp(100, "1m"));
 
-// Per-client rate limiting: requests without the header share one bucket (see below)
+// Per-client rate limiting: requests without the header are limited per IP (see below)
 app.before("/api/*", RateLimiter.perKey(
     req -> req.header("Authorization"),
     1000,
@@ -1384,19 +1384,22 @@ only, and so does `req.form(...)` on `POST`, `PUT`, `PATCH` and `DELETE`: a fiel
 string never fills a form field on those methods. (Only `GET` and `HEAD` forms bind from the
 query string.) A limiter keyed on `formParam("username")` therefore counts exactly the username
 the login handler checks; `POST /login?username=victim` with no username in the body is counted
-in the missing-key bucket and binds no username.
+in the client's missing-key bucket and binds no username.
 
 ### Key normalization (DoS protection)
 
 Rate-limit keys extracted from requests (usernames, tokens, IP addresses, custom headers) are
 normalized before use:
 
-- **Null or blank extractor result → one shared missing-key bucket** (shown as `(none)`). Requests
-  with a missing header or form field are counted together rather than silently bypassing the
-  limiter. The bucket's internal key cannot be produced from a request, so a client that sends
-  the literal value `(none)` gets its own bucket and cannot drain this one. Where a missing key
-  genuinely means "nothing to limit", opt out explicitly, and bound those requests some other
-  way (here, per IP):
+- **Null or blank extractor result → a missing-key bucket per client address** (`(none):` plus
+  the address, an IPv6 client's /64, with the limiter's own limit and window). A request with a
+  missing header or form field is limited exactly as `perIp` would limit it, rather than silently
+  bypassing the limiter, and keyless requests from one address never use up another's budget (an
+  earlier design counted them all in one global bucket, so five visitors viewing a page the
+  limiter covered locked out the sixth). The bucket keys cannot be produced from a request, so a
+  client that sends the literal value `(none):203.0.113.9` gets its own bucket and cannot drain
+  that address's. Where a missing key genuinely means "nothing to limit", opt out explicitly, and
+  bound those requests some other way (here, per IP):
 
   ```java
   app.before("/api/*", RateLimiter.perIp(300, "1m"));
@@ -1406,7 +1409,9 @@ normalized before use:
 
   Don't register a key limiter on a path whose page views carry no key (a `GET /login` with no
   username) without restricting it to the submissions, as the login example above does:
-  otherwise every view counts against the shared bucket and the page locks for everyone.
+  otherwise each view uses up one of that visitor's keyless requests, and a visitor who reloads
+  the page `limit` times is locked out of it. Dev mode logs a warning, once per limiter, the first
+  time a key limiter counts a keyless `GET` or `HEAD`.
 - **Surrounding whitespace is stripped**, so `"victim "` and `"victim"` are one bucket. **Case is
   not folded**: tokens and API keys are case-sensitive. When the key is an identity that is
   case-insensitive (a username, an email address), lower-case it in the extractor, as above.
