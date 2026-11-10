@@ -518,7 +518,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     "unchecked, over cap"; apply `STORED_CLASSES` on both cache paths.
   - **Model: Sonnet 5.5.** Deferrable.
 
-- [ ] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
+- [x] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
   - The 20,000-row buffer per 10 s flush allows about 2,000 inserted rows per second, kept 35
     days, with no per-visitor or per-day cap; any client sending `Sec-Fetch-Mode: navigate` and
     a browser User-Agent counts.

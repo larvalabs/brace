@@ -1341,6 +1341,12 @@ attempt. Binding the public key means a captured signature is only valid for the
 produced it; the nonce makes each signed request single-use; the origin makes it valid only at
 the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
 
+The nonce memory is per instance and empty at startup, so the server also refuses a request whose
+timestamp is earlier than its own start time (a request captured during a deploy cannot be
+replayed once after the restart). Each key has its own quota of remembered nonces (5,000 of the
+100,000 overall), so one key, even a read-scoped one, cannot fill the memory and block other
+operators' logins.
+
 **The signature is bound to a server.** The CLI reads the server's URL from the committed
 `.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
 signature and relay it to the real server within the time window. The server accepts a v3
