@@ -684,10 +684,22 @@ public class Database {
      */
     private static final Pattern HAS_ORDER_BY = Pattern.compile("(?i)\\border\\s+by\\b");
 
+    /**
+     * Sort.of(...) text (H3). Checks the normalized ORDER BY and the caller's original string:
+     * normalization trims, collapses spaces and upper-cases keywords, so a request value like
+     * "secretField ", "secretField desc" or "secretField,id" no longer appears verbatim in the
+     * normalized text (L15).
+     */
+    private void checkSortOf(Sort sort, String method) {
+        if (sort.fromAllowlist()) return;
+        checkQuery(sort.hql(), method);
+        if (sort.original() != null) checkQuery(" ORDER BY " + sort.original(), method);
+    }
+
     /** The where clause plus {@code sort}'s ORDER BY; just the where clause when there's no sort. */
     private String orderedWhere(String hqlWhere, Sort sort, String method) {
         if (sort == null) return whereClause(hqlWhere, true);
-        if (!sort.fromAllowlist()) checkQuery(sort.hql(), method); // Sort.of(...) text, H3
+        checkSortOf(sort, method);
         if (hqlWhere != null && HAS_ORDER_BY.matcher(hqlWhere).find()) {
             throw new IllegalArgumentException("The where-fragment has its own ORDER BY and a Sort was passed: "
                 + "put the whole order in the Sort (Sort.of(\"createdAt DESC, id\") for a fixed one)");
@@ -699,7 +711,7 @@ public class Database {
     private String withSort(String query, Sort sort, String method) {
         checkQuery(query, method);
         if (sort == null) return query;
-        if (!sort.fromAllowlist()) checkQuery(sort.hql(), method); // Sort.of(...) text
+        checkSortOf(sort, method);
         if (HAS_ORDER_BY.matcher(query).find()) {
             throw new IllegalArgumentException("The query has its own ORDER BY and a Sort was passed: "
                 + "put the whole order in the Sort (Sort.of(\"p.createdAt DESC, p.id\") for a fixed one)");

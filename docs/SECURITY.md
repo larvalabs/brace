@@ -125,7 +125,11 @@ What it does **not** catch:
   flagging bare words everywhere would trip on ordinary code.
 - A value the handler transformed (trimmed, split into terms, re-cased) before concatenating it.
 - JSON bodies, headers and cookies; queries run outside a request (jobs, `withSession`); and,
-  past the first 1,000 values or 64 KB of a request, the rest.
+  past the first 1,000 values or 64 KB of each source (form body, query string, path
+  parameters; each has its own budget, so padding one cannot hide the others), the rest. In dev
+  and test modes the first such request logs a one-time "unchecked, over cap" warning.
+  `Sort.of(...)` is checked against the string you passed as well as the normalized order, so
+  `?sort=title%20desc` is caught even though it renders as `title DESC`.
 
 It can also fire on safe code: a hand-written allowlist (`switch (sort) { case "title" ->
 "title"; ... }` concatenated after `ORDER BY`) looks the same as the injection it replaces. Use

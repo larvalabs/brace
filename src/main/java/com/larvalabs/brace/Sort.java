@@ -31,6 +31,7 @@ public final class Sort {
     // Built by from(): the request only picked a key, so the order is code's. A Sort.of(...) order
     // is text that could have come from the request, so the Database checks it like a fragment.
     private final boolean fromAllowlist;
+    private String original;           // Sort.of's argument, unnormalized (L15)
 
     private Sort(String key, boolean descending, String orderBy, boolean fromAllowlist) {
         this.key = key;
@@ -85,8 +86,18 @@ public final class Sort {
             for (int i = 1; i < words.length; i++) normalized.append(' ').append(words[i].toUpperCase(java.util.Locale.ROOT));
             items.add(normalized.toString());
         }
-        return new Sort(null, false, String.join(", ", items), false);
+        // Keep the caller's string as given: normalizing above drops the spacing/case a request value
+        // had, so only the original still appears verbatim in the text the taint check compares (L15).
+        return new Sort(null, false, String.join(", ", items), false).withOriginal(order);
     }
+
+    private Sort withOriginal(String order) {
+        this.original = order;
+        return this;
+    }
+
+    /** The string {@link #of} was given, verbatim; {@code null} for a {@link #from} sort. */
+    String original() { return original; }
 
     private static void requireFields(String fields) {
         if (fields == null) throw new IllegalArgumentException("Sort allowlist values must be field paths");
