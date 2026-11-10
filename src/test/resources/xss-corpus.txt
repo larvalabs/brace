@@ -81,8 +81,8 @@ var b = "${y}"; foo('${x}');
 ');alert(1);//||";alert(1);//
 </script><img src=x onerror=alert(1)>||ok
 --- expect
-<script>{{NL}}<!--{{NL}}document.write("<script src='/x.js'></script>");{{NL}}var b = "\u0022;alert(1);//"; foo('\u0027);alert(1);//');{{NL}}//-->{{NL}}</script><p>after ');alert(1);//</p>
-<script>{{NL}}<!--{{NL}}document.write("<script src='/x.js'></script>");{{NL}}var b = "ok"; foo('\u003c/script\u003e\u003cimg src=x onerror=alert(1)\u003e');{{NL}}//-->{{NL}}</script><p>after &lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;</p>
+<script>{{NL}}<!--{{NL}}document.write("<script src='/x.js'></script>");{{NL}}var b = "\u0022\u003balert\u00281\u0029\u003b\u002f\u002f"; foo('\u0027\u0029\u003balert\u00281\u0029\u003b\u002f\u002f');{{NL}}//-->{{NL}}</script><p>after ');alert(1);//</p>
+<script>{{NL}}<!--{{NL}}document.write("<script src='/x.js'></script>");{{NL}}var b = "ok"; foo('\u003c\u002fscript\u003e\u003cimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u003e');{{NL}}//-->{{NL}}</script><p>after &lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;</p>
 ### f2-double-escaped-one-line
 <script><!--<script>var a="${x}";</script>var b="${y}";--></script><a href="${x}">l</a>
 --- values
@@ -90,9 +90,9 @@ x||";alert(1);//
 x||\\
 javascript:alert(1)||</script><img src=x onerror=alert(1)>
 --- expect
-<script><!--<script>var a="x";</script>var b="\u0022;alert(1);//";--></script><a href="x">l</a>
+<script><!--<script>var a="x";</script>var b="\u0022\u003balert\u00281\u0029\u003b\u002f\u002f";--></script><a href="x">l</a>
 <script><!--<script>var a="x";</script>var b="\\";--></script><a href="x">l</a>
-<script><!--<script>var a="javascript:alert(1)";</script>var b="\u003c/script\u003e\u003cimg src=x onerror=alert(1)\u003e";--></script><a href="about:invalid#blocked">l</a>
+<script><!--<script>var a="javascript\u003aalert\u00281\u0029";</script>var b="\u003c\u002fscript\u003e\u003cimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u003e";--></script><a href="about:invalid#blocked">l</a>
 
 #! ---------------------------------------------------------------- F3
 ### f3-svg-script-body
@@ -104,10 +104,10 @@ javascript:alert(1)||</script><img src=x onerror=alert(1)>
 &lt;img src=x onerror=alert(1)&gt;
 plain
 --- expect
-<svg><script>var a="\u003cimg src=x onerror=alert(1)\u003e";</script></svg>
-<svg><script>var a="\u003c/script\u003e\u003cscript\u003ealert(1)\u003c/script\u003e";</script></svg>
-<svg><script>var a="\u0027 onmouseover=\u0027alert(1)";</script></svg>
-<svg><script>var a="\u0026lt;img src=x onerror=alert(1)\u0026gt;";</script></svg>
+<svg><script>var a="\u003cimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u003e";</script></svg>
+<svg><script>var a="\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e";</script></svg>
+<svg><script>var a="\u0027\u0020onmouseover\u003d\u0027alert\u00281\u0029";</script></svg>
+<svg><script>var a="\u0026lt\u003bimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u0026gt\u003b";</script></svg>
 <svg><script>var a="plain";</script></svg>
 ### f3-svg-script-everything
 <svg><foreignObject><script>var a = "${x}";</script></foreignObject><style>a{color:${x}}</style><script>var b = '${x}';</script><script>/* <![CDATA[ */ var c = "${x}"; /* ]]> */</script><title>${x}</title></svg>
@@ -122,8 +122,8 @@ a<b>&c
 <!--<script>
 --- expect
 <script>var a = "a\u003cb\u003e\u0026c", t = `a\u003cb\u003e\u0026c`;</script><script type="application/json">{"a":"a\u003cb\u003e\u0026c"}</script>
-<script>var a = "\u003c\/script\u003e\u003cscript\u003ealert(1)\u003c\/script\u003e", t = `\u003c\/script\u003e\u003cscript\u003ealert(1)\u003c\/script\u003e`;</script><script type="application/json">{"a":"\u003c\/script\u003e\u003cscript\u003ealert(1)\u003c\/script\u003e"}</script>
-<script>var a = "\u003c!\-\-\u003cscript\u003e", t = `\u003c!\-\-\u003cscript\u003e`;</script><script type="application/json">{"a":"\u003c!\-\-\u003cscript\u003e"}</script>
+<script>var a = "\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e", t = `\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e`;</script><script type="application/json">{"a":"\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e"}</script>
+<script>var a = "\u003c\u0021\u002d\u002d\u003cscript\u003e", t = `\u003c\u0021\u002d\u002d\u003cscript\u003e`;</script><script type="application/json">{"a":"\u003c\u0021\u002d\u002d\u003cscript\u003e"}</script>
 
 #! ---------------------------------------------------------------- F4
 ### f4-hx-request
@@ -154,8 +154,8 @@ j||s:alert(1)
 z||";alert(1)//
 ||";alert(1)//
 --- expect
-<script>var a = "</scrzipt>"; var b = "\";alert(1)\/\/";</script><p>";alert(1)//</p>
-<script>var a = "</script>"; var b = "\u0022;alert(1)//";</script><p>";alert(1)//</p>
+<script>var a = "</scrzipt>"; var b = "\u0022\u003balert\u00281\u0029\u002f\u002f";</script><p>";alert(1)//</p>
+<script>var a = "</script>"; var b = "\u0022\u003balert\u00281\u0029\u002f\u002f";</script><p>";alert(1)//</p>
 
 #! ------------------------------------- Checked and cleared: Template attributes
 ### url-attributes-script-urls
@@ -267,6 +267,67 @@ Illegal HTML attribute name
 --- error
 Illegal HTML attribute name
 
+#! ------------------------------------- Final review, L1 and L3: script-body data is escaped whole
+#! Everything but letters, digits, "_", "," and non-ASCII is \uXXXX ("\" is "\\"), in every script
+#! body. JTE's own escapes (\' \- \` \$) are not JSON, and its \" still ended a pseudo-attribute
+#! when the browser read the script as markup and the tokenizer did not.
+### l3-json-script-block
+<script type="application/json" id="d">{"name": "${x}"}</script>
+--- values
+O'Brien
+a-b `c` $d
+a/b
+tab\tx
+back\\slash "q"
+café 😀, a_b
+--- expect
+<script type="application/json" id="d">{"name": "O\u0027Brien"}</script>
+<script type="application/json" id="d">{"name": "a\u002db\u0020\u0060c\u0060\u0020\u0024d"}</script>
+<script type="application/json" id="d">{"name": "a\u002fb"}</script>
+<script type="application/json" id="d">{"name": "tab\u0009x"}</script>
+<script type="application/json" id="d">{"name": "back\\slash\u0020\u0022q\u0022"}</script>
+<script type="application/json" id="d">{"name": "café\u0020😀,\u0020a_b"}</script>
+--- forbid
+\\['`$-]
+### l1-svg-font-then-script
+<svg width="10" height="10"><defs><font id="f" horiz-adv-x="10"></font></defs><script>if (a<b && ok) { t = "${x}"; }</script></svg>
+--- values
+"x
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(2) x="
+--- expect
+<svg width="10" height="10"><defs><font id="f" horiz-adv-x="10"></font></defs><script>if (a<b && ok) { t = "\u0022x"; }</script></svg>
+*
+--- forbid
+ style=
+statechange=
+\\"
+### l1-math-annotation-xml-script
+<math><annotation-xml encoding="application/x-tex"><script>var n = 0<i ? "${x}" : "";</script></annotation-xml></math>
+--- values
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(3) x="
+--- forbid
+ style=
+statechange=
+\\"
+### script-data-in-every-literal
+<script>var a = "${x}", t = `${x}`, r = /${x}/;</script><svg><script>var a = `${x}`;</script></svg>
+--- values
+${alert(1)}
+x/;alert(1);/
+</script><!--
+--- expect
+<script>var a = "\u0024\u007balert\u00281\u0029\u007d", t = `\u0024\u007balert\u00281\u0029\u007d`, r = /\u0024\u007balert\u00281\u0029\u007d/;</script><svg><script>var a = `\u0024\u007balert\u00281\u0029\u007d`;</script></svg>
+<script>var a = "x\u002f\u003balert\u00281\u0029\u003b\u002f", t = `x\u002f\u003balert\u00281\u0029\u003b\u002f`, r = /x\u002f\u003balert\u00281\u0029\u003b\u002f/;</script><svg><script>var a = `x\u002f\u003balert\u00281\u0029\u003b\u002f`;</script></svg>
+<script>var a = "\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d", t = `\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d`, r = /\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d/;</script><svg><script>var a = `\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d`;</script></svg>
+### table-then-svg-script
+<table><svg><desc><td></td></desc><script>var a = "${x}", b = "${y}";</script></svg></table>
+--- values
+";alert(1)//||ok
+\\||;alert(1)//
+--- expect
+<table><svg><desc><td></td></desc><script>var a = "\u0022\u003balert\u00281\u0029\u002f\u002f", b = "ok";</script></svg></table>
+<table><svg><desc><td></td></desc><script>var a = "\\", b = "\u003balert\u00281\u0029\u002f\u002f";</script></svg></table>
+
 #! ------------------------------------- Final review, M1: data inside a tag, outside a quoted value
 #! A script or style body in <svg>/<math> is markup to a browser, so "0<i ?" opens a tag and a
 #! string that doesn't follow "=" is in attribute-name position. Every character there is escaped.
@@ -359,6 +420,17 @@ x style=display:block onfocus=alert(1) autofocus y
  style=
 onfocus=
  autofocus
+### m1-svg-style-pseudo-tag-name
+<svg><style>a{color:${x}} b<c{content:"${y}"}</style></svg>
+--- values
+red||ok
+red;}*{background:url(//evil)}||"><img src=x onerror=alert(1)>
+--- expect
+<svg><style>a{color:red} b<c{content:"\6f \6b "}</style></svg>
+*
+--- forbid
+<img
+onerror
 ### m1-jte-drops-the-text-before-a-first-css-comment
 <style>/* c */ a<b { color: ${x} }</style>
 --- values

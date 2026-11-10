@@ -42,10 +42,15 @@ import java.util.regex.Pattern;
  *   <li><strong>CSS</strong> ({@code <style>} bodies and {@code style=""}): user data is written
  *       with CSS hex escapes for everything but plain value characters, so it can't end its
  *       declaration or rule. See {@link #escapeCss}.</li>
- *   <li><strong>Script bodies</strong>: on top of JTE's JavaScript escaping, {@code < > &} are
- *       written as {@code \}{@code uXXXX}, and in a {@code <script>} inside {@code <svg>} or
- *       {@code <math>}, which a browser tokenizes as markup, quotes are too. See
- *       {@link #writeScriptData}.</li>
+ *   <li><strong>Script bodies</strong>: everything in user data but letters, digits, {@code _},
+ *       {@code ,} and non-ASCII characters is written as {@code \}{@code uXXXX}, which a
+ *       JavaScript string, a template literal, a regex literal and a JSON string all read back
+ *       as the data, and which has nothing in it that is syntax to an HTML tokenizer, whether the
+ *       browser reads the script as raw text or (inside {@code <svg>} or {@code <math>}) as
+ *       markup. See {@link #escapeScriptData}.</li>
+ *   <li><strong>Inside a tag, outside a quoted value</strong> (reached only through such a script
+ *       or style body, where {@code a<b} opens a tag): every character is written as an escape.
+ *       See {@link #escapeAll}.</li>
  * </ul>
  *
  * Where each {@code ${...}} lands is read from the output itself, by a small HTML tokenizer over
@@ -92,6 +97,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private int firstUser;              // where in valueOut user data first appears; -1 if none
     private int userWrites;             // pieces of user data in the held value
     private String soleUser;            // the last of them (the only one, if userWrites == 1)
+    private boolean scriptEscaped;      // some of them were script-escaped on top (JTE reads a script there)
 
     public BraceHtmlOutput(TemplateOutput target) {
         super(target);
@@ -182,6 +188,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         firstUser = -1;
         userWrites = 0;
         soleUser = null;
+        scriptEscaped = false;
     }
 
     // --- where the output is ---
@@ -632,7 +639,14 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             String raw = decodeReferences(valueOut);
             int userAt = templatePrefixLength();
             if (urlValue) {
-                if (isSafeValue(raw, userAt)) target.writeContent(valueOut.toString());
+                boolean safe = isSafeValue(raw, userAt);
+                if (safe && scriptEscaped) {
+                    // Data in it was script-escaped as well (JTE reads a script here), and that
+                    // takes the ':' out of "javascript:". Judged again with those escapes undone:
+                    // the URL rule isn't switched off by the other reading's escaping.
+                    safe = isSafeValue(unescapeScript(raw), unescapeScript(raw.substring(0, userAt)).length());
+                }
+                if (safe) target.writeContent(valueOut.toString());
                 else Escape.htmlAttribute(BLOCKED_URL, target);
             } else if (userWrites == 1 && !templateText) {
                 // The whole value is one piece of data: JSON the app built (hx-vals='${json}').
@@ -712,13 +726,18 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         boolean jteScript = attributeName == null && "script".equals(tagName);
         boolean jteStyle = attributeName == null && "style".equals(tagName);
         boolean insideTag = valueOut == null && inTagOutsideValue();
-        // What the data's first character will be once written: an escape, inside a tag.
-        if (!value.isEmpty()) dataWritten(insideTag ? '\\' : value.charAt(0));
+        boolean scriptBody = inScriptBody() || jteScript;
+        if (!value.isEmpty()) {
+            // The data's first character as it will be written: inside a tag, and for a character
+            // that script escaping doesn't leave alone, the backslash of an escape.
+            char first = value.charAt(0);
+            dataWritten(insideTag || (scriptBody && !jteAttribute && !isScriptDataPlain(first)) ? '\\' : first);
+        }
         if (valueOut != null) {
             appendToHeldValue(value, jteScript, jteStyle);
         } else if (insideTag) {
             writeAttributeData(null, null, jteAttribute ? tagName : null, jteAttribute ? attributeName : null, value,
-                inScriptBody() || jteScript, inStyleBody() || jteStyle, true);
+                scriptBody, inStyleBody() || jteStyle, true);
         } else if (inQuotedValue()) {
             // In an attribute value that isn't held. Also reached with no attribute context from
             // JTE (a @template call inside the value): JTE would escape that as body text, which
@@ -731,62 +750,21 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             // body the output is in.
             writeAttributeData(null, null, tagName, attributeName, value, inScriptBody(), inStyleBody(), false);
         } else {
-            boolean script = inScriptBody(), style = inStyleBody() || jteStyle;
-            if (script != jteScript) {
-                // One says script body: \\uXXXX escapes, inert in a script string and as text.
-                String escaped = escapeScript(value);
+            boolean style = inStyleBody() || jteStyle;
+            if (scriptBody) {
+                // A script body by either reading: the same escaping whether the two agree or
+                // not, and whether the script is HTML's raw text or markup inside <svg>. What it
+                // writes is inert as body text too, if only one of them says script.
+                String escaped = escapeScriptData(value);
                 target.writeContent(style ? escapeCss(escaped) : escaped);
             } else if (style) {
                 // L7: JTE HTML-escapes data in a <style> body, which keeps it in the element but not
                 // in its declaration. (The result is inert as body text too, if JTE alone says style.)
                 target.writeContent(escapeCss(value));
-            } else if (script) {
-                writeScriptData(value);
             } else {
                 super.writeUserContent(value); // JTE's escaping for body text
             }
         }
-    }
-
-    /**
-     * Data in a script body, where JTE and the tokenizer agree that it is one (H1 review, F3).
-     *
-     * <p>In HTML content: JTE's script escaping, with {@code < > &} written as
-     * {@code \}{@code uXXXX} on top (JTE leaves them alone, and escapes nothing into them). In a
-     * JavaScript string, template literal or regex literal and in a JSON string that reads back
-     * as the same character; anywhere else in a script it is a syntax error, and data there was
-     * code already. It costs nothing in HTML, where a script body is raw text, and it is what
-     * keeps the data text if the browser is tokenizing the body as markup after all.
-     *
-     * <p>In foreign content ({@code <svg><script>}) it is tokenized as markup: {@code <img} in a
-     * string is a tag, a character reference is decoded, and after a {@code <} the template wrote
-     * ({@code if (a<b)}) a quote ends an attribute value. So everything that is syntax to either
-     * parser goes: {@link #escapeScript}, which leaves no {@code < > & " '} at all.
-     */
-    private void writeScriptData(String value) {
-        if (!inRawText()) {
-            target.writeContent(escapeScript(value));
-            return;
-        }
-        int i = 0, n = value.length();
-        while (i < n && !isMarkup(value.charAt(i))) i++;
-        if (i == n) {
-            Escape.javaScriptBlock(value, target);
-            return;
-        }
-        var escaped = new StringBuilder(n + 32);
-        Escape.javaScriptBlock(value, new Appender(escaped));
-        var out = new StringBuilder(escaped.length() + 16);
-        for (i = 0; i < escaped.length(); i++) {
-            char c = escaped.charAt(i);
-            if (isMarkup(c)) out.append(c == '<' ? "\\u003c" : c == '>' ? "\\u003e" : "\\u0026");
-            else out.append(c);
-        }
-        target.writeContent(out.toString());
-    }
-
-    private static boolean isMarkup(char c) {
-        return c == '<' || c == '>' || c == '&';
     }
 
     /**
@@ -840,14 +818,22 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         }
         if ((isJsonAttribute(attribute) || isJsonAttribute(jteAttribute)) && evaluatedBecauseOfUserData(value, 0)) value = "";
         css |= "style".equals(attribute) || "style".equals(jteAttribute);
-        script |= isScriptAttribute(attribute) || isScriptAttribute(jteAttribute);
+        boolean scriptAttribute = isScriptAttribute(attribute) || isScriptAttribute(jteAttribute);
         if (insideTag) {
             // CSS alone: hex escapes, which a CSS parser reads back. Otherwise \\uXXXX, which a
             // script reads back, CSS-escaped as well if a style is one of the readings.
-            target.writeContent(css && !script ? escapeCss(value, true) : css ? escapeCss(escapeAll(value)) : escapeAll(value));
+            boolean anyScript = script || scriptAttribute;
+            target.writeContent(css && !anyScript ? escapeCss(value, true) : css ? escapeCss(escapeAll(value)) : escapeAll(value));
             return;
         }
-        if (script) value = escapeScript(value);
+        // A script body by one of the readings. JTE says script (and so no attribute): the data
+        // is in a string of that script, and gets a script body's escaping. JTE says attribute
+        // and the tokenizer says script body: JTE saw a quoted attribute value in the template's
+        // source, so either the browser is in that value (and the tokenizer has lost its place)
+        // or in a script string with a quote before the data; a script attribute's escaping
+        // covers both, and leaves a URL readable if the tokenizer is the one that is wrong.
+        if (script && jteAttribute == null) value = escapeScriptData(value);
+        else if (script || scriptAttribute) value = escapeScript(value);
         if (css) {
             target.writeContent(escapeCss(value)); // nothing left in it for HTML escaping to do
         } else if ("srcdoc".equals(attribute) || "srcdoc".equals(jteAttribute)) {
@@ -880,7 +866,9 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         boolean jteDiffers = jteScript || jteStyle || (urlValue && isScriptAttribute(attributeName));
         userWrites += jteDiffers ? 2 : 1; // never "the whole value is one piece of JSON" then
         soleUser = value;
-        if (jteDiffers || !urlValue) value = escapeScript(value);
+        if (jteScript) value = escapeScriptData(value);
+        else if (jteDiffers || !urlValue) value = escapeScript(value);
+        scriptEscaped |= jteDiffers;
         if (jteStyle) value = escapeCss(value);
         Escape.htmlAttribute(value, new Appender(valueOut));
     }
@@ -1055,6 +1043,51 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             }
         }
         return out == null ? value : out.toString();
+    }
+
+    /**
+     * Escape for data in a script body (final review): everything but ASCII letters and digits,
+     * {@code _}, {@code ,} and non-ASCII characters is written as {@code \}{@code uXXXX}
+     * ({@code \} itself as {@code \\}). U+2028, U+2029, the C1 controls and unpaired surrogates
+     * are escaped too.
+     *
+     * <p>What is left is the same text to everything that might read it. A JavaScript string in
+     * either quote style, a template literal (no {@code `} or <code>${</code>) and a JSON string
+     * read the escapes back as the original characters, and a regex literal matches them
+     * literally. To an HTML tokenizer there is no {@code < > & " '}, no space, {@code =} or
+     * {@code /}: in raw text it can't spell {@code </script} or {@code <!--}, and if the browser
+     * is reading the script as markup (in {@code <svg>}) it can't end an attribute value in
+     * either quote style, an unquoted one or an attribute name, so it doesn't matter whether the
+     * tokenizer here knows which of those it is. JTE's own script escaping wrote {@code \'},
+     * {@code \-}, {@code \`} and {@code \$}, which are not JSON, and {@code \"}, whose quote is
+     * still a quote to HTML.
+     *
+     * <p>It protects data inside a string or regex literal. Outside one, anything escaped is a
+     * syntax error ({@code var n = ${count}} works for digits only).
+     */
+    static String escapeScriptData(String value) {
+        StringBuilder out = null;
+        for (int i = 0, n = value.length(); i < n; i++) {
+            char c = value.charAt(i);
+            boolean pair = Character.isHighSurrogate(c) && i + 1 < n && Character.isLowSurrogate(value.charAt(i + 1));
+            if (pair || isScriptDataPlain(c)) {
+                if (out != null) out.append(c);
+                if (pair) {
+                    i++;
+                    if (out != null) out.append(value.charAt(i));
+                }
+                continue;
+            }
+            if (out == null) out = new StringBuilder(n + 32).append(value, 0, i);
+            if (c == '\\') out.append("\\\\");
+            else appendUnicodeEscape(out, c);
+        }
+        return out == null ? value : out.toString();
+    }
+
+    private static boolean isScriptDataPlain(char c) {
+        return isAsciiAlphanumeric(c) || c == '_' || c == ','
+            || (c >= 0xa0 && c != 0x2028 && c != 0x2029 && !Character.isSurrogate(c));
     }
 
     /**
