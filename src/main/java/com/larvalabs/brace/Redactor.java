@@ -440,8 +440,9 @@ public class Redactor {
             } else if (isChunkChar(c)) {
                 to = chunkEnd(s, i);
                 int u = knownSchemeStart(s, i, to);
-                if (u == i) {
-                    to = urlEnd(s, i); // jdbc:<subscheme>:// after a prefix ("-jdbc:sqlserver://")
+                int end = u == i ? urlEnd(s, i) : -1;
+                if (end > i) {
+                    to = end; // jdbc:<subscheme>:// after a prefix ("-jdbc:sqlserver://")
                     replacement = urlReplacement(s.substring(i, to), rounds, depth);
                 } else {
                     if (u > i) {
@@ -519,7 +520,8 @@ public class Redactor {
     /**
      * Where a URL starts inside the run {@code s[from, to)} that ends right before {@code ://}: at
      * a {@link #KNOWN_SCHEMES known scheme} that ends the run, or at the run itself when it follows
-     * {@code jdbc:} ({@code -jdbc:sqlserver://}). Otherwise -1.
+     * {@code jdbc:} ({@code -jdbc:sqlserver://}) and is a scheme name (a letter, then
+     * {@code [A-Za-z0-9+.-]}: a run holding {@code _ / ~ $ %} is not one). Otherwise -1.
      */
     private static int knownSchemeStart(String s, int from, int to) {
         if (!s.startsWith("://", to)) return -1;
@@ -528,8 +530,20 @@ public class Redactor {
             int st = to - k.length();
             if (st >= from && (best < 0 || st < best) && s.regionMatches(true, st, k, 0, k.length())) best = st;
         }
-        if (best < 0 && from >= 5 && s.regionMatches(true, from - 5, "jdbc:", 0, 5)) return from;
+        if (best < 0 && from >= 5 && s.regionMatches(true, from - 5, "jdbc:", 0, 5) && isSchemeName(s, from, to)) {
+            return from;
+        }
         return best;
+    }
+
+    /** {@code s[from, to)} is a URL scheme name: a letter, then letters, digits, {@code + - .}. */
+    private static boolean isSchemeName(String s, int from, int to) {
+        if (from >= to || !isAsciiLetter(s.charAt(from))) return false;
+        for (int i = from + 1; i < to; i++) {
+            char c = s.charAt(i);
+            if (!(isAsciiLetter(c) || isAsciiDigit(c) || c == '+' || c == '-' || c == '.')) return false;
+        }
+        return true;
     }
 
     private static boolean endsUrl(char c) {

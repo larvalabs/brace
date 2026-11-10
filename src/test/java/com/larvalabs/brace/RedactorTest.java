@@ -1030,4 +1030,26 @@ class RedactorTest {
         Redactor.redactHeaders(Map.of("X-Big", big));
         assertTrue(System.nanoTime() - t0 < 5_000_000_000L, "redaction of a 1 MB value must be fast");
     }
+
+    // ---- Second review (2026-11): docs/2026-11-09-security-review-todos.md, M6 "Second review fixes" ----
+
+    @Test
+    void aRunAfterJdbcThatIsNotASchemeIsTextNotAUrl() {
+        // H-1: "jdbc:" before a run holding _ / ~ $ % and then "://" was taken for a URL start,
+        // the URL scan found no scheme there, and substring(i, -1) threw out of every entry point.
+        for (String in : List.of("jdbc:my_driver://host/db", "Invalid url jdbc:_x://h", "jdbc:a/b://h",
+                "jdbc:a~b://h", "jdbc:a$b://h", "jdbc:a%b://h", "jdbc:%://", "x jdbc:_://")) {
+            assertEquals(in, Redactor.redactMessage(in), in);
+            assertEquals(in, Redactor.redactValue(in), in);
+            assertEquals(in + "\n\tat a.B.c(B.java:1)\n", Redactor.redactStackTrace(in + "\n\tat a.B.c(B.java:1)\n"), in);
+            assertEquals(in, Redactor.redactHeaders(Map.of("X-Thing", in)).get("X-Thing"), in);
+        }
+        assertEquals("x=jdbc:_x://h", Redactor.redactQuery("x=jdbc:_x://h"));
+        assertEquals("x=jdbc%3A_x%3A%2F%2Fh", Redactor.redactQuery("x=jdbc%3A_x%3A%2F%2Fh"));
+        assertEquals("https://h/p?next=jdbc:_x://h", Redactor.redactUrl("https://h/p?next=jdbc:_x://h"));
+        assertEquals("/jdbc%3A%5Fx%3A%2F%2Faaaaaaaaaaaa", Redactor.redactPath("/jdbc%3A%5Fx%3A%2F%2Faaaaaaaaaaaa"));
+        // A real sub-scheme after a prefix is still a URL.
+        assertEquals("-jdbc:sqlserver://db:1433;password=[REDACTED]",
+            Redactor.redactMessage("-jdbc:sqlserver://db:1433;password=hunter2"));
+    }
 }
