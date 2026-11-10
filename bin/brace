@@ -136,20 +136,33 @@ version_lt() {
 # not a valid version or pom.xml has more than one <brace.version> element.
 pinned_version() {
     [[ -f pom.xml ]] || return 1
-    local raw count
+    local raw count attrs flat
     # One element only: with a second one (in an XML comment, or a profile) the launcher would
-    # pick a toolchain by one value while Maven and a reviewer see another. Counts opening tags,
-    # attributes and self-closing included, over the file with its whitespace made spaces.
-    count=$(tr '[:space:]' ' ' < pom.xml \
-        | awk '{ n += gsub(/<brace[.]version[ \/>]/, "") } END { print n + 0 }')
-    if [[ "$count" != 0 && "$count" != 1 ]]; then
+    # pick a toolchain by one value while Maven and a reviewer see another.
+    #
+    # The pin is read from ONE normalised copy of the file (NUL bytes dropped, then every
+    # whitespace byte deleted), and the opening tags are counted on that same copy, so whatever
+    # the extraction could match is counted: a tag name split by a space or a newline, or text
+    # after a NUL byte (which macOS awk stops reading at), can't hide a decoy from the count.
+    # Self-closing tags are counted there too. An attribute (<brace.version a="b">) can't be told
+    # from a longer tag name once whitespace is gone, so those are counted on a copy with the
+    # whitespace made spaces; that copy only adds to the count and is never read for the pin.
+    # Byte-wise (LC_ALL=C), so bytes that aren't valid text in the user's locale are kept as is.
+    flat=$(LC_ALL=C tr -d '\000' < pom.xml | LC_ALL=C tr -d '[:space:]')
+    count=$(printf '%s\n' "$flat" \
+        | LC_ALL=C awk '{ n += gsub(/<brace[.]version>/, ""); n += gsub(/<brace[.]version\/>/, "") }
+                        END { print n + 0 }')
+    attrs=$(LC_ALL=C tr -d '\000' < pom.xml | LC_ALL=C tr '[:space:]' ' ' \
+        | LC_ALL=C awk '{ n += gsub(/<brace[.]version +[^ \/>]/, "") } END { print n + 0 }')
+    count=$(( count + attrs ))
+    if (( count > 1 )); then
         error "pom.xml has $(printf '%q' "$count") <brace.version> elements; brace needs exactly one, so the"
         error "toolchain the launcher picks is the version Maven builds. Remove the others (commented-out"
         error "and profile copies count too)."
         return 2
     fi
-    raw=$(tr -d '[:space:]' < pom.xml \
-        | sed -n 's/.*<brace\.version>\(.*\)<\/brace\.version>.*/\1/p')
+    raw=$(printf '%s\n' "$flat" \
+        | LC_ALL=C sed -n 's/.*<brace\.version>\(.*\)<\/brace\.version>.*/\1/p')
     raw="${raw#v}"
     [[ -n "$raw" ]] || return 1
     if ! valid_version "$raw"; then

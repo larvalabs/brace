@@ -310,7 +310,19 @@ printf '<project><properties><brace.version>0.1.10</brace.version></properties>\
     > "$POMS/profile.xml"
 printf '<project><properties>\n  <brace.version\n    >0.1.10</brace.version>\n  <brace.version a="b">0.1.12</brace.version>\n</properties></project>\n' \
     > "$POMS/split.xml"
-for f in comment profile split; do
+# Decoys the count must see because the extraction does: the launcher deletes whitespace before it
+# reads the pin, so a tag name split by a space or a newline is still a <brace.version> to it, and
+# a NUL byte must not hide the rest of the file from the count (macOS awk stops reading at one).
+printf '<project><properties>\n  <brace.version>0.1.12</brace.version>\n  <!-- <brace .version>0.1.11</brace.version> -->\n</properties></project>\n' \
+    > "$POMS/spacedname.xml"
+printf '<project><properties>\n  <brace.version>0.1.12</brace.version>\n  <!-- <brace.ver\nsion>0.1.11</brace.version> -->\n</properties></project>\n' \
+    > "$POMS/newlinename.xml"
+printf '<project><properties>\n  <brace.version>0.1.12</brace.version>\n  \000<!-- <brace.version>0.1.11</brace.version> -->\n</properties></project>\n' \
+    > "$POMS/nul.xml"
+if LC_ALL=C tr -d '\000' < "$POMS/nul.xml" | cmp -s - "$POMS/nul.xml"; then
+    fail "the NUL fixture has no NUL byte"
+fi
+for f in comment profile split spacedname newlinename nul; do
     cp "$POMS/$f.xml" "$PROJECT/pom.xml"
     for cmd in status version; do
         run_brace "$cmd"
