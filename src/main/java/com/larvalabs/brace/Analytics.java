@@ -240,7 +240,7 @@ public final class Analytics {
                 try {
                     flush();
                 } catch (Exception e) {
-                    Log.warn("analytics flush failed: " + e);
+                    Log.warn("analytics flush failed: " + Redactor.redactMessage(String.valueOf(e)));
                 }
             }
         });
@@ -271,7 +271,7 @@ public final class Analytics {
                 tally(verdict.wire, today());
             }
         } catch (RuntimeException e) {
-            Log.debug("analytics.observe_failed", Map.of("error", String.valueOf(e)));
+            Log.debug("analytics.observe_failed", Map.of("error", Redactor.redactMessage(String.valueOf(e))));
         }
     }
 

@@ -712,6 +712,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     output (`Cli*.java`, `ProjectGenerator`, `ClaudeMdGenerator`), messages of exceptions thrown
     to the caller rather than written to a sink (`Http.failed`, `EventStream`, `Request`), and
     `BraceHandler`'s `stats.recordError`, which `Stats` already redacts.
+  - **Final review fixes** (`fix(security): L13 final review fixes`). Wrapped in
+    `Redactor.redactMessage`: `Analytics` flush-failure warning and `analytics.observe_failed`
+    debug event, `WsRegistry` `ws-broadcast-send-failed`, `PostgresBackend` cache-trim debug
+    line. Still raw, in files owned by other fixes, to wrap after the merge: `BraceHandler`
+    after-middleware warning, request-resource release warning and upload temp sweep warning
+    (`"…" + e`), `Request` upload temp-file release warning; and on stderr only,
+    `Brace` shutdown error and `HealthCheck` failure.
 
 - [x] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`
   - **Verified (angus-mail 2.0.5).** `"a@b.c, victim@x.y"` passes `@Email` and parses to two

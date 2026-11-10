@@ -818,6 +818,26 @@ class RedactorTest {
     }
 
     @Test
+    void aWebSocketBroadcastFailureIsLoggedRedacted() {
+        // L13 final review: WsRegistry logged "error=" + e raw; the exception text reaches /ops/logs.
+        var registry = new WsRegistry(new InProcessMessageBus(), 1 << 20);
+        var ctx = new WsContext(null, null, registry) {
+            @Override
+            public void send(String message) {
+                throw new IllegalStateException("relay wss://bot:hunter2pw@relay.example/ws?token=abc rejected " + T);
+            }
+        };
+        registry.join("room", ctx);
+        LogTap.clear();
+        registry.broadcast("room", "hi");
+        String logs = LogTap.snapshot().toString();
+        assertTrue(logs.contains("ws-broadcast-send-failed"), logs);
+        for (String secret : List.of(T, "hunter2pw", "token=abc")) {
+            assertFalse(logs.contains(secret), secret + " logged: " + logs);
+        }
+    }
+
+    @Test
     void longAdversarialInputStaysLinear() {
         // Error path only, but attacker-sized: a 1 MB value of near-misses must not blow up.
         String nearMiss = "a".repeat(19) + "." + "b".repeat(19);
