@@ -93,6 +93,13 @@ class AssetsTest {
     }
 
     @Test
+    void prefixWithoutSegmentBoundaryReturnsUnchanged() {
+        // M1: "/assetsapp.css" is not under "/assets"
+        assertEquals("/assetsapp.css", Assets.url("/assetsapp.css"));
+        assertEquals("/assetssub/nested.css", Assets.url("/assetssub/nested.css"));
+    }
+
+    @Test
     void pathTraversalReturnsUnchanged() {
         var url = Assets.url("/assets/../etc/passwd");
         assertEquals("/assets/../etc/passwd", url);

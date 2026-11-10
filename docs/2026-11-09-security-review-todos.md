@@ -151,7 +151,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
 
 ## Medium
 
-- [ ] **M1: Static mapping prefix has no segment boundary**, `BraceHandler.java:1337-1344`, `Assets.java:108-110`
+- [x] **M1: Static mapping prefix has no segment boundary**, `BraceHandler.java:1337-1344`, `Assets.java:108-110`
   - **What's wrong.** `serveStaticFile` tests `requestPath.startsWith(prefix)` and strips the
     prefix, so `/filesX` is treated as `/files` + `X`. `Middleware.PathPattern.matches`
     (`Middleware.java:82-87`) requires `path.equals("/files") || path.startsWith("/files/")`,

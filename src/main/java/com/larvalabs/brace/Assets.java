@@ -106,6 +106,9 @@ public class Assets {
         for (var mapping : mappings) {
             var prefix = mapping.prefix();
             if (!urlPath.startsWith(prefix)) continue;
+            // Segment boundary (M1): same rule as the static-file handler.
+            if (urlPath.length() > prefix.length() && !prefix.endsWith("/")
+                    && urlPath.charAt(prefix.length()) != '/') continue;
             var relative = urlPath.substring(prefix.length());
             if (relative.startsWith("/")) relative = relative.substring(1);
             if (relative.isEmpty() || relative.contains("..")) return null;

@@ -1337,6 +1337,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         for (var mapping : staticFileMappings) {
             String prefix = mapping.urlPrefix();
             if (!requestPath.startsWith(prefix)) continue;
+            // Segment boundary (M1): "/filesX" is not under "/files". Matches Middleware's
+            // path patterns, so a guard on "/files/*" covers exactly what this serves.
+            if (requestPath.length() > prefix.length() && !prefix.endsWith("/")
+                    && requestPath.charAt(prefix.length()) != '/') continue;
 
             String relativePath = requestPath.substring(prefix.length());
             if (relativePath.startsWith("/")) {
