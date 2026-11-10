@@ -1486,7 +1486,7 @@ public class Redactor {
             int authStart = sep + 3;
             int authEnd = indexOfAny(url, authStart, len, "/?#");
             out.append(url, 0, authStart);
-            int at = userInfoEnd(url, sep, authStart, authEnd);
+            int at = userInfoEnd(url, authStart, authEnd);
             int hostStart = authStart;
             if (at >= authStart) {
                 out.append(PLACEHOLDER);
@@ -1533,11 +1533,12 @@ public class Redactor {
      *       ({@code user:pa}, {@code :pw}): yes. {@link #AMBIGUOUS} ({@code user:12345}, which
      *       is also what {@code db:5432} looks like): yes, unless parameters follow the port
      *       ({@code db:1433;user=sa;password=p@ss}: the parameter pass redacts that value).
-     *       {@link #HOST}: no for a web scheme
-     *       ({@code https://example.com:8443/users/@bob}).</li>
+     *       {@link #HOST}: no, in any scheme: {@code https://example.com:8443/users/@bob} and
+     *       {@code mongodb://h1:27017,h2:27017/db?authSource=a@b} keep their hosts, path and
+     *       query.</li>
      * </ol>
      */
-    private static int userInfoEnd(String url, int sep, int authStart, int authEnd) {
+    private static int userInfoEnd(String url, int authStart, int authEnd) {
         int semi = indexOfAny(url, authStart, authEnd, ";");
         if (semi < authEnd) {
             // Parameters are name=value: a ';' with no '=' before the next '@' is part of the
@@ -1552,11 +1553,7 @@ public class Redactor {
         if (at >= 0) return at;
         if (indexOfAny(url, authStart, semi, ":") == semi) return -1;
         int kind = hostKind(url, authStart, semi);
-        if (kind == HOST) {
-            String scheme = url.substring(0, sep).toLowerCase(Locale.ROOT);
-            if (scheme.equals("http") || scheme.equals("https") || scheme.equals("ws") || scheme.equals("wss")) return -1;
-        }
-        if (kind != USERINFO && semi < authEnd) return -1;
+        if (kind == HOST || (kind == AMBIGUOUS && semi < authEnd)) return -1;
         int lastAt = url.lastIndexOf('@');
         return lastAt > semi ? lastAt : -1;
     }

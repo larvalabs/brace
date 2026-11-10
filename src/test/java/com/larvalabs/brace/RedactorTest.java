@@ -1345,6 +1345,40 @@ class RedactorTest {
     }
 
     @Test
+    void anAtSignBeyondAnEvidentHostIsNotUserInfo() {
+        // L-2: "user info up to the last '@'" (for a password holding / ? #) applied to every
+        // non-web URL whose authority held ':', so a host list or host:port followed by an '@' in
+        // the query lost its hosts, path and query: mongodb://[REDACTED]@b.
+        for (String same : List.of(
+                "Failed mongodb://h1:27017,h2:27017/db?authSource=a@b",
+                "Failed mongodb://h1:27017,h2:27017,h3:27017/db?replicaSet=rs0&appName=a@b",
+                "Failed postgres://localhost:5432/db?options=user@x",
+                "Failed postgres://db.internal:5432/app?email=a@b.c",
+                "Failed redis://10.0.0.5:6379/0?client=a@b",
+                "Failed amqp://[::1]:5672/vhost?name=a@b")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+        String[][] cases = {
+            // Real user info in front of a host list is still masked, and the list is kept.
+            {"Failed mongodb://u:pw@h1:27017,h2:27017/db?authSource=a@b",
+                "Failed mongodb://[REDACTED]@h1:27017,h2:27017/db?authSource=a@b"},
+            // A password holding / ? # stays fully masked.
+            {"Failed postgres://app:pa/ss@db/x", "Failed postgres://[REDACTED]@db/x"},
+            {"Failed redis://:pa?ss@host:6379/0", "Failed redis://[REDACTED]@host:6379/0"},
+            {"Failed redis://:p#w@cache:6379", "Failed redis://[REDACTED]@cache:6379"},
+            // The tie: one dotless name:digits is a host and port, or a user and a numeric
+            // password cut at its '/'. Redaction wins it, in every scheme.
+            {"Failed postgres://app:12345/678@db/x", "Failed postgres://[REDACTED]@db/x"},
+            {"Failed redis://cache:6379/0?client=a@b", "Failed redis://[REDACTED]@b"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        assertEquals("mongodb://h1:27017,h2:27017/db?authSource=a@b",
+            Redactor.redactUrl("mongodb://h1:27017,h2:27017/db?authSource=a@b"));
+    }
+
+    @Test
     void everyEntryPointFailsClosedWhenRedactionFailsInside() {
         // H-1: the redactor runs on error paths, so a bug inside it must cost one marker, never an
         // exception (the error being recorded would be lost) and never the raw input.
