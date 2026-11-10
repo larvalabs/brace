@@ -247,6 +247,107 @@ class CacheSerializationTest {
         assertEquals(new StoredHere("mine"), cache.get("k", java.io.Serializable.class));
     }
 
+    // --- L15 final review: supertype reads on an instance that never stored the class ---
+    // Two Cache instances over one backend stand for two servers; forgetStoredClasses() makes the
+    // reader a fresh process (the stored-class registry is per JVM).
+
+    interface Named { String name(); }
+
+    record Rule(String name) implements Named {}
+
+    record PlantedViaObject(String name) {
+        static final AtomicInteger CONSTRUCTED = new AtomicInteger();
+        PlantedViaObject { CONSTRUCTED.incrementAndGet(); }
+    }
+
+    @Test
+    void jdkValuesWrittenByOneInstanceAreReadThroughTheirInterfaceByAFreshOne() {
+        var backend = new SerializingMapBackend();
+        var writer = new Cache(backend);
+        var reader = new Cache(backend);
+        writer.set("denylist", new java.util.ArrayList<>(java.util.List.of("mallory", "eve")));
+        writer.set("linked", new java.util.LinkedList<>(java.util.List.of("a")));
+        writer.set("flags", new java.util.HashMap<>(Map.of("beta", true)));
+        writer.set("sorted", new java.util.TreeMap<>(Map.of("k", "v")));
+        writer.set("revoked", new java.util.HashSet<>(java.util.Set.of("token-1")));
+        writer.set("listOf", java.util.List.of("x", "y", "z"));
+        writer.set("listOf1", java.util.List.of("only"));
+        writer.set("mapOf", Map.of("k", 1));
+        writer.set("setOf", java.util.Set.of("s"));
+        writer.set("count", 42);
+        writer.set("price", new java.math.BigDecimal("9.99"));
+        writer.set("when", java.time.Instant.parse("2026-11-10T00:00:00Z"));
+        writer.set("names", new String[] {"a", "b"});
+        Cache.forgetStoredClasses();
+
+        assertEquals(java.util.List.of("mallory", "eve"), reader.get("denylist", java.util.List.class));
+        assertEquals(java.util.List.of("mallory", "eve"), reader.get("denylist", java.util.Collection.class));
+        assertEquals(java.util.List.of("a"), reader.get("linked", java.util.List.class));
+        assertEquals(Map.of("beta", true), reader.get("flags", Map.class));
+        assertEquals(Map.of("k", "v"), reader.get("sorted", Map.class));
+        assertEquals(java.util.Set.of("token-1"), reader.get("revoked", java.util.Set.class));
+        assertEquals(java.util.List.of("x", "y", "z"), reader.get("listOf", java.util.List.class));
+        assertEquals(java.util.List.of("only"), reader.get("listOf1", java.util.List.class));
+        assertEquals(Map.of("k", 1), reader.get("mapOf", Map.class));
+        assertEquals(java.util.Set.of("s"), reader.get("setOf", java.util.Set.class));
+        assertEquals(42, reader.get("count", Number.class));
+        assertEquals(new java.math.BigDecimal("9.99"), reader.get("price", Number.class));
+        assertEquals(java.time.Instant.parse("2026-11-10T00:00:00Z"), reader.get("when", java.time.temporal.Temporal.class));
+        assertArrayEquals(new String[] {"a", "b"}, (Object[]) reader.get("names", Object.class));
+        assertEquals(0, reader.misses());
+    }
+
+    @Test
+    void getOrSetOnAFreshInstanceReadsAJdkValueInsteadOfOverwritingIt() {
+        var backend = new SerializingMapBackend();
+        new Cache(backend).set("denylist", new java.util.ArrayList<>(java.util.List.of("mallory")));
+        Cache.forgetStoredClasses();
+        var fresh = new Cache(backend);
+        var calls = new AtomicInteger();
+        java.util.List<String> read = fresh.getOrSet("denylist", "5m", () -> {
+            calls.incrementAndGet();
+            return new java.util.ArrayList<>();
+        });
+        assertEquals(java.util.List.of("mallory"), read);
+        assertEquals(0, calls.get(), "the fresh instance must not recompute and overwrite the stored list");
+    }
+
+    @Test
+    void anAppClassReadThroughItsInterfaceNeedsAllowType() {
+        var backend = new SerializingMapBackend();
+        new Cache(backend).set("rule", new Rule("block"));
+        Cache.forgetStoredClasses();
+        var fresh = new Cache(backend);
+        assertNull(fresh.get("rule", Named.class), "unregistered app class through an interface: a miss");
+        assertTrue(Cache.warnedRefusals().contains(Rule.class.getName() + " as " + Named.class.getName()),
+            "the refusal is logged at WARN, once per pair: " + Cache.warnedRefusals());
+        assertTrue(Cache.refusalMessage(Rule.class.getName(), Named.class.getName()).contains("allowType"));
+        // The exact type is always readable.
+        assertEquals(new Rule("block"), fresh.get("rule", Rule.class));
+        Cache.forgetStoredClasses();
+        fresh.allowType(Rule.class);
+        assertEquals(new Rule("block"), fresh.get("rule", Named.class));
+        assertEquals(new Rule("block"), fresh.getOrSet("rule", "5m", () -> new Rule("WRONG")));
+        assertThrows(IllegalArgumentException.class, () -> fresh.allowType(Named.class),
+            "allowType takes the concrete class that is stored, not the type it is read as");
+    }
+
+    @Test
+    void aPlantedClassThroughObjectStillMisses() {
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        backend.setBytes("o", craft(PlantedViaObject.class.getName(), "{\"name\":\"evil\"}".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        backend.setBytes("t", craft("java.lang.ProcessBuilder", "{}".getBytes(StandardCharsets.UTF_8)), null, new String[0]);
+        backend.setBytes("a", craft("[L" + PlantedViaObject.class.getName() + ";", "[{\"name\":\"evil\"}]".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        assertNull(cache.get("o", Object.class));
+        assertNull(cache.get("t", Object.class));
+        assertNull(cache.get("a", Object.class), "an array of a foreign class is not a built-in value");
+        assertEquals("recomputed", cache.getOrSet("o", "5m", () -> "recomputed"));
+        assertEquals(0, PlantedViaObject.CONSTRUCTED.get());
+    }
+
     // --- Null values are rejected on both backends (null is reserved for 'missing') ---
 
     @Test

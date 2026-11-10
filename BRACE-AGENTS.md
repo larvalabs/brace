@@ -887,6 +887,7 @@ cache.clearTag("posts");                               // remove all with tag
 cache.incr("counter");                                 // atomic increment
 cache.decr("counter");                                 // atomic decrement
 cache.clear();                                         // remove all
+cache.allowType(Rule.class);                           // shared backend: Rule readable via a supertype (startup)
 ```
 
 Route-level page caching:
@@ -901,30 +902,36 @@ cache.clearTag("posts");  // invalidate all cached pages with this tag
 page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
 or the cache will serve the same entry for every value. Undeclared params never key the cache
 (so `?utm_source=...` junk can't mint entries). A param given twice (`?t=a&t=b`) keys on all its
-values. Headers key the cache only when declared: `.varyHeader("Accept-Language")`. A request
-carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or
+values. Headers key the cache only when declared: `.varyHeader("Accept-Language")` (the value
+enters the key as a SHA-256 digest, so a declared `Authorization` is never stored in clear). A
+request carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or
 `HX-Prompt` bypasses the cache (served by the handler, nothing stored) unless that header is
-declared with `.varyHeader(...)`. A response that sets a cookie is never stored (and keeps its
-`Set-Cookie`).
+declared with `.varyHeader(...)`; so does an `HX-Request` with any value but `true`. A response
+that sets a cookie is never stored (and keeps its `Set-Cookie`). A `HEAD` may be served a cached
+`GET` page but never stores one, and a request whose raw path is not in normal form (`/p/%62` for
+`/p/b`, lower-case hex, raw non-ASCII) may be served the entry but never stores it.
 
 **A cached handler must depend only on its route's path parameters and its declared `vary` /
 `varyHeader` values.** Reading anything else through `Request` (another query param, `req.url()`,
 a header, a cookie, `req.ip()`, the body) means the page stored for one visitor is served to the
 next whatever they send; in dev mode Brace logs this once per route, and under `Brace.test()` the
-request fails with an `IllegalStateException`, so a test catches it.
+request fails with an `IllegalStateException`, so a test catches it. Use `req.pathParam(...)`, not
+`req.path()`, in a cached handler: the raw path is not checked.
 
-Page-cache entries (keys starting `brace:page:`; don't use that prefix for your own keys) never
-push out your own entries. The in-memory backend is capped at 10,000 entries (expired first, then
-page entries, then arbitrary ones; a new page entry only displaces another page entry;
-`CacheBackend.inMemory(maxEntries)` to size). The Postgres backend is capped at 100,000 rows, of
-which at most 10,000 page rows (expired first, then page rows, then soonest-to-expire, rows
+Page-cache entries (keys starting `brace:page:`) never push out your own entries, and
+`set`/`getOrSet`/`delete` refuse an app key with that prefix (`IllegalArgumentException`);
+`deletePrefix("brace:page:")`, tags and `clear()` still clear pages. The in-memory backend is
+capped at 10,000 entries (expired first, then the page entries least recently hit, then arbitrary
+ones; a new page entry only displaces another page entry; `CacheBackend.inMemory(maxEntries)` to
+size). The Postgres backend is capped at 100,000 rows, of which at most 10,000 page rows (expired
+first, then page rows least recently written or hit, then app rows soonest-to-expire, rows
 without a TTL last; `CacheBackend.postgres(dbFactory, maxEntries)` or
 `CacheBackend.postgres(dbFactory, maxEntries, maxPageEntries)` to size).
 
 **Only 2xx responses are stored.** An error, a redirect or a 304 is served uncached, so one bad
 request can't pin it for everyone. The key is the matched **route pattern plus its decoded path
-parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method, the `HX-Request`
-variant, and the declared `vary` params and `varyHeader` headers.
+parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method (`HEAD` reads the
+`GET` entry), the `HX-Request` variant, and the declared `vary` params and `varyHeader` headers.
 
 **A cached page is shared by every visitor**, so it must not contain per-visitor content. A
 response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose
@@ -956,7 +963,8 @@ Choose **per use case**, not per deployment — you can run both (a default in-p
 | Cached pages that must match across the fleet | shared |
 
 Constraints on the shared backend (the in-process default has none of these):
-- **Values must be Jackson-round-trippable** (POJOs, records, collections, primitives, String). A non-serializable value (a stream, a live handle) throws at `set` time. A `get` with the wrong `Class` fails loudly (values carry a type header).
+- **Values must be Jackson-round-trippable** (POJOs, records, collections, primitives, String). A non-serializable value (a stream, a live handle) throws at `set` time. A `get` with the wrong `Class` fails loudly (values carry a type header). Elements inside a collection carry no type: a `List<Foo>` comes back holding `LinkedHashMap`s, so cache a record or array wrapping it, or convert.
+- **Read with the concrete class.** `get(key, Rule.class)` for a stored `Rule` always works. A read through a supertype (`Object`, an interface, a base class), or `getOrSet`, accepts the stored class only if this instance stored it itself, it is a JDK container or value (`ArrayList`, `HashMap`, `HashSet`, `TreeMap`, `List.of`/`Map.of`/`Set.of`, boxed numbers, `String`, `BigDecimal`, `java.time` types, `UUID`, arrays of these), or it is registered: `cache.allowType(Rule.class)` (the concrete class; **register at startup on every instance**, since after a deploy no instance has stored anything). Otherwise it is a miss with a WARN naming `allowType`. So read security state (a denylist, revoked tokens, a feature flag) with its concrete type: a miss there fails open.
 - **`getOrSet` dogpile is per-server, not global** — a cold key can have one supplier run per server before the first write lands. Accepted; it's a stampede, not a correctness bug.
 - `counterCount()`/`tagCount()` report 0 (use `size()`).
 
@@ -1069,7 +1077,7 @@ SMTP timeouts are bounded by default — 10s connect, 30s per read/write — so 
 the send instead of hanging the caller forever. Override with `.connectTimeout(Duration)` and
 `.timeout(Duration)` for a slow relay or large attachments.
 
-`to(...)`, `cc(...)`, `from(...)` and `Mailer.replyTo(...)` each take exactly one address: a list (`a@b.c, d@e.f`), a group (`g: a@b.c;`), a route address or a control character throws `IllegalArgumentException` (`from`/`replyTo` on the `Mailer` at configuration time). A quoted display name may contain a comma (`"Doe, J" <a@b.c>`). Send to several people with one message each. `Mailer.replyTo(...)` sets `Reply-To` on every SMTP message. `@Email` rejects `,` `;` `<` `>` whitespace and control characters. `new MailerNotifier(mailer, "a@x.com, b@x.com")` (or varargs / a `List`) validates each recipient at construction and mails each separately.
+`to(...)`, `cc(...)`, `from(...)` and `Mailer.replyTo(...)` each take exactly one address: a list (`a@b.c, d@e.f`), a group (`g: a@b.c;`), a route address or a control character throws `IllegalArgumentException` (`from`/`replyTo` on the `Mailer` at configuration time). A quoted display name may contain a comma (`"Doe, J" <a@b.c>`). Send to several people with one message each. `Mailer.replyTo(...)` sets `Reply-To` on every SMTP message. `@Email` accepts one bare address only: it rejects `,` `;` `<` `>` `(` `)` `"`, whitespace and control characters (a comment like `x@evil.tld(ceo@corp.example)` would become the display name). `new MailerNotifier(mailer, "a@x.com, b@x.com")` (or varargs / a `List`) validates each recipient at construction and mails each separately.
 
 `sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
 `smtp://` requires STARTTLS: if the relay does not offer it, the send fails rather than falling back to
@@ -1450,7 +1458,9 @@ app.analytics(Analytics.options()
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
     .rawRetention("35d")                         // raw rows only; daily summaries are kept
     .maxViewsPerVisitorPerFlush(30)              // row cap per visitor per 10 s; over it is "Not counted: dropped"
-    .dailyRowBudget(500_000));                   // rows per instance per day; 0 turns a cap off
+    .maxViewsPerIpPerFlush(300)                  // per client address (IPv6 /64) per 10 s, any user agents
+    .dailyRowBudget(500_000)                     // rows per instance per day; 0 turns a cap off
+    .maxDailyRowsPerIp(10_000));                 // one address's share of the budget (default 2%)
 
 app.get("/invite/{code}", ctrl::invite).analytics(false);      // URL carries a secret the name doesn't reveal
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}

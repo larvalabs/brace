@@ -130,8 +130,9 @@ public interface CacheBackend {
 
     /**
      * In-memory backend with a custom entry cap (default 10,000). The cap is a heap-safety net:
-     * past it, inserting a new key first drops expired entries, then page-cache entries, then
-     * arbitrary ones; a new page-cache entry only ever displaces another page entry, and is not
+     * past it, inserting a new key first drops expired entries, then evicts a page-cache entry
+     * not hit recently (an approximate LRU), then, for a new app entry with no page left, an
+     * arbitrary one; a new page-cache entry only ever displaces another page entry, and is not
      * stored when there is none. Counters and tags are not capped.
      */
     static CacheBackend inMemory(int maxEntries) {
@@ -142,8 +143,8 @@ public interface CacheBackend {
      * Shared Postgres backend, capped at 100,000 value rows, of which at most 10,000 are page-cache
      * rows ({@code cache.wrap(...)}). Page rows are trimmed against their own cap and are the first
      * to go when the table is over the overall one, so page-cache growth never evicts the app's
-     * own entries. Within each group expired rows go first, then the rows that expire soonest (rows
-     * with no expiry last). Counters are not capped.
+     * own entries. Expired rows go first; then page rows least recently written or hit, and app
+     * rows soonest-expiring (rows with no expiry last). Counters are not capped.
      */
     static CacheBackend postgres(DatabaseFactory factory) {
         return new PostgresBackend(factory);

@@ -15,7 +15,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | Server-side page-view analytics | new, opt-in | none; add `.analytics()` to use it | [§](#new-server-side-page-view-analytics) |
 | Gzip response compression | new, on by default | none; `.compression(false)` to opt out | [§](#new-gzip-response-compression-on-by-default) |
 | CSRF token masked in pages | security | tests that compare `${csrfField}` to `Csrf.getToken` | [§](#security-csrf-token-masked-per-render) |
-| Framework migration V18 | schema | none (applied automatically) | [§](#schema-framework-migration-v18) |
+| Framework migration V18 (and, from the 2026-11 review, V19 on Postgres) | schema | none (applied automatically) | [§](#schema-framework-migration-v18) |
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
@@ -61,7 +61,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | **2026-11 review:** `Http.timeout(...)` bounds the whole buffered exchange, body included; `idleTimeout(...)` applies to `fetch*` | security, **breaking** for buffered calls that take over 30 s | add `.timeout(Duration...)` to slow downloads and slow APIs | [§](#breaking-http-timeouts-cover-the-response-body) |
 | **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; IPv6 addresses are unbracketed | security, **breaking** behind a proxy that sends only `Forwarded` | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host` | [§](#breaking-proxy-headers-and-reqip) |
 | **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are JavaScript-escaped again; `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"` | move the data to `data-*` attributes; pass CSS values, not CSS syntax | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
-| **2026-11 review:** page cache stores only 2xx, keys on the route, bypasses on `Authorization` and htmx targeting headers; `Brace.test()` throws when a cached handler reads undeclared input | security, **breaking** for tests of cached handlers that read undeclared input | declare inputs with `.vary(...)`/`.varyHeader(...)`, or stop caching the route | [§](#breaking-page-cache-keys-bypasses-and-undeclared-reads) |
+| **2026-11 review:** page cache stores only 2xx, keys on the route, bypasses on `Authorization`, htmx targeting headers and `HX-Request` values other than `true`; `HEAD` never stores; `varyHeader` values hashed; app keys on `brace:page:` refused; shared-cache supertype reads need `allowType` for app classes; Postgres migration V19 | security, **breaking** for tests of cached handlers that read undeclared input, app keys starting `brace:page:`, and app classes read through an interface from the shared cache | declare inputs with `.vary(...)`/`.varyHeader(...)`, or stop caching the route; rename `brace:page:` keys; `cache.allowType(...)` at startup or read the concrete class | [§](#breaking-page-cache-keys-bypasses-and-undeclared-reads) |
 | **2026-11 review:** access rejections and guarded static responses are never shared-cacheable; `Result` header names are case-insensitive; dot segments are 404; WebSocket paths are exact | security | none, unless code relied on two spellings of a header name being two headers, or on `result.headers()` order | [§](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable) |
 | **2026-11 review:** previous session secrets are validated and lifetime-bounded; `/ops/errors` redacts by value shape; the error store survives hostile input; analytics row caps; ops auth start-time floor | security | none, unless a previous secret was a placeholder, or a log field is named exactly `code` | [§](#security-sessions-error-store-analytics-and-ops-auth) |
 | **2026-11 review:** CLI: env names and key labels validated, project files never written through a symlink, terminal control characters escaped; launcher: one `<brace.version>` per pom, prereleases ordered before their release, toolchain floor raised to 0.1.11 with the release | security, **breaking** for env names with other characters and for projects pinned below 0.1.11 once it ships | rename such env keys; raise `<brace.version>` to `0.1.11` | [§](#security-cli-and-launcher-on-an-untrusted-checkout) |
@@ -198,6 +198,10 @@ for example) are not covered. See "Response Compression" in `docs/SECURITY.md`.
 `V18__brace_analytics.sql` creates `brace_analytics_pageviews`, `brace_analytics_rejects`,
 `brace_analytics_daily` and `brace_analytics_salts` on both H2 and Postgres. The tables are created whether or not the app
 enables analytics, and stay empty unless it does. Nothing to do.
+
+The November 2026 review adds `V19__brace_cache_used_at.sql` on Postgres only: a `used_at` column
+and index on `brace_cache`, which the page cache trims by
+([§](#breaking-page-cache-keys-bypasses-and-undeclared-reads)). Also applied automatically.
 
 ## Fix: `HEAD` requests reach `GET` routes
 
@@ -476,7 +480,9 @@ written, and treats anything else as a miss. After a restart, or when another se
 entry first, the first `getOrSet` for a given class recomputes and rewrites the entry; later
 calls hit as before. `cache.get(key, Type.class)` is unchanged.
 
-No code change.
+No code change. (The November 2026 review extended this: JDK containers and values, and classes
+registered with `cache.allowType(...)`, are read too. See
+[Breaking: page cache keys, bypasses and undeclared reads](#breaking-page-cache-keys-bypasses-and-undeclared-reads).)
 
 ## Security: the page cache no longer stores per-visitor pages
 
@@ -1452,7 +1458,9 @@ cleartext. Dev-mode capture (no SMTP URL) is unaffected.
 **One address per field.** `"a@b.c, victim@x.y"` passed `@Email`, and `Mailer.to(...)` expanded
 it to two recipients. Now:
 
-- `@Email` rejects `,`, `;`, `<`, `>`, whitespace and control characters.
+- `@Email` rejects `,`, `;`, `<`, `>`, `(`, `)`, `"`, whitespace and control characters, and
+  accepts only a bare address: `evil@attacker.tld(ceo@corp.example)` used to pass and went out
+  with `ceo@corp.example` as its display name.
 - `to(...)`, `cc(...)`, the per-message `from(...)`, `Mailer.from(...)` and
   `Mailer.replyTo(...)` each take exactly one address. A list, a group (`g: a@b.c;`), a route
   address or a control character throws `IllegalArgumentException` (`Mailer.from` and
@@ -1665,8 +1673,21 @@ visitor.
 - **The key is the route pattern plus the decoded path parameters** (plus method, the
   `HX-Request` variant and declared `vary` params), so `/posts/hello` and `/posts/hell%6f` share
   one entry. A repeated `vary` param keys on all its values. Page keys now start with
-  `brace:page:`; don't use that prefix for your own keys. Existing page entries are simply
-  missed once after the upgrade.
+  `brace:page:`, and **`cache.set`, `getOrSet` and `delete` throw `IllegalArgumentException` for
+  an app key with that prefix**; rename such keys. `deletePrefix("brace:page:")`, tags and
+  `clear()` still clear pages. `deletePrefix(null)` throws `IllegalArgumentException` (it was a
+  `NullPointerException`). Existing page entries are simply missed once after the upgrade.
+- **`HX-Request` is keyed as absent or exactly `true`.** Any other value (`1`, `True`) bypasses
+  the cache, so `HX-Request: 1` can no longer store a partial under the full-page key.
+- **A `HEAD` never stores.** It may be served an existing `GET` entry; on a miss the handler runs
+  and nothing is stored, so a handler answering `HEAD` with an empty body no longer pins that
+  empty body for `GET`.
+- **A raw path not in normal form never stores** (`/p/%62` for `/p/b`, lower-case hex, raw
+  non-ASCII): it may be served the entry for the same path parameters, but its own render is not
+  stored. Read path parameters with `req.pathParam(...)`, not `req.path()`, in a cached handler.
+- **`varyHeader` values are hashed in the key** (SHA-256 hex), so `varyHeader("Authorization")`
+  no longer writes the credential into `brace_cache.cache_key`. Existing entries keyed on a
+  declared header are missed once.
 - **Requests carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`,
   `HX-Boosted` or `HX-Prompt` bypass the cache** unless the handler declares the header:
 
@@ -1690,9 +1711,35 @@ app.get("/feed", cache.wrap("10m", ctrl::feed).vary("page").varyHeader("HX-Targe
   `CacheBackend.postgres(db, maxEntries, maxPageEntries)`, defaults 100,000 rows in all and
   10,000 pages. A flood of page entries can no longer evict `cache.set(...)` data; in memory, a
   new page is not stored when the cache is full of app entries.
-- **`cache.get(key, type)`** returns a miss when the stored class is not `type` itself or a
-  class this process has stored. Using `Object` or an interface as `type` now only reads classes
-  this JVM wrote.
+- **Page entries are evicted least recently used first.** On Postgres, page rows are trimmed by
+  `used_at` (last write, or last hit, recorded at most once a minute per row), not by expiry, so
+  rows on a long-TTL route no longer push out every page of a short-TTL one. This adds framework
+  migration `V19__brace_cache_used_at.sql` (Postgres only: a `used_at` column and index on
+  `brace_cache`, added without a table rewrite; applied automatically). In memory, a full cache
+  evicts the page least recently hit, and a new page always displaces a cold page, so a flood
+  of never-read pages no longer locks the hot ones out.
+- **Shared-backend reads through a supertype.** On `CacheBackend.postgres(...)`,
+  `cache.get(key, type)` with a `type` other than the stored class itself (`Object`, an
+  interface, a base class), and `getOrSet`, read the entry only when its stored class is one
+  this process has stored, a JDK container or value (`ArrayList`, `HashMap`, `HashSet`, the
+  `List.of`/`Map.of`/`Set.of` classes, boxed numbers, `String`, `BigDecimal`, `java.time`
+  types, `UUID`, arrays of these, and similar), or a class registered with `cache.allowType(...)`.
+  Anything else is a miss with a WARN naming `allowType`, once per stored class and requested
+  type. **Action:** if an app class is read through an interface or with `getOrSet` on an
+  instance that may not have written it, register it at startup on every instance; read
+  security state (a denylist, revocations, a feature flag) with its concrete type, which is
+  always allowed:
+
+```java
+// before: on a server that never wrote a Rule since its last deploy, a miss (fails open)
+Named rule = cache.get("rule", Named.class);
+
+// after: register at startup on every instance...
+var cache = new Cache(CacheBackend.postgres(dbFactory)).allowType(Rule.class);
+app.cache(cache);
+// ...or read the concrete type, which is always allowed
+Rule rule = cache.get("rule", Rule.class);
+```
 - **`deletePrefix`** with a prefix containing a control character, `#sha256:`, or over 128
   characters no longer clears unrelated keys that share its start. Cache keys with control
   characters, or over 512 bytes, are stored hashed; invisible to callers.
@@ -1773,16 +1820,27 @@ No action needed unless noted.
 
 **Analytics**
 
-- **Row growth is capped.** At most 30 rows per visitor per 10-second flush window, and 500,000
-  rows per instance per day. Views over a cap are counted under "Not counted" on the dashboard
-  instead of being stored, so a capped day reads as capped. A site above about 500,000 views a
-  day, or with many people behind one IP and user agent, should raise them:
+- **Row growth is capped.** At most 30 rows per visitor per 10-second flush window, 300 per client
+  address per window whatever user agents it sends (an IPv6 address counts by its /64; rotating
+  the `User-Agent` made every request a new visitor), and 500,000 rows per instance per day, of
+  which one client address may use at most 2% (so one source cannot spend the day's budget and
+  leave everyone else unrecorded until midnight). Views over a cap are counted under "Not
+  counted" on the dashboard instead of being stored, so a capped day reads as capped. When the
+  daily budget is reached, `/ops/analytics` shows "Row budget reached at HH:MM, N views not
+  stored" and the JSON report (`/ops/analytics/data`) has a new `rowBudget` field (`null`
+  otherwise). A site above about 500,000 views a day, or with many people behind one address,
+  should raise them:
 
 ```java
 app.analytics(Analytics.options()
     .maxViewsPerVisitorPerFlush(100)   // 0 turns the cap off
-    .dailyRowBudget(5_000_000));       // 0 turns the budget off
+    .maxViewsPerIpPerFlush(1_000)      // a large office or campus behind one address
+    .dailyRowBudget(5_000_000)         // 0 turns the budget off
+    .maxDailyRowsPerIp(100_000));      // default 2% of the budget; 0 turns it off
 ```
+
+`Analytics.Report` (returned to code that reads reports directly) has a new last component,
+`rowBudget`.
 
 **Ops auth**
 
@@ -1795,8 +1853,12 @@ app.analytics(Analytics.options()
 **Development checks**
 
 - **`QueryTaint`** (dev and test mode) now catches `Sort.of(...)` built from request text even
-  when whitespace, case or commas differ, and logs a one-time "unchecked, over cap" warning for
-  a request with more than 1,000 values or 64 KB in one source.
+  when whitespace, case or commas differ. Every path and query value is checked (no count cap).
+  **Breaking for tests:** a request whose form body has more than 1,000 values (or 1 MB of text)
+  cannot be fully checked, so under `Brace.test()` and in dev mode it throws
+  `IllegalArgumentException` when it reaches a where-fragment, raw query or `Sort.of(...)`;
+  production runs the query and logs an "over cap" warning once a minute per call site. Keep
+  forms posted in tests under that size.
 
 ## Security: CLI and launcher on an untrusted checkout
 

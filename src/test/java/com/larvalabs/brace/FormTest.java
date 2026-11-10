@@ -97,6 +97,24 @@ class FormTest {
     }
 
     @Test
+    void emailRejectsCommentsThatBecomeADisplayName() throws Exception {
+        // L14 final review: an RFC 822 comment parses as the address's personal part, so
+        // "evil@attacker.tld(ceo@corp.example)" was sent as "ceo@corp.example" <evil@attacker.tld>.
+        String spoof = "evil@attacker.tld(ceo@corp.example)";
+        var parsed = new jakarta.mail.internet.InternetAddress(spoof, true);
+        assertEquals("ceo@corp.example", parsed.getPersonal(), "the comment is the display name on the wire");
+        for (String bad : new String[] {spoof, "(ceo@corp.example)evil@attacker.tld", "evil(x)@attacker.tld",
+                "evil@attacker.tld()", "\"ceo@corp.example\"@attacker.tld"}) {
+            var form = FormBinder.bind(TypedForm.class, Map.of("name", "Alice", "age", "25", "email", bad));
+            assertFalse(form.errors("email").isEmpty(), bad);
+        }
+        for (String good : new String[] {"alice@example.com", "o'brien@example.co.uk", "a_b-c@sub.example.org"}) {
+            var form = FormBinder.bind(TypedForm.class, Map.of("name", "Alice", "age", "25", "email", good));
+            assertTrue(form.errors("email").isEmpty(), good);
+        }
+    }
+
+    @Test
     void inValidation() {
         var form = FormBinder.bind(InForm.class, Map.of("status", "invalid"));
         assertTrue(form.hasErrors());

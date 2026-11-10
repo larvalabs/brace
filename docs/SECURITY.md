@@ -211,12 +211,16 @@ What it does **not** catch:
   with `id` as the value is a tautology that returns every row, and isn't flagged, because
   flagging bare words everywhere would trip on ordinary code.
 - A value the handler transformed (trimmed, split into terms, re-cased) before concatenating it.
-- JSON bodies, headers and cookies; queries run outside a request (jobs, `withSession`); and,
-  past the first 1,000 values or 64 KB of each source (form body, query string, path
-  parameters; each has its own budget, so padding one cannot hide the others), the rest. In dev
-  and test modes the first such request logs a one-time "unchecked, over cap" warning.
+- JSON bodies, headers and cookies, and queries run outside a request (jobs, `withSession`).
   `Sort.of(...)` is checked against the string you passed as well as the normalized order, so
   `?sort=title%20desc` is caught even though it renders as `title DESC`.
+
+Every path parameter and query value is recorded (the request line is bounded at 8 KB, so there
+are never many). The form body is recorded up to 1,000 values or 1 MB of text; a request past
+that is *over cap* and cannot be fully checked. When such a request reaches a where-fragment, a
+raw query or a `Sort.of(...)`, the call throws in dev mode and `Brace.test()` (so padding a form
+cannot slip a payload past a test), and production runs the query and logs an "over cap" warning
+at most once a minute per call site.
 
 It can also fire on safe code: a hand-written allowlist (`switch (sort) { case "title" ->
 "title"; ... }` concatenated after `ORDER BY`) looks the same as the injection it replaces. Use
@@ -1095,20 +1099,54 @@ it reads (another query param, `req.url()`, a header such as `Accept-Language`, 
 `req.ip()`, the body) can differ between visitors, and whatever the first visitor sent is replayed
 to the rest for the TTL: `?msg=<b>PWNED</b>` on an undeclared param becomes everyone's page. In dev
 mode Brace logs such a read once per route, and under `Brace.test()` it throws, so a test of the
-route fails; production does no checking.
+route fails; production does no checking. `req.path()` (the raw, undecoded path) and
+`req.method()` are not recorded, so they are covered differently: a `HEAD` is never stored (it may
+be served an existing `GET` entry), and a request whose raw path is not in RFC 3986 normal form
+(an escaped unreserved character such as `/p/%62` for `/p/b`, lower-case hex, raw non-ASCII) is
+rendered but never stored, so a crafted spelling cannot choose the page served at the normal URL.
+Read path parameters with `req.pathParam(...)` in a cached handler.
 
 Some inputs are refused outright rather than trusted to the handler: a request with
 `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or `HX-Prompt` is
 served by the handler without reading or writing the cache, unless the route declares that
-header with `.varyHeader(...)`. A response that sets a cookie is never stored (it is returned with
-its `Set-Cookie` intact). Only 2xx responses are stored, and a response carrying the visitor's
-CSRF token or flash is not.
+header with `.varyHeader(...)`. `HX-Request` is keyed as absent or exactly `true`; any other value
+(`1`, `True`) bypasses the cache, so a handler testing `req.hasHeader("HX-Request")` cannot store
+its partial under the full-page key. A declared header's value enters the key as its SHA-256
+digest, so `varyHeader("Authorization")` never puts the credential in `brace_cache.cache_key`. A
+response that sets a cookie is never stored (it is returned with its `Set-Cookie` intact). Only 2xx
+responses are stored, and a response carrying the visitor's CSRF token or flash is not.
 
-Page entries are kept apart from the app's own cache entries (keys starting `brace:page:`): on
-Postgres they have their own row cap (10,000 by default) and are trimmed first when the table is
-over its overall cap; in memory they are evicted before any other entry, and a new page never
+Page entries are kept apart from the app's own cache entries (keys starting `brace:page:`, which
+`set`, `getOrSet` and `delete` refuse for app keys): on Postgres they have their own row cap
+(10,000 by default), are trimmed least recently used first (written, or hit, recorded at most once
+a minute per row) and are trimmed before app rows when the table is over its overall cap; in
+memory a full cache evicts the page least recently hit (an approximate LRU), and a new page never
 displaces an app entry. A client minting pages (any declared `vary` value or path parameter)
-therefore churns only the page cache.
+therefore churns only the page cache, and pages nobody reads again go before the hot ones, so a
+flood cannot lock the real pages out.
+
+### Shared cache values (`CacheBackend.postgres`)
+
+On the shared backend each value is stored as its class name plus Jackson JSON, so whoever can
+write the `brace_cache` table chooses the class name a row carries. Brace never lets that choice
+reach Jackson for an arbitrary class. A row is deserialized only when its class is:
+
+- the exact class the caller asked for (`get(key, Rule.class)` for a `Rule`), always allowed;
+- a class this process has itself stored;
+- a built-in JDK container or value (`ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`,
+  `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `ArrayDeque`, the `List.of`/`Map.of`/
+  `Set.of` and `Collections.unmodifiable*`/`empty*`/`singleton*` classes, boxed primitives,
+  `String`, `BigDecimal`, `BigInteger`, `UUID`, the `java.time` value types, and arrays of
+  these), which Jackson rebuilds without running app code;
+- or a class registered with `cache.allowType(...)`.
+
+Anything else (an app class read through `Object`, an interface or a base class, or by
+`getOrSet`, on an instance that has not stored it) is treated as a miss and logged at WARN once
+per stored class and requested type. A miss on security state fails open: after a deploy, or on
+a node that only reads, `cache.get("denylist", Set.class)` for an app-defined set type would see
+nothing. **Read security state with its concrete type**, or register the class at startup on
+every instance with `cache.allowType(MyType.class)`. Register only plain data classes (records,
+POJOs whose constructors and setters only assign): a registered class can be named by any row.
 
 ---
 
@@ -1951,13 +1989,22 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
   the parameter.
 - **Bounded growth.** Only matched routes returning HTML are counted, so a scanner requesting
   random URLs produces 404s, not rows. The in-memory buffer is capped at 20,000 views; beyond that
-  views are dropped and tallied. Two more caps bound table growth against a client that sends
+  views are dropped and tallied. More caps bound table growth against a client that sends
   browser-looking requests in a loop: one visitor (host, IP, user agent) adds at most 30 rows per
-  10-second flush window (`maxViewsPerVisitorPerFlush`), and an instance inserts at most 500,000
-  rows a day (`dailyRowBudget`, one warning when it is reached). Views over either cap are not
-  stored but are tallied as `dropped`, which the dashboard and `notCounted` show, so a capped day
-  reads as capped rather than silently low. Every stored string is length-capped, and every value the page
-  renders is HTML-escaped.
+  10-second flush window (`maxViewsPerVisitorPerFlush`); one client address (an IPv6 address by
+  its /64), whatever user agents it rotates through, at most 300 (`maxViewsPerIpPerFlush`); and an
+  instance inserts at most 500,000 rows a day (`dailyRowBudget`). Views over a cap are not stored
+  but are tallied as `dropped`, which the dashboard and `notCounted` show, so a capped day reads
+  as capped rather than silently low. Every stored string is length-capped, and every value the
+  page renders is HTML-escaped.
+- **The daily budget is not a blinding switch for one client.** Once the budget is spent nothing
+  more is stored until midnight, so a single client that could spend it (500,000 requests, about
+  four minutes at 2,000 req/s) could hide everyone else's traffic for the rest of the day. One
+  client address may use at most 2% of the budget a day (`maxDailyRowsPerIp`, tallied for up to
+  50,000 addresses), so after one source hits its share, other visitors' views are still stored.
+  Many sources together can still spend it; when that happens, `/ops/analytics` shows "Row budget
+  reached at HH:MM, N views not stored", the JSON report carries `rowBudget`, and a warning is
+  logged once that day.
 - **The "don't count" cookie.** `POST /ops/analytics/ignore` sets `__brace_analytics_ignore=1`
   (HttpOnly, `SameSite=Lax`, `Path=/`, `Secure` except on localhost). It carries no credential;
   it only marks the browser's visits as excluded. The endpoint is CSRF-exempt like the other ops
@@ -2124,7 +2171,9 @@ Strict parsing yields exactly one address or throws; on top of that, group synta
 (`g: a@b.c, victim@x.y;`, several mailboxes as one address), route addresses
 (`<@relay:a@b.c>`) and control characters are refused. A comma inside a quoted display name
 (`"Doe, J" <a@b.c>`) is one mailbox and is accepted. `@Email` likewise rejects `,` `;` `<` `>`,
-whitespace and control characters. `MailerNotifier` accepts several recipients, validates each at
+`(` `)` `"`, whitespace and control characters, and accepts only a value that parses as one bare
+address equal to itself: an RFC 822 comment (`evil@attacker.tld(ceo@corp.example)`) would
+otherwise be sent as the display name. `MailerNotifier` accepts several recipients, validates each at
 construction and sends each its own message.
 
 ## Secrets Management

@@ -581,7 +581,10 @@ app.cache(CacheBackend.postgres(dbFactory));
 
 With a shared backend, `clear()` is fleet-wide, `incr` is globally atomic, and a page rendered on
 one server is served by any other. Values must be Jackson-round-trippable (POJOs, records,
-collections, primitives, String). The default in-process cache has no such restriction.
+collections, primitives, String). Read a value with its concrete class; reading an app class
+through an interface or with `getOrSet` on a server that didn't write it needs
+`cache.allowType(MyClass.class)` at startup on every instance (JDK collections and values need
+nothing). The default in-process cache has no such restriction.
 
 `clear()` empties the cached **data** (a single fleet-wide `TRUNCATE` on the shared backend; this
 instance only on the default). Hit/miss/eviction **stats stay per-instance** — each server reports

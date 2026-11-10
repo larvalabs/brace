@@ -537,6 +537,28 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `Request` are recorded and an undeclared query param, header, cookie, `ip()` or body read is
     logged once per route (dev) or thrown (test); a response that sets a cookie is returned
     intact and not stored. Tests in `PageCacheReviewFixesTest`, `PageCacheCapPostgresIT`.
+  - **Final review fixes** (`fix(security): L4 final review fixes`). Tests in
+    `PageCacheFinalReviewTest`, `PageCacheCapPostgresIT`.
+    - `HX-Request` other than exactly `true` stored a `hasHeader`-based partial under the
+      full-page key: it is keyed as absent / `true`, and any other value bypasses the cache, so
+      every read of the header is fixed by the key and the detector's excuse for it is sound.
+    - A `HEAD` miss stored its (possibly empty) body for `GET`: a `HEAD` may be served a `GET`
+      entry but never stores. A raw path not in RFC 3986 normal form (`/p/%62` for `/p/b`) never
+      stores either, since `req.path()` is an unrecorded raw read. Flagging `req.path()` reads in
+      the detector needs a hook in `Request.java` (outside this fix's files); not done.
+    - In memory, a flood of twice the page cap locked the real pages out (they hit 3%): pages are
+      now evicted by CLOCK (approximate LRU), a new page always displaces a cold page (never an
+      app entry), and a store full of app entries no longer costs two scans per page request
+      (inline expiry sweeps at most once a second; O(1) refusal with no page to displace).
+    - On Postgres, page rows were trimmed soonest-expiring first (600 of 600 requests ran the
+      handler in the reviewer's 1d/5m scenario): new migration `V19__brace_cache_used_at.sql`
+      adds `used_at` (write time, refreshed on a hit at most once a minute per row), and page rows
+      are trimmed least recently used first.
+    - `varyHeader` values are SHA-256 hex in the key (`Authorization` was stored in clear in
+      `brace_cache.cache_key`).
+    - App `set`/`getOrSet`/`delete` on `brace:page:` throw `IllegalArgumentException`
+      (`deletePrefix("brace:page:")`, tags and `clear()` still clear pages); `deletePrefix(null)`
+      throws `IllegalArgumentException`.
 
 - [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a
@@ -713,6 +735,11 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     blunt `,`/`;` check is gone (a quoted display name with a comma is one address); groups,
     route addresses and control characters are refused. `cc`, `from` and `replyTo` are strict
     single addresses too (`replyTo` is now applied as `Reply-To`).
+  - **Final review fixes** (`fix(security): L14 final review fixes`). `@Email` accepted RFC 822
+    comments, which became a display name on the wire: `evil@attacker.tld(ceo@corp.example)` was
+    sent as `"ceo@corp.example" <evil@attacker.tld>`. `@Email` now refuses `(`, `)` and `"`, and
+    the value must parse strictly as one address with no personal part whose address equals the
+    value. Test: `FormTest.emailRejectsCommentsThatBecomeADisplayName`.
 
 - [x] **L15: `QueryTaint` evasions; the cache class allow-check covers only `getOrSet`**, `Sort.java:73-89`, `Database.java:690, 702`, `QueryTaint.java:95-100, 143`, `Cache.java:294, 308`
   - `Sort.of` normalizes its input, so `secretField%20`, `secretField desc` and
@@ -724,6 +751,27 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** `Sort.of` keeps and checks the original string; check form values first or log
     "unchecked, over cap"; apply `STORED_CLASSES` on both cache paths.
   - **Model: Sonnet 5.5.** Deferrable.
+  - **Final review fixes** (`fix(security): L15 final review fixes`).
+    - **QueryTaint.** The per-source cap was evaded by padding within one source:
+      `GET /q?` + `a=abc&` × 1000 + `sort=body` ran `ORDER BY body` with 200 under `Brace.test()`,
+      and production logged nothing. Path and query values now have no count cap (the request
+      line is bounded at 8 KB; a 64 KB character cap only bounds a hand-built `Request`); the form
+      body keeps 1,000 values / 1 MB. An over-cap request that reaches a where-fragment, raw query
+      or `Sort.of` now throws in dev mode and `Brace.test()`, and production logs once a minute per
+      call site. Tests: `QueryTaintTest.paddingTheQueryStringNoLongerHidesASortValue`,
+      `queryAndPathValuesHaveNoCountCap`, `anOverCapRequestThrowsInStrictModeWhenItReachesAQuery`,
+      `productionLogsOverCapOncePerCallSite`.
+    - **Cache class allow-check (M2).** `get(key, SuperType.class)` missed on any instance that
+      had not itself stored the concrete class (an `ArrayList` read as `List`, a `HashMap` as
+      `Map`, `Integer` as `Number`), with only a debug line: after a deploy a denylist read
+      through its interface failed open, and `getOrSet` on a fresh instance recomputed and
+      overwrote the shared value. Now a built-in allowlist of JDK containers and values
+      (`Cache.BUILT_IN_VALUE_CLASSES`, arrays included) is always accepted as the stored class,
+      app classes are registered with `cache.allowType(...)` (concrete classes only), the exact
+      requested type is always read, and a refused read logs a WARN once per (stored class,
+      requested type) naming `allowType`. A planted foreign class through `Object` still misses.
+      Elements inside a container still come back as Jackson's natural types (unchanged). Tests
+      in `CacheSerializationTest` (two `Cache` instances over one backend).
 
 - [x] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
   - The 20,000-row buffer per 10 s flush allows about 2,000 inserted rows per second, kept 35
@@ -735,6 +783,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** A per-visitor cap per flush window and a daily row budget; reject timestamps before
     process start, give each key its own quota, sweep on a timer.
   - **Model: Sonnet 5.5.** Deferrable.
+  - **Final review fixes** (`fix(security): L16 final review fixes`). The per-visitor cap did
+    nothing against one IP rotating `User-Agent` (one IP stored 20,000 of 25,000 views per
+    window), and the daily row budget was a blinding primitive (about 250 s at 2,000 req/s spent
+    it; legitimate views then stored 0 rows until midnight, shown only as one WARN and "Dropped").
+    Now: a cap keyed on the client address alone (`RateLimiter.ipBucket`, IPv6 by /64) per flush
+    window, `maxViewsPerIpPerFlush`, default 300 (1.5% of the 20,000-view buffer); each address
+    may use at most `maxDailyRowsPerIp` of the daily budget, default 2% (10,000 of 500,000),
+    tallied for up to 50,000 addresses a day; when the budget is reached the time and the views
+    refused since are recorded and shown on `/ops/analytics` ("Row budget reached at HH:MM, N
+    views not stored", through `esc()`) and in the JSON report (`rowBudget`). Totals stay honest
+    (refused views under "Not counted: dropped"). Tests in `AnalyticsCapsTest`.
 
 ## Documentation errors
 
