@@ -16,20 +16,44 @@ public class CliOps {
 
     public static int keypair(Path projectDir, String[] args) {
         String label = null;
-        boolean readOnly = false;
+        boolean readOnlyFlag = false;
+        boolean controlFlag = false;
         for (int i = 0; i < args.length; i++) {
             if ("--label".equals(args[i]) && i + 1 < args.length) { label = args[i + 1]; }
-            else if ("--read-only".equals(args[i])) { readOnly = true; }
+            else if ("--read-only".equals(args[i])) { readOnlyFlag = true; }
+            else if ("--control".equals(args[i])) { controlFlag = true; }
+        }
+        if (readOnlyFlag && controlFlag) {
+            CliOutput.printError("Give --read-only or --control, not both.");
+            return 1;
         }
         label = label == null ? "" : sanitizeLabel(label);
         if (label.isEmpty()) label = defaultLabel(projectDir);
         // Refuse, before any key exists, a label the server's keys-file grammar would reject at
         // startup or cut short as a comment (L1 follow-up).
-        String problem = labelProblem(label, readOnly);
+        String problem = labelProblem(label, readOnlyFlag);
         if (problem != null) {
             CliOutput.printError(problem);
             return 1;
         }
+        // L1 verification: a rotation keeps the scope of the entry it replaces unless a flag says
+        // otherwise. Defaulting to control silently raised an agent's read-only key to full
+        // control on the next deploy. Decided before any key is generated, so a refusal leaves
+        // nothing behind.
+        OpsScope previous;
+        try {
+            previous = existingScope(projectDir.resolve("ops-authorized-keys"), label);
+        } catch (IllegalStateException e) {
+            if (!readOnlyFlag && !controlFlag) {
+                CliOutput.printError(e.getMessage());
+                return 1;
+            }
+            previous = null;
+        } catch (IOException e) {
+            CliOutput.printError("Failed to read ops-authorized-keys: " + e.getMessage());
+            return 1;
+        }
+        boolean readOnly = readOnlyFlag || (!controlFlag && previous == OpsScope.READ);
         var kp = OpsKeys.generateKeypair();
 
         // Write the private key first. Format must match OpsKeys.readKeyFile: private key on the
@@ -101,11 +125,44 @@ public class CliOps {
         System.out.println("Public key:   " + kp.publicKey());
         System.out.println("Label:        " + label);
         System.out.println("Scope:        " + (readOnly ? "read (read-only — cannot hit control endpoints)" : "control"));
+        OpsScope now = readOnly ? OpsScope.READ : OpsScope.CONTROL;
+        if (previous != null && previous != now) {
+            System.out.println("scope changed: " + previous.wire() + " -> " + now.wire());
+        }
         System.out.println();
         System.out.println("Wrote ops-private.key (gitignored) and " + (replaced ? "updated" : "added")
             + " the entry for \"" + label + "\" in ops-authorized-keys.");
         System.out.println("Commit ops-authorized-keys and deploy it to authorize this key on the server.");
         return 0;
+    }
+
+    /**
+     * The scope of the existing entries for {@code label} in {@code file} (the lower one if
+     * there are several), or null when there is none.
+     *
+     * @throws IllegalStateException when an entry for the label has no scope token (a file
+     *         written before every line had to state one): the caller needs an explicit flag
+     */
+    static OpsScope existingScope(Path file, String label) throws IOException {
+        if (!Files.exists(file)) {
+            return null;
+        }
+        OpsScope scope = null;
+        var lines = Files.readAllLines(file);
+        for (int i = 0; i < lines.size(); i++) {
+            var existing = OpsKeys.parseLine(lines.get(i), i == 0, true);
+            if (existing == null || !label.equals(existing.label())) {
+                continue;
+            }
+            if (existing.scope() == null) {
+                throw new IllegalStateException("The entry for \"" + label + "\" in ops-authorized-keys "
+                    + "has no scope (a line written before every key had to state one), so the scope to "
+                    + "keep is unknown. Re-run with --read-only (status, logs and errors only) or "
+                    + "--control (everything).");
+            }
+            scope = scope == null ? existing.scope() : scope.min(existing.scope());
+        }
+        return scope;
     }
 
     /**
@@ -173,6 +230,11 @@ public class CliOps {
             if (Character.isISOControl(label.charAt(i))) {
                 return "The label may not contain a control character." + rule;
             }
+        }
+        // L1 verification: the keys file is UTF-8, which has no encoding for a lone surrogate, so
+        // writing it failed after the private key had been written, leaving an orphan key.
+        if (Cache.hasUnpairedSurrogate(label)) {
+            return "The label is not valid Unicode text (it has an unpaired surrogate)." + rule;
         }
         String confusing = OpsKeys.confusingCharacter(label);
         if (confusing != null) {

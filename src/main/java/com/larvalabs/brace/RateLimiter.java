@@ -88,6 +88,15 @@ public class RateLimiter {
      */
     static final int FLUSH_CHUNK_ROWS = Counters.MAX_BATCH_ROWS;
 
+    /**
+     * Most single-row fleet-count reads one limiter makes in a second for keys that may have been
+     * evicted earlier in their window (L6 verification). Past it a returning key is treated as new
+     * and the next batched flush brings its fleet count, so a flood that makes every new key look
+     * like a returning one cannot put a database round trip on every request.
+     */
+    static final int DEFAULT_FLEET_READS_PER_SECOND = 50;
+    static volatile int fleetReadsPerSecond = DEFAULT_FLEET_READS_PER_SECOND;
+
     /** Set the global flush-batch divisor (Brace builder). Clamped to ≥ 1. */
     static void setBatchDivisor(int divisor) {
         batchDivisor = Math.max(1, divisor);
@@ -127,7 +136,11 @@ public class RateLimiter {
      * for its whole window, so without a cap a client that can mint keys (a rotating source
      * address, a made-up username) grows the state without bound. A limiter holds at most
      * {@code maxKeys} keys plus {@code maxKeys + 1} overflow buckets; what happens at the cap is
-     * described on {@link #perKey}. Change per limiter with {@code maxKeys(int)}.
+     * described on {@link #perKey}. Change per limiter with {@code maxKeys(int)}. Counting
+     * everything, a limiter holds at most those tracked entries, a flush queue of
+     * {@link #dirtyBound()} ({@code 2 × maxKeys + 10,016}) entries on Postgres, the per-process
+     * fallback tables after a shared-counter error (another {@code 2 × maxKeys + 1}), and two
+     * evicted-key filter generations of 4 bytes per {@code maxKeys} each.
      */
     static final int DEFAULT_MAX_KEYS = 100_000;
 
@@ -200,14 +213,46 @@ public class RateLimiter {
     private final java.util.IdentityHashMap<Map<String, ?>, java.util.Iterator<String>> cursors = new java.util.IdentityHashMap<>();
 
     /**
-     * Shared keys this instance evicted whose windows are still open, as a Bloom filter, so a key
+     * Shared keys this instance evicted whose windows are still open, as Bloom filters, so a key
      * that comes back is recognised and its fleet count read before it is judged (L6 final
-     * review). {@link #evictionHorizonMillis} is the latest window end among them; past it the
-     * filter is stale and is replaced at the next eviction. Null until the first eviction. A false
-     * positive costs one extra database round trip; there are no false negatives.
+     * review). Null until the first eviction. A false positive costs one extra database round
+     * trip, within {@link #fleetReadsPerSecond}.
+     *
+     * <p>L6 verification: one filter for a whole window filled up over a long flood, and then
+     * every new key looked like a returning one. The filters now come in generations: when the
+     * current one has taken {@link EvictedFilter#capacity} keys a new one starts and the old one
+     * is kept for lookups until the next rotation, so the false-positive rate stays under about
+     * 0.4% per generation. A key evicted two rotations ago is no longer recognised: it is then
+     * treated as new, and the next batched flush brings its fleet count (see {@link #perKey}).
      */
-    private volatile java.util.concurrent.atomic.AtomicLongArray evictedFilter;
-    private volatile long evictionHorizonMillis;
+    private volatile EvictedFilters evictedFilters;
+
+    /** One generation of the evicted-key filter: 32 bits per key it is sized for, two probes. */
+    private static final class EvictedFilter {
+        final java.util.concurrent.atomic.AtomicLongArray bits;
+        /** Keys this generation takes before the next one starts. */
+        final int capacity;
+        int added; // guarded by evictLock
+        /** The latest window end among its keys; past it every key in it has expired. */
+        volatile long horizonMillis;
+
+        EvictedFilter(int maxKeys, long horizonMillis) {
+            long size = Math.max(1L << 16, Math.min(32L * maxKeys, 1L << 25));
+            this.bits = new java.util.concurrent.atomic.AtomicLongArray((int) (size / 64));
+            this.capacity = (int) (size / 32);
+            this.horizonMillis = horizonMillis;
+        }
+
+        boolean live(long nowMillis) {
+            return nowMillis < horizonMillis;
+        }
+    }
+
+    /** The current generation and the one before it, swapped as one so a lookup sees both. */
+    private record EvictedFilters(EvictedFilter current, EvictedFilter previous) {}
+
+    /** {@link #fleetReadsPerSecond} accounting: the epoch second shifted left 20 bits, plus reads in it. */
+    private final AtomicLong fleetReads = new AtomicLong();
 
     /** What kind of bucket a tracked entry is. */
     private enum Kind { KEY, ADDRESS_OVERFLOW, LAST_RESORT }
@@ -224,6 +269,8 @@ public class RateLimiter {
         final AtomicLong pending = new AtomicLong();
         /** In {@link #dirty}; set by the request that enqueues it, cleared by the flush that polls it. */
         final AtomicBoolean queued = new AtomicBoolean();
+        /** A request is reading this key's fleet count ({@code readFleetCount}); no monitor is held across it. */
+        final AtomicBoolean reading = new AtomicBoolean();
         /** The fleet count as of this key's last write, or -1 when this instance has not written or read it yet. */
         final AtomicLong fleetCount = new AtomicLong(-1);
         /**
@@ -500,8 +547,8 @@ public class RateLimiter {
      * row is left alone (final review M-B: deleting it let an instance with a stale view release a
      * key the fleet had blocked; rows expire with their windows), a count it has buffered is still
      * written by the next flush (the object stays in the flush queue), and the key is remembered
-     * in {@link #evictedFilter} so that, if it comes back, its fleet count is read before it is
-     * judged.
+     * in {@link #evictedFilters} so that, if it comes back, its fleet count can be read before it
+     * is judged.
      */
     private <T> boolean evict(ConcurrentHashMap<String, T> table, String key, long nowMillis) {
         Object[] removed = {null};
@@ -516,41 +563,74 @@ public class RateLimiter {
         return removed[0] != null;
     }
 
-    /** Record an evicted shared key in the Bloom filter. Called with {@link #evictLock} held. */
+    /**
+     * Record an evicted shared key in the current filter generation, starting a new generation
+     * when the current one is full or stale. Called with {@link #evictLock} held.
+     *
+     * <p>A generation has 32 bits per key of the cap (400 KB at the default cap; two generations
+     * at most, allocated at the first eviction) and takes as many keys as the cap before the next
+     * one starts: two probes give about 0.4% false positives when it is full, so a lookup in both
+     * generations is wrong for under 1% of new keys however long the flood. A false positive
+     * makes a new key cost one single-row write instead of a share of a batch, within the
+     * per-second budget.
+     */
     private void rememberEvicted(SharedKey sk, long nowMillis) {
-        var filter = evictedFilter;
-        boolean stale = filter == null || nowMillis >= evictionHorizonMillis;
-        if (stale) {
-            // 64 bits per tracked key (800 KB at the default cap, allocated at the first
-            // eviction), two probes: under 0.1% false positives after maxKeys evictions in a
-            // window, a few percent after five times that, rising with a longer flood. A false
-            // positive makes a new key cost one single-row write instead of a share of a batch.
-            long bits = Math.max(1L << 16, Math.min(64L * maxKeys, 1L << 26));
-            filter = new java.util.concurrent.atomic.AtomicLongArray((int) ((bits + 63) / 64));
+        var filters = evictedFilters;
+        if (filters == null || !filters.current().live(nowMillis)) {
+            filters = new EvictedFilters(new EvictedFilter(maxKeys, sk.windowEnd), null);
+        } else if (filters.current().added >= filters.current().capacity) {
+            filters = new EvictedFilters(new EvictedFilter(maxKeys, sk.windowEnd), filters.current());
         }
-        int bits = filter.length() * 64;
+        var filter = filters.current();
+        int bits = filter.bits.length() * 64;
         for (int probe = 0; probe < 2; probe++) {
             int bit = filterBit(sk.counterKey, probe, bits);
-            filter.accumulateAndGet(bit >>> 6, 1L << (bit & 63), (a, b) -> a | b);
+            filter.bits.accumulateAndGet(bit >>> 6, 1L << (bit & 63), (a, b) -> a | b);
         }
-        if (stale) {
-            evictedFilter = filter;
-            evictionHorizonMillis = sk.windowEnd;
-        } else if (sk.windowEnd > evictionHorizonMillis) {
-            evictionHorizonMillis = sk.windowEnd;
+        filter.added++;
+        if (sk.windowEnd > filter.horizonMillis) {
+            filter.horizonMillis = sk.windowEnd;
         }
+        evictedFilters = filters;
     }
 
     /** True when this instance may have evicted {@code counterKey} in its current window. */
     private boolean mayHaveBeenEvicted(String counterKey, long nowMillis) {
-        var filter = evictedFilter;
-        if (filter == null || nowMillis >= evictionHorizonMillis) return false;
-        int bits = filter.length() * 64;
+        var filters = evictedFilters;
+        if (filters == null) return false;
+        return contains(filters.current(), counterKey, nowMillis) || contains(filters.previous(), counterKey, nowMillis);
+    }
+
+    private static boolean contains(EvictedFilter filter, String counterKey, long nowMillis) {
+        if (filter == null || !filter.live(nowMillis)) return false;
+        int bits = filter.bits.length() * 64;
         for (int probe = 0; probe < 2; probe++) {
             int bit = filterBit(counterKey, probe, bits);
-            if ((filter.get(bit >>> 6) & 1L << (bit & 63)) == 0) return false;
+            if ((filter.bits.get(bit >>> 6) & 1L << (bit & 63)) == 0) return false;
         }
         return true;
+    }
+
+    /**
+     * Take one of this second's {@link #fleetReadsPerSecond} single-row reads, or return false
+     * when they are used up (the key then waits for the next batched flush).
+     */
+    private boolean takeFleetRead(long nowMillis) {
+        long second = nowMillis / 1000;
+        int budget = fleetReadsPerSecond;
+        for (;;) {
+            long cur = fleetReads.get();
+            long next;
+            if (cur >>> 20 != second) {
+                if (budget < 1) return false;
+                next = second << 20 | 1;
+            } else if ((cur & 0xFFFFF) >= Math.min(budget, 0xFFFFF)) {
+                return false;
+            } else {
+                next = cur + 1;
+            }
+            if (fleetReads.compareAndSet(cur, next)) return true;
+        }
     }
 
     private static int filterBit(String key, int probe, int bits) {
@@ -576,11 +656,22 @@ public class RateLimiter {
      *
      * <p><strong>Memory is bounded, and a flood has a defined outcome.</strong> A limiter tracks at
      * most {@code maxKeys} keys (default {@value #DEFAULT_MAX_KEYS}), {@code maxKeys} per-address
-     * overflow buckets and one last-resort bucket. With the table full, a new key replaces a tracked
+     * overflow buckets and one last-resort bucket (the flush queue and the fallback tables have
+     * bounds of the same order; see {@link #DEFAULT_MAX_KEYS}). With the table full, a new key replaces a tracked
      * key that is under its limit (least recently used of a small sample); keys at their limit are
      * kept until their windows end, so a blocked key stays blocked. With shared (Postgres) counters
-     * forgetting a key loses nothing fleet-wide: its row is kept, its buffered count is still
-     * written, and its fleet count is read when it comes back. With per-process counting the
+     * forgetting a key loses nothing fleet-wide: its row is kept and its buffered count is still
+     * written. When it comes back, its fleet count is read before its first request is judged if
+     * the instance still recognises it (it is among at least the last
+     * {@code max(2,048, min(maxKeys, 1,048,576))} keys this instance evicted, and Bloom-filter
+     * false positives stay under 1%) and the limiter has made fewer than 50 such single-row reads
+     * in the current second. Otherwise it is counted as a new key and its fleet count arrives with
+     * the limiter's next batched flush, the same lag as for any key: a key the fleet has blocked
+     * is admitted by this instance at most one flush batch ({@code limit / 10} requests by
+     * default) before it is refused, plus requests that arrive while another thread's flush is
+     * running, outages aside. The exception is an instance whose key table is full of keys at
+     * their limit: there an untracked key, a fleet-blocked one included, is counted in its client
+     * address's overflow bucket (below) rather than refused as a key. With per-process counting the
      * forgotten key restarts from zero, so a client that keeps the table turning over (about
      * {@code maxKeys / 16} fresh-key requests per turn) buys fewer than the limit in extra attempts
      * at one key each turn. When only keys at their limit are found, a new key is counted against
@@ -959,7 +1050,8 @@ public class RateLimiter {
 
         // A key this instance evicted earlier in the window and is tracking again: read what the
         // fleet has counted for it before judging this request (final review M-B), instead of
-        // learning it at some later flush. Otherwise the count waits in the buffer for a flush.
+        // learning it at the next flush. Otherwise, or past this second's read budget (L6
+        // verification), the count waits in the buffer for a flush.
         boolean written = tracked.fleetCount.get() < 0 && mayHaveBeenEvicted(tracked.counterKey, nowMillis)
             && readFleetCount(tracked, counters, nowMillis);
         if (!written) {
@@ -1010,9 +1102,12 @@ public class RateLimiter {
      * Write this key's buffered count now, on its own, and take the fleet count the database
      * returns: one round trip that both counts this request fleet-wide and tells this instance
      * where the key stands. Used for a key that may have been evicted earlier in its window.
-     * Requests for the same key wait for each other here rather than each judging the key blind.
-     * On a database error the count goes back in the buffer and the key is judged on what this
-     * instance has, as during any outage.
+     * One request per key reads at a time; a request that finds a read in progress does not wait
+     * for it but is buffered and judged on what this instance has, like any request between
+     * flushes (L6 verification: a monitor held across the database call pinned the virtual
+     * thread's carrier on JDK 21, so a slow database starved unrelated requests). On a database
+     * error the count goes back in the buffer and the key is judged on what this instance has, as
+     * during any outage.
      *
      * @return true when the buffered count was written (or dropped as unstorable), so the caller
      *         has nothing left to queue for the next flush
@@ -1021,9 +1116,15 @@ public class RateLimiter {
         if (nowMillis < flushCooldownUntilMillis) {
             return false;
         }
-        synchronized (sk) {
+        if (!sk.reading.compareAndSet(false, true)) {
+            return false; // another request for this key is reading it
+        }
+        try {
             if (sk.fleetCount.get() >= 0) {
                 return false; // another request for this key just read it
+            }
+            if (!takeFleetRead(nowMillis)) {
+                return false; // this second's reads are used up: wait for the next flush
             }
             long delta = sk.pending.getAndSet(0);
             if (delta <= 0) {
@@ -1047,6 +1148,8 @@ public class RateLimiter {
                     + Redactor.redactMessage(e.getMessage()));
                 return false;
             }
+        } finally {
+            sk.reading.set(false);
         }
     }
 

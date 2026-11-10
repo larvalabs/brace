@@ -338,6 +338,15 @@ public class OpsKeys {
             return "the first token decodes to " + decoded.length + " bytes; an Ed25519 public key is "
                 + ED25519_X509_LENGTH + " (the key looks truncated or has extra characters)." + hint;
         }
+        // L1 verification: the decoder accepts more than one spelling of the same bytes (missing
+        // padding, non-zero unused bits in the last character). The server matches keys as text,
+        // so a second spelling was a second entry with its own scope, defeating "a key listed
+        // twice keeps the lower scope". Only the canonical spelling is accepted.
+        if (!Base64.getEncoder().encodeToString(decoded).equals(key)) {
+            return "the first token is not the key's canonical base64 spelling (missing '=' padding, or "
+                + "a last character that decodes to the same bytes as another); write the key exactly as "
+                + "printed, so one key cannot be listed twice under different scopes." + hint;
+        }
         try {
             KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(decoded));
         } catch (Exception e) {

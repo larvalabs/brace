@@ -153,6 +153,14 @@ public class OpsHandler {
     private volatile boolean restartWindow = true;
     private volatile Counters durableNonces;
     private volatile long lastNonceRowSweepMillis;
+    // L16 verification: the durable write is given this long, waiting for a pooled connection
+    // included, then counts as failed; after a failure the database is not tried for the cool-down.
+    // A write that completes after its timeout only records a nonce that this instance already
+    // holds in seenNonces, and the CLI signs every attempt with a fresh nonce, so a late record
+    // can refuse only a replay of that same request, never the operator's next sign-in.
+    static final long DURABLE_WRITE_TIMEOUT_MILLIS = 2_000;
+    static final long DURABLE_COOL_DOWN_MILLIS = 10_000;
+    private volatile long durableRetryAtNanos = System.nanoTime();
     private final NonceCache seenNonces;
 
     /**
@@ -329,36 +337,84 @@ public class OpsHandler {
      * Record {@code nonce} in {@code brace_counters}, the one small framework table with an atomic
      * "add and tell me the count" and an expiry (no migration needed).
      *
-     * @return true on first use, false if any instance has recorded it before (a replay), null
-     *         when there is no database or the write failed (the caller then applies the restart
-     *         window; an ops sign-in must not depend on the database being up)
+     * @return true on first use, false if any instance has recorded it before (a replay, a
+     *         unique-key violation from a concurrent first use included), null when there is no
+     *         database, the write failed or did not finish within
+     *         {@link #DURABLE_WRITE_TIMEOUT_MILLIS}, or a recent failure's cool-down is running
+     *         (the caller then applies the restart window; an ops sign-in must not depend on the
+     *         database being up, nor wait on it)
      */
     private Boolean recordDurably(String nonce, long nowMillis) {
         Counters counters = durableNonces;
         if (counters == null) {
             return null;
         }
+        // L16 verification: after a failed or timed-out write, do not try the database again for
+        // a while, so every sign-in during an outage is answered at once.
+        if (System.nanoTime() - durableRetryAtNanos < 0) {
+            return null;
+        }
+        java.util.concurrent.FutureTask<Long> write = null;
         try {
             // The nonce is client text of up to 256 characters: store its digest.
             String key = "ops-nonce:" + java.util.HexFormat.of().formatHex(
                 java.security.MessageDigest.getInstance("SHA-256").digest(nonce.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-            long uses = counters.incrementAndGet(key, 1, java.time.Instant.ofEpochMilli(nowMillis + NONCE_TTL_MILLIS));
+            var expiresAt = java.time.Instant.ofEpochMilli(nowMillis + NONCE_TTL_MILLIS);
+            long deadline = System.nanoTime() + DURABLE_WRITE_TIMEOUT_MILLIS * 1_000_000L;
+            // On its own (virtual) thread, so the wait for a pooled connection is bounded too:
+            // the statement's query timeout only starts once there is a connection.
+            write = new java.util.concurrent.FutureTask<>(() -> counters.incrementAndGet(key, 1, expiresAt, deadline));
+            Thread.ofVirtual().name("brace-ops-nonce").start(write);
+            long uses = write.get(DURABLE_WRITE_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
             // Expired rows are swept by the rate limiter's cleanup when there is one; make sure
-            // they go either way. Rare (one sweep at most every ten minutes) and best effort.
+            // they go either way. Rare (one sweep at most every ten minutes), best effort, and
+            // off the request thread.
             if (nowMillis - lastNonceRowSweepMillis > 600_000) {
                 lastNonceRowSweepMillis = nowMillis;
-                try {
-                    counters.sweepExpired();
-                } catch (RuntimeException ignored) {
-                    // the next sweep retries
-                }
+                Thread.ofVirtual().name("brace-ops-nonce-sweep").start(() -> {
+                    try {
+                        counters.sweepExpired();
+                    } catch (RuntimeException ignored) {
+                        // the next sweep retries
+                    }
+                });
             }
             return uses == 1;
         } catch (Exception e) {
+            Throwable cause = e instanceof java.util.concurrent.ExecutionException && e.getCause() != null ? e.getCause() : e;
+            // Two first uses raced and the loser's insert hit the key (H2's portable path): the
+            // other one recorded this nonce, so this is a replay on every database.
+            if (isUniqueViolation(cause)) {
+                return false;
+            }
+            if (write != null) {
+                // Not interrupted: interrupting a virtual thread in a socket read closes the
+                // socket, and the server would keep the statement waiting on its lock. The query
+                // timeout cancels the statement instead, and a connection obtained after the
+                // deadline runs no statement at all (Counters.applyDeadline).
+                write.cancel(false);
+            }
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            durableRetryAtNanos = System.nanoTime() + DURABLE_COOL_DOWN_MILLIS * 1_000_000L;
+            String why = e instanceof java.util.concurrent.TimeoutException
+                ? "no answer within " + DURABLE_WRITE_TIMEOUT_MILLIS + " ms"
+                : Redactor.redactMessage(cause.getMessage());
             Log.warn("ops auth: could not record the sign-in nonce in the database, using this instance's "
-                + "memory only — " + Redactor.redactMessage(e.getMessage()));
+                + "memory only for the next " + DURABLE_COOL_DOWN_MILLIS / 1000 + " s — " + why);
             return null;
         }
+    }
+
+    private static boolean isUniqueViolation(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && "23505".equals(sql.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

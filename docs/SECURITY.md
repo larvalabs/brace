@@ -1714,9 +1714,22 @@ are keyed on the full address. Clients that share a /64 share a budget.
 
 **A limiter's memory is bounded.** Each limiter tracks at most `maxKeys` keys (default 100,000)
 plus at most `maxKeys` per-address overflow buckets and one last-resort bucket: at most
-`2 × maxKeys + 1` entries per instance, however many distinct keys clients send. (Concurrent
-requests can put a table a few entries over for a moment, at most one per request in flight.)
-Change the cap per limiter with `.maxKeys(n)`, e.g. `RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+`2 × maxKeys + 1` tracked entries per instance, however many distinct keys clients send.
+(Concurrent requests can put a table a few entries over for a moment, at most one per request
+in flight.) Change the cap per limiter with `.maxKeys(n)`, e.g.
+`RateLimiter.perIp(100, "1m").maxKeys(500_000)`. Counting all of it, one limiter holds at most:
+
+- the tracked entries above, `2 × maxKeys + 1`;
+- on Postgres, the flush queue of keys counted since the last flush, which can still hold keys
+  evicted from the tables: at most `2 × maxKeys + 10,016` entries (`dirtyBound()`), reached
+  only while flushes are failing;
+- after a shared-counter database error, the per-process fallback tables, which fill like the
+  tracked ones (another `2 × maxKeys + 1` at most) and empty as their windows end;
+- on Postgres, two generations of the evicted-key filter, 4 bytes per `maxKeys` each (at least
+  8 KB, at most 4 MB each).
+
+So in the worst case, a long database outage under a key flood, about `6 × maxKeys + 10,018`
+entries of a few hundred bytes each plus up to `8 × maxKeys` bytes of filter.
 
 Once the key table is full (a warning is logged, at most once a minute), a request for a key the
 limiter is not tracking is handled in this order:
@@ -1736,10 +1749,25 @@ limiter is not tracking is handled in this order:
 **What forgetting a key costs.** It differs by mode:
 
 - *Postgres (shared counters).* Nothing is lost fleet-wide. The key's `brace_counters` row is
-  never deleted by an eviction, a count the instance had buffered for it is still written at the
-  next flush, and when the key comes back the instance reads the fleet count before judging the
-  request. A key the fleet has blocked stays blocked whichever instance sees it next.
-  (Counts buffered but unwritten can be lost only while database writes are failing.)
+  never deleted by an eviction, and a count the instance had buffered for it is still written at
+  the next flush. When the key comes back, the instance reads its fleet count with one
+  single-row statement before judging the request, provided two things hold: the instance still
+  recognises the key as one it evicted (a pair of rotating Bloom filters remembers at least the
+  last `max(2,048, min(maxKeys, 1,048,576))` keys it evicted, with under 1% false positives
+  however long the window), and the limiter has made fewer than 50 such reads in the current
+  second. Otherwise the key is counted as new and its fleet count arrives with the limiter's next
+  batched flush, the same lag every key has: **a key the fleet has blocked is admitted by that
+  instance at most one flush batch (`limit / 10` requests by default, see
+  `rateLimitBatchDivisor`) before it is refused**, plus any requests that arrive while another
+  thread's flush is still running, and from then on it stays blocked there. The read budget is
+  what keeps a flood of fresh keys from putting a database round trip on every request. One
+  caveat: on an instance whose key table is full of keys at their limit, a key it is not
+  tracking gets no entry of its own (step 3 above), so a key the fleet has blocked is counted
+  there in its client address's overflow bucket: it gets at most `limit` requests per window
+  from that address, shared with that address's other untracked keys, rather than being refused
+  as a key. That is the documented last-resort step, and it takes a flood that pins the whole
+  table. (Counts buffered but unwritten can be lost only while database writes are failing, and
+  during an outage every instance counts on its own.)
 - *Per-process counting (no shared database).* The forgotten key's count so far, fewer than
   `limit`, is gone: if it returns it starts again from zero. A client that wants extra attempts
   at one key must therefore fill the table with fresh keys and keep it turning over; with the
@@ -2012,7 +2040,14 @@ again. Two layers do that, and which guarantee you get depends on whether the ap
   configuration). The record is shared by every instance and outlives the process, so **an
   accepted request is refused by every instance and after any restart or deploy**. Nothing is
   refused after a start. If the write fails (database down), sign-in still works and the rules
-  of the next bullet apply until it succeeds again.
+  of the next bullet apply until it succeeds again. A sign-in never waits on the database: the
+  write, waiting for a pooled connection included, is given 2 seconds and then counts as failed
+  (its statement carries a query timeout so it does not linger), and after a failure the
+  database is not tried again for 10 seconds, so every sign-in during an outage is answered at
+  once. A write that completes after its 2 seconds records only that request's nonce, which the
+  instance already remembers and the CLI never reuses, so it cannot refuse a later sign-in. Two
+  instances recording the same nonce at once is a replay on every database: the one that loses
+  the race (a unique-key violation) refuses it.
 - *Without a database, or while it is unreachable:* accepted nonces are remembered in each
   instance's memory only. A replay to the same instance is refused. A restart empties that
   memory, so for the first minute after a start the server **refuses any sign-in whose timestamp
@@ -2093,9 +2128,12 @@ KEY scope:control [label words...] [# comment]. ...
 
 `brace ops keypair` always writes the token (`scope:control`, or `scope:read` with
 `--read-only`), as does the file `brace new` generates. A key listed twice keeps the lower
-scope. Each key's fingerprint and scope is logged at boot (`ops.key`). A token whose payload has
-no scope claim, or one the server does not recognise, is treated as `read`, as is an
-unrecognised `scope` requested at `/ops/auth`.
+scope. A key must be written in its one canonical base64 spelling, as `brace ops keypair` prints
+it: a spelling the decoder also accepts (missing `=` padding, or a last character that differs
+only in bits the decoding ignores) fails startup, because keys are matched as text and a second
+spelling would be a second entry with its own scope. Each key's fingerprint and scope is logged
+at boot (`ops.key`). A token whose payload has no scope claim, or one the server does not
+recognise, is treated as `read`, as is an unrecognised `scope` requested at `/ops/auth`.
 
 ### Ops pages in the browser
 

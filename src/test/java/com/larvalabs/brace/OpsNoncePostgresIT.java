@@ -81,6 +81,32 @@ class OpsNoncePostgresIT extends PostgresTestBase {
         }
     }
 
+    /** L16 verification: a locked counters table neither holds the sign-in nor leaves a statement waiting. */
+    @Test
+    void aLockedCountersTableDoesNotHoldASignIn() throws Exception {
+        try (var locker = connect()) {
+            locker.setAutoCommit(false);
+            try (var st = locker.createStatement()) {
+                st.execute("LOCK TABLE brace_counters IN ACCESS EXCLUSIVE MODE");
+            }
+            var h = instance();
+            h.setStartedAtForTest(System.currentTimeMillis() - 61_000);
+            long start = System.nanoTime();
+            assertEquals(200, h.auth(signed(Instant.now())).status());
+            long millis = (System.nanoTime() - start) / 1_000_000;
+            assertTrue(millis < 2_500, "answered in " + millis + " ms");
+            // The abandoned insert is cancelled by its query timeout, not left behind the lock.
+            Thread.sleep(2_000);
+            try (var c = connect(); var st = c.createStatement();
+                 var rs = st.executeQuery("SELECT count(*) FROM pg_stat_activity WHERE state = 'active' "
+                     + "AND query LIKE 'INSERT INTO brace_counters%'")) {
+                rs.next();
+                assertEquals(0, rs.getLong(1));
+            }
+            locker.rollback();
+        }
+    }
+
     @Test
     void oneNonceRacedAcrossEightInstancesIsAcceptedOnce() throws Exception {
         var request = signed(Instant.now());

@@ -560,6 +560,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       Ed25519 public key (OpenSSH lines get their own message). `brace ops keypair` and the
       scaffold always write the token; a scope word is accepted as a label at either scope.
       Tests in `OpsKeysFinalReviewTest`, `CliOpsTest`; every fixture now writes `scope:control`.
+    - **Verification fixes.** `brace ops keypair` for an existing label keeps that entry's scope
+      unless `--read-only` or the new `--control` is given, and prints
+      `scope changed: read -> control` when it changes; an entry with no scope token needs one
+      of the flags (exit 1, nothing written). A `--label` with an unpaired surrogate is refused before a key is
+      generated. A key token that is not the canonical base64 spelling of its bytes (missing
+      padding, a padding alias) fails startup, so one key cannot be listed twice under two
+      scopes. Tests in `CliOpsRotationTest`, `OpsKeysFinalReviewTest`.
 
 - [x] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
   - With the mode unset, startup succeeds unpinned and `originIsThisServer` falls back to
@@ -729,6 +736,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       with per-process counting an evicted key restarts from zero; `brace_counters` rows are
       bounded by time (one per key per window), not by the cap; a wait for a pooled connection
       is not covered by the flush budget.
+    - **Verification fixes.** The single-row read of a returning evicted key's fleet count is
+      budgeted at 50 a second per limiter (past it the key waits for the next batched flush), and
+      the evicted-key Bloom filter rotates in two generations sized to the cap, so a long flood no
+      longer puts every new key on the database; the read no longer holds a monitor across the
+      JDBC call (it pinned virtual-thread carriers on JDK 21), a per-key CAS flag replaces it.
+      `docs/SECURITY.md` now states the full memory bound (flush queue, fallback tables, filters),
+      the returning-key guarantee (refused within one flush batch when no read is made), and the
+      overflow-bucket caveat for a fleet-blocked key on an instance with a pinned table. Tests in
+      `RateLimiterFleetReadTest`, `RateLimiterPinningTest`.
 
 - [x] **L7: Smaller gaps in template output**, `BraceHtmlOutput.java:87-88, 190-194, 226-229, 318-335, 367-370, 432-435`
   - **Template-written `javascript:` URL.** `<a href="javascript:go('${x}')">` with
@@ -987,6 +1003,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       cap. Tests in `OpsAuthFinalReviewTest`, `OpsNoncePostgresIT`. Residual, documented: with
       no database, a request accepted by one live instance can be replayed against another
       within its window.
+    - **Verification fixes.** Regression from the ops-auth fix: the durable nonce write had no
+      statement timeout and no bound on the pool wait, so with the pool exhausted, Postgres down
+      or `brace_counters` locked a sign-in took 30 s or more (past the CLI's own timeout). The
+      write now runs on a virtual thread with 2 s, connection wait included, and a JDBC query
+      timeout; a timeout counts as a failed write (the restart-window fallback), and after a
+      failure the database is skipped for 10 s. A unique-key violation from two first uses racing
+      is a replay on every database. Tests in `OpsNonceTimeoutTest`, `OpsNoncePostgresIT`.
 
 ## Documentation errors
 

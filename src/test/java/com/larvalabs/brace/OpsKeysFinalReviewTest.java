@@ -132,6 +132,33 @@ class OpsKeysFinalReviewTest {
         assertEquals(OpsScope.CONTROL, OpsKeys.loadAuthorizedKeys(legacyPrefix.toString()).get(kp.publicKey()));
     }
 
+    // ---- L1 verification: one key, one spelling ----
+
+    /** The same key with a non-zero unused bit in its last base64 character (a padding alias). */
+    private static String paddingAlias(String key) {
+        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        int at = key.indexOf('=') - 1;
+        char aliased = alphabet.charAt(alphabet.indexOf(key.charAt(at)) ^ 1);
+        return key.substring(0, at) + aliased + key.substring(at + 1);
+    }
+
+    @Test
+    void aKeyListedUnderASecondSpellingIsRefused() throws Exception {
+        var kp = OpsKeys.generateKeypair();
+        String alias = paddingAlias(kp.publicKey());
+        assertNotEquals(kp.publicKey(), alias);
+        assertArrayEquals(java.util.Base64.getDecoder().decode(kp.publicKey()),
+            java.util.Base64.getDecoder().decode(alias), "the same key bytes");
+        Path file = write(kp.publicKey() + " scope:read agent\n" + alias + " scope:control agent-too\n");
+        var ex = assertThrows(IllegalStateException.class, () -> OpsKeys.loadAuthorizedKeys(file.toString()));
+        assertTrue(ex.getMessage().contains("line 2"), ex.getMessage());
+
+        String unpadded = kp.publicKey().replace("=", "");
+        Path noPadding = write(unpadded + " scope:control agent\n");
+        var ex2 = assertThrows(IllegalStateException.class, () -> OpsKeys.loadAuthorizedKeys(noPadding.toString()));
+        assertTrue(ex2.getMessage().contains("line 1"), ex2.getMessage());
+    }
+
     // ---- the tools that write the file always write the token ----
 
     @Test
