@@ -1684,6 +1684,17 @@ block the others:
 Before the 2026-11 security review (M5), one such request failed every later flush on
 Postgres, so nothing reached `ops_errors` and regression alerts stopped until restart.
 
+### Regression notifications carry request-derived text
+
+A new error kind's message can contain text a web user chose. `WebhookNotifier` (Slack and
+Mattermost incoming webhooks) therefore puts the type, route and message each in an inline code
+span, which both render literally: Mattermost markdown links, images (a tracking pixel) and
+emphasis are inert. Inside the span, a backtick (which would close it) becomes `ˋ`, `<` `>` `&`
+(Slack control sequences such as `<!channel>`) become `‹` `›` `＆`, `@` becomes the full-width
+`＠` so no `@channel` mention fires, and line breaks and control characters become spaces. The
+message is cut to 500 characters first. Backslash escaping was not used because Slack does not
+honour it. `MailerNotifier` sends plain text.
+
 ---
 
 ## Outbound Mail

@@ -508,6 +508,10 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     message can phish or spam the ops channel.
   - **Fix.** Escape `&`, `<`, `>` and truncate to about 500 characters.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L12 review fixes`). Mattermost markdown (`@channel`,
+    `[text](url)`, `![](pixel)`) passed unchanged. Each field is now one inline code span with
+    backticks, `< > &` and `@` replaced by look-alikes and control characters by spaces;
+    truncation happens first and never splits a surrogate pair.
 
 - [x] **L13: Raw exception messages still reach `/ops` without `redactMessage`**, `JobScheduler.java:199`, `OpsHandler.java:465`, `Brace.java:1449-1452`, plus `Log.warn("…" + e.getMessage())` sites (`Mailer.java:81`, `WebhookNotifier.java:42`, `RateLimiter.java:215, 380`, `JobScheduler.java:279, 330`)
   - Scheduled-job `lastError` is served at `/ops/status`; the uncaught-exception event reaches
