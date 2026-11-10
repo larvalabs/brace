@@ -536,6 +536,12 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** `@Email` rejects `,`, `;`, `<`, `>`, whitespace and control characters; the
     single-recipient API uses `new InternetAddress(to, true)`.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L14 review fixes`). `MailerNotifier` with a
+    comma-separated list had broken (every notification threw in its thread); it now takes one
+    or more recipients, validates each at construction and sends one message per recipient. The
+    blunt `,`/`;` check is gone (a quoted display name with a comma is one address); groups,
+    route addresses and control characters are refused. `cc`, `from` and `replyTo` are strict
+    single addresses too (`replyTo` is now applied as `Reply-To`).
 
 - [x] **L15: `QueryTaint` evasions; the cache class allow-check covers only `getOrSet`**, `Sort.java:73-89`, `Database.java:690, 702`, `QueryTaint.java:95-100, 143`, `Cache.java:294, 308`
   - `Sort.of` normalizes its input, so `secretField%20`, `secretField desc` and

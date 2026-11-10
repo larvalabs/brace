@@ -169,6 +169,94 @@ class MailerTest {
         assertEquals("a@b.c", Mailer.singleAddress("a@b.c").getAddress());
     }
 
+    // --- L14 review fixes ---
+
+    @Test
+    void aQuotedDisplayNameWithACommaIsOneAddress() {
+        var mailer = new Mailer(null);
+        mailer.to("\"Doe, J\" <a@b.c>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+        assertEquals("a@b.c", Mailer.singleAddress("\"Doe; J\" <a@b.c>").getAddress());
+    }
+
+    @Test
+    void groupsRoutesAndListsAreRefused() {
+        for (String bad : new String[] {"g: a@b.c;", "undisclosed: a@b.c, d@e.f;", "g:;",
+                "<@relay.example:a@b.c>", "a@b.c, d@e.f", "a@b.c d@e.f", "", "a@b.c\n", "\"x\r\n\" <a@b.c>"}) {
+            assertThrows(IllegalArgumentException.class, () -> Mailer.singleAddress(bad), bad);
+        }
+    }
+
+    @Test
+    void ccIsASingleAddressLikeTo() {
+        var mailer = new Mailer(null);
+        for (String bad : new String[] {"a@b.c, victim@x.y", "g: a@b.c, victim@x.y;"}) {
+            assertThrows(IllegalArgumentException.class,
+                () -> mailer.to("user@example.com").cc(bad).subject("s").text("t").send(), bad);
+        }
+        assertEquals(0, mailer.sentCount());
+        mailer.to("user@example.com").cc("\"Boss, The\" <boss@example.com>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
+    void fromAndReplyToAreExactlyOneAddress() {
+        assertThrows(IllegalArgumentException.class, () -> new Mailer(null).from("a@b.c, x@y.z"));
+        assertThrows(IllegalArgumentException.class, () -> new Mailer(null).replyTo("a@b.c, x@y.z"));
+        assertThrows(IllegalArgumentException.class, () -> new Mailer(null).replyTo("g: a@b.c;"));
+        var mailer = new Mailer(null).from("App <noreply@example.com>").replyTo("support@example.com");
+        assertThrows(IllegalArgumentException.class,
+            () -> mailer.to("user@example.com").from("a@b.c, x@y.z").subject("s").text("t").send());
+        assertEquals(0, mailer.sentCount());
+        mailer.to("user@example.com").from("\"Team, Ops\" <ops@example.com>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
+    void mailerNotifierSendsToEachOfSeveralRecipients() throws Exception {
+        var regression = new RegressionTracker.Regression("id", "java.lang.Boom", "GET /x", "m",
+            java.time.Instant.EPOCH, 1, null);
+
+        var mailer = new Mailer(null);
+        new MailerNotifier(mailer, "ops@example.com, \"On Call, Team\" <oncall@example.com>").notifyRegression(regression);
+        awaitCount(() -> mailer.sentCount() == 2);
+        var to = mailer.sent().stream().map(Mailer.CapturedEmail::to).sorted().toList();
+        assertEquals(2, to.size(), to.toString());
+        assertTrue(to.get(0).contains("oncall@example.com"), to.toString());
+        assertEquals("ops@example.com", to.get(1));
+
+        var varargs = new Mailer(null);
+        new MailerNotifier(varargs, "a@example.com", "b@example.com").notifyRegression(regression);
+        awaitCount(() -> varargs.sentCount() == 2);
+
+        var list = new Mailer(null);
+        new MailerNotifier(list, java.util.List.of("a@example.com", "b@example.com", "c@example.com")).notifyRegression(regression);
+        awaitCount(() -> list.sentCount() == 3);
+    }
+
+    @Test
+    void oneFailingRecipientDoesNotStopTheOthers() throws Exception {
+        var regression = new RegressionTracker.Regression("id", "T", "GET /x", "m", java.time.Instant.EPOCH, 1, null);
+        var mailer = new Mailer(null) {
+            @Override public EmailBuilder to(String address) {
+                if (address.startsWith("down@")) throw new RuntimeException("relay refused");
+                return super.to(address);
+            }
+        };
+        new MailerNotifier(mailer, "a@example.com", "down@example.com", "b@example.com").notifyRegression(regression);
+        awaitCount(() -> mailer.sentCount() == 2);
+        assertEquals(java.util.List.of("a@example.com", "b@example.com"),
+            mailer.sent().stream().map(Mailer.CapturedEmail::to).toList());
+    }
+
+    @Test
+    void mailerNotifierRefusesAnInvalidRecipientAtConstruction() {
+        var mailer = new Mailer(null);
+        assertThrows(IllegalArgumentException.class, () -> new MailerNotifier(mailer, "ops@example.com, not an address"));
+        assertThrows(IllegalArgumentException.class, () -> new MailerNotifier(mailer, "ops@example.com", "g: a@b.c;"));
+        assertThrows(IllegalArgumentException.class, () -> new MailerNotifier(mailer, java.util.List.of("ok@example.com", "bad@")));
+    }
+
     @Test
     void ccSupport() {
         var mailer = new Mailer(null);

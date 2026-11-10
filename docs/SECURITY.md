@@ -1711,8 +1711,14 @@ exchange is cleartext. The scheme is compared case-insensitively (`SMTPS://` is 
 Dev mode (no SMTP URL) only captures mail and is unaffected.
 
 `Mailer.to(...)` takes exactly one address and parses it strictly, so a recipient taken from a form
-cannot add recipients (`"a@b.c, victim@x.y"` throws). `@Email` likewise rejects `,` `;` `<` `>`,
-whitespace and control characters.
+cannot add recipients (`"a@b.c, victim@x.y"` throws). The same holds for `cc(...)`, the
+per-message `from(...)`, and `Mailer.from(...)`/`Mailer.replyTo(...)` (checked when configured).
+Strict parsing yields exactly one address or throws; on top of that, group syntax
+(`g: a@b.c, victim@x.y;`, several mailboxes as one address), route addresses
+(`<@relay:a@b.c>`) and control characters are refused. A comma inside a quoted display name
+(`"Doe, J" <a@b.c>`) is one mailbox and is accepted. `@Email` likewise rejects `,` `;` `<` `>`,
+whitespace and control characters. `MailerNotifier` accepts several recipients, validates each at
+construction and sends each its own message.
 
 ## Secrets Management
 

@@ -61,8 +61,19 @@ public class Mailer {
         return url.getScheme() == null ? null : url.getScheme().toLowerCase(java.util.Locale.ROOT);
     }
 
-    public Mailer from(String from) { this.defaultFrom = from; return this; }
-    public Mailer replyTo(String replyTo) { this.defaultReplyTo = replyTo; return this; }
+    /** The default sender: exactly one address, checked here so a bad one fails at startup (L14). */
+    public Mailer from(String from) {
+        if (from != null) singleAddress(from, "from");
+        this.defaultFrom = from;
+        return this;
+    }
+
+    /** The {@code Reply-To} address for every message: exactly one, checked here (L14). */
+    public Mailer replyTo(String replyTo) {
+        if (replyTo != null) singleAddress(replyTo, "replyTo");
+        this.defaultReplyTo = replyTo;
+        return this;
+    }
 
     /** How long to wait for the SMTP TCP connect. Default 10s. */
     public Mailer connectTimeout(java.time.Duration connectTimeout) {
@@ -111,25 +122,43 @@ public class Mailer {
 
     /**
      * {@code to(...)} takes exactly one address (L14). {@code InternetAddress.parse} expands a
-     * comma-separated list, so an address taken from a form field could add recipients; strict
-     * single-address parsing rejects lists, groups and control characters instead.
+     * comma-separated list, so an address taken from a form field could add recipients. Strict
+     * parsing with {@code new InternetAddress(s, true)} already yields exactly one address or
+     * throws; on top of that this refuses group syntax ({@code g: a@b.c;}, which names several
+     * mailboxes as one address), route addresses ({@code <@relay:a@b.c>}) and any control
+     * character. A comma or semicolon inside a quoted display name ({@code "Doe, J" <a@b.c>})
+     * is one mailbox and is accepted.
      */
     static jakarta.mail.internet.InternetAddress singleAddress(String to) {
+        return singleAddress(to, "to");
+    }
+
+    /** {@link #singleAddress(String)}, naming {@code field} ({@code to}, {@code cc}, {@code from}, {@code replyTo}) in the error. */
+    static jakarta.mail.internet.InternetAddress singleAddress(String value, String field) {
+        if (value == null) throw new IllegalArgumentException(field + " address is required");
+        for (int i = 0; i < value.length(); i++) {
+            if (Character.isISOControl(value.charAt(i))) {
+                throw new IllegalArgumentException(field + "(...) takes a single address without control characters");
+            }
+        }
         try {
-            if (to == null) throw new IllegalArgumentException("recipient is required");
-            var address = new jakarta.mail.internet.InternetAddress(to, true);
-            if (to.indexOf(',') >= 0 || to.indexOf(';') >= 0) {
-                throw new IllegalArgumentException("to(...) takes a single address");
+            var address = new jakarta.mail.internet.InternetAddress(value, true);
+            String mailbox = address.getAddress();
+            if (address.isGroup() || mailbox == null || mailbox.startsWith("@") || mailbox.indexOf(':') >= 0) {
+                throw new IllegalArgumentException(field + "(...) takes a single mailbox, not a group or route address");
             }
             return address;
         } catch (jakarta.mail.internet.AddressException e) {
-            throw new IllegalArgumentException("to(...) takes a single valid address", e);
+            throw new IllegalArgumentException(field + "(...) takes a single valid address", e);
         }
     }
 
     void send(EmailBuilder email) {
         var from = email.from != null ? email.from : defaultFrom;
-        singleAddress(email.to);
+        // Every address field is exactly one mailbox (L14), checked in dev capture mode too.
+        singleAddress(email.to, "to");
+        if (email.cc != null) singleAddress(email.cc, "cc");
+        if (from != null) singleAddress(from, "from");
 
         if (smtpUrl == null) {
             // Dev mode: capture instead of sending, bounded drop-oldest. Capture is dev-only —
@@ -189,12 +218,15 @@ public class Mailer {
             }
 
             var message = new jakarta.mail.internet.MimeMessage(session);
-            if (from != null) message.setFrom(new jakarta.mail.internet.InternetAddress(from));
+            if (from != null) message.setFrom(singleAddress(from, "from"));
+            if (defaultReplyTo != null) {
+                message.setReplyTo(new jakarta.mail.Address[] {singleAddress(defaultReplyTo, "replyTo")});
+            }
             message.setRecipients(jakarta.mail.Message.RecipientType.TO,
-                new jakarta.mail.Address[] {singleAddress(email.to)});
+                new jakarta.mail.Address[] {singleAddress(email.to, "to")});
             if (email.cc != null) {
                 message.setRecipients(jakarta.mail.Message.RecipientType.CC,
-                    jakarta.mail.internet.InternetAddress.parse(email.cc));
+                    new jakarta.mail.Address[] {singleAddress(email.cc, "cc")});
             }
             message.setSubject(email.subject);
 

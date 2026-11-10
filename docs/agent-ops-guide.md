@@ -115,7 +115,9 @@ require `control`. See "Token scopes" below. Authenticate with `POST /ops/auth`
 When a new error kind first appears since startup, Brace notifies the registered
 notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a
 `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl),
-new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a
+new MailerNotifier(mailer, "ops@example.com"))`. `MailerNotifier` takes one or more
+recipients (`"a@x.com, b@x.com"`, varargs or a `List`), checks each at construction (a bad one
+fails startup) and sends one message per recipient. `WebhookNotifier` posts a
 Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)`
 (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error
 store).
