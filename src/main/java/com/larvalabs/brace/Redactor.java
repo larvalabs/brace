@@ -17,10 +17,11 @@ import java.util.regex.Pattern;
  *
  * <p>This is an allowlist-of-shape — it matches field <em>names</em>, not value
  * content; it is not PII detection. It deliberately over-redacts (a field named
- * {@code token_count} is redacted) rather than risk leaking a credential. Matching
- * is on the normalized name (lowercased, {@code -}/{@code _} stripped) containing a
- * sensitive token as a substring, or, for the short names {@code code}, {@code sig} and
- * {@code otp}, being exactly that name.
+ * {@code token_count} is redacted) rather than risk leaking a credential. There are two name
+ * rules: {@link #isSensitive} for values in transit (query strings, headers), which also treats
+ * short words such as {@code code}, {@code sig}, {@code pin} and {@code session} as credentials,
+ * and {@link #isSensitiveField} for log fields and route parameters, where those words are
+ * ordinary data ({@code code:"card_declined"}, {@code /countries/{code}}).
  *
  * <p><strong>Value-shaped redaction</strong> ({@link #redactPath} and
  * {@link #redactMessage}) targets high-entropy tokens by their shape rather than
@@ -74,13 +75,24 @@ public class Redactor {
         "jwt", "assertion", "signature", "authkey", "nonce");
 
     /**
-     * Short sensitive names matched against the WHOLE normalized name only. As substrings they
-     * hit ordinary words ({@code encode}, {@code postcode}, {@code barcode}; {@code design},
-     * {@code assign}; {@code footprint}), so {@code ?code=} (an OAuth authorization code),
-     * {@code ?sig=} (Azure SAS) and {@code ?otp=} are redacted while {@code zip_code},
-     * {@code status_code} and {@code signal} are not.
+     * Name segments that make a {@code code} segment a credential ({@code auth_code},
+     * {@code verificationCode}, {@code otpcode}, {@code passcode}, {@code code_verifier}). A
+     * {@code code} next to anything else ({@code zip_code}, {@code status_code},
+     * {@code country_code}, {@code promo_code}, {@code code_challenge}) is ordinary data.
      */
-    private static final Set<String> SENSITIVE_EXACT = Set.of("code", "sig", "otp");
+    private static final Set<String> CODE_QUALIFIERS = Set.of(
+        "auth", "authorization", "authentication", "oauth", "verification", "verify", "verifier", "reset",
+        "otp", "totp", "hotp", "sms", "mfa", "2fa", "tfa", "pin", "pass", "password", "invite", "invitation",
+        "access", "login", "signin", "confirm", "confirmation", "activation", "activate", "recovery",
+        "backup", "security", "magic", "device", "unlock");
+
+    /**
+     * Short words that are credentials in transit (query strings, headers) when they are a whole
+     * name segment ({@code ?sig=}, {@code ?pin=}, {@code ?ticket=}, {@code user_session},
+     * {@code account_sid}), but ordinary data in a log field or a route parameter. Matched by
+     * {@link #isSensitive} only.
+     */
+    private static final Set<String> TRANSIT_WORDS = Set.of("sig", "otp", "pin", "sid", "ticket", "session");
 
     // ---- Value-shaped redaction constants ----
 
@@ -146,25 +158,99 @@ public class Redactor {
 
     private Redactor() {}
 
-    /** True if a field with this name should have its value redacted. */
+    /**
+     * The strict name rule, for values in transit: query parameters, request headers, and
+     * {@code name=value} pairs inside header values, URLs and path segments. True when:
+     * <ul>
+     *   <li>the normalized name (lowercased, {@code -}/{@code _} stripped) contains a
+     *       {@link #SENSITIVE} substring ({@code token}, {@code password}, {@code apikey}, …); or</li>
+     *   <li>a name segment (split on {@code _ - . [ ]} and other punctuation, and at camelCase
+     *       boundaries; a leading {@code X-} ignored) is {@code code} next to an auth-ish segment
+     *       ({@link #CODE_QUALIFIERS}), or is an auth-ish word plus {@code code}
+     *       ({@code passcode}, {@code authcode}); or</li>
+     *   <li>a segment is one of {@link #TRANSIT_WORDS} ({@code sig}, {@code otp}, {@code pin},
+     *       {@code sid}, {@code ticket}, {@code session}); or</li>
+     *   <li>the whole name is {@code code} (an OAuth authorization code), or its last segment is
+     *       {@code auth} ({@code X-Auth}, {@code X-Upstream-Auth}).</li>
+     * </ul>
+     * {@code zip_code}, {@code status_code}, {@code postcode}, {@code signal}, {@code pinned},
+     * {@code sessions}, {@code auth_method} and {@code X-Auth-Request-User} do not match.
+     */
     public static boolean isSensitive(String name) {
-        if (name == null) return false;
-        String norm = name.toLowerCase(Locale.ROOT).replace("-", "").replace("_", "");
-        if (SENSITIVE_EXACT.contains(norm)) return true;
-        for (String token : SENSITIVE) {
-            if (norm.contains(token)) return true;
-        }
-        return false;
-    }
-
-    /** The name rule for {@code name=value} pairs found in free text. */
-    private static boolean sensitiveName(String name, boolean strict) {
-        return !name.isEmpty() && isSensitive(name);
+        return sensitiveName(name, true);
     }
 
     /**
-     * Return a deep copy of {@code fields} with the values of sensitive-named keys
-     * replaced by {@link #PLACEHOLDER}. Recurses into nested maps and lists.
+     * The field name rule, for structured log fields ({@link #redact(Map)}, so every
+     * {@code Log} entry) and route parameter names (analytics): the {@link #SENSITIVE} substrings
+     * and the auth-paired {@code code} rule of {@link #isSensitive}, plus a field named exactly
+     * {@code otp}, but not the short words that are ordinary data there: a field
+     * {@code code:"card_declined"}, a route {@code /countries/{code}}, {@code sig}, {@code pin},
+     * {@code sid}, {@code ticket}, {@code session}, {@code X-Auth}.
+     */
+    public static boolean isSensitiveField(String name) {
+        return sensitiveName(name, false);
+    }
+
+    private static boolean sensitiveName(String name, boolean strict) {
+        if (name == null || name.isEmpty()) return false;
+        String norm = name.toLowerCase(Locale.ROOT).replace("-", "").replace("_", "");
+        for (String token : SENSITIVE) {
+            if (norm.contains(token)) return true;
+        }
+        List<String> segs = nameSegments(name);
+        if (segs.isEmpty()) return false;
+        int first = segs.size() > 1 && segs.get(0).equals("x") ? 1 : 0;
+        boolean code = false;
+        boolean qualifier = false;
+        for (int i = first; i < segs.size(); i++) {
+            String seg = segs.get(i);
+            if (seg.equals("code")) {
+                code = true;
+            } else if (seg.length() > 4 && seg.endsWith("code")
+                    && CODE_QUALIFIERS.contains(seg.substring(0, seg.length() - 4))) {
+                return true; // passcode, authcode, otpcode
+            }
+            if (CODE_QUALIFIERS.contains(seg)) qualifier = true;
+            if (strict && TRANSIT_WORDS.contains(seg)) return true;
+        }
+        if (code && qualifier) return true;
+        boolean single = segs.size() - first == 1;
+        if (!strict) return single && segs.get(first).equals("otp");
+        return (single && segs.get(first).equals("code")) || segs.get(segs.size() - 1).equals("auth");
+    }
+
+    /**
+     * Lowercased segments of a name: split on anything but ASCII letters and digits, and at
+     * camelCase boundaries ({@code verificationCode}, {@code ABCCode} is {@code abc}, {@code code}).
+     */
+    static List<String> nameSegments(String name) {
+        var out = new ArrayList<String>(4);
+        int n = name.length();
+        int start = -1;
+        for (int i = 0; i <= n; i++) {
+            char c = i < n ? name.charAt(i) : ' ';
+            boolean alnum = isAsciiLetter(c) || isAsciiDigit(c);
+            boolean boundary = false;
+            if (alnum && start >= 0 && c >= 'A' && c <= 'Z') {
+                char prev = name.charAt(i - 1);
+                boolean nextLower = i + 1 < n && name.charAt(i + 1) >= 'a' && name.charAt(i + 1) <= 'z';
+                boundary = (prev >= 'a' && prev <= 'z') || isAsciiDigit(prev)
+                    || (prev >= 'A' && prev <= 'Z' && nextLower);
+            }
+            if (start >= 0 && (!alnum || boundary)) {
+                out.add(name.substring(start, i).toLowerCase(Locale.ROOT));
+                start = -1;
+            }
+            if (alnum && start < 0) start = i;
+        }
+        return out;
+    }
+
+    /**
+     * Return a deep copy of {@code fields} (a structured log entry) with the values of keys that
+     * are sensitive by the field rule ({@link #isSensitiveField}) replaced by {@link #PLACEHOLDER}.
+     * Recurses into nested maps and lists.
      */
     @SuppressWarnings("unchecked")
     public static Map<String, Object> redact(Map<String, Object> fields) {
@@ -172,7 +258,7 @@ public class Redactor {
         for (var e : fields.entrySet()) {
             String key = e.getKey();
             Object value = e.getValue();
-            if (isSensitive(key)) {
+            if (isSensitiveField(key)) {
                 out.put(key, PLACEHOLDER);
             } else if (value instanceof Map<?, ?> m) {
                 out.put(key, redact((Map<String, Object>) m));

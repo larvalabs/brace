@@ -662,6 +662,95 @@ class RedactorTest {
             Map.of("Referer", "https://cdn.example.com/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css")).get("Referer"));
     }
 
+    // ---- Final review (2026-11): name segments (L11) and the field rule (L12) ----
+
+    /** Names {@link Redactor#isSensitive} (query strings, headers, pairs in transit) must match. */
+    static final List<String> STRICT_NAMES_THAT_MATCH = List.of(
+        // whole-name and auth-paired "code"
+        "code", "Code", "X-Code", "verification_code", "verificationCode", "VerificationCode", "auth_code",
+        "authCode", "authcode", "reset_code", "resetCode", "otp_code", "sms_code", "mfa_code", "2fa_code",
+        "pin_code", "invite_code", "access_code", "login_code", "confirm_code", "confirmation_code",
+        "activation_code", "recovery_code", "backup_code", "security_code", "magic_code", "device_code",
+        "code_verifier", "user[auth_code]", "passcode", "pass_code", "Passcode",
+        // short words as a whole segment
+        "pin", "user_pin", "new-pin", "session", "user_session", "session_id", "sessionId", "sid", "account_sid",
+        "ticket", "service_ticket", "sig", "SIG", "url_sig", "otp", "sms_otp",
+        // auth as the last segment
+        "X-Auth", "X-Upstream-Auth", "Proxy-Auth", "basic_auth",
+        // the substring list (unchanged)
+        "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce");
+
+    /** Names {@link Redactor#isSensitive} must NOT match. */
+    static final List<String> STRICT_NAMES_THAT_DONT = List.of(
+        "zip_code", "zipcode", "status_code", "error_code", "country_code", "country-code", "currency_code",
+        "postal_code", "promo_code", "language_code", "exit_code", "http_code", "response_code", "product_code",
+        "code_challenge", "user_code", "postcode", "barcode", "encode", "codec", "signal", "design", "assign",
+        "sigma", "footprint", "hotpath", "otpauth_uri", "pinned", "is_pinned", "spin", "pinterest", "sessions",
+        "sidebar", "side", "tickets", "author", "authority", "auth_method", "auth_provider", "oauth_provider",
+        "X-Auth-Request-User", "state", "username", "count", "path", "monkey");
+
+    /** Names {@link Redactor#isSensitiveField} (log fields, route params) must match. */
+    static final List<String> FIELD_NAMES_THAT_MATCH = List.of(
+        "password", "token", "api_key", "secret", "csrf", "jwt", "sessionId", "session_id", "X-Auth-Token",
+        "auth_code", "verification_code", "verificationCode", "reset_code", "pin_code", "passcode", "otp",
+        "otp_code", "code_verifier", "device_code");
+
+    /** Names {@link Redactor#isSensitiveField} must NOT match: the short words that are ordinary data in logs and routes. */
+    static final List<String> FIELD_NAMES_THAT_DONT = List.of(
+        "code", "Code", "sig", "pin", "session", "sid", "ticket", "state", "X-Auth", "otp_enabled",
+        "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user");
+
+    @Test
+    void sensitiveNamesMatchBySegment() {
+        for (String n : STRICT_NAMES_THAT_MATCH) assertTrue(Redactor.isSensitive(n), "strict should match: " + n);
+        for (String n : STRICT_NAMES_THAT_DONT) assertFalse(Redactor.isSensitive(n), "strict should not match: " + n);
+        for (String n : FIELD_NAMES_THAT_MATCH) assertTrue(Redactor.isSensitiveField(n), "field should match: " + n);
+        for (String n : FIELD_NAMES_THAT_DONT) assertFalse(Redactor.isSensitiveField(n), "field should not match: " + n);
+    }
+
+    @Test
+    void shortSecretsUnderMissedNamesAreRedactedInTransit() {
+        // L11: short secrets under names the old list missed.
+        for (String name : List.of("verification_code", "auth_code", "reset_code", "passcode", "pin", "session",
+                "sid", "ticket")) {
+            assertEquals(name + "=[REDACTED]&page=2", Redactor.redactQuery(name + "=hunter2&page=2"), name);
+        }
+        assertEquals("[REDACTED]", Redactor.redactHeaders(Map.of("X-Auth", "hunter2pw")).get("X-Auth"));
+        assertEquals("[REDACTED]", Redactor.redactHeaders(Map.of("X-Upstream-Auth", "password=hunter2Hdr")).get("X-Upstream-Auth"));
+        // a short token nested in an encoded URL value
+        assertEquals("next=[REDACTED]",
+            Redactor.redactQuery("next=https%3A%2F%2Fapp.example.com%2Freset%3Ftoken%3Dhunter2pw"));
+        assertEquals("next=[REDACTED]", Redactor.redactQuery("next=%2Freset%3Fcode%3Dhunter2"));
+        // ordinary names and nested URLs survive
+        assertEquals("zip_code=94107&status_code=404&next=%2Fposts%3Fpage%3D2",
+            Redactor.redactQuery("zip_code=94107&status_code=404&next=%2Fposts%3Fpage%3D2"));
+    }
+
+    @Test
+    void logFieldsAndRouteParamsUseTheFieldRule() {
+        // L12: code/sig/pin/session/... are credentials in a query string, but ordinary data in a
+        // structured log field or a route parameter.
+        LogTap.clear();
+        Log.info("charge failed", Map.of("code", "card_declined", "auth_code", "hunter2", "session", "s-42"));
+        var entry = LogTap.snapshot().stream()
+            .filter(e -> "charge failed".equals(e.fields().get("message")))
+            .findFirst().orElseThrow();
+        assertEquals("card_declined", entry.fields().get("code"));
+        assertEquals("s-42", entry.fields().get("session"));
+        assertEquals(Redactor.PLACEHOLDER, entry.fields().get("auth_code"));
+        var countries = new Route("GET", "/countries/{code}", (Handler) r -> null, null);
+        assertEquals("/countries/US", Analytics.storedPath(countries, "/countries/US"));
+        var verify = new Route("GET", "/verify/{verification_code}", (Handler) r -> null, null);
+        assertEquals("/verify/{verification_code}", Analytics.storedPath(verify, "/verify/123456"));
+        var reset = new Route("GET", "/reset/{token}", (Handler) r -> null, null);
+        assertEquals("/reset/{token}", Analytics.storedPath(reset, "/reset/abc"));
+        // The strict rule still applies in transit.
+        assertEquals("code=[REDACTED]", Redactor.redactQuery("code=card_declined"));
+        // And messages use the field rule for name=value pairs.
+        assertEquals("charge failed code=card_declined password=[REDACTED]",
+            Redactor.redactMessage("charge failed code=card_declined password=hunter2"));
+    }
+
     @Test
     void longAdversarialInputStaysLinear() {
         // Error path only, but attacker-sized: a 1 MB value of near-misses must not blow up.
