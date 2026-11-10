@@ -887,6 +887,7 @@ cache.clearTag("posts");                               // remove all with tag
 cache.incr("counter");                                 // atomic increment
 cache.decr("counter");                                 // atomic decrement
 cache.clear();                                         // remove all
+cache.allowType(Rule.class);                           // shared backend: Rule readable via a supertype (startup)
 ```
 
 Route-level page caching:
@@ -956,7 +957,8 @@ Choose **per use case**, not per deployment — you can run both (a default in-p
 | Cached pages that must match across the fleet | shared |
 
 Constraints on the shared backend (the in-process default has none of these):
-- **Values must be Jackson-round-trippable** (POJOs, records, collections, primitives, String). A non-serializable value (a stream, a live handle) throws at `set` time. A `get` with the wrong `Class` fails loudly (values carry a type header).
+- **Values must be Jackson-round-trippable** (POJOs, records, collections, primitives, String). A non-serializable value (a stream, a live handle) throws at `set` time. A `get` with the wrong `Class` fails loudly (values carry a type header). Elements inside a collection carry no type: a `List<Foo>` comes back holding `LinkedHashMap`s, so cache a record or array wrapping it, or convert.
+- **Read with the concrete class.** `get(key, Rule.class)` for a stored `Rule` always works. A read through a supertype (`Object`, an interface, a base class), or `getOrSet`, accepts the stored class only if this instance stored it itself, it is a JDK container or value (`ArrayList`, `HashMap`, `HashSet`, `TreeMap`, `List.of`/`Map.of`/`Set.of`, boxed numbers, `String`, `BigDecimal`, `java.time` types, `UUID`, arrays of these), or it is registered: `cache.allowType(Rule.class)` (the concrete class; **register at startup on every instance**, since after a deploy no instance has stored anything). Otherwise it is a miss with a WARN naming `allowType`. So read security state (a denylist, revoked tokens, a feature flag) with its concrete type: a miss there fails open.
 - **`getOrSet` dogpile is per-server, not global** — a cold key can have one supplier run per server before the first write lands. Accepted; it's a stampede, not a correctness bug.
 - `counterCount()`/`tagCount()` report 0 (use `size()`).
 

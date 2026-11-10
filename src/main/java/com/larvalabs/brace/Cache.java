@@ -35,12 +35,123 @@ public class Cache {
     private static final String[] NO_TAGS = new String[0];
 
     // Value classes this process has itself serialized into a shared backend. getOrSet has no
-    // Class<T> to check a stored entry against, so it would otherwise bean-deserialize into
-    // whatever class name the row carries; anyone able to write the shared store could pick the
-    // class. A stored class not in here is treated as a miss instead (defense in depth). Process-
-    // wide so every Cache in the JVM agrees; filled on write, so a fresh instance misses once,
-    // recomputes, writes, and from then on reads its own class normally.
+    // Class<T> to check a stored entry against, and a get with a supertype (Object, an interface)
+    // does not pin the class, so either would otherwise bean-deserialize into whatever class name
+    // the row carries; anyone able to write the shared store could pick the class. A stored class
+    // is read only when it is the exact type requested, in here, a built-in JDK value or container
+    // (BUILT_IN_VALUE_CLASSES), or registered with allowType; otherwise it is a miss with a WARN
+    // (defense in depth). Process-wide so every Cache in the JVM agrees; filled on write.
     private static final Set<String> STORED_CLASSES = ConcurrentHashMap.newKeySet();
+
+    /** Tests: make this JVM look like a fresh process that has stored nothing. */
+    static void forgetStoredClasses() { STORED_CLASSES.clear(); }
+
+    /**
+     * JDK classes always accepted as the stored class of a shared-backend entry, whatever this
+     * process has stored (L15 final review). Without them a fresh instance (every node after a
+     * deploy, or one that only reads) missed on {@code get("denylist", List.class)} for an
+     * {@code ArrayList} another instance wrote, so a denylist or revocation set read through its
+     * interface failed open, and {@code getOrSet} recomputed and overwrote the shared value.
+     *
+     * <p>Each is a plain value or container that Jackson rebuilds without calling app code, so a
+     * row naming one cannot make Jackson bind an arbitrary class (the threat the stored-class check
+     * closes). Elements inside a container carry no type information: they come back as Jackson's
+     * natural types ({@code String}, {@code Integer}, {@code LinkedHashMap} for an object), exactly
+     * as on the instance that wrote them. The immutable {@code List.of}/{@code Map.of}/
+     * {@code Set.of} and {@code Collections.unmodifiable*} classes are stored under their JDK
+     * names and read back as {@code ArrayList} or an unmodifiable wrapper. {@code EnumMap},
+     * {@code EnumSet} and {@code Collections.unmodifiableCollection} do not round-trip through
+     * Jackson at all and are not listed.
+     */
+    static final Set<String> BUILT_IN_VALUE_CLASSES = Set.of(
+        // Containers
+        "java.util.ArrayList", "java.util.LinkedList", "java.util.ArrayDeque",
+        "java.util.HashMap", "java.util.LinkedHashMap", "java.util.TreeMap",
+        "java.util.HashSet", "java.util.LinkedHashSet", "java.util.TreeSet",
+        "java.util.ImmutableCollections$List12", "java.util.ImmutableCollections$ListN",
+        "java.util.ImmutableCollections$Set12", "java.util.ImmutableCollections$SetN",
+        "java.util.ImmutableCollections$Map1", "java.util.ImmutableCollections$MapN",
+        "java.util.Arrays$ArrayList",
+        "java.util.Collections$UnmodifiableList",
+        "java.util.Collections$UnmodifiableRandomAccessList", "java.util.Collections$UnmodifiableSet",
+        "java.util.Collections$UnmodifiableSortedSet", "java.util.Collections$UnmodifiableMap",
+        "java.util.Collections$UnmodifiableSortedMap",
+        "java.util.Collections$EmptyList", "java.util.Collections$EmptySet", "java.util.Collections$EmptyMap",
+        "java.util.Collections$SingletonList", "java.util.Collections$SingletonSet", "java.util.Collections$SingletonMap",
+        // Values
+        "java.lang.String", "java.lang.Boolean", "java.lang.Character", "java.lang.Byte", "java.lang.Short",
+        "java.lang.Integer", "java.lang.Long", "java.lang.Float", "java.lang.Double",
+        "java.math.BigDecimal", "java.math.BigInteger", "java.util.UUID",
+        "java.time.Instant", "java.time.LocalDate", "java.time.LocalDateTime", "java.time.LocalTime",
+        "java.time.OffsetDateTime", "java.time.OffsetTime", "java.time.ZonedDateTime", "java.time.Duration",
+        "java.time.Period", "java.time.Year", "java.time.YearMonth", "java.time.MonthDay",
+        "java.time.DayOfWeek", "java.time.Month", "java.time.ZoneOffset");
+
+    /** True if {@code className} is a built-in value class, or an array (of any depth) of one or of a primitive. */
+    static boolean isBuiltInValueClass(String className) {
+        if (!className.startsWith("[")) return BUILT_IN_VALUE_CLASSES.contains(className);
+        String component = className.substring(className.lastIndexOf('[') + 1);
+        if (component.length() == 1) return "ZBCSIJFD".contains(component);
+        return component.startsWith("L") && component.endsWith(";")
+            && BUILT_IN_VALUE_CLASSES.contains(component.substring(1, component.length() - 1));
+    }
+
+    // Class names the app registered with allowType, per Cache.
+    private final Set<String> allowedTypes = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Registers app classes that may be read from a shared backend through a supertype
+     * ({@code get(key, Object.class)}, an interface, a base class) or with {@code getOrSet},
+     * on an instance that has not itself stored them. <b>Register at startup on every instance</b>
+     * (every server of the fleet), next to {@code app.cache(...)}: the instance that reads is
+     * often not the one that wrote, and after a deploy no instance has written anything yet.
+     *
+     * <p>Not needed for a read with the stored class itself ({@code get(key, Rule.class)} for a
+     * {@code Rule}), which is always allowed, nor for the JDK containers and values in
+     * {@link #BUILT_IN_VALUE_CLASSES}. Pass the concrete class that is stored, not the type it is
+     * read as: an interface or abstract class throws {@code IllegalArgumentException}. A class
+     * registered here is bound by Jackson from whatever a row names it with, so register only
+     * plain data classes (records, POJOs) whose constructors and setters do nothing but assign.
+     * The in-memory backend stores live objects and needs none of this.
+     */
+    public Cache allowType(Class<?>... types) {
+        for (Class<?> type : types) {
+            if (type.isInterface() || (!type.isArray() && !type.isPrimitive()
+                    && java.lang.reflect.Modifier.isAbstract(type.getModifiers()))) {
+                throw new IllegalArgumentException("allowType takes the concrete class that is stored, not "
+                    + type.getName() + ", which no stored value can be: register the class you pass to set(...)");
+            }
+            allowedTypes.add(type.getName());
+        }
+        return this;
+    }
+
+    // (stored class, requested type) pairs already warned about; bounded, as the stored class
+    // name comes from the row.
+    private static final Set<String> WARNED_REFUSALS = ConcurrentHashMap.newKeySet();
+    private static final int MAX_WARNED_REFUSALS = 1000;
+
+    static Set<String> warnedRefusals() { return WARNED_REFUSALS; }
+
+    static String refusalMessage(String storedName, String requested) {
+        return "cache: an entry stored as " + storedName + " was read as " + requested + " and treated as a miss: "
+            + "this instance has not stored that class itself, and it is neither the type requested nor registered. "
+            + "Register it at startup on every instance with cache.allowType(" + simpleName(storedName) + ".class), "
+            + "or read it with its concrete type. Logged once per stored class and requested type.";
+    }
+
+    private static String simpleName(String className) {
+        int cut = Math.max(className.lastIndexOf('.'), className.lastIndexOf('$'));
+        return cut >= 0 ? className.substring(cut + 1) : className;
+    }
+
+    private static void warnRefusal(String storedName, String requested) {
+        String clipped = storedName.length() > 200 ? storedName.substring(0, 200) : storedName;
+        String pair = clipped + " as " + requested;
+        if (WARNED_REFUSALS.size() < MAX_WARNED_REFUSALS && WARNED_REFUSALS.add(pair)) {
+            Log.warn(refusalMessage(clipped, requested));
+        }
+    }
 
     private final CacheBackend backend;
     private final boolean serializes;
@@ -485,7 +596,7 @@ public class Cache {
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> T deserialize(byte[] data, Class<T> expected) {
+    private <T> T deserialize(byte[] data, Class<T> expected) {
         if (data.length < 4) {
             throw new CacheCorruptionException("cached value too short to hold a header");
         }
@@ -502,13 +613,16 @@ public class Cache {
         }
         int offset = 4 + len;
         String storedName = new String(className, StandardCharsets.UTF_8);
-        if (expected == null && !STORED_CLASSES.contains(storedName)) {
-            // No caller-supplied type to check against (getOrSet), and this process never stored
-            // this class: don't load or bind to a class named by the row. A miss; the caller
-            // recomputes and the write registers the class.
-            Log.debug("cache entry names a class this process has not stored; treating as a miss",
-                    Map.of("class", storedName.length() > 200 ? storedName.substring(0, 200) : storedName));
-            throw new CacheCorruptionException("cached class not stored by this process: " + storedName);
+        // A class the row names is trusted when this process stored it, it is a built-in JDK value
+        // or container, or the app registered it with allowType (L15, L15 final review).
+        boolean trusted = STORED_CLASSES.contains(storedName) || isBuiltInValueClass(storedName)
+            || allowedTypes.contains(storedName);
+        if (expected == null && !trusted) {
+            // No caller-supplied type to check against (getOrSet), and the class is not trusted:
+            // don't load or bind to a class named by the row. A miss; the caller recomputes and
+            // the write registers the class.
+            warnRefusal(storedName, "getOrSet (no type)");
+            throw new CacheCorruptionException("cached class not trusted by this process: " + storedName);
         }
         Class<?> stored;
         try {
@@ -521,13 +635,14 @@ public class Cache {
             throw new ClassCastException("Cached value is a " + storedName
                     + " but get(...) requested " + expected.getName());
         }
-        if (expected != null && stored != expected && !STORED_CLASSES.contains(storedName)) {
-            // A strict subtype of the requested type (Object, an interface, a base class) that this
-            // process never stored: the row, not the caller, would choose the class Jackson binds
-            // (L15). Only the exact type the caller named, or a class this JVM stored, is read.
-            Log.debug("cache entry names a subclass this process has not stored; treating as a miss",
-                    Map.of("class", storedName.length() > 200 ? storedName.substring(0, 200) : storedName));
-            throw new CacheCorruptionException("cached class not stored by this process: " + storedName);
+        if (expected != null && stored != expected && !trusted) {
+            // A strict subtype of the requested type (Object, an interface, a base class) that is
+            // not trusted: the row, not the caller, would choose the class Jackson binds (L15).
+            // Only the exact type the caller named, or a trusted class, is read. A WARN rather than
+            // a silent miss (L15 final review): a security read through an interface failing open
+            // must be visible.
+            warnRefusal(storedName, expected.getName());
+            throw new CacheCorruptionException("cached class not trusted by this process: " + storedName);
         }
         try {
             return (T) Json.mapper().readValue(data, offset, data.length - offset, stored);

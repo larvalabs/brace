@@ -1114,6 +1114,29 @@ over its overall cap; in memory they are evicted before any other entry, and a n
 displaces an app entry. A client minting pages (any declared `vary` value or path parameter)
 therefore churns only the page cache.
 
+### Shared cache values (`CacheBackend.postgres`)
+
+On the shared backend each value is stored as its class name plus Jackson JSON, so whoever can
+write the `brace_cache` table chooses the class name a row carries. Brace never lets that choice
+reach Jackson for an arbitrary class. A row is deserialized only when its class is:
+
+- the exact class the caller asked for (`get(key, Rule.class)` for a `Rule`), always allowed;
+- a class this process has itself stored;
+- a built-in JDK container or value (`ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`,
+  `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `ArrayDeque`, the `List.of`/`Map.of`/
+  `Set.of` and `Collections.unmodifiable*`/`empty*`/`singleton*` classes, boxed primitives,
+  `String`, `BigDecimal`, `BigInteger`, `UUID`, the `java.time` value types, and arrays of
+  these), which Jackson rebuilds without running app code;
+- or a class registered with `cache.allowType(...)`.
+
+Anything else (an app class read through `Object`, an interface or a base class, or by
+`getOrSet`, on an instance that has not stored it) is treated as a miss and logged at WARN once
+per stored class and requested type. A miss on security state fails open: after a deploy, or on
+a node that only reads, `cache.get("denylist", Set.class)` for an app-defined set type would see
+nothing. **Read security state with its concrete type**, or register the class at startup on
+every instance with `cache.allowType(MyType.class)`. Register only plain data classes (records,
+POJOs whose constructors and setters only assign): a registered class can be named by any row.
+
 ---
 
 ## File Uploads

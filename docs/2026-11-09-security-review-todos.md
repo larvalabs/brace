@@ -728,6 +728,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       call site. Tests: `QueryTaintTest.paddingTheQueryStringNoLongerHidesASortValue`,
       `queryAndPathValuesHaveNoCountCap`, `anOverCapRequestThrowsInStrictModeWhenItReachesAQuery`,
       `productionLogsOverCapOncePerCallSite`.
+    - **Cache class allow-check (M2).** `get(key, SuperType.class)` missed on any instance that
+      had not itself stored the concrete class (an `ArrayList` read as `List`, a `HashMap` as
+      `Map`, `Integer` as `Number`), with only a debug line: after a deploy a denylist read
+      through its interface failed open, and `getOrSet` on a fresh instance recomputed and
+      overwrote the shared value. Now a built-in allowlist of JDK containers and values
+      (`Cache.BUILT_IN_VALUE_CLASSES`, arrays included) is always accepted as the stored class,
+      app classes are registered with `cache.allowType(...)` (concrete classes only), the exact
+      requested type is always read, and a refused read logs a WARN once per (stored class,
+      requested type) naming `allowType`. A planted foreign class through `Object` still misses.
+      Elements inside a container still come back as Jackson's natural types (unchanged). Tests
+      in `CacheSerializationTest` (two `Cache` instances over one backend).
 
 - [x] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
   - The 20,000-row buffer per 10 s flush allows about 2,000 inserted rows per second, kept 35

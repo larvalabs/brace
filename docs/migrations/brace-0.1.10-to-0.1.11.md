@@ -476,7 +476,9 @@ written, and treats anything else as a miss. After a restart, or when another se
 entry first, the first `getOrSet` for a given class recomputes and rewrites the entry; later
 calls hit as before. `cache.get(key, Type.class)` is unchanged.
 
-No code change.
+No code change. (The November 2026 review extended this: JDK containers and values, and classes
+registered with `cache.allowType(...)`, are read too. See
+[Breaking: page cache keys, bypasses and undeclared reads](#breaking-page-cache-keys-bypasses-and-undeclared-reads).)
 
 ## Security: the page cache no longer stores per-visitor pages
 
@@ -1692,9 +1694,28 @@ app.get("/feed", cache.wrap("10m", ctrl::feed).vary("page").varyHeader("HX-Targe
   `CacheBackend.postgres(db, maxEntries, maxPageEntries)`, defaults 100,000 rows in all and
   10,000 pages. A flood of page entries can no longer evict `cache.set(...)` data; in memory, a
   new page is not stored when the cache is full of app entries.
-- **`cache.get(key, type)`** returns a miss when the stored class is not `type` itself or a
-  class this process has stored. Using `Object` or an interface as `type` now only reads classes
-  this JVM wrote.
+- **Shared-backend reads through a supertype.** On `CacheBackend.postgres(...)`,
+  `cache.get(key, type)` with a `type` other than the stored class itself (`Object`, an
+  interface, a base class), and `getOrSet`, read the entry only when its stored class is one
+  this process has stored, a JDK container or value (`ArrayList`, `HashMap`, `HashSet`, the
+  `List.of`/`Map.of`/`Set.of` classes, boxed numbers, `String`, `BigDecimal`, `java.time`
+  types, `UUID`, arrays of these, and similar), or a class registered with `cache.allowType(...)`.
+  Anything else is a miss with a WARN naming `allowType`, once per stored class and requested
+  type. **Action:** if an app class is read through an interface or with `getOrSet` on an
+  instance that may not have written it, register it at startup on every instance; read
+  security state (a denylist, revocations, a feature flag) with its concrete type, which is
+  always allowed:
+
+```java
+// before: on a server that never wrote a Rule since its last deploy, a miss (fails open)
+Named rule = cache.get("rule", Named.class);
+
+// after: register at startup on every instance...
+var cache = new Cache(CacheBackend.postgres(dbFactory)).allowType(Rule.class);
+app.cache(cache);
+// ...or read the concrete type, which is always allowed
+Rule rule = cache.get("rule", Rule.class);
+```
 - **`deletePrefix`** with a prefix containing a control character, `#sha256:`, or over 128
   characters no longer clears unrelated keys that share its start. Cache keys with control
   characters, or over 512 bytes, are stored hashed; invisible to callers.
