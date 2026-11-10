@@ -797,50 +797,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 response, callback, session, csrfOnlySession, cookieSpec, exchange);
             return true;
         } catch (Exception e) {
-            String errorMethod = jettyRequest.getMethod();
-            String errorPath = jettyRequest.getHttpURI().getPath();
-            String errorQuery = jettyRequest.getHttpURI().getQuery();
-            // Redact high-entropy path segments (reset tokens, invite tokens, etc.) so they
-            // are not persisted in the error store or surfaced on /ops/errors.
-            String redactedPath = Redactor.redactPath(errorPath);
-            // An error kind is (type, route PATTERN), like the stats keys (H1): keyed by the
-            // concrete path, every /users/{id} a client tried was a new kind and a new regression
-            // notification. The concrete (redacted) path is still in requestInfo below.
-            // The method is folded to a fixed list (methodKey) for the same reason: it is the
-            // client's to choose, and an unmatched request can reach here through a throwing
-            // global before-middleware. requestInfo keeps the method as sent.
-            String routeInfo = methodKey(errorMethod) + " " + routeKey(exchange.match);
-            // Redact query params before the request detail is stored in the error record and
-            // served over /ops/errors: by decoded name (?token=…, ?%74oken=…, ?code=…) and by
-            // value shape (a JWT or 32-char token under any name; M6).
-            String requestInfo = errorMethod + " " + redactedPath
-                + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
-            int qc = exchange.db != null ? exchange.db.queryCount() : 0;
-            long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
-            if (stats != null) {
-                stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
-                    routeInfo, stackTraceToString(e), requestInfo, "");
-                Log.error(errorMethod, errorPath, e);
-                // http.error already carries this request, with the exception and app frame.
-                // Suppress the choke point's http.request line so a 500 stays one log entry;
-                // the stats side still records (that is the whole point of H2).
-                exchange.logged = true;
-            }
-            if (errorStore != null) {
-                String errorType = e.getClass().getSimpleName();
-                // Redact the exception message: name-based pass (via Redactor.isSensitive on
-                // tokens that look like key=value) is not applicable here, so we run the
-                // value-shaped pass to strip embedded bearer tokens, SQL literals, etc.
-                String errorMessage = Redactor.redactMessage(e.getMessage());
-                String stackTrace = stackTraceToString(e);
-                // Instant-of-failure context: how much DB work ran before the throw, and the
-                // redacted request headers. record() only merges into the in-memory buffer (the
-                // flusher persists it), so it runs here, before the 500 is sent: once a client sees
-                // the response, the error is buffered and a flush() will persist it.
-                String queriesBefore = "{\"count\":" + qc + ",\"durationMs\":" + (Math.round(qu / 100.0) / 10.0) + "}";
-                String requestHeaders = captureRedactedHeaders(jettyRequest);
-                errorStore.record(
-                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders);
+            // Recording the failure must never cost the response. A throw in here used to skip
+            // everything after it, respondToError included (the redactor's, on ?x=jdbc:_x://h:
+            // no http.error line, nothing in the stats or the error store, a bare Jetty 500), so
+            // a client that could cause a 500 could also hide it. Now the exception's message and
+            // trace are read once, guarded (a getMessage() that throws takes printStackTrace and
+            // the logger with it), each sink runs in its own try, and whatever still escapes is
+            // caught around the lot.
+            try {
+                recordFailure(jettyRequest, exchange, e);
+            } catch (RuntimeException recording) {
+                recordingFailed("request", recording);
             }
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.
@@ -858,6 +825,100 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // call below finds nothing left to release.
             if (braceRequest != null) braceRequest.releaseUploads();
         }
+    }
+
+    /**
+     * Record an exception that escaped a handler in the in-memory stats (served on
+     * {@code /ops/status}), the {@code http.error} log line and the error store. A failure in one
+     * sink costs that record only, not the others.
+     */
+    private void recordFailure(org.eclipse.jetty.server.Request jettyRequest, Exchange exchange, Exception e) {
+        String errorType = e.getClass().getSimpleName();
+        String errorMethod = jettyRequest.getMethod();
+        String errorPath = jettyRequest.getHttpURI().getPath();
+        String errorQuery = jettyRequest.getHttpURI().getQuery();
+        // Redact high-entropy path segments (reset tokens, invite tokens, etc.) so they
+        // are not persisted in the error store or surfaced on /ops/errors.
+        String redactedPath = Redactor.redactPath(errorPath);
+        // An error kind is (type, route PATTERN), like the stats keys (H1): keyed by the
+        // concrete path, every /users/{id} a client tried was a new kind and a new regression
+        // notification. The concrete (redacted) path is still in requestInfo below.
+        // The method is folded to a fixed list (methodKey): it is the client's to choose, and an
+        // unmatched request can reach here through a throwing global before-middleware.
+        // requestInfo keeps the method as sent.
+        String routeInfo = methodKey(errorMethod) + " " + routeKey(exchange.match);
+        // Redact query params before the request detail is stored in the error record and
+        // served over /ops/errors: by decoded name (?token=…, ?%74oken=…, ?code=…) and by
+        // value shape (a JWT or 32-char token under any name; M6).
+        String requestInfo = errorMethod + " " + redactedPath
+            + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
+        String rawMessage;
+        try {
+            rawMessage = e.getMessage();
+        } catch (RuntimeException ex) {
+            rawMessage = "[exception message unavailable]";
+        }
+        String stackTrace;
+        try {
+            stackTrace = stackTraceToString(e);
+        } catch (RuntimeException ex) {
+            stackTrace = framesOnly(e, rawMessage);
+        }
+        int qc = exchange.db != null ? exchange.db.queryCount() : 0;
+        long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
+        if (stats != null) {
+            try {
+                stats.recordError(errorType, rawMessage, routeInfo, stackTrace, requestInfo, "");
+            } catch (RuntimeException ex) {
+                recordingFailed("stats", ex);
+            }
+            try {
+                Log.error(errorMethod, errorPath, e, rawMessage);
+                // http.error already carries this request, with the exception and app frame.
+                // Suppress the choke point's http.request line so a 500 stays one log entry;
+                // the stats side still records (that is the whole point of H2).
+                exchange.logged = true;
+            } catch (RuntimeException ex) {
+                recordingFailed("log", ex);
+            }
+        }
+        if (errorStore != null) {
+            try {
+                // Redact the exception message: name-based pass (via Redactor.isSensitive on
+                // tokens that look like key=value) is not applicable here, so we run the
+                // value-shaped pass to strip embedded bearer tokens, SQL literals, etc.
+                String errorMessage = Redactor.redactMessage(rawMessage);
+                // Instant-of-failure context: how much DB work ran before the throw, and the
+                // redacted request headers. record() only merges into the in-memory buffer (the
+                // flusher persists it), so it runs here, before the 500 is sent: once a client sees
+                // the response, the error is buffered and a flush() will persist it.
+                String queriesBefore = "{\"count\":" + qc + ",\"durationMs\":" + (Math.round(qu / 100.0) / 10.0) + "}";
+                String requestHeaders = captureRedactedHeaders(jettyRequest);
+                errorStore.record(
+                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders);
+            } catch (RuntimeException ex) {
+                recordingFailed("error store", ex);
+            }
+        }
+    }
+
+    /** A trace built from the frames alone, for an exception whose {@code printStackTrace} throws. */
+    private static String framesOnly(Throwable t, String message) {
+        var sb = new StringBuilder(t.getClass().getName()).append(": ").append(message).append('\n');
+        try {
+            for (StackTraceElement frame : t.getStackTrace()) sb.append("\tat ").append(frame).append('\n');
+        } catch (RuntimeException ex) {
+            // the header line alone
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Last resort when recording a request error itself throws. Straight to stderr (the logger may
+     * be what failed) and by class name only: the message would be unredacted text.
+     */
+    private static void recordingFailed(String sink, RuntimeException ex) {
+        System.err.println("Brace: could not record a request error (" + sink + "): " + ex.getClass().getName());
     }
 
     /**

@@ -859,7 +859,12 @@ class RedactorTest {
         // the substring list (unchanged)
         "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce",
         // verification pass: totp alone, and the plural "codes" next to an auth word
-        "totp", "TOTP", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
+        "totp", "TOTP", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes",
+        // second review (L-4): one-time and second-factor names
+        "onetimecode", "one_time_code", "onetime_code", "oneTimeCode", "OneTimeCode", "two_factor", "twoFactor",
+        "two-factor", "two_factor_code", "twoFactorCode", "twofactorcode", "2fa", "2FA", "user_2fa", "2FA_CODE",
+        "2fa_codes", "mfa", "MFA", "X-MFA", "tfa", "multi_factor", "second_factor", "verification",
+        "email_verification", "Verification");
 
     /** Names {@link Redactor#isSensitive} must NOT match. */
     static final List<String> STRICT_NAMES_THAT_DONT = List.of(
@@ -869,20 +874,30 @@ class RedactorTest {
         "sigma", "footprint", "hotpath", "otpauth_uri", "pinned", "is_pinned", "spin", "pinterest", "sessions",
         "sidebar", "side", "tickets", "author", "authority", "auth_method", "auth_provider", "oauth_provider",
         "X-Auth-Request-User", "state", "username", "count", "path", "monkey",
-        "zip_codes", "status_codes", "country_codes", "error_codes", "barcodes");
+        "zip_codes", "status_codes", "country_codes", "error_codes", "barcodes",
+        // second review (L-4): the new words count only where they name the value itself
+        "two_factor_enabled", "twoFactorEnabled", "mfa_enabled", "mfa_method", "2fa_required", "verification_status",
+        "verification_url", "factor", "scale_factor", "load_factor", "one_time", "onetime", "time", "timecode",
+        "first_time_code", "one_code_time");
 
     /** Names {@link Redactor#isSensitiveField} (log fields, route params) must match. */
     static final List<String> FIELD_NAMES_THAT_MATCH = List.of(
         "password", "token", "api_key", "secret", "csrf", "jwt", "sessionId", "session_id", "X-Auth-Token",
         "auth_code", "verification_code", "verificationCode", "reset_code", "pin_code", "passcode", "otp",
         "otp_code", "code_verifier", "device_code",
-        "totp", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
+        "totp", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes",
+        // second review (L-4): only the forms paired with "code"
+        "onetimecode", "one_time_code", "onetime_code", "oneTimeCode", "two_factor_code", "twoFactorCode",
+        "twofactorcode", "2fa_code", "2FA_CODE", "mfa_code", "mfa_codes");
 
     /** Names {@link Redactor#isSensitiveField} must NOT match: the short words that are ordinary data in logs and routes. */
     static final List<String> FIELD_NAMES_THAT_DONT = List.of(
         "code", "Code", "sig", "pin", "session", "sid", "ticket", "state", "X-Auth", "otp_enabled",
         "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user",
-        "codes", "zip_codes", "status_codes", "totp_enabled");
+        "codes", "zip_codes", "status_codes", "totp_enabled",
+        // second review (L-4): plain words stay ordinary data in a log field or a route parameter
+        "mfa", "2fa", "tfa", "two_factor", "twoFactor", "verification", "email_verification", "mfa_enabled",
+        "two_factor_enabled", "factor", "onetime", "one_time", "first_time_code");
 
     @Test
     void sensitiveNamesMatchBySegment() {
@@ -982,7 +997,13 @@ class RedactorTest {
             "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25",
             // verification pass: mid-run schemes, user info to the last '@', ';' parameters, names
             "1https://u:p@", "-https:/", "/https://", "x-jdbc:s://h;a=b", "postgres://a:b/c@", ";password=",
-            "@", "a://b:c/d@", "ab_cd-", "Ab3_", "2024q4-", "0x1/");
+            "@", "a://b:c/d@", "ab_cd-", "Ab3_", "2024q4-", "0x1/",
+            // second review: bracketed values with and without a closer, user info across a
+            // URL-ending character (the '@' look-ahead), parameter sections, frame-like lines
+            "token=[", "token={a}}", "token='a''", "password=(", "x=[", "a://b:c^", "a://b:c ", "a://b:1^",
+            "a://h;p=a/", "a://u:p;", "\n\tat a.B(", "\n at a.b(C.java:1) ~[", "aB/cD1/", "Ab/Cd/",
+            // any scheme inside a run, and a token for a scheme
+            "a-b://", "_x://u:p@", "a_b:c_d://", "Ab1Cd2Ef3Gh4Ij5Kl6://");
         long t0 = System.nanoTime();
         for (int size : List.of(64 * 1024, 1024 * 1024)) {
             for (String unit : units) {
@@ -1029,5 +1050,638 @@ class RedactorTest {
         Redactor.redactUrl("https://h/" + big);
         Redactor.redactHeaders(Map.of("X-Big", big));
         assertTrue(System.nanoTime() - t0 < 5_000_000_000L, "redaction of a 1 MB value must be fast");
+    }
+
+    // ---- Second review (2026-11): docs/2026-11-09-security-review-todos.md, M6 "Second review fixes" ----
+
+    @Test
+    void aRunAfterJdbcThatIsNotASchemeIsTextNotAUrl() {
+        // H-1: "jdbc:" before a run holding _ / ~ $ % and then "://" was taken for a URL start,
+        // the URL scan found no scheme there, and substring(i, -1) threw out of every entry point.
+        for (String in : List.of("jdbc:my_driver://host/db", "Invalid url jdbc:_x://h", "jdbc:a/b://h",
+                "jdbc:a~b://h", "jdbc:a$b://h", "jdbc:a%b://h", "jdbc:%://", "x jdbc:_://")) {
+            assertEquals(in, Redactor.redactMessage(in), in);
+            assertEquals(in, Redactor.redactValue(in), in);
+            assertEquals(in + "\n\tat a.B.c(B.java:1)\n", Redactor.redactStackTrace(in + "\n\tat a.B.c(B.java:1)\n"), in);
+            assertEquals(in, Redactor.redactHeaders(Map.of("X-Thing", in)).get("X-Thing"), in);
+        }
+        assertEquals("x=jdbc:_x://h", Redactor.redactQuery("x=jdbc:_x://h"));
+        assertEquals("x=jdbc%3A_x%3A%2F%2Fh", Redactor.redactQuery("x=jdbc%3A_x%3A%2F%2Fh"));
+        assertEquals("https://h/p?next=jdbc:_x://h", Redactor.redactUrl("https://h/p?next=jdbc:_x://h"));
+        assertEquals("/jdbc%3A%5Fx%3A%2F%2Faaaaaaaaaaaa", Redactor.redactPath("/jdbc%3A%5Fx%3A%2F%2Faaaaaaaaaaaa"));
+        // A real sub-scheme after a prefix is still a URL.
+        assertEquals("-jdbc:sqlserver://db:1433;password=[REDACTED]",
+            Redactor.redactMessage("-jdbc:sqlserver://db:1433;password=hunter2"));
+    }
+
+    static void throwsThroughReflection() {
+        throw new IllegalArgumentException("reflective " + HEX32);
+    }
+
+    /** A trace with real frames of every kind the JDK prints here: lambda, virtual thread, reflection, cause, suppressed. */
+    static String realTrace() throws Exception {
+        Throwable[] caught = new Throwable[1];
+        Runnable lambda = () -> {
+            try {
+                RedactorTest.class.getDeclaredMethod("throwsThroughReflection").invoke(null);
+            } catch (ReflectiveOperationException e) {
+                var outer = new IllegalStateException("outer " + HEX32, e);
+                outer.addSuppressed(new java.io.IOException("suppressed " + RANDOM32, new RuntimeException("under " + T)));
+                throw outer;
+            }
+        };
+        Thread thread = Thread.ofVirtual().unstarted(() -> {
+            try {
+                lambda.run();
+            } catch (Throwable e) {
+                caught[0] = e;
+            }
+        });
+        thread.start();
+        thread.join();
+        return traceOf(caught[0]);
+    }
+
+    @Test
+    void realFrameLinesOfEveryKindAreKept() throws Exception {
+        // M-1: a frame line must look like a frame. First, that real ones still do.
+        String trace = realTrace();
+        int frames = 0;
+        for (String line : trace.split("\n")) {
+            if (line.strip().startsWith("at ")) {
+                frames++;
+                assertTrue(Redactor.isFrameLine(line, 0, line.length()), "a real frame is not recognised: " + line);
+            }
+        }
+        assertTrue(frames >= 6, trace);
+        for (String needle : List.of("lambda$", "VirtualThread", "java.base/", "Caused by: ", "Suppressed: ", "... ")) {
+            assertTrue(trace.contains(needle), "precondition, the trace has " + needle + ": " + trace);
+        }
+        String redacted = Redactor.redactStackTrace(trace);
+        for (String secret : List.of(HEX32, RANDOM32, T)) assertFalse(redacted.contains(secret), redacted);
+        for (String line : trace.split("\n")) {
+            if (line.strip().startsWith("at ") || line.strip().startsWith("... ")) {
+                assertTrue(redacted.contains(line + "\n"), "frame line changed: " + line);
+            }
+        }
+        // Frame shapes this JVM did not print above, as StackTraceElement and Logback write them.
+        var shapes = new java.util.ArrayList<String>();
+        for (StackTraceElement e : List.of(
+                new StackTraceElement("app", "my.module", "1.0-SNAPSHOT", "com.x.Y", "z", "Y.java", 1),
+                new StackTraceElement("app", null, null, "com.x.Y", "z", "Y.java", 1),
+                new StackTraceElement(null, "java.base", "21.0.5+11", "java.lang.Thread", "run", "Thread.java", 1583),
+                new StackTraceElement("com.x.Y", "z", "Y.java", -1),
+                new StackTraceElement("com.x.Y", "z", null, -1),
+                new StackTraceElement("com.x.Y", "nativeCall", "Y.java", -2),
+                new StackTraceElement("com.x.Y", "<init>", "Y.java", 3),
+                new StackTraceElement("com.x.Y", "<clinit>", "Y.java", 3),
+                new StackTraceElement("com.x.Y", "lambda$run$0", "Y.java", 12),
+                new StackTraceElement("com.x.Y$$Lambda/0x000001f0a1047000", "run", null, -1),
+                new StackTraceElement("com.x.Y$$Lambda$142/0x0000000800c8a1b0", "run", null, -1),
+                new StackTraceElement("java.lang.invoke.LambdaForm$MH/0x0000000800c04000", "invoke", "LambdaForm$MH", -1),
+                new StackTraceElement("jdk.internal.reflect.GeneratedMethodAccessor12", "invoke", null, -1),
+                new StackTraceElement("com.x.Foo$$EnhancerBySpringCGLIB$$1a2b3c4d", "bar", "<generated>", -1),
+                new StackTraceElement("com.x.FooKt$main$1", "invokeSuspend", "Foo.kt", 12),
+                new StackTraceElement("com.x.Foo$", "$anonfun$main$1", "Foo.scala", 5),
+                new StackTraceElement("com.x.Money", "plus-WZ4Q5Ns", "Money.kt", 8),
+                new StackTraceElement("com.example.net.Http2ConnectionHandlerImpl", "run", "Http2ConnectionHandlerImpl.java", 42))) {
+            shapes.add(e.toString());
+        }
+        shapes.add("com.x.Http2ConnectionHandlerImpl.z(Http2ConnectionHandlerImpl.java:1) ~[app-1.0.jar:1.0]");
+        shapes.add("com.x.Y.z(Y.java:1) [classes/:na]");
+        shapes.add("org.springframework.web.Foo.bar(Foo.java:9) ~[spring-web-6.1.0.jar!/:6.1.0]");
+        shapes.add("java.base/java.lang.Thread.run(Thread.java:1583) ~[na:na]");
+        for (String shape : shapes) {
+            for (String indent : List.of("\t", "\t\t", "    ")) {
+                String line = indent + "at " + shape;
+                assertTrue(Redactor.isFrameLine(line, 0, line.length()), "frame not recognised: " + line);
+            }
+        }
+        String all = "a.B: m\n\tat " + String.join("\n\tat ", shapes) + "\n\t... 3 more\n";
+        assertSame(all, Redactor.redactStackTrace(all));
+    }
+
+    @Test
+    void aMessageLineThatStartsWithAtIsNotAFrame() {
+        // M-1: any line of whitespace then "at " was taken for a frame and left unredacted, so a
+        // continuation line of a multi-line message that happened to start that way kept its
+        // secrets. Jackson writes its source excerpt exactly so.
+        String jackson = "com.fasterxml.jackson.core.JsonParseException: Unexpected character\n"
+            + " at [Source: (String)\"{\"apiKey\":\"sk_live_4eC39HqLyjWDarjtT1zdp7dc\",\"note\":\"x\"}\"; line: 1, column: 3]\n"
+            + "\tat com.x.Y.z(Y.java:1)\n";
+        assertEquals(jackson.replace("sk_live_4eC39HqLyjWDarjtT1zdp7dc", "[redacted]"), Redactor.redactStackTrace(jackson));
+        assertEquals("java.lang.RuntimeException: upstream said\n  at token=[REDACTED] postgres://[REDACTED]@db/x\n"
+                + "\tat com.x.Y.z(Y.java:1)\n",
+            Redactor.redactStackTrace("java.lang.RuntimeException: upstream said\n"
+                + "  at token=" + HEX32 + " postgres://u:hunter2@db/x\n\tat com.x.Y.z(Y.java:1)\n"));
+        // Near-frames: no "(source)", a source that is not a file name, text after the frame, a
+        // packaging suffix that is not [jar:version].
+        String[][] cases = {
+            {"\tat token " + HEX32 + " (bad)", "\tat token [redacted] (bad)"},
+            {"\tat " + HEX32, "\tat [redacted]"},
+            {"\tat com.x.Y.z(password=hunter2)", "\tat com.x.Y.z(password=[REDACTED])"},
+            {"\tat x(postgres://u:hunter2@db/x)", "\tat x(postgres://[REDACTED]@db/x)"},
+            {"\tat com.x.Y.z(Y.java:1) password=hunter2", "\tat com.x.Y.z(Y.java:1) password=[REDACTED]"},
+            {"\tat com.x.Y.z(Y.java:1) ~[" + HEX32 + "]", "\tat com.x.Y.z(Y.java:1) ~[[redacted]]"},
+            {"\tat com.x.Y.z(Y.java:1) and " + HEX32, "\tat com.x.Y.z(Y.java:1) and [redacted]"},
+            {"\tat com.x.Y.z()", "\tat com.x.Y.z()"},
+            // The tighter "... N more" rule stays.
+            {"\t... 3 more " + HEX32, "\t... 3 more [redacted]"},
+        };
+        for (String[] c : cases) {
+            assertFalse(Redactor.isFrameLine(c[0], 0, c[0].length()), c[0]);
+            assertEquals("a.B: m\n" + c[1] + "\n", Redactor.redactStackTrace("a.B: m\n" + c[0] + "\n"), c[0]);
+        }
+    }
+
+    @Test
+    void aBase64SecretHoldingASlashIsNotTakenForAPath() {
+        // M-2: a run with '/' was judged piece by piece whenever no short piece mixed upper case,
+        // lower case and digits, so a standard-base64 secret survived when its pieces were short
+        // or held no digit (AWS's documented example key, below).
+        String[][] cases = {
+            {"Invalid key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "Invalid key [redacted]"},
+            {"key /wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY bad", "key [redacted] bad"},
+            {"key UlEMvPsopWhuHgywaZzg/KPi1gJZ2tD8jNuxkSSL rejected", "key [redacted] rejected"},
+            {"key JzoyJi/theJNjBxXcccJm/dwWU12ydOACauKMgTsU0i rejected", "key [redacted] rejected"},
+            {"key /FmyLbFvatOwYUJSPtJFs/wI5fFAOpbl4oYt8s2Vr rejected", "key [redacted] rejected"},
+            {"key /dl/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY.pdf", "key [redacted].pdf"},
+            // A secret piece after short pieces that are not words: one base64 value, not a path.
+            {"key /IShbxYCPZpUDcmS/DPH/of7Na0GjC6bFm3ssSaxI rejected", "key [redacted] rejected"},
+            {"key /1mf7eoWGdELH4mW4Gg3S/HXtglNEQZmWVL/UlJypjT rejected", "key [redacted] rejected"},
+            {"open /Users/matt/MyApp/getUserById/" + T + ".tmp", "open /Users/matt/MyApp/getUserById/[redacted].tmp"},
+            // Nothing says this is a path (no leading /, ./, ../ or ~/, no file extension), and one
+            // piece is a secret: the whole run goes, as before the piece-by-piece rule.
+            {"open exports/" + T + "/data", "open [redacted]"},
+            // With that evidence the secret piece alone goes.
+            {"open /exports/" + T + "/data", "open /exports/[redacted]/data"},
+            {"open exports/" + T + "/data.csv", "open exports/[redacted]/data.csv"},
+            {"open ./exports/" + T + "/data", "open ./exports/[redacted]/data"},
+            {"open ../exports/" + T + "/data", "open ../exports/[redacted]/data"},
+            {"open ~/exports/" + T + "/data", "open ~/exports/[redacted]/data"},
+            {"open C:/Users/app/uploads/" + T + "/report.pdf", "open C:/Users/app/uploads/[redacted]/report.pdf"},
+            {"see /var/lib/app-1.2/releases/3f9a1c2b4d5e6f7a8b9c/current", "see /var/lib/app-1.2/releases/[redacted]/current"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        // Paths of words survive with or without that evidence.
+        for (String ok : List.of(
+                "open ./build/libs/app-1.0.jar ../conf/settings_v2.yaml ~/projects/app/target/classes",
+                "missing templates/layouts/main_layout_v2 and db/migration/V3__create_users_table",
+                "cannot read var/lib/app/data/reports/quarterly-report-2024q4-final.pdf",
+                "/Users/matt/code/app/target/classes/templates/layouts/main_layout_v2.jte",
+                "/opt/app/classes/com/example/AdminDashboardController2/Internationalization/x",
+                "GET /api/v2/users/12345/orders failed; see application/vnd.api+json")) {
+            assertEquals(ok, Redactor.redactMessage(ok), ok);
+        }
+    }
+
+    @Test
+    void aSensitiveValueInBracketsOrSingleQuotesIsRedactedToItsCloser() {
+        // M-3 (i): for a sensitive name, a value that opened with ' ( [ { < was skipped (the value
+        // scan stopped on the opener), so the SQL Server {braced} password form and a toString
+        // list of codes were kept.
+        String[][] cases = {
+            {"jdbc:sqlserver://db:1433;user=sa;password={hunter2};encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password={[REDACTED]};encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password={hun;ter2};encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password={[REDACTED]};encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=(hunter2);encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=([REDACTED]);encrypt=true"},
+            {"jdbc:sqlserver://h;password=\"hunter 2\";x=1", "jdbc:sqlserver://h;password=\"[REDACTED]\";x=1"},
+            {"jdbc:sqlserver://h;password='hunter 2';x=1", "jdbc:sqlserver://h;password='[REDACTED]';x=1"},
+            {"password='hunter2'", "password='[REDACTED]'"},
+            {"password='hunter 2' next", "password='[REDACTED]' next"},
+            {"password=(hunter2)", "password=([REDACTED])"},
+            {"password={hunter2}", "password={[REDACTED]}"},
+            {"password=<hunter2>", "password=<[REDACTED]>"},
+            {"password=[hunter2] ok", "password=[[REDACTED]] ok"},
+            {"User[id=1, backupCodes=[a1b2c-d3e4f, g5h6i-j7k8l]]", "User[id=1, backupCodes=[[REDACTED]]]"},
+            {"recovery_codes=[abcd-1234, efgh-5678]", "recovery_codes=[[REDACTED]]"},
+            // nesting of the same bracket, and the doubled closer that escapes one in {..} and '..'
+            {"password=(a(b)c) x", "password=([REDACTED]) x"},
+            {"password={a}}b};x=1", "password={[REDACTED]};x=1"},
+            {"password='it''s' x", "password='[REDACTED]' x"},
+            // no closer: to the end of the line, not beyond
+            {"password={hunter2 and more\nnext line", "password={[REDACTED]\nnext line"},
+            {"password=[a, b", "password=[[REDACTED]"},
+        };
+        for (String[] c : cases) {
+            String once = Redactor.redactMessage(c[0]);
+            assertEquals(c[1], once, c[0]);
+            assertEquals(once, Redactor.redactMessage(once), "redacting twice changes nothing: " + c[0]);
+        }
+        assertEquals("user=bob; password='[REDACTED]'; realm=x",
+            Redactor.redactHeaders(Map.of("X-Upstream-Info", "user=bob; password='hunter 2'; realm=x")).get("X-Upstream-Info"));
+        // Unchanged: an empty value, a value already redacted, and a pair that merely sits inside brackets.
+        for (String same : List.of("token=() token=[] token={} token='' token=<> ok", "password=[REDACTED] x",
+                "token=[redacted], next", "password=\"[REDACTED]\"", "id={42} name='bob' tags=[a, b]")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+        assertEquals("User(id=1, password=[REDACTED]) and Config{password=[REDACTED]} and [password=[REDACTED]]",
+            Redactor.redactMessage("User(id=1, password=hunter2) and Config{password=hunter2} and [password=hunter2]"));
+        // A URL that ends in a redacted value is the same URL the second time round.
+        String url = Redactor.redactMessage("Failed postgres://app@db/x?password=hunter2");
+        assertEquals("Failed postgres://[REDACTED]@db/x?password=[REDACTED]", url);
+        assertEquals(url, Redactor.redactMessage(url));
+    }
+
+    @Test
+    void userInfoWithACharacterThatEndsAUrlIsStillMasked() {
+        // M-3 (ii): the URL scan stopped at ^ { } | \ ` ' < > or a space inside a password, before
+        // the '@', so the URL had no user info to mask and the password stayed.
+        for (String odd : List.of("^", "{", "}", "|", "\\", "`", "'", "<", ">", "{ss}", "<ss>", "^^|")) {
+            String in = "Failed jdbcUrl=jdbc:postgresql://app:p" + odd + "ssw0rd@db/x now";
+            assertEquals("Failed jdbcUrl=jdbc:postgresql://[REDACTED]@db/x now", Redactor.redactMessage(in), in);
+        }
+        String[][] cases = {
+            // One space: masked when the next word holds the '@' and what follows ':' is no port.
+            {"Failed postgres://app:my pass@db/x", "Failed postgres://[REDACTED]@db/x"},
+            // Digits after ':' with a '/' before the '@' were taken for a port and a path.
+            {"Failed https://user:12345/678@host/x", "Failed https://[REDACTED]@host/x"},
+            {"Failed postgres://app:12345/678@db/x", "Failed postgres://[REDACTED]@db/x"},
+            {"Failed redis://:12345?6@cache:6379/0", "Failed redis://[REDACTED]@cache:6379/0"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        assertEquals("https://[REDACTED]@host/x", Redactor.redactUrl("https://user:12345/678@host/x"));
+        assertEquals("jdbc:postgresql://[REDACTED]@db/x", Redactor.redactUrl("jdbc:postgresql://app:p^ssw0rd@db/x"));
+        // Not user info: a host that is evidently a host (a dot, localhost, an IPv6 literal), no
+        // ':' at all, an '@' beyond whitespace, a URL in quotes next to an address.
+        for (String same : List.of(
+                "see https://example.com:8443/a{b}@c and https://example.com/a^b@c",
+                "see http://localhost:8080/@alice and http://[::1]:8080/@alice and http://10.0.0.1:8080/@alice",
+                "connect to postgres://db:5432 as bob@example.com failed",
+                "postgres://app:secret host unreachable, mail bob@example.com",
+                "<a href='https://example.com:8443/x'>bob@example.com</a>",
+                "{\"url\":\"http://api:8080/x\",\"email\":\"bob@example.com\"}",
+                "urls 'http://api:8080/x','bob@example.com'",
+                "mail bob@example.com about https://example.com/x then alice@example.com")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+    }
+
+    @Test
+    void aParameterSectionAfterTheHostCoversTheRestOfTheUrl() {
+        // M-3 (iii): only the text up to the first / ? # went through the name=value pass, so a
+        // password holding one of those lost its head only (password=[REDACTED]/def123).
+        String[][] cases = {
+            {"jdbc:sqlserver://db:1433;user=sa;password=abc/def123;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=abc?def123;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=abc#def123;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db:1433;user=sa;password=a/b?c#d;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            // An '@' in a parameter value is not user info: the host stays, the value goes.
+            {"jdbc:sqlserver://db:1433;user=sa;password=p@ss;encrypt=true",
+                "jdbc:sqlserver://db:1433;user=sa;password=[REDACTED];encrypt=true"},
+            {"jdbc:sqlserver://db.internal:1433;user=sa;password=p@ss/w0rd;encrypt=true",
+                "jdbc:sqlserver://db.internal:1433;user=sa;password=[REDACTED];encrypt=true"},
+            // A ';' inside a user:password is still user info.
+            {"postgres://u:p;w@host/db refused", "postgres://[REDACTED]@host/db refused"},
+            {"postgres://us;er:hunter2@host/db refused", "postgres://[REDACTED]@host/db refused"},
+            {"postgres://u:p;x=1/w@host/db refused", "postgres://[REDACTED]@host/db refused"},
+            // The rest of such a URL is still redacted by name and by shape.
+            {"jdbc:sqlserver://db;databaseName=app/" + T + "?token=abc", "jdbc:sqlserver://db;databaseName=[redacted]?token=[REDACTED]"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        for (String same : List.of("jdbc:sqlserver://db:1433;databaseName=app/main;user=sa",
+                "jdbc:postgresql://db.internal:5432/app;ApplicationName=web",
+                "jdbc:h2:mem:redactfinal;DB_CLOSE_DELAY=-1")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+        // A space still ends an unquoted value (documented in docs/SECURITY.md).
+        assertEquals("jdbc:sqlserver://db:1433;user=sa;password=[REDACTED] def123;encrypt=true",
+            Redactor.redactMessage("jdbc:sqlserver://db:1433;user=sa;password=abc def123;encrypt=true"));
+    }
+
+    @Test
+    void anAtSignBeyondAnEvidentHostIsNotUserInfo() {
+        // L-2: "user info up to the last '@'" (for a password holding / ? #) applied to every
+        // non-web URL whose authority held ':', so a host list or host:port followed by an '@' in
+        // the query lost its hosts, path and query: mongodb://[REDACTED]@b.
+        for (String same : List.of(
+                "Failed mongodb://h1:27017,h2:27017/db?authSource=a@b",
+                "Failed mongodb://h1:27017,h2:27017,h3:27017/db?replicaSet=rs0&appName=a@b",
+                "Failed postgres://localhost:5432/db?options=user@x",
+                "Failed postgres://db.internal:5432/app?email=a@b.c",
+                "Failed redis://10.0.0.5:6379/0?client=a@b",
+                "Failed amqp://[::1]:5672/vhost?name=a@b")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+        String[][] cases = {
+            // Real user info in front of a host list is still masked, and the list is kept.
+            {"Failed mongodb://u:pw@h1:27017,h2:27017/db?authSource=a@b",
+                "Failed mongodb://[REDACTED]@h1:27017,h2:27017/db?authSource=a@b"},
+            // A password holding / ? # stays fully masked.
+            {"Failed postgres://app:pa/ss@db/x", "Failed postgres://[REDACTED]@db/x"},
+            {"Failed redis://:pa?ss@host:6379/0", "Failed redis://[REDACTED]@host:6379/0"},
+            {"Failed redis://:p#w@cache:6379", "Failed redis://[REDACTED]@cache:6379"},
+            // The tie: one dotless name:digits is a host and port, or a user and a numeric
+            // password cut at its '/'. Redaction wins it, in every scheme.
+            {"Failed postgres://app:12345/678@db/x", "Failed postgres://[REDACTED]@db/x"},
+            {"Failed redis://cache:6379/0?client=a@b", "Failed redis://[REDACTED]@b"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        assertEquals("mongodb://h1:27017,h2:27017/db?authSource=a@b",
+            Redactor.redactUrl("mongodb://h1:27017,h2:27017/db?authSource=a@b"));
+    }
+
+    @Test
+    void aDottedUserNameWithANumericPasswordIsStillMaskedOutsideWebSchemes() {
+        // The other side of L-2: "first.last:12345/678@db" reads as host.name:port/path. Before
+        // L-2 every non-web URL with ':' was masked to the last '@', so this one was; keeping an
+        // evident host's query must not start leaking it. For one evident host in a non-web
+        // scheme an '@' inside a path segment still ends the user info; one in the query, or one
+        // that starts a segment (/@handle), does not. Web schemes keep their path as before
+        // (http://localhost:3000/assets/logo@2x.png).
+        String[][] cases = {
+            {"Failed postgres://first.last:12345/678@db.internal/x", "Failed postgres://[REDACTED]@db.internal/x"},
+            {"Failed postgres://localhost:5432/678@db.internal/x?sslmode=require",
+                "Failed postgres://[REDACTED]@db.internal/x?sslmode=require"},
+            {"Failed redis://first.last:12345/6@cache/0?client=a@b", "Failed redis://[REDACTED]@cache/0?client=a@b"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        for (String same : List.of(
+                "Failed postgres://db.internal:5432/app?email=a@b.c",
+                "Failed sftp://files.example.com:22/home/@shared/x",
+                "Failed mongodb://h1.internal:27017,h2.internal:27017/db/a@b",
+                "see http://localhost:3000/assets/logo@2x.png",
+                "see https://example.com:8443/users/@bob/posts and https://unpkg.example.com:443/react@18.2.0/x.js")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+    }
+
+    @Test
+    void anySchemeIsFoundInsideARun() {
+        // L-3: inside a run only a fixed list of schemes was looked for, so a URL of any other
+        // scheme glued to a prefix kept its user info.
+        String[][] cases = {
+            {"backup_ldap://cn:hunter2@host/x", "backup_ldap://[REDACTED]@host/x"},
+            {"my_app+ldap://cn:hunter2@host/x", "my_app+ldap://[REDACTED]@host/x"},
+            {"x_y_z://u:hunter2@h/p", "x_y_z://[REDACTED]@h/p"},
+            {"jdbc:my_driver://u:hunter2@host/db", "jdbc:my_driver://[REDACTED]@host/db"},
+            {"GET /proxy/sftp://user:hunter2@host/x", "GET /proxy/sftp://[REDACTED]@host/x"},
+            {"1sftp://user:hunter2@host/x", "1sftp://[REDACTED]@host/x"},
+            {"-https://user:hunter2@host/x", "-https://[REDACTED]@host/x"},
+            {"%https://user:hunter2@host/x", "%https://[REDACTED]@host/x"},
+            // A token before the scheme is still redacted, glued to it or not.
+            {T + "_https://user:hunter2@host/x", "[redacted]https://[REDACTED]@host/x"},
+            {T + "https://user:hunter2@host/x", "[redacted]://[REDACTED]@host/x"},
+            {"tok a3f9Bc2d8eF1g4h5a3f9://x", "tok [redacted]://x"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        for (String same : List.of("see docs://guide and file:///etc/passwd and _://x and 9://x and -://u",
+                "com.example.Foo://bar", "jdbc:tc:postgresql:15.3:///db", "word_other://host/path",
+                "chrome-extension://abcdefghijklmnop/page.html")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+    }
+
+    @Test
+    void tokensThatWereTakenForNamesAreRedacted() {
+        // L-1: the name rule kept two-group tokens (base32 8-8: 0.76%), long digit groups, any
+        // short 0x literal and any <digits>-g<hex>.
+        for (String v : List.of("ZAXVVMA5-LAHQRWYU", "OLRWUXXO_PYMGPED7", "htvmuprj-tsnyagi2", "90974875-ffaaadac",
+                "deadbeef-12345678", "mgfKoexw-QMA3Jiqr", "KEBIXAGP3-WIOIIWDWS", "nxwegyb0-cxejavwa",
+                "mtfohuyjhq-sybhnvezz1", "PPAGTWEDKI26-ADBNODTICPRD", "uhiyagpanv71_jsznymzluuzm",
+                "reset-code-48213977", "session-abcdefghijkl-12345678", "test-user-12345678",
+                "0x1234567890abcdef", "0xdeadbeefcafe1234", "0x00a3f9bc2d8ef14a", "12345678-gdeadbeefcafe",
+                "99999999-gabcdef012345", "1-gabcdef0123456789", "facade-decade-accede-12345678",
+                "UFVScbbyhUokwvd5", "breaPmuykrtiAkooTUT9", "RFG8TuduskKhdorfsdAqwt")) {
+            assertEquals("seen [redacted] here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+        // Still names: words a reader would say, short digit groups, dates, a lambda's address
+        // (zero-padded to 16 hex digits), a git describe suffix after a tag.
+        for (String v : List.of("V3__create_users_table", "quarterly-report-2024q4-final", "users_email_address_key1",
+                "notification_preferences_json2", "invoice-48213-final-v2", "ORD-2024-11-000482", "INV-20241105-000482",
+                "build-number-20241105", "report-20241105-final", "customer-orders-2024-11-05", "page-12345-of-99999",
+                "audit_log_entries_2024", "user_sessions_archive_2024q4", "CONSTRAINT_INDEX_4", "PARTIALLY_REFUNDED_V2",
+                "shippingAddressLine2", "Http2ConnectionHandlerImpl", "UTF8StreamJsonParser", "XMLHttpRequest2Handler",
+                "2024-black-friday-sale", "x86_64-linux-gnu", "ip-10-0-12-34-internal", "web-server-01-prod-east",
+                "0x0000000800c8a1b0", "0x000001f0a1047000", "05-1423-g3f9a1c2", "v1-1423-g3f9a1c2beef",
+                "shipping_address2", "customer-orders1", "password_hasher2", "background_worker_2",
+                "monkey_dragon_letmein_2024", "the-quick-brown-fox-jumps-2")) {
+            assertEquals("seen " + v + " here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+        for (String m : List.of("Version v0.1.11-rc.6-12-gabc1234 is not supported",
+                "Version 2024.11.05-1423-g3f9a1c2 is not supported",
+                "class com.example.Foo$$Lambda$142/0x0000000800c8a1b0 cannot be cast to class Bar")) {
+            assertEquals(m, Redactor.redactMessage(m), m);
+        }
+    }
+
+    /** One shape of random token for {@link #randomTokensOfEveryShapeAreRedacted}. */
+    record TokenShape(String name, String alphabet, int length, int group, String separator, String prefix, int maxKept) {}
+
+    static final String B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static final String B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    static final String B62 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    static final String HEX = "0123456789abcdef";
+    static final String B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    static final String B36 = "abcdefghijklmnopqrstuvwxyz0123456789";
+    static final String CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
+
+    /** Tokens sampled per shape. */
+    static final int SURVIVAL_SAMPLES = 100_000;
+
+    /**
+     * The measured ceiling for a shape judged by the name rule: at most 1 token in 10,000 kept
+     * whole or by half (the owner's accepted residual for the name-versus-secret heuristic).
+     */
+    static final int ONE_IN_TEN_THOUSAND = SURVIVAL_SAMPLES / 10_000;
+
+    @Test
+    void randomTokensOfEveryShapeAreRedacted() {
+        // L-1 and M-2: the survival statistics of the second review, seeded, in the repo. For each
+        // shape, 100,000 random tokens that hold a digit and a letter go through redactMessage;
+        // a token "survives" when half of it or more is still readable in one piece. Shapes the
+        // name rule judges must stay at or under 1 in 10,000. Standard base64 can read as a path
+        // of short pieces ("YGw/A0C3B/hJOQFgnBClnm"): those ceilings are what c136520, the last
+        // commit before the path and name rules, measured (with margin for the seed), so the
+        // rules cost no base64 secret.
+        List<TokenShape> shapes = List.of(
+            new TokenShape("base64 40 (AWS secret key)", B64, 40, 0, "", "", 3),
+            new TokenShape("base64 43 (32 bytes)", B64, 43, 0, "", "", 3),
+            new TokenShape("base64 22 (16 bytes)", B64, 22, 0, "", "", 120),
+            new TokenShape("base64 27 (20 bytes)", B64, 27, 0, "", "", 35),
+            new TokenShape("base64 86 (64 bytes)", B64, 86, 0, "", "", 3),
+            new TokenShape("base64 40 after /", B64, 40, 0, "", "/", 3),
+            new TokenShape("base64url 43", B64URL, 43, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base64url 22", B64URL, 22, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 32", B62, 32, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 20", B62, 20, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 16", B62, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 32", HEX, 32, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 16", HEX, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 40", HEX, 40, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 32", B32, 32, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 (TOTP secret)", B32, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 24", B36, 24, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 16", B36, 16, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("crockford 26 (ULID-like)", CROCKFORD, 26, 0, "", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 32 in 8s -", HEX, 32, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 24 in 6s -", HEX, 24, 6, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 16 in 4s -", HEX, 16, 4, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 16 in 8s -", HEX, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 20 in 10s _", HEX, 20, 10, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("hex 24 in 12s -", HEX, 24, 12, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 20 in 5s -", B36, 20, 5, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 18 in 6s -", B36, 18, 6, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 16 in 8s -", B36, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 20 in 10s -", B36, 20, 10, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base36 24 in 12s _", B36, 24, 12, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 in 4s -", B32, 16, 4, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 20 in 5s -", B32, 20, 5, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 in 8s -", B32, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 16 in 8s _", B32, 16, 8, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 18 in 9s -", B32, 18, 9, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base32 24 in 12s -", B32, 24, 12, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("crockford 16 in 8s -", CROCKFORD, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 16 in 8s -", B62, 16, 8, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 24 in 12s -", B62, 24, 12, "-", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 24 in 8s _", B62, 24, 8, "_", "", ONE_IN_TEN_THOUSAND),
+            new TokenShape("base62 21 in 7s -", B62, 21, 7, "-", "", ONE_IN_TEN_THOUSAND));
+        var rnd = new java.util.Random(7);
+        var over = new java.util.ArrayList<String>();
+        var sb = new StringBuilder();
+        for (TokenShape shape : shapes) {
+            int kept = 0;
+            String example = null;
+            for (int n = 0; n < SURVIVAL_SAMPLES; n++) {
+                sb.setLength(0);
+                sb.append(shape.prefix());
+                boolean digit = false;
+                boolean letter = false;
+                for (int k = 0; k < shape.length(); k++) {
+                    if (shape.group() > 0 && k > 0 && k % shape.group() == 0) sb.append(shape.separator());
+                    char c = shape.alphabet().charAt(rnd.nextInt(shape.alphabet().length()));
+                    if (c >= '0' && c <= '9') digit = true;
+                    else if (Character.isLetter(c)) letter = true;
+                    sb.append(c);
+                }
+                if (!digit || !letter) continue; // all letters or all digits: never a candidate
+                String token = sb.toString();
+                String out = Redactor.redactMessage("key " + token + " rejected");
+                if (out.equals("key [redacted] rejected")) continue; // the common case, cheaply
+                if (longestSurvivingPiece(token, out) * 2 >= token.length()) {
+                    kept++;
+                    if (example == null) example = token + " => " + out;
+                }
+            }
+            if (kept > shape.maxKept()) {
+                over.add(shape.name() + ": " + kept + " of " + SURVIVAL_SAMPLES + " kept (limit " + shape.maxKept()
+                    + "), e.g. " + example);
+            }
+        }
+        assertTrue(over.isEmpty(), String.join("\n", over));
+    }
+
+    /** Length of the longest piece of {@code token} still present in {@code out}. */
+    static int longestSurvivingPiece(String token, String out) {
+        if (out.contains(token)) return token.length();
+        int best = 0;
+        for (int i = 0; i < token.length(); i++) {
+            for (int j = token.length(); j > i + best; j--) {
+                if (out.contains(token.substring(i, j))) {
+                    best = j - i;
+                    break;
+                }
+            }
+        }
+        return best;
+    }
+
+    @Test
+    void oneTimeAndSecondFactorValuesAreRedactedInTransit() {
+        // L-4: six-digit codes under names the transit rule did not know.
+        for (String name : List.of("onetimecode", "one_time_code", "onetime_code", "two_factor", "twoFactorCode",
+                "2fa", "2FA", "mfa", "verification")) {
+            assertEquals(name + "=[REDACTED]&page=2", Redactor.redactQuery(name + "=123456&page=2"), name);
+        }
+        assertEquals("[REDACTED]", Redactor.redactHeaders(Map.of("X-MFA", "123456")).get("X-MFA"));
+        assertEquals("two_factor_enabled=1&mfa_enabled=1&verification_status=ok&factor=2",
+            Redactor.redactQuery("two_factor_enabled=1&mfa_enabled=1&verification_status=ok&factor=2"));
+        // In a message (the field rule) only the forms paired with "code" count.
+        assertEquals("mfa=on verification=pending two_factor=on one_time_code=[REDACTED] twoFactorCode=[REDACTED]",
+            Redactor.redactMessage("mfa=on verification=pending two_factor=on one_time_code=123456 twoFactorCode=123456"));
+    }
+
+    @Test
+    void everyEntryPointFailsClosedWhenRedactionFailsInside() {
+        // H-1: the redactor runs on error paths, so a bug inside it must cost one marker, never an
+        // exception (the error being recorded would be lost) and never the raw input.
+        String secret = "hunter2-" + HEX32;
+        String trace = "java.lang.RuntimeException: bad token " + secret + "\n\tat a.B.c(B.java:1)\n"
+            + "Caused by: java.lang.Error: again " + secret + "\n\t... 3 more\n";
+        var headers = new java.util.LinkedHashMap<String, Object>();
+        headers.put("X-Token-Holder", secret);
+        headers.put("Referer", "https://app.example.com/reset/" + secret);
+        headers.put("X-Count", 3);
+        Map<String, Object> fields = new java.util.LinkedHashMap<>();
+        fields.put("message", "login");
+        fields.put("password", secret);
+        Redactor.faultForTest = () -> { throw new IllegalStateException("injected"); };
+        try {
+            assertEquals(Redactor.FAILED, Redactor.redactMessage("bad token " + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactQuery("token=" + secret + "&page=2"));
+            assertEquals(Redactor.FAILED, Redactor.redactQuery("x=" + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactUrl("https://app.example.com/reset?t=" + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactPath("/reset/" + secret));
+            assertEquals(Redactor.FAILED, Redactor.redactValue("v1 " + secret));
+            // A trace fails line by line, so its frames are kept.
+            assertEquals(Redactor.FAILED + "\n\tat a.B.c(B.java:1)\n" + Redactor.FAILED + "\n\t... 3 more\n",
+                Redactor.redactStackTrace(trace));
+            assertTrue(Redactor.isSensitive("page"), "a name that cannot be judged is treated as sensitive");
+            assertTrue(Redactor.isSensitiveField("page"));
+            var h = Redactor.redactHeaders(headers);
+            assertEquals(List.of("X-Token-Holder", "Referer", "X-Count"), List.copyOf(h.keySet()));
+            assertEquals(Redactor.FAILED, h.get("X-Token-Holder"));
+            assertEquals(Redactor.FAILED, h.get("Referer"));
+            assertEquals(Redactor.FAILED, h.get("X-Count"));
+            var f = Redactor.redact(fields);
+            assertEquals(List.of("message", "password"), List.copyOf(f.keySet()));
+            assertEquals(Redactor.FAILED, f.get("message"));
+            assertEquals(Redactor.FAILED, f.get("password"));
+        } finally {
+            Redactor.faultForTest = null;
+        }
+        // The seam is off again: ordinary results.
+        assertEquals("bad token [redacted]", Redactor.redactMessage("bad token " + HEX32));
+        assertFalse(Redactor.isSensitive("page"));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void mapFormsFailClosedOnAMapThatMisbehaves() {
+        // No seam needed here: a map whose iteration throws, a key that is not a String (a raw
+        // map from application code), and null.
+        Map<String, Object> throwing = new java.util.AbstractMap<>() {
+            @Override
+            public java.util.Set<Map.Entry<String, Object>> entrySet() {
+                throw new java.util.ConcurrentModificationException("mutated while logging");
+            }
+        };
+        assertEquals(Map.of("redaction", Redactor.FAILED), Redactor.redact(throwing));
+        assertEquals(Map.of("redaction", Redactor.FAILED), Redactor.redactHeaders(throwing));
+        Map raw = new java.util.LinkedHashMap();
+        raw.put(42, "hunter2-" + HEX32);
+        raw.put("ok", "fine");
+        assertEquals(Map.of("42", Redactor.FAILED, "ok", Redactor.FAILED), Redactor.redact((Map<String, Object>) raw));
+        assertEquals(Map.of("42", Redactor.FAILED, "ok", Redactor.FAILED), Redactor.redactHeaders((Map<String, ?>) raw));
+        assertEquals(Map.of(), Redactor.redact(null));
+        assertEquals(Map.of(), Redactor.redactHeaders(null));
     }
 }
