@@ -2077,10 +2077,11 @@ ops.prod-eu.url=https://eu.example.com
 - **CLI requests time out and cap what they read.** Every ops request has a 10 second connect
   timeout and a 30 second request timeout, and a response body is read within 30 seconds and
   at most 16 MB, so a server that never answers, sends a byte at a time or never stops sending
-  fails the command with a one-line error instead of hanging. Server text in an error message
-  is cut to about 300 characters. `ops.key` must be a regular file of at most 64 KB (a symlink
-  to one is fine; a pipe or device is refused). Toolchain downloads stop after 60 seconds
-  without data. An `OutOfMemoryError` or other `Error` exits 1 with a short message.
+  fails the command with a one-line error instead of hanging; `brace check`'s unauthenticated
+  `GET /` probe has the same limits (a root it cannot read in time is skipped). Server text in
+  an error message is cut to about 300 characters. `ops.key` must be a regular file of at most
+  64 KB (a symlink to one is fine; a pipe or device is refused). Toolchain downloads stop after
+  60 seconds without data, or after 30 minutes in all. An `OutOfMemoryError` or other `Error` exits 1 with a short message.
 - **`--json` output escapes control and format characters.** DEL, the C1 range (U+0080 to
   U+009F, including the 8-bit CSI), bidi and zero-width characters, the BOM, U+2028, U+2029
   and unpaired surrogates are written as `\uXXXX` escapes, in values and in key names. A JSON

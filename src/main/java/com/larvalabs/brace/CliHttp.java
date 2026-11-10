@@ -36,8 +36,10 @@ final class CliHttp {
     /** The most a response body may hold (16 MB). Tests shorten it. */
     static volatile long maxBodyBytes = 16L * 1024 * 1024;
 
+    /** Never follows a redirect, and holds no authenticator: {@code brace check}'s root probe relies on both. */
     private static final HttpClient CLIENT = HttpClient.newBuilder()
         .connectTimeout(CONNECT_TIMEOUT)
+        .followRedirects(HttpClient.Redirect.NEVER)
         .build();
 
     private static final ExecutorService READERS = Executors.newCachedThreadPool(r -> {

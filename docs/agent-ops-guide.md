@@ -86,6 +86,8 @@ piped. Force with `--json` or `--pretty`.
 
 Each request times out after 30 seconds and a response body is capped at 16 MB, so a server
 that stalls or never stops sending fails the command with a one-line error instead of hanging.
+`brace check`'s unauthenticated `GET /` (the CSP check) has the same limits and is skipped when
+it cannot finish.
 `--json` output escapes control, format and line-separator characters (and unpaired
 surrogates) as `\uXXXX`; a JSON parser reads them back as the original text.
 

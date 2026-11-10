@@ -145,21 +145,17 @@ public class CliCheck {
         }
     }
 
-    private static final HttpClient probeClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(5))
-        .followRedirects(HttpClient.Redirect.NEVER)
-        .build();
-
     /**
      * Fetch {@code GET /} without credentials, or null if that fails. The app's after-middleware
      * runs on every response, redirects and 404s included, so a login redirect still shows the
-     * headers the app sets.
+     * headers the app sets. Sent through {@link CliHttp} (verification pass): its client never
+     * follows a redirect and adds no credentials, and the body is read within its request
+     * timeout, total deadline and size cap, so a root that drips or never ends cannot hold
+     * {@code brace check}.
      */
     static RootProbe probeRoot(String baseUrl) {
         try {
-            var response = probeClient.send(
-                HttpRequest.newBuilder().uri(URI.create(baseUrl + "/")).timeout(Duration.ofSeconds(10)).GET().build(),
-                HttpResponse.BodyHandlers.discarding());
+            var response = CliHttp.send(HttpRequest.newBuilder().uri(URI.create(baseUrl + "/")).GET());
             return new RootProbe(response.statusCode(),
                 response.headers().firstValue("Content-Type").orElse(null),
                 response.headers().allValues("Content-Security-Policy"));

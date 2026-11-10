@@ -34,6 +34,10 @@ public class Cli {
     static int guarded(java.util.concurrent.Callable<Integer> command) {
         try {
             return command.call();
+        } catch (CliAuth.OpsAuthFailure e) {
+            // Already holds an excerpt of the server's text; excerpting again cut its marker.
+            CliOutput.printError(e.getMessage());
+            return 1;
         } catch (Exception e) {
             CliOutput.printError(CliOutput.excerpt(e.getMessage() != null ? e.getMessage() : e.toString()));
             return 1;

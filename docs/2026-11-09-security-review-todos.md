@@ -853,6 +853,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     keys in `brace check`, trailing-slash ops URLs, an `Error` exits 1 with a short message.
     Docs: `maxUploadSize("10MB")` now parses, `SessionOptions.secure(config.get(...))` sample,
     the README's missing-key rate-limit bucket is per client IP.
+  - **Verification fixes** (`fix(security): L11 the brace check root probe is bounded`). The
+    unauthenticated `GET /` probe had its own client and a discarding body, so its 10 s timeout
+    covered the headers only: a root that drips a byte every 200 ms held `brace check`
+    indefinitely, and an endless one ran until the server stopped. It now goes through `CliHttp`
+    (request timeout, body deadline, 16 MB cap; that client never follows a redirect and sends no
+    credentials) and is skipped like an unreachable root when it cannot finish. Nits: `Cli.guarded`
+    no longer excerpts an `OpsAuthFailure` message a second time (that cut its "N more
+    characters" marker), and `Toolchains.readWithIdleTimeout` has a 30-minute total deadline
+    besides its idle timeout. Tests in `CliHttpLimitsTest` and `CliExcerptTest`.
 
 - [x] **L12: `WebhookNotifier` posts exception text as Slack markup, unbounded**, `WebhookNotifier.java:29-34`
   - The message is redacted but otherwise raw; Slack and Mattermost parse `<!channel>` and
