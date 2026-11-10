@@ -44,6 +44,15 @@ class Counters {
      * @return the counter value after applying {@code delta}
      */
     long incrementAndGet(String key, long delta, Instant expiresAt) {
+        return incrementAndGet(key, delta, expiresAt, NO_DEADLINE);
+    }
+
+    /**
+     * As {@link #incrementAndGet(String, long, Instant)}, with every statement given a JDBC query
+     * timeout for what is left before {@code deadlineNanos} (see {@link #applyDeadline}), so an
+     * abandoned call does not leave a statement waiting on a lock (L16 verification).
+     */
+    long incrementAndGet(String key, long delta, Instant expiresAt, long deadlineNanos) {
         var db = new Database(dbFactory.openSession());
         try {
             db.beginTransaction();
@@ -52,8 +61,8 @@ class Counters {
             Timestamp nowTs = Timestamp.from(now);
             long result = db.jdbc(conn ->
                 dbFactory.isPostgres()
-                    ? incrementPostgres(conn, key, delta, exp, nowTs)
-                    : incrementPortable(conn, key, delta, exp, now, NO_DEADLINE));
+                    ? incrementPostgres(conn, key, delta, exp, nowTs, deadlineNanos)
+                    : incrementPortable(conn, key, delta, exp, now, deadlineNanos));
             db.commitTransaction();
             return result;
         } catch (RuntimeException e) {
@@ -224,7 +233,8 @@ class Counters {
      * for the rate limiter on a busy server; see {@code docs/2026-06-07-rate-limiter-load.md}.
      */
     private static long incrementPostgres(java.sql.Connection conn, String key, long delta,
-                                          Timestamp exp, Timestamp now) throws java.sql.SQLException {
+                                          Timestamp exp, Timestamp now, long deadlineNanos)
+            throws java.sql.SQLException {
         try (var ps = conn.prepareStatement(
                 "INSERT INTO brace_counters AS c (counter_key, n, expires_at) VALUES (?, ?, ?) " +
                 "ON CONFLICT (counter_key) DO UPDATE SET " +
@@ -237,6 +247,7 @@ class Counters {
             ps.setTimestamp(4, now);   // expiry comparison uses the same Timestamp basis as storage
             ps.setLong(5, delta);      // reset value when the prior window had expired
             ps.setLong(6, delta);      // otherwise increment the live count
+            applyDeadline(ps, deadlineNanos);
             try (var rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getLong(1);

@@ -1998,7 +1998,14 @@ again. Two layers do that, and which guarantee you get depends on whether the ap
   configuration). The record is shared by every instance and outlives the process, so **an
   accepted request is refused by every instance and after any restart or deploy**. Nothing is
   refused after a start. If the write fails (database down), sign-in still works and the rules
-  of the next bullet apply until it succeeds again.
+  of the next bullet apply until it succeeds again. A sign-in never waits on the database: the
+  write, waiting for a pooled connection included, is given 2 seconds and then counts as failed
+  (its statement carries a query timeout so it does not linger), and after a failure the
+  database is not tried again for 10 seconds, so every sign-in during an outage is answered at
+  once. A write that completes after its 2 seconds records only that request's nonce, which the
+  instance already remembers and the CLI never reuses, so it cannot refuse a later sign-in. Two
+  instances recording the same nonce at once is a replay on every database: the one that loses
+  the race (a unique-key violation) refuses it.
 - *Without a database, or while it is unreachable:* accepted nonces are remembered in each
   instance's memory only. A replay to the same instance is refused. A restart empties that
   memory, so for the first minute after a start the server **refuses any sign-in whose timestamp
