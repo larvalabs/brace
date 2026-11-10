@@ -205,7 +205,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     banner show the mapping's access.
   - **Model: Fable 5.2.** A public API and a startup invariant every app changes for.
 
-- [ ] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
+- [x] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
   - **What's wrong.**
     - `check()` returns `null` (not limited) for a null or blank key. The Javadoc calls this
       intentional; `docs/SECURITY.md` says such requests go to a `"(none)"` bucket "rather than
@@ -522,8 +522,8 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
 
 Fixed in the commit of the finding named, or the closeout docs commit.
 
-- [ ] `docs/SECURITY.md:1208-1209`: the `"(none)"` bucket claim (M4).
-- [ ] `docs/SECURITY.md:1187, 1190`: `before("/api", …)` limits only the literal `/api` (M4).
+- [x] `docs/SECURITY.md:1208-1209`: the `"(none)"` bucket claim (M4).
+- [x] `docs/SECURITY.md:1187, 1190`: `before("/api", …)` limits only the literal `/api` (M4).
 - [ ] `docs/SECURITY.md:707-716`: recommends `::ffff:10.0.0.0/104`, which throws at startup
   ("Prefix length must be 0..32"); the mapped form already matches the IPv4 CIDR. Remove it.
 - [ ] `docs/SECURITY.md:1389`: says ops auth v1 "is accepted for one release"; it is removed.

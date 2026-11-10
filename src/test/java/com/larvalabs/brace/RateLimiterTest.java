@@ -103,35 +103,82 @@ class RateLimiterTest {
         assertNull(limiter.handle(reqB));
     }
 
+    // ---- M4 / D2: a missing key is limited by default; the exemption is opt-in ----
+
     /**
-     * Null key → request is not rate-limited (intentional exemption).
-     *
-     * <p>A null key means "no identity established yet" (e.g., a GET to a login page before the
-     * user has entered an email). Bucketing all such requests together would cause site-wide
-     * lockout — the documented login example {@code RateLimiter.perKey(req -> req.formParam("email"), …)}
-     * would drain the "(none)" bucket on every unauthenticated GET and lock out the page.
+     * Null key → counted in one shared missing-key bucket (M4). Before the fix a request without
+     * the key header skipped the limiter entirely, so the documented API limiter
+     * {@code perKey(req -> req.header("Authorization"), …)} admitted unlimited anonymous traffic.
      */
     @Test
-    void nullKeyIsAllowed() {
+    void nullKeyIsLimitedByDefault() {
         var limiter = RateLimiter.perKey(req -> req.header("X-Missing"), 2, "1m");
         var req = fakeRequest("10.0.0.4");
-        // All requests pass — null key is exempted, no bucket is consumed.
+        assertNull(limiter.handle(req));
+        assertNull(limiter.handle(req));
+        var blocked = limiter.handle(req);
+        assertNotNull(blocked, "a missing key must not bypass the limiter");
+        assertEquals(429, blocked.status());
+    }
+
+    /** Blank and null keys share the one missing-key bucket. */
+    @Test
+    void blankAndNullKeysShareOneBucket() {
+        var calls = new AtomicInteger();
+        var limiter = RateLimiter.perKey(req -> calls.getAndIncrement() % 2 == 0 ? null : " \t ", 2, "1m");
+        var req = fakeRequest("10.0.0.5");
+        assertNull(limiter.handle(req)); // null
+        assertNull(limiter.handle(req)); // blank
+        assertNotNull(limiter.handle(req), "null and blank keys count against the same bucket");
+    }
+
+    /** {@code exemptMissingKey()} restores the old pass-through for null and blank keys. */
+    @Test
+    void exemptMissingKeyOptInPassesNullAndBlankKeys() {
+        var limiter = RateLimiter.perKey(req -> req.header("X-Missing"), 1, "1m").exemptMissingKey();
+        var req = fakeRequest("10.0.0.6");
         for (int i = 0; i < 10; i++) {
-            assertNull(limiter.handle(req), "null-key request should be exempt from rate limiting");
+            assertNull(limiter.handle(req), "opted-in limiter exempts a missing key");
         }
+        var blank = RateLimiter.perKey(r -> "  ", 1, "1m").exemptMissingKey();
+        for (int i = 0; i < 5; i++) {
+            assertNull(blank.handle(req));
+        }
+        // A present key is still limited on an opted-in limiter.
+        var keyed = RateLimiter.perKey(r -> r.header("X-User"), 1, "1m").exemptMissingKey();
+        var alice = fakeRequestWithHeader("X-User", "alice");
+        assertNull(keyed.handle(alice));
+        assertNotNull(keyed.handle(alice));
     }
 
     /**
-     * Blank key (all whitespace) → request is not rate-limited (same exemption as null).
+     * A client cannot reach the missing-key bucket by sending a key that spells its label: neither
+     * draining it for everyone else nor riding on it.
      */
     @Test
-    void blankKeyIsAllowed() {
-        var limiter = RateLimiter.perKey(req -> "   ", 1, "1m");
-        var req = fakeRequest("10.0.0.5");
-        // All requests pass — blank key is treated like null.
-        for (int i = 0; i < 5; i++) {
-            assertNull(limiter.handle(req), "blank-key request should be exempt from rate limiting");
+    void clientSentLiteralCannotTouchMissingKeyBucket() {
+        for (var literal : new String[]{"(none)", " (none)", "(none) ", RateLimiter.MISSING_KEY}) {
+            var limiter = RateLimiter.perKey(req -> req.header("X-User"), 1, "1m");
+            var attacker = fakeRequestWithHeader("X-User", literal);
+            var anonymous = fakeRequest("10.0.0.7");
+
+            assertNull(limiter.handle(attacker), "literal '" + literal + "' gets its own bucket");
+            assertNotNull(limiter.handle(attacker));
+            assertNull(limiter.handle(anonymous),
+                "literal '" + literal + "' must not have drained the missing-key bucket");
+            assertNotNull(limiter.handle(anonymous));
         }
+    }
+
+    /** Keys are stripped, so a trailing space is not a fresh bucket. Case is left to the extractor. */
+    @Test
+    void keysAreStrippedButNotCaseFolded() {
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 1, "1m");
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "victim")));
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", " victim ")),
+            "' victim ' must share the 'victim' bucket");
+        // Tokens are case-sensitive: the framework does not fold case.
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "Victim")));
     }
 
     // ---- Key normalization (M7a) ----
@@ -360,6 +407,19 @@ class RateLimiterTest {
         app.before("/limited", RateLimiter.perIp(3, "1m"));
         app.get("/limited", req -> Result.text("ok"));
         app.get("/unlimited", req -> Result.text("ok"));
+
+        // The documented login setup (docs/SECURITY.md "Rate Limiting"): count submissions only,
+        // one bucket per normalized username.
+        var loginLimit = RateLimiter.perKey(req -> {
+            var username = req.formParam("username");
+            return username == null ? null : username.strip().toLowerCase(java.util.Locale.ROOT);
+        }, 2, "1m");
+        app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
+        app.get("/login", req -> Result.text("login page"));
+        app.post("/login", req -> {
+            var form = req.form(LoginForm.class);
+            return Result.text("username=" + form.value().username());
+        }).csrf(false);
         app.start();
         port = app.actualPort();
     }
@@ -396,6 +456,41 @@ class RateLimiterTest {
             var response = get("/unlimited");
             assertEquals(200, response.statusCode());
         }
+    }
+
+    public record LoginForm(String username, String password) {}
+
+    private HttpResponse<String> postForm(String path, String body) throws IOException, InterruptedException {
+        var request = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + path))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * M4 repro: {@code POST /login?username=victim} with only {@code password=} in the body. Before
+     * the fix the limiter saw no username (body only) and skipped, while {@code req.form()} bound
+     * {@code username=victim} from the query: unlimited guesses against the victim's account.
+     */
+    @Test
+    void documentedLoginSetupLimitsUsernameInQueryString() throws Exception {
+        for (int i = 0; i < 2; i++) {
+            var r = postForm("/login?username=victim", "password=guess" + i);
+            assertEquals(200, r.statusCode());
+            assertEquals("username=null", r.body(), "the handler must not bind username from the query");
+        }
+        assertEquals(429, postForm("/login?username=victim", "password=guess3").statusCode(),
+            "a submission without a username is counted, not exempt");
+        // The login page itself is not counted.
+        for (int i = 0; i < 5; i++) {
+            assertEquals(200, get("/login").statusCode());
+        }
+        // A normalized username has its own bucket: case and padding variants share it.
+        assertEquals(200, postForm("/login", "username=Alice&password=a").statusCode());
+        assertEquals(200, postForm("/login", "username=+alice+&password=b").statusCode());
+        assertEquals(429, postForm("/login", "username=ALICE&password=c").statusCode());
     }
 
     @Test

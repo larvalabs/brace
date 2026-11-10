@@ -143,25 +143,79 @@ public class RateLimiter {
     /**
      * Rate-limit requests by an arbitrary key extracted from the request.
      *
-     * <p>If the key extractor returns {@code null} or a blank string, the request is
-     * <strong>not</strong> rate-limited and passes through immediately. This is an intentional
-     * escape hatch: a {@code null} key means "no identity established yet" (e.g., a GET to
-     * the login page before the user has typed their email), and bucketing those requests
-     * together with a shared limit would cause site-wide lockout of the guarded endpoint.
+     * <p>The key is stripped of surrounding whitespace; it is <em>not</em> case-folded, because
+     * tokens are case-sensitive. When the key names an identity that is case-insensitive
+     * (a username, an email address), normalize it in the extractor so {@code Alice} and
+     * {@code alice} share one bucket.
      *
-     * <p>Example: rate-limit login attempts by email address. GET requests to the login page
-     * (which have no email parameter) return {@code null} from the extractor and are exempted;
-     * only POST submissions with a concrete email value are counted.
+     * <p><strong>A null or blank key is limited, not skipped</strong> (M4): every such request
+     * counts against one shared missing-key bucket, so a client cannot bypass the limiter by
+     * leaving the key out. When a missing key genuinely means "nothing to count" and must pass
+     * through, opt in with {@link PerKeyLimit#exemptMissingKey()}.
+     *
+     * <p>Example: rate-limit login submissions per account. The limiter runs only for the POST,
+     * so viewing the login page is not counted; a submission without a username shares the
+     * missing-key bucket.
      *
      * <pre>{@code
-     * app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
+     * var loginLimit = RateLimiter.perKey(req -> {
+     *     var username = req.formParam("username");
+     *     return username == null ? null : username.strip().toLowerCase(Locale.ROOT);
+     * }, 5, "15m");
+     * app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
      * }</pre>
      */
-    public static Middleware.Before perKey(Function<Request, String> keyExtractor, int maxRequests, String duration) {
+    public static PerKeyLimit perKey(Function<Request, String> keyExtractor, int maxRequests, String duration) {
         var limiter = new RateLimiter(maxRequests, Cache.parseTtl(duration), keyExtractor,
             "perKey(" + maxRequests + "/" + duration + ")");
-        return limiter::check;
+        return new PerKeyLimit(limiter);
     }
+
+    /**
+     * The middleware returned by {@link #perKey}: register it with {@code app.before(...)}, and
+     * call {@link #exemptMissingKey()} on it to change how a missing key is treated.
+     */
+    public static final class PerKeyLimit implements Middleware.Before {
+        private final RateLimiter limiter;
+
+        private PerKeyLimit(RateLimiter limiter) {
+            this.limiter = limiter;
+        }
+
+        /**
+         * Let a request whose key is null or blank through without counting it, instead of
+         * counting it in the shared missing-key bucket (the default). Use it only where a client
+         * gains nothing by omitting the key, typically because another limiter already bounds
+         * the requests that lack one:
+         *
+         * <pre>{@code
+         * app.before("/api/*", RateLimiter.perIp(300, "1m"));                // everyone, by address
+         * app.before("/api/*", RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h")
+         *     .exemptMissingKey());                                           // keyed clients, by key
+         * }</pre>
+         *
+         * @return this middleware, for registration
+         */
+        public PerKeyLimit exemptMissingKey() {
+            limiter.exemptMissingKey = true;
+            return this;
+        }
+
+        @Override
+        public Result handle(Request req) {
+            return limiter.check(req);
+        }
+    }
+
+    /**
+     * Bucket key for a null or blank extractor result. It starts with a space, and
+     * {@link #normalizeKey} strips every key it returns and hashes to hex, so no client-sent key
+     * (not even the literal {@code " (none)"}) can land in, drain, or ride on this bucket.
+     */
+    static final String MISSING_KEY = " (none)";
+
+    /** Set by {@link PerKeyLimit#exemptMissingKey()}: skip, rather than count, a missing key. */
+    private volatile boolean exemptMissingKey;
 
     /**
      * Install the shared cluster-wide counter backend. Called by {@code Brace.start()} when the app
@@ -187,20 +241,19 @@ public class RateLimiter {
     }
 
     Result check(Request req) {
-        var rawKey = keyExtractor.apply(req);
+        // Normalize the key before it reaches either backend: stripped, and keys longer than
+        // MAX_KEY_LENGTH → SHA-256 hex digest (fixed 64 chars) to prevent DoS via unbounded
+        // brace_counters rows / local map entries with huge key strings.
+        var key = normalizeKey(keyExtractor.apply(req));
 
-        // null or blank key → request is not rate-limited (intentional exemption).
-        // See perKey() Javadoc for the rationale: a null key means "no identity established
-        // yet" (e.g., a GET to the login page before the email field is submitted). Bucketing
-        // all such requests together would cause site-wide lockout of the endpoint.
-        if (rawKey == null || rawKey.isBlank()) {
-            return null;
+        // M4: a null or blank key is counted in one shared bucket rather than skipping the limiter
+        // (leaving the key out was a bypass). The exemption is an explicit opt-in.
+        if (key == null) {
+            if (exemptMissingKey) {
+                return null;
+            }
+            key = MISSING_KEY;
         }
-
-        // Normalize the key before it reaches either backend:
-        //   keys longer than MAX_KEY_LENGTH → SHA-256 hex digest (fixed 64 chars) to prevent
-        //   DoS via unbounded brace_counters rows / local map entries with huge key strings.
-        var key = normalizeKey(rawKey);
 
         var counters = sharedCounters;
         if (counters != null) {
@@ -220,20 +273,29 @@ public class RateLimiter {
     }
 
     /**
-     * Normalize a non-null, non-blank raw key value extracted from the request.
+     * Normalize a raw key value extracted from the request.
      *
      * <ul>
+     *   <li>null or blank → {@code null}: the caller ({@link #check}) maps it to
+     *       {@link #MISSING_KEY} or exempts it.
+     *   <li>surrounding whitespace is stripped ({@link String#strip()}, the same definition of
+     *       whitespace as {@link String#isBlank()}), so {@code "victim "} is {@code "victim"}.
+     *       Case is left alone: tokens are case-sensitive, and the extractor is the place to fold
+     *       case for identities that are not.
      *   <li>length &gt; {@link #MAX_KEY_LENGTH} → SHA-256 hex digest — caps storage at 64 chars,
      *       preventing DoS via arbitrarily long user-controlled strings (see field javadoc).
-     *   <li>null or blank keys are handled by the caller ({@link #check}) before this is called.
      * </ul>
      *
-     * Applied before any prefix/window-slot decoration so the cap holds in both the local and
-     * shared backends.
+     * Never returns a value that starts with whitespace, which is what keeps
+     * {@link #MISSING_KEY} out of a client's reach. Applied before any prefix/window-slot
+     * decoration so the cap holds in both the local and shared backends.
      */
     static String normalizeKey(String rawKey) {
-        if (rawKey == null || rawKey.isBlank()) {
-            // Callers should have exempted null/blank keys already; treat defensively the same way.
+        if (rawKey == null) {
+            return null;
+        }
+        rawKey = rawKey.strip();
+        if (rawKey.isEmpty()) {
             return null;
         }
         if (rawKey.length() <= MAX_KEY_LENGTH) {

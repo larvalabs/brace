@@ -618,13 +618,30 @@ public class Request {
         return rightmostUntrusted(forValues.toArray(new String[0]));
     }
 
+    /**
+     * Bind the form to a record and validate it.
+     *
+     * <p>On {@code GET} and {@code HEAD} (a search or filter form) the fields come from the query
+     * string, with any body field taking precedence. On every other method ({@code POST},
+     * {@code PUT}, {@code PATCH}, {@code DELETE}) they come from the body only, the same source
+     * as {@link #formParam(String)} (M4): a value in the URL must not fill a field the body left
+     * out, or a guard reading {@code formParam} and the handler would see different values.
+     */
     public <T> Form<T> form(Class<T> type) {
+        if (!bindsQueryString(method)) {
+            return FormBinder.bind(type, parsedFormBody());
+        }
         // Copy: the cached form map must not absorb query params, and may be immutable-empty.
         var params = new LinkedHashMap<>(parsedFormBody());
         for (var entry : queryParams.entrySet()) {
             params.putIfAbsent(entry.getKey(), entry.getValue());
         }
         return FormBinder.bind(type, params);
+    }
+
+    /** Only the safe methods bind a form from the query string; fail closed for anything else. */
+    private static boolean bindsQueryString(String method) {
+        return "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
     }
 
     /**

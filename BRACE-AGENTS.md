@@ -671,6 +671,10 @@ if (jf.hasErrors()) return Result.json(Map.of("errors", jf.allErrors()), 422);
 
 `Form` methods: `hasErrors()`, `value()`, `errors()`, `allErrors()`, `errors(field)`, `raw(field)`.
 
+**Where `req.form` reads from:** on `POST`/`PUT`/`PATCH`/`DELETE`, the body only (the same
+source as `req.formParam`); a query-string value never fills a missing body field. On `GET`/`HEAD`
+(search and filter forms) it binds from the query string.
+
 **JSON APIs use the same pipeline** via `req.jsonForm(Class)` — never hand-roll per-field
 null checks or wrap `bodyAs` in try/catch. It binds the JSON body to the record, runs the
 annotations plus `validate(Errors)`, and turns a malformed or non-object body into a
@@ -1224,8 +1228,23 @@ app.get("/feed", req -> Result.sse(events -> {
 
 ```java
 app.before("/api/*", RateLimiter.perIp(100, "1m"));
-app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
+
+// Login attempts per account: count the POST only, normalize the identity
+var loginLimit = RateLimiter.perKey(req -> {
+    var email = req.formParam("email");
+    return email == null ? null : email.strip().toLowerCase(Locale.ROOT);
+}, 5, "15m");
+app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
 ```
+
+**A null or blank key is limited, not skipped:** every request without a key shares one
+missing-key bucket, so leaving the key out is not a bypass. That is why the login limiter above
+runs only for the POST: on `GET /login` (no email) every page view would drain the shared bucket.
+Opt out only where requests without a key are bounded some other way:
+`RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h").exemptMissingKey()` behind a
+`perIp` limiter. Keys are stripped of surrounding whitespace but **not case-folded** (tokens are
+case-sensitive): lower-case usernames and emails in the extractor. Key on what the handler uses:
+`formParam` and, on POST/PUT/PATCH/DELETE, `req.form` read the body only.
 
 **Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see `BRACE-OPS.md` → "Scaling horizontally" and [`docs/scaling.md`](docs/scaling.md).
 

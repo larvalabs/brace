@@ -1260,31 +1260,56 @@ read a room: joining one is still an authorization decision the handler makes be
 Protect endpoints from abuse with rate limiting:
 
 ```java
-// Per-IP rate limiting
-app.before("/api", RateLimiter.perIp(100, "1m"));
+// Per-IP rate limiting (`/api/*`: the bare `/api` pattern matches only the literal path /api)
+app.before("/api/*", RateLimiter.perIp(100, "1m"));
 
-// Per-user rate limiting
-app.before("/api", RateLimiter.perKey(
+// Per-client rate limiting: requests without the header share one bucket (see below)
+app.before("/api/*", RateLimiter.perKey(
     req -> req.header("Authorization"),
     1000,
     "1h"
 ));
 
-// Custom key function
-app.before("/login", RateLimiter.perKey(
-    req -> req.formParam("username"),
-    5,
-    "15m"
-));
+// Login attempts per account: count submissions only (not views of the login page), and
+// normalize the username so "Alice", "alice" and "alice " are one account
+var loginLimit = RateLimiter.perKey(req -> {
+    var username = req.formParam("username");
+    return username == null ? null : username.strip().toLowerCase(Locale.ROOT);
+}, 5, "15m");
+app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
 ```
+
+**Key the limiter on the value the handler uses.** `req.formParam(...)` reads the request body
+only, and so does `req.form(...)` on `POST`, `PUT`, `PATCH` and `DELETE`: a field in the query
+string never fills a form field on those methods. (Only `GET` and `HEAD` forms bind from the
+query string.) A limiter keyed on `formParam("username")` therefore counts exactly the username
+the login handler checks; `POST /login?username=victim` with no username in the body is counted
+in the missing-key bucket and binds no username.
 
 ### Key normalization (DoS protection)
 
 Rate-limit keys extracted from requests (usernames, tokens, IP addresses, custom headers) are
 normalized before use:
 
-- **Null or blank extractor result → `"(none)"`** bucket. Requests with a missing header or null
-  key are counted together rather than silently bypassing the limiter.
+- **Null or blank extractor result → one shared missing-key bucket** (shown as `(none)`). Requests
+  with a missing header or form field are counted together rather than silently bypassing the
+  limiter. The bucket's internal key cannot be produced from a request, so a client that sends
+  the literal value `(none)` gets its own bucket and cannot drain this one. Where a missing key
+  genuinely means "nothing to limit", opt out explicitly, and bound those requests some other
+  way (here, per IP):
+
+  ```java
+  app.before("/api/*", RateLimiter.perIp(300, "1m"));
+  app.before("/api/*", RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h")
+      .exemptMissingKey());
+  ```
+
+  Don't register a key limiter on a path whose page views carry no key (a `GET /login` with no
+  username) without restricting it to the submissions, as the login example above does:
+  otherwise every view counts against the shared bucket and the page locks for everyone.
+- **Surrounding whitespace is stripped**, so `"victim "` and `"victim"` are one bucket. **Case is
+  not folded**: tokens and API keys are case-sensitive. When the key is an identity that is
+  case-insensitive (a username, an email address), lower-case it in the extractor, as above.
 - **Keys longer than 64 characters → SHA-256 hex digest** (always exactly 64 chars). Long
   user-controlled values (e.g. bearer tokens, forged headers) would otherwise create unbounded
   storage — millions of bytes of map entries locally, or arbitrarily large rows in
