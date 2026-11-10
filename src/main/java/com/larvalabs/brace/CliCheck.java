@@ -81,7 +81,7 @@ public class CliCheck {
     }
 
     private static void renderHuman(CheckResult result) {
-        System.out.println();
+        CliOutput.println();
         for (var check : result.checks()) {
             String icon = switch (check.status()) {
                 case "pass" -> "\u2713";
@@ -89,18 +89,18 @@ public class CliCheck {
                 case "fail" -> "\u2717";
                 default -> "?";
             };
-            System.out.printf("%s %-15s %s%n", icon, check.name(), check.message());
+            CliOutput.printf("%s %-15s %s%n", icon, check.name(), check.message());
             if (check.followUp() != null && !"pass".equals(check.status())) {
-                System.out.printf("  %-15s \u2192 %s%n", "", check.followUp());
+                CliOutput.printf("  %-15s \u2192 %s%n", "", check.followUp());
             }
         }
-        System.out.println();
+        CliOutput.println();
         long issues = result.checks().stream()
             .filter(c -> !"pass".equals(c.status())).count();
         if (issues == 0) {
-            System.out.println("All checks passed");
+            CliOutput.println("All checks passed");
         } else {
-            System.out.println(issues + " issue" + (issues == 1 ? "" : "s") + " found");
+            CliOutput.println(issues + " issue" + (issues == 1 ? "" : "s") + " found");
         }
     }
 

@@ -1,6 +1,7 @@
 package com.larvalabs.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.*;
@@ -28,6 +29,13 @@ public class CliOps {
         // first non-comment line, public key on the second. Never clobber an existing key — that
         // would orphan a key already trusted by a deployed server's ops-authorized-keys.
         Path keyFile = projectDir.resolve("ops-private.key");
+        try {
+            // Fail before generating anything if the authorized-keys list is a planted symlink.
+            SecretFiles.refuseSymlink(projectDir.resolve("ops-authorized-keys"));
+        } catch (IOException e) {
+            CliOutput.printError(e.getMessage());
+            return 1;
+        }
         if (Files.exists(keyFile)) {
             CliOutput.printError("ops-private.key already exists — refusing to overwrite. "
                 + "Delete it first to generate a fresh keypair.");
@@ -67,9 +75,9 @@ public class CliOps {
                     }
                 }
                 if (!replaced) lines.add(entry);
-                Files.writeString(file, String.join("\n", lines) + "\n");
+                SecretFiles.writeProjectFile(file, String.join("\n", lines) + "\n");
             } else {
-                Files.writeString(file,
+                SecretFiles.writeProjectFile(file,
                     "# Ops authorized public keys — one per line, optional label\n" + entry + "\n");
             }
         } catch (Exception e) {

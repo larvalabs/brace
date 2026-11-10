@@ -18,7 +18,7 @@ public class CliInit {
         // .brace
         Path brace = projectDir.resolve(".brace");
         if (!Files.exists(brace)) {
-            Files.writeString(brace,
+            SecretFiles.writeProjectFile(brace,
                 "# Brace CLI project config — committed to git\n" +
                 "ops.local.url=http://localhost:8080\n" +
                 "# ops.prod.url=https://your-app.example.com\n" +
@@ -32,7 +32,7 @@ public class CliInit {
         // .brace.local
         Path local1 = projectDir.resolve(".brace.local");
         if (!Files.exists(local1)) {
-            Files.writeString(local1,
+            SecretFiles.writeProjectFile(local1,
                 "# Brace CLI per-developer overrides — gitignored\n" +
                 "ops.key=ops-private.key\n" +
                 "\n" +
@@ -59,7 +59,7 @@ public class CliInit {
         if (!needs.isEmpty()) {
             String addition = (existing.isEmpty() || existing.endsWith("\n") ? "" : "\n")
                 + "\n# brace CLI\n" + String.join("\n", needs) + "\n";
-            Files.writeString(gitignore, existing + addition);
+            SecretFiles.writeProjectFile(gitignore, existing + addition);
             local.add(new Check(".gitignore", true, "added " + String.join(", ", needs)));
             actions.add("Updated .gitignore");
         } else {
@@ -169,26 +169,26 @@ public class CliInit {
                 "actions", r.actions())));
             return;
         }
-        System.out.println();
-        System.out.println("Local setup");
+        CliOutput.println();
+        CliOutput.println("Local setup");
         for (var c : r.local()) {
-            System.out.println("  " + (c.ok() ? "✓" : "✗") + " "
+            CliOutput.println("  " + (c.ok() ? "✓" : "✗") + " "
                 + pad(c.name(), 24) + " " + c.detail());
         }
         if (!r.remote().isEmpty()) {
-            System.out.println();
-            System.out.println("Remote (prod)");
+            CliOutput.println();
+            CliOutput.println("Remote (prod)");
             for (var c : r.remote()) {
-                System.out.println("  " + (c.ok() ? "✓" : "✗") + " "
+                CliOutput.println("  " + (c.ok() ? "✓" : "✗") + " "
                     + pad(c.name(), 24) + " " + c.detail());
             }
         }
         if (!r.actions().isEmpty()) {
-            System.out.println();
-            System.out.println("Actions:");
-            for (var a : r.actions()) System.out.println("  - " + a);
+            CliOutput.println();
+            CliOutput.println("Actions:");
+            for (var a : r.actions()) CliOutput.println("  - " + a);
         }
-        System.out.println();
+        CliOutput.println();
     }
 
     private static void addAuthFailureActions(Path projectDir, Path privKey,

@@ -79,14 +79,14 @@ public class CliCommands {
     }
 
     private static void renderErrorDetail(JsonNode e) {
-        System.out.println(e.path("errorType").asText("?") + ": " + e.path("message").asText(""));
-        System.out.println("  id          " + e.path("id").asText("?"));
-        System.out.println("  route       " + e.path("route").asText(""));
-        System.out.println("  count       " + e.path("occurrenceCount").asInt(0));
-        System.out.println("  first seen  " + e.path("firstSeen").asText(""));
-        System.out.println("  last seen   " + e.path("lastSeen").asText(""));
+        CliOutput.println(e.path("errorType").asText("?") + ": " + e.path("message").asText(""));
+        CliOutput.println("  id          " + e.path("id").asText("?"));
+        CliOutput.println("  route       " + e.path("route").asText(""));
+        CliOutput.println("  count       " + e.path("occurrenceCount").asInt(0));
+        CliOutput.println("  first seen  " + e.path("firstSeen").asText(""));
+        CliOutput.println("  last seen   " + e.path("lastSeen").asText(""));
         if (!e.path("resolvedAt").isNull() && !e.path("resolvedAt").isMissingNode()) {
-            System.out.println("  resolved    " + e.path("resolvedAt").asText(""));
+            CliOutput.println("  resolved    " + e.path("resolvedAt").asText(""));
         }
         printTextSection("Request", e.path("requestDetail"));
         printTextSection("Request headers", e.path("requestHeaders"));
@@ -94,18 +94,23 @@ public class CliCommands {
         printTextSection("Stack trace", e.path("stackTrace"));
     }
 
+    /**
+     * Server text that is multi-line by nature (a stack trace, request headers). It stays
+     * multi-line, but every line carries the block's {@code "  | "} gutter and goes through
+     * {@code sanitizeLine}, so none of it can pass for a line of the CLI's own.
+     */
     private static void printTextSection(String title, JsonNode value) {
         if (value.isMissingNode() || value.isNull()) return;
         String text = value.asText("");
         if (text.isBlank()) return;
-        System.out.println();
-        System.out.println(title + ":");
-        for (var line : text.split("\n")) System.out.println("  " + line);
+        CliOutput.println();
+        CliOutput.println(title + ":");
+        for (var line : text.split("\\R")) CliOutput.println("  | " + line.replace("\t", "    "));
     }
 
     private static void renderErrorsTable(JsonNode errors) {
         if (errors.size() == 0) {
-            System.out.println("No errors.");
+            CliOutput.println("No errors.");
             return;
         }
         var rows = new ArrayList<List<String>>();
@@ -117,9 +122,11 @@ public class CliCommands {
                 e.path("route").asText(""),
                 e.path("message").asText("")));
         }
-        System.out.println(CliOutput.table(
+        // print, not println: the table's line breaks are its own (cells are one line each).
+        CliOutput.print(CliOutput.table(
             List.of("ID", "COUNT", "LAST SEEN", "ROUTE", "MESSAGE"),
             rows, 120));
+        CliOutput.println();
     }
 
     // ---------- brace logs ----------
@@ -199,7 +206,7 @@ public class CliCommands {
             if (k.equals("id") || k.equals("ts") || k.equals("level") || k.equals("message") || k.equals("event")) continue;
             sb.append(" ").append(k).append("=").append(entry.getValue().asText());
         }
-        System.out.println(sb);
+        CliOutput.println(sb.toString());
     }
 
     // ---------- brace status ----------
@@ -278,17 +285,17 @@ public class CliCommands {
     }
 
     static void renderStatus(JsonNode root) {
-        System.out.println();
-        System.out.println("App");
+        CliOutput.println();
+        CliOutput.println("App");
         var app = root.path("app");
-        System.out.println("  uptime    " + app.path("uptime").asText("-"));
+        CliOutput.println("  uptime    " + app.path("uptime").asText("-"));
         // 0.1.11+ servers only; older ones omit it.
-        if (app.has("braceVersion")) System.out.println("  brace     " + app.path("braceVersion").asText());
-        System.out.println("  java      " + app.path("javaVersion").asText("-"));
-        System.out.println();
-        System.out.println("HTTP");
+        if (app.has("braceVersion")) CliOutput.println("  brace     " + app.path("braceVersion").asText());
+        CliOutput.println("  java      " + app.path("javaVersion").asText("-"));
+        CliOutput.println();
+        CliOutput.println("HTTP");
         var http = root.path("http");
-        System.out.println("  status    " + http.path("statusCodes").toString());
+        CliOutput.println("  status    " + http.path("statusCodes").toString());
         // 0.1.10+ servers only; older ones omit these, so print nothing rather than zeros.
         // The JSON is per minute; show per second on a busy app, as the dashboard does (RateUnit).
         var rpm = http.path("requestsPerMinute");
@@ -296,72 +303,72 @@ public class CliCommands {
         if (!rpm.isMissingNode()) {
             long last = rpm.path("lastMinute").asLong();
             if (unit == RateUnit.SECOND) {
-                System.out.printf("  req/s     %s last minute (%,d requests), %s avg over %d min%n",
+                CliOutput.printf("  req/s     %s last minute (%,d requests), %s avg over %d min%n",
                     RateUnit.format(unit.fromPerMinute(last)), last,
                     RateUnit.format(unit.fromPerMinute(rpm.path("avg").asDouble())), rpm.path("windowMinutes").asInt());
             } else {
-                System.out.printf("  req/min   %d last minute, %.1f avg over %d min%n",
+                CliOutput.printf("  req/min   %d last minute, %.1f avg over %d min%n",
                     last, rpm.path("avg").asDouble(), rpm.path("windowMinutes").asInt());
             }
         }
         var top = http.path("topRoutes");
         if (top.size() > 0) {
-            System.out.println("  busiest (last " + http.path("topRoutesWindowMinutes").asInt() + " min):");
+            CliOutput.println("  busiest (last " + http.path("topRoutesWindowMinutes").asInt() + " min):");
             for (var r : top) {
                 String perUnit = unit == RateUnit.MINUTE ? String.format("%.1f", r.path("perMinute").asDouble())
                     : RateUnit.format(unit.fromPerMinute(r.path("perMinute").asDouble()));
-                System.out.printf("    %s  %s%s (%.1f%%)%n",
+                CliOutput.printf("    %s  %s%s (%.1f%%)%n",
                     r.path("route").asText(), perUnit, unit.suffix, r.path("sharePct").asDouble());
             }
         }
         var slow = http.path("slowestRoutes");
         if (slow.size() > 0) {
-            System.out.println("  slowest:");
+            CliOutput.println("  slowest:");
             for (var r : slow) {
-                System.out.println("    " + r.path("route").asText() + "  "
+                CliOutput.println("    " + r.path("route").asText() + "  "
                     + r.path("avgMs").asDouble() + "ms (" + r.path("count").asInt() + ")");
             }
         }
         // Present only when the app enabled analytics.
         var analytics = root.path("analytics");
         if (analytics.has("todayVisitors")) {
-            System.out.println();
-            System.out.printf("Visitors  %,d today, %,d pageviews, %,d now%n", analytics.path("todayVisitors").asLong(),
+            CliOutput.println();
+            CliOutput.printf("Visitors  %,d today, %,d pageviews, %,d now%n", analytics.path("todayVisitors").asLong(),
                 analytics.path("todayPageviews").asLong(), analytics.path("live").asLong());
         }
-        System.out.println();
-        System.out.println("Errors    " + errorCount(root));
-        System.out.println();
+        CliOutput.println();
+        CliOutput.println("Errors    " + errorCount(root));
+        CliOutput.println();
         var jvm = root.path("jvm");
         if (!jvm.isMissingNode()) {
             var heap = jvm.path("heap");
-            System.out.println("Heap      " + heap.path("usedMB").asLong() + "MB / "
+            CliOutput.println("Heap      " + heap.path("usedMB").asLong() + "MB / "
                 + heap.path("maxMB").asLong() + "MB");
         }
         // Opt-in blocks (--include): only printed when the server returned them.
         var profiling = jvm.path("profiling");
         if (!profiling.isMissingNode()) {
-            System.out.println();
-            System.out.println("Hot methods (samples, last " + profiling.path("windowSeconds").asInt() + "s)");
+            CliOutput.println();
+            CliOutput.println("Hot methods (samples, last " + profiling.path("windowSeconds").asInt() + "s)");
             for (var m : first(profiling.path("hotMethods"), 10)) {
-                System.out.printf("  %8d  %s%n", m.path("samples").asLong(), m.path("method").asText());
+                CliOutput.printf("  %8d  %s%n", m.path("samples").asLong(), m.path("method").asText());
             }
-            System.out.println("Top allocations");
+            CliOutput.println("Top allocations");
             for (var a : first(profiling.path("topAllocations"), 10)) {
-                System.out.printf("  %8s  %s%n", formatBytes(a.path("bytes").asLong()), a.path("class").asText());
+                CliOutput.printf("  %8s  %s%n", formatBytes(a.path("bytes").asLong()), a.path("class").asText());
             }
         }
         var minutes = root.path("timeseries").path("minutes");
         if (minutes.size() > 0) {
-            System.out.println();
-            System.out.println("Last minutes (requests / errors / avg ms)");
+            CliOutput.println();
+            CliOutput.println("Last minutes (requests / errors / avg ms)");
             for (int i = Math.max(0, minutes.size() - 10); i < minutes.size(); i++) {
                 var m = minutes.get(i);
-                System.out.printf("  %s  %6d  %4d  %8.1f%n", m.path("ts").asText(),
+                CliOutput.printf("  %s  %6d  %4d  %8.1f%n", m.path("ts").asText(),
                     m.path("requests").asLong(), m.path("errors").asLong(), m.path("avgMs").asDouble());
             }
         }
-        System.out.println();
+        CliOutput.println();
     }
 
     private static List<JsonNode> first(JsonNode array, int n) {
@@ -401,14 +408,14 @@ public class CliCommands {
             System.out.println(CliOutput.json(root));
         } else {
             if (!root.path("enabled").asBoolean(false)) {
-                System.out.println("Cache: disabled");
+                CliOutput.println("Cache: disabled");
             } else {
-                System.out.println("Cache");
-                System.out.println("  size       " + root.path("size").asLong());
-                System.out.println("  hits       " + root.path("hits").asLong());
-                System.out.println("  misses     " + root.path("misses").asLong());
-                System.out.println("  hit rate   " + String.format("%.1f%%", root.path("hitRate").asDouble() * 100));
-                System.out.println("  evictions  " + root.path("evictions").asLong());
+                CliOutput.println("Cache");
+                CliOutput.println("  size       " + root.path("size").asLong());
+                CliOutput.println("  hits       " + root.path("hits").asLong());
+                CliOutput.println("  misses     " + root.path("misses").asLong());
+                CliOutput.println("  hit rate   " + String.format("%.1f%%", root.path("hitRate").asDouble() * 100));
+                CliOutput.println("  evictions  " + root.path("evictions").asLong());
             }
         }
         return 0;
@@ -446,15 +453,17 @@ public class CliCommands {
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(root));
         } else {
-            System.out.print(renderAnalytics(root));
+            CliOutput.print(renderAnalytics(root));
         }
         return 0;
     }
 
     static String renderAnalytics(JsonNode r) {
         var sb = new StringBuilder();
-        sb.append(r.path("from").asText()).append(" – ").append(r.path("to").asText())
-          .append("  (").append(r.path("timezone").asText()).append(")\n\n");
+        // Server values go in through sanitizeLine (or table): the report's line breaks are its own.
+        sb.append(CliOutput.sanitizeLine(r.path("from").asText())).append(" – ")
+          .append(CliOutput.sanitizeLine(r.path("to").asText()))
+          .append("  (").append(CliOutput.sanitizeLine(r.path("timezone").asText())).append(")\n\n");
         long v = r.path("visitors").asLong(), pv = r.path("pageviews").asLong();
         sb.append(String.format("Visitors %,d   Pageviews %,d   Views/visit %.2f   Now %,d%n%n",
             v, pv, v == 0 ? 0.0 : (double) pv / v, r.path("live").asLong()));
@@ -468,7 +477,9 @@ public class CliCommands {
         for (var it = r.path("notCounted").fields(); it.hasNext(); ) {
             var e = it.next();
             total += e.getValue().asLong();
-            if (e.getValue().asLong() > 0) parts.add(e.getKey() + " " + String.format("%,d", e.getValue().asLong()));
+            if (e.getValue().asLong() > 0) {
+                parts.add(CliOutput.sanitizeLine(e.getKey()) + " " + String.format("%,d", e.getValue().asLong()));
+            }
         }
         sb.append(String.format("Not counted: %,d", total));
         if (!parts.isEmpty()) sb.append(" (").append(String.join(", ", parts)).append(')');
@@ -510,10 +521,30 @@ public class CliCommands {
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
         if (mode == CliOutput.Mode.JSON) {
-            System.out.println(response.body());
-        } else {
-            CliOutput.printSuccess("cache cleared");
+            return printJsonBody(response);
         }
+        CliOutput.printSuccess("cache cleared");
+        return 0;
+    }
+
+    /**
+     * JSON mode for a command whose server reply is passed on: parse it and print it
+     * re-serialized (compact, control characters escaped by Jackson), never the raw body, which
+     * a hostile server could fill with terminal escape sequences (L11). A body that isn't JSON
+     * gets the same one-line error, and exit code, as an HTTP error status.
+     */
+    private static int printJsonBody(HttpResponse<String> response) {
+        JsonNode body;
+        try {
+            body = Json.mapper().readTree(response.body());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            body = null;
+        }
+        if (body == null || body.isMissingNode()) {
+            CliOutput.printError("HTTP " + response.statusCode() + " but the response is not JSON: " + response.body());
+            return 2;
+        }
+        System.out.println(CliOutput.json(body));
         return 0;
     }
 
@@ -544,10 +575,9 @@ public class CliCommands {
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
         if (mode == CliOutput.Mode.JSON) {
-            System.out.println(response.body());
-        } else {
-            CliOutput.printSuccess("resolved error " + id);
+            return printJsonBody(response);
         }
+        CliOutput.printSuccess("resolved error " + id);
         return 0;
     }
 
