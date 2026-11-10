@@ -2124,7 +2124,9 @@ Strict parsing yields exactly one address or throws; on top of that, group synta
 (`g: a@b.c, victim@x.y;`, several mailboxes as one address), route addresses
 (`<@relay:a@b.c>`) and control characters are refused. A comma inside a quoted display name
 (`"Doe, J" <a@b.c>`) is one mailbox and is accepted. `@Email` likewise rejects `,` `;` `<` `>`,
-whitespace and control characters. `MailerNotifier` accepts several recipients, validates each at
+`(` `)` `"`, whitespace and control characters, and accepts only a value that parses as one bare
+address equal to itself: an RFC 822 comment (`evil@attacker.tld(ceo@corp.example)`) would
+otherwise be sent as the display name. `MailerNotifier` accepts several recipients, validates each at
 construction and sends each its own message.
 
 ## Secrets Management

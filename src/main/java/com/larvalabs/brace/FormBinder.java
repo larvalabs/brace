@@ -265,19 +265,28 @@ public class FormBinder {
     }
 
     /**
-     * L14: {@code @Email} validates one address. A comma, semicolon, angle bracket, whitespace or
+     * L14: {@code @Email} validates one bare address. A comma, semicolon, angle bracket, whitespace or
      * control character would let a form value smuggle a recipient list ("a@b.c, victim@x.y") into
-     * code that later hands it to a mail API.
+     * code that later hands it to a mail API. Parentheses and double quotes are refused too (L14
+     * final review): an RFC 822 comment parses as the display name, so
+     * {@code evil@attacker.tld(ceo@corp.example)} went out as
+     * {@code "ceo@corp.example" <evil@attacker.tld>}. What is left must parse strictly as an address
+     * with no display name whose address is exactly the value given.
      */
     private static boolean isSingleAddress(String s) {
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
-            if (c == ',' || c == ';' || c == '<' || c == '>' || Character.isWhitespace(c)
-                    || Character.isISOControl(c)) {
+            if (c == ',' || c == ';' || c == '<' || c == '>' || c == '(' || c == ')' || c == '"'
+                    || Character.isWhitespace(c) || Character.isISOControl(c)) {
                 return false;
             }
         }
-        return true;
+        try {
+            var address = new jakarta.mail.internet.InternetAddress(s, true);
+            return address.getPersonal() == null && s.equals(address.getAddress());
+        } catch (jakarta.mail.internet.AddressException e) {
+            return false;
+        }
     }
 
     @SuppressWarnings("unchecked")

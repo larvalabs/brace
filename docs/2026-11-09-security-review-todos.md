@@ -702,6 +702,11 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     blunt `,`/`;` check is gone (a quoted display name with a comma is one address); groups,
     route addresses and control characters are refused. `cc`, `from` and `replyTo` are strict
     single addresses too (`replyTo` is now applied as `Reply-To`).
+  - **Final review fixes** (`fix(security): L14 final review fixes`). `@Email` accepted RFC 822
+    comments, which became a display name on the wire: `evil@attacker.tld(ceo@corp.example)` was
+    sent as `"ceo@corp.example" <evil@attacker.tld>`. `@Email` now refuses `(`, `)` and `"`, and
+    the value must parse strictly as one address with no personal part whose address equals the
+    value. Test: `FormTest.emailRejectsCommentsThatBecomeADisplayName`.
 
 - [x] **L15: `QueryTaint` evasions; the cache class allow-check covers only `getOrSet`**, `Sort.java:73-89`, `Database.java:690, 702`, `QueryTaint.java:95-100, 143`, `Cache.java:294, 308`
   - `Sort.of` normalizes its input, so `secretField%20`, `secretField desc` and

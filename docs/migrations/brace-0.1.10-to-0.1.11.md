@@ -1452,7 +1452,9 @@ cleartext. Dev-mode capture (no SMTP URL) is unaffected.
 **One address per field.** `"a@b.c, victim@x.y"` passed `@Email`, and `Mailer.to(...)` expanded
 it to two recipients. Now:
 
-- `@Email` rejects `,`, `;`, `<`, `>`, whitespace and control characters.
+- `@Email` rejects `,`, `;`, `<`, `>`, `(`, `)`, `"`, whitespace and control characters, and
+  accepts only a bare address: `evil@attacker.tld(ceo@corp.example)` used to pass and went out
+  with `ceo@corp.example` as its display name.
 - `to(...)`, `cc(...)`, the per-message `from(...)`, `Mailer.from(...)` and
   `Mailer.replyTo(...)` each take exactly one address. A list, a group (`g: a@b.c;`), a route
   address or a control character throws `IllegalArgumentException` (`Mailer.from` and
