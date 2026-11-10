@@ -243,7 +243,7 @@ November 2026" on). That guide is the reference; this table is the checklist it 
 | The Postgres cache caps page rows separately (`CacheBackend.postgres(db, maxEntries, maxPageEntries)`) | L4 review | None expected |
 | `cache.get(key, type)` misses on an unregistered subtype | L15 | Read with the concrete type |
 | A previous session secret that is a placeholder fails `start()`; previous-secret cookies need a bounded `_abs`; `sessions(options)` copies the options | M7 | Don't list public or leaked secrets; configure options before the call |
-| A log field named exactly `code`, `sig` or `otp` is redacted; `/ops/errors` redacts by value shape | M6 | Rename such log fields |
+| A log field or route parameter whose name contains `jwt`, `assertion`, `signature`, `authkey` or `nonce`, pairs `code` with an auth word, or is exactly `otp` or `totp`, is redacted (`code` and `sig` alone are sensitive only in query strings and headers); `/ops/errors` redacts by value shape | M6 | Rename such log fields |
 | Analytics rows are capped per visitor and per day | L16 | Raise the caps on high-traffic sites |
 | A literal `.` or `..` path segment is a 404; WebSocket paths are exact | L9, L9 review | None expected |
 | A static mapping answers 405 to methods other than GET and HEAD, and never serves a path a route pattern matches | M3 review | Serve anything that takes another method from a route |

@@ -945,7 +945,7 @@ Examples:
 |---|---|---|
 | `1.2.3.4` | `10.0.0.0/8` | `1.2.3.4` |
 | `spoofed, 9.9.9.9` | `10.0.0.0/8` | `9.9.9.9` (rightmost untrusted, not attacker-supplied leftmost) |
-| `client, 10.0.0.2, 10.0.0.1` | `10.0.0.0/8` | `client` (both proxies trusted) |
+| `203.0.113.9, 10.0.0.2, 10.0.0.1` | `10.0.0.0/8` | `203.0.113.9` (both proxies trusted) |
 | `10.0.0.1, 10.0.0.2` | `10.0.0.0/8` | `10.0.0.1` (all trusted → leftmost) |
 
 **Dual-stack.** `TrustedProxies` matches addresses by binary value and never resolves names. An
@@ -1951,7 +1951,7 @@ Ops endpoints (`/ops/*`) provide powerful observability and control. **Secure th
 Ops endpoints use public key authentication:
 
 ```java
-app.ops("authorized-keys");
+app.ops("authorized-keys").opsOrigins("https://app.example.com");   // origins: required outside dev
 ```
 
 The `authorized-keys` file contains public keys of clients allowed to access ops endpoints.

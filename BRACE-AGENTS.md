@@ -27,6 +27,12 @@ lists breaking changes with before/after examples. Guides live at
 https://github.com/larvalabs/brace/tree/main/docs/migrations and in the dist zip at
 `brace-X.Y.Z/migrations/brace-FROM-to-TO.md`.
 
+The launcher refuses a project whose `<brace.version>` is older than the oldest toolchain it
+runs (`This project pins brace X, older than Y, the oldest this launcher runs`), because older
+CLIs have security bugs fixed since; a prerelease counts as older than its release. Raise
+`<brace.version>`. `BRACE_ALLOW_OLD_TOOLCHAIN=1` runs the old pin anyway, for the one command
+that needs it.
+
 After bumping `<brace.version>`, run `brace agents-md` to refresh this file (and `BRACE-OPS.md`).
 Both are written once at `brace new` time and do not update themselves, so without the refresh
 they silently document the old version's API. (`brace agents-md --stdout` prints instead of
@@ -84,7 +90,7 @@ var app = Brace.app()
     .cache(Brace.cache())
     .storage(Storage.s3(config))
     .ops("ops-authorized-keys")
-    .opsOrigins(config.get("ops.origins"))           // the app's public origin: required in prod with ops
+    .opsOrigins(config.get("ops.origins"))           // the app's public origin: required with ops outside dev
     .staticFiles("/assets", "public").publicFiles()   // a mapping must say .publicFiles() or .access(...)
     .maxUploadSize("10MB")                            // K/KB, M/MB, G/GB, any case; or a byte count
     .after(SecurityHeaders.strict());

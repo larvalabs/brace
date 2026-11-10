@@ -546,8 +546,8 @@ Rules the server enforces:
 - **Key binding:** the public key is part of the signed message, so a
   signature is only valid for the key that produced it.
 - **Origin binding:** the origin must be one the server lists with
-  `app.opsOrigins(...)` / `BRACE_OPS_ORIGINS` (required in prod; without one, in
-  dev, its host must match the request's), so a signature made for another server
+  `app.opsOrigins(...)` / `BRACE_OPS_ORIGINS` (required in every mode except dev; in
+  dev without one, its host must match the request's), so a signature made for another server
   is refused with `401 This request was signed for <origin>…`. The origin is just
   `scheme://host[:port]`: no user info, path, query or fragment.
 
@@ -571,7 +571,7 @@ alone) was removed in 0.1.8; v2 (no origin) in 0.1.11. Either gets a 401 naming
 the cause. If you implemented one by hand, switch to the v3 payload above.
 
 **Token cache.** The CLI caches its bearer token per server origin under
-`target/.brace-token-<id>`, and remembers the last origin each project logged in
+`~/.brace/tokens/<project>/`, outside the project, and remembers the last origin each project logged in
 to in `~/.brace/ops-origins.json`, warning when `.brace` points somewhere new.
 
 ## Environment selection
