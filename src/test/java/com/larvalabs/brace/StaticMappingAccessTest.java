@@ -49,7 +49,7 @@ class StaticMappingAccessTest {
         Files.writeString(keys, keypair.publicKey() + " test\n");
 
         Access login = Access.session("userId", "/login");
-        app = Brace.app().port(0).banner(false).sessions(SECRET).ops(keys.toString()).strictAccessCheck()
+        app = Brace.app().opsUnpinnedForTests().port(0).banner(false).sessions(SECRET).ops(keys.toString()).strictAccessCheck()
             .staticFiles("/pub", pubDir.toString()).publicFiles()
             .staticFiles("/files", filesDir.toString()).access(login)
             .staticFiles("/uploads", uploadsDir.toString(), StaticFiles.UNTRUSTED).access(login);
