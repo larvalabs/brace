@@ -142,7 +142,7 @@ public class App {
             .storage(storage)
             .ops("ops-authorized-keys")
             .opsOrigins("https://app.example.com")          // the origin ops CLI logins are signed for
-            .staticFiles("/assets", "public");
+            .staticFiles("/assets", "public").publicFiles();  // a mapping declares who may fetch it
 
         var posts = new PostController();
         var pages = new PageController();
@@ -171,7 +171,7 @@ public class App {
 
 Components included in the framework jar as of this release:
 
-- **HTTP** — Jetty 12 with virtual threads, programmatic routing with a required access rule per route (`app.defaultAccess(...)`, `Access.*`, `.publicRoute()`), middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting, gzip response compression on by default (`.compression(false)` to opt out), `GET /__brace/health` for container and load-balancer health checks
+- **HTTP** — Jetty 12 with virtual threads, programmatic routing with a required access rule per route (`app.defaultAccess(...)`, `Access.*`, `.publicRoute()`), middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting and a required access declaration per mapping (`.publicFiles()` or `.access(...)`), gzip response compression on by default (`.compression(false)` to opt out), `GET /__brace/health` for container and load-balancer health checks
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks, `findOwnedOr404()` for user-owned rows, `Sort` for request-chosen orders. PostgreSQL JDBC driver bundled — no extra dependency to add
 - **Templates** — JTE compiled type safe templates with explicit parameters, `javascript:` and other script URLs blocked in URL attributes, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless; `__Host-` cookie name in production, absolute lifetime, `session.regenerate()` at login and logout
@@ -583,9 +583,14 @@ its own hit rate — so a clear resets counters only on the box that handled it.
 ## Static Files
 
 ```java
-app.staticFiles("/assets", "public");   // serve public/ directory at /assets/*
-app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);  // files users uploaded
+app.staticFiles("/assets", "public").publicFiles();   // serve public/ at /assets/* to everyone
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)   // files users uploaded
+   .access(Access.session("userId", "/login"));                         // logged-in users only
 ```
+
+Every mapping ends in `.publicFiles()` or `.access(...)`; `start()` refuses one with neither, and
+`defaultAccess(...)` does not cover mappings. The access check is bound to the mapping and runs
+before the file is looked up.
 
 `UNTRUSTED` serves user files so nothing in them can run on your origin: an uploaded `.html` or
 `.svg` is a sandboxed `application/octet-stream` download, and only raster images display inline.

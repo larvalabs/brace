@@ -185,7 +185,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     returns 404 on a case-insensitive volume (assume-guarded).
   - **Model: Opus 5.5.** The rule has to match the route fix and not break legitimate encoding.
 
-- [ ] **M3: Static mappings are outside deny-by-default, and the docs don't say so**, `BraceHandler.java:351-362, 390-396`, `Brace.java` (`staticFiles`), `docs/SECURITY.md` (Authorization, Static Files)
+- [x] **M3: Static mappings are outside deny-by-default, and the docs don't say so**, `BraceHandler.java:351-362, 390-396`, `Brace.java` (`staticFiles`), `docs/SECURITY.md` (Authorization, Static Files)
   - **What's wrong.** Access runs only `if (match != null)`; static files are served when
     `match == null`. `staticFiles(...)` takes no access argument. `docs/SECURITY.md` says plain
     `before(...)` never counts as access, so the only way to gate a mapping is a path `before`,

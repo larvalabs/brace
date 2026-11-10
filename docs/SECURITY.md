@@ -61,6 +61,42 @@ ops route registered without one fails `start()`. The app's default access never
 
 `/ops/routes` and the startup banner list each route's resolved access.
 
+### Static mappings are covered too
+
+A `staticFiles` mapping is not a route, but it is inside the same model. Every mapping says who
+may fetch its files, and `start()` (so also `Brace.test()`) refuses to run while one says
+neither:
+
+```java
+app.staticFiles("/assets", "public").publicFiles();                    // everyone
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));                        // logged-in users
+```
+
+- **`defaultAccess(...)` does not apply to a mapping**, and neither does
+  `defaultAccess(Access.none())`. A mapping's access is exactly what its `.access(...)` lists
+  (all must pass). Inheriting a login default would put the login in front of the login page's
+  own stylesheet; defaulting to public would publish an upload directory by omission. So there
+  is no default, and an undeclared mapping is a startup error.
+- The requirements are bound to the mapping, not to a path pattern. They run when no route
+  matched and the mapping's prefix covers the path, at the same point as a route's: after plain
+  `before(...)`, before session-aware `before(...)`, with the one `Session` the request uses.
+  They run before the path is decoded or the disk is touched, so every spelling that reaches the
+  mapping's files is guarded, and a rejected request gets the same response whether or not the
+  file exists.
+- Responses under a guarded mapping are sent `Cache-Control: private, no-cache`, never
+  `public`, and a `?v=` fingerprint earns no `immutable` there. This is enforced after
+  after-middleware, for the file, a 304, a 404 and the rejection alike.
+- `start()` refuses a guarded mapping whose directory contains, or is inside, a public
+  mapping's directory: the same files would be public at the other prefix.
+- The bundled `/__brace/*` assets and `/__brace/health` are not mappings and stay public.
+- `/ops/routes` (method `STATIC`) and the startup banner list each mapping with its access.
+
+A path-pattern `before("/uploads/*", ...)` is still not access, for the reasons above. For a
+per-file decision (the owner of this file, not any logged-in user), serve the file from a route
+instead: look the record up with `db.findOwnedOr404(...)` and return
+`Result.fileUnder(dir, name)` or `Result.download(...)`, with `.untrusted()` for uploads.
+
 ### Object-level authorization
 
 Route access answers "may this user call this endpoint". It does not answer "may this user
@@ -857,6 +893,10 @@ caches, but prefer scoping such middleware to application routes (`/app/*`) rath
 `/*`, and never configure a proxy to ignore response headers for paths a session
 middleware can touch.
 
+A static mapping with access requirements never sends `public` at all: its responses are
+`private, no-cache`, with or without a session cookie (see
+[Static mappings are covered too](#static-mappings-are-covered-too)).
+
 ---
 
 ## File Uploads
@@ -957,9 +997,17 @@ the object from the key.
 **Static directory.** Register an upload directory as untrusted:
 
 ```java
-app.staticFiles("/assets", "public");                                       // your files
-app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);     // users' files
+app.staticFiles("/assets", "public").publicFiles();                          // your files
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)       // users' files
+   .access(Access.session("userId", "/login"));
 ```
+
+`UNTRUSTED` decides how a file is served; the access declaration decides who gets it, and every
+mapping needs one (see [Static mappings are covered too](#static-mappings-are-covered-too)).
+`.publicFiles()` on an upload directory means anyone who can guess or enumerate a name can fetch
+the file: choose it only for uploads that are meant to be public, such as avatars. A static
+mapping can only ask "may this user fetch from this directory"; when the answer depends on the
+file, serve it from a handler (below).
 
 In `UNTRUSTED` mode:
 
@@ -1014,6 +1062,12 @@ than letting CR/LF terminate the part headers and forge extra parts in the reque
 
 ## Static Files
 
+Every mapping declares its access: `app.staticFiles(urlPrefix, directory).publicFiles()` or
+`.access(...)`. `start()` refuses a mapping with neither, and `defaultAccess(...)` does not cover
+mappings; see [Static mappings are covered too](#static-mappings-are-covered-too). Prefer
+`.access(...)` to a path guard for anything private: it is bound to the mapping, so it cannot
+disagree with the path that is served.
+
 `app.staticFiles(urlPrefix, directory)` confines serving to `directory`. The check resolves
 symlinks (`toRealPath`) before comparing, so a symlink under the served tree cannot serve a
 file outside it — a lexical `normalize()` + `startsWith` check does not catch that, because
@@ -1052,8 +1106,9 @@ directory users write to is registered `UNTRUSTED` (see
 [Serving uploaded files](#serving-uploaded-files)):
 
 ```java
-app.staticFiles("/assets", "public");
-app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);
+app.staticFiles("/assets", "public").publicFiles();
+app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));
 ```
 
 When prefixes overlap, the longest one serves the request regardless of registration order, so

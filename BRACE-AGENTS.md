@@ -85,7 +85,7 @@ var app = Brace.app()
     .storage(Storage.s3(config))
     .ops("ops-authorized-keys")
     .opsOrigins(config.get("ops.origins"))           // the app's public origin: required in prod with ops
-    .staticFiles("/assets", "public")
+    .staticFiles("/assets", "public").publicFiles()   // a mapping must say .publicFiles() or .access(...)
     .maxUploadSize("10MB")
     .after(SecurityHeaders.strict());
 ```
@@ -233,6 +233,27 @@ app.postDb("/billing/refund", billing::refund)
 - `/ops/*` has its own credential; the app default never applies there. The startup banner and
   `/ops/routes` show each route's access.
 
+**Static mappings need a declaration too.** `staticFiles(...)` returns a config, and `start()`
+refuses a mapping that says neither of these:
+
+```java
+app.staticFiles("/assets", "public").publicFiles();                 // everyone (CSS, JS, images)
+app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));                     // all listed requirements must pass
+```
+
+- `defaultAccess(...)` does **not** apply to mappings (not `Access.none()` either): a mapping's
+  access is exactly what `.access(...)` lists. Both methods return the app, so a builder chain
+  continues.
+- The requirements are bound to the mapping and run before the file is looked up, at the same
+  point as a route's, with the same `Session`. A rejection looks the same whether or not the
+  file exists. Guarded responses are `Cache-Control: private, no-cache`.
+- A guarded mapping's directory must not overlap a public mapping's (`start()` throws).
+  `/__brace/*` assets are always public. The banner and `/ops/routes` (`STATIC`) list mappings.
+- A mapping answers "may this user fetch from this directory". For a per-file check (the
+  file's owner), serve from a route: `db.findOwnedOr404(...)`, then `Result.fileUnder(dir, name)`
+  (add `.untrusted()` for uploads).
+
 This is route-level access — whether a user may call the endpoint. Whether they may touch a
 particular row (`/posts/{id}/edit` for someone else's post) is still the handler's check.
 
@@ -340,7 +361,8 @@ path written. `saveTo(Path)` takes a full path and does no checking. `contentTyp
 uploader's claim; never serve or store by it.
 
 **Serving uploads:** an uploaded `.html`/`.svg` served inline runs script on your origin. Serve
-upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED)` and handler
+upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED).access(...)` (or
+`.publicFiles()` if anyone may fetch them; see Access) and handler
 responses with `.untrusted()` (`Result.fileUnder(dir, name).untrusted()`). Untrusted responses get
 an allowlisted type (else `application/octet-stream`), `Content-Disposition: attachment` unless a
 raster image (png/jpeg/gif/webp/avif/bmp/ico; not svg), and always `CSP: sandbox` + `nosniff`,
@@ -1028,7 +1050,8 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 
 ## Asset Fingerprinting
 
-`staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
+Every mapping ends in `.publicFiles()` or `.access(...)` (see Access); the examples here are
+public assets. `staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
 serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
 leading `.well-known/`. The longest matching prefix wins. For a directory users write to, use
 `staticFiles(prefix, dir, StaticFiles.UNTRUSTED)` (see Serving uploads); it must not be inside
@@ -1039,7 +1062,8 @@ Cache-bust static assets by appending a content-hash query parameter — in a JT
 `"/assets/app.css?v=a1b2c3d4"`. The hash is the first 8 hex chars of MD5 of the file
 contents, cached per `(path, mtime)`. Unknown URLs (no matching `staticFiles` mapping,
 missing file, or path traversal) return unchanged. Pair with long `Cache-Control: max-age`
-so redeploys with unchanged files don't invalidate browser/CDN caches.
+so redeploys with unchanged files don't invalidate browser/CDN caches. In a mapping with
+`.access(...)` the URL still gets its `?v=`, but responses stay `private, no-cache`.
 
 ## HTTP Client
 
