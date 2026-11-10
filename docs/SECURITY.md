@@ -2331,15 +2331,61 @@ once:
      common root such as `java`, `com`, `org`, `io`:
      `com.amazonaws.services.s3.model.AmazonS3Exception`) and a hostname (three
      or more DNS labels ending in a common TLD such as `com`, `net`, `io`,
-     `internal`, `local`) are kept whole.
+     `internal`, `local`, or two labels ending in `internal`, `local`,
+     `localhost`, `lan` or `corp`: `db-primary-7f8c9d.internal`) are kept whole.
+   - A **file path** (a label with `/`, no `+`, and no `/`-piece under 16
+     characters that mixes upper case, lower case and digits) is judged piece
+     by piece, as `redactPath` judges a request path: the directories survive
+     and only a secret-shaped piece is replaced.
+     `/tmp/brace-uploads/upload-8a7b6c5d4e3f2a1b.tmp` is
+     `/tmp/brace-uploads/[redacted].tmp`, `Failed to load
+     /assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is `Failed to load
+     /assets/[redacted].css`, and
+     `/var/lib/app/uploads/2024/11/05/invoice-48213-final-v2.pdf` is kept. A
+     label with `/` that is not path-shaped (`aB3dE/fG7hI9jK1/mN2oP4qR`, a
+     standard-base64 secret) is judged whole.
    - Otherwise each **label** between `. ~ $ %` is redacted when **all** of
      these hold: it is at least **16** characters of `[A-Za-z0-9_\-+/]`; it
      contains an ASCII digit **and** an ASCII letter; it is not a UUID
-     (`8-4-4-4-12` hex); and it is not a short path (a label with `/` whose
-     `/`-pieces are all under 16 characters and none mixes upper case, lower
-     case and digits, such as `/var/app/releases/20241105`). The separators
-     are kept: `T.` is `[redacted].`, `/dl/T.pdf` is `/dl/[redacted].pdf`,
-     `SG.x.y` is `SG.[redacted].[redacted]`, `T~x` is `[redacted]~x`.
+     (`8-4-4-4-12` hex); and it is not a **name made of words** (below). The
+     separators are kept: `T.` is `[redacted].`, `/dl/T.pdf` is
+     `/dl/[redacted].pdf`, `SG.x.y` is `SG.[redacted].[redacted]`, `T~x` is
+     `[redacted]~x`.
+
+   **Names versus secrets.** A label is a name, and kept, when it is made of
+   words: it holds only `[A-Za-z0-9_-]`, it is split into parts on `_` and
+   `-` and each part into words (a leading digit group, or letters cut at
+   camelCase boundaries with an optional trailing digit group), and:
+   - it has two or more words, at least one of three or more letters;
+   - a digit group has at most 8 digits on its own (`20241105`, `000482`) and
+     at most 3 after letters (`v2`, `V19`), and at most one word has both
+     letters and digits;
+   - letters and digits are not interleaved: a digit followed directly by a
+     letter, other than at a camelCase boundary (`Http2Connection`), is
+     allowed once and only in a part shaped like `2024q4`;
+   - at most one word is a one- or two-letter fragment inside a longer part;
+   - in a camelCase part every word has four or more letters (`Http`,
+     `Line`), except a first lower-case word (`get`, `shipping`) and one
+     acronym of two to four capitals that starts the part or carries the
+     digits (`UTF8`, `XML`); no word has five consonants in a row;
+   - it is not three or more parts of (nearly) one length (the shape of a
+     grouped code, `abcd5-efgh6-ijkl7`).
+
+   Also names: a `0x` literal of at most 16 hex digits (a lambda's address,
+   `$$Lambda/0x000001f0a1047000`) and a `git describe` suffix
+   (`2024.11.05-1423-g3f9a1c2`). So `V3__create_users_table`,
+   `invoice-48213-final-v2`, `user_sessions_archive_2024q4`,
+   `CONSTRAINT_INDEX_4`, `audit_log_entries_2024`, `PARTIALLY_REFUNDED_V2`,
+   `ORD-2024-11-000482`, `shippingAddressLine2`,
+   `Http2ConnectionHandlerImpl` and `UTF8StreamJsonParser` are kept, while a
+   hex hash (`8a7b6c5d4e3f2a1b`, a 40-hex commit SHA), a random token, a
+   Stripe id (`pi_3OaBcD2eFgHiJkLm`) and a word joined to a secret
+   (`reset-8a7b6c5d4e3f2a1b9c0d`, `token_Ab3dE9fGh1JkLmN0pQrS`) are
+   redacted. Measured on random tokens (a test samples 12,000 of them): none
+   of a million hex, base32 or base36 tokens of 16 to 40 characters, or of
+   grouped codes, is kept; of base62 and base64url tokens with a digit, about
+   1 in 10,000 at 16 characters, 1 in 100,000 at 20, and none in a million at
+   32 or more, happen to read as camelCase words and are kept.
 
 `=` is not part of a run (it separates a name from its value, and base64
 padding is not secret). Recursion through URL-inside-URL values stops at 4
@@ -2370,8 +2416,10 @@ rule.
 | UUIDs (`8-4-4-4-12` hex), anywhere | Usually record identifiers, not bearer secrets; needed for debugging. A request id that is not a UUID is kept only in the request-id headers above |
 | Purely numeric values and runs | Page IDs, order numbers, user IDs |
 | Short labels (< 16 chars) | Route labels, action names, dotted versions (`4.12.0-beta.3+build.20241105`), file names whose labels are short (`app.3f9a1c2b.js`, Brace's own `?v=a1b2c3d4` fingerprint) |
-| Java qualified names, hostnames ending in a common TLD | `com.amazonaws.services.s3.model.AmazonS3Exception`, `my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com`, a CloudFront `Via` |
-| Short paths | `/srv/app/uploads/2024/11/report-final.pdf`, `/var/app/releases/20241105` (each piece short, none mixing upper case, lower case and digits) |
+| Java qualified names, hostnames ending in a common TLD | `com.amazonaws.services.s3.model.AmazonS3Exception`, `my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com`, `db-primary-7f8c9d.internal`, a CloudFront `Via` |
+| Names made of words | `V3__create_users_table.sql` (any Flyway file name, Brace's own included), `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`, `Http2ConnectionHandlerImpl`, `2024-black-friday-sale` |
+| File paths, piece by piece | `/srv/app/uploads/2024/11/report-final.pdf`, `/var/app/releases/20241105`, `exports/2024/11/05/customer-orders-2024-11-05.csv`; only a secret-shaped piece is replaced (`/tmp/brace-uploads/[redacted].tmp`) |
+| Stack frame lines | `at …` and `... N more` at any indent, the frames of `Suppressed:` exceptions included |
 | Email addresses | PII, not a credential; `@` is outside the run alphabet and each label is short |
 | Comma- or `#`-separated lists (`#ff0000,#00ff00`) | Each item is short |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
@@ -2380,18 +2428,21 @@ rule.
 redact:
 
 - A 16+ character label of letters, digits, `-`, `_`, `+` or `/` with both a
-  digit and a letter: a dated slug `2024-black-friday-sale`, a dash-joined hex
-  list `ff0000-00ff00-0000ff`, a 16+ character hex hash (a commit SHA in a
-  message). These look exactly like a grouped recovery code or a token.
+  digit and a letter that is not a name made of words: a dash-joined hex list
+  `ff0000-00ff00-0000ff`, a 16+ character hex hash (a commit SHA in a
+  message), a pod name `web-7d9f8b6c5-x2k4q`, `db-primary-7f8c9d` outside a
+  hostname, a name with a one-letter camelCase word or two words holding digits
+  (`AmazonS3Exception`, `utf8mb4_0900_ai_ci`), and three parts of one length
+  (`test-case-data-2024`). These look exactly like a grouped recovery code or
+  a token.
 - **A content hash of 16 or more characters in a file name**:
   `/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as
   `/assets/[redacted].css`, and so is a bundler chunk such as
   `ProductDetail-a1B2c3D4.js` (the label is 22 characters). Chosen
   deliberately: such a name cannot be told from a download token in
   `/dl/<token>.pdf`. The cost is cosmetic, in error records and logs only.
-- A dotted name that is neither a qualified Java name with a known root nor a
-  hostname ending in a listed TLD: a class name alone (`UTF8StreamJsonParser`),
-  a two-label host (`abcdef1234567890xyz.com`).
+- A two-label host whose last label is a public TLD
+  (`abcdef1234567890xyz.com`).
 - A `/`-joined value with a long or mixed-case-and-digit piece
   (`/files/Ab3dE9fG/raw` as a whole header value), since a standard-base64
   secret can contain `/`.

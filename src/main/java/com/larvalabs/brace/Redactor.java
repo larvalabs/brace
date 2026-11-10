@@ -36,9 +36,11 @@ import java.util.regex.Pattern;
  *   <li>Length ≥ {@value #MIN_SECRET_LENGTH} characters (of {@code [A-Za-z0-9_\-+/]}).</li>
  *   <li>Contains at least one ASCII digit <em>and</em> at least one ASCII letter
  *       (rules out purely numeric IDs and purely alphabetic slugs).</li>
- *   <li>It is not a standard UUID, and not an absolute path whose {@code /}-pieces are all short
- *       and none mixes upper case, lower case and digits.</li>
+ *   <li>It is not a standard UUID, and not a {@linkplain #isNameLike name made of words}
+ *       ({@code V3__create_users_table}, {@code invoice-48213-final-v2}).</li>
  * </ol>
+ * A label that is a file path (it holds {@code /} and no short piece mixes upper case, lower case
+ * and digits) is judged piece by piece instead, as {@link #redactPath} does.
  * So {@code T.}, {@code <T>}, {@code T~x}, {@code /dl/T.pdf} and {@code SG.x.y} lose T. A run
  * holding {@code %} is also percent-decoded (up to {@value #DECODE_ROUNDS} rounds) and replaced
  * whole when the decoded text holds anything to redact. Kept whole: a JWT or two-part
@@ -581,10 +583,24 @@ public class Redactor {
         for (int k = 0; k <= len; k++) {
             char c = k < len ? chunk.charAt(k) : '.';
             if (c == '.' || c == '~' || c == '$' || c == '%') {
-                if (k - start >= MIN_SECRET_LENGTH && isSecretLabel(chunk, start, k)) {
-                    if (out == null) out = new StringBuilder(len);
-                    out.append(chunk, copied, start).append(SHAPE_PLACEHOLDER);
-                    copied = k;
+                if (k - start >= MIN_SECRET_LENGTH) {
+                    if (isPathShaped(chunk, start, k)) {
+                        // A file path: each '/'-piece is judged on its own, as redactPath does.
+                        int p = start;
+                        for (int m = start; m <= k; m++) {
+                            if (m < k && chunk.charAt(m) != '/') continue;
+                            if (isSecretLabel(chunk, p, m)) {
+                                if (out == null) out = new StringBuilder(len);
+                                out.append(chunk, copied, p).append(SHAPE_PLACEHOLDER);
+                                copied = m;
+                            }
+                            p = m + 1;
+                        }
+                    } else if (isSecretLabel(chunk, start, k)) {
+                        if (out == null) out = new StringBuilder(len);
+                        out.append(chunk, copied, start).append(SHAPE_PLACEHOLDER);
+                        copied = k;
+                    }
                 }
                 start = k + 1;
             }
@@ -595,14 +611,212 @@ public class Redactor {
 
     /**
      * A label ({@code [A-Za-z0-9_\-+/]}, no dots) that is secret-shaped: at least
-     * {@value #MIN_SECRET_LENGTH} characters with a digit and a letter, not a UUID, and not
-     * {@linkplain #isPathLike path-like}.
+     * {@value #MIN_SECRET_LENGTH} characters with a digit and a letter, not a UUID, and not a
+     * {@linkplain #isNameLike name made of words}. A label with {@code /} reaches here whole only
+     * when it is not {@linkplain #isPathShaped path-shaped}.
      */
     private static boolean isSecretLabel(String s, int from, int to) {
         if (to - from < MIN_SECRET_LENGTH) return false;
         if (to - from == 36 && UUID_SHAPE.matcher(s.substring(from, to)).matches()) return false;
         if (!hasDigitAndLetter(s, from, to)) return false;
-        return !isPathLike(s, from, to);
+        return !isNameLike(s, from, to);
+    }
+
+    /**
+     * A label that is a file or URL path rather than a standard-base64 secret: it holds {@code /},
+     * no {@code +}, and no {@code /}-piece shorter than {@value #MIN_SECRET_LENGTH} mixes upper
+     * case, lower case and digits. Its pieces are then judged one by one, so
+     * {@code /tmp/uploads/upload-<hex>} keeps its directories and {@code aB3dE/fG7hI9jK1/mN2oP4qR}
+     * is still judged whole.
+     */
+    private static boolean isPathShaped(String s, int from, int to) {
+        if (indexOfAny(s, from, to, "/") == to) return false;
+        int start = from;
+        for (int i = from; i <= to; i++) {
+            char c = i < to ? s.charAt(i) : '/';
+            if (c == '+') return false;
+            if (c == '/') {
+                if (i - start < MIN_SECRET_LENGTH && mixesCaseAndDigits(s, start, i)) return false;
+                start = i + 1;
+            }
+        }
+        return true;
+    }
+
+    /** Digits in a group of a name ({@code 20241105}, {@code 000482}); a longer group is an id or a token. */
+    private static final int NAME_DIGITS = 8;
+
+    /**
+     * A label made of ordinary words, so not secret-shaped although it is long and holds a digit:
+     * {@code V3__create_users_table}, {@code invoice-48213-final-v2}, {@code CONSTRAINT_INDEX_4},
+     * {@code user_sessions_archive_2024q4}, {@code shippingAddressLine2},
+     * {@code Http2ConnectionHandlerImpl}. The label is split into parts on {@code _} and {@code -},
+     * and each part into words: a leading digit group, or a run of letters (cut at camelCase
+     * boundaries) with an optional trailing digit group. It is a name when all of these hold:
+     * <ul>
+     *   <li>it holds only {@code [A-Za-z0-9_-]};</li>
+     *   <li>it has two or more words, and at least one has three or more letters;</li>
+     *   <li>a digit group has at most {@value #NAME_DIGITS} digits on its own and at most
+     *       {@value #NAME_SUFFIX_DIGITS} after letters ({@code v2}, {@code V19}), and at most one
+     *       word in the label has both letters and digits;</li>
+     *   <li>a digit is followed directly by a letter (not at a camelCase boundary such as
+     *       {@code Http2Connection}) at most once, and only inside a part of at most 8 characters
+     *       ({@code 2024q4}): letters and digits interleaved within a long part
+     *       ({@code upload-8a7b6c5d4e3f2a1b}, a SHA, a random token) are a secret;</li>
+     *   <li>at most one word is a fragment (one or two letters inside a longer part, {@code q4});</li>
+     *   <li>in a part with both cases (camelCase), every word has four or more letters
+     *       ({@code Http}, {@code Line}), except a first lower-case word of three or more
+     *       ({@code get}) and one acronym of two to four capitals ({@code UTF}): random
+     *       mixed-case text cuts into short words ({@code Ym}, {@code Hf7}, {@code Oz});</li>
+     *   <li>it is not three or more parts of (nearly) one length, the shape of a grouped code
+     *       ({@code abcd5-efgh6-ijkl7}).</li>
+     * </ul>
+     * Also a name: a {@code 0x} literal of at most 16 hex digits (a lambda's address), and a
+     * {@code git describe} suffix ({@code 1423-g3f9a1c2}: {@code g} plus 7 to 12 hex digits after
+     * a digit group). A single word ({@code deadbeefcafe1234}, a 40-hex SHA) is never a name.
+     */
+    static boolean isNameLike(String s, int from, int to) {
+        if (to - from > 2 && to - from <= 18 && s.charAt(from) == '0' && s.charAt(from + 1) == 'x'
+                && isHex(s, from + 2, to)) {
+            return true;
+        }
+        int words = 0;
+        int longWords = 0;
+        int fragments = 0;
+        int interleaved = 0;
+        int digitWords = 0;
+        int parts = 0;
+        int minPart = Integer.MAX_VALUE;
+        int maxPart = 0;
+        boolean prevDigits = false;
+        int i = from;
+        while (i < to) {
+            char c = s.charAt(i);
+            if (c == '_' || c == '-') {
+                i++;
+                continue;
+            }
+            int end = i;
+            boolean partLower = false;
+            boolean partUpper = false;
+            while (end < to && (isAsciiLetter(s.charAt(end)) || isAsciiDigit(s.charAt(end)))) {
+                char e = s.charAt(end);
+                if (e >= 'a' && e <= 'z') partLower = true;
+                else if (e >= 'A' && e <= 'Z') partUpper = true;
+                end++;
+            }
+            boolean camel = partLower && partUpper;
+            if (end == i) return false; // '+', '/' or anything else: not a name
+            int partLen = end - i;
+            parts++;
+            minPart = Math.min(minPart, partLen);
+            maxPart = Math.max(maxPart, partLen);
+            if (prevDigits && partLen >= 8 && partLen <= 13 && s.charAt(i) == 'g' && isLowerHex(s, i + 1, end)) {
+                words++; // git describe: <tag>-<n>-g<hash>
+                longWords++;
+                prevDigits = false;
+                i = end;
+                continue;
+            }
+            int partWords = 0;
+            int partFragments = 0;
+            int acronyms = 0;
+            boolean digitsOnly = true;
+            int j = i;
+            while (j < end) {
+                int letters = 0;
+                boolean lower = false;
+                int wordStart = j;
+                if (isAsciiLetter(s.charAt(j))) {
+                    digitsOnly = false;
+                    letters = 1;
+                    int consonants = isConsonant(s.charAt(j)) ? 1 : 0;
+                    j++;
+                    while (j < end && isAsciiLetter(s.charAt(j)) && !camelBoundary(s, j, end)) {
+                        if (s.charAt(j) >= 'a') lower = true;
+                        consonants = isConsonant(s.charAt(j)) ? consonants + 1 : 0;
+                        if (consonants >= 5) return false; // not a word: bxsngv, Snzkmpf
+                        letters++;
+                        j++;
+                    }
+                }
+                int digits = 0;
+                while (j < end && isAsciiDigit(s.charAt(j))) {
+                    digits++;
+                    j++;
+                }
+                if (j == wordStart) return false;
+                if (digits > (letters > 0 ? NAME_SUFFIX_DIGITS : NAME_DIGITS)) return false;
+                if (letters > 0 && digits > 0 && ++digitWords > 1) return false;
+                if (camel) {
+                    boolean capital = letters > 0 && s.charAt(wordStart) <= 'Z';
+                    if (capital && letters >= 2 && !lower) {
+                        // one short acronym, first in the part or before digits (XMLHttp, UTF8Stream)
+                        if (letters > 4 || ++acronyms > 1 || (partWords > 0 && digits == 0)) return false;
+                    } else if (capital ? letters < 4 : partWords > 0 || letters < 3 || digits > 0) {
+                        return false; // also: a leading digit group, or digits on the first lower-case word
+                    }
+                }
+                if (j < end && digits > 0 && !camelBoundary(s, j, end)) {
+                    // a letter straight after a digit, not starting a camelCase word: only in a
+                    // part shaped like 2024q4 (1-4 digits, one letter, 1-2 digits), once
+                    if (!isQuarter(s, i, end) || ++interleaved > 1) return false;
+                }
+                partWords++;
+                if (letters >= 3) longWords++;
+                else if (letters > 0) partFragments++;
+            }
+            words += partWords;
+            if (partWords > 1) fragments += partFragments;
+            prevDigits = digitsOnly;
+            i = end;
+        }
+        // Three or more parts of (nearly) one length are a grouped code (abcd5-efgh6-ijkl7), not words.
+        if (parts >= 3 && maxPart - minPart <= 1) return false;
+        return words >= 2 && longWords >= 1 && fragments <= 1;
+    }
+
+    /** Digits after the letters of a word in a name ({@code v2}, {@code V19}, {@code sha256}). */
+    private static final int NAME_SUFFIX_DIGITS = 3;
+
+    /** {@code s[from, to)} is 1 to 4 digits, one letter, then 1 or 2 digits: {@code 2024q4}, {@code 2024H1}. */
+    private static boolean isQuarter(String s, int from, int to) {
+        int i = from;
+        while (i < to && isAsciiDigit(s.charAt(i))) i++;
+        int lead = i - from;
+        if (lead < 1 || lead > 4 || i >= to || !isAsciiLetter(s.charAt(i))) return false;
+        int tail = to - i - 1;
+        return tail >= 1 && tail <= 2 && isAsciiDigit(s.charAt(i + 1)) && (tail == 1 || isAsciiDigit(s.charAt(i + 2)));
+    }
+
+    /** A letter other than {@code a e i o u y}, either case. */
+    private static boolean isConsonant(char c) {
+        return "aeiouyAEIOUY".indexOf(c) < 0;
+    }
+
+    /** {@code s[j]} starts a camelCase word: an upper-case letter after a lower-case letter or a digit, or before a lower-case one. */
+    private static boolean camelBoundary(String s, int j, int end) {
+        char c = s.charAt(j);
+        if (c < 'A' || c > 'Z') return false;
+        char prev = s.charAt(j - 1);
+        if ((prev >= 'a' && prev <= 'z') || isAsciiDigit(prev)) {
+            // after a digit, only a Capitalized word counts ("Http2Connection", not "KQZR8MWPX")
+            return !isAsciiDigit(prev) || (j + 1 < end && s.charAt(j + 1) >= 'a' && s.charAt(j + 1) <= 'z');
+        }
+        return j + 1 < end && s.charAt(j + 1) >= 'a' && s.charAt(j + 1) <= 'z';
+    }
+
+    private static boolean isHex(String s, int from, int to) {
+        for (int i = from; i < to; i++) if (hexValue(s.charAt(i)) < 0) return false;
+        return true;
+    }
+
+    private static boolean isLowerHex(String s, int from, int to) {
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (!isAsciiDigit(c) && (c < 'a' || c > 'f')) return false;
+        }
+        return true;
     }
 
     /**
@@ -670,10 +884,22 @@ public class Redactor {
         return labels >= 3;
     }
 
-    /** A DNS name of three or more labels ({@code [A-Za-z0-9-]}, 1 to 63) whose last label is in {@link #HOST_TLDS}. */
+    /**
+     * Last labels of a private network name, which make a two-label name a hostname too:
+     * {@code db-primary-7f8c9d.internal}.
+     */
+    private static final Set<String> PRIVATE_TLDS = Set.of("internal", "local", "localhost", "lan", "corp");
+
+    /**
+     * A DNS name of three or more labels ({@code [A-Za-z0-9-]}, 1 to 63) whose last label is in
+     * {@link #HOST_TLDS}, or of two labels whose last is in {@link #PRIVATE_TLDS}.
+     */
     private static boolean isHostname(String v) {
         int lastDot = v.lastIndexOf('.');
-        if (lastDot < 0 || !HOST_TLDS.contains(v.substring(lastDot + 1).toLowerCase(Locale.ROOT))) return false;
+        if (lastDot < 0) return false;
+        String tld = v.substring(lastDot + 1).toLowerCase(Locale.ROOT);
+        if (!HOST_TLDS.contains(tld)) return false;
+        int minLabels = PRIVATE_TLDS.contains(tld) ? 2 : 3;
         int labels = 0;
         int start = 0;
         for (int i = 0; i <= v.length(); i++) {
@@ -687,7 +913,7 @@ public class Redactor {
                 return false;
             }
         }
-        return labels >= 3;
+        return labels >= minLabels;
     }
 
     /**

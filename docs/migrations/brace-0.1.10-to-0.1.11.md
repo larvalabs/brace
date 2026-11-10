@@ -1949,7 +1949,10 @@ No action needed unless noted.
 - **A stricter shape rule.** A secret is now found wherever it sits: every run of 16 or more
   letters, digits, `-`, `_`, `+` or `/` with a digit and a letter is redacted, even next to
   punctuation or inside a dotted name (`/dl/<token>.pdf`), and percent-encoded or `;matrix`
-  path segments are checked too. One visible cost: a file name with a long content hash
+  path segments are checked too. Names made of words (`V3__create_users_table.sql`,
+  `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`) are kept, and a file
+  path in a message is judged piece by piece, so only its secret-shaped piece is replaced. One
+  visible cost: a file name with a long content hash
   (`/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css`) shows as `/assets/[redacted].css` in error
   records and logs.
 - **New sensitive names:** `jwt`, `assertion`, `signature`, `authkey`, `nonce` (anywhere in a

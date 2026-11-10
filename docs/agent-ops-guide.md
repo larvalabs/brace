@@ -695,20 +695,25 @@ log field).
 user info, path and query are redacted; any other run of letters, digits and
 `_ - + / . ~ $ %` is checked label by label (split at `. ~ $ %`), and a label
 of 16+ characters that has both a digit and a letter becomes `[redacted]`,
-whatever field it is in. JWTs and `payload.signature` tokens are caught whole,
-and percent-encoded runs are checked decoded too.
+whatever field it is in, unless it is a name made of words (`V3__create_users_table`,
+`invoice-48213-final-v2`, `shippingAddressLine2`). A file path in a message is
+judged piece by piece, so its directories stay readable
+(`/tmp/uploads/[redacted].tmp`). JWTs and `payload.signature` tokens are caught
+whole, and percent-encoded runs are checked decoded too. Stack frame lines (`at …`,
+`... N more`, at any indent) are never redacted.
 
 What remains visible (intentionally):
-- **UUIDs** (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) — these are usually record
+- **UUIDs** (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`): these are usually record
   identifiers, not secrets, and are needed for debugging.
 - **Numeric IDs**, **short labels** (below 16 characters), Java class names,
-  hostnames, short file paths and email addresses.
+  hostnames, file paths (piece by piece), names made of words (table, column,
+  constraint, enum and Flyway file names) and email addresses.
 - Exception message text that does not contain high-entropy tokens.
 
 Over-redacted by design: a 16+ character content hash in a file name
-(`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` becomes `[redacted].css`) and other long
-slugs that mix digits and letters (`2024-black-friday-sale`), because they cannot
-be told from a token.
+(`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` becomes `[redacted].css`), a commit SHA, and
+other long values that interleave digits and letters (`web-7d9f8b6c5-x2k4q`),
+because they cannot be told from a token.
 
 If your app routes carry user-supplied secrets in path positions, prefer opaque
 non-entropic route parameters (e.g. a lookup key in a database rather than a raw

@@ -453,7 +453,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Verification fixes.** `redactStackTrace` treats a line as a frame after any run of tabs or
     spaces (`at ...`, `... N more`, `... N common frames omitted`), so the frames of a
     `Suppressed:` exception and of the causes under it are kept; their message lines are still
-    redacted (`RedactorTest.framesOfSuppressedExceptionsAndTheirCausesAreKept`).
+    redacted (`RedactorTest.framesOfSuppressedExceptionsAndTheirCausesAreKept`). A run with `/` in
+    a message is judged piece by piece as `redactPath` does (`/tmp/brace-uploads/[redacted].tmp`,
+    not `[redacted].tmp`), and a label made of words (`V3__create_users_table`,
+    `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`) is no longer
+    secret-shaped (`Redactor.isNameLike`); hex hashes, random tokens and look-alikes such as
+    `reset-8a7b6c5d4e3f2a1b9c0d` stay redacted, and a seeded test samples 12,000 random tokens
+    (`RedactorTest.namesAndFilePathsInMessagesSurvive`,
+    `aFilePathInAMessageIsRedactedSegmentBySegment`, `lookAlikesMixingWordsAndSecretsAreRedacted`).
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current
@@ -1037,7 +1044,8 @@ either a hardening option, a limitation, or something that could not be verified
   hex list, a hash of 16 or more hex characters, and a free-form header whose whole value is an
   absolute path containing a digit are redacted in error records, because they look like a
   grouped recovery code or a secret. Unchanged by M6 and documented in `docs/SECURITY.md`;
-  narrowing it means changing the rule for paths and logs too.
+  narrowing it means changing the rule for paths and logs too. (The verification pass narrowed
+  it for names made of words, `2024-black-friday-sale` included; see M6.)
 - **Rate-limiter flush on the request thread.** The shared-counter flush still runs on the
   request thread that wins it. It is now chunked, bisects on a bad key and stops after 2 s, but
   it was not moved off-thread because the same request reads the result for its own decision.

@@ -495,17 +495,15 @@ class RedactorTest {
     @Test
     void valuesTheShapeRuleCannotTellFromSecretsAreRedactedConsistently() {
         // Judgment calls, kept consistent with redactPath: a 16+ char run of base64url/hex
-        // characters with a digit and a letter is redacted wherever it appears. A dated slug and a
-        // dash-joined hex list look exactly like a grouped recovery code; a 16+ hex hash looks
-        // like a hex token. Short hex (< 16) and comma/#-separated colour lists survive above.
-        assertEquals("utm_campaign=[REDACTED]", Redactor.redactQuery("utm_campaign=2024-black-friday-sale"));
+        // characters with a digit and a letter is redacted wherever it appears, unless it is a
+        // name made of words (namesAndFilePathsInMessagesSurvive). A dash-joined hex list looks
+        // exactly like a grouped recovery code; a 16+ hex hash looks like a hex token. Short hex
+        // (< 16) and comma/#-separated colour lists survive above.
         assertEquals("colors=[REDACTED]", Redactor.redactQuery("colors=ff0000-00ff00-0000ff"));
         assertEquals("hash=[REDACTED]", Redactor.redactQuery("hash=3f9a1c2b4d5e6f70"));
-        assertEquals("/blog/[redacted]", Redactor.redactPath("/blog/2024-black-friday-sale"));
         // Final review costs (documented in docs/SECURITY.md, "Known over-redaction").
         assertEquals("/assets/[redacted].js", Redactor.redactPath("/assets/ProductDetail-a1B2c3D4.js"));
         assertEquals("[redacted]", Redactor.redactHeaders(Map.of("X-Path", "/files/Ab3dE9fG/raw")).get("X-Path"));
-        assertEquals("[redacted] failed", Redactor.redactMessage("UTF8StreamJsonParser failed"));
         assertEquals("ticket_id=[REDACTED]&sig_alg=[REDACTED]", Redactor.redactQuery("ticket_id=4521&sig_alg=hs256"));
         // An email is PII, not a credential: kept, as before.
         assertEquals("email=a%40b.c", Redactor.redactQuery("email=a%40b.c"));
@@ -697,6 +695,109 @@ class RedactorTest {
         for (String m : MESSAGES_THAT_SURVIVE) {
             assertEquals(m, Redactor.redactMessage(m), m);
         }
+    }
+
+    /**
+     * Verification pass: messages the run rule must keep. A file path in a message is judged
+     * segment by segment, as redactPath judges it, and a name made of words (snake_case,
+     * kebab-case, camelCase, with short digit groups) is not secret-shaped.
+     */
+    static final List<String> NAMES_AND_PATHS_THAT_SURVIVE = List.of(
+        "java.nio.file.NoSuchFileException: /var/lib/app/uploads/2024/11/05/invoice-48213-final-v2.pdf",
+        "Script V3__create_users_table.sql failed at db/migration/V3__create_users_table.sql",
+        "Migration V19__brace_cache_used_at.sql failed",
+        "NoSuchKey: exports/2024/11/05/customer-orders-2024-11-05.csv",
+        "ERROR: relation \"user_sessions_archive_2024q4\" does not exist",
+        "Unique index or primary key violation: \"CONSTRAINT_INDEX_4 ON PUBLIC.USERS(EMAIL)\"",
+        "Connection to db-primary-7f8c9d.internal:5432 refused",
+        "class com.example.Foo$$Lambda$142/0x0000000800c8a1b0 cannot be cast to class Bar",
+        "class com.example.Foo$$Lambda/0x000001f0a1047000 cannot be cast to class Bar",
+        "Version 2024.11.05-1423-g3f9a1c2 is not supported",
+        "ERROR: relation \"audit_log_entries_2024\" does not exist",
+        "Unrecognized field \"shippingAddressLine2\" (class Order), not marked as ignorable",
+        "Order ORD-2024-11-000482 not found",
+        "Invoice INV-20241105-000482 could not be sent",
+        "No enum constant Status.PARTIALLY_REFUNDED_V2",
+        "UTF8StreamJsonParser failed",
+        "Http2ConnectionHandlerImpl closed the stream",
+        "XMLHttpRequest2Handler failed",
+        "blog post 2024-black-friday-sale not found");
+
+    /**
+     * Names the word rule still cannot tell from a secret, and so redacts: a short hex group
+     * (a pod's ReplicaSet hash, a host suffix), a one-letter camelCase word, two words with digits,
+     * three parts of one length (a grouped code's shape), a 40-hex commit SHA.
+     */
+    static final List<String> NAMES_STILL_REDACTED = List.of(
+        "web-7d9f8b6c5-x2k4q", "db-primary-7f8c9d", "AmazonS3Exception", "utf8mb4_0900_ai_ci",
+        "test-case-data-2024", "3f9a1c2b4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90");
+
+    @Test
+    void namesAndFilePathsInMessagesSurvive() {
+        for (String m : NAMES_AND_PATHS_THAT_SURVIVE) {
+            assertEquals(m, Redactor.redactMessage(m), m);
+        }
+        // The same names in a request path and a query value.
+        assertEquals("/files/2024/11/invoice-48213-final-v2.pdf", Redactor.redactPath("/files/2024/11/invoice-48213-final-v2.pdf"));
+        assertEquals("/blog/2024-black-friday-sale", Redactor.redactPath("/blog/2024-black-friday-sale"));
+        assertEquals("utm_campaign=2024-black-friday-sale", Redactor.redactQuery("utm_campaign=2024-black-friday-sale"));
+        for (String v : NAMES_STILL_REDACTED) {
+            assertEquals("seen [redacted] here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+    }
+
+    @Test
+    void aFilePathInAMessageIsRedactedSegmentBySegment() {
+        String[][] cases = {
+            {"java.io.FileNotFoundException: /tmp/brace-uploads/upload-8a7b6c5d4e3f2a1b.tmp",
+                "java.io.FileNotFoundException: /tmp/brace-uploads/[redacted].tmp"},
+            {"Failed to load /assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css", "Failed to load /assets/[redacted].css"},
+            {"no such file /reset/" + T + "/confirm", "no such file /reset/[redacted]/confirm"},
+            {"NoSuchKey: exports/" + T + "/data.csv", "NoSuchKey: exports/[redacted]/data.csv"},
+            {"GET /v1/payment_intents/pi_3OaBcD2eFgHiJkLm failed", "GET /v1/payment_intents/[redacted] failed"},
+            // A standard-base64 secret holding '/' is still replaced whole.
+            {"key aB3dE/fG7hI9jK1/mN2oP4qR rejected", "key [redacted] rejected"},
+            {"key /aB3dE9fG/h1JkLmN0pQrS7tUv rejected", "key [redacted] rejected"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+    }
+
+    /** Look-alikes: a word next to a secret-shaped part, and tokens that must stay redacted. */
+    static final List<String> LOOK_ALIKES_THAT_ARE_REDACTED = List.of(
+        "reset-8a7b6c5d4e3f2a1b9c0d", "token_Ab3dE9fGh1JkLmN0pQrS", "upload-8a7b6c5d4e3f2a1b",
+        "8a7b6c5d4e3f2a1b", "3f9a1c2b4d5e6f7a8b9c0d1e", "3f9a1c2b4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90",
+        "pi_3OaBcD2eFgHiJkLm", "kqzrmw8pxtnbv7ab", "KQZR8MWPX3TNBV7A", "deadbeefcafe1234", "abcd-ef12-gh3i-4jkl",
+        HEX32, RANDOM32, T, "0x" + HEX32 + HEX32);
+
+    @Test
+    void lookAlikesMixingWordsAndSecretsAreRedacted() {
+        for (String v : LOOK_ALIKES_THAT_ARE_REDACTED) {
+            assertEquals("seen [redacted] here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+        // Random tokens of every common alphabet, 16 to 40 characters, are redacted.
+        var rnd = new java.util.Random(42);
+        String[] alphabets = {"0123456789abcdef", "0123456789ABCDEF", "0123456789abcdefghijklmnopqrstuvwxyz",
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"};
+        int kept = 0;
+        var keptExamples = new java.util.ArrayList<String>();
+        for (String alphabet : alphabets) {
+            for (int n = 0; n < 2_000; n++) {
+                int len = 16 + rnd.nextInt(25);
+                var sb = new StringBuilder(len);
+                for (int k = 0; k < len; k++) sb.append(alphabet.charAt(rnd.nextInt(alphabet.length())));
+                String tok = sb.toString();
+                if (!Redactor.isSecretShaped(tok)) continue; // all digits, all letters, a UUID: not candidates
+                if (Redactor.redactMessage("x " + tok).equals("x " + tok)) {
+                    kept++;
+                    if (keptExamples.size() < 5) keptExamples.add(tok);
+                }
+            }
+        }
+        assertEquals(0, kept, "random tokens kept as names: " + keptExamples);
     }
 
     @Test
