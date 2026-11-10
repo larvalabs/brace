@@ -55,30 +55,60 @@ final class QueryTaint {
     private static final int MAX_WARN_KEYS = 1000;
     private static final ConcurrentHashMap<String, Long> lastWarned = new ConcurrentHashMap<>();
 
-    private QueryTaint(List<Input> inputs, boolean strict) {
+    private final boolean overCap;
+
+    private QueryTaint(List<Input> inputs, boolean strict, boolean overCap) {
         this.inputs = inputs;
         this.strict = strict;
+        this.overCap = overCap;
     }
 
     /** The checkable values of {@code req}; {@code null} when it has none. */
     static QueryTaint of(Request req, boolean strict) {
+        // Each source gets its own cap (L15). One shared budget, whichever source is filled first,
+        // lets that source starve the rest: a padded query string used to leave the form body
+        // unchecked. The form body is the source an attacker can pad cheapest (it is bounded by
+        // the body limit, not the ~8 KB URL), so it is read first and, with its own budget, can no
+        // longer crowd out the short, handler-relevant path and query values read after it.
         var inputs = new Inputs();
-        if (req.pathParams() != null) req.pathParams().forEach((k, v) -> inputs.add("path parameter", k, v));
-        for (String[] pair : req.queryPairs()) inputs.add("query parameter", pair[0], pair[1]);
+        var form = new Inputs(inputs.list);
+        var query = new Inputs(inputs.list);
+        var path = new Inputs(inputs.list);
         // The body is read before the handler runs, so this parses no more than the handler could.
         // Every value of a repeated field counts (formParams reads them all). A body that isn't
         // valid form encoding is skipped: the handler sees that error only if it reads the form.
         if (isFormBody(req.header("Content-Type"))) {
             try {
                 Request.parsePairs(req.body(), false).forEach((name, values) -> {
-                    for (String value : values) inputs.add("form field", name, value);
+                    for (String value : values) form.add("form field", name, value);
                 });
             } catch (IllegalArgumentException malformed) {
                 // e.g. a stray "%" — not a form this handler can read either
             }
         }
-        return inputs.list.isEmpty() ? null : new QueryTaint(inputs.list, strict);
+        for (String[] pair : req.queryPairs()) query.add("query parameter", pair[0], pair[1]);
+        if (req.pathParams() != null) req.pathParams().forEach((k, v) -> path.add("path parameter", k, v));
+        boolean overCap = form.overCap || query.overCap || path.overCap;
+        if (overCap && strict) warnOverCap();
+        return inputs.list.isEmpty() && !overCap ? null : new QueryTaint(inputs.list, strict, overCap);
     }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean CAP_WARNED = new java.util.concurrent.atomic.AtomicBoolean();
+
+    private static void warnOverCap() {
+        if (CAP_WARNED.compareAndSet(false, true)) {
+            Log.warn("A request has more than " + MAX_INPUTS + " values or " + (MAX_VALUE_CHARS / 1024)
+                + " KB of text in one source (path, query or form): the rest are unchecked, over cap, so "
+                + "db query-string injection checks (H3) cannot see them. Logged once per process.");
+        }
+    }
+
+    static boolean capWarned() { return CAP_WARNED.get(); }
+
+    static void resetCapWarned() { CAP_WARNED.set(false); }
+
+    /** True when some request values were not recorded because a source hit the cap: unchecked. */
+    boolean overCap() { return overCap; }
 
     /** The body types {@code formParam} reads values from in practice, matched case-insensitively. */
     private static boolean isFormBody(String contentType) {
@@ -89,12 +119,23 @@ final class QueryTaint {
     }
 
     private static final class Inputs {
-        final List<Input> list = new ArrayList<>();
+        final List<Input> list;
+        int count;
         int chars;
+        boolean overCap;
+
+        Inputs() { this.list = new ArrayList<>(); }
+
+        /** A budget of its own that records into {@code shared}. */
+        Inputs(List<Input> shared) { this.list = shared; }
 
         void add(String source, String name, String value) {
             if (value == null || value.length() < 3 || NUMBER.matcher(value).matches()) return;
-            if (list.size() >= MAX_INPUTS || chars + value.length() > MAX_VALUE_CHARS) return;
+            if (count >= MAX_INPUTS || chars + value.length() > MAX_VALUE_CHARS) {
+                overCap = true;
+                return;
+            }
+            count++;
             chars += value.length();
             list.add(new Input(source, name, value));
         }

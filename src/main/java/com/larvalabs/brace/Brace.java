@@ -28,6 +28,8 @@ public class Brace {
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     // Started by Brace.test(): request data in a query string throws instead of logging (H3).
     private boolean testHarness;
+    /** Test-only: skip the L2 "ops needs opsOrigins" startup check for apps built outside {@code Brace.test()}. */
+    private boolean opsOriginsOptional;
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
     private SessionValidator sessionValidator;
     // H1 access model: the requirement every route gets unless it is marked .publicRoute().
@@ -98,6 +100,12 @@ public class Brace {
     private TrustedProxies trustedProxies;
     private int regressionsWarmupSeconds = 30;
     private final List<Notifier> regressionNotifiers = new ArrayList<>();
+
+    /** Package-private for tests that start a real server with ops on and no pinned origin. */
+    Brace opsUnpinnedForTests() {
+        this.opsOriginsOptional = true;
+        return this;
+    }
 
     public static Brace app() {
         JulLogging.init();
@@ -267,11 +275,29 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Enable sessions with these options. The options are copied here: changing them after this
+     * call has no effect (M7 review: a placeholder previous secret added afterwards would
+     * otherwise skip the validation below). Configure them fully first.
+     */
     public Brace sessions(SessionOptions options) {
-        validateSecret(options.secret(), "session");
-        this.sessionSecret = options.secret();
-        this.sessionOptions = options;
+        var snapshot = options.copy();
+        validateSessionSecrets(snapshot, true);
+        this.sessionSecret = snapshot.secret();
+        this.sessionOptions = snapshot;
         return this;
+    }
+
+    /**
+     * The current secret and every previous one through {@link #validateSecret}. M7: a previous
+     * secret that is the public scaffold placeholder (or leaked) forges cookies. {@code warn} is
+     * false for the start() backstop, so weak-secret warnings aren't logged twice.
+     */
+    private void validateSessionSecrets(SessionOptions options, boolean warn) {
+        validateSecret(options.secret(), "session", warn);
+        for (String previous : options.previousSecrets()) {
+            validateSecret(previous, "previous session", warn);
+        }
     }
 
     /**
@@ -359,6 +385,10 @@ public class Brace {
         java.util.Set.of("CHANGE-ME-to-a-random-string-at-least-32-chars");
 
     private void validateSecret(String secret, String type) {
+        validateSecret(secret, type, true);
+    }
+
+    private void validateSecret(String secret, String type, boolean warn) {
         if (secret == null || secret.isEmpty()) {
             throw new IllegalArgumentException(type + " secret cannot be null or empty");
         }
@@ -380,6 +410,7 @@ public class Brace {
                 + "is only a warning.");
         }
         // Warn about obvious placeholder values (including old scaffolds)
+        if (!warn) return;
         String lower = secret.toLowerCase();
         // The old scaffold placeholder ("CHANGE-ME-to-a-random-string-at-least-32-chars") had its
         // own clause here, comparing a mixed-case literal against a string that was just
@@ -713,10 +744,10 @@ public class Brace {
      * The public origin(s) of this app ({@code "https://app.example.com"}), the only ones an ops
      * CLI login may be signed for (M14). The {@code brace} CLI signs the server's origin into its
      * login, so a signature collected by another server (a {@code .brace} pointing elsewhere) is
-     * refused here. Required in prod mode when ops is on; also read from the
+     * refused here. Required whenever ops is on, except in dev mode and the test harness; also read from the
      * {@code BRACE_OPS_ORIGINS} environment variable when not set in code. Each argument may be a
      * comma-separated list; null and blank entries are skipped (an unset config key).
-     * Without it (dev, tests) the origin's host must match the request's {@code Host}, which a
+     * Without it (dev mode, tests) the origin's host must match the request's {@code Host}, which a
      * client can choose on a directly exposed app, so it's no defense there.
      */
     public Brace opsOrigins(String... origins) {
@@ -1211,6 +1242,11 @@ public class Brace {
         if (trustedProxies != null) {
             trustedProxies.resumeRefresh();
         }
+        // M7 review backstop: sessions() validated a snapshot, but check again here, under the
+        // mode the app actually starts in.
+        if (sessionOptions != null) {
+            validateSessionSecrets(sessionOptions, false);
+        }
         // Session-aware middleware without .sessions(secret) is a silent trap: every request
         // gets a fresh empty Session. A session-reading access requirement fails start() for
         // that (see resolveAccess); a generic BeforeSession may be read-only or otherwise
@@ -1275,15 +1311,19 @@ public class Brace {
         // Register ops endpoints if authorized keys are configured
         String tokenSecret = null;
         if (opsKeysPath != null) {
-            var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
+            var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath, true);
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             opsHandler.setAnalytics(analytics);
             if (opsOrigins.isEmpty() && System.getenv("BRACE_OPS_ORIGINS") != null) {
                 opsOrigins(System.getenv("BRACE_OPS_ORIGINS"));
             }
-            if (opsOrigins.isEmpty() && "prod".equals(System.getProperty("brace.mode"))) {
-                throw new IllegalStateException("Ops is on in prod mode without app.opsOrigins(\"https://your-app\") "
+            // L2: required everywhere except dev and the test harness, matching validateSecret:
+            // deployments launched with no brace.mode at all (old scaffold Dockerfiles) are real
+            // deployments, and an unpinned origin falls back to the Host header a client can choose.
+            if (opsOrigins.isEmpty() && !testHarness && !opsOriginsOptional
+                    && !"dev".equals(System.getProperty("brace.mode"))) {
+                throw new IllegalStateException("Ops is on outside dev mode without app.opsOrigins(\"https://your-app\") "
                     + "(or BRACE_OPS_ORIGINS): the ops CLI login is bound to the server's origin, and without "
                     + "it configured the server can only compare against the Host header, which a client "
                     + "talking to the app directly can choose.");
@@ -1493,7 +1533,7 @@ public class Brace {
             String threadName = thread.getName();
             stats.recordError(
                 throwable.getClass().getName(),
-                throwable.getMessage(),
+                Redactor.redactMessage(throwable.getMessage()),
                 "thread:" + threadName,
                 sw.toString(),
                 null,
@@ -1501,7 +1541,7 @@ public class Brace {
             Log.event("uncaught_exception", java.util.Map.of(
                 "thread", threadName,
                 "type", throwable.getClass().getName(),
-                "message", String.valueOf(throwable.getMessage())));
+                "message", String.valueOf(Redactor.redactMessage(throwable.getMessage()))));
         });
 
         // Durable-job retention (perf review H3): finished rows otherwise accumulate forever and

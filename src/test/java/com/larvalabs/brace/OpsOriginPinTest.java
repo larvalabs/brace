@@ -114,6 +114,45 @@ class OpsOriginPinTest {
     }
 
     @Test
+    void unsetModeRequiresOpsOrigins() throws Exception {
+        Path keys = tmp.resolve("unset-keys");
+        Files.writeString(keys, keypair.publicKey() + " test\n");
+        String previous = System.getProperty("brace.mode");
+        System.clearProperty("brace.mode");
+        try {
+            var unpinned = Brace.app().port(0).opsSecret("ops-origin-pin-test-secret-at-least-32-chars").ops(keys.toString());
+            var e = assertThrows(IllegalStateException.class, unpinned::start);
+            assertTrue(e.getMessage().contains("opsOrigins"), e.getMessage());
+            unpinned.stop();
+        } finally {
+            if (previous != null) System.setProperty("brace.mode", previous);
+        }
+    }
+
+    @Test
+    void devModeStartsWithoutOpsOrigins() throws Exception {
+        Path keys = tmp.resolve("dev-keys");
+        Files.writeString(keys, keypair.publicKey() + " test\n");
+        String previous = System.getProperty("brace.mode");
+        System.setProperty("brace.mode", "dev");
+        try {
+            var dev = Brace.app().port(0).opsSecret("ops-origin-pin-test-secret-at-least-32-chars").ops(keys.toString());
+            dev.start();
+            dev.stop();
+        } finally {
+            if (previous != null) System.setProperty("brace.mode", previous); else System.clearProperty("brace.mode");
+        }
+    }
+
+    @Test
+    void testHarnessStartsWithoutOpsOrigins() throws Exception {
+        Path keys = tmp.resolve("harness-keys");
+        Files.writeString(keys, keypair.publicKey() + " test\n");
+        var testApp = Brace.test().start(a -> a.ops(keys.toString()));
+        testApp.stop();
+    }
+
+    @Test
     void theCliRefusesAnOpsUrlThatIsntAnOrigin() {
         for (String bad : new String[] {"https://app.example.com@evil.example", "https://app.example.com/some/path",
                 "https://app.example.com?x=", "app.example.com"}) {

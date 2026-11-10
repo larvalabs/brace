@@ -341,7 +341,9 @@ public class Storage {
                         "key", key, "status", response.statusCode()));
             }
         } catch (Exception e) {
-            Log.event("s3.delete.error", java.util.Map.of("key", key, "error", e.getMessage()));
+            // String.valueOf: Map.of rejects the null message a bare IOException can carry.
+            Log.event("s3.delete.error", java.util.Map.of("key", key,
+                "error", String.valueOf(Redactor.redactMessage(e.getMessage()))));
         }
     }
 

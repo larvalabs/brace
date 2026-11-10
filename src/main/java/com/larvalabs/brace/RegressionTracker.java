@@ -98,7 +98,7 @@ public class RegressionTracker implements ErrorStore.RegressionListener {
                 try {
                     n.notifyRegression(r);
                 } catch (Exception ex) {
-                    Log.warn("regression notifier failed: " + ex.getMessage());
+                    Log.warn("regression notifier failed: " + Redactor.redactMessage(ex.getMessage()));
                 }
             }
         }

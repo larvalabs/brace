@@ -307,7 +307,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     exactly as `perIp` would; `.exemptMissingKey()` is unchanged. Dev mode warns once per limiter
     when it counts a keyless GET/HEAD. Tests in `RateLimiterReviewFixesTest`.
 
-- [ ] **M5: One request containing `%00` stops error persistence and regression alerts on Postgres**, `ErrorStore.java:100-133, 141-204, 228-256`, `BraceHandler.java:586-626`, `Request.java:158-207, 289, 326-330`
+- [x] **M5: One request containing `%00` stops error persistence and regression alerts on Postgres**, `ErrorStore.java:100-133, 141-204, 228-256`, `BraceHandler.java:586-626`, `Request.java:158-207, 289, 326-330`
+  - **Confirmed on Postgres 16 (fix commit).** `ErrorStorePostgresIT` against the unfixed code:
+    a batch holding one entry with a NUL stored zero rows, including the healthy kind beside it.
+    An over-long `type` or `route` (over 255 characters; the route starts with the client's
+    HTTP method) failed the batch the same way, so that second trigger is real at the store
+    level. Whether Jetty lets such a method through is still not traced. The fix replaces NUL
+    with U+FFFD rather than deleting it: the message arrives already redacted, and deleting
+    would join two short tokens into one secret-shaped one.
   - **What's wrong.**
     - `Request.scanPairs` decodes with `URLDecoder.decode`, so `%00` becomes `\u0000` in query
       and form values. The typed accessors (`queryInt`, `queryLong`, `formInt`, …) are bare
@@ -334,6 +341,10 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     kinds in the same batch are stored. A unit test that a permanently failing entry is dropped
     and logged.
   - **Model: Opus 5.5.**
+  - **Review fixes** (`fix(security): M5 review fixes`). A row error in a connection-classed
+    SQLState (57014 and the like) on a connection that still passes `isValid` counts against the
+    row instead of retaining the batch; a rejected row is retried once with its payload stripped
+    (fixed placeholder message) so the count and regression signal survive.
 
 - [ ] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches
@@ -362,7 +373,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     unredacted (false positives are the risk here).
   - **Model: Opus 5.5.**
 
-- [ ] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
+- [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current
     secret only. `previousSecrets` checks length alone, and the shipped placeholder
     `CHANGE-ME-to-a-random-string-at-least-32-chars` is 46 characters. `Session.fromCookie`
@@ -384,8 +395,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** Startup refuses a placeholder previous secret; a previous-secret cookie without
     `_abs` is rejected; ordinary rotation still works.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): M7 review fixes`). An empty previous-secret cookie opens as
+    a brand-new session (no inherited `_abs`); `sessions(options)` snapshots the options and
+    `start()` re-validates; a previous-secrets list without the bound (copied) honours no
+    previous-secret cookie. The bound still rides on the `PreviousSecrets` list type, with a
+    TODO, because `BraceHandler.java` could not change.
 
-- [ ] **M8: Buffered `Http.fetch*` has no timeout on the response body**, `Http.java:197, 224-230, 253-261, 315-329`
+- [x] **M8: Buffered `Http.fetch*` has no timeout on the response body**, `Http.java:197, 224-230, 253-261, 315-329`
   - **What's wrong.** `fetch()`, `fetchString()`, `fetchJson()`, `fetchBytes()` and the
     error-body path of `fetchEvents` send with `BodyHandlers.ofInputStream()` and loop on
     `body.read(buffer)` in `readBody`. `HttpRequest.timeout` covers only the wait for headers;
@@ -402,8 +418,11 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** A stalling body fails within the idle timeout; a slow-drip body fails at the
     total deadline; a normal large body is unaffected.
   - **Model: Opus 5.5.** Watchdog concurrency.
+  - **Review fixes** (`fix(security): M8 review fixes`). `timeout(null)` means the 30s default
+    for buffered calls (only `stream()` may run without a deadline); zero or negative throws;
+    durations over 365 days are clamped instead of overflowing.
 
-- [ ] **M9: STARTTLS is opportunistic**, `Mailer.java:134, 182-186`
+- [x] **M9: STARTTLS is opportunistic**, `Mailer.java:134, 182-186`
   - **What's wrong.** For `smtp://` the mailer sets `mail.smtp.starttls.enable` but never
     `mail.smtp.starttls.required`. With `enable` only, Angus Mail continues in cleartext when
     the server's EHLO does not advertise STARTTLS, then sends AUTH and the message. This moves
@@ -417,10 +436,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     builder flag).
   - **Tests.** The session properties for each scheme; the opt-out.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): M9 review fixes`). Credentials on an `smtp+plain://` URL
+    log one warning at construction (never the credentials); the scheme is compared
+    case-insensitively, so `SMTPS://` is implicit TLS.
 
 ## Low
 
-- [ ] **L1: An unrecognized `scope:` value silently becomes CONTROL**, `OpsKeys.java:121-134`, `OpsScope.java:34-41`
+- [x] **L1: An unrecognized `scope:` value silently becomes CONTROL**, `OpsKeys.java:121-134`, `OpsScope.java:34-41`
   - `OpsScope.parse(value, CONTROL)` falls back to CONTROL for anything it doesn't know, and a
     line with no `scope:` token is CONTROL. Probed: `scope:readonly`, `scope: read` (space),
     `Scope:read`, `read-only`, and a key listed twice (last wins) all yield CONTROL, with no log.
@@ -430,8 +452,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     in another case; on a duplicate key keep the lower scope or refuse; log each key's
     fingerprint and scope at boot.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L1 review fixes`). Grammar rewritten: any token with `:`
+    or `=` must be exactly `scope:read`/`scope:control`, at most once; other tokens are labels,
+    except a lone scope word after the key; `#` after whitespace is a comment; a leading BOM is
+    stripped. A token with no scope claim is READ. Tests for unknown/missing token scope and an
+    unknown requested scope on `/ops/auth`.
 
-- [ ] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
+- [x] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
   - With the mode unset, startup succeeds unpinned and `originIsThisServer` falls back to
     comparing the signed host with `req.host()`, which the `opsOrigins` Javadoc calls "no
     defense". `validateSecret` already refuses "everywhere except dev" because old scaffold
@@ -608,28 +635,48 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     helper that refuses a symlink target or writes by temp file and move, as `SecretFiles` does.
   - **Model: Sonnet 5.5.** Three commits.
 
-- [ ] **L12: `WebhookNotifier` posts exception text as Slack markup, unbounded**, `WebhookNotifier.java:29-34`
+- [x] **L12: `WebhookNotifier` posts exception text as Slack markup, unbounded**, `WebhookNotifier.java:29-34`
   - The message is redacted but otherwise raw; Slack and Mattermost parse `<!channel>` and
     `<https://evil|View incident>`. A web user who triggers a new error kind with input in the
     message can phish or spam the ops channel.
   - **Fix.** Escape `&`, `<`, `>` and truncate to about 500 characters.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L12 review fixes`). Mattermost markdown (`@channel`,
+    `[text](url)`, `![](pixel)`) passed unchanged. Each field is now one inline code span with
+    backticks, `< > &` and `@` replaced by look-alikes and control characters by spaces;
+    truncation happens first and never splits a surrogate pair.
 
-- [ ] **L13: Raw exception messages still reach `/ops` without `redactMessage`**, `JobScheduler.java:199`, `OpsHandler.java:465`, `Brace.java:1449-1452`, plus `Log.warn("…" + e.getMessage())` sites (`Mailer.java:81`, `WebhookNotifier.java:42`, `RateLimiter.java:215, 380`, `JobScheduler.java:279, 330`)
+- [x] **L13: Raw exception messages still reach `/ops` without `redactMessage`**, `JobScheduler.java:199`, `OpsHandler.java:465`, `Brace.java:1449-1452`, plus `Log.warn("…" + e.getMessage())` sites (`Mailer.java:81`, `WebhookNotifier.java:42`, `RateLimiter.java:215, 380`, `JobScheduler.java:279, 330`)
   - Scheduled-job `lastError` is served at `/ops/status`; the uncaught-exception event reaches
     `/ops/logs`. `redactMessage` also does not recognize the ops token's own two-part shape.
   - **Fix.** Apply `redactMessage` at those sinks (or inside `Log.warn`/`Log.event` for string
     values), and add a two-part base64url shape to `isSecretShaped`.
+  - Done in Track D: `redactMessage` applied at `JobScheduler` `lastError` and warn sites, the
+    uncaught-exception event and stats record in `Brace.java`, `Mailer`, `MailerNotifier`,
+    `WebhookNotifier`, `RateLimiter` (one-line wraps), `RegressionTracker`, `TrustedProxies`.
+    The two-part base64url token shape in `isSecretShaped` is done under M6 (`Redactor.java`).
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L13 review fixes`). Also wrapped: `PostgresMessageBus` log
+    events, `Storage` `s3.delete.error` (now null-safe), `JobPoller`'s stored
+    `scheduled_jobs.error` and its `System.err` lines. Left raw on purpose: CLI-side terminal
+    output (`Cli*.java`, `ProjectGenerator`, `ClaudeMdGenerator`), messages of exceptions thrown
+    to the caller rather than written to a sink (`Http.failed`, `EventStream`, `Request`), and
+    `BraceHandler`'s `stats.recordError`, which `Stats` already redacts.
 
-- [ ] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`
+- [x] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`
   - **Verified (angus-mail 2.0.5).** `"a@b.c, victim@x.y"` passes `@Email` and parses to two
     recipients. Confirms the 2026-10 "Not confirmed" item.
   - **Fix.** `@Email` rejects `,`, `;`, `<`, `>`, whitespace and control characters; the
     single-recipient API uses `new InternetAddress(to, true)`.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L14 review fixes`). `MailerNotifier` with a
+    comma-separated list had broken (every notification threw in its thread); it now takes one
+    or more recipients, validates each at construction and sends one message per recipient. The
+    blunt `,`/`;` check is gone (a quoted display name with a comma is one address); groups,
+    route addresses and control characters are refused. `cc`, `from` and `replyTo` are strict
+    single addresses too (`replyTo` is now applied as `Reply-To`).
 
-- [ ] **L15: `QueryTaint` evasions; the cache class allow-check covers only `getOrSet`**, `Sort.java:73-89`, `Database.java:690, 702`, `QueryTaint.java:95-100, 143`, `Cache.java:294, 308`
+- [x] **L15: `QueryTaint` evasions; the cache class allow-check covers only `getOrSet`**, `Sort.java:73-89`, `Database.java:690, 702`, `QueryTaint.java:95-100, 143`, `Cache.java:294, 308`
   - `Sort.of` normalizes its input, so `secretField%20`, `secretField desc` and
     `secretField,id` no longer appear verbatim and nothing fires. Recording stops after 1,000
     values or 64 KB in path, query, form order, so a padded query string leaves the form
@@ -640,7 +687,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     "unchecked, over cap"; apply `STORED_CLASSES` on both cache paths.
   - **Model: Sonnet 5.5.** Deferrable.
 
-- [ ] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
+- [x] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
   - The 20,000-row buffer per 10 s flush allows about 2,000 inserted rows per second, kept 35
     days, with no per-visitor or per-day cap; any client sending `Sec-Fetch-Mode: navigate` and
     a browser User-Agent counts.

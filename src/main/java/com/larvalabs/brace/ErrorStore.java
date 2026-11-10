@@ -1,5 +1,6 @@
 package com.larvalabs.brace;
 
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -18,6 +19,21 @@ import java.util.*;
  * notifications lag by at most one interval, and past {@value #MAX_PENDING_KINDS} distinct pending
  * kinds new kinds are dropped (counted, warned on flush). Occurrences of already-pending kinds are
  * never dropped — they're a counter bump. Tests and shutdown call {@link #flush()} directly.
+ *
+ * <p>One bad entry cannot stall the store (security review 2026-11, M5). {@link #record} replaces
+ * NUL characters (Postgres text cannot hold them, and pgjdbc rejects them client-side) and clips
+ * {@code type} and {@code route} to their {@code VARCHAR(255)} columns. Each upsert runs under its
+ * own savepoint, so a row the database rejects is rolled back alone while the rest of the batch
+ * commits. A rejected row is retried once at once with its payload stripped (a fixed placeholder
+ * message, no trace, detail or headers), so the kind's count and the regression signal survive;
+ * if that is rejected too, the entry is retried on later flushes and dropped after
+ * {@value #MAX_FLUSH_FAILURES} rejections. A connection-level failure (database down, pool
+ * exhausted, or a connection-classed SQLState on a connection that then fails
+ * {@code isValid}) is not the entry's fault: the whole batch is kept and retried, as before. A
+ * connection-classed SQLState on a connection that is still valid (a statement timeout on one
+ * huge row, a deadlock) counts as a row rejection. Failures are
+ * logged at most once a minute, naming the exception class, SQLState and error type, never the
+ * request-derived payload.
  */
 public class ErrorStore {
 
@@ -34,12 +50,24 @@ public class ErrorStore {
 
     static final long FLUSH_INTERVAL_MS = 2_000;
     static final int MAX_PENDING_KINDS = 1_000;
+    /** Flushes in which the database rejected an entry before that entry is dropped. */
+    static final int MAX_FLUSH_FAILURES = 5;
+    /** Width of the {@code error_type} and {@code route} columns ({@code VARCHAR(255)}). */
+    static final int MAX_KEY_LENGTH = 255;
+    static final long FAILURE_LOG_INTERVAL_NANOS = 60_000_000_000L;
+    /**
+     * Stored in place of the message when the database rejected the full record and the retry
+     * without its payload succeeded. Fixed text: it must never carry request-derived content.
+     */
+    static final String STRIPPED_MESSAGE = "[details not stored: the database rejected this error record]";
 
     /** One coalesced error kind awaiting flush: occurrence count + the latest payload. */
     private static final class Pending {
         final String type;
         final String route;
         final Instant firstSeen;
+        /** Flushes in which the database rejected this entry; reset only by a successful write. */
+        int failures;
         long count;
         String message;
         String stackTrace;
@@ -53,6 +81,16 @@ public class ErrorStore {
             this.route = route;
             this.firstSeen = firstSeen;
         }
+
+        /** Same kind, count and times; the payload replaced by {@link #STRIPPED_MESSAGE}. */
+        Pending stripped() {
+            var s = new Pending(type, route, firstSeen);
+            s.failures = failures;
+            s.count = count;
+            s.lastSeen = lastSeen;
+            s.message = STRIPPED_MESSAGE;
+            return s;
+        }
     }
 
     private final DatabaseFactory databaseFactory;
@@ -64,9 +102,34 @@ public class ErrorStore {
         new java.util.concurrent.atomic.LongAdder();
     private final Thread flusher;
 
+    /** Opens the flush session. A seam for tests that simulate an unreachable database. */
+    volatile java.util.function.Supplier<Database> flushSession;
+
+    /** Test seam: runs before each row write; throwing simulates the database rejecting that row. */
+    interface RowFault {
+        void check(String type, String message) throws SQLException;
+    }
+
+    /** Test seam: whether the flush connection is still usable after a connection-classed error. */
+    interface ConnectionCheck {
+        boolean alive(java.sql.Connection connection) throws SQLException;
+    }
+
+    volatile RowFault rowFault;
+    volatile ConnectionCheck connectionCheck = connection -> connection.isValid(1);
+
+    // Failure accounting for the rate-limited log line. Guarded by flush()'s monitor.
+    private long nextFailureLogNanos = System.nanoTime();
+    private long rejectedRows;
+    private long failedFlushes;
+    private long droppedEntries;
+    private final Set<String> droppedTypes = new LinkedHashSet<>();
+    private String lastFailure;
+
     public ErrorStore(DatabaseFactory databaseFactory, int maxErrors) {
         this.databaseFactory = databaseFactory;
         this.maxErrors = maxErrors;
+        this.flushSession = () -> new Database(databaseFactory.openSession());
         this.flusher = Thread.ofVirtual().name("brace-error-flush").start(() -> {
             while (true) {
                 try {
@@ -112,41 +175,81 @@ public class ErrorStore {
     public void record(String type, String message, String route, String stackTrace,
                        String requestDetail, String queriesBefore, String requestHeaders) {
         var now = Instant.now();
-        var key = type + '\u0000' + route;
+        // M5: a NUL from `?page=1%00` reaches the message, trace and request detail. Postgres text
+        // can't store it, so it is replaced here rather than failing the write. And both key
+        // columns are VARCHAR(255), while the route starts with the client-chosen HTTP method.
+        String cleanType = clip(withoutNul(type));
+        String cleanRoute = clip(withoutNul(route));
+        String cleanMessage = withoutNul(message);
+        String cleanDetail = withoutNul(requestDetail);
+        String cleanQueries = withoutNul(queriesBefore);
+        String cleanHeaders = withoutNul(requestHeaders);
+        var key = cleanType + '\u0000' + cleanRoute;
         if (pending.size() >= MAX_PENDING_KINDS && !pending.containsKey(key)) {
             droppedKinds.increment();
             return;
         }
         // Served on /ops/errors; the trace repeats the message (and every cause's) verbatim.
-        String redactedTrace = Redactor.redactStackTrace(stackTrace);
+        String redactedTrace = Redactor.redactStackTrace(withoutNul(stackTrace));
         pending.compute(key, (k, p) -> {
-            if (p == null) p = new Pending(type, route, now);
+            if (p == null) p = new Pending(cleanType, cleanRoute, now);
             p.count++;
-            p.message = message;
+            p.message = cleanMessage;
             p.stackTrace = redactedTrace;
-            p.requestDetail = requestDetail;
-            p.queriesBefore = queriesBefore;
-            p.requestHeaders = requestHeaders;
+            p.requestDetail = cleanDetail;
+            p.queriesBefore = cleanQueries;
+            p.requestHeaders = cleanHeaders;
             p.lastSeen = now;
             return p;
         });
     }
 
     /**
+     * Replaces each NUL with U+FFFD rather than deleting it. Deleting would join the text on
+     * either side, and the message arrives already redacted: {@code abc\0def} passed the redactor
+     * as two short tokens and must not be stored as one long, secret-shaped one.
+     */
+    static String withoutNul(String s) {
+        return s == null || s.indexOf('\u0000') < 0 ? s : s.replace('\u0000', '�');
+    }
+
+    /** Clips to {@link #MAX_KEY_LENGTH} UTF-16 units without splitting a surrogate pair. */
+    static String clip(String s) {
+        if (s == null || s.length() <= MAX_KEY_LENGTH) return s;
+        int end = MAX_KEY_LENGTH;
+        if (Character.isHighSurrogate(s.charAt(end - 1))) end--;
+        return s.substring(0, end);
+    }
+
+    /** Per-row outcome of a flush. */
+    private static final byte UPDATED = 0, INSERTED = 1, REJECTED = 2;
+
+    /**
      * Drain the buffer and persist it: one upsert per distinct {@code (type, route)} carrying the
-     * coalesced occurrence count, plus one prune check — all in a single transaction on a single
-     * connection. On failure the drained entries are merged back and the next interval retries.
-     * Serialized so the periodic, shutdown, and test-triggered flushes can't interleave.
+     * coalesced occurrence count, plus one prune check, in a single transaction on a single
+     * connection. Each upsert (and the prune) runs under its own savepoint, so a row the database
+     * rejects is rolled back alone and the rest commit. A rejected entry is merged back and
+     * retried, and dropped after {@value #MAX_FLUSH_FAILURES} rejections. A connection-level
+     * failure merges the whole batch back without counting against any entry, and the next
+     * interval retries. Serialized so the periodic, shutdown, and test-triggered flushes can't
+     * interleave.
      */
     public synchronized void flush() {
-        long dropped = droppedKinds.sumThenReset();
-        if (dropped > 0) {
-            Log.warn("error storm: dropped " + dropped + " new error kinds beyond the "
-                + MAX_PENDING_KINDS + "-kind pending buffer");
+        try {
+            long dropped = droppedKinds.sumThenReset();
+            if (dropped > 0) {
+                Log.warn("error storm: dropped " + dropped + " new error kinds beyond the "
+                    + MAX_PENDING_KINDS + "-kind pending buffer");
+            }
+            if (!pending.isEmpty()) {
+                flushBatch();
+            }
+        } finally {
+            logFailures();
         }
-        if (pending.isEmpty()) {
-            return;
-        }
+    }
+
+    private void flushBatch() {
         // Drain a snapshot; records arriving during the flush re-create entries for the next one.
         var batch = new ArrayList<Pending>();
         for (var key : pending.keySet()) {
@@ -157,50 +260,238 @@ public class ErrorStore {
             return;
         }
 
-        var isNew = new boolean[batch.size()];
+        var outcome = new byte[batch.size()];
+        var rowErrors = new Throwable[batch.size()];
+        boolean postgres = databaseFactory.isPostgres();
         boolean committed = false;
-        var db = new Database(databaseFactory.openSession());
-        db.beginTransaction();
+        Database db = null;
         try {
-            for (int i = 0; i < batch.size(); i++) {
-                var p = batch.get(i);
-                isNew[i] = databaseFactory.isPostgres() ? upsertPostgres(db, p) : upsertH2(db, p);
-            }
-
-            // Prune if over limit — once per flush, not per occurrence.
-            var countResult = db.sqlQueryLong("SELECT COUNT(*) FROM ops_errors");
-            if (countResult != null && countResult > maxErrors) {
-                long excess = countResult - maxErrors;
-                // Delete resolved first (oldest), then unresolved oldest
-                db.sql("DELETE FROM ops_errors WHERE id IN (" +
-                    "SELECT id FROM ops_errors ORDER BY " +
-                    "CASE WHEN resolved_at IS NOT NULL THEN 0 ELSE 1 END, " +
-                    "last_seen ASC " +
-                    "LIMIT ?)", (int) excess);
-            }
-
+            db = flushSession.get();
+            db.beginTransaction();
+            db.jdbc(connection -> {
+                for (int i = 0; i < batch.size(); i++) {
+                    var p = batch.get(i);
+                    try {
+                        outcome[i] = writeRow(connection, p, postgres);
+                    } catch (RowRejected first) {
+                        // Retry once without the payload, so the kind's count and the regression
+                        // signal survive whatever in the message, trace or detail was refused.
+                        var stripped = p.stripped();
+                        try {
+                            outcome[i] = writeRow(connection, stripped, postgres);
+                            batch.set(i, stripped);
+                        } catch (RowRejected second) {
+                            outcome[i] = REJECTED;
+                            rowErrors[i] = first.getCause();
+                        }
+                    }
+                }
+                prune(connection);
+            });
             db.commitTransaction();
             committed = true;
         } catch (Exception e) {
-            db.rollbackTransaction();
+            if (db != null) {
+                try {
+                    db.rollbackTransaction();
+                } catch (Exception ignored) {
+                    // The connection is likely gone; closing below releases it.
+                }
+            }
             // DB unavailable (the storm case): put the batch back so counts keep accumulating —
             // bounded by kind cardinality, not error rate — and retry next interval.
             for (var p : batch) {
                 mergeBack(p);
             }
+            failedFlushes++;
+            lastFailure = describe(e);
         } finally {
-            db.close();
+            if (db != null) {
+                try {
+                    db.close();
+                } catch (Exception ignored) {
+                    // Nothing more to do; the pool reclaims or evicts the connection.
+                }
+            }
+        }
+        if (!committed) {
+            return;
+        }
+
+        // Rows the database rejected: retry a few times, then give up on that entry.
+        for (int i = 0; i < batch.size(); i++) {
+            if (outcome[i] != REJECTED) continue;
+            var p = batch.get(i);
+            rejectedRows++;
+            lastFailure = describe(rowErrors[i]);
+            if (++p.failures >= MAX_FLUSH_FAILURES) {
+                droppedEntries++;
+                if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
+            } else {
+                mergeBack(p);
+            }
         }
 
         // Notify the regression listener only after a successful commit, off the DB path.
         var listener = regressionListener;
-        if (committed && listener != null) {
+        if (listener != null) {
             for (int i = 0; i < batch.size(); i++) {
                 var p = batch.get(i);
-                if (isNew[i]) listener.onNew(p.type, p.route, p.message, p.firstSeen);
-                else listener.onRepeat(p.type, p.route, p.count);
+                if (outcome[i] == INSERTED) listener.onNew(p.type, p.route, p.message, p.firstSeen);
+                else if (outcome[i] == UPDATED) listener.onRepeat(p.type, p.route, p.count);
             }
         }
+    }
+
+    /** The database refused this row; the connection is still usable. Wraps the row's error. */
+    private static final class RowRejected extends Exception {
+        RowRejected(Throwable cause) {
+            super(null, cause, false, false);
+        }
+    }
+
+    /**
+     * Writes one entry under its own savepoint. Throws {@link RowRejected} when the database
+     * refused the row and the connection is still usable (the savepoint is rolled back), and the
+     * original {@link SQLException} when the connection is gone, which aborts the whole flush and
+     * keeps the batch without counting against any entry.
+     */
+    private byte writeRow(java.sql.Connection connection, Pending p, boolean postgres)
+            throws SQLException, RowRejected {
+        var savepoint = connection.setSavepoint();
+        try {
+            var fault = rowFault;
+            if (fault != null) fault.check(p.type, p.message);
+            byte result = (postgres ? upsertPostgres(connection, p) : upsertH2(connection, p)) ? INSERTED : UPDATED;
+            connection.releaseSavepoint(savepoint);
+            return result;
+        } catch (SQLException | RuntimeException e) {
+            recoverOrAbort(connection, savepoint, e);
+            throw new RowRejected(e);
+        }
+    }
+
+    /**
+     * Rolls back to {@code savepoint} after {@code e}, or rethrows {@code e} when the connection
+     * is gone. A connection-classed SQLState (08, 53, 57, 40, 25) is not trusted on its own: 57014
+     * is a statement timeout on one huge row, 40P01 a deadlock on one key. Only when the
+     * connection also fails its liveness check does the flush abort; otherwise the error is the
+     * row's (M5 review). The rollback itself throws if the connection is gone.
+     */
+    private void recoverOrAbort(java.sql.Connection connection, java.sql.Savepoint savepoint, Exception e)
+            throws SQLException {
+        try {
+            connection.rollback(savepoint);
+        } catch (SQLException rollbackFailed) {
+            if (e instanceof SQLException se) throw se;
+            throw rollbackFailed;
+        }
+        if (e instanceof SQLException se && isConnectionFailure(se)) {
+            boolean alive;
+            try {
+                alive = connectionCheck.alive(connection);
+            } catch (SQLException | RuntimeException checkFailed) {
+                alive = false;
+            }
+            if (!alive) throw se;
+        }
+    }
+
+    /** Prune if over limit — once per flush, not per occurrence. Best effort under a savepoint. */
+    private void prune(java.sql.Connection connection) throws SQLException {
+        var savepoint = connection.setSavepoint();
+        try {
+            long count;
+            try (var st = connection.createStatement();
+                 var rs = st.executeQuery("SELECT COUNT(*) FROM ops_errors")) {
+                rs.next();
+                count = rs.getLong(1);
+            }
+            if (count > maxErrors) {
+                // Delete resolved first (oldest), then unresolved oldest
+                try (var ps = connection.prepareStatement("DELETE FROM ops_errors WHERE id IN (" +
+                        "SELECT id FROM ops_errors ORDER BY " +
+                        "CASE WHEN resolved_at IS NOT NULL THEN 0 ELSE 1 END, " +
+                        "last_seen ASC " +
+                        "LIMIT ?)")) {
+                    ps.setInt(1, (int) (count - maxErrors));
+                    ps.executeUpdate();
+                }
+            }
+            connection.releaseSavepoint(savepoint);
+        } catch (SQLException e) {
+            // Keep the upserts; the next flush prunes again. Aborts only if the connection is gone.
+            recoverOrAbort(connection, savepoint, e);
+            lastFailure = describe(e);
+            rejectedRows++;
+        }
+    }
+
+    /**
+     * True when an exception means the connection or server is unavailable, rather than that the
+     * database rejected this row: SQLState classes 08 (connection), 53 (insufficient resources),
+     * 57 (operator intervention, e.g. shutdown or statement timeout), 40 (rollback: serialization
+     * failure, deadlock) and 25 (invalid transaction state).
+     */
+    static boolean isConnectionFailure(SQLException e) {
+        if (e instanceof java.sql.SQLRecoverableException
+                || e instanceof java.sql.SQLTransientConnectionException
+                || e instanceof java.sql.SQLNonTransientConnectionException) {
+            return true;
+        }
+        String state = e.getSQLState();
+        return state != null && (state.startsWith("08") || state.startsWith("53")
+            || state.startsWith("57") || state.startsWith("40") || state.startsWith("25"));
+    }
+
+    /** Exception class and SQLState only: driver messages can echo the request-derived values. */
+    private static String describe(Throwable e) {
+        String state = null;
+        for (Throwable t = e; t != null && state == null; t = t.getCause()) {
+            if (t instanceof SQLException se) state = se.getSQLState();
+        }
+        return e.getClass().getName() + (state != null ? " (SQLState " + state + ")" : "");
+    }
+
+    /** An error type for a log line: printable ASCII, short. It's an exception class name. */
+    private static String forLog(String s) {
+        if (s == null) return "null";
+        var sb = new StringBuilder();
+        for (int i = 0; i < s.length() && sb.length() < 100; i++) {
+            char c = s.charAt(i);
+            sb.append(c >= 0x20 && c < 0x7f ? c : '?');
+        }
+        return sb.toString();
+    }
+
+    /** At most one warning per {@link #FAILURE_LOG_INTERVAL_NANOS}, summarising what failed since the last. */
+    private void logFailures() {
+        if (rejectedRows == 0 && failedFlushes == 0 && droppedEntries == 0) return;
+        long now = System.nanoTime();
+        if (now - nextFailureLogNanos < 0) return;
+        nextFailureLogNanos = now + FAILURE_LOG_INTERVAL_NANOS;
+        var msg = new StringBuilder("error store: could not persist errors");
+        if (failedFlushes > 0) {
+            msg.append("; ").append(failedFlushes).append(" flush(es) failed, entries kept for retry");
+        }
+        if (rejectedRows > 0) {
+            msg.append("; database rejected ").append(rejectedRows).append(" row write(s)");
+        }
+        if (droppedEntries > 0) {
+            msg.append("; dropped ").append(droppedEntries).append(" error kind(s) after ")
+                .append(MAX_FLUSH_FAILURES).append(" rejected flushes: ").append(String.join(", ", droppedTypes));
+        }
+        msg.append("; last failure: ").append(lastFailure);
+        Log.warn(msg.toString());
+        rejectedRows = 0;
+        failedFlushes = 0;
+        droppedEntries = 0;
+        droppedTypes.clear();
+    }
+
+    /** Test hook: lets the next flush write its failure summary without waiting out the interval. */
+    synchronized void expireFailureLogWindow() {
+        nextFailureLogNanos = System.nanoTime();
     }
 
     /** Re-merge a failed-flush entry without clobbering anything newer that arrived meanwhile. */
@@ -208,6 +499,8 @@ public class ErrorStore {
         pending.compute(old.type + '\u0000' + old.route, (k, p) -> {
             if (p == null) return old;
             p.count += old.count; // keep p's payload — it's newer
+            // Carry the rejection count, so a key the database always rejects is still dropped.
+            p.failures = Math.max(p.failures, old.failures);
             return p;
         });
     }
@@ -225,57 +518,85 @@ public class ErrorStore {
      * idiom for "was this a fresh insert?": {@code xmax} is 0 on a row this statement inserted,
      * non-zero on one it updated — that's the new-vs-repeat signal the regression listener needs.
      */
-    private boolean upsertPostgres(Database db, Pending p) {
-        return db.jdbc(connection -> {
-            try (var ps = connection.prepareStatement(
-                "INSERT INTO ops_errors " +
-                "(error_type, message, stack_trace, route, request_detail, queries_before, request_headers, first_seen, last_seen, occurrence_count) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-                "ON CONFLICT (error_type, route) WHERE resolved_at IS NULL DO UPDATE SET " +
-                "occurrence_count = ops_errors.occurrence_count + EXCLUDED.occurrence_count, " +
-                "message = EXCLUDED.message, stack_trace = EXCLUDED.stack_trace, " +
-                "request_detail = EXCLUDED.request_detail, queries_before = EXCLUDED.queries_before, " +
-                "request_headers = EXCLUDED.request_headers, last_seen = EXCLUDED.last_seen " +
-                "RETURNING (xmax = 0) AS inserted")) {
-                ps.setString(1, p.type);
-                ps.setString(2, p.message);
-                ps.setString(3, p.stackTrace);
-                ps.setString(4, p.route);
-                ps.setString(5, p.requestDetail);
-                ps.setString(6, p.queriesBefore);
-                ps.setString(7, p.requestHeaders);
-                ps.setTimestamp(8, Timestamp.from(p.firstSeen));
-                ps.setTimestamp(9, Timestamp.from(p.lastSeen));
-                ps.setLong(10, p.count);
-                try (var rs = ps.executeQuery()) {
-                    rs.next();
-                    return rs.getBoolean("inserted");
-                }
+    private static boolean upsertPostgres(java.sql.Connection connection, Pending p) throws SQLException {
+        try (var ps = connection.prepareStatement(
+            "INSERT INTO ops_errors " +
+            "(error_type, message, stack_trace, route, request_detail, queries_before, request_headers, first_seen, last_seen, occurrence_count) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+            "ON CONFLICT (error_type, route) WHERE resolved_at IS NULL DO UPDATE SET " +
+            "occurrence_count = ops_errors.occurrence_count + EXCLUDED.occurrence_count, " +
+            "message = EXCLUDED.message, stack_trace = EXCLUDED.stack_trace, " +
+            "request_detail = EXCLUDED.request_detail, queries_before = EXCLUDED.queries_before, " +
+            "request_headers = EXCLUDED.request_headers, last_seen = EXCLUDED.last_seen " +
+            "RETURNING (xmax = 0) AS inserted")) {
+            ps.setString(1, p.type);
+            ps.setString(2, p.message);
+            ps.setString(3, p.stackTrace);
+            ps.setString(4, p.route);
+            ps.setString(5, p.requestDetail);
+            ps.setString(6, p.queriesBefore);
+            ps.setString(7, p.requestHeaders);
+            ps.setTimestamp(8, Timestamp.from(p.firstSeen));
+            ps.setTimestamp(9, Timestamp.from(p.lastSeen));
+            ps.setLong(10, p.count);
+            try (var rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getBoolean("inserted");
             }
-        });
+        }
     }
 
     /**
      * H2 path: check for an existing unresolved {@code (type, route)}, then UPDATE-or-INSERT. Not
      * atomic — see {@link #upsertPostgres} for the race this carries and why H2 keeps it anyway
      * (no partial unique index, different upsert syntax). Returns true if a new row was inserted.
+     * Raw JDBC like the Postgres path, so a rejected row stays inside its savepoint and never
+     * passes through Hibernate's exception handling (which could mark the transaction rollback-only).
      */
-    private boolean upsertH2(Database db, Pending p) {
-        var existing = db.sqlQuery(
-            "SELECT id, occurrence_count FROM ops_errors WHERE error_type = ? AND route = ? AND resolved_at IS NULL",
-            p.type, p.route);
+    private static boolean upsertH2(java.sql.Connection connection, Pending p) throws SQLException {
+        Long id = null;
+        long count = 0;
+        try (var ps = connection.prepareStatement(
+                "SELECT id, occurrence_count FROM ops_errors WHERE error_type = ? AND route = ? AND resolved_at IS NULL")) {
+            ps.setString(1, p.type);
+            ps.setString(2, p.route);
+            try (var rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    id = rs.getLong(1);
+                    count = rs.getLong(2);
+                }
+            }
+        }
 
-        if (!existing.isEmpty()) {
-            Object[] row = existing.get(0);
-            long id = ((Number) row[0]).longValue();
-            long count = ((Number) row[1]).longValue();
-            db.sql("UPDATE ops_errors SET occurrence_count = ?, message = ?, stack_trace = ?, request_detail = ?, queries_before = ?, request_headers = ?, last_seen = ? WHERE id = ?",
-                count + p.count, p.message, p.stackTrace, p.requestDetail, p.queriesBefore, p.requestHeaders, Timestamp.from(p.lastSeen), id);
+        if (id != null) {
+            try (var ps = connection.prepareStatement(
+                    "UPDATE ops_errors SET occurrence_count = ?, message = ?, stack_trace = ?, request_detail = ?, queries_before = ?, request_headers = ?, last_seen = ? WHERE id = ?")) {
+                ps.setLong(1, count + p.count);
+                ps.setString(2, p.message);
+                ps.setString(3, p.stackTrace);
+                ps.setString(4, p.requestDetail);
+                ps.setString(5, p.queriesBefore);
+                ps.setString(6, p.requestHeaders);
+                ps.setTimestamp(7, Timestamp.from(p.lastSeen));
+                ps.setLong(8, id);
+                ps.executeUpdate();
+            }
             return false;
         }
-        db.sql("INSERT INTO ops_errors (error_type, message, stack_trace, route, request_detail, queries_before, request_headers, first_seen, last_seen, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            p.type, p.message, p.stackTrace, p.route, p.requestDetail, p.queriesBefore, p.requestHeaders,
-            Timestamp.from(p.firstSeen), Timestamp.from(p.lastSeen), p.count);
+        try (var ps = connection.prepareStatement(
+                "INSERT INTO ops_errors (error_type, message, stack_trace, route, request_detail, queries_before, request_headers, first_seen, last_seen, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+            ps.setString(1, p.type);
+            ps.setString(2, p.message);
+            ps.setString(3, p.stackTrace);
+            ps.setString(4, p.route);
+            ps.setString(5, p.requestDetail);
+            ps.setString(6, p.queriesBefore);
+            ps.setString(7, p.requestHeaders);
+            ps.setTimestamp(8, Timestamp.from(p.firstSeen));
+            ps.setTimestamp(9, Timestamp.from(p.lastSeen));
+            ps.setLong(10, p.count);
+            ps.executeUpdate();
+        }
         return true;
     }
 

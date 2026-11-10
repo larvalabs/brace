@@ -332,7 +332,7 @@ class CliCheckTest {
         Files.writeString(integrationProjectDir.resolve("ops-private.key"),
             integrationKeypair.privateKey() + "\n" + integrationKeypair.publicKey() + "\n");
 
-        integrationApp = Brace.app().port(0).ops(keysFile.toString());
+        integrationApp = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         integrationApp.start();
         integrationPort = integrationApp.actualPort();
 
@@ -427,7 +427,7 @@ class CliCheckTest {
 
     @Test
     void probeReadsTheRootResponseWithoutFollowingRedirects() throws Exception {
-        var app = Brace.app().port(0);
+        var app = Brace.app().opsUnpinnedForTests().port(0);
         app.after(SecurityHeaders.strict());
         app.get("/", req -> Redirect.to("/login"));
         app.start();

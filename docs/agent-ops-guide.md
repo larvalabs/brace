@@ -115,7 +115,9 @@ require `control`. See "Token scopes" below. Authenticate with `POST /ops/auth`
 When a new error kind first appears since startup, Brace notifies the registered
 notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a
 `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl),
-new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a
+new MailerNotifier(mailer, "ops@example.com"))`. `MailerNotifier` takes one or more
+recipients (`"a@x.com, b@x.com"`, varargs or a `List`), checks each at construction (a bad one
+fails startup) and sends one message per recipient. `WebhookNotifier` posts a
 Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)`
 (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error
 store).
@@ -385,8 +387,13 @@ A line with no `scope:` marker defaults to `control` (backward compatible). Mark
 read-only by adding `scope:read`:
 
 ```
-<base64-pubkey>  scope:read  oncall-agent
+<base64-pubkey>  scope:read  oncall-agent   # read-only CI key
 ```
+
+Any token with `:` or `=` must be exactly `scope:read` or `scope:control` (at most once), or
+the server refuses to start; other words are label text, and `#` after whitespace starts a
+comment. A lone `read`/`ro`/`control` after the key also fails: write `scope:read`. The full
+grammar is in `docs/SECURITY.md` (Ops Endpoints).
 
 `POST /ops/auth` caps the minted token at the key's ceiling, so a `scope:read` key
 **cannot** obtain a control token even if it requests one — escalation is impossible by

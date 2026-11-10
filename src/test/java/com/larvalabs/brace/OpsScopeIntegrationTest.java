@@ -39,7 +39,7 @@ class OpsScopeIntegrationTest {
         var db = new DatabaseFactory(
             "jdbc:h2:mem:scopedb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null, List.of());
 
-        app = Brace.app().port(0).ops(keysFile.toString()).cache(cache).database(db);
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString()).cache(cache).database(db);
         app.get("/boom", req -> { throw new RuntimeException("scope test error"); });
         app.start();
         port = app.actualPort();
@@ -116,6 +116,17 @@ class OpsScopeIntegrationTest {
         // Even asking for control, a read-ceiling key is capped at read.
         var auth = authenticate(readKey, "control");
         assertEquals("read", auth.scope(), "requested control must be down-capped to the key's read ceiling");
+    }
+
+    @Test
+    void anUnknownRequestedScopeIsReadEvenForAControlKey() throws Exception {
+        // L1 review: present but unrecognised fails closed to READ, never to the ceiling.
+        for (String requested : new String[] {"admin", "read-only", "CONTROL!"}) {
+            var auth = authenticate(controlKey, requested);
+            assertEquals(200, auth.status(), requested);
+            assertEquals("read", auth.scope(), requested);
+        }
+        assertEquals("control", authenticate(controlKey, "Control").scope(), "a known scope is case-insensitive");
     }
 
     @Test

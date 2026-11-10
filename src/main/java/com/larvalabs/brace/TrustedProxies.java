@@ -246,7 +246,7 @@ public class TrustedProxies {
             Log.info("trusted-proxies: refreshed Cloudflare IP ranges (" + fetched.size() + " CIDRs)");
             return true;
         } catch (RuntimeException e) {
-            Log.warn("trusted-proxies: Cloudflare IP range refresh failed, keeping current ranges — " + e.getMessage());
+            Log.warn("trusted-proxies: Cloudflare IP range refresh failed, keeping current ranges — " + Redactor.redactMessage(e.getMessage()));
             return false;
         }
     }

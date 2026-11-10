@@ -45,6 +45,81 @@ class MailerTest {
     }
 
     @Test
+    void smtpRequiresStarttls() {
+        var props = new Mailer("smtp://mail.example.com:587")
+            .smtpProperties("mail.example.com", 587, "smtp");
+        assertEquals("true", props.get("mail.smtp.starttls.enable"));
+        assertEquals("true", props.get("mail.smtp.starttls.required"));
+    }
+
+    @Test
+    void smtpPlainOptsOutOfRequiredStarttls() {
+        var props = new Mailer("smtp+plain://localhost:25")
+            .smtpProperties("localhost", 25, "smtp+plain");
+        assertEquals("true", props.get("mail.smtp.starttls.enable"));
+        assertNull(props.get("mail.smtp.starttls.required"));
+    }
+
+    @Test
+    void smtpsDoesNotSetStarttls() {
+        var props = new Mailer("smtps://mail.example.com:465")
+            .smtpProperties("mail.example.com", 465, "smtps");
+        assertNull(props.get("mail.smtp.starttls.required"));
+    }
+
+    // --- M9 review fixes ---
+
+    @Test
+    void schemeIsComparedCaseInsensitively() {
+        var smtps = new Mailer("SMTPS://mail.example.com:465").smtpProperties("mail.example.com", 465, "SMTPS");
+        assertEquals("true", smtps.get("mail.smtp.ssl.enable"), "SMTPS:// is implicit TLS, not STARTTLS");
+        assertNull(smtps.get("mail.smtp.starttls.required"));
+
+        var plain = new Mailer("SMTP+Plain://localhost:25").smtpProperties("localhost", 25, "SMTP+Plain");
+        assertNull(plain.get("mail.smtp.starttls.required"));
+
+        var smtp = new Mailer("SMTP://mail.example.com:587").smtpProperties("mail.example.com", 587, "SMTP");
+        assertEquals("true", smtp.get("mail.smtp.starttls.required"));
+    }
+
+    @Test
+    void credentialsOnAPlainUrlWarnOnceWithoutTheCredentials() {
+        LogTap.clear();
+        new Mailer("smtp+plain://mailuser:hunter2-secret@relay.internal:25");
+        var warnings = mailerWarnings();
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertTrue(warnings.get(0).contains("smtp+plain"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("hunter2-secret"), "never log the password");
+        assertFalse(warnings.get(0).contains("mailuser"), "nor the user name");
+
+        LogTap.clear();
+        new Mailer("SMTP+PLAIN://mailuser:pw@relay.internal:25");
+        assertEquals(1, mailerWarnings().size(), "case-insensitive scheme");
+
+        LogTap.clear();
+        new Mailer("smtp+plain://relay.internal:25");
+        new Mailer("smtp://mailuser:pw@mail.example.com:587");
+        new Mailer("smtps://mailuser:pw@mail.example.com:465");
+        new Mailer(null);
+        assertEquals(java.util.List.of(), mailerWarnings(), "no credentials, or TLS: no warning");
+    }
+
+    private static java.util.List<String> mailerWarnings() {
+        return LogTap.snapshot().stream()
+            .filter(e -> "WARN".equals(e.fields().get("level")))
+            .map(e -> String.valueOf(e.fields().get("message")))
+            .filter(m -> m.contains("cleartext"))
+            .toList();
+    }
+
+    @Test
+    void captureModeUnaffectedBySchemeRules() {
+        var mailer = new Mailer(null);
+        mailer.to("user@example.com").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
     void captureMode() {
         var mailer = new Mailer(null); // no SMTP = capture only
         mailer.from("noreply@test.com");
@@ -74,6 +149,112 @@ class MailerTest {
         var email = mailer.last();
         assertEquals("<h1>Hello</h1>", email.html());
         assertNull(email.text());
+    }
+
+    @Test
+    void toRejectsRecipientLists() {
+        var mailer = new Mailer(null);
+        for (String bad : new String[] {"a@b.c, victim@x.y", "a@b.c;victim@x.y", "a@b.c\r\nBcc: v@x.y"}) {
+            assertThrows(IllegalArgumentException.class,
+                () -> mailer.to(bad).subject("s").text("t").send(), bad);
+        }
+        assertEquals(0, mailer.sentCount());
+        mailer.to("Name <ok@example.com>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
+    void singleAddressIsNotExpandedToTwoRecipients() {
+        assertThrows(IllegalArgumentException.class, () -> Mailer.singleAddress("a@b.c, victim@x.y"));
+        assertEquals("a@b.c", Mailer.singleAddress("a@b.c").getAddress());
+    }
+
+    // --- L14 review fixes ---
+
+    @Test
+    void aQuotedDisplayNameWithACommaIsOneAddress() {
+        var mailer = new Mailer(null);
+        mailer.to("\"Doe, J\" <a@b.c>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+        assertEquals("a@b.c", Mailer.singleAddress("\"Doe; J\" <a@b.c>").getAddress());
+    }
+
+    @Test
+    void groupsRoutesAndListsAreRefused() {
+        for (String bad : new String[] {"g: a@b.c;", "undisclosed: a@b.c, d@e.f;", "g:;",
+                "<@relay.example:a@b.c>", "a@b.c, d@e.f", "a@b.c d@e.f", "", "a@b.c\n", "\"x\r\n\" <a@b.c>"}) {
+            assertThrows(IllegalArgumentException.class, () -> Mailer.singleAddress(bad), bad);
+        }
+    }
+
+    @Test
+    void ccIsASingleAddressLikeTo() {
+        var mailer = new Mailer(null);
+        for (String bad : new String[] {"a@b.c, victim@x.y", "g: a@b.c, victim@x.y;"}) {
+            assertThrows(IllegalArgumentException.class,
+                () -> mailer.to("user@example.com").cc(bad).subject("s").text("t").send(), bad);
+        }
+        assertEquals(0, mailer.sentCount());
+        mailer.to("user@example.com").cc("\"Boss, The\" <boss@example.com>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
+    void fromAndReplyToAreExactlyOneAddress() {
+        assertThrows(IllegalArgumentException.class, () -> new Mailer(null).from("a@b.c, x@y.z"));
+        assertThrows(IllegalArgumentException.class, () -> new Mailer(null).replyTo("a@b.c, x@y.z"));
+        assertThrows(IllegalArgumentException.class, () -> new Mailer(null).replyTo("g: a@b.c;"));
+        var mailer = new Mailer(null).from("App <noreply@example.com>").replyTo("support@example.com");
+        assertThrows(IllegalArgumentException.class,
+            () -> mailer.to("user@example.com").from("a@b.c, x@y.z").subject("s").text("t").send());
+        assertEquals(0, mailer.sentCount());
+        mailer.to("user@example.com").from("\"Team, Ops\" <ops@example.com>").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
+    void mailerNotifierSendsToEachOfSeveralRecipients() throws Exception {
+        var regression = new RegressionTracker.Regression("id", "java.lang.Boom", "GET /x", "m",
+            java.time.Instant.EPOCH, 1, null);
+
+        var mailer = new Mailer(null);
+        new MailerNotifier(mailer, "ops@example.com, \"On Call, Team\" <oncall@example.com>").notifyRegression(regression);
+        awaitCount(() -> mailer.sentCount() == 2);
+        var to = mailer.sent().stream().map(Mailer.CapturedEmail::to).sorted().toList();
+        assertEquals(2, to.size(), to.toString());
+        assertTrue(to.get(0).contains("oncall@example.com"), to.toString());
+        assertEquals("ops@example.com", to.get(1));
+
+        var varargs = new Mailer(null);
+        new MailerNotifier(varargs, "a@example.com", "b@example.com").notifyRegression(regression);
+        awaitCount(() -> varargs.sentCount() == 2);
+
+        var list = new Mailer(null);
+        new MailerNotifier(list, java.util.List.of("a@example.com", "b@example.com", "c@example.com")).notifyRegression(regression);
+        awaitCount(() -> list.sentCount() == 3);
+    }
+
+    @Test
+    void oneFailingRecipientDoesNotStopTheOthers() throws Exception {
+        var regression = new RegressionTracker.Regression("id", "T", "GET /x", "m", java.time.Instant.EPOCH, 1, null);
+        var mailer = new Mailer(null) {
+            @Override public EmailBuilder to(String address) {
+                if (address.startsWith("down@")) throw new RuntimeException("relay refused");
+                return super.to(address);
+            }
+        };
+        new MailerNotifier(mailer, "a@example.com", "down@example.com", "b@example.com").notifyRegression(regression);
+        awaitCount(() -> mailer.sentCount() == 2);
+        assertEquals(java.util.List.of("a@example.com", "b@example.com"),
+            mailer.sent().stream().map(Mailer.CapturedEmail::to).toList());
+    }
+
+    @Test
+    void mailerNotifierRefusesAnInvalidRecipientAtConstruction() {
+        var mailer = new Mailer(null);
+        assertThrows(IllegalArgumentException.class, () -> new MailerNotifier(mailer, "ops@example.com, not an address"));
+        assertThrows(IllegalArgumentException.class, () -> new MailerNotifier(mailer, "ops@example.com", "g: a@b.c;"));
+        assertThrows(IllegalArgumentException.class, () -> new MailerNotifier(mailer, java.util.List.of("ok@example.com", "bad@")));
     }
 
     @Test

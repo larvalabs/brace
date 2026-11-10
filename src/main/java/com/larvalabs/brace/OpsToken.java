@@ -17,8 +17,8 @@ import java.util.Base64;
  * Format: base64url(json).base64url(hmac) — same as Brace session cookies.
  *
  * <p>The payload carries {@code exp} (expiry, epoch seconds), an optional
- * {@code scope} ({@link OpsScope}, default {@code CONTROL} when absent for
- * backward compatibility), and an optional {@code kid} (a fingerprint of the
+ * {@code scope} ({@link OpsScope}; {@code READ} when absent or unrecognised), and an
+ * optional {@code kid} (a fingerprint of the
  * minting key, so ops access can be attributed to a key in an audit log), and a
  * {@code typ} ({@link Type}) saying which channel the token is valid on.
  */
@@ -127,7 +127,7 @@ public class OpsToken {
     /**
      * Verify a token's HMAC and expiry and return its claims, or {@code null} if the
      * token is missing, malformed, tampered, or expired. A payload with no {@code scope}
-     * field is treated as {@link OpsScope#CONTROL} (tokens minted before scoping existed).
+     * field, or an unrecognised one, is {@link OpsScope#READ} (L1 review: fail closed).
      */
     public static Claims verify(String token, String secret) {
         if (token == null || token.isEmpty()) return null;
@@ -148,7 +148,11 @@ public class OpsToken {
             if (!n.hasNonNull("exp")) return null;
             long exp = n.get("exp").asLong();
             if (System.currentTimeMillis() / 1000 >= exp) return null;
-            OpsScope scope = OpsScope.parse(n.hasNonNull("scope") ? n.get("scope").asText() : null, OpsScope.CONTROL);
+            // A missing or unrecognised scope claim fails closed to READ, never to CONTROL (L1
+            // review). Every creator in the framework writes one, so only a token minted before
+            // scoping existed, or one built by hand, lacks it.
+            OpsScope scope = n.hasNonNull("scope")
+                ? OpsScope.parse(n.get("scope").asText(), OpsScope.READ) : OpsScope.READ;
             String kid = n.hasNonNull("kid") ? n.get("kid").asText() : null;
             Type type = n.hasNonNull("typ") ? Type.parse(n.get("typ").asText()) : null;
             return new Claims(exp, scope, kid, type);

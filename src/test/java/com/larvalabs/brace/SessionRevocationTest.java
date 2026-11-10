@@ -23,11 +23,11 @@ class SessionRevocationTest {
     @Test
     void cookieSealedWithAPreviousSecretOpensAndIsResealed() {
         String old = Session.of("userId", "5").toCookie(OLD);
-        var session = Session.fromCookie(old, CURRENT, List.of(OLD));
+        var session = Session.fromCookie(old, CURRENT, SessionOptions.of(CURRENT).previousSecrets(OLD).previousSecrets());
         assertEquals("5", session.get("userId"));
         assertTrue(session.isModified(), "re-sealed with the current secret on this response");
         // Not opened without the previous secret listed.
-        assertNull(Session.fromCookie(old, CURRENT, List.of()).get("userId"));
+        assertNull(Session.fromCookie(old, CURRENT, SessionOptions.of(CURRENT).previousSecrets()).get("userId"));
     }
 
     @Test
@@ -52,6 +52,147 @@ class SessionRevocationTest {
     @Test
     void shortPreviousSecretIsRejected() {
         assertThrows(IllegalArgumentException.class, () -> SessionOptions.of(CURRENT).previousSecrets("short"));
+    }
+
+    @Test
+    void placeholderPreviousSecretRefusedAtStartup() {
+        String placeholder = "CHANGE-ME-to-a-random-string-at-least-32-chars";
+        var app = Brace.app();
+        assertThrows(IllegalArgumentException.class,
+            () -> app.sessions(SessionOptions.of(CURRENT).previousSecrets(placeholder)));
+    }
+
+    @Test
+    void previousSecretCookieWithoutAbsIsRejected() {
+        String forged = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (System.currentTimeMillis() / 1000 + 3600) + "\"}");
+        var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
+        assertNull(Session.fromCookie(forged, CURRENT, options.previousSecrets()).get("userId"));
+    }
+
+    @Test
+    void previousSecretCookieWithDistantAbsIsRejected() {
+        long now = System.currentTimeMillis() / 1000;
+        String forged = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
+            + (now + 3L * 365 * 86400) + "\"}");
+        var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
+        assertNull(Session.fromCookie(forged, CURRENT, options.previousSecrets()).get("userId"));
+    }
+
+    @Test
+    void currentSecretCookieWithoutAbsKeepsWorking() {
+        String c = sealRaw(CURRENT, "{\"userId\":\"1\",\"_exp\":\"" + (System.currentTimeMillis() / 1000 + 3600) + "\"}");
+        assertEquals("1", Session.fromCookie(c, CURRENT, SessionOptions.of(CURRENT).previousSecrets(OLD).previousSecrets()).get("userId"));
+    }
+
+    // --- M7 review fixes ---
+
+    @Test
+    void anEmptyPreviousSecretCookieDoesNotPassItsDeadlineOn() {
+        // Forged with the old secret: no data, a valid _exp and an _abs a century out. Opening it,
+        // writing to it and re-sealing must not carry that _abs into the new cookie.
+        long now = System.currentTimeMillis() / 1000;
+        String forged = sealRaw(OLD, "{\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
+            + (now + 100L * 365 * 86400) + "\"}");
+        var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
+        var session = Session.fromCookie(forged, CURRENT, options.previousSecrets());
+        session.set("userId", "1");
+        String resealed = session.toCookie(CURRENT);
+        long abs = Long.parseLong(openRaw(CURRENT, resealed).replaceAll(".*\"_abs\":\"(\\d+)\".*", "$1"));
+        assertTrue(abs <= now + Session.DEFAULT_ABSOLUTE_MAX_AGE_SECONDS + 60,
+            "the re-sealed _abs must be a fresh, bounded deadline, was " + (abs - now) + "s out");
+    }
+
+    @Test
+    void previousSecretsWithoutTheConfiguredBoundAreNotHonoured() {
+        // The bound travels with SessionOptions.previousSecrets(); a copied (plain) list loses it.
+        // That must fail closed: no previous-secret cookie opens, even one with a modest _abs.
+        long now = System.currentTimeMillis() / 1000;
+        String cookie = sealRaw(OLD, "{\"userId\":\"1\",\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
+            + (now + 3600) + "\"}");
+        var options = SessionOptions.of(CURRENT).previousSecrets(OLD);
+        assertEquals("1", Session.fromCookie(cookie, CURRENT, options.previousSecrets()).get("userId"));
+        assertNull(Session.fromCookie(cookie, CURRENT, List.copyOf(options.previousSecrets())).get("userId"));
+        assertNull(Session.fromCookie(cookie, CURRENT, List.of(OLD)).get("userId"));
+    }
+
+    @Test
+    void mutatingSessionOptionsAfterSessionsHasNoEffect() throws Exception {
+        String placeholder = "CHANGE-ME-to-a-random-string-at-least-32-chars";
+        long now = System.currentTimeMillis() / 1000;
+        String forged = sealRaw(placeholder, "{\"userId\":\"1\",\"_exp\":\"" + (now + 3600) + "\",\"_abs\":\""
+            + (now + 3600) + "\"}");
+        var opts = SessionOptions.of(CURRENT);
+        String previousMode = System.getProperty("brace.mode");
+        System.setProperty("brace.mode", "prod");
+        TestApp app;
+        try {
+            app = Brace.test().start(a -> {
+                a.sessions(opts);
+                // Accepted by SessionOptions itself (it's 46 characters); the app validated a snapshot.
+                opts.previousSecrets(placeholder);
+                a.getSession("/me", (req, s) -> Result.text(String.valueOf(s.get("userId"))));
+            });
+        } finally {
+            if (previousMode == null) System.clearProperty("brace.mode");
+            else System.setProperty("brace.mode", previousMode);
+        }
+        try {
+            var res = app.request("GET", "/me").header("Cookie", "brace_session=" + forged).send();
+            assertEquals("null", res.body(), "a cookie forged with the placeholder must not open");
+        } finally {
+            app.stop();
+        }
+    }
+
+    @Test
+    void startRevalidatesTheSessionSecretsAsABackstop() {
+        // Configured while the mode was dev (placeholder only warns), started under prod.
+        String placeholder = "CHANGE-ME-to-a-random-string-at-least-32-chars";
+        String previousMode = System.getProperty("brace.mode");
+        try {
+            var e = assertThrows(Exception.class, () -> Brace.test().start(a -> {
+                System.setProperty("brace.mode", "dev");
+                a.sessions(SessionOptions.of(CURRENT).previousSecrets(placeholder));
+                System.setProperty("brace.mode", "prod");
+                a.getSession("/me", (req, s) -> Result.text("x"));
+            }));
+            Throwable t = e;
+            while (t != null && !(t instanceof IllegalArgumentException)) t = t.getCause();
+            assertNotNull(t, "refused at start: " + e);
+            assertTrue(t.getMessage().contains("previous session secret"), t.getMessage());
+        } finally {
+            if (previousMode == null) System.clearProperty("brace.mode");
+            else System.setProperty("brace.mode", previousMode);
+        }
+    }
+
+    static String openRaw(String secret, String cookie) {
+        try {
+            byte[] combined = java.util.Base64.getUrlDecoder().decode(cookie);
+            var cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, Session.getCachedKey(secret),
+                new javax.crypto.spec.GCMParameterSpec(128, combined, 0, 12));
+            return new String(cipher.doFinal(combined, 12, combined.length - 12), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    static String sealRaw(String secret, String json) {
+        try {
+            var key = Session.getCachedKey(secret);
+            byte[] nonce = new byte[12];
+            new java.security.SecureRandom().nextBytes(nonce);
+            var cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, nonce));
+            byte[] ct = cipher.doFinal(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            byte[] combined = new byte[nonce.length + ct.length];
+            System.arraycopy(nonce, 0, combined, 0, nonce.length);
+            System.arraycopy(ct, 0, combined, nonce.length, ct.length);
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(combined);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     // --- validator ---

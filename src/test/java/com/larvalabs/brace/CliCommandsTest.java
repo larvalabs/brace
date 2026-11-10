@@ -23,7 +23,7 @@ class CliCommandsTest {
         Files.writeString(projectDir.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
-        app = Brace.app().port(0).ops(keysFile.toString());
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         app.get("/boom", req -> { throw new RuntimeException("cli status test error"); });
         app.start();
         port = app.actualPort();

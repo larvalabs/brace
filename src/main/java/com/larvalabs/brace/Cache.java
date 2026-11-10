@@ -521,6 +521,14 @@ public class Cache {
             throw new ClassCastException("Cached value is a " + storedName
                     + " but get(...) requested " + expected.getName());
         }
+        if (expected != null && stored != expected && !STORED_CLASSES.contains(storedName)) {
+            // A strict subtype of the requested type (Object, an interface, a base class) that this
+            // process never stored: the row, not the caller, would choose the class Jackson binds
+            // (L15). Only the exact type the caller named, or a class this JVM stored, is read.
+            Log.debug("cache entry names a subclass this process has not stored; treating as a miss",
+                    Map.of("class", storedName.length() > 200 ? storedName.substring(0, 200) : storedName));
+            throw new CacheCorruptionException("cached class not stored by this process: " + storedName);
+        }
         try {
             return (T) Json.mapper().readValue(data, offset, data.length - offset, stored);
         } catch (java.io.IOException e) {

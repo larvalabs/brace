@@ -99,6 +99,243 @@ class ErrorStoreTest {
         assertEquals(trace.replace(secret, "[redacted]"), stored, "frame lines are unchanged");
     }
 
+    // --- M5 (2026-11 review): one bad entry must not stall the store ---
+
+    @Test
+    void nulIsReplacedSoAlreadyRedactedTokensAreNotJoined() {
+        // H2 stores a NUL happily; Postgres can't (see ErrorStorePostgresIT). Replacing it with
+        // U+FFFD rather than deleting keeps `abc\0def` (two short tokens to the redactor that ran
+        // upstream) from becoming one long secret-shaped token in the stored row.
+        errorStore.record("NumberFormatException", "For input string: \"abc\u0000def\"", "GET /x",
+            "java.lang.NumberFormatException: abc\u0000def\n", "GET /x?page=abc\u0000def",
+            "{\"count\":0}", "{\"x-h\":\"a\u0000b\"}");
+        errorStore.flush();
+
+        var err = errorStore.list(null).get(0);
+        assertEquals("For input string: \"abc�def\"", err.get("message"));
+        assertEquals("GET /x?page=abc�def", err.get("requestDetail"));
+        assertEquals("{\"x-h\":\"a�b\"}", err.get("requestHeaders"));
+        assertFalse(((String) err.get("stackTrace")).contains("\u0000"));
+    }
+
+    @Test
+    void overlongTypeAndRouteAreClippedNotRejected() {
+        errorStore.record("E".repeat(300), "m", "X".repeat(400) + " /r", "s", "req");
+        errorStore.record("Healthy", "m", "GET /ok", "s", "req");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(2, errors.size());
+        for (var e : errors) {
+            assertTrue(((String) e.get("errorType")).length() <= ErrorStore.MAX_KEY_LENGTH);
+            assertTrue(((String) e.get("route")).length() <= ErrorStore.MAX_KEY_LENGTH);
+        }
+        // A surrogate pair straddling the limit is dropped whole, not split.
+        String clipped = ErrorStore.clip("a".repeat(254) + "😀");
+        assertEquals(254, clipped.length());
+    }
+
+    @Test
+    void anEntryTheDatabaseKeepsRejectingIsDroppedAndLoggedOthersCommit() {
+        // A CHECK constraint stands in for any row-level rejection that sanitizing doesn't foresee.
+        // It is on error_type, which the payload-stripped retry keeps, so the retry fails too.
+        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check CHECK (error_type NOT LIKE '%Poison%')");
+        LogTap.clear();
+        try {
+            errorStore.record("PoisonException", "POISON secret-payload", "GET /p", "s", "req");
+            errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "the healthy kind commits despite its neighbour");
+
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            sql("ALTER TABLE ops_errors DROP CONSTRAINT poison_check");
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "dropped after MAX_FLUSH_FAILURES, not retried forever");
+        } finally {
+            sql("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS poison_check");
+        }
+
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), "rate-limited to one line per interval: " + warnings);
+        assertTrue(warnings.get(0).contains("database rejected"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("secret-payload"), "request-derived content is never logged");
+        // The drop happened after the first (immediate) warning, inside the rate-limit window, so
+        // it is reported by the next line once the window passes.
+        assertFalse(warnings.get(0).contains("dropped"));
+    }
+
+    @Test
+    void dropIsLoggedWhenTheWindowAllows() {
+        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check2 CHECK (error_type NOT LIKE '%Poison%')");
+        LogTap.clear();
+        try {
+            errorStore.record("PoisonException", "POISON", "GET /p", "s", "req");
+            for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            LogTap.clear();
+            // Next flush is past the window (simulated): the summary names the dropped kind.
+            errorStore.expireFailureLogWindow();
+            errorStore.flush();
+        } finally {
+            sql("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS poison_check2");
+        }
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertTrue(warnings.get(0).contains("dropped 1 error kind(s)"), warnings.get(0));
+        assertTrue(warnings.get(0).contains("PoisonException"), warnings.get(0));
+    }
+
+    @Test
+    void anUnreachableDatabaseKeepsEntriesAndRetries() {
+        // DB down / pool exhausted: not any entry's fault. Entries must survive any number of
+        // failed flushes (bounded by kind cardinality, as before) and land once it's back.
+        var real = errorStore.flushSession;
+        LogTap.clear();
+        errorStore.flushSession = () -> {
+            throw new org.hibernate.exception.JDBCConnectionException("Unable to acquire JDBC Connection",
+                new java.sql.SQLTransientConnectionException("Connection is not available", "08001"));
+        };
+        errorStore.record("RuntimeException", "first", "GET /down", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("RuntimeException", "second", "GET /down", "s", "req");
+        errorStore.flush();
+
+        errorStore.flushSession = real;
+        errorStore.flush();
+        var errors = errorStore.list(null);
+        assertEquals(1, errors.size());
+        assertEquals(2, errors.get(0).get("occurrenceCount"), "both occurrences survived the outage");
+        assertEquals("second", errors.get(0).get("message"));
+
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), "rate-limited: " + warnings);
+        assertTrue(warnings.get(0).contains("kept for retry"), warnings.get(0));
+        assertTrue(warnings.get(0).contains("SQLState 08001"), warnings.get(0));
+    }
+
+    @Test
+    void connectionFailureClassification() {
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "08006")));
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "57P01")));
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "40P01")));
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLTransientConnectionException("x")));
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "22023")), "pgjdbc's NUL rejection");
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "22001")), "value too long");
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "23514")), "check violation");
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x")));
+    }
+
+    // --- M5 review fixes ---
+
+    @Test
+    void aRetainedClassRowErrorOnALiveConnectionIsARowRejection() {
+        // 57014 (statement_timeout on a huge row) is in a "connection-level" SQLState class, but
+        // the connection is fine: it must count against the entry, not abort and retain the batch
+        // forever (the original stall). The fault fires on the stripped retry too.
+        errorStore.rowFault = (type, message) -> {
+            if ("HugeRowException".equals(type)) {
+                throw new java.sql.SQLException("canceling statement due to statement timeout", "57014");
+            }
+        };
+        errorStore.record("HugeRowException", "x".repeat(1000), "GET /huge", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types(), "the healthy kind commits despite its neighbour");
+
+        for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types(), "dropped after MAX_FLUSH_FAILURES, not retained forever");
+    }
+
+    @Test
+    void aConnectionClassedErrorOnADeadConnectionRetainsTheBatchUncounted() {
+        errorStore.rowFault = (type, message) -> {
+            throw new java.sql.SQLException("An I/O error occurred while sending to the backend", "08006");
+        };
+        errorStore.connectionCheck = connection -> false;
+        errorStore.record("RuntimeException", "first", "GET /down", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        assertEquals(List.of(), types(), "nothing commits while the connection is dead");
+
+        errorStore.rowFault = null;
+        errorStore.connectionCheck = connection -> connection.isValid(1);
+        errorStore.flush();
+        assertEquals(List.of("Healthy", "RuntimeException"), types(), "kept, not counted or dropped");
+    }
+
+    @Test
+    void aRejectedRowIsRetriedOnceWithoutItsPayload() {
+        // e.g. a value the database refuses in the message, trace or request detail. The kind's
+        // count and the regression signal must survive; the payload is replaced by fixed text.
+        var seen = new java.util.ArrayList<String>();
+        errorStore.setRegressionListener(new ErrorStore.RegressionListener() {
+            public void onNew(String type, String route, String message, java.time.Instant firstSeen) {
+                seen.add(type + ": " + message);
+            }
+            public void onRepeat(String type, String route, long count) { }
+        });
+        errorStore.rowFault = (type, message) -> {
+            if ("BigPayloadException".equals(type) && !ErrorStore.STRIPPED_MESSAGE.equals(message)) {
+                throw new java.sql.SQLException("value too long", "22001");
+            }
+        };
+        errorStore.record("BigPayloadException", "request text token=abc", "GET /big",
+            "trace with request text", "GET /big?q=request-text", "{\"count\":1}", "{\"x-h\":\"request-text\"}");
+        errorStore.record("BigPayloadException", "request text again", "GET /big", "trace", "detail");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(1, errors.size(), errors.toString());
+        var err = errors.get(0);
+        assertEquals("BigPayloadException", err.get("errorType"));
+        assertEquals("GET /big", err.get("route"));
+        assertEquals(2, err.get("occurrenceCount"), "the count survives");
+        assertEquals(ErrorStore.STRIPPED_MESSAGE, err.get("message"));
+        assertNull(err.get("stackTrace"));
+        assertNull(err.get("requestDetail"));
+        assertNull(err.get("queriesBefore"));
+        assertNull(err.get("requestHeaders"));
+        assertEquals(List.of("BigPayloadException: " + ErrorStore.STRIPPED_MESSAGE), seen,
+            "the regression signal fires, with the placeholder rather than the rejected payload");
+        assertFalse(ErrorStore.STRIPPED_MESSAGE.contains("request"), "fixed text only");
+
+        // Nothing left pending: a later flush with the fault gone adds nothing.
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(2, errorStore.list(null).get(0).get("occurrenceCount"));
+    }
+
+    private static void sql(String statement) {
+        var db = new Database(dbFactory.openSession());
+        db.beginTransaction();
+        db.sql(statement);
+        db.commitTransaction();
+        db.close();
+    }
+
+    private static List<Object> types() {
+        return errorStore.list(null).stream().map(e -> e.get("errorType")).sorted().toList();
+    }
+
+    private static List<String> errorStoreWarnings() {
+        return LogTap.snapshot().stream()
+            .filter(e -> "WARN".equals(e.fields().get("level")))
+            .map(e -> String.valueOf(e.fields().get("message")))
+            .filter(m -> m.startsWith("error store:"))
+            .toList();
+    }
+
     @Test
     void recordCreatesRow() {
         errorStore.record("RuntimeException", "test error", "GET /test", "stack...", "GET /test");
@@ -388,7 +625,7 @@ class ErrorStoreTest {
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile, kp.publicKey() + "\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -431,7 +668,7 @@ class ErrorStoreTest {
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile, kp.publicKey() + "\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opsresolvedb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -501,7 +738,7 @@ class ErrorStoreTest {
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile, kp.publicKey() + "\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsauthdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -534,7 +771,7 @@ class ErrorStoreTest {
         // A 32-char hex-like secret that should trigger value-shaped redaction
         String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:redacttest" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))

@@ -815,7 +815,9 @@ app.sessionValidator(s -> !s.has("userId") || Objects.equals(s.get("sessionVersi
 
 **Rotating the secret:** `SessionOptions.of(newSecret).previousSecrets(oldSecret)` keeps old
 cookies working and re-seals them with the new secret; drop the old one after the absolute
-lifetime. On Postgres with WebSockets, instances on different secrets don't share broadcasts
+lifetime. Never list a public or leaked secret (including the `brace new` placeholder, which startup
+refuses) as previous; a previous-secret cookie without `_abs` is rejected. `app.sessions(options)`
+copies the options: configure them fully before the call, later changes are ignored. On Postgres with WebSockets, instances on different secrets don't share broadcasts
 until all are rotated (the bus key derives from the current secret).
 
 ```java
@@ -1067,7 +1069,14 @@ SMTP timeouts are bounded by default — 10s connect, 30s per read/write — so 
 the send instead of hanging the caller forever. Override with `.connectTimeout(Duration)` and
 `.timeout(Duration)` for a slow relay or large attachments.
 
+`to(...)`, `cc(...)`, `from(...)` and `Mailer.replyTo(...)` each take exactly one address: a list (`a@b.c, d@e.f`), a group (`g: a@b.c;`), a route address or a control character throws `IllegalArgumentException` (`from`/`replyTo` on the `Mailer` at configuration time). A quoted display name may contain a comma (`"Doe, J" <a@b.c>`). Send to several people with one message each. `Mailer.replyTo(...)` sets `Reply-To` on every SMTP message. `@Email` rejects `,` `;` `<` `>` whitespace and control characters. `new MailerNotifier(mailer, "a@x.com, b@x.com")` (or varargs / a `List`) validates each recipient at construction and mails each separately.
+
 `sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
+`smtp://` requires STARTTLS: if the relay does not offer it, the send fails rather than falling back to
+cleartext (a network attacker could otherwise strip the offer and read the SMTP password and mail). `smtps://`
+is implicit TLS. For a trusted local relay without TLS use `smtp+plain://localhost:25` (STARTTLS if offered,
+never required); credentials on an `smtp+plain://` URL log a startup warning. Schemes are case-insensitive.
+
 Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.
 Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
 With SMTP configured nothing is captured; `sentCount()` counts successful sends, `failCount()` failures.
@@ -1176,6 +1185,13 @@ boolean ok = Arrays.stream(InetAddress.getAllByName(host)).allMatch(Http::isPubl
   throw `Http.ResponseTooLargeException` past it, without downloading the rest; change it with
   `.maxResponseBytes(n)`. `stream()` is uncapped: bound what you read. Both `.trusted()` and
   `.maxResponseBytes(n)` work on `multipart()` too.
+- Buffered fetches are bounded in time too: `.timeout()` (default 30s) is the deadline for the
+  whole exchange, headers **and body**, and `.idleTimeout()` (default 30s) each wait for more
+  body bytes. Either throws `Http.StreamTimeoutException`. A server that sends headers and then
+  stalls or drips can't hold the thread. Raise `.timeout(...)` for a big download on a slow
+  link or a slow API. A buffered call always has a deadline: `.timeout(null)` means the 30s
+  default there (only `stream()`/`fetchEvents` run without one); zero or negative throws
+  `IllegalArgumentException`; over 365 days is clamped to 365 days.
 - `Storage`, `WebhookNotifier` and raw `java.net.http` don't apply this check. Details, and the
   narrow DNS-rebinding window that remains, in `docs/SECURITY.md` ("Server-Side Request Forgery").
 
@@ -1217,7 +1233,8 @@ try (var s = Http.post(url).bodyJson(request).stream()) {
 - Stream timeouts differ from `fetch*`: `.idleTimeout()` (default 30s; `Duration.ZERO` or
   `null` turns it off) bounds each wait for the headers or the next bytes, and only counts
   time blocked in a read, so a slow consumer doesn't trip it. There is no total deadline
-  unless you call `.timeout()`, which then bounds the whole call. Either closes the
+  unless you call `.timeout()`, which then bounds the whole call (a `fetchEvents` error body
+  is buffered and gets the 30s default). Either closes the
   connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`). Both count time
   the machine spends asleep, so a laptop that sleeps through a call gives up within a second
   of waking instead of holding a dead connection.
@@ -1409,8 +1426,8 @@ all-lowercase-letters) log a warning but are allowed. Use 32+ random characters.
 
 Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`, plus
 `app.opsOrigins("https://your-app")` (or `BRACE_OPS_ORIGINS`), the public origin CLI logins are
-signed for, which prod mode requires; scaffold config with
-`brace init`, keys with `brace ops keypair`. **Operating in production?** Start with
+signed for, which every mode except `dev` (and tests) requires when ops is on; scaffold config with
+`brace init`, keys with `brace ops keypair`. In `ops-authorized-keys` (`KEY [scope:read|scope:control] [label...] [# comment]`) any token with `:` or `=` must be exactly `scope:read` or `scope:control`, at most once, or startup fails (`scope: read`, `--scope=read`, `role:read`); other words are labels, except a lone `read`/`ro`/`control` after the key, which fails; a duplicate key keeps the lower scope; no scope token means control. **Operating in production?** Start with
 `brace check --env prod --json` — not `brace status`. The full ops reference — auth keys and
 scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, storage/retention —
 is **`BRACE-OPS.md`** in the project root (written by `brace new`, refreshed together with this
@@ -1431,7 +1448,9 @@ app.analytics(Analytics.options()
     .exclude("/admin/*")                          // exact path or trailing /* prefix
     .excludeIps("203.0.113.0/24")                 // never counted
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
-    .rawRetention("35d"));                       // raw rows only; daily summaries are kept
+    .rawRetention("35d")                         // raw rows only; daily summaries are kept
+    .maxViewsPerVisitorPerFlush(30)              // row cap per visitor per 10 s; over it is "Not counted: dropped"
+    .dailyRowBudget(500_000));                   // rows per instance per day; 0 turns a cap off
 
 app.get("/invite/{code}", ctrl::invite).analytics(false);      // URL carries a secret the name doesn't reveal
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}

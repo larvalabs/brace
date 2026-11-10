@@ -29,7 +29,7 @@ class CliAuthTest {
         // readKeyFile expects: line 0 = private key, line 1 = public key
         Files.writeString(tmp.resolve("ops-private.key"), keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
-        app = Brace.app().port(0).ops(keysFile.toString());
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         app.start();
         port = app.actualPort();
     }
@@ -180,7 +180,7 @@ class CliAuthTest {
         Path serverKeysFile = tmp.resolve("server-only-keys");
         Files.writeString(serverKeysFile, serverKey.publicKey() + " server-only\n");
 
-        var unauthorizedApp = Brace.app().port(0).ops(serverKeysFile.toString());
+        var unauthorizedApp = Brace.app().opsUnpinnedForTests().port(0).ops(serverKeysFile.toString());
         unauthorizedApp.start();
         try {
             var cfg = new CliConfig("http://localhost:" + unauthorizedApp.actualPort(),

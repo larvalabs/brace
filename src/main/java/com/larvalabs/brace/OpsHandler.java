@@ -133,7 +133,9 @@ public class OpsHandler {
     // docs/SECURITY.md ("Ops Endpoints"). TTL is 2 minutes — comfortably above the 60s total
     // acceptance window — and the map is size-bounded (entries are only recorded after a valid
     // signature, so only holders of an authorized key can occupy slots).
-    private final NonceCache seenNonces = new NonceCache(120_000, 100_000);
+    // L16: auth timestamps before this are refused (the nonce cache below is empty at startup).
+    private final long startedAtMillis = System.currentTimeMillis();
+    private final NonceCache seenNonces = new NonceCache(120_000, 100_000, 5_000);
 
     /**
      * POST /ops/auth — validate a signed auth request, issue a short-lived bearer token.
@@ -177,6 +179,12 @@ public class OpsHandler {
             if (Math.abs(java.time.Duration.between(ts, now).getSeconds()) > 30) {
                 return Result.unauthorized("Stale timestamp");
             }
+            // L16: the nonce memory starts empty, so a request signed before this process started
+            // (captured during a deploy) could be replayed once inside its +-30 s window. Nothing
+            // this process could have seen is older than its own start.
+            if (ts.toEpochMilli() < startedAtMillis) {
+                return Result.unauthorized("Timestamp is from before this server started; sign a fresh request");
+            }
 
             // Verify signature per protocol version
             if ("3".equals(auth.v)) {
@@ -201,7 +209,7 @@ public class OpsHandler {
                         + "that rewrites Host, list the public origin with app.opsOrigins(...)");
                 }
                 // Replay check last, so only validly-signed requests consume nonce slots.
-                if (!seenNonces.checkAndRecord(auth.nonce, System.currentTimeMillis())) {
+                if (!seenNonces.checkAndRecord(OpsKeys.fingerprint(auth.publicKey), auth.nonce, System.currentTimeMillis())) {
                     return Result.unauthorized("Nonce already used");
                 }
             } else if ("2".equals(auth.v)) {
@@ -239,7 +247,9 @@ public class OpsHandler {
             // never mint a control token, so the grant is min(requested, ceiling). When
             // the client requests no scope, it gets the full ceiling.
             OpsScope ceiling = authorizedKeys.getOrDefault(auth.publicKey, OpsScope.CONTROL);
-            OpsScope requested = OpsScope.parse(auth.scope, ceiling);
+            // No scope requested -> the ceiling; a scope that is present but unrecognised -> READ.
+            OpsScope requested = auth.scope == null || auth.scope.isBlank()
+                ? ceiling : OpsScope.parse(auth.scope, OpsScope.READ);
             OpsScope granted = requested.min(ceiling);
             String kid = OpsKeys.fingerprint(auth.publicKey);
 
@@ -1101,40 +1111,87 @@ public class OpsHandler {
 
     /**
      * Per-instance, best-effort seen-nonce set for v3 ops auth replay suppression.
-     * Maps nonce → expiry (epoch millis); expired entries are swept opportunistically on
-     * each call (the auth endpoint is low-rate, so a full sweep per call is cheap). The
-     * set is size-bounded and fails closed: when full (after sweeping), new nonces are
-     * rejected rather than evicting live ones. Entries are only recorded after signature
-     * verification, so only holders of an authorized key can fill it.
+     * Maps nonce to its expiry (epoch millis) and the key that used it. Entries are only
+     * recorded after signature verification, so only holders of an authorized key can fill it.
+     *
+     * <p>Bounded two ways, both failing closed (a new nonce is rejected rather than a live one
+     * evicted): an overall cap, and a per-key quota inside it (L16), so one key, including a
+     * read-scoped one, can exhaust only its own share and never another operator's login. Expired
+     * entries are swept at most once per {@link #SWEEP_INTERVAL_MS}, not on every call, and also
+     * when a cap would otherwise reject.
      *
      * <p>Deliberately NOT fleet-global (B5: ops must work without shared state), so a
      * captured request remains replayable against a different instance within the
-     * timestamp acceptance window — see docs/SECURITY.md.
+     * timestamp acceptance window — see docs/SECURITY.md. Nor does it survive a restart:
+     * {@code OpsHandler.auth} refuses timestamps from before the process started instead.
      */
     static final class NonceCache {
-        private final java.util.concurrent.ConcurrentHashMap<String, Long> seen =
-            new java.util.concurrent.ConcurrentHashMap<>();
+        static final long SWEEP_INTERVAL_MS = 1_000;
+
+        private record Entry(long expiresAt, String key) {}
+
+        private final java.util.HashMap<String, Entry> seen = new java.util.HashMap<>();
+        private final java.util.HashMap<String, Integer> perKey = new java.util.HashMap<>();
         private final long ttlMillis;
         private final int maxSize;
+        private final int maxPerKey;
+        private long lastSweep;
 
         NonceCache(long ttlMillis, int maxSize) {
+            this(ttlMillis, maxSize, maxSize);
+        }
+
+        NonceCache(long ttlMillis, int maxSize, int maxPerKey) {
             this.ttlMillis = ttlMillis;
             this.maxSize = maxSize;
+            this.maxPerKey = maxPerKey;
+        }
+
+        boolean checkAndRecord(String nonce, long nowMillis) {
+            return checkAndRecord("", nonce, nowMillis);
         }
 
         /**
-         * Record the nonce if it is fresh. Returns {@code false} when the nonce was
-         * already seen (replay) or the cache is at capacity (fail closed).
+         * Record {@code nonce}, used by {@code key} (a key fingerprint), if it is fresh. Returns
+         * {@code false} when the nonce was already seen (replay) or the key's quota or the overall
+         * cap is full (fail closed).
          */
-        boolean checkAndRecord(String nonce, long nowMillis) {
-            seen.entrySet().removeIf(e -> e.getValue() < nowMillis);
-            if (seen.size() >= maxSize) {
-                return false;
+        synchronized boolean checkAndRecord(String key, String nonce, long nowMillis) {
+            if (nowMillis - lastSweep >= SWEEP_INTERVAL_MS) sweep(nowMillis);
+            Entry existing = seen.get(nonce);
+            if (existing != null && existing.expiresAt >= nowMillis) return false;
+            if (existing != null) drop(nonce, existing); // expired, not yet swept
+            if (seen.size() >= maxSize || perKey.getOrDefault(key, 0) >= maxPerKey) {
+                sweep(nowMillis); // free expired entries before refusing
+                if (seen.size() >= maxSize || perKey.getOrDefault(key, 0) >= maxPerKey) return false;
             }
-            return seen.putIfAbsent(nonce, nowMillis + ttlMillis) == null;
+            seen.put(nonce, new Entry(nowMillis + ttlMillis, key));
+            perKey.merge(key, 1, Integer::sum);
+            return true;
         }
 
-        int size() {
+        private void sweep(long nowMillis) {
+            lastSweep = nowMillis;
+            var it = seen.entrySet().iterator();
+            while (it.hasNext()) {
+                var e = it.next();
+                if (e.getValue().expiresAt < nowMillis) {
+                    it.remove();
+                    release(e.getValue().key);
+                }
+            }
+        }
+
+        private void drop(String nonce, Entry entry) {
+            seen.remove(nonce);
+            release(entry.key);
+        }
+
+        private void release(String key) {
+            perKey.computeIfPresent(key, (k, n) -> n <= 1 ? null : n - 1);
+        }
+
+        synchronized int size() {
             return seen.size();
         }
     }

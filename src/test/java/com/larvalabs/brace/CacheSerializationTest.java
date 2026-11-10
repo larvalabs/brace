@@ -210,6 +210,43 @@ class CacheSerializationTest {
         assertEquals(1, cache.hits());
     }
 
+    record ForeignViaObject(String name) {
+        static final AtomicInteger CONSTRUCTED = new AtomicInteger();
+        ForeignViaObject { CONSTRUCTED.incrementAndGet(); }
+    }
+
+    record ForeignViaInterface(String name) implements java.io.Serializable {
+        static final AtomicInteger CONSTRUCTED = new AtomicInteger();
+        ForeignViaInterface { CONSTRUCTED.incrementAndGet(); }
+    }
+
+    record StoredHere(String name) implements java.io.Serializable {}
+
+    @Test
+    void getWithBroadTypeDoesNotBindAClassNamedByTheRow() {
+        // L15: with Object or an interface as the type, isAssignableFrom let a writer to the
+        // shared table pick the class Jackson binds. An unregistered strict subtype is a miss.
+        var backend = new SerializingMapBackend();
+        var cache = new Cache(backend);
+        backend.setBytes("o", craft(ForeignViaObject.class.getName(), "{\"name\":\"evil\"}".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        backend.setBytes("i", craft(ForeignViaInterface.class.getName(), "{\"name\":\"evil\"}".getBytes(StandardCharsets.UTF_8)),
+                null, new String[0]);
+        assertNull(cache.get("o", Object.class));
+        assertNull(cache.get("i", java.io.Serializable.class));
+        assertEquals(0, ForeignViaObject.CONSTRUCTED.get());
+        assertEquals(0, ForeignViaInterface.CONSTRUCTED.get());
+        assertEquals(2, cache.misses());
+    }
+
+    @Test
+    void getWithBroadTypeStillReadsAClassThisProcessStored() {
+        var cache = new Cache(new SerializingMapBackend());
+        cache.set("k", new StoredHere("mine"));
+        assertEquals(new StoredHere("mine"), cache.get("k", Object.class));
+        assertEquals(new StoredHere("mine"), cache.get("k", java.io.Serializable.class));
+    }
+
     // --- Null values are rejected on both backends (null is reserved for 'missing') ---
 
     @Test

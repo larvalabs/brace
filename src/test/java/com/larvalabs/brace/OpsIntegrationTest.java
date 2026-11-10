@@ -29,7 +29,7 @@ class OpsIntegrationTest {
         Files.writeString(keysFile, keypair.publicKey() + " test-key\n");
         keysFilePath = keysFile.toString();
 
-        app = Brace.app().port(0).ops(keysFilePath);
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFilePath);
 
         app.get("/hello", req -> Result.text("Hello!")).name("hello");
         app.get("/error", req -> { throw new RuntimeException("test error"); });
@@ -442,7 +442,7 @@ class OpsIntegrationTest {
         var db = new DatabaseFactory(
             "jdbc:h2:mem:cacheopsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
             List.of());
-        cacheApp = Brace.app().port(0).ops(cacheKeysFile.toString()).cache(cache).database(db);
+        cacheApp = Brace.app().opsUnpinnedForTests().port(0).ops(cacheKeysFile.toString()).cache(cache).database(db);
         cacheApp.get("/cacheboom", req -> { throw new RuntimeException("cache test error"); });
         cacheApp.start();
         cachePort = cacheApp.actualPort();
@@ -593,7 +593,7 @@ class OpsIntegrationTest {
         Path metricsKeysFile = tmpDir.resolve("metrics-authorized-keys");
         Files.writeString(metricsKeysFile, metricsKeypair.publicKey() + "\n");
 
-        metricsApp = Brace.app().port(0).ops(metricsKeysFile.toString());
+        metricsApp = Brace.app().opsUnpinnedForTests().port(0).ops(metricsKeysFile.toString());
         metricsApp.get("/ping", req -> Result.text("pong"));
         metricsApp.start();
         metricsPort = metricsApp.actualPort();
@@ -670,7 +670,7 @@ class OpsIntegrationTest {
         Path jfrKeysFile = tmpDir.resolve("jfr-authorized-keys");
         Files.writeString(jfrKeysFile, jfrKeypair.publicKey() + "\n");
 
-        jfrApp = Brace.app().port(0).ops(jfrKeysFile.toString());
+        jfrApp = Brace.app().opsUnpinnedForTests().port(0).ops(jfrKeysFile.toString());
         jfrApp.get("/work", req -> {
             long sum = 0;
             for (int i = 0; i < 10000; i++) sum += i;

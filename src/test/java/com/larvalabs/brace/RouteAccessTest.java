@@ -149,7 +149,7 @@ class RouteAccessTest {
     @Test
     void routesCantBeAddedOrReconfiguredWhileRunning() throws Exception {
         // Access is resolved at start(): a route added later would have run with no requirements.
-        var app = Brace.app().port(0).banner(false).sessions(SECRET).strictAccessCheck()
+        var app = Brace.app().opsUnpinnedForTests().port(0).banner(false).sessions(SECRET).strictAccessCheck()
             .defaultAccess(Access.session("userId", "/login"));
         var early = app.get("/early", req -> Result.text("early"));
         app.start();
@@ -250,7 +250,7 @@ class RouteAccessTest {
     void everyOpsRouteResolvesToAnOpsScopeOrIsAnAuthHandshake(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
         var keys = dir.resolve("ops-authorized-keys");
         java.nio.file.Files.writeString(keys, OpsKeys.generateKeypair().publicKey() + "\n");
-        var app = Brace.app().port(0).banner(false).ops(keys.toString())
+        var app = Brace.app().opsUnpinnedForTests().port(0).banner(false).ops(keys.toString())
             .strictAccessCheck()
             .defaultAccess(Access.session("userId", "/login"))
             .sessions(SECRET);

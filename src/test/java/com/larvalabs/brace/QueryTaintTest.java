@@ -144,6 +144,51 @@ class QueryTaintTest {
     }
 
     @Test
+    void sortOfEvasionsThatNormalizationHidesStillThrow() {
+        // L15: Sort.of normalizes (trim, collapse spaces, upper-case keywords), so these request
+        // values no longer appeared verbatim in the ORDER BY text.
+        for (String value : List.of("title ", "title desc", "title,id", "title  desc", " title")) {
+            var req = get(Map.of(), Map.of("sort", value));
+            assertThrows(IllegalArgumentException.class,
+                () -> run(req, true, db -> db.query(Post.class, "", Sort.of(req.queryParam("sort")))),
+                "should flag: [" + value + "]");
+            assertThrows(IllegalArgumentException.class,
+                () -> run(req, true, db -> db.hql("SELECT p.id FROM Post p", Sort.of(req.queryParam("sort")))),
+                "hql should flag: [" + value + "]");
+        }
+        // A fixed order written in code that merely shares nothing with the request is fine.
+        var unrelated = get(Map.of(), Map.of("sort", "body desc"));
+        assertDoesNotThrow(() -> run(unrelated, true, db -> db.query(Post.class, "", Sort.of("createdAt DESC, id"))));
+    }
+
+    @Test
+    void paddedQueryStringDoesNotStarveTheFormBody() {
+        var query = new HashMap<String, String>();
+        for (int i = 0; i < 1500; i++) query.put("pad" + i, "padding-value-" + i);
+        String q = "x' OR '1'='1";
+        var req = new Request("POST", "/search", Map.of(), query,
+            Map.of("Content-Type", "application/x-www-form-urlencoded"),
+            "q=" + java.net.URLEncoder.encode(q, java.nio.charset.StandardCharsets.UTF_8));
+        assertThrows(IllegalArgumentException.class,
+            () -> run(req, true, db -> db.query(Post.class, "title = '" + q + "'")));
+    }
+
+    @Test
+    void overCapIsMarkedUncheckedAndWarnedOnceInStrictMode() {
+        QueryTaint.resetCapWarned();
+        var small = get(Map.of(), Map.of("q", "hello"));
+        assertFalse(QueryTaint.of(small, true).overCap());
+        assertFalse(QueryTaint.capWarned());
+        var query = new HashMap<String, String>();
+        for (int i = 0; i < 1500; i++) query.put("pad" + i, "padding-value-" + i);
+        var big = get(Map.of(), query);
+        assertTrue(QueryTaint.of(big, false).overCap());
+        assertFalse(QueryTaint.capWarned(), "production only marks, it does not warn");
+        assertTrue(QueryTaint.of(big, true).overCap());
+        assertTrue(QueryTaint.capWarned());
+    }
+
+    @Test
     void aliasedOrderByWordThrows() {
         var req = get(Map.of(), Map.of("sort", "title"));
         assertThrows(IllegalArgumentException.class,

@@ -110,7 +110,7 @@ final class PostgresMessageBus implements MessageBus {
             // A failed broadcast must not break the request handler that triggered it.
             Log.event("ws_broadcast_failed", Map.of(
                 "room", room,
-                "error", String.valueOf(e.getMessage())));
+                "error", String.valueOf(Redactor.redactMessage(e.getMessage()))));
         }
     }
 
@@ -206,7 +206,7 @@ final class PostgresMessageBus implements MessageBus {
             // pgjdbc absent or incompatible — without it there's no LISTEN/NOTIFY. The bus degrades
             // to publish-only (local delivery still works via the publisher's own NOTIFY path is
             // lost too, so log loudly). This should never happen on a Postgres app.
-            Log.event("ws_listener_unavailable", Map.of("error", String.valueOf(e.getMessage())));
+            Log.event("ws_listener_unavailable", Map.of("error", String.valueOf(Redactor.redactMessage(e.getMessage()))));
             return;
         }
         while (!closed) {
@@ -229,7 +229,7 @@ final class PostgresMessageBus implements MessageBus {
                 if (closed) {
                     return;
                 }
-                Log.event("ws_listener_reconnect", Map.of("error", String.valueOf(e.getMessage())));
+                Log.event("ws_listener_reconnect", Map.of("error", String.valueOf(Redactor.redactMessage(e.getMessage()))));
                 sleep(RECONNECT_BACKOFF_MS);
             }
         }
@@ -263,7 +263,7 @@ final class PostgresMessageBus implements MessageBus {
         } catch (MessageBusSigner.RejectedException e) {
             reject(e.reason);
         } catch (Exception e) {
-            Log.event("ws_notification_parse_failed", Map.of("error", String.valueOf(e.getMessage())));
+            Log.event("ws_notification_parse_failed", Map.of("error", String.valueOf(Redactor.redactMessage(e.getMessage()))));
         }
     }
 

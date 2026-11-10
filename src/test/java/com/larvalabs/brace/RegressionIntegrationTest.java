@@ -39,7 +39,7 @@ class RegressionIntegrationTest {
             "jdbc:h2:mem:regrdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null, List.of());
 
         // warmup 0 so an error triggered right after startup is flagged immediately.
-        app = Brace.app().port(0).ops(keysFile.toString()).database(db).regressionsWarmup(0);
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString()).database(db).regressionsWarmup(0);
         app.get("/boom", req -> { throw new RuntimeException("kaboom"); });
         app.start();
         port = app.actualPort();

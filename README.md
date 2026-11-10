@@ -420,7 +420,8 @@ mail.to("user@example.com")
     .sendAsync();   // background virtual thread; send() blocks until delivered
 ```
 
-SMTP timeouts default to 10s connect / 30s per read-write, so a wedged relay fails the send rather
+`smtp://` requires STARTTLS (no silent cleartext fallback); use `smtp+plain://` for a local relay
+without TLS. SMTP timeouts default to 10s connect / 30s per read-write, so a wedged relay fails the send rather
 than hanging the caller. Override with `.connectTimeout(Duration)` / `.timeout(Duration)`.
 
 Use `sendAsync()` from request handlers — `send()` does synchronous SMTP on the calling

@@ -246,7 +246,7 @@ public class FormBinder {
             } else if (ann instanceof Email) {
                 if (raw != null && !raw.isEmpty()) {
                     int at = raw.indexOf('@');
-                    if (at < 1 || raw.indexOf('.', at) < 0) {
+                    if (at < 1 || raw.indexOf('.', at) < 0 || !isSingleAddress(raw)) {
                         errors.add(name, "must be a valid email");
                     }
                 }
@@ -262,6 +262,22 @@ public class FormBinder {
                 }
             }
         }
+    }
+
+    /**
+     * L14: {@code @Email} validates one address. A comma, semicolon, angle bracket, whitespace or
+     * control character would let a form value smuggle a recipient list ("a@b.c, victim@x.y") into
+     * code that later hands it to a mail API.
+     */
+    private static boolean isSingleAddress(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == ',' || c == ';' || c == '<' || c == '>' || Character.isWhitespace(c)
+                    || Character.isISOControl(c)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @SuppressWarnings("unchecked")

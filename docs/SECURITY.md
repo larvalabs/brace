@@ -24,6 +24,7 @@ This document describes Brace's security features and best practices for buildin
 - [Installing and Updating Brace](#installing-and-updating-brace)
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
+- [Outbound Mail](#outbound-mail)
 - [Secrets Management](#secrets-management)
 
 ---
@@ -211,7 +212,11 @@ What it does **not** catch:
   flagging bare words everywhere would trip on ordinary code.
 - A value the handler transformed (trimmed, split into terms, re-cased) before concatenating it.
 - JSON bodies, headers and cookies; queries run outside a request (jobs, `withSession`); and,
-  past the first 1,000 values or 64 KB of a request, the rest.
+  past the first 1,000 values or 64 KB of each source (form body, query string, path
+  parameters; each has its own budget, so padding one cannot hide the others), the rest. In dev
+  and test modes the first such request logs a one-time "unchecked, over cap" warning.
+  `Sort.of(...)` is checked against the string you passed as well as the normalized order, so
+  `?sort=title%20desc` is caught even though it renders as `title DESC`.
 
 It can also fire on safe code: a hand-written allowlist (`switch (sort) { case "title" ->
 "title"; ... }` concatenated after `ORDER BY`) looks the same as the injection it replaces. Use
@@ -299,6 +304,14 @@ altered without the secret.
   secret is derived from the session secret, so ops clients re-authenticate after a rotation, and
   so is the key for WebSocket broadcasts between instances on Postgres: during a rolling rotation,
   instances on the old and new secret don't receive each other's broadcasts until all match.
+  A secret that is public or compromised (the `brace new` placeholder, or one that leaked) must
+  never be listed as previous: a listed secret still mints cookies. Startup refuses the shipped
+  placeholder as a previous secret, and a cookie opened with a previous secret is honoured only
+  if it carries `_abs` and that deadline is no further out than the configured absolute
+  lifetime. An empty previous-secret cookie opens as a brand-new session, inheriting no
+  deadline. `app.sessions(options)` copies the options, so changing them afterwards has no
+  effect, and `start()` re-runs the secret checks under the mode the app starts in. Drop a
+  retired secret once cookies sealed with it have expired.
 - **Cookie name.** Wherever the browser allows it (`Secure`, `Path=/`, no `Domain` — every
   default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
   set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant
@@ -702,6 +715,22 @@ Buffered fetches (`fetch`, `fetchString`, `fetchBytes`, `fetchJson`, and the err
 if `Content-Length` says the body is larger, otherwise as soon as the bytes read pass the limit,
 without downloading the rest. Raise or lower it per call with `.maxResponseBytes(n)`. `stream()`
 is not capped, because it hands you the body to read: bound what you read yourself.
+
+The same calls are bounded in **time**. `.timeout(...)` (default 30s) is the deadline for the
+whole exchange, response headers and body together, and `.idleTimeout(...)` (default 30s) bounds
+each wait for more body bytes. Either closes the connection and throws
+`Http.StreamTimeoutException`. Without them, a hostile server behind a user-supplied URL could
+send headers at once and then stall, or drip one byte every 29 seconds under the size cap, and
+hold the request thread (and its pooled database connection, in a `DbHandler`) indefinitely; a
+few dozen such requests would exhaust the pool. That was the case for buffered fetches until the
+2026-11 security review (M8): `timeout` used to cover only the wait for headers. The error body
+`fetchEvents` reads on a non-2xx status gets the same 30s default, though the event stream
+itself has no deadline unless you set one.
+
+A buffered call cannot be configured out of its deadline: `.timeout(null)` removes the deadline
+only for `stream()` and `fetchEvents`, and means the 30s default for every `fetch*` call. Zero
+or a negative duration throws `IllegalArgumentException`, and a duration over 365 days (for
+example `Duration.ofSeconds(Long.MAX_VALUE)`) is clamped to 365 days rather than overflowing.
 
 ### DNS rebinding: what remains
 
@@ -1688,6 +1717,12 @@ attempt. Binding the public key means a captured signature is only valid for the
 produced it; the nonce makes each signed request single-use; the origin makes it valid only at
 the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
 
+The nonce memory is per instance and empty at startup, so the server also refuses a request whose
+timestamp is earlier than its own start time (a request captured during a deploy cannot be
+replayed once after the restart). Each key has its own quota of remembered nonces (5,000 of the
+100,000 overall), so one key, even a read-scoped one, cannot fill the memory and block other
+operators' logins.
+
 **The signature is bound to a server.** The CLI reads the server's URL from the committed
 `.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
 signature and relay it to the real server within the time window. The server accepts a v3
@@ -1695,8 +1730,9 @@ signature only for an origin listed with `app.opsOrigins("https://app.example.co
 `BRACE_OPS_ORIGINS` environment variable, comma-separated), compared exactly: scheme, host and
 port. The request's `Host` and `X-Forwarded-Host` play no part, because the client relaying a
 signature chooses those: an app reachable directly, or a proxy that passes a client's
-`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Prod
-mode refuses to start with ops on and no origin configured. In dev and tests, with none set, the
+`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Every
+mode except `dev` (including an unset `brace.mode`, as in older scaffold Dockerfiles) refuses to
+start with ops on and no origin configured. In dev mode and the test harness, with none set, the
 origin's host must match the request's host instead, which is no defense against a client that
 can reach the app directly.
 
@@ -1765,6 +1801,31 @@ token's scope at its key's current ceiling. Removing a key, or lowering it to `s
 restarting or redeploying takes effect on its outstanding tokens immediately, although the token secret is derived from
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
+
+**Scope tokens in `ops-authorized-keys`.** The file is UTF-8 (a leading byte-order mark is
+ignored), one key per line:
+
+```
+KEY [scope:read | scope:control] [label words ...] [# comment]
+```
+
+- `#` at the start of a line, or after whitespace, starts a comment that runs to the end of the
+  line. Blank and comment-only lines are ignored. (`ci#1` is label text: no whitespace before
+  the `#`.)
+- The first token is the public key. The rest may come in any order.
+- Any token containing `:` or `=` must be exactly `scope:read` or `scope:control` (`scope:` in
+  lowercase, the value case-insensitive), and at most one appears per line. Anything else with
+  a `:` or `=` fails startup: `scope: read`, `Scope:read`, `scope=read`, `--scope=read`,
+  `role:read`, `scpoe:read`, `scope:read-only`, or a second scope token.
+- Every other token is label text, including `control`, `ro`, `read` and `scope-ci`, with one
+  exception: `read`, `ro`, `readonly`, `read-only` or `control` as the **only** token after the
+  key (`KEY read`, the classic mistake) fails startup with a message to write `scope:read`.
+- A line with no scope token is `control` (backward compatible) and is logged as such at boot.
+
+Failures name the file and line number, never the key: a silent fallback would hand an agent a
+full-privilege key. A key listed twice keeps the lower scope. Each key's fingerprint and scope
+is logged at boot (`ops.key`). A token whose payload has no scope claim, or one the server does
+not recognise, is treated as `read`, as is an unrecognised `scope` requested at `/ops/auth`.
 
 ### Ops pages in the browser
 
@@ -1890,7 +1951,12 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
   the parameter.
 - **Bounded growth.** Only matched routes returning HTML are counted, so a scanner requesting
   random URLs produces 404s, not rows. The in-memory buffer is capped at 20,000 views; beyond that
-  views are dropped and tallied. Every stored string is length-capped, and every value the page
+  views are dropped and tallied. Two more caps bound table growth against a client that sends
+  browser-looking requests in a loop: one visitor (host, IP, user agent) adds at most 30 rows per
+  10-second flush window (`maxViewsPerVisitorPerFlush`), and an instance inserts at most 500,000
+  rows a day (`dailyRowBudget`, one warning when it is reached). Views over either cap are not
+  stored but are tallied as `dropped`, which the dashboard and `notCounted` show, so a capped day
+  reads as capped rather than silently low. Every stored string is length-capped, and every value the page
   renders is HTML-escaped.
 - **The "don't count" cookie.** `POST /ops/analytics/ignore` sets `__brace_analytics_ignore=1`
   (HttpOnly, `SameSite=Lax`, `Path=/`, `Secure` except on localhost). It carries no credential;
@@ -1956,7 +2022,71 @@ records useless. If your application routes embed raw bearer tokens or reset
 secrets in path positions, consider moving them to opaque database-lookup keys
 so the route retains meaning even after redaction.
 
+### One bad record cannot stall the store
+
+Error records carry client-controlled text, so `ErrorStore` makes sure no single record can
+block the others:
+
+- `ErrorStore.record` replaces NUL characters with U+FFFD. A request such as `?page=1%00` puts a
+  NUL in a `NumberFormatException` message, and Postgres text cannot hold one. Replacing it
+  instead of deleting it keeps already-redacted tokens from being joined into one secret-shaped
+  token. The error type and route are clipped to their 255-character columns; the route starts
+  with the client-chosen HTTP method.
+- Each upsert in a flush runs under its own savepoint. A row the database rejects is rolled
+  back alone, and the rest of the batch commits.
+- A rejected row is retried once, in the same flush, with its payload stripped: the message is
+  replaced by a fixed placeholder (`[details not stored: the database rejected this error
+  record]`, no request-derived text) and the stack trace, request detail, queries and headers
+  are left empty. The error kind's count and the regression notification survive. Only if that
+  retry is rejected too is the entry retried on later flushes, and dropped after 5 rejected
+  flushes.
+- A connection-level failure (database down, pool exhausted, failure to open the session or
+  begin the transaction) is not blamed on any entry. The whole batch is kept and retried,
+  bounded by the 1,000-kind pending buffer as before. A row error whose SQLState is in a
+  connection-level class (`08`, `53`, `57`, `40` or `25`) counts as a connection failure only
+  when the connection also fails `isValid`; on a live connection (for example `57014`, a
+  statement timeout on one huge row) it is a row rejection like any other.
+- Failures are logged at most once a minute, naming the exception class, SQLState and the error
+  type of any dropped entry. Request-derived content (messages, paths, headers) is never logged.
+
+Before the 2026-11 security review (M5), one such request failed every later flush on
+Postgres, so nothing reached `ops_errors` and regression alerts stopped until restart.
+
+### Regression notifications carry request-derived text
+
+A new error kind's message can contain text a web user chose. `WebhookNotifier` (Slack and
+Mattermost incoming webhooks) therefore puts the type, route and message each in an inline code
+span, which both render literally: Mattermost markdown links, images (a tracking pixel) and
+emphasis are inert. Inside the span, a backtick (which would close it) becomes `ˋ`, `<` `>` `&`
+(Slack control sequences such as `<!channel>`) become `‹` `›` `＆`, `@` becomes the full-width
+`＠` so no `@channel` mention fires, and line breaks and control characters become spaces. The
+message is cut to 500 characters first. Backslash escaping was not used because Slack does not
+honour it. `MailerNotifier` sends plain text.
+
 ---
+
+## Outbound Mail
+
+`Mailer` over `smtp://user:pass@host:587` **requires STARTTLS**
+(`mail.smtp.starttls.required=true`). If the relay's EHLO does not offer it, the send fails
+instead of continuing in cleartext, so a network attacker cannot strip the offer and read the
+SMTP password and mail bodies (password-reset links). `smtps://` is implicit TLS. A trusted
+local relay that cannot do TLS (a sidecar on localhost) opts out explicitly with
+`smtp+plain://localhost:25`, which uses STARTTLS when offered but never requires it. Credentials
+on an `smtp+plain://` URL are allowed but logged as a warning once, when the `Mailer` is
+constructed (the host is named; the user and password never are), because without TLS the AUTH
+exchange is cleartext. The scheme is compared case-insensitively (`SMTPS://` is implicit TLS).
+Dev mode (no SMTP URL) only captures mail and is unaffected.
+
+`Mailer.to(...)` takes exactly one address and parses it strictly, so a recipient taken from a form
+cannot add recipients (`"a@b.c, victim@x.y"` throws). The same holds for `cc(...)`, the
+per-message `from(...)`, and `Mailer.from(...)`/`Mailer.replyTo(...)` (checked when configured).
+Strict parsing yields exactly one address or throws; on top of that, group syntax
+(`g: a@b.c, victim@x.y;`, several mailboxes as one address), route addresses
+(`<@relay:a@b.c>`) and control characters are refused. A comma inside a quoted display name
+(`"Doe, J" <a@b.c>`) is one mailbox and is accepted. `@Email` likewise rejects `,` `;` `<` `>`,
+whitespace and control characters. `MailerNotifier` accepts several recipients, validates each at
+construction and sends each its own message.
 
 ## Secrets Management
 

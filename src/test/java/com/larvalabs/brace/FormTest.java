@@ -86,6 +86,17 @@ class FormTest {
     }
 
     @Test
+    void emailRejectsRecipientListsAndControlCharacters() {
+        for (String bad : new String[] {"a@b.c, victim@x.y", "a@b.c;victim@x.y", "Eve <a@b.c>",
+                "a@b.c\r\nBcc: victim@x.y", "a @b.c", "a@b.c\t"}) {
+            var form = FormBinder.bind(TypedForm.class, Map.of("name", "Alice", "age", "25", "email", bad));
+            assertFalse(form.errors("email").isEmpty(), bad);
+        }
+        var ok = FormBinder.bind(TypedForm.class, Map.of("name", "Alice", "age", "25", "email", "a.b+c@example.com"));
+        assertTrue(ok.errors("email").isEmpty());
+    }
+
+    @Test
     void inValidation() {
         var form = FormBinder.bind(InForm.class, Map.of("status", "invalid"));
         assertTrue(form.hasErrors());

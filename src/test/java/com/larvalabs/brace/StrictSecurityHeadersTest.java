@@ -35,7 +35,7 @@ class StrictSecurityHeadersTest {
 
         var db = new DatabaseFactory("jdbc:h2:mem:stricthdr" + System.nanoTime() + ";DB_CLOSE_DELAY=-1",
             null, null, List.of());
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .sessions("strict-headers-session-secret-at-least-32")
             .opsSecret(OPS_SECRET)
             .ops(keys.toString())
