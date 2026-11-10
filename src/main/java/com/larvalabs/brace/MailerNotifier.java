@@ -24,7 +24,7 @@ public class MailerNotifier implements Notifier {
             try {
                 mailer.to(to).subject(subject).text(body).send();
             } catch (Exception e) {
-                Log.warn("regression email failed: " + e.getMessage());
+                Log.warn("regression email failed: " + Redactor.redactMessage(e.getMessage()));
             }
         });
     }

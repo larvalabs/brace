@@ -39,7 +39,7 @@ public class WebhookNotifier implements Notifier {
                         .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
                     HttpResponse.BodyHandlers.discarding());
             } catch (Exception e) {
-                Log.warn("regression webhook failed: " + e.getMessage());
+                Log.warn("regression webhook failed: " + Redactor.redactMessage(e.getMessage()));
             }
         });
     }

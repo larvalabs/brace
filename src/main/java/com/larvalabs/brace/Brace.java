@@ -1457,7 +1457,7 @@ public class Brace {
             String threadName = thread.getName();
             stats.recordError(
                 throwable.getClass().getName(),
-                throwable.getMessage(),
+                Redactor.redactMessage(throwable.getMessage()),
                 "thread:" + threadName,
                 sw.toString(),
                 null,
@@ -1465,7 +1465,7 @@ public class Brace {
             Log.event("uncaught_exception", java.util.Map.of(
                 "thread", threadName,
                 "type", throwable.getClass().getName(),
-                "message", String.valueOf(throwable.getMessage())));
+                "message", String.valueOf(Redactor.redactMessage(throwable.getMessage()))));
         });
 
         // Durable-job retention (perf review H3): finished rows otherwise accumulate forever and

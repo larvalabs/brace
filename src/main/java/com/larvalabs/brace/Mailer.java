@@ -78,7 +78,7 @@ public class Mailer {
                 send(email);
             } catch (Exception e) {
                 // send() already counted the failure in failCount
-                Log.warn("async email to " + email.to + " failed: " + e.getMessage());
+                Log.warn("async email to " + email.to + " failed: " + Redactor.redactMessage(e.getMessage()));
             }
         });
     }

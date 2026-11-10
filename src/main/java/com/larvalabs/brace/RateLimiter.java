@@ -212,7 +212,7 @@ public class RateLimiter {
                 // blip causes per-instance approximation (across a fleet the effective limit
                 // becomes limit × N for the duration of the outage), which is far better than
                 // turning every rate-limited endpoint into an error.
-                Log.warn("rate-limiter: shared-counter DB error, falling back to local counting — " + e.getMessage());
+                Log.warn("rate-limiter: shared-counter DB error, falling back to local counting — " + Redactor.redactMessage(e.getMessage()));
                 return checkLocal(key);
             }
         }
@@ -377,7 +377,7 @@ public class RateLimiter {
             // limiter keeps enforcing per-instance — mirroring the old per-request fallback ("a
             // brief DB blip causes per-instance approximation") instead of 500-ing the endpoint.
             // Back off retries so a sustained outage isn't hammered once per request.
-            Log.warn("rate-limiter: shared-counter flush failed, counting per-instance until retry — " + e.getMessage());
+            Log.warn("rate-limiter: shared-counter flush failed, counting per-instance until retry — " + Redactor.redactMessage(e.getMessage()));
             flushCooldownUntilMillis = nowMillis + FLUSH_RETRY_COOLDOWN_MILLIS;
         } finally {
             flushing.set(false);

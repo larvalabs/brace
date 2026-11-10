@@ -489,11 +489,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Escape `&`, `<`, `>` and truncate to about 500 characters.
   - **Model: Sonnet 5.5.**
 
-- [ ] **L13: Raw exception messages still reach `/ops` without `redactMessage`**, `JobScheduler.java:199`, `OpsHandler.java:465`, `Brace.java:1449-1452`, plus `Log.warn("…" + e.getMessage())` sites (`Mailer.java:81`, `WebhookNotifier.java:42`, `RateLimiter.java:215, 380`, `JobScheduler.java:279, 330`)
+- [x] **L13: Raw exception messages still reach `/ops` without `redactMessage`**, `JobScheduler.java:199`, `OpsHandler.java:465`, `Brace.java:1449-1452`, plus `Log.warn("…" + e.getMessage())` sites (`Mailer.java:81`, `WebhookNotifier.java:42`, `RateLimiter.java:215, 380`, `JobScheduler.java:279, 330`)
   - Scheduled-job `lastError` is served at `/ops/status`; the uncaught-exception event reaches
     `/ops/logs`. `redactMessage` also does not recognize the ops token's own two-part shape.
   - **Fix.** Apply `redactMessage` at those sinks (or inside `Log.warn`/`Log.event` for string
     values), and add a two-part base64url shape to `isSecretShaped`.
+  - Done in Track D: `redactMessage` applied at `JobScheduler` `lastError` and warn sites, the
+    uncaught-exception event and stats record in `Brace.java`, `Mailer`, `MailerNotifier`,
+    `WebhookNotifier`, `RateLimiter` (one-line wraps), `RegressionTracker`, `TrustedProxies`.
+    The two-part base64url token shape in `isSecretShaped` is done under M6 (`Redactor.java`).
   - **Model: Sonnet 5.5.**
 
 - [ ] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`

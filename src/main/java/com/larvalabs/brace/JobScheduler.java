@@ -196,7 +196,7 @@ public class JobScheduler {
             var prev = statuses.get(index);
             var msg = ctx.consumeMessage();
             statuses.set(index, new JobStatus(
-                rj.name(), rj.schedule(), start, durationMs, "error", e.getMessage(),
+                rj.name(), rj.schedule(), start, durationMs, "error", Redactor.redactMessage(e.getMessage()),
                 prev.failCount() + 1, nextRun,
                 msg != null ? msg : prev.lastMessage()
             ));
@@ -276,7 +276,7 @@ public class JobScheduler {
             }
         } catch (Exception e) {
             // A transient read error shouldn't drop a run — fall through and decide under the lock.
-            Log.warn("scheduler-claim-read-failed job=" + rj.name() + " error=" + e.getMessage());
+            Log.warn("scheduler-claim-read-failed job=" + rj.name() + " error=" + Redactor.redactMessage(e.getMessage()));
         }
 
         // Slow path: the slot looks unclaimed (or the row is missing). Take the row lock and re-check
@@ -327,7 +327,7 @@ public class JobScheduler {
             // Coordination failed (e.g. transient DB error). Skip this tick rather than
             // risk a duplicate side effect — the job runs again next interval. Preventing
             // N-fold duplicate runs is the whole point, so favor skip over duplicate.
-            Log.warn("scheduler-claim-failed job=" + rj.name() + " error=" + e.getMessage());
+            Log.warn("scheduler-claim-failed job=" + rj.name() + " error=" + Redactor.redactMessage(e.getMessage()));
             return false;
         } finally {
             db.close();
