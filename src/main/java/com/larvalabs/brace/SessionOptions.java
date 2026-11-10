@@ -170,7 +170,7 @@ public class SessionOptions {
      * second argument.
      */
     public java.util.List<String> previousSecrets() {
-        return new PreviousSecrets(previousSecrets, this);
+        return new PreviousSecrets(previousSecrets, maxPreviousAbsoluteSeconds());
     }
 
     /** Longest absolute lifetime, in seconds, a cookie opened with a previous secret may carry. */
@@ -181,20 +181,44 @@ public class SessionOptions {
         return Math.max(Session.DEFAULT_ABSOLUTE_MAX_AGE_SECONDS, horizon);
     }
 
-    /** Read-only list of previous secrets that carries the lifetime bound for {@link Session}. */
+    /**
+     * Read-only list of previous secrets that carries the lifetime bound for {@link Session}.
+     * The bound rides on the list type because {@code BraceHandler} could not change in the
+     * 2026-11 review; {@link Session#fromCookie(String, String, java.util.List)} honours no
+     * previous-secret cookie when handed any other list (fail closed).
+     */
+    // TODO(security-review-2026-11): pass the bound explicitly once BraceHandler can change.
     static final class PreviousSecrets extends java.util.AbstractList<String> {
         private final java.util.List<String> secrets;
-        private final SessionOptions options;
+        private final long maxAbsoluteSeconds;
 
-        PreviousSecrets(java.util.List<String> secrets, SessionOptions options) {
+        PreviousSecrets(java.util.List<String> secrets, long maxAbsoluteSeconds) {
             this.secrets = secrets;
-            this.options = options;
+            this.maxAbsoluteSeconds = maxAbsoluteSeconds;
         }
 
         @Override public String get(int index) { return secrets.get(index); }
         @Override public int size() { return secrets.size(); }
 
-        long maxAbsoluteSeconds() { return options.maxPreviousAbsoluteSeconds(); }
+        long maxAbsoluteSeconds() { return maxAbsoluteSeconds; }
+    }
+
+    /**
+     * An independent copy, taken by {@link Brace#sessions(SessionOptions)} so that changing these
+     * options afterwards (a placeholder previous secret, say) cannot bypass the validation it ran
+     * (M7 review). Every field is immutable or copied.
+     */
+    SessionOptions copy() {
+        var c = new SessionOptions(secret);
+        c.httpOnly = httpOnly;
+        c.secure = secure;
+        c.sameSite = sameSite;
+        c.maxAge = maxAge;
+        c.absoluteMaxAge = absoluteMaxAge;
+        c.previousSecrets = java.util.List.copyOf(previousSecrets);
+        c.path = path;
+        c.domain = domain;
+        return c;
     }
 
     /** Cookie Path; must start with {@code /} and contain no {@code ;} or control characters. */

@@ -221,7 +221,10 @@ altered without the secret.
   never be listed as previous: a listed secret still mints cookies. Startup refuses the shipped
   placeholder as a previous secret, and a cookie opened with a previous secret is honoured only
   if it carries `_abs` and that deadline is no further out than the configured absolute
-  lifetime. Drop a retired secret once cookies sealed with it have expired.
+  lifetime. An empty previous-secret cookie opens as a brand-new session, inheriting no
+  deadline. `app.sessions(options)` copies the options, so changing them afterwards has no
+  effect, and `start()` re-runs the secret checks under the mode the app starts in. Drop a
+  retired secret once cookies sealed with it have expired.
 - **Cookie name.** Wherever the browser allows it (`Secure`, `Path=/`, no `Domain` — every
   default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
   set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant

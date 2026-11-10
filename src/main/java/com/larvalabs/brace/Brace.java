@@ -273,15 +273,29 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Enable sessions with these options. The options are copied here: changing them after this
+     * call has no effect (M7 review: a placeholder previous secret added afterwards would
+     * otherwise skip the validation below). Configure them fully first.
+     */
     public Brace sessions(SessionOptions options) {
-        validateSecret(options.secret(), "session");
-        // M7: a previous secret that is the public scaffold placeholder (or leaked) forges cookies.
-        for (String previous : options.previousSecrets()) {
-            validateSecret(previous, "previous session");
-        }
-        this.sessionSecret = options.secret();
-        this.sessionOptions = options;
+        var snapshot = options.copy();
+        validateSessionSecrets(snapshot, true);
+        this.sessionSecret = snapshot.secret();
+        this.sessionOptions = snapshot;
         return this;
+    }
+
+    /**
+     * The current secret and every previous one through {@link #validateSecret}. M7: a previous
+     * secret that is the public scaffold placeholder (or leaked) forges cookies. {@code warn} is
+     * false for the start() backstop, so weak-secret warnings aren't logged twice.
+     */
+    private void validateSessionSecrets(SessionOptions options, boolean warn) {
+        validateSecret(options.secret(), "session", warn);
+        for (String previous : options.previousSecrets()) {
+            validateSecret(previous, "previous session", warn);
+        }
     }
 
     /**
@@ -369,6 +383,10 @@ public class Brace {
         java.util.Set.of("CHANGE-ME-to-a-random-string-at-least-32-chars");
 
     private void validateSecret(String secret, String type) {
+        validateSecret(secret, type, true);
+    }
+
+    private void validateSecret(String secret, String type, boolean warn) {
         if (secret == null || secret.isEmpty()) {
             throw new IllegalArgumentException(type + " secret cannot be null or empty");
         }
@@ -390,6 +408,7 @@ public class Brace {
                 + "is only a warning.");
         }
         // Warn about obvious placeholder values (including old scaffolds)
+        if (!warn) return;
         String lower = secret.toLowerCase();
         // The old scaffold placeholder ("CHANGE-ME-to-a-random-string-at-least-32-chars") had its
         // own clause here, comparing a mixed-case literal against a string that was just
@@ -1183,6 +1202,11 @@ public class Brace {
         // A previous stop() ended autoRefresh()'s fetcher; a restart picks it back up.
         if (trustedProxies != null) {
             trustedProxies.resumeRefresh();
+        }
+        // M7 review backstop: sessions() validated a snapshot, but check again here, under the
+        // mode the app actually starts in.
+        if (sessionOptions != null) {
+            validateSessionSecrets(sessionOptions, false);
         }
         // Session-aware middleware without .sessions(secret) is a silent trap: every request
         // gets a fresh empty Session. A session-reading access requirement fails start() for

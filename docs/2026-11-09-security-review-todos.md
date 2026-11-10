@@ -320,6 +320,11 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** Startup refuses a placeholder previous secret; a previous-secret cookie without
     `_abs` is rejected; ordinary rotation still works.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): M7 review fixes`). An empty previous-secret cookie opens as
+    a brand-new session (no inherited `_abs`); `sessions(options)` snapshots the options and
+    `start()` re-validates; a previous-secrets list without the bound (copied) honours no
+    previous-secret cookie. The bound still rides on the `PreviousSecrets` list type, with a
+    TODO, because `BraceHandler.java` could not change.
 
 - [x] **M8: Buffered `Http.fetch*` has no timeout on the response body**, `Http.java:197, 224-230, 253-261, 315-329`
   - **What's wrong.** `fetch()`, `fetchString()`, `fetchJson()`, `fetchBytes()` and the
