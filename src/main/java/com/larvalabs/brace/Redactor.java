@@ -455,7 +455,7 @@ public class Redactor {
         StringBuilder out = null;
         int copied = 0;
         int i = 0;
-        int urlAt = -1; // a known scheme found at the end of the previous run ("/proxy/https://")
+        int urlAt = -1; // a scheme found at the end of the previous run ("backup_ldap://", "1https://")
         while (i < n) {
             char c = s.charAt(i);
             String replacement = null;
@@ -470,7 +470,7 @@ public class Redactor {
                     replacement = urlReplacement(s.substring(i, end), rounds, depth);
                 } else {
                     to = chunkEnd(s, i);
-                    int u = knownSchemeStart(s, i, to);
+                    int u = schemeStart(s, i, to);
                     if (u > i) {
                         to = u;
                         urlAt = u;
@@ -514,10 +514,10 @@ public class Redactor {
                 }
             } else if (isChunkChar(c)) {
                 to = chunkEnd(s, i);
-                int u = knownSchemeStart(s, i, to);
+                int u = schemeStart(s, i, to);
                 int end = u == i ? urlEnd(s, i) : -1;
                 if (end > i) {
-                    to = end; // jdbc:<subscheme>:// after a prefix ("-jdbc:sqlserver://")
+                    to = end; // a scheme right after a scheme character ("-jdbc:sqlserver://")
                     url = true;
                     replacement = urlReplacement(s.substring(i, to), rounds, depth);
                 } else {
@@ -730,41 +730,23 @@ public class Redactor {
     }
 
     /**
-     * Scheme names recognised even in the middle of a run, where a URL is otherwise not looked for
-     * ({@code GET /proxy/https://user:pw@host}, {@code -https://}, {@code 1https://}). Any other
-     * {@code [a-z][a-z0-9+.-]*://} is recognised at the start of a run only.
+     * Where a URL starts inside the run {@code s[from, to)} that ends right before {@code ://}:
+     * at the scheme name that ends the run, found by backing up from the {@code ://} over
+     * {@code [A-Za-z0-9+.-]} and then forward to the first letter ({@code backup_ldap://} is
+     * {@code ldap://}, {@code 1https://} is {@code https://}, {@code jdbc:my_driver://} is
+     * {@code driver://}). -1 when the run does not end in {@code ://} or holds no letter there.
+     * Any scheme counts: there is no list. {@link #urlEnd} always finds a URL at the result.
      */
-    private static final List<String> KNOWN_SCHEMES = List.of(
-        "http", "https", "ws", "wss", "ftp", "postgres", "postgresql", "mysql", "mariadb", "mongodb",
-        "mongodb+srv", "redis", "rediss", "amqp", "amqps", "smtp", "smtps", "s3");
-
-    /**
-     * Where a URL starts inside the run {@code s[from, to)} that ends right before {@code ://}: at
-     * a {@link #KNOWN_SCHEMES known scheme} that ends the run, or at the run itself when it follows
-     * {@code jdbc:} ({@code -jdbc:sqlserver://}) and is a scheme name (a letter, then
-     * {@code [A-Za-z0-9+.-]}: a run holding {@code _ / ~ $ %} is not one). Otherwise -1.
-     */
-    private static int knownSchemeStart(String s, int from, int to) {
+    private static int schemeStart(String s, int from, int to) {
         if (!s.startsWith("://", to)) return -1;
-        int best = -1;
-        for (String k : KNOWN_SCHEMES) {
-            int st = to - k.length();
-            if (st >= from && (best < 0 || st < best) && s.regionMatches(true, st, k, 0, k.length())) best = st;
+        int st = to;
+        while (st > from) {
+            char c = s.charAt(st - 1);
+            if (!(isAsciiLetter(c) || isAsciiDigit(c) || c == '+' || c == '-' || c == '.')) break;
+            st--;
         }
-        if (best < 0 && from >= 5 && s.regionMatches(true, from - 5, "jdbc:", 0, 5) && isSchemeName(s, from, to)) {
-            return from;
-        }
-        return best;
-    }
-
-    /** {@code s[from, to)} is a URL scheme name: a letter, then letters, digits, {@code + - .}. */
-    private static boolean isSchemeName(String s, int from, int to) {
-        if (from >= to || !isAsciiLetter(s.charAt(from))) return false;
-        for (int i = from + 1; i < to; i++) {
-            char c = s.charAt(i);
-            if (!(isAsciiLetter(c) || isAsciiDigit(c) || c == '+' || c == '-' || c == '.')) return false;
-        }
-        return true;
+        while (st < to && !isAsciiLetter(s.charAt(st))) st++;
+        return st < to ? st : -1;
     }
 
     private static boolean endsUrl(char c) {
@@ -1485,7 +1467,18 @@ public class Redactor {
         if (sep > 0 && isScheme(url, sep)) {
             int authStart = sep + 3;
             int authEnd = indexOfAny(url, authStart, len, "/?#");
-            out.append(url, 0, authStart);
+            // The scheme is kept, unless a part of it is secret-shaped: a token glued to "://" or
+            // to a scheme (<token>https://) reads as one long scheme name.
+            int part = 0;
+            for (int i = 0; i <= sep; i++) {
+                if (i < sep && url.charAt(i) != ':') continue;
+                String redacted = redactChunk(url, part, i, true, 0, depth);
+                if (redacted == null) out.append(url, part, i);
+                else out.append(redacted);
+                if (i < sep) out.append(':');
+                part = i + 1;
+            }
+            out.append("://");
             int at = userInfoEnd(url, authStart, authEnd);
             int hostStart = authStart;
             if (at >= authStart) {

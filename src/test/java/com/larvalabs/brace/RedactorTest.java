@@ -986,7 +986,9 @@ class RedactorTest {
             // second review: bracketed values with and without a closer, user info across a
             // URL-ending character (the '@' look-ahead), parameter sections, frame-like lines
             "token=[", "token={a}}", "token='a''", "password=(", "x=[", "a://b:c^", "a://b:c ", "a://b:1^",
-            "a://h;p=a/", "a://u:p;", "\n\tat a.B(", "\n at a.b(C.java:1) ~[", "aB/cD1/", "Ab/Cd/");
+            "a://h;p=a/", "a://u:p;", "\n\tat a.B(", "\n at a.b(C.java:1) ~[", "aB/cD1/", "Ab/Cd/",
+            // any scheme inside a run, and a token for a scheme
+            "a-b://", "_x://u:p@", "a_b:c_d://", "Ab1Cd2Ef3Gh4Ij5Kl6://");
         long t0 = System.nanoTime();
         for (int size : List.of(64 * 1024, 1024 * 1024)) {
             for (String unit : units) {
@@ -1376,6 +1378,34 @@ class RedactorTest {
         }
         assertEquals("mongodb://h1:27017,h2:27017/db?authSource=a@b",
             Redactor.redactUrl("mongodb://h1:27017,h2:27017/db?authSource=a@b"));
+    }
+
+    @Test
+    void anySchemeIsFoundInsideARun() {
+        // L-3: inside a run only a fixed list of schemes was looked for, so a URL of any other
+        // scheme glued to a prefix kept its user info.
+        String[][] cases = {
+            {"backup_ldap://cn:hunter2@host/x", "backup_ldap://[REDACTED]@host/x"},
+            {"my_app+ldap://cn:hunter2@host/x", "my_app+ldap://[REDACTED]@host/x"},
+            {"x_y_z://u:hunter2@h/p", "x_y_z://[REDACTED]@h/p"},
+            {"jdbc:my_driver://u:hunter2@host/db", "jdbc:my_driver://[REDACTED]@host/db"},
+            {"GET /proxy/sftp://user:hunter2@host/x", "GET /proxy/sftp://[REDACTED]@host/x"},
+            {"1sftp://user:hunter2@host/x", "1sftp://[REDACTED]@host/x"},
+            {"-https://user:hunter2@host/x", "-https://[REDACTED]@host/x"},
+            {"%https://user:hunter2@host/x", "%https://[REDACTED]@host/x"},
+            // A token before the scheme is still redacted, glued to it or not.
+            {T + "_https://user:hunter2@host/x", "[redacted]https://[REDACTED]@host/x"},
+            {T + "https://user:hunter2@host/x", "[redacted]://[REDACTED]@host/x"},
+            {"tok a3f9Bc2d8eF1g4h5a3f9://x", "tok [redacted]://x"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        for (String same : List.of("see docs://guide and file:///etc/passwd and _://x and 9://x and -://u",
+                "com.example.Foo://bar", "jdbc:tc:postgresql:15.3:///db", "word_other://host/path",
+                "chrome-extension://abcdefghijklmnop/page.html")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
     }
 
     @Test
