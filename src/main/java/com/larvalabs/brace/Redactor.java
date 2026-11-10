@@ -1439,20 +1439,79 @@ public class Redactor {
     /**
      * A frame line of a printed trace, at any indent: {@code printStackTrace} indents the frames of
      * a {@code Suppressed:} exception, and of the causes nested under it, with two or more tabs.
-     * After at least one space or tab: {@code at ...}, {@code ... N more} or (Logback)
-     * {@code ... N common frames omitted}.
+     * After at least one space or tab: {@code at } and a {@linkplain #isFrame frame},
+     * {@code ... N more} or (Logback) {@code ... N common frames omitted}. Any other line that
+     * starts with {@code at } is message text (Jackson's {@code  at [Source: ...]} excerpt of the
+     * document it failed on) and is redacted like the rest.
      */
-    private static boolean isFrameLine(String s, int from, int end) {
+    static boolean isFrameLine(String s, int from, int end) {
         int i = from;
         while (i < end && (s.charAt(i) == '\t' || s.charAt(i) == ' ')) i++;
         if (i == from) return false;
-        if (s.startsWith("at ", i)) return true;
+        if (s.startsWith("at ", i)) return isFrame(s, i + 3, end);
         if (!s.startsWith("... ", i)) return false;
         int d = i + 4;
         while (d < end && isAsciiDigit(s.charAt(d))) d++;
         if (d == i + 4) return false;
         String rest = s.substring(d, end);
         return rest.equals(" more") || rest.equals(" common frames omitted");
+    }
+
+    /**
+     * {@code s[from, end)} is a stack frame as {@code StackTraceElement.toString} writes it,
+     * with Logback's packaging data if any, and nothing else:
+     * <pre>
+     *   [loader/][module[@version]/]pkg.Class.method(Source)[ ~[jar:version]]
+     * </pre>
+     * <ul>
+     *   <li>the name before {@code (} is letters, digits and {@code _ $ . / @ < > - +}, with at
+     *       least one {@code .}: {@code java.base/java.lang.Thread.run},
+     *       {@code app//com.x.Y.z}, {@code com.x.Y.<init>}, {@code com.x.Y.lambda$run$0},
+     *       {@code com.x.Y$$Lambda/0x000001f0a1047000.run}, Kotlin's {@code plus-WZ4Q5Ns};</li>
+     *   <li>the source is {@code Native Method}, {@code Unknown Source}, or a file name (letters,
+     *       digits, {@code _ $ . - < >}) with an optional {@code :line};</li>
+     *   <li>the packaging data, if present, is {@code [..]} or {@code ~[..]} after one space,
+     *       holds a {@code :} and only letters, digits and {@code . _ - / ! + $ :}.</li>
+     * </ul>
+     * No {@code =}, space, quote or {@code ://} fits anywhere, so a {@code name=value} pair or a
+     * URL on such a line makes it message text.
+     */
+    private static boolean isFrame(String s, int from, int end) {
+        int i = from;
+        boolean dot = false;
+        while (i < end) {
+            char c = s.charAt(i);
+            if (c == '.') dot = true;
+            else if (!(Character.isLetterOrDigit(c) || "_$/@<>-+".indexOf(c) >= 0)) break;
+            i++;
+        }
+        if (!dot || i >= end || s.charAt(i) != '(') return false;
+        int j = i + 1;
+        if (s.startsWith("Native Method)", j)) {
+            j += 13;
+        } else if (s.startsWith("Unknown Source)", j)) {
+            j += 14;
+        } else {
+            while (j < end && (Character.isLetterOrDigit(s.charAt(j)) || "_$.-<>".indexOf(s.charAt(j)) >= 0)) j++;
+            if (j == i + 1) return false;
+            if (j < end && s.charAt(j) == ':') {
+                int digits = ++j;
+                while (j < end && isAsciiDigit(s.charAt(j))) j++;
+                if (j == digits) return false;
+            }
+        }
+        if (j >= end || s.charAt(j) != ')') return false;
+        if (++j == end) return true;
+        if (s.charAt(j) != ' ') return false;
+        if (++j < end && s.charAt(j) == '~') j++;
+        if (j >= end - 1 || s.charAt(j) != '[' || s.charAt(end - 1) != ']') return false;
+        boolean colon = false;
+        for (int k = j + 1; k < end - 1; k++) {
+            char c = s.charAt(k);
+            if (c == ':') colon = true;
+            else if (!(isAsciiLetter(c) || isAsciiDigit(c) || "._-/!+$".indexOf(c) >= 0)) return false;
+        }
+        return colon;
     }
 
     /**

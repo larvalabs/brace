@@ -1053,6 +1053,126 @@ class RedactorTest {
             Redactor.redactMessage("-jdbc:sqlserver://db:1433;password=hunter2"));
     }
 
+    static void throwsThroughReflection() {
+        throw new IllegalArgumentException("reflective " + HEX32);
+    }
+
+    /** A trace with real frames of every kind the JDK prints here: lambda, virtual thread, reflection, cause, suppressed. */
+    static String realTrace() throws Exception {
+        Throwable[] caught = new Throwable[1];
+        Runnable lambda = () -> {
+            try {
+                RedactorTest.class.getDeclaredMethod("throwsThroughReflection").invoke(null);
+            } catch (ReflectiveOperationException e) {
+                var outer = new IllegalStateException("outer " + HEX32, e);
+                outer.addSuppressed(new java.io.IOException("suppressed " + RANDOM32, new RuntimeException("under " + T)));
+                throw outer;
+            }
+        };
+        Thread thread = Thread.ofVirtual().unstarted(() -> {
+            try {
+                lambda.run();
+            } catch (Throwable e) {
+                caught[0] = e;
+            }
+        });
+        thread.start();
+        thread.join();
+        return traceOf(caught[0]);
+    }
+
+    @Test
+    void realFrameLinesOfEveryKindAreKept() throws Exception {
+        // M-1: a frame line must look like a frame. First, that real ones still do.
+        String trace = realTrace();
+        int frames = 0;
+        for (String line : trace.split("\n")) {
+            if (line.strip().startsWith("at ")) {
+                frames++;
+                assertTrue(Redactor.isFrameLine(line, 0, line.length()), "a real frame is not recognised: " + line);
+            }
+        }
+        assertTrue(frames >= 6, trace);
+        for (String needle : List.of("lambda$", "VirtualThread", "java.base/", "Caused by: ", "Suppressed: ", "... ")) {
+            assertTrue(trace.contains(needle), "precondition, the trace has " + needle + ": " + trace);
+        }
+        String redacted = Redactor.redactStackTrace(trace);
+        for (String secret : List.of(HEX32, RANDOM32, T)) assertFalse(redacted.contains(secret), redacted);
+        for (String line : trace.split("\n")) {
+            if (line.strip().startsWith("at ") || line.strip().startsWith("... ")) {
+                assertTrue(redacted.contains(line + "\n"), "frame line changed: " + line);
+            }
+        }
+        // Frame shapes this JVM did not print above, as StackTraceElement and Logback write them.
+        var shapes = new java.util.ArrayList<String>();
+        for (StackTraceElement e : List.of(
+                new StackTraceElement("app", "my.module", "1.0-SNAPSHOT", "com.x.Y", "z", "Y.java", 1),
+                new StackTraceElement("app", null, null, "com.x.Y", "z", "Y.java", 1),
+                new StackTraceElement(null, "java.base", "21.0.5+11", "java.lang.Thread", "run", "Thread.java", 1583),
+                new StackTraceElement("com.x.Y", "z", "Y.java", -1),
+                new StackTraceElement("com.x.Y", "z", null, -1),
+                new StackTraceElement("com.x.Y", "nativeCall", "Y.java", -2),
+                new StackTraceElement("com.x.Y", "<init>", "Y.java", 3),
+                new StackTraceElement("com.x.Y", "<clinit>", "Y.java", 3),
+                new StackTraceElement("com.x.Y", "lambda$run$0", "Y.java", 12),
+                new StackTraceElement("com.x.Y$$Lambda/0x000001f0a1047000", "run", null, -1),
+                new StackTraceElement("com.x.Y$$Lambda$142/0x0000000800c8a1b0", "run", null, -1),
+                new StackTraceElement("java.lang.invoke.LambdaForm$MH/0x0000000800c04000", "invoke", "LambdaForm$MH", -1),
+                new StackTraceElement("jdk.internal.reflect.GeneratedMethodAccessor12", "invoke", null, -1),
+                new StackTraceElement("com.x.Foo$$EnhancerBySpringCGLIB$$1a2b3c4d", "bar", "<generated>", -1),
+                new StackTraceElement("com.x.FooKt$main$1", "invokeSuspend", "Foo.kt", 12),
+                new StackTraceElement("com.x.Foo$", "$anonfun$main$1", "Foo.scala", 5),
+                new StackTraceElement("com.x.Money", "plus-WZ4Q5Ns", "Money.kt", 8),
+                new StackTraceElement("com.example.net.Http2ConnectionHandlerImpl", "run", "Http2ConnectionHandlerImpl.java", 42))) {
+            shapes.add(e.toString());
+        }
+        shapes.add("com.x.Http2ConnectionHandlerImpl.z(Http2ConnectionHandlerImpl.java:1) ~[app-1.0.jar:1.0]");
+        shapes.add("com.x.Y.z(Y.java:1) [classes/:na]");
+        shapes.add("org.springframework.web.Foo.bar(Foo.java:9) ~[spring-web-6.1.0.jar!/:6.1.0]");
+        shapes.add("java.base/java.lang.Thread.run(Thread.java:1583) ~[na:na]");
+        for (String shape : shapes) {
+            for (String indent : List.of("\t", "\t\t", "    ")) {
+                String line = indent + "at " + shape;
+                assertTrue(Redactor.isFrameLine(line, 0, line.length()), "frame not recognised: " + line);
+            }
+        }
+        String all = "a.B: m\n\tat " + String.join("\n\tat ", shapes) + "\n\t... 3 more\n";
+        assertSame(all, Redactor.redactStackTrace(all));
+    }
+
+    @Test
+    void aMessageLineThatStartsWithAtIsNotAFrame() {
+        // M-1: any line of whitespace then "at " was taken for a frame and left unredacted, so a
+        // continuation line of a multi-line message that happened to start that way kept its
+        // secrets. Jackson writes its source excerpt exactly so.
+        String jackson = "com.fasterxml.jackson.core.JsonParseException: Unexpected character\n"
+            + " at [Source: (String)\"{\"apiKey\":\"sk_live_4eC39HqLyjWDarjtT1zdp7dc\",\"note\":\"x\"}\"; line: 1, column: 3]\n"
+            + "\tat com.x.Y.z(Y.java:1)\n";
+        assertEquals(jackson.replace("sk_live_4eC39HqLyjWDarjtT1zdp7dc", "[redacted]"), Redactor.redactStackTrace(jackson));
+        assertEquals("java.lang.RuntimeException: upstream said\n  at token=[REDACTED] postgres://[REDACTED]@db/x\n"
+                + "\tat com.x.Y.z(Y.java:1)\n",
+            Redactor.redactStackTrace("java.lang.RuntimeException: upstream said\n"
+                + "  at token=" + HEX32 + " postgres://u:hunter2@db/x\n\tat com.x.Y.z(Y.java:1)\n"));
+        // Near-frames: no "(source)", a source that is not a file name, text after the frame, a
+        // packaging suffix that is not [jar:version].
+        String[][] cases = {
+            {"\tat token " + HEX32 + " (bad)", "\tat token [redacted] (bad)"},
+            {"\tat " + HEX32, "\tat [redacted]"},
+            {"\tat com.x.Y.z(password=hunter2)", "\tat com.x.Y.z(password=[REDACTED])"},
+            {"\tat x(postgres://u:hunter2@db/x)", "\tat x(postgres://[REDACTED]@db/x)"},
+            {"\tat com.x.Y.z(Y.java:1) password=hunter2", "\tat com.x.Y.z(Y.java:1) password=[REDACTED]"},
+            {"\tat com.x.Y.z(Y.java:1) ~[" + HEX32 + "]", "\tat com.x.Y.z(Y.java:1) ~[[redacted]]"},
+            {"\tat com.x.Y.z(Y.java:1) and " + HEX32, "\tat com.x.Y.z(Y.java:1) and [redacted]"},
+            {"\tat com.x.Y.z()", "\tat com.x.Y.z()"},
+            // The tighter "... N more" rule stays.
+            {"\t... 3 more " + HEX32, "\t... 3 more [redacted]"},
+        };
+        for (String[] c : cases) {
+            assertFalse(Redactor.isFrameLine(c[0], 0, c[0].length()), c[0]);
+            assertEquals("a.B: m\n" + c[1] + "\n", Redactor.redactStackTrace("a.B: m\n" + c[0] + "\n"), c[0]);
+        }
+    }
+
     @Test
     void everyEntryPointFailsClosedWhenRedactionFailsInside() {
         // H-1: the redactor runs on error paths, so a bug inside it must cost one marker, never an
