@@ -37,6 +37,25 @@ class RegressionTrackerTest {
     }
 
     @Test
+    void aFailingNotifiersMessageIsRedactedInTheWarnLog() {
+        // L13: a Log.warn(... + e.getMessage()) sink. A notifier's exception can echo a webhook
+        // or API key; the warn line must carry the redacted message.
+        String secret = "xoxb9f8e7d6c5b4a3f2e1d0c9b8a7f6e5";
+        Notifier failing = r -> { throw new RuntimeException("webhook rejected key " + secret); };
+        var t = new RegressionTracker(Instant.now().minusSeconds(3600), 30, List.of(failing));
+        LogTap.clear();
+        t.onNew("RuntimeException", "GET /a", "boom", Instant.now());
+        var warnings = LogTap.snapshot().stream()
+            .filter(e -> "WARN".equals(e.fields().get("level")))
+            .map(e -> String.valueOf(e.fields().get("message")))
+            .filter(m -> m.startsWith("regression notifier failed"))
+            .toList();
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertFalse(warnings.get(0).contains(secret), warnings.get(0));
+        assertTrue(warnings.get(0).contains("webhook rejected key"), warnings.get(0));
+    }
+
+    @Test
     void warmupSuppressesEarlyErrors() {
         var n = new CapturingNotifier();
         // Started now with a 30s warmup; an error at startup is within the window.

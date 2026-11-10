@@ -523,6 +523,12 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `WebhookNotifier`, `RateLimiter` (one-line wraps), `RegressionTracker`, `TrustedProxies`.
     The two-part base64url token shape in `isSecretShaped` is done under M6 (`Redactor.java`).
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): L13 review fixes`). Also wrapped: `PostgresMessageBus` log
+    events, `Storage` `s3.delete.error` (now null-safe), `JobPoller`'s stored
+    `scheduled_jobs.error` and its `System.err` lines. Left raw on purpose: CLI-side terminal
+    output (`Cli*.java`, `ProjectGenerator`, `ClaudeMdGenerator`), messages of exceptions thrown
+    to the caller rather than written to a sink (`Http.failed`, `EventStream`, `Request`), and
+    `BraceHandler`'s `stats.recordError`, which `Stats` already redacts.
 
 - [x] **L14: `@Email` plus `Mailer.to` accepts recipient lists**, `FormBinder.java:246-252`, `Mailer.java:148-152`
   - **Verified (angus-mail 2.0.5).** `"a@b.c, victim@x.y"` passes `@Email` and parses to two

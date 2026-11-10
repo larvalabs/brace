@@ -457,6 +457,38 @@ class DurableJobTest {
         }
     }
 
+    /** Fails with a secret-shaped token in its message (L13 review). */
+    public static class SecretFailingJob implements DurableJob {
+        static final String SECRET = "sk9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4";
+        public SecretFailingJob() {}
+        @Override public String data() { return null; }
+        @Override public void run(String data, Database db) {
+            throw new RuntimeException("upstream rejected token " + SECRET);
+        }
+    }
+
+    @Test
+    void theStoredJobErrorIsRedacted() {
+        // scheduled_jobs.error is served at /ops (job stats) and read by operators: the raw
+        // exception message used to be stored as is.
+        long id;
+        var db = new Database(factory.openSession());
+        try {
+            db.beginTransaction();
+            id = Jobs.schedule(db, new SecretFailingJob(), Duration.ZERO, JobOptions.maxAttempts(1).backoff(Duration.ZERO));
+            db.commitTransaction();
+        } finally {
+            db.close();
+        }
+        new JobPoller().pollAndExecute(factory);
+        var row = jobRow(id);
+        assertNotNull(row[2], "failed");
+        String error = (String) row[4];
+        assertNotNull(error);
+        assertFalse(error.contains(SecretFailingJob.SECRET), error);
+        assertTrue(error.contains("upstream rejected token"), "the rest of the message is kept: " + error);
+    }
+
     @Test
     void jobPollIntervalDefaultsToFiveSeconds() {
         // Five, not one: Jobs.schedule wakes the poller directly for work that is due now, so
