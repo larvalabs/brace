@@ -394,18 +394,24 @@ public class Redactor {
         StringBuilder out = null;
         int copied = 0;
         int i = 0;
+        int urlAt = -1; // a known scheme found at the end of the previous run ("/proxy/https://")
         while (i < n) {
             char c = s.charAt(i);
             String replacement = null;
             int from = i;
             int to = i + 1;
-            if (isAsciiLetter(c) && (i == 0 || !isSchemeChar(s.charAt(i - 1)))) {
+            if (isAsciiLetter(c) && (i == 0 || !isSchemeChar(s.charAt(i - 1)) || i == urlAt)) {
                 int end = urlEnd(s, i);
                 if (end > i) {
                     to = end;
                     replacement = urlReplacement(s.substring(i, end), rounds, depth);
                 } else {
                     to = chunkEnd(s, i);
+                    int u = knownSchemeStart(s, i, to);
+                    if (u > i) {
+                        to = u;
+                        urlAt = u;
+                    }
                     replacement = redactChunk(s, i, to, strict, rounds, depth);
                 }
             } else if (c == '<' && i + 1 < n && s.charAt(i + 1) == '/') {
@@ -432,7 +438,17 @@ public class Redactor {
                 }
             } else if (isChunkChar(c)) {
                 to = chunkEnd(s, i);
-                replacement = redactChunk(s, i, to, strict, rounds, depth);
+                int u = knownSchemeStart(s, i, to);
+                if (u == i) {
+                    to = urlEnd(s, i); // jdbc:<subscheme>:// after a prefix ("-jdbc:sqlserver://")
+                    replacement = urlReplacement(s.substring(i, to), rounds, depth);
+                } else {
+                    if (u > i) {
+                        to = u;
+                        urlAt = u;
+                    }
+                    replacement = redactChunk(s, i, to, strict, rounds, depth);
+                }
             }
             if (replacement != null && !replacement.contentEquals(s.subSequence(from, to))) {
                 if (out == null) out = new StringBuilder(n);
@@ -488,6 +504,31 @@ public class Redactor {
             j++;
         }
         return -1;
+    }
+
+    /**
+     * Scheme names recognised even in the middle of a run, where a URL is otherwise not looked for
+     * ({@code GET /proxy/https://user:pw@host}, {@code -https://}, {@code 1https://}). Any other
+     * {@code [a-z][a-z0-9+.-]*://} is recognised at the start of a run only.
+     */
+    private static final List<String> KNOWN_SCHEMES = List.of(
+        "http", "https", "ws", "wss", "ftp", "postgres", "postgresql", "mysql", "mariadb", "mongodb",
+        "mongodb+srv", "redis", "rediss", "amqp", "amqps", "smtp", "smtps", "s3");
+
+    /**
+     * Where a URL starts inside the run {@code s[from, to)} that ends right before {@code ://}: at
+     * a {@link #KNOWN_SCHEMES known scheme} that ends the run, or at the run itself when it follows
+     * {@code jdbc:} ({@code -jdbc:sqlserver://}). Otherwise -1.
+     */
+    private static int knownSchemeStart(String s, int from, int to) {
+        if (!s.startsWith("://", to)) return -1;
+        int best = -1;
+        for (String k : KNOWN_SCHEMES) {
+            int st = to - k.length();
+            if (st >= from && (best < 0 || st < best) && s.regionMatches(true, st, k, 0, k.length())) best = st;
+        }
+        if (best < 0 && from >= 5 && s.regionMatches(true, from - 5, "jdbc:", 0, 5)) return from;
+        return best;
     }
 
     private static boolean endsUrl(char c) {
@@ -1091,11 +1132,25 @@ public class Redactor {
             for (int i = authStart; i < authEnd; i++) {
                 if (url.charAt(i) == '@') at = i;
             }
-            if (at >= authStart) {
-                out.append(PLACEHOLDER).append(url, at, authEnd);
-            } else {
-                out.append(url, authStart, authEnd);
+            if (at < 0) {
+                // A password holding an unencoded '/', '?' or '#' (postgres://user:pa/ss@host): the
+                // user info runs to the last '@'.
+                int lastAt = url.lastIndexOf('@');
+                if (lastAt > authEnd && userInfoBeforeStop(url, sep, authStart, authEnd)) {
+                    at = lastAt;
+                    authEnd = indexOfAny(url, at, len, "/?#");
+                }
             }
+            int hostStart = authStart;
+            if (at >= authStart) {
+                out.append(PLACEHOLDER);
+                hostStart = at;
+            }
+            // Parameters after the host (jdbc:sqlserver://host:1433;user=sa;password=…) get the
+            // name=value pass.
+            int semi = indexOfAny(url, hostStart, authEnd, ";");
+            out.append(url, hostStart, semi);
+            if (semi < authEnd) out.append(redactText(url.substring(semi, authEnd), true, rounds, depth));
             pos = authEnd;
         } else if (url.charAt(0) == '/') {
             pos = 0;
@@ -1113,6 +1168,25 @@ public class Redactor {
             out.append('#').append(redactQuery(url.substring(fragStart + 1), rounds, depth));
         }
         return out.toString();
+    }
+
+    /**
+     * The text between {@code ://} and the first {@code / ? #} looks like the start of a
+     * {@code user:password} rather than a host: it holds {@code :}, and either the scheme is not a
+     * web scheme or what follows the {@code :} is not a numeric port. So
+     * {@code https://example.com:8443/users/@bob} and {@code s3://bucket/a@b.csv} keep their path.
+     */
+    private static boolean userInfoBeforeStop(String url, int sep, int authStart, int authEnd) {
+        int colon = indexOfAny(url, authStart, authEnd, ":");
+        if (colon == authEnd) return false;
+        String scheme = url.substring(0, sep).toLowerCase(Locale.ROOT);
+        boolean web = scheme.equals("http") || scheme.equals("https") || scheme.equals("ws") || scheme.equals("wss");
+        if (!web) return true;
+        if (colon + 1 == authEnd) return true;
+        for (int i = colon + 1; i < authEnd; i++) {
+            if (!isAsciiDigit(url.charAt(i))) return true;
+        }
+        return false;
     }
 
     /** {@code scheme://…} or {@code /…} with no whitespace: what {@link #redactUrl} parses. */

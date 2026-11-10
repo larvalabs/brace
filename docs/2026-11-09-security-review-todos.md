@@ -461,6 +461,12 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `reset-8a7b6c5d4e3f2a1b9c0d` stay redacted, and a seeded test samples 12,000 random tokens
     (`RedactorTest.namesAndFilePathsInMessagesSurvive`,
     `aFilePathInAMessageIsRedactedSegmentBySegment`, `lookAlikesMixingWordsAndSecretsAreRedacted`).
+    `redactUrl` sends everything after the first `;` of the authority through the `name=value`
+    pass (`jdbc:sqlserver://…;password=[REDACTED]`), masks user info up to the last `@` when the
+    password holds an unencoded `/ ? #`, and known schemes are found inside a run
+    (`/proxy/https://`, `-https://`, `1https://`)
+    (`RedactorTest.credentialsInAUrlsParameterSectionAndOddPrefixesAreRedacted`; the linear-time
+    test gained these shapes).
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current

@@ -591,6 +591,37 @@ class RedactorTest {
     }
 
     @Test
+    void credentialsInAUrlsParameterSectionAndOddPrefixesAreRedacted() {
+        // Verification pass: the authority was copied verbatim unless it held '@', a URL was found
+        // only at the start of a scheme-character run, and an unencoded '/', '?' or '#' in a
+        // password ended the authority before the '@'.
+        String[][] cases = {
+            {"jdbc:sqlserver://db.internal:1433;databaseName=app;user=sa;password=hunter2 failed",
+                "jdbc:sqlserver://db.internal:1433;databaseName=app;user=sa;password=[REDACTED] failed"},
+            {"-jdbc:sqlserver://db:1433;password=hunter2", "-jdbc:sqlserver://db:1433;password=[REDACTED]"},
+            {"GET /proxy/https://user:hunter2@host/x failed", "GET /proxy/https://[REDACTED]@host/x failed"},
+            {"-https://user:hunter2@host/x", "-https://[REDACTED]@host/x"},
+            {"1https://user:hunter2@host/x", "1https://[REDACTED]@host/x"},
+            {"via=mongodb+srv://app:hunter2@cluster0.example.net/db", "via=mongodb+srv://[REDACTED]@cluster0.example.net/db"},
+            {"postgres://user:pa/ss@host:5432/db refused", "postgres://[REDACTED]@host:5432/db refused"},
+            {"postgres://user:pa?ss@host/db?sslmode=require", "postgres://[REDACTED]@host/db?sslmode=require"},
+            {"redis://:p#w@cache:6379 unreachable", "redis://[REDACTED]@cache:6379 unreachable"},
+            {"https://user:pa/ss@app.example.com/x", "https://[REDACTED]@app.example.com/x"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        assertEquals("https://[REDACTED]@app.example.com/x",
+            Redactor.redactHeaders(Map.of("Referer", "https://user:pa/ss@app.example.com/x")).get("Referer"));
+        // An '@' in a web path or query, or in an object key, is not user info.
+        for (String ok : List.of("see https://example.com/search?email=a@b.c&lang=en",
+                "see https://example.com:8443/users/@bob/posts", "NoSuchKey s3://bucket/exports/a@b.csv",
+                "jdbc:postgresql://db.internal:5432/app;ApplicationName=web")) {
+            assertEquals(ok, Redactor.redactMessage(ok), ok);
+        }
+    }
+
+    @Test
     void aSecretRunIsRedactedWhateverPunctuationSurroundsIt() {
         // M4: the shape test ran on whole delimiter-separated tokens, so one adjacent character
         // ('.', '<', '~', '!') hid the token. Now each maximal run of the secret alphabet is tested,
@@ -943,7 +974,10 @@ class RedactorTest {
         // ampersands, dots, %25 (decode rounds), '=' pairs, '<'+'/' spans, scheme scans, nested
         // URLs, quotes, name runs. 64 KB and 1 MB of each, through every entry point.
         List<String> units = List.of("%", "&", ".", "%25", "=", "</", "a:", "x://", "a=/", "\"", "a=\"",
-            "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25");
+            "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25",
+            // verification pass: mid-run schemes, user info to the last '@', ';' parameters, names
+            "1https://u:p@", "-https:/", "/https://", "x-jdbc:s://h;a=b", "postgres://a:b/c@", ";password=",
+            "@", "a://b:c/d@", "ab_cd-", "Ab3_", "2024q4-", "0x1/");
         long t0 = System.nanoTime();
         for (int size : List.of(64 * 1024, 1024 * 1024)) {
             for (String unit : units) {

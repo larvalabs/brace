@@ -1942,7 +1942,8 @@ No action needed unless noted.
   by name only. Now a `Referer` carrying `?token=…` or `/reset/<token>`, a JWT in any header,
   an OAuth `?code=`, a percent-encoded `?%74oken=`, or a 32-character random value under any
   parameter name shows as `[REDACTED]`. URLs quoted in exception messages are redacted like a
-  `Referer`, including any `user:password@` (`postgres://…`, `jdbc:postgresql://…`).
+  `Referer`, including any `user:password@` (`postgres://…`, `jdbc:postgresql://…`, a password
+  with an unencoded `/`) and `;password=` parameters (`jdbc:sqlserver://…`).
   `Forwarded` and `Via` are now redacted (their `for=`, `by=`, `proto=` and `host=` stay
   readable); the other protocol headers (`Accept*`, `Content-Type`, `User-Agent`, ETags,
   `X-Forwarded-For`/`-Host`/`-Port`/`-Proto`, request ids, trace context) are kept.

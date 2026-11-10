@@ -2312,7 +2312,18 @@ once:
    `redactUrl`: any `user:password@` becomes `[REDACTED]` whatever its shape,
    the path through `redactPath`, the query and fragment through
    `redactQuery`; scheme, host and port are kept. A URL ends at whitespace, a
-   quote, `< > \ ^ { } |`, and loses trailing `. , ; : ! ? ) ]`.
+   quote, `< > \ ^ { } |`, and loses trailing `. , ; : ! ? ) ]`. A known
+   scheme (`http`, `https`, `ws`, `wss`, `ftp`, `postgres`, `postgresql`,
+   `mysql`, `mariadb`, `mongodb`, `mongodb+srv`, `redis`, `rediss`, `amqp`,
+   `amqps`, `smtp`, `smtps`, `s3`, and `jdbc:<anything>`) is found even inside
+   a run (`GET /proxy/https://user:pw@host`, `-https://`, `1https://`); any
+   other scheme only where a run starts. A password holding an unencoded
+   `/`, `?` or `#` (`postgres://user:pa/ss@host`) is masked up to the last
+   `@` when the text before the first `/ ? #` holds a `:` (for `http`,
+   `https`, `ws` and `wss`, a `:` not followed by a numeric port, so
+   `https://example.com:8443/users/@bob` keeps its path). Parameters after
+   the host (`jdbc:sqlserver://db:1433;user=sa;password=…`) get the
+   `name=value` pass.
 2. **`name=value` pairs.** When the name before `=` is sensitive (the
    in-transit rule, or the field rule inside exception messages), the value
    becomes `[REDACTED]`: up to the closing quote if it is quoted, otherwise up
