@@ -45,6 +45,36 @@ class MailerTest {
     }
 
     @Test
+    void smtpRequiresStarttls() {
+        var props = new Mailer("smtp://mail.example.com:587")
+            .smtpProperties("mail.example.com", 587, "smtp");
+        assertEquals("true", props.get("mail.smtp.starttls.enable"));
+        assertEquals("true", props.get("mail.smtp.starttls.required"));
+    }
+
+    @Test
+    void smtpPlainOptsOutOfRequiredStarttls() {
+        var props = new Mailer("smtp+plain://localhost:25")
+            .smtpProperties("localhost", 25, "smtp+plain");
+        assertEquals("true", props.get("mail.smtp.starttls.enable"));
+        assertNull(props.get("mail.smtp.starttls.required"));
+    }
+
+    @Test
+    void smtpsDoesNotSetStarttls() {
+        var props = new Mailer("smtps://mail.example.com:465")
+            .smtpProperties("mail.example.com", 465, "smtps");
+        assertNull(props.get("mail.smtp.starttls.required"));
+    }
+
+    @Test
+    void captureModeUnaffectedBySchemeRules() {
+        var mailer = new Mailer(null);
+        mailer.to("user@example.com").subject("s").text("t").send();
+        assertEquals(1, mailer.sentCount());
+    }
+
+    @Test
     void captureMode() {
         var mailer = new Mailer(null); // no SMTP = capture only
         mailer.from("noreply@test.com");

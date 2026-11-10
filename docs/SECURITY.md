@@ -24,6 +24,7 @@ This document describes Brace's security features and best practices for buildin
 - [Installing and Updating Brace](#installing-and-updating-brace)
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
+- [Outbound Mail](#outbound-mail)
 - [Secrets Management](#secrets-management)
 
 ---
@@ -1627,6 +1628,16 @@ Before the 2026-11 security review (M5), one such request failed every later flu
 Postgres, so nothing reached `ops_errors` and regression alerts stopped until restart.
 
 ---
+
+## Outbound Mail
+
+`Mailer` over `smtp://user:pass@host:587` **requires STARTTLS**
+(`mail.smtp.starttls.required=true`). If the relay's EHLO does not offer it, the send fails
+instead of continuing in cleartext, so a network attacker cannot strip the offer and read the
+SMTP password and mail bodies (password-reset links). `smtps://` is implicit TLS. A trusted
+local relay that cannot do TLS (a sidecar on localhost) opts out explicitly with
+`smtp+plain://localhost:25`, which uses STARTTLS when offered but never requires it. Dev mode
+(no SMTP URL) only captures mail and is unaffected.
 
 ## Secrets Management
 

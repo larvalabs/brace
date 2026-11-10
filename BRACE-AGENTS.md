@@ -993,6 +993,11 @@ the send instead of hanging the caller forever. Override with `.connectTimeout(D
 `.timeout(Duration)` for a slow relay or large attachments.
 
 `sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
+`smtp://` requires STARTTLS: if the relay does not offer it, the send fails rather than falling back to
+cleartext (a network attacker could otherwise strip the offer and read the SMTP password and mail). `smtps://`
+is implicit TLS. For a trusted local relay without TLS use `smtp+plain://localhost:25` (STARTTLS if offered,
+never required).
+
 Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.
 Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
 With SMTP configured nothing is captured; `sentCount()` counts successful sends, `failCount()` failures.

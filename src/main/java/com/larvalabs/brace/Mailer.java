@@ -110,7 +110,7 @@ public class Mailer {
 
     private void sendSmtp(EmailBuilder email, String from) {
         try {
-            // Parse smtpUrl: smtp://user:pass@host:port or smtps://user:pass@host:port
+            // Parse smtpUrl: smtp://, smtps:// or smtp+plain:// (user:pass@host:port)
             var url = new java.net.URI(smtpUrl);
             var host = url.getHost();
             var port = url.getPort() > 0 ? url.getPort() : 587;
@@ -183,6 +183,13 @@ public class Mailer {
             props.put("mail.smtp.ssl.enable", "true");
         } else {
             props.put("mail.smtp.starttls.enable", "true");
+            // M9: without "required" the library silently continues in cleartext when the server's
+            // EHLO does not advertise STARTTLS (a network attacker strips it), then sends AUTH and
+            // the message. Plain `smtp://` therefore refuses to talk without TLS; a local relay
+            // that cannot offer it opts out with the `smtp+plain://` scheme.
+            if (!"smtp+plain".equals(scheme)) {
+                props.put("mail.smtp.starttls.required", "true");
+            }
         }
 
         props.put("mail.smtp.connectiontimeout", String.valueOf(connectTimeout.toMillis()));

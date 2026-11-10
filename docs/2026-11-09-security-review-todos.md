@@ -335,7 +335,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     total deadline; a normal large body is unaffected.
   - **Model: Opus 5.5.** Watchdog concurrency.
 
-- [ ] **M9: STARTTLS is opportunistic**, `Mailer.java:134, 182-186`
+- [x] **M9: STARTTLS is opportunistic**, `Mailer.java:134, 182-186`
   - **What's wrong.** For `smtp://` the mailer sets `mail.smtp.starttls.enable` but never
     `mail.smtp.starttls.required`. With `enable` only, Angus Mail continues in cleartext when
     the server's EHLO does not advertise STARTTLS, then sends AUTH and the message. This moves
