@@ -321,8 +321,7 @@ class StaticMappingAccessTest {
         assertEquals(304, notModified.status());
         assertEquals("private, no-cache", notModified.header("Cache-Control"));
 
-        String rejected = get("/files/report.txt", null).header("Cache-Control");
-        assertTrue(rejected == null || !rejected.toLowerCase(Locale.ROOT).contains("public"), rejected);
+        assertEquals("no-store", get("/files/report.txt", null).header("Cache-Control"));
     }
 
     @Test
@@ -342,12 +341,12 @@ class StaticMappingAccessTest {
         a.after((req, res) -> res.header("Cache-Control", "public, max-age=300"));
         a.start();
         try {
-            for (String c : new String[]{cookie, null}) {
-                for (String path : new String[]{"/files/report.txt", "/files/nope.txt"}) {
-                    String cacheControl = get(a, path, c).header("Cache-Control");
-                    assertEquals("private, max-age=300", cacheControl, path + " cookie=" + (c != null));
-                }
-            }
+            // The file may be kept by the browser and revalidated through the guard; nothing
+            // else under the mapping is stored at all. The middleware's value doesn't survive.
+            assertEquals("private, no-cache", get(a, "/files/report.txt", cookie).header("Cache-Control"));
+            assertEquals("no-store", get(a, "/files/nope.txt", cookie).header("Cache-Control"));
+            assertEquals("no-store", get(a, "/files/report.txt", null).header("Cache-Control"));
+            assertEquals("no-store", get(a, "/files/nope.txt", null).header("Cache-Control"));
             assertEquals("public, max-age=300", get(a, "/pub/app.css", null).header("Cache-Control"));
         } finally {
             a.stop();

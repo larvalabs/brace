@@ -79,23 +79,66 @@ app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
   own stylesheet; defaulting to public would publish an upload directory by omission. So there
   is no default, and an undeclared mapping is a startup error.
 - The requirements are bound to the mapping, not to a path pattern. They run when no route
-  matched and the mapping's prefix covers the path, at the same point as a route's: after plain
-  `before(...)`, before session-aware `before(...)`, with the one `Session` the request uses.
-  They run before the path is decoded or the disk is touched, so every spelling that reaches the
-  mapping's files is guarded, and a rejected request gets the same response whether or not the
-  file exists.
-- Responses under a guarded mapping are sent `Cache-Control: private, no-cache`, never
-  `public`, and a `?v=` fingerprint earns no `immutable` there. This is enforced after
-  after-middleware, for the file, a 304, a 404 and the rejection alike.
-- `start()` refuses a guarded mapping whose directory contains, or is inside, a public
-  mapping's directory: the same files would be public at the other prefix.
+  matched the request's method and path and the mapping's prefix covers the path, at the same
+  point as a route's: after plain `before(...)`, before session-aware `before(...)`, with the
+  one `Session` the request uses. They run before the path is decoded or the disk is touched,
+  for every method, so every spelling that reaches the mapping's files is guarded, and a
+  rejected request gets the same response whether or not the file exists.
+- **A mapping serves `GET` and `HEAD` only.** Any other method on a path under a mapping
+  (`POST`, `OPTIONS`, an unknown method) gets `405` with `Allow: GET, HEAD`, after the mapping's
+  access has run, so an anonymous request to a guarded mapping still gets the rejection. The
+  bundled `/__brace/*` assets answer other methods with `405` too.
+- **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
+  `app.get("/docs/payroll.pdf", ...)`, the route answers `GET` (and `HEAD`) with its own access,
+  and the mapping never serves `/docs/payroll.pdf` under any method: a request the route does
+  not handle gets `405` with the route's methods in `Allow`, after the mapping's access. (Before
+  this, `POST /docs/payroll.pdf` skipped the route and was served the file by the mapping.)
+  `start()` logs a warning naming each mapping that has routes under its prefix, because every
+  other file in that directory is still served under the mapping's access alone; a mapping at
+  `/` is not warned about. Outside a mapping, a path that only matches a route under another
+  method is a `404`, as before.
+- Nothing under a guarded mapping can be stored by a shared cache. A served file (200, 206, 304)
+  is sent `Cache-Control: private, no-cache`, and a `?v=` fingerprint earns no `immutable`
+  there. Every other response under the mapping (the access rejection, a 404, 405 or 416, an
+  early response from `before(...)`, an error) is sent `Cache-Control: no-store`. This is
+  enforced after after-middleware: `Cache-Control`, `Expires`, `Pragma`, `CDN-Cache-Control`,
+  `Surrogate-Control`, `Cloudflare-CDN-Cache-Control` and `Vercel-CDN-Cache-Control` are removed
+  in any letter case, whatever set them, and the one `Cache-Control` above is set.
+- `start()` refuses two mappings whose directories overlap (the same directory, or one inside
+  the other, compared as written and with symlinks resolved) unless their access is the same:
+  a guarded directory that a public mapping also serves, or one that a less strictly guarded
+  mapping also serves, would be reachable through the weaker prefix. Requirements are compared
+  by identity, so pass the same `Access` objects to both mappings if they are meant to match.
+- `start()` requires every mapping's directory to exist. A directory created later could be a
+  symlink into another mapping's tree, or a case-variant sibling of one on a case-insensitive
+  volume, which the overlap check would never have seen. As a second line, a mapping answers
+  404 for a file whose real path is inside the directory of a mapping with different access,
+  which covers a directory replaced by a symlink after startup.
+- The same URL prefix cannot be registered twice (`staticFiles` throws; `/files` and `/files/`
+  are the same prefix): only one of the two could ever serve.
 - The bundled `/__brace/*` assets and `/__brace/health` are not mappings and stay public.
 - `/ops/routes` (method `STATIC`) and the startup banner list each mapping with its access.
 
 A path-pattern `before("/uploads/*", ...)` is still not access, for the reasons above. For a
 per-file decision (the owner of this file, not any logged-in user), serve the file from a route
 instead: look the record up with `db.findOwnedOr404(...)` and return
-`Result.fileUnder(dir, name)` or `Result.download(...)`, with `.untrusted()` for uploads.
+`Result.fileUnder(dir, name)` or `Result.download(...)`, with `.untrusted()` for uploads. Keep
+those files in a directory no mapping serves. If the route does sit under a mapping's prefix,
+the route wins for its methods and the mapping never serves that path, as described above.
+
+### Access rejections are never cached
+
+When an access requirement rejects a request, on a route or a mapping, the response is sent
+`Cache-Control: no-store` with the same header stripping as above, and
+`Vary: Accept, HX-Request` is added (merged with any existing `Vary`), because
+`Access.session` answers a page request with a 302, a JSON client with a 401 and an htmx
+request with a 401 plus `HX-Redirect`. Without this, an app-wide `after(...)` that marks
+responses `public` let a shared cache store the anonymous login redirect for a guarded URL and
+serve it to logged-in users.
+
+How a *successful* response from a guarded route is cached stays the app's decision. In dev
+mode Brace warns once per route when such a response carries `Cache-Control: public` or
+`s-maxage`.
 
 ### Object-level authorization
 
@@ -899,11 +942,22 @@ This sets: `HttpOnly=true`, `Secure=true` (explicitly, regardless of request),
 
 ### Session Cookies and Shared Caches
 
-Any response Brace attaches a session `Set-Cookie` to also gets `Cache-Control: private`
-(unless the handler set an explicit `Cache-Control`, which always wins). A response
-carrying a session cookie is per-user by definition — without this header it is
-*heuristically cacheable*, and a misconfigured shared cache (e.g. an nginx recipe that
+Any response Brace attaches a session `Set-Cookie` to is sent `private`. With no
+`Cache-Control` it gets `Cache-Control: private`. With one set by the handler or an
+after-middleware, `public` is rewritten to `private`, and `private` is added in front when the
+value has neither `private` nor `no-store` (`max-age=600` becomes `private, max-age=600`; so
+does `s-maxage=600`, which a shared cache then ignores); the other directives are kept. A
+response carrying a session cookie is per-user by definition — without this it is
+*heuristically cacheable*, or explicitly storable, and a shared cache (e.g. an nginx recipe that
 force-caches everything under `/static/`) would replay user A's cookie to every user.
+
+Response header names are case-insensitive in `Result`: `res.header("cache-control", ...)` and
+`res.header("Cache-Control", ...)` are the same header, and the second write replaces the
+first. (Before 0.1.11 they were two entries; Brace checked one spelling and the other reached
+the wire, so a lowercase `cache-control: public` rode out with the session cookie.) Brace does
+not strip `CDN-Cache-Control`, `Surrogate-Control` or `Expires` from a cookie-carrying response
+outside a guarded static mapping or an access rejection, so don't set those app-wide on
+responses that can carry a session.
 
 The riskiest shape is a session-mutating middleware whose path pattern covers static
 prefixes — for example a `lastSeen`-touch guard on `/*`. Every static file response then
@@ -912,9 +966,11 @@ caches, but prefer scoping such middleware to application routes (`/app/*`) rath
 `/*`, and never configure a proxy to ignore response headers for paths a session
 middleware can touch.
 
-A static mapping with access requirements never sends `public` at all: its responses are
-`private, no-cache`, with or without a session cookie (see
-[Static mappings are covered too](#static-mappings-are-covered-too)).
+A static mapping with access requirements never sends anything a shared cache may store: a
+served file is `private, no-cache` and every other response under it is `no-store`, with or
+without a session cookie (see
+[Static mappings are covered too](#static-mappings-are-covered-too)). Access rejections are
+`no-store` everywhere (see [Access rejections are never cached](#access-rejections-are-never-cached)).
 
 ---
 
@@ -1086,6 +1142,10 @@ Every mapping declares its access: `app.staticFiles(urlPrefix, directory).public
 mappings; see [Static mappings are covered too](#static-mappings-are-covered-too). Prefer
 `.access(...)` to a path guard for anything private: it is bound to the mapping, so it cannot
 disagree with the path that is served.
+
+A mapping serves `GET` and `HEAD`; every other method gets `405` with `Allow: GET, HEAD`. Its
+directory must exist when the app starts, a URL prefix can be registered once, and two mappings
+may share or nest directories only when their access is the same.
 
 `app.staticFiles(urlPrefix, directory)` confines serving to `directory`. The check resolves
 symlinks (`toRealPath`) before comparing, so a symlink under the served tree cannot serve a

@@ -7,7 +7,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.Consumer;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -17,7 +16,13 @@ public class Result {
     private String contentType;
     private String body;
     private byte[] rawBytes;
-    private final Map<String, String> headers = new LinkedHashMap<>();
+    // Header names are case-insensitive (RFC 9110 5.1), so the map is too: header("cache-control")
+    // and header("Cache-Control") are one entry, a second write replaces the first, and a read
+    // or a framework rewrite finds the header however a handler or middleware spelled it. With a
+    // case-sensitive map the two spellings were two entries; the framework read one ("is this
+    // response public?") and the other reached the wire. The first-written spelling is kept, and
+    // headers() iterates in case-insensitive name order.
+    private final Map<String, String> headers = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     // Set-Cookie is the one header that legitimately repeats: a response may carry several
     // cookies (e.g. an app cookie plus the framework session cookie). It is kept out of the
     // single-value `headers` map — which would collapse repeats — and appended here instead.
@@ -132,16 +137,8 @@ public class Result {
         if (status < 200 || status >= 300) return this;
         contentType = UntrustedContent.safeType(contentType);
         if (!UntrustedContent.isRasterImage(contentType)) {
-            String disposition = null;
-            String existingName = null;
-            for (var entry : headers.entrySet()) {
-                if (entry.getKey().equalsIgnoreCase("Content-Disposition")) {
-                    existingName = entry.getKey();
-                    disposition = entry.getValue();
-                }
-            }
+            String disposition = headers.get("Content-Disposition");
             if (disposition == null || !disposition.strip().toLowerCase(java.util.Locale.ROOT).startsWith("attachment")) {
-                if (existingName != null) headers.remove(existingName);
                 header("Content-Disposition", "attachment");
             }
         }
@@ -423,11 +420,19 @@ public class Result {
 
     /** Sets a deferred {@link #materialize()} body as raw UTF-8 bytes (M6: the rendered-to-bytes path). */
     void setRenderedBytes(byte[] rendered) { this.rawBytes = rendered; }
+    /**
+     * The response headers other than {@code Set-Cookie} (see {@link #setCookies()}). The live
+     * map: names are matched case-insensitively, and it iterates in case-insensitive name order.
+     */
     public Map<String, String> headers() { return headers; }
 
     /** All {@code Set-Cookie} values for this response, in the order they were added. */
     public List<String> setCookies() { return setCookies; }
 
+    /**
+     * Sets a header, replacing any value already set under the same name in any letter case
+     * ({@code Set-Cookie} is appended instead: a response may carry several).
+     */
     public Result header(String name, String value) {
         if (name.equalsIgnoreCase("Set-Cookie")) {
             setCookies.add(value);
@@ -437,6 +442,7 @@ public class Result {
         return this;
     }
 
+    /** The header's value, or null. The name is matched case-insensitively. */
     public String header(String name) {
         if (name.equalsIgnoreCase("Set-Cookie")) {
             return setCookies.isEmpty() ? null : setCookies.get(0);

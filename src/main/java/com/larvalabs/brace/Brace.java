@@ -549,11 +549,28 @@ public class Brace {
      * <p>When prefixes overlap, the longest one serves the request, whatever the registration
      * order. Throws {@link IllegalArgumentException} when an untrusted directory sits inside a
      * trusted one (or the reverse): its files would be reachable through the trusted mapping too.
+     * Throws {@link IllegalStateException} when the prefix is already registered.
+     *
+     * <p>A mapping serves {@code GET} and {@code HEAD}; any other method gets 405. A route
+     * registered at a path under the prefix answers that path for its own methods, and the
+     * mapping never serves a path a route pattern matches. {@link #start()} requires the
+     * directory to exist, and refuses two mappings whose directories overlap unless their access
+     * is the same.
      */
     public StaticFilesConfig staticFiles(String urlPrefix, String directory, StaticFiles mode) {
         java.util.Objects.requireNonNull(mode, "mode");
         router.requireNotStarted("Registering static mapping " + urlPrefix);
         var added = new StaticFilesConfig(this, urlPrefix, directory, mode);
+        for (var existing : staticFileMappings) {
+            // Only one of two mappings at the same prefix ever serves; the other, with its
+            // directory and its access declaration, is silently dead. Refused, like a route
+            // registered twice. "/files" and "/files/" cover the same paths.
+            if (Router.stripTrailingSlashes(existing.urlPrefix()).equals(Router.stripTrailingSlashes(urlPrefix))) {
+                throw new IllegalStateException("Static mapping " + urlPrefix + " is registered twice ("
+                    + existing.directory() + " and " + directory + "): only one could ever serve, "
+                    + "with its access declaration. Give each directory its own prefix.");
+            }
+        }
         for (var existing : staticFileMappings) {
             if (existing.mode() == mode) continue;
             if (directoriesOverlap(directory, existing.directory())) {
@@ -1355,6 +1372,7 @@ public class Brace {
             }
         }
         resolveAccess();
+        warnRoutesUnderStaticMappings(staticMappingsCopy);
         router.freeze();
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
@@ -1946,7 +1964,9 @@ public class Brace {
      * what it declared: {@code .publicFiles()} or its {@code .access(...)} list. The app's
      * default access is deliberately not applied (an inherited login would break the login
      * page's own stylesheet), so a mapping that declared nothing is refused here, whatever the
-     * default is. Also refused: a guarded directory that a public mapping serves too.
+     * default is. Also refused: a mapping whose directory doesn't exist, and two mappings on
+     * overlapping directories whose access differs (a guarded directory that a public mapping
+     * serves too, or one a less strictly guarded mapping serves too).
      */
     private List<BraceHandler.StaticFileMapping> resolveStaticAccess() {
         var undeclared = new ArrayList<StaticFilesConfig>();
@@ -1975,20 +1995,74 @@ public class Brace {
                         + "session, so the requirement rejects every request.");
                 }
             }
-            if (!m.isPublicFiles()) {
-                for (var other : staticFileMappings) {
-                    if (other.isPublicFiles() && directoriesOverlap(m.directory(), other.directory())) {
-                        throw new IllegalStateException("Static mapping " + m.urlPrefix() + " (" + m.directory()
-                            + ") has access requirements, but its directory overlaps the public mapping "
-                            + other.urlPrefix() + " (" + other.directory() + "): the same files would be served "
-                            + "to everyone there. Keep guarded files in a directory no public mapping covers.");
-                    }
-                }
+            // The directory checks below read the filesystem as it is now. A directory that
+            // doesn't exist yet can't be checked: created later as a link into another mapping's
+            // tree, or as a case-variant sibling of one on a case-insensitive volume, it would
+            // serve that mapping's files under this one's access.
+            var dir = java.nio.file.Path.of(m.directory()).toAbsolutePath().normalize();
+            if (!java.nio.file.Files.isDirectory(dir)) {
+                throw new IllegalStateException("Static mapping " + m.urlPrefix() + " serves " + m.directory()
+                    + (dir.toString().equals(m.directory()) ? "" : " (" + dir + ")")
+                    + ", which is not an existing directory. Create it before start(): the checks that "
+                    + "keep one mapping's files from being served through another need to see it.");
             }
             resolved.add(new BraceHandler.StaticFileMapping(m.urlPrefix(), m.directory(), m.mode(),
                 List.copyOf(m.declaredAccess())));
         }
+        // A file under two mappings is reachable through whichever asks for less, so two mappings
+        // may share or nest directories only when their access is the same: both public, or the
+        // same requirements.
+        for (int i = 0; i < resolved.size(); i++) {
+            for (int j = i + 1; j < resolved.size(); j++) {
+                var a = resolved.get(i);
+                var b = resolved.get(j);
+                if (a.sameAccessAs(b) || !directoriesOverlap(a.directory(), b.directory())) continue;
+                if (!a.guarded() || !b.guarded()) {
+                    var guarded = a.guarded() ? a : b;
+                    var open = a.guarded() ? b : a;
+                    throw new IllegalStateException("Static mapping " + guarded.urlPrefix() + " (" + guarded.directory()
+                        + ") has access requirements, but its directory overlaps the public mapping "
+                        + open.urlPrefix() + " (" + open.directory() + "): the same files would be served "
+                        + "to everyone there. Keep guarded files in a directory no public mapping covers.");
+                }
+                throw new IllegalStateException("Static mappings " + a.urlPrefix() + " (" + a.directory() + ", "
+                    + a.accessLabel() + ") and " + b.urlPrefix() + " (" + b.directory() + ", " + b.accessLabel()
+                    + ") serve overlapping directories with different access requirements: a file under both "
+                    + "is reachable through whichever asks for less. Give each its own directory, or pass the "
+                    + "same Access objects to both (requirements are compared by identity, so two "
+                    + "Access.session(...) calls count as different).");
+            }
+        }
         return resolved;
+    }
+
+    /**
+     * M3 review: a route registered under a mapping's prefix is the documented way to decide
+     * per file (the route wins for its methods, and the mapping never serves a path a route
+     * pattern matches), but it is also an easy accident: the file stays in the mapping's
+     * directory, and the route is the only thing between it and everyone who passes the
+     * mapping's access. Say so once at startup, per mapping. A mapping at {@code /} is skipped:
+     * every route is under it.
+     */
+    private void warnRoutesUnderStaticMappings(List<BraceHandler.StaticFileMapping> mappings) {
+        for (var mapping : mappings) {
+            if (mapping.urlPrefix().equals("/")) continue;
+            var under = new ArrayList<String>();
+            for (Route route : router.routes()) {
+                if (!route.isFramework() && mapping.covers(route.pattern())) {
+                    under.add(route.method() + " " + route.pattern());
+                }
+            }
+            if (under.isEmpty()) continue;
+            int shown = Math.min(5, under.size());
+            Log.warn("Static mapping " + mapping.pattern() + " (" + mapping.directory() + ", "
+                + mapping.accessLabel() + ") has " + (under.size() == 1 ? "a route" : under.size() + " routes")
+                + " under its prefix: " + String.join(", ", under.subList(0, shown))
+                + (under.size() > shown ? " and " + (under.size() - shown) + " more" : "")
+                + ". A route answers its path for its own methods, with its own access, and the mapping "
+                + "never serves a path a route pattern matches (other methods get 405). Every other file in "
+                + "the directory is served under the mapping's access alone.");
+        }
     }
 
     /**

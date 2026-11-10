@@ -204,6 +204,24 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     anonymous requests in every path variant from M1 and M2; `/ops/routes` and the startup
     banner show the mapping's access.
   - **Model: Fable 5.2.** A public API and a startup invariant every app changes for.
+  - **Review fixes.** An independent review reproduced four gaps in the first fix; all fixed,
+    tests in `StaticMappingReviewFixesTest`.
+    - *Method bypass (Medium).* A non-GET/HEAD request found no route for its method and was
+      served the mapping's file, around a route registered at that path with stricter access.
+      A mapping now serves only GET and HEAD (405 otherwise, after its access) and never serves
+      a path any route pattern matches; `start()` warns about routes under a mapping's prefix.
+    - *Shared-cacheable guarded responses (Medium).* The `public`→`private` rewrite missed a
+      lowercase header name, `s-maxage`, bare `max-age`, `Expires` and the CDN headers, and
+      left the 404/416/rejection with no `Cache-Control`. Every caching header is now stripped
+      (any case) under a guarded mapping and one is set: `private, no-cache` for the file,
+      `no-store` otherwise. `Result` header names are case-insensitive, and a session cookie
+      always rides `private`.
+    - *Cacheable route rejections (Low).* Any access rejection is now `no-store` with
+      `Vary: Accept, HX-Request`; dev mode warns when a guarded route's success is `public`.
+    - *Directory checks (Low).* `start()` refuses overlapping directories with different
+      access (not only guarded versus public) and a mapping whose directory is missing;
+      a duplicate prefix throws; at serve time a file inside a differently guarded mapping's
+      real directory is a 404.
 
 - [x] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
   - **What's wrong.**

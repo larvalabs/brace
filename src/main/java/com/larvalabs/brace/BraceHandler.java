@@ -122,6 +122,15 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             return !access.isEmpty();
         }
 
+        /**
+         * Both public, or the same requirements in any order. Requirements are compared by
+         * identity: two {@code Access.session("userId", "/login")} calls are not known to be the
+         * same check, so they count as different (the fail-closed reading).
+         */
+        boolean sameAccessAs(StaticFileMapping other) {
+            return access.containsAll(other.access) && other.access.containsAll(access);
+        }
+
         /** {@code public}, or the requirement labels joined with {@code +}; as {@link Route#accessLabel}. */
         String accessLabel() {
             if (access.isEmpty()) return "public";
@@ -323,6 +332,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Percent-encoded forms (%2e%2e) are not segments here and Jetty refuses them itself.
             if (Router.hasDotSegment(path)) throw new NotFoundException();
 
+            // M3: the static mapping whose prefix covers the path, chosen once. A guarded one is
+            // flagged here, before anything below can answer (a malformed query's 400, a
+            // before() short-circuit, the rejection itself), so every response under it gets the
+            // no-shared-cache headers in send(). Un-flagged below if a route matches instead.
+            StaticFileMapping coveringMapping = staticMappingFor(path);
+            exchange.guardedStatic = coveringMapping != null && coveringMapping.guarded();
+
             // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
             String rawQuery = jettyRequest.getHttpURI().getQuery();
             Map<String, String> queryParams = parseQuery(rawQuery);
@@ -348,6 +364,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             RouteMatch match = router.match(method, path);
             // The choke point keys stats on the matched ROUTE PATTERN, not the concrete URL (H1).
             exchange.match = match;
+            // A route wins over a mapping for the same path, and carries its own access; how its
+            // responses are cached is the app's choice.
+            StaticFileMapping staticMapping = match == null ? coveringMapping : null;
+            if (match != null) {
+                exchange.guardedStatic = false;
+            } else if (exchange.guardedStatic) {
+                exchange.noMatchKey = STATIC_ROUTE_KEY;
+            }
 
             // L1: the router serves "/users/" from the "/users" route (no compiled pattern ends in
             // a slash, so a match on such a path is always that fallback). From here on the request
@@ -411,23 +435,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // is inside the same model. Its requirements are bound to the mapping object and run
             // here, at the route position, before the path is decoded or the filesystem touched:
             // every spelling that can reach the mapping's files goes through them, and a rejection
-            // is the same response whether or not the file exists. The bundled /__brace assets
-            // are not mappings and stay public.
-            StaticFileMapping staticMapping = match == null ? staticMappingFor(path) : null;
+            // is the same response whether or not the file exists and whatever the method (the
+            // 405 for a method a mapping doesn't serve comes after, below). The bundled /__brace
+            // assets are not mappings and stay public.
             List<Access> requirements = match != null ? match.route().access()
                 : staticMapping != null ? staticMapping.access() : List.of();
-            if (staticMapping != null && staticMapping.guarded()) {
-                // Flagged before the first response can leave, so the rejection is covered too:
-                // nothing under a guarded mapping is sent with a "public" Cache-Control (see send()).
-                exchange.guardedStatic = true;
-                exchange.noMatchKey = STATIC_ROUTE_KEY;
-            }
             for (var access : requirements) {
                 if (access.usesSession() && session == null) {
                     session = buildSession(headers, sessionCookieName);
                 }
                 Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
                 if (rejected != null) {
+                    // A rejection (route or mapping) is per-caller: send() makes it no-store.
+                    exchange.accessRejected = true;
                     respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSpec, exchange);
                     return true;
                 }
@@ -460,8 +480,30 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // counters) — the write-back contract holds on these paths too via the
             // choke point, instead of silently dropping the mutation.
             if (match == null) {
+                if (staticMapping != null || isBundledAsset(path)) {
+                    // M3 review: no route matched this METHOD, but the path may still be a
+                    // route's (GET /docs/payroll.pdf with its own access, requested as POST). A
+                    // mapping never serves a path some route pattern matches: the route decides
+                    // who gets that file, and falling through here served it to anyone who
+                    // passed the mapping's weaker access by changing the method. The mapping's
+                    // access has already run, so an anonymous caller got its uniform rejection
+                    // and learns nothing from the 405.
+                    List<String> routeMethods = staticMapping != null ? router.methodsMatching(path) : List.of();
+                    // And a mapping (or a bundled asset) serves GET and HEAD, nothing else.
+                    boolean readMethod = "GET".equals(method) || "HEAD".equals(method);
+                    if (!routeMethods.isEmpty() || !readMethod) {
+                        exchange.noMatchKey = STATIC_ROUTE_KEY;
+                        Result notAllowed = Result.error(405, "Method Not Allowed")
+                            .header("Allow", routeMethods.isEmpty() ? "GET, HEAD" : String.join(", ", routeMethods));
+                        respond(braceRequest, notAllowed, response, callback, session, csrfOnlySession, cookieSpec, exchange);
+                        return true;
+                    }
+                }
                 Result staticResult = serveStaticFile(braceRequest, staticMapping);
                 if (staticResult != null) {
+                    // The file itself (or its 304): send() marks it "private, no-cache" under a
+                    // guarded mapping; every other response there is "no-store".
+                    exchange.staticServed = staticResult.status() == 200 || staticResult.status() == 304;
                     exchange.noMatchKey = STATIC_ROUTE_KEY;
                     respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSpec, exchange);
                     return true;
@@ -776,6 +818,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         String noMatchKey = UNMATCHED_ROUTE_KEY;
         /** M3: the request is under a static mapping with access requirements; see {@link #send}. */
         boolean guardedStatic;
+        /** A mapping's file (200, or its 304) is the response; with {@link #guardedStatic}, see {@link #send}. */
+        boolean staticServed;
+        /** An access requirement, a route's or a mapping's, rejected the request; see {@link #send}. */
+        boolean accessRejected;
         /** Set once the response is recorded, so a second choke-point pass cannot double-count. */
         boolean recorded;
         /** Set when this request was already logged another way (the 500 path's http.error). */
@@ -970,17 +1016,30 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         if (exchange.match != null && exchange.match.route().isFramework()) {
             OpsHandler.applySecurityHeaders(result);
         }
-        // M3: nothing under an access-guarded static mapping may be stored by a shared cache: not
-        // the file, and not the rejection or 404 either. Here, after after-middleware, so an
-        // app-wide after(...) that marks every response "public" can't undo it.
-        if (exchange.guardedStatic) {
-            String cacheControl = result.header("Cache-Control");
-            if (cacheControl != null && PUBLIC_DIRECTIVE.matcher(cacheControl).find()) {
-                result.header("Cache-Control", PUBLIC_DIRECTIVE.matcher(cacheControl).replaceAll("private"));
-            }
+        // M3: nothing under an access-guarded static mapping may be stored by a shared cache, and
+        // neither may an access rejection anywhere (a cached login redirect is served to
+        // logged-in users). Here, after after-middleware, so an app-wide after(...) can't undo
+        // it. Rewriting "public" to "private" was not enough: "s-maxage", a bare "max-age" on a
+        // cookie-authenticated response, Expires and the CDN-specific headers all make a
+        // response storable without that word. So every caching header is dropped, in any
+        // letter case, and one Cache-Control is set: the file (200, 206, 304) may be kept by the
+        // browser and revalidated through the guard; anything else is not stored at all.
+        if (exchange.guardedStatic || exchange.accessRejected) {
+            int status = result.status();
+            boolean file = exchange.staticServed && !exchange.accessRejected
+                && (status == 200 || status == 206 || status == 304);
+            result.headers().keySet().removeIf(SHARED_CACHE_HEADERS::contains);
+            result.header("Cache-Control", file ? "private, no-cache" : "no-store");
+        }
+        if (exchange.accessRejected) {
+            // Access.session answers a page, a JSON client and htmx differently. no-store already
+            // keeps the rejection out of caches; Vary covers one that stores it regardless.
+            result.header("Vary", mergeVary(result.header("Vary"), "Accept, HX-Request"));
         }
         attachSessionCookie(result, session, cookieSpec);
         attachSessionCookie(result, csrfOnlySession != null ? csrfOnlySession.peek() : null, cookieSpec);
+        // After the cookie: a response that carries one has had "public" rewritten already.
+        if (!exchange.accessRejected) warnIfGuardedRouteSentPublic(exchange, result);
         // H2: recording lives here, not at the call sites, because this is the ONE place every
         // response passes through. Recording per-site meant only three of the exits were
         // covered, so rate-limiter 429s, CSRF 403s, 413s, static files and unmatched 404s never
@@ -1551,6 +1610,13 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 if (!realFile.startsWith(baseReal)) {
                     return Result.notFound();
                 }
+                // M3 review: start() refuses mappings with different access on overlapping
+                // directories, but it sees the filesystem as it was then. If this mapping's
+                // directory has since become a link into another mapping's tree (or the reverse),
+                // the file is that mapping's to guard, so it isn't served from here.
+                if (insideMappingWithOtherAccess(mapping, realFile)) {
+                    return Result.notFound();
+                }
                 // M2: the second spelling a case-insensitive volume (macOS, Windows) accepts.
                 // "/files/PRIVATE/x" opens private/x there while skipping a guard on
                 // "/files/private/*", so every requested name must be the name stored on disk.
@@ -1628,6 +1694,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         return null;
+    }
+
+    /** True if {@code realFile} is inside the (link-resolved) directory of a mapping whose access differs. */
+    private boolean insideMappingWithOtherAccess(StaticFileMapping serving, Path realFile) {
+        for (var other : staticFileMappings) {
+            if (other == serving || serving.sameAccessAs(other)) continue;
+            Path dir = realPathOrNearest(Path.of(other.directory()).toAbsolutePath().normalize());
+            if (realFile.startsWith(dir)) return true;
+        }
+        return false;
     }
 
     private boolean insideUntrustedDirectory(Path realFile) {
@@ -1838,10 +1914,52 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return true;
     }
 
-    /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
     private static final java.util.regex.Pattern PUBLIC_DIRECTIVE =
         java.util.regex.Pattern.compile("(?i)(?<![-\\w])public(?![-\\w])");
+    private static final java.util.regex.Pattern PRIVATE_OR_NO_STORE =
+        java.util.regex.Pattern.compile("(?i)(?<![-\\w])(private|no-store)(?![-\\w])");
+    private static final java.util.regex.Pattern S_MAXAGE_DIRECTIVE =
+        java.util.regex.Pattern.compile("(?i)(?<![-\\w])s-maxage(?![-\\w])");
 
+    /**
+     * Every response header that tells a browser, a proxy or a CDN it may store a response.
+     * {@link #send} removes them all (names match in any letter case) from responses that must
+     * not be shared, then sets the one {@code Cache-Control} it wants.
+     */
+    private static final Set<String> SHARED_CACHE_HEADERS = sharedCacheHeaders();
+
+    private static Set<String> sharedCacheHeaders() {
+        var names = new java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER);
+        names.addAll(List.of("Cache-Control", "Expires", "Pragma", "CDN-Cache-Control",
+            "Surrogate-Control", "Cloudflare-CDN-Cache-Control", "Vercel-CDN-Cache-Control"));
+        return java.util.Collections.unmodifiableSet(names);
+    }
+
+    /** Route patterns already warned about by {@link #warnIfGuardedRouteSentPublic}. */
+    private final Set<String> warnedPublicGuarded = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Dev-mode nudge: a route with access requirements answered with {@code Cache-Control: public}
+     * or {@code s-maxage}, so a shared cache may hand one user's response to the next without
+     * the requirement running. Caching a successful response is the app's choice (some guarded
+     * pages are the same for everyone), so this only warns, once per route.
+     */
+    private void warnIfGuardedRouteSentPublic(Exchange exchange, Result result) {
+        if (!devMode || exchange.match == null) return;
+        Route route = exchange.match.route();
+        if (route.isFramework() || !route.isGuarded()) return;
+        String cacheControl = result.header("Cache-Control");
+        if (cacheControl == null) return;
+        if (!PUBLIC_DIRECTIVE.matcher(cacheControl).find() && !S_MAXAGE_DIRECTIVE.matcher(cacheControl).find()) return;
+        String key = route.method() + " " + route.pattern();
+        if (!warnedPublicGuarded.add(key)) return;
+        Log.warn(key + " has access requirements (" + route.accessLabel() + ") but its response was sent "
+            + "Cache-Control: " + cacheControl + ". A shared cache (CDN, reverse proxy) may store it and "
+            + "serve it to other users without the requirement running. Use \"private\" or \"no-store\" "
+            + "unless the response is the same for everyone who may see it. Logged once per route.");
+    }
+
+    /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
     private void attachSessionCookie(Result result, Session session, CookieSpec cookieSpec) {
         if (session == null || !session.isModified() || sessionSecret == null) return;
         session.maxAgeSeconds(sessionMaxAgeSeconds());
@@ -1861,12 +1979,19 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // middleware) is heuristically cacheable, and a force-cache proxy would replay
         // user A's Set-Cookie to everyone. An explicit Cache-Control wins, except "public": a
         // shared cache may store that (a fingerprinted static file is public, immutable), and
-        // with it this user's session cookie, so it becomes "private".
+        // with it this user's session cookie, so it becomes "private". Result matches header
+        // names case-insensitively, so a middleware's "cache-control" is this same header (it
+        // used to be a second map entry that this lookup missed and the wire sent).
+        // "public" is not the only way in: "s-maxage=600", or a bare "max-age=600", also lets a
+        // shared cache store the response, so "private" is added whenever the value has neither
+        // "private" nor "no-store". The handler's other directives are kept.
         String cacheControl = result.header("Cache-Control");
-        if (cacheControl == null) {
+        if (cacheControl == null || cacheControl.isBlank()) {
             result.header("Cache-Control", "private");
-        } else if (PUBLIC_DIRECTIVE.matcher(cacheControl).find()) {
-            result.header("Cache-Control", PUBLIC_DIRECTIVE.matcher(cacheControl).replaceAll("private"));
+        } else {
+            String rewritten = PUBLIC_DIRECTIVE.matcher(cacheControl).replaceAll("private");
+            if (!PRIVATE_OR_NO_STORE.matcher(rewritten).find()) rewritten = "private, " + rewritten;
+            if (!rewritten.equals(cacheControl)) result.header("Cache-Control", rewritten);
         }
     }
 

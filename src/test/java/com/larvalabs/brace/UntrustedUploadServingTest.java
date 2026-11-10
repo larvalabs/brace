@@ -278,11 +278,13 @@ class UntrustedUploadServingTest {
         Path pub = Files.createDirectories(root.resolve("public"));
         Path inner = Files.createDirectories(pub.resolve("u"));
         Files.writeString(inner.resolve("x.html"), SCRIPT_PAGE);
-        Path later = root.resolve("uploads");
+        // start() requires the directory to exist, so the link replaces a real directory.
+        Path later = Files.createDirectory(root.resolve("uploads"));
         var linked = Brace.test().start(a -> a
             .staticFiles("/assets", pub.toString()).publicFiles()
             .staticFiles("/uploads", later.toString(), StaticFiles.UNTRUSTED).publicFiles());
         try {
+            Files.delete(later);
             Files.createSymbolicLink(later, inner);
             var r = linked.get("/assets/u/x.html");
             assertEquals("application/octet-stream", r.header("Content-Type"));

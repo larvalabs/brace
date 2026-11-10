@@ -53,8 +53,10 @@ public final class StaticFilesConfig {
      * Require every listed {@link Access} to pass before a file under this mapping is served or
      * even looked up. The requirements run after plain {@code before(...)} middleware, with the
      * session the rest of the request uses, and are bound to the mapping: every URL that reaches
-     * its files goes through them. A rejected request gets the same response whether or not the
-     * file exists. Responses are sent {@code Cache-Control: private, no-cache}.
+     * its files goes through them, whatever the method. A rejected request gets the same response
+     * whether or not the file exists. A served file is sent {@code Cache-Control: private,
+     * no-cache}; every other response under the mapping (the rejection, a 404, a 405) is
+     * {@code no-store}, and no other caching header an after-middleware sets survives.
      *
      * <p>The app's {@link Brace#defaultAccess(Access)} is not added; list what the mapping needs.
      */

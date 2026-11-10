@@ -147,6 +147,28 @@ public class Router {
         return null;
     }
 
+    /**
+     * The methods of every route whose pattern matches {@code path}, whatever the request's
+     * method: empty when no route is registered at this path at all. A trailing slash matches as
+     * in {@link #match}, and {@code HEAD} follows {@code GET}, which answers it. BraceHandler
+     * asks this only after {@link #match} found nothing for the request's own method, so a
+     * non-empty answer means "a route owns this path, under another method".
+     */
+    List<String> methodsMatching(String path) {
+        String canonical = path.length() > 1 && path.endsWith("/") ? stripTrailingSlashes(path) : path;
+        var methods = new java.util.LinkedHashSet<String>();
+        for (var route : routes) {
+            if (methods.contains(route.method())) continue;
+            boolean matches = route.isStatic()
+                ? route.staticPath().equals(path) || route.staticPath().equals(canonical)
+                : route.match(path) != null || (canonical != path && route.match(canonical) != null);
+            if (!matches) continue;
+            methods.add(route.method());
+            if (route.method().equals("GET")) methods.add("HEAD");
+        }
+        return List.copyOf(methods);
+    }
+
     /** True if some {@code /}-separated segment of the raw path is exactly {@code .} or {@code ..}. */
     static boolean hasDotSegment(String path) {
         int len = path.length();

@@ -110,6 +110,11 @@ public class Route {
         return publicRoute ? "public" : "none";
     }
 
+    /** True once access is resolved and at least one requirement guards the route. Never throws. */
+    boolean isGuarded() {
+        return access != null && !access.isEmpty();
+    }
+
     /** True if the route opted out of the app's default access with {@code .publicRoute()}. */
     public boolean isPublicRoute() { return publicRoute; }
 

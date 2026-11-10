@@ -227,6 +227,42 @@ class ResultTest {
     }
 
     @Test
+    void headerNamesAreCaseInsensitive() {
+        // M3 review: two spellings of one header were two map entries; the framework read one
+        // and the wire sent the other.
+        var result = Result.text("hello");
+        result.header("Cache-Control", "max-age=60");
+        result.header("cache-control", "public");
+        assertEquals("public", result.header("CACHE-CONTROL"));
+        assertEquals("public", result.headers().get("Cache-control"));
+        assertEquals(1, result.headers().size());
+        assertTrue(result.headers().containsKey("cache-CONTROL"));
+        // The first-written spelling is the one sent.
+        assertEquals(java.util.Set.of("Cache-Control"), result.headers().keySet());
+        result.headers().remove("CACHE-control");
+        assertNull(result.header("Cache-Control"));
+    }
+
+    @Test
+    void untrustedReplacesAnInlineDispositionInAnyCase() {
+        var result = Result.bytes(new byte[0], "application/pdf").header("content-disposition", "inline");
+        result.untrusted();
+        assertEquals("attachment", result.header("Content-Disposition"));
+        assertEquals(1, result.headers().keySet().stream()
+            .filter(n -> n.equalsIgnoreCase("Content-Disposition")).count());
+    }
+
+    @Test
+    void aPageCacheReplayKeepsHeadersCaseInsensitive() {
+        var original = Result.text("cached").header("x-thing", "1").header("Cache-Control", "max-age=5");
+        var replayed = Cache.RenderedResponse.from(original).toResult();
+        assertEquals("1", replayed.header("X-Thing"));
+        replayed.header("cache-control", "no-store");
+        assertEquals("no-store", replayed.header("Cache-Control"));
+        assertEquals(2, replayed.headers().size());
+    }
+
+    @Test
     void multipleCookiesAreKept() {
         var result = Result.text("ok");
         result.cookie("a", "1", 3600, true, false, "Lax");

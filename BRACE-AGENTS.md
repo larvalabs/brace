@@ -245,11 +245,21 @@ app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
 - `defaultAccess(...)` does **not** apply to mappings (not `Access.none()` either): a mapping's
   access is exactly what `.access(...)` lists. Both methods return the app, so a builder chain
   continues.
-- The requirements are bound to the mapping and run before the file is looked up, at the same
-  point as a route's, with the same `Session`. A rejection looks the same whether or not the
-  file exists. Guarded responses are `Cache-Control: private, no-cache`.
-- A guarded mapping's directory must not overlap a public mapping's (`start()` throws).
+- The requirements are bound to the mapping and run before the file is looked up, for every
+  method, at the same point as a route's, with the same `Session`. A rejection looks the same
+  whether or not the file exists. A served file is `Cache-Control: private, no-cache`; every
+  other response under a guarded mapping (rejection, 404, 405) is `no-store`, and caching
+  headers set by an `after(...)` are removed there.
+- A mapping serves `GET`/`HEAD` only; other methods get `405`. A route registered under a
+  mapping's prefix owns its path: the mapping never serves it, under any method (`start()`
+  logs a warning listing such routes).
+- `start()` throws if a mapping's directory doesn't exist, or if two mappings' directories
+  overlap (same, nested, or via a symlink) with different access: pass the same `Access`
+  objects to both if they should match. Registering the same prefix twice throws.
   `/__brace/*` assets are always public. The banner and `/ops/routes` (`STATIC`) list mappings.
+- An access rejection (route or mapping) is always sent `Cache-Control: no-store` with
+  `Vary: Accept, HX-Request`. In dev mode a guarded route answering `Cache-Control: public` or
+  `s-maxage` logs a warning once.
 - A mapping answers "may this user fetch from this directory". For a per-file check (the
   file's owner), serve from a route: `db.findOwnedOr404(...)`, then `Result.fileUnder(dir, name)`
   (add `.untrusted()` for uploads).
@@ -463,7 +473,11 @@ result.cookie("t", "v", 3600, true, true, "Lax", "/admin")  // ...plus an explic
 
 `Set-Cookie` is the one repeatable header: multiple `result.cookie(...)` calls all reach the
 wire (and your app cookies are never clobbered by the framework session cookie). Every other
-header is single-value — setting it again replaces the prior value.
+header is single-value — setting it again replaces the prior value. Header names are
+case-insensitive: `result.header("cache-control", ...)` replaces `Cache-Control`, and
+`result.header("Cache-Control")` reads either spelling. A response that carries the session
+cookie is always sent `Cache-Control: private` (added to whatever the handler set, unless it
+already says `private` or `no-store`).
 
 Note: `Json.of()`, `View.of()`, and `Redirect.to()` still work (called by the `Result.*` methods).
 
@@ -1064,7 +1078,8 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 Every mapping ends in `.publicFiles()` or `.access(...)` (see Access); the examples here are
 public assets. `staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
 serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
-leading `.well-known/`. The longest matching prefix wins. For a directory users write to, use
+leading `.well-known/`. The longest matching prefix wins. The directory must exist at `start()`,
+and only `GET`/`HEAD` are served (other methods: `405`). For a directory users write to, use
 `staticFiles(prefix, dir, StaticFiles.UNTRUSTED)` (see Serving uploads); it must not be inside
 a trusted mapping's directory, or `staticFiles` throws.
 
@@ -1074,7 +1089,7 @@ Cache-bust static assets by appending a content-hash query parameter — in a JT
 contents, cached per `(path, mtime)`. Unknown URLs (no matching `staticFiles` mapping,
 missing file, or path traversal) return unchanged. Pair with long `Cache-Control: max-age`
 so redeploys with unchanged files don't invalidate browser/CDN caches. In a mapping with
-`.access(...)` the URL still gets its `?v=`, but responses stay `private, no-cache`.
+`.access(...)` the URL still gets its `?v=`, but the file stays `private, no-cache`.
 
 ## HTTP Client
 
