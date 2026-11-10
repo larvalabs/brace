@@ -252,7 +252,7 @@ public class CliOps {
                     .POST(HttpRequest.BodyPublishers.noBody()));
 
             if (loginResponse.statusCode() != 200) {
-                CliOutput.printError("Failed to get login token: " + loginResponse.body());
+                CliOutput.printError("Failed to get login token: " + CliOutput.excerpt(loginResponse.body()));
                 return 1;
             }
 

@@ -138,11 +138,11 @@ public class CliInit {
                 remote.add(new Check("reachable", true, prodUrl));
                 String detail = "HTTP " + e.status
                     + (e.code != null ? " (" + e.code + ")" : "")
-                    + ": " + (e.body == null || e.body.isBlank() ? "(empty body)" : e.body);
+                    + ": " + (e.body == null || e.body.isBlank() ? "(empty body)" : CliOutput.excerpt(e.body));
                 remote.add(new Check("authorized", false, detail));
                 addAuthFailureActions(projectDir, privKey, e, actions);
             } catch (Exception e) {
-                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+                String msg = CliOutput.excerpt(e.getMessage() != null ? e.getMessage() : e.toString());
                 if (msg.contains("Connection") || msg.contains("refused") || msg.contains("HostNotFound")) {
                     remote.add(new Check("reachable", false, "not reachable: " + msg));
                     actions.add("Verify " + prodUrl + " is reachable");

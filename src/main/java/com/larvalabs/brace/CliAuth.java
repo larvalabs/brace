@@ -24,7 +24,7 @@ public class CliAuth {
         public final String code;
 
         OpsAuthFailure(int status, String body) {
-            super("Authentication failed (" + status + "): " + body);
+            super("Authentication failed (" + status + "): " + CliOutput.excerpt(body));
             this.status = status;
             this.body = body;
             this.code = parseCode(body);

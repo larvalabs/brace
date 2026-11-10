@@ -38,7 +38,7 @@ public class CliCommands {
                 .GET());
 
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
 
@@ -65,7 +65,7 @@ public class CliCommands {
             return 1;
         }
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
 
@@ -176,7 +176,7 @@ public class CliCommands {
                 .header("Accept", "application/json")
                 .GET());
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 0;
         }
         JsonNode entries = Json.mapper().readTree(response.body());
@@ -226,7 +226,7 @@ public class CliCommands {
                     .header("Accept", "application/json")
                     .GET());
         } catch (Exception e) {
-            CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+            CliOutput.printError("Cannot reach " + CliOutput.excerpt(cfg.url()) + ": " + CliOutput.excerpt(e.getMessage()));
             return 2;
         }
 
@@ -437,7 +437,7 @@ public class CliCommands {
                     .header("Accept", "application/json")
                     .GET());
         } catch (Exception e) {
-            CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+            CliOutput.printError("Cannot reach " + CliOutput.excerpt(cfg.url()) + ": " + CliOutput.excerpt(e.getMessage()));
             return 2;
         }
         if (response.statusCode() == 404) {
@@ -516,7 +516,7 @@ public class CliCommands {
             return 0;
         }
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
@@ -541,7 +541,7 @@ public class CliCommands {
             body = null;
         }
         if (body == null || body.isMissingNode()) {
-            CliOutput.printError("HTTP " + response.statusCode() + " but the response is not JSON: " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + " but the response is not JSON: " + CliOutput.excerpt(response.body()));
             return 2;
         }
         System.out.println(CliOutput.json(body));
@@ -570,7 +570,7 @@ public class CliCommands {
             return 1;
         }
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));

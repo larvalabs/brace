@@ -246,6 +246,23 @@ public class CliOutput {
         return sb == null ? json : sb.toString();
     }
 
+    /** The most server-derived text an error message carries. */
+    static final int EXCERPT_LIMIT = 300;
+
+    /**
+     * Server-derived text for an error message, cut to {@value #EXCERPT_LIMIT} code points (never
+     * through a surrogate pair) with a visible marker, so a hostile server cannot make the CLI
+     * print megabytes on one line. Null is the empty string. Not sanitized: {@link #printError}
+     * and the other one-line printers do that.
+     */
+    public static String excerpt(String s) {
+        if (s == null) return "";
+        int points = s.codePointCount(0, s.length());
+        if (points <= EXCERPT_LIMIT) return s;
+        int end = s.offsetByCodePoints(0, EXCERPT_LIMIT);
+        return s.substring(0, end) + "… (" + (points - EXCERPT_LIMIT) + " more characters)";
+    }
+
     /** One line on stderr; the message goes through {@link #sanitizeLine}. */
     public static void printError(String message) {
         System.err.println("✗ " + sanitizeLine(message));

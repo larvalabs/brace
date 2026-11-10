@@ -34,12 +34,12 @@ public class CliCheck {
             status = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/status");
         } catch (Exception e) {
             if (mode == CliOutput.Mode.JSON) {
-                var result = new CheckResult(false, "App unreachable: " + e.getMessage(), List.of(
-                    new Check("reachability", "fail", "Cannot connect: " + e.getMessage())
+                var result = new CheckResult(false, "App unreachable: " + CliOutput.excerpt(e.getMessage()), List.of(
+                    new Check("reachability", "fail", "Cannot connect: " + CliOutput.excerpt(e.getMessage()))
                 ));
                 System.out.println(CliOutput.json(result));
             } else {
-                CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+                CliOutput.printError("Cannot reach " + CliOutput.excerpt(cfg.url()) + ": " + CliOutput.excerpt(e.getMessage()));
             }
             return 2;
         }
