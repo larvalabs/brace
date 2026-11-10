@@ -266,3 +266,108 @@ Illegal HTML attribute name
 <a title="a" @template._x(u = x)>l</a>
 --- error
 Illegal HTML attribute name
+
+#! ------------------------------------- Final review, M1: data inside a tag, outside a quoted value
+#! A script or style body in <svg>/<math> is markup to a browser, so "0<i ?" opens a tag and a
+#! string that doesn't follow "=" is in attribute-name position. Every character there is escaped.
+### m1-svg-script-string-in-attribute-name-position
+<svg width="10" height="10"><circle r="4"/><script>var n = 0<i ? "${x}" : "";</script></svg>
+--- values
+ok
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(4) x="
+--- expect
+<svg width="10" height="10"><circle r="4"/><script>var n = 0<i ? "\u006f\u006b" : "";</script></svg>
+*
+--- forbid
+ style=
+statechange=
+### m1-svg-script-no-special-character-needed
+<svg width="10" height="10"><script>if (a<b && ok) { log("${x}"); }</script></svg>
+--- values
+x style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(5) y
+hidden
+--- expect
+*
+<svg width="10" height="10"><script>if (a<b && ok) { log("\u0068\u0069\u0064\u0064\u0065\u006e"); }</script></svg>
+--- forbid
+ style=
+statechange=
+### m1-svg-style-tag-opened-by-less-than
+<svg><style>@media (400px<width) { a{fill:${x}} }</style></svg>
+--- values
+red
+x style=display:block onfocus=alert(1) autofocus
+--- expect
+<svg><style>@media (400px<width) { a{fill:\72 \65 \64 } }</style></svg>
+*
+--- forbid
+ autofocus
+onfocus
+### m1-svg-script-tag-name-and-unquoted-value
+<svg><script>var t = "<${x}>"; if (i<n) k=${y};</script></svg>
+--- values
+img src=x onerror=alert(1)||1 onfocus=alert(1) autofocus
+p||7
+--- expect
+*
+<svg><script>var t = "<\u0070>"; if (i<n) k=\u0037;</script></svg>
+--- forbid
+<img
+<p
+ onfocus=
+ autofocus
+### m1-quoted-after-equals-is-a-value
+<svg><script>if (a<b && ok) { t = "${x}"; u = '${x}'; }</script></svg>
+--- values
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(6) x="
+--- forbid
+["'] style=
+### m1-html-script-is-raw-text
+<script>var n = 0<i ? "${x}" : "";</script>
+--- values
+ok
+--- expect
+<script>var n = 0<i ? "ok" : "";</script>
+#! JTE 3.2.1 drops the template text before a template's first comment when the text after the
+#! comment has a "<letter" still open at the next ${...}: here "<p>intro</p><script>" is lost, the
+#! script's source is body text, and "i<n;" is a real tag with the data in attribute-name position.
+### m1-jte-drops-the-text-before-a-first-comment
+<p>intro</p>
+<script>
+  // set up
+  for (var i = 0; i<n; i++) { items.push("${x}"); }
+</script>
+--- values
+ok
+x style=display:block onfocus=alert(1) autofocus y
+--- expect
+{{NL}}  for (var i = 0; i<n; i++) { items.push("\u006f\u006b"); }{{NL}}</script>
+*
+--- forbid
+ style=
+onfocus=
+ autofocus
+### m1-jte-drops-the-text-before-a-first-block-comment
+<script>/* c */ for (i=0;i<n;i++) { log("${x}"); }</script>
+--- values
+7
+x style=display:block onfocus=alert(1) autofocus y
+--- expect
+ for (i=0;i<n;i++) { log("\u0037"); }</script>
+*
+--- forbid
+ style=
+onfocus=
+ autofocus
+### m1-jte-drops-the-text-before-a-first-css-comment
+<style>/* c */ a<b { color: ${x} }</style>
+--- values
+red
+x style=display:block onfocus=alert(1) autofocus y
+--- expect
+ a<b { color: \72 \65 \64  }</style>
+*
+--- forbid
+ style=
+onfocus=
+ autofocus

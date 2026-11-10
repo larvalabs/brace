@@ -961,14 +961,15 @@ class BraceHtmlOutputTest {
         assertEquals("<svg><![CDATA[ a ]']><a href=\"" + blocked + ":alert(1)\"> ]]><a href=\"" + blocked + "\">",
             driven(Part.text("<svg><![CDATA[ a ]"), text, Part.text("]><a href=\""), scheme, Part.text(":alert(1)\"> ]]><a href=\""),
                 scheme, Part.text(":alert(1)\">")));
-        // After a "<" in markup the data's first character decides, as it does for the browser:
-        // a letter starts a tag (so the quoted value after it is an attribute's), a digit doesn't.
+        // After a "<" in markup a letter would start a tag. Data there is written as escapes, all
+        // of it (final review, M1), so it never does: to the browser and to the tokenizer the
+        // "<" is text, and so is what follows it.
         Part breakout = Part.data("p", null, "\" onmouseover=\"alert(1)");
-        assertEquals("<p><xa title=\"&#34; onmouseover=&#34;alert(1)\">",
+        assertEquals("<p><\\u0078a title=\"\" onmouseover=\"alert(1)\">",
             driven(Part.text("<p><"), Part.data("p", null, "x"), Part.text("a title=\""), breakout, Part.text("\">")));
-        assertEquals("<p><1a title=\"\" onmouseover=\"alert(1)\">",
+        assertEquals("<p><\\u0031a title=\"\" onmouseover=\"alert(1)\">",
             driven(Part.text("<p><"), Part.data("p", null, "1"), Part.text("a title=\""), breakout, Part.text("\">")));
-        assertEquals("<p></xa title=\"\" onmouseover=\"alert(1)\"><a href=\"" + blocked + "\">",   // on an end tag: not an attribute
+        assertEquals("<p><\\u002f\\u0078a title=\"\" onmouseover=\"alert(1)\"><a href=\"" + blocked + "\">",
             driven(Part.text("<p><"), Part.data("p", null, "/x"), Part.text("a title=\""), breakout, Part.text("\"><a href=\""),
                 scheme, Part.text(":alert(1)\">")));
     }
@@ -1012,6 +1013,52 @@ class BraceHtmlOutputTest {
         assertEquals("<a title=\"\\u0027\\u003c\"><i title='a\\3b b'><style>a{color:\\5c u0027\\3b }",
             driven(Part.text("<a title=\""), Part.data("script", null, "'<"), Part.text("\"><i title='"),
                 Part.data("style", null, "a;b"), Part.text("'><style>a{color:"), Part.data("script", null, "';"), Part.text("}")));
+    }
+
+    // --- Final review (M1): data inside a tag, outside a quoted value ---
+    //
+    // `<svg><script>var n = 0<i ? "${x}" : "";` : to a browser "<i" opens a tag and the string,
+    // which doesn't follow "=", is in attribute-name position. The tokenizer knew, and the data
+    // still got script escaping only, which leaves space, "=" and "/" alone.
+
+    @Test
+    void dataInsideATagOutsideAQuotedValueIsEscapedWhole() {
+        String x = "x on=1/>";
+        String all = "\\u0078\\u0020\\u006f\\u006e\\u003d\\u0031\\u002f\\u003e";
+        // Every state inside a tag, and straight after "<" and "</", whatever JTE reports.
+        for (String open : List.of("<svg><script>a<b", "<svg><script>a<b ", "<svg><script>a<b c", "<svg><script>a<b c ",
+                "<svg><script>a<b c=", "<svg><script>a<b c=d", "<svg><script>a<b c='d' ", "<svg><script>a<b c='d'", "<svg><script>a<",
+                "<svg><script>a</", "<svg><script>a</b ", "<p><b ", "<b/", "<b c = ", "<svg><script>var s = \"", "<svg><script>if (a<b && ok) { log(\"")) {
+            boolean inTag = !open.endsWith("s = \"");
+            for (String[] context : new String[][] {{"script", null}, {"html", null}, {"b", "title"}, {"b", "onclick"}}) {
+                if (!inTag && context[1] != null) continue;
+                String expected = inTag ? all : BraceHtmlOutput.escapeScript(x);
+                assertEquals(open + expected + " y>", driven(Part.text(open), Part.data(context[0], context[1], x), Part.text(" y>")),
+                    open + " in " + String.join(" ", context[0], String.valueOf(context[1])));
+            }
+            if (!inTag) continue;
+            // JTE's attribute keeps its own rule first: a URL piece that doesn't settle its scheme is blocked.
+            assertEquals(open + BraceHtmlOutput.escapeAll(BraceHtmlOutput.BLOCKED_URL) + ">",
+                driven(Part.text(open), Part.data("a", "href", "javascript"), Part.text(">")), open);
+            // CSS reads a hex escape of every character back as the value (where a script is
+            // the other reading, it gets both escapings).
+            String css = open.contains("<script>") ? BraceHtmlOutput.escapeCss(all.substring(0, 6)) + BraceHtmlOutput.escapeCss("\\u003b")
+                : "\\78 \\3b ";
+            assertEquals(open + css + ">", driven(Part.text(open), Part.data("style", null, "x;"), Part.text(">")), open);
+        }
+        // Data can't start a tag, name one, or end one.
+        assertEquals("<svg><script>var t = \"<\\u0069\\u006d\\u0067 src=x>\";</script></svg><p>&lt;</p>",
+            driven(Part.text("<svg><script>var t = \"<"), Part.data("script", null, "img"), Part.text(" src=x>\";</script></svg><p>"),
+                Part.data("p", null, "<"), Part.text("</p>")));
+        // In a quoted value it is a value, escaped as one: nothing changes there.
+        assertEquals("<svg><script>if (a<b) t = \"x on=1/\\u003e\";</script></svg>",
+            driven(Part.text("<svg><script>if (a<b) t = \""), Part.data("script", null, x), Part.text("\";</script></svg>")));
+        assertEquals("<a title=\"x on=1/>\" class='x on=1/>'>",
+            driven(Part.text("<a title=\""), Part.data("a", "title", x), Part.text("\" class='"), Part.data("a", "class", x), Part.text("'>")));
+        // And HTML's own script is raw text: no tag in it.
+        assertEquals("<script>var n = 0<i ? \"" + js(x) + "\" : \"\";</script>",
+            driven(Part.text("<script>var n = 0<i ? \""), Part.data("script", null, x), Part.text("\" : \"\";</script>")));
+        assertEquals("\\u0061\\u005c\\u00e9\\ud83d\\ude00", BraceHtmlOutput.escapeAll("a\\é😀"));
     }
 
     /**

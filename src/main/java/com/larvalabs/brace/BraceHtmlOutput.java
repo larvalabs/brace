@@ -328,6 +328,15 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         return state == VALUE_QUOTED && !endTag;
     }
 
+    /**
+     * Whether what is written next lands inside a tag (start or end) and outside a quoted value,
+     * or straight after the {@code <} or {@code </} that would open one.
+     */
+    private boolean inTagOutsideValue() {
+        return state == TAG_NAME || state == BEFORE_ATTR || state == ATTR_NAME || state == AFTER_ATTR_NAME
+            || state == BEFORE_VALUE || state == VALUE_UNQUOTED || state == LT || state == END_TAG_OPEN;
+    }
+
     /** The tag being read, or the last one read. */
     private String currentTag() {
         if (tagString == null) tagString = tag.toString();
@@ -680,27 +689,47 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     // attribute or script body, CSS escaping if either says style, attribute escaping if either
     // says attribute. Neither reading can switch off a rule the other calls for, so a tokenizer
     // that has lost its place garbles data (script escapes in body text) and never unescapes it.
+    //
+    // The strictest reading of all (final review, M1): the tokenizer is INSIDE A TAG AND NOT IN A
+    // QUOTED VALUE: in the tag name, before, in or after an attribute name, before a value or in
+    // an unquoted one, or straight after "<" or "</". Nothing escapes for that position: in
+    // attribute-name position a space ends a name, "=" starts a value and letters alone spell
+    // `hidden` or `autofocus`; after "<" a letter starts a tag. So there every character of the
+    // data is written as an escape (escapeAll, or CSS hex escapes in a style), whatever JTE
+    // reports and on top of whatever rule JTE's attribute calls for. JTE refuses ${...} as a tag
+    // name, as an attribute name and in an unquoted value at compile time, so a template reaches
+    // this only in a script or style body that a browser reads as markup:
+    //   <svg><script>var n = 0<i ? "${x}" : "";</script></svg>
+    // where "<i" opens a tag and the string is in attribute-name position (a JavaScript string
+    // reads the escapes back as the text, so the script still gets its value), or through text
+    // JTE dropped (in 3.2.1 a first comment in a script can take the <script> tag before it with
+    // it, leaving the script's source as body text; see SECURITY.md), or after a desync.
 
     @Override
     public void writeUserContent(String value) {
         if (value == null) return;
-        if (!value.isEmpty()) dataWritten(value.charAt(0));
         boolean jteAttribute = tagName != null && attributeName != null;
         boolean jteScript = attributeName == null && "script".equals(tagName);
         boolean jteStyle = attributeName == null && "style".equals(tagName);
+        boolean insideTag = valueOut == null && inTagOutsideValue();
+        // What the data's first character will be once written: an escape, inside a tag.
+        if (!value.isEmpty()) dataWritten(insideTag ? '\\' : value.charAt(0));
         if (valueOut != null) {
             appendToHeldValue(value, jteScript, jteStyle);
+        } else if (insideTag) {
+            writeAttributeData(null, null, jteAttribute ? tagName : null, jteAttribute ? attributeName : null, value,
+                inScriptBody() || jteScript, inStyleBody() || jteStyle, true);
         } else if (inQuotedValue()) {
             // In an attribute value that isn't held. Also reached with no attribute context from
             // JTE (a @template call inside the value): JTE would escape that as body text, which
             // leaves quotes alone.
             writeAttributeData(currentTag(), currentAttribute(), jteAttribute ? tagName : null,
-                jteAttribute ? attributeName : null, value, jteScript, jteStyle);
+                jteAttribute ? attributeName : null, value, jteScript, jteStyle, false);
         } else if (jteAttribute) {
             // JTE reports an attribute and the output isn't in a quoted value of a start tag
             // (JTE refuses unquoted ones, so the two disagree): JTE's attribute, and whatever
             // body the output is in.
-            writeAttributeData(null, null, tagName, attributeName, value, inScriptBody(), inStyleBody());
+            writeAttributeData(null, null, tagName, attributeName, value, inScriptBody(), inStyleBody(), false);
         } else {
             boolean script = inScriptBody(), style = inStyleBody() || jteStyle;
             if (script != jteScript) {
@@ -796,9 +825,11 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
      * in ({@code tag}, {@code attribute}; null if it isn't in one) and of the one JTE reports
      * ({@code jteTag}, {@code jteAttribute}; null if none), which are normally the same, plus
      * script or CSS escaping when one of the two readings is a script or style body.
+     * {@code insideTag}: the output is inside a tag and not in a quoted value at all (see "user
+     * data" above); JTE's attribute, if it reports one, still gets its rule first.
      */
     private void writeAttributeData(String tag, String attribute, String jteTag, String jteAttribute,
-                                    String value, boolean script, boolean css) {
+                                    String value, boolean script, boolean css, boolean insideTag) {
         boolean url = attribute != null && isUrlAttribute(tag, attribute);
         boolean jteUrl = jteAttribute != null && isUrlAttribute(jteTag, jteAttribute);
         if (url || jteUrl) {
@@ -808,8 +839,16 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             if (!settlesItsScheme(value) || !(isSafeUrl(value) || media)) value = BLOCKED_URL;
         }
         if ((isJsonAttribute(attribute) || isJsonAttribute(jteAttribute)) && evaluatedBecauseOfUserData(value, 0)) value = "";
-        if (script || isScriptAttribute(attribute) || isScriptAttribute(jteAttribute)) value = escapeScript(value);
-        if (css || "style".equals(attribute) || "style".equals(jteAttribute)) {
+        css |= "style".equals(attribute) || "style".equals(jteAttribute);
+        script |= isScriptAttribute(attribute) || isScriptAttribute(jteAttribute);
+        if (insideTag) {
+            // CSS alone: hex escapes, which a CSS parser reads back. Otherwise \\uXXXX, which a
+            // script reads back, CSS-escaped as well if a style is one of the readings.
+            target.writeContent(css && !script ? escapeCss(value, true) : css ? escapeCss(escapeAll(value)) : escapeAll(value));
+            return;
+        }
+        if (script) value = escapeScript(value);
+        if (css) {
             target.writeContent(escapeCss(value)); // nothing left in it for HTML escaping to do
         } else if ("srcdoc".equals(attribute) || "srcdoc".equals(jteAttribute)) {
             var once = new StringBuilder(value.length() + 16);
@@ -1019,6 +1058,25 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     /**
+     * Every character as {@code \}{@code uXXXX}, letters and digits too (final review, M1): for
+     * data that lands inside a tag but outside a quoted value. Nothing in the result is syntax to
+     * an HTML tokenizer in any state, it can't start or name a tag (after {@code <} a browser
+     * needs a letter) or spell an attribute name ({@code hidden}, {@code autofocus}), and a
+     * JavaScript string or template literal still reads the original text back.
+     */
+    static String escapeAll(String value) {
+        var out = new StringBuilder(value.length() * 6);
+        for (int i = 0; i < value.length(); i++) appendUnicodeEscape(out, value.charAt(i));
+        return out.toString();
+    }
+
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+    private static void appendUnicodeEscape(StringBuilder out, char c) {
+        out.append('\\').append('u').append(HEX[c >> 12]).append(HEX[(c >> 8) & 15]).append(HEX[(c >> 4) & 15]).append(HEX[c & 15]);
+    }
+
+    /**
      * Escape for CSS, in a {@code <style>} body or a {@code style=""} attribute (L7): everything
      * but letters, digits, spaces, {@code # % . _ -} and non-ASCII characters becomes a hex
      * escape ({@code ;} is {@code \3b }). An escaped character is never syntax to a CSS parser,
@@ -1028,17 +1086,26 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
      * an odd identifier, and its declaration is dropped.
      */
     static String escapeCss(String value) {
+        return escapeCss(value, false);
+    }
+
+    /** {@code all}: every character as a hex escape, for data inside a tag (see {@link #escapeAll}). */
+    private static String escapeCss(String value, boolean all) {
         StringBuilder out = null;
         for (int i = 0; i < value.length(); i++) {
             char c = value.charAt(i);
-            boolean plain = isAsciiAlphanumeric(c) || c == ' ' || c == '#' || c == '%' || c == '.'
-                || c == '_' || c == '-' || c >= 0xa0;
+            boolean plain = !all && (isAsciiAlphanumeric(c) || c == ' ' || c == '#' || c == '%' || c == '.'
+                || c == '_' || c == '-' || c >= 0xa0);
             if (plain) {
                 if (out != null) out.append(c);
                 continue;
             }
             if (out == null) out = new StringBuilder(value.length() + 16).append(value, 0, i);
-            out.append('\\').append(Integer.toHexString(c == 0 ? 0xfffd : c)).append(' ');
+            int code = c == 0 ? 0xfffd : c;
+            if (Character.isHighSurrogate(c) && i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1))) {
+                code = Character.toCodePoint(c, value.charAt(++i)); // only with `all`: a hex escape names a code point
+            }
+            out.append('\\').append(Integer.toHexString(code)).append(' ');
         }
         return out == null ? value : out.toString();
     }
