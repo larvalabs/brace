@@ -460,6 +460,11 @@ class RedactorTest {
         assertEquals("colors=[REDACTED]", Redactor.redactQuery("colors=ff0000-00ff00-0000ff"));
         assertEquals("hash=[REDACTED]", Redactor.redactQuery("hash=3f9a1c2b4d5e6f70"));
         assertEquals("/blog/[redacted]", Redactor.redactPath("/blog/2024-black-friday-sale"));
+        // Final review costs (documented in docs/SECURITY.md, "Known over-redaction").
+        assertEquals("/assets/[redacted].js", Redactor.redactPath("/assets/ProductDetail-a1B2c3D4.js"));
+        assertEquals("[redacted]", Redactor.redactHeaders(Map.of("X-Path", "/files/Ab3dE9fG/raw")).get("X-Path"));
+        assertEquals("[redacted] failed", Redactor.redactMessage("UTF8StreamJsonParser failed"));
+        assertEquals("ticket_id=[REDACTED]&sig_alg=[REDACTED]", Redactor.redactQuery("ticket_id=4521&sig_alg=hs256"));
         // An email is PII, not a credential: kept, as before.
         assertEquals("email=a%40b.c", Redactor.redactQuery("email=a%40b.c"));
     }
@@ -749,6 +754,67 @@ class RedactorTest {
         // And messages use the field rule for name=value pairs.
         assertEquals("charge failed code=card_declined password=[REDACTED]",
             Redactor.redactMessage("charge failed code=card_declined password=hunter2"));
+    }
+
+    @Test
+    void deeplyNestedLogFieldsAreBoundedNotAStackOverflow() {
+        // nit: redact(Map) recursed once per level; 20,000 levels overflowed the stack.
+        Map<String, Object> deep = new java.util.HashMap<>();
+        Map<String, Object> cur = deep;
+        for (int i = 0; i < 20_000; i++) {
+            Map<String, Object> next = new java.util.HashMap<>();
+            cur.put("n", i % 2 == 0 ? next : List.of(next));
+            if (i % 2 != 0) cur.put("token", "x");
+            cur = next;
+        }
+        var out = Redactor.redact(deep);
+        Object level = out;
+        int depth = 0;
+        while (level instanceof Map<?, ?> m || level instanceof List<?>) {
+            if (level instanceof List<?> l) level = l.get(0);
+            else {
+                var map = (Map<?, ?>) level;
+                if (map.containsKey("token")) assertEquals(Redactor.PLACEHOLDER, map.get("token"));
+                level = map.get("n");
+            }
+            depth++;
+        }
+        assertEquals(Redactor.TOO_DEEP, level);
+        assertTrue(depth <= Redactor.MAX_NESTING + 1, "depth " + depth);
+        // A map that contains itself is cut off the same way.
+        Map<String, Object> self = new java.util.HashMap<>();
+        self.put("me", self);
+        self.put("again", self);
+        assertNotNull(Redactor.redact(self));
+        // A shared child under two keys at every level (2^40 paths) is bounded by the copy budget.
+        Map<String, Object> shared = Map.of("leaf", 1);
+        for (int i = 0; i < 40; i++) shared = Map.of("a", shared, "b", shared);
+        long t0 = System.nanoTime();
+        assertNotNull(Redactor.redact(shared));
+        assertTrue(System.nanoTime() - t0 < 5_000_000_000L);
+    }
+
+    @Test
+    void reviewerWorstCasesStayLinear() {
+        // Error path only, but attacker-sized. Each shape targets one scanner: percent runs,
+        // ampersands, dots, %25 (decode rounds), '=' pairs, '<'+'/' spans, scheme scans, nested
+        // URLs, quotes, name runs. 64 KB and 1 MB of each, through every entry point.
+        List<String> units = List.of("%", "&", ".", "%25", "=", "</", "a:", "x://", "a=/", "\"", "a=\"",
+            "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25");
+        long t0 = System.nanoTime();
+        for (int size : List.of(64 * 1024, 1024 * 1024)) {
+            for (String unit : units) {
+                String big = unit.repeat(size / unit.length());
+                Redactor.redactQuery(big);
+                Redactor.redactUrl("https://h/" + big);
+                Redactor.redactPath("/" + big);
+                Redactor.redactMessage(big);
+                Redactor.redactStackTrace("java.lang.RuntimeException: " + big + "\n\tat a.B(B.java:1)\n");
+                Redactor.redactHeaders(Map.of("X-Big", big, "Referer", "https://h/?" + big, "Forwarded", big));
+            }
+        }
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(ms < 20_000, "worst cases took " + ms + " ms");
     }
 
     @Test

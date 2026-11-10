@@ -247,23 +247,40 @@ public class Redactor {
         return out;
     }
 
+    /** Nesting levels of maps and lists {@link #redact(Map)} copies; deeper values become {@link #TOO_DEEP}. */
+    static final int MAX_NESTING = 64;
+
+    /**
+     * Stands in for a map or list nested deeper than {@link #MAX_NESTING} (a map that contains
+     * itself ends here too) or past the {@link #MAX_ELEMENTS} copy budget.
+     */
+    static final String TOO_DEEP = "[nested too deep]";
+
     /**
      * Return a deep copy of {@code fields} (a structured log entry) with the values of keys that
      * are sensitive by the field rule ({@link #isSensitiveField}) replaced by {@link #PLACEHOLDER}.
      * Recurses into nested maps and lists.
      */
-    @SuppressWarnings("unchecked")
     public static Map<String, Object> redact(Map<String, Object> fields) {
+        return redactMap(fields, 0, new int[1]);
+    }
+
+    /**
+     * {@code budget[0]} counts the values copied so far: past {@link #MAX_ELEMENTS}, containers
+     * become {@link #TOO_DEEP}, so a shared child referenced from many keys (or a cycle) cannot
+     * blow up the copy. Nesting past {@link #MAX_NESTING} is cut the same way.
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> redactMap(Map<String, Object> fields, int depth, int[] budget) {
         var out = new LinkedHashMap<String, Object>(fields.size());
         for (var e : fields.entrySet()) {
             String key = e.getKey();
             Object value = e.getValue();
+            budget[0]++;
             if (isSensitiveField(key)) {
                 out.put(key, PLACEHOLDER);
-            } else if (value instanceof Map<?, ?> m) {
-                out.put(key, redact((Map<String, Object>) m));
-            } else if (value instanceof List<?> list) {
-                out.put(key, redactList(list));
+            } else if (value instanceof Map<?, ?> || value instanceof List<?>) {
+                out.put(key, redactNested(value, depth + 1, budget));
             } else {
                 out.put(key, value);
             }
@@ -272,19 +289,20 @@ public class Redactor {
     }
 
     @SuppressWarnings("unchecked")
-    private static List<Object> redactList(List<?> list) {
+    private static Object redactNested(Object value, int depth, int[] budget) {
+        if (depth > MAX_NESTING || budget[0] > MAX_ELEMENTS) return TOO_DEEP;
+        if (value instanceof Map<?, ?> m) return redactMap((Map<String, Object>) m, depth, budget);
+        var list = (List<?>) value;
         var out = new ArrayList<Object>(list.size());
         for (Object item : list) {
-            if (item instanceof Map<?, ?> m) {
-                out.add(redact((Map<String, Object>) m));
-            } else if (item instanceof List<?> l) {
-                out.add(redactList(l));
-            } else {
-                out.add(item);
-            }
+            budget[0]++;
+            out.add(item instanceof Map<?, ?> || item instanceof List<?> ? redactNested(item, depth + 1, budget) : item);
         }
         return out;
     }
+
+    /** Values {@link #redact(Map)} copies before further nested containers become {@link #TOO_DEEP}. */
+    static final int MAX_ELEMENTS = 100_000;
 
     /**
      * Redact a URL query string (e.g. {@code a=1&token=xyz&b=2} → {@code a=1&token=[REDACTED]&b=2}).

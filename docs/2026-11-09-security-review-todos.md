@@ -383,6 +383,20 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `authkey`, `nonce` as substrings; `code`, `sig`, `otp` as the whole normalized name only.
     Tables of must-survive and must-redact values in `RedactorTest`; end to end in
     `ErrorStoreTest.secretBearingHeadersAndQueryValuesAreRedactedInStoredError`.
+  - **Final review fixes** (`fix(security): M6 final review fixes: …`). One free-form pass
+    (`Redactor.redactText`) for messages, header values, path segments and query values:
+    every `scheme://…` (any scheme, `jdbc:postgresql://` too), `<…>` and `uri=/…` goes through
+    `redactUrl` (userinfo always masked), sensitive `name=value` pairs lose their value up to
+    the next delimiter (no longer the next name), and every run of `[A-Za-z0-9_\-+/.~$%]` is
+    tested label by label (16+, a digit and a letter, not a UUID or short path), decoded up to
+    3 rounds; Java qualified names and hostnames with a common TLD are kept. `redactPath` checks
+    decoded and `;matrix` segments. `Forwarded` and `Via` left the verbatim list. Names match by
+    segment (`auth_code`, `verificationCode`, `passcode`; in transit also `pin`, `sid`,
+    `ticket`, `session`, `X-Auth`), and the short words no longer hit log fields or route
+    params (`isSensitive` vs `isSensitiveField`). `redact(Map)` is bounded at 64 levels and
+    100,000 values. Cost: a 16+ character hash label in a file name is redacted; a short path
+    (`/var/app/releases/20241105`) is no longer. Tables in `RedactorTest`, end to end in
+    `ErrorStoreTest.finalReviewSecretsDoNotReachTheStoreOrTheLogs`.
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current

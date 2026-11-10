@@ -63,7 +63,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are JavaScript-escaped again; `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"` | move the data to `data-*` attributes; pass CSS values, not CSS syntax | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
 | **2026-11 review:** page cache stores only 2xx, keys on the route, bypasses on `Authorization` and htmx targeting headers; `Brace.test()` throws when a cached handler reads undeclared input | security, **breaking** for tests of cached handlers that read undeclared input | declare inputs with `.vary(...)`/`.varyHeader(...)`, or stop caching the route | [§](#breaking-page-cache-keys-bypasses-and-undeclared-reads) |
 | **2026-11 review:** access rejections and guarded static responses are never shared-cacheable; `Result` header names are case-insensitive; dot segments are 404; WebSocket paths are exact | security | none, unless code relied on two spellings of a header name being two headers, or on `result.headers()` order | [§](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable) |
-| **2026-11 review:** previous session secrets are validated and lifetime-bounded; `/ops/errors` redacts by value shape; the error store survives hostile input; analytics row caps; ops auth start-time floor | security | none, unless a previous secret was a placeholder, or a log field is named exactly `code` | [§](#security-sessions-error-store-analytics-and-ops-auth) |
+| **2026-11 review:** previous session secrets are validated and lifetime-bounded; `/ops/errors` redacts by value shape; the error store survives hostile input; analytics row caps; ops auth start-time floor | security | none, unless a previous secret was a placeholder | [§](#security-sessions-error-store-analytics-and-ops-auth) |
 | **2026-11 review:** CLI: env names and key labels validated, project files never written through a symlink, terminal control characters escaped; launcher: one `<brace.version>` per pom, prereleases ordered before their release, toolchain floor raised to 0.1.11 with the release | security, **breaking** for env names with other characters and for projects pinned below 0.1.11 once it ships | rename such env keys; raise `<brace.version>` to `0.1.11` | [§](#security-cli-and-launcher-on-an-untrusted-checkout) |
 
 ## New: server-side page-view analytics
@@ -1752,12 +1752,24 @@ No action needed unless noted.
 - **Redaction by value shape.** Stored error records redacted request headers and query strings
   by name only. Now a `Referer` carrying `?token=…` or `/reset/<token>`, a JWT in any header,
   an OAuth `?code=`, a percent-encoded `?%74oken=`, or a 32-character random value under any
-  parameter name shows as `[REDACTED]`. Protocol headers (`Accept*`, `Content-Type`,
-  `User-Agent`, ETags, `X-Forwarded-*`, request ids, trace context) are kept.
+  parameter name shows as `[REDACTED]`. URLs quoted in exception messages are redacted like a
+  `Referer`, including any `user:password@` (`postgres://…`, `jdbc:postgresql://…`).
+  `Forwarded` and `Via` are now redacted (their `for=`, `by=`, `proto=` and `host=` stay
+  readable); the other protocol headers (`Accept*`, `Content-Type`, `User-Agent`, ETags,
+  `X-Forwarded-For`/`-Host`/`-Port`/`-Proto`, request ids, trace context) are kept.
+- **A stricter shape rule.** A secret is now found wherever it sits: every run of 16 or more
+  letters, digits, `-`, `_`, `+` or `/` with a digit and a letter is redacted, even next to
+  punctuation or inside a dotted name (`/dl/<token>.pdf`), and percent-encoded or `;matrix`
+  path segments are checked too. One visible cost: a file name with a long content hash
+  (`/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css`) shows as `/assets/[redacted].css` in error
+  records and logs.
 - **New sensitive names:** `jwt`, `assertion`, `signature`, `authkey`, `nonce` (anywhere in a
-  name) and `code`, `sig`, `otp` (as the whole name only, so `zip_code` and `status_code` are
-  kept). **This applies to structured log fields too:** a `Log.event` field named exactly `code`
-  is now redacted; rename it (`error_code`) if you need it in logs.
+  name), and a `code` paired with an auth word (`auth_code`, `verificationCode`, `passcode`).
+  In query strings and headers only, `code` (the whole name), `sig`, `otp`, `pin`, `sid`,
+  `ticket` and `session` are sensitive too, so `?code=` and `?ticket=` are redacted while
+  `zip_code` and `status_code` are kept. Structured log fields and route parameters are not
+  affected by those short words: a `Log.event` field named `code` and a route
+  `/countries/{code}` are kept as they are.
 - **Hostile input can't stall the store.** A request carrying `%00` (`?page=1%00` reaching
   `req.queryInt`) used to make every later flush fail on Postgres, so `ops_errors` and
   regression alerts went silent until restart. NUL characters are replaced, type and route are
