@@ -1389,9 +1389,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * percent-escape of an RFC 3986 unreserved character ({@code ALPHA DIGIT - . _ ~}, either hex
      * case), an escape written with non-ASCII "hex digits" (which {@link Route#decodeSegment}
      * would otherwise decode), or a separator smuggled in as {@code %2F}, {@code %5C} or a bare
-     * {@code \}. Jetty already answers the separator forms with a 400; this keeps the static
-     * lookup safe if its URI compliance is relaxed. Escapes of everything else ({@code %20},
-     * UTF-8 bytes, reserved characters such as {@code %26} or {@code %40}) stay legitimate.
+     * {@code \}. Escapes of everything else ({@code %20}, UTF-8 bytes, reserved characters such as
+     * {@code %26} or {@code %40}) stay legitimate.
+     *
+     * <p>Jetty's default URI compliance already answers the separator forms, {@code //} and
+     * encoded dot segments with a 400, but the static lookup does not rely on that: an encoded
+     * separator or dot ({@code %2F}, {@code %5C}, {@code %2E}) is refused here, a raw {@code .}
+     * or {@code ..} segment is refused for every request ({@link Router#hasDotSegment}), and an
+     * empty segment or a trailing slash fails the exact-spelling comparison in
+     * {@code serveStaticFile}. This method covers only what it lists; path parameters
+     * ({@code ;x=1}) are not interpreted and are looked up as part of the literal name.
      */
     static boolean hasNonCanonicalEscape(String rawPath) {
         for (int i = 0; i < rawPath.length(); i++) {
@@ -1594,6 +1601,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Path filePath = baseDir.resolve(relativePath).normalize();
 
             if (!filePath.startsWith(baseDir)) {
+                return Result.notFound();
+            }
+
+            // M2 review: resolve() and normalize() are forgiving. They drop a trailing
+            // separator and collapse an empty or "." segment, so "exact.txt/" and "v2//app.js"
+            // open the same file as the plain spelling while skipping a guard written for it.
+            // The path that will be opened, written back out, must be the requested path
+            // character for character. (Jetty's default URI compliance already answers "//"
+            // with a 400; this does not depend on it.)
+            String opened = baseDir.relativize(filePath).toString().replace(java.io.File.separatorChar, '/');
+            if (relativePath.endsWith("/") || relativePath.contains("//") || !opened.equals(relativePath)) {
                 return Result.notFound();
             }
 

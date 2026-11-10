@@ -1167,6 +1167,10 @@ skip a guard written for the first, so these get a 404:
   `Url.to` never encode these.
 - An encoded or literal separator: `%2F`, `%5C`, `\`. Jetty already answers these with a 400;
   the static handler refuses them as well in case URI compliance is relaxed.
+- A trailing slash or an empty segment: `/files/exact.txt/`, `/files/v2//app.js`. The path that
+  would be opened, written back out, has to equal the requested path character for character.
+  (A trailing slash on a file was served before 0.1.11, past a guard on the exact path.) A
+  directory is a 404 with or without the slash; there are no index files or listings.
 - A name that differs from the name stored on disk: `/files/PRIVATE/secret.txt` on a
   case-insensitive volume (macOS, Windows), or a decomposed (NFD) spelling of an accented name
   on APFS. Each requested segment is compared, case-sensitively, with the stored name.

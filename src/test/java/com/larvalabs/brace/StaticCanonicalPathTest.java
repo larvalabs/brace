@@ -42,6 +42,9 @@ class StaticCanonicalPathTest {
 
         app = Brace.app().port(0).staticFiles("/files", dir.toString()).publicFiles();
         app.before("/files/private/*", req -> Result.forbidden("forbidden"));
+        // An exact-path guard, for the trailing-slash spelling (M2 review).
+        Files.writeString(dir.resolve("exact.txt"), "exact-secret");
+        app.before("/files/exact.txt", req -> Result.forbidden("forbidden"));
         app.start();
     }
 
@@ -102,7 +105,50 @@ class StaticCanonicalPathTest {
     }
 
     @Test
+    void trailingSlashIsNotASecondSpellingOfAFile() throws Exception {
+        // M2 review: Path.normalize() drops a trailing separator, so "/files/exact.txt/" opened
+        // exact.txt while skipping a guard on exactly "/files/exact.txt". It was a 200.
+        assertEquals(403, get("/files/exact.txt").status());
+        for (String path : new String[]{"/files/exact.txt/", "/files/exact.txt//", "/files/v2/app.js/",
+                "/files/my%20file.css/", "/files/latest/app.js/"}) {
+            var res = get(path);
+            assertTrue(res.status() == 404 || res.status() == 400, path + " got " + res.status());
+            assertFalse(res.body().contains("exact-secret"), path);
+        }
+        assertEquals(404, get("/files/exact.txt/").status());
+        assertEquals(404, get("/files/v2/app.js/").status());
+        // The plain spellings still work.
+        assertEquals(200, get("/files/v2/app.js").status());
+        assertEquals(200, get("/files/my%20file.css").status());
+    }
+
+    @Test
+    void aDirectoryIsNotServedWithOrWithoutATrailingSlash() throws Exception {
+        assertEquals(404, get("/files/v2").status());
+        assertEquals(404, get("/files/v2/").status());
+        assertEquals(404, get("/files").status());
+        assertEquals(404, get("/files/").status());
+    }
+
+    @Test
+    void emptySegmentsAreNotASecondSpelling() throws Exception {
+        // Jetty's default URI compliance answers "//" with a 400 before Brace sees it; the
+        // static handler's exact-spelling comparison refuses it as well.
+        for (String path : new String[]{"/files/v2//app.js", "/files//v2/app.js", "/files//exact.txt"}) {
+            var res = get(path);
+            assertTrue(res.status() == 404 || res.status() == 400, path + " got " + res.status());
+            assertFalse(res.body().contains("exact-secret"), path);
+        }
+    }
+
+    @Test
     void escapeClassification() {
+        // A fullwidth "hex digit" is refused whatever it would decode to: "%２０" reads as a
+        // space to Character.digit, which is not an unreserved character, so only the non-ASCII
+        // check catches it (the mutation the M2 review found surviving).
+        assertTrue(BraceHandler.hasNonCanonicalEscape("a%２０b"));
+        assertTrue(BraceHandler.hasNonCanonicalEscape("a%2０b"));
+        assertTrue(BraceHandler.hasNonCanonicalEscape("a%２0b"));
         assertTrue(BraceHandler.hasNonCanonicalEscape("%70rivate/x"));
         assertTrue(BraceHandler.hasNonCanonicalEscape("a%2db"));
         assertTrue(BraceHandler.hasNonCanonicalEscape("a%2Fb"));

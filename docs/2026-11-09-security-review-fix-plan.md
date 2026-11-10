@@ -184,6 +184,7 @@ Collected for the migration guide.
 | Projects pinned below `0.1.11` need an override to use the launcher | D5 | Upgrade the pin |
 | Unknown `scope:` fails startup; `opsOrigins` required outside dev | D6 | Fix the key file; set `BRACE_OPS_ORIGINS` |
 | A percent-encoded unreserved character in a static path is a 404 | M2 | None expected; browsers don't send these |
+| A static file requested with a trailing slash or an empty segment is a 404 | M2 review | None expected; link to the file's own URL |
 | Page cache stores only 2xx | L4 | None expected |
 | A static mapping answers 405 to methods other than GET and HEAD, and never serves a path a route pattern matches | M3 review | Serve anything that takes another method from a route |
 | A static mapping's directory must exist at `start()` | M3 review | Create it at deploy time or before `start()` |

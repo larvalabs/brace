@@ -184,6 +184,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** `%70rivate` returns 404; `my%20file.css` is still served; the case variant
     returns 404 on a case-insensitive volume (assume-guarded).
   - **Model: Opus 5.5.** The rule has to match the route fix and not break legitimate encoding.
+  - **Review fixes.** A trailing slash was a second spelling that still served the file
+    (`GET /files/exact.txt/` returned 200 past `before("/files/exact.txt", ...)`), because
+    `Path.normalize()` drops the trailing separator. The static handler now returns 404 unless
+    the path it would open, rendered with `/`, equals the requested relative path exactly (no
+    trailing slash, no empty segment). The comment claiming safety under relaxed Jetty URI
+    compliance now says what each check covers. Tests in `StaticCanonicalPathTest`, including
+    the non-ASCII hex-digit case the reviewer's mutation check found unpinned.
 
 - [x] **M3: Static mappings are outside deny-by-default, and the docs don't say so**, `BraceHandler.java:351-362, 390-396`, `Brace.java` (`staticFiles`), `docs/SECURITY.md` (Authorization, Static Files)
   - **What's wrong.** Access runs only `if (match != null)`; static files are served when
