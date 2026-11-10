@@ -168,7 +168,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     registered with a trailing slash still works.
   - **Model: Sonnet 5.5.**
 
-- [ ] **M2: Path guards see the raw path; static serving decodes it afterwards**, `BraceHandler.java:335-341, 369-384, 1351`
+- [x] **M2: Path guards see the raw path; static serving decodes it afterwards**, `BraceHandler.java:335-341, 369-384, 1351`
   - **What's wrong.** Before-middleware and session middleware match the raw request path. The
     static handler then calls `Route.decodePath(relativePath)`. This is the normalization
     mismatch the 2026-10 route fix removed, still present for static mappings.

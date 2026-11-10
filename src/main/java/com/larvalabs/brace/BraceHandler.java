@@ -1242,6 +1242,59 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return false;
     }
 
+    /**
+     * M2: true if a raw (still encoded) static path spells something non-canonically: a
+     * percent-escape of an RFC 3986 unreserved character ({@code ALPHA DIGIT - . _ ~}, either hex
+     * case), an escape written with non-ASCII "hex digits" (which {@link Route#decodeSegment}
+     * would otherwise decode), or a separator smuggled in as {@code %2F}, {@code %5C} or a bare
+     * {@code \}. Jetty already answers the separator forms with a 400; this keeps the static
+     * lookup safe if its URI compliance is relaxed. Escapes of everything else ({@code %20},
+     * UTF-8 bytes, reserved characters such as {@code %26} or {@code %40}) stay legitimate.
+     */
+    static boolean hasNonCanonicalEscape(String rawPath) {
+        for (int i = 0; i < rawPath.length(); i++) {
+            char c = rawPath.charAt(i);
+            if (c == '\\') return true;
+            if (c != '%' || i + 2 >= rawPath.length()) continue;
+            char h = rawPath.charAt(i + 1), l = rawPath.charAt(i + 2);
+            int hi = Character.digit(h, 16), lo = Character.digit(l, 16);
+            if (hi < 0 || lo < 0) continue; // malformed: decodeSegment leaves the segment literal
+            if (h > 0x7F || l > 0x7F) return true;
+            char decoded = (char) ((hi << 4) | lo);
+            if ((decoded >= 'a' && decoded <= 'z') || (decoded >= 'A' && decoded <= 'Z')
+                    || (decoded >= '0' && decoded <= '9') || "-._~/\\".indexOf(decoded) >= 0) {
+                return true;
+            }
+            i += 2;
+        }
+        return false;
+    }
+
+    /**
+     * M2: true if every name in {@code requested} (relative to the served directory) is the name
+     * stored on disk, byte for byte. A case-insensitive volume opens {@code PRIVATE/x} as
+     * {@code private/x}, and a normalization-insensitive one opens an NFD name as its NFC twin;
+     * both are spellings a raw-path guard never saw. {@code toRealPath} reports stored names.
+     *
+     * <p>The common case costs a string compare: no link inside the tree, so the real path's tail
+     * is the request itself. Otherwise (a link, or a folded spelling) walk the names: each must be
+     * the stored name of its own entry ({@code NOFOLLOW_LINKS}, so a link is judged by its own
+     * name, not its target's), and the walk continues from the link-resolved directory. Links
+     * that stay inside the tree keep working; the caller has already checked containment.
+     */
+    private static boolean requestedNamesAreStored(Path baseReal, Path requested, Path realFile)
+            throws java.io.IOException {
+        if (baseReal.relativize(realFile).toString().equals(requested.toString())) return true;
+        Path dir = baseReal;
+        for (Path name : requested) {
+            Path entry = dir.resolve(name.toString());
+            Path stored = entry.toRealPath(java.nio.file.LinkOption.NOFOLLOW_LINKS).getFileName();
+            if (stored == null || !stored.toString().equals(name.toString())) return false;
+            dir = entry.toRealPath();
+        }
+        return true;
+    }
+
     /** Set once {@link #warnIfProxyNotTrusted} has warned; it warns once per process. */
     private final java.util.concurrent.atomic.AtomicBoolean warnedProxyNotTrusted =
         new java.util.concurrent.atomic.AtomicBoolean();
@@ -1347,11 +1400,20 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 relativePath = relativePath.substring(1);
             }
 
+            // M2: path guards (before/after middleware, a reverse proxy's location block) match
+            // the RAW path, and the lookup below decodes it. So the file must be reachable only
+            // at its canonical spelling, or "/files/%70rivate/x" reaches what a guard on
+            // "/files/private/*" protects. A canonical URL never percent-encodes an unreserved
+            // character; anything that does is another spelling of a plainer path, so it's a 404.
+            if (hasNonCanonicalEscape(relativePath)) {
+                return Result.notFound();
+            }
+
             // Decode BEFORE the traversal checks (H3). Serving from the raw path meant
             // /assets/my%20file.css looked for a literal "my%20file.css" and 404'd; decoding
             // after the ".." check would have been worse, letting %2e%2e slip past it.
-            // decodePath decodes per segment, so a %2F cannot invent a separator that wasn't
-            // in the request — and the checks below run on what actually reaches the disk.
+            // A %2F or %5C would decode to a separator the guards never saw; Jetty 400s those and
+            // hasNonCanonicalEscape refused them above. The checks below run on what reaches disk.
             relativePath = Route.decodePath(relativePath);
 
             if (relativePath.isEmpty() || relativePath.contains("..")) {
@@ -1381,7 +1443,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Path realFile;
             try {
                 realFile = filePath.toRealPath();
-                if (!realFile.startsWith(baseDir.toRealPath())) {
+                Path baseReal = baseDir.toRealPath();
+                if (!realFile.startsWith(baseReal)) {
+                    return Result.notFound();
+                }
+                // M2: the second spelling a case-insensitive volume (macOS, Windows) accepts.
+                // "/files/PRIVATE/x" opens private/x there while skipping a guard on
+                // "/files/private/*", so every requested name must be the name stored on disk.
+                if (!requestedNamesAreStored(baseReal, baseDir.relativize(filePath), realFile)) {
                     return Result.notFound();
                 }
             } catch (java.io.IOException e) {

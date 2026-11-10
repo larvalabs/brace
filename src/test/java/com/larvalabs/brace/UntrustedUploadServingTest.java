@@ -34,7 +34,9 @@ class UntrustedUploadServingTest {
         for (Path dir : new Path[] {uploads, assets}) {
             Files.writeString(dir.resolve("x.html"), SCRIPT_PAGE);
             Files.writeString(dir.resolve("x.svg"), SCRIPT_SVG);
-            Files.writeString(dir.resolve("X.SVG"), SCRIPT_SVG);
+            // Its own name, not "X.SVG": on a case-insensitive volume that is x.svg again, and
+            // since M2 a file is only served under its stored name.
+            Files.writeString(dir.resolve("Y.SVG"), SCRIPT_SVG);
             Files.writeString(dir.resolve("x.svg.png"), "not really a png");
             Files.writeString(dir.resolve("x.js"), "alert(1)");
             Files.writeString(dir.resolve("x.xml"), "<x/>");
@@ -86,7 +88,7 @@ class UntrustedUploadServingTest {
 
     @Test
     void uploadedHtmlAndSvgAreSandboxedOctetStreamAttachments() {
-        for (String name : new String[] {"x.html", "x.svg", "X.SVG", "x.js", "x.xml", "noext"}) {
+        for (String name : new String[] {"x.html", "x.svg", "Y.SVG", "x.js", "x.xml", "noext"}) {
             String path = "/assets/uploads/" + name;
             var r = app.get(path);
             assertEquals(200, r.status(), path);
@@ -160,7 +162,7 @@ class UntrustedUploadServingTest {
         assertFalse(html.headers("Content-Security-Policy").contains("sandbox"));
 
         assertEquals("image/svg+xml", app.get("/assets/x.svg").header("Content-Type"));
-        assertEquals("image/svg+xml", app.get("/assets/X.SVG").header("Content-Type"));
+        assertEquals("image/svg+xml", app.get("/assets/Y.SVG").header("Content-Type"));
         assertEquals("text/javascript; charset=utf-8", app.get("/assets/x.js").header("Content-Type"));
         // Only the final extension decides the type, so a double extension is its last part.
         assertEquals("image/png", app.get("/assets/x.svg.png").header("Content-Type"));

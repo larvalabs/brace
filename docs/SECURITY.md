@@ -1024,6 +1024,28 @@ served (404), whatever the mapping; the only exception is a leading `.well-known
 challenges and `security.txt` keep working. The check runs on the decoded path, so `%2eenv`
 is refused too.
 
+**A static file is served only at its canonical spelling.** Path guards (`before("/files/private/*", ...)`,
+a path-scoped `after(...)`, a reverse proxy's `location` block) match the raw, still-encoded
+request path, while the file lookup decodes it. Any second spelling of the same file would
+skip a guard written for the first, so these get a 404:
+
+- A percent-escape of an RFC 3986 unreserved character (`A-Z a-z 0-9 - . _ ~`), in either hex
+  case: `/files/%70rivate/secret.txt`, `/files/a%7Eb.txt`. Browsers, `encodeURIComponent` and
+  `Url.to` never encode these.
+- An encoded or literal separator: `%2F`, `%5C`, `\`. Jetty already answers these with a 400;
+  the static handler refuses them as well in case URI compliance is relaxed.
+- A name that differs from the name stored on disk: `/files/PRIVATE/secret.txt` on a
+  case-insensitive volume (macOS, Windows), or a decomposed (NFD) spelling of an accented name
+  on APFS. Each requested segment is compared, case-sensitively, with the stored name.
+
+Escapes that a canonical URL needs keep working: `%20`, UTF-8 bytes for non-ASCII names
+(`caf%C3%A9.txt`, either hex case), and reserved characters (`%26`, `%40`, `%3D`, which may also
+be written literally). Two consequences for guards: write the guarded path in unreserved
+characters, because a guard pattern containing `&`, `@`, `=`, a space or non-ASCII can still
+be reached by the other legitimate spelling of that character; and the case check relies on `Path.toRealPath` reporting
+stored names, which it does on macOS and Windows; a Linux directory with the `casefold`
+attribute is untested and may not be covered.
+
 Symlinks that stay inside the served directory keep working. To serve a directory that
 lives elsewhere, register it as its own mapping rather than linking it into the web root. A
 directory users write to is registered `UNTRUSTED` (see
