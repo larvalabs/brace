@@ -39,8 +39,12 @@ import java.util.regex.Pattern;
  *   <li>It is not a standard UUID, and not a {@linkplain #isNameLike name made of words}
  *       ({@code V3__create_users_table}, {@code invoice-48213-final-v2}).</li>
  * </ol>
- * A label that is a file path (it holds {@code /} and no short piece mixes upper case, lower case
- * and digits) is judged piece by piece instead, as {@link #redactPath} does.
+ * A label holding {@code /} is a file path when every piece looks like part of one (no short
+ * piece mixes upper case, lower case and digits, a long piece without digits is cased like words,
+ * no {@code +}); a path whose pieces are all plain is kept. A path with a secret-shaped piece
+ * loses that piece alone when the run starts like a path ({@code /}, {@code ./}, {@code ../},
+ * {@code ~/}) or ends in a file extension, and is replaced whole otherwise. Any other label with
+ * {@code /} is a base64 candidate and is judged whole.
  * So {@code T.}, {@code <T>}, {@code T~x}, {@code /dl/T.pdf} and {@code SG.x.y} lose T. A run
  * holding {@code %} is also percent-decoded (up to {@value #DECODE_ROUNDS} rounds) and replaced
  * whole when the decoded text holds anything to redact. Kept whole: a JWT or two-part
@@ -690,12 +694,14 @@ public class Redactor {
         int copied = 0;
         int start = 0;
         int len = chunk.length();
+        boolean pathEvidence = hasPathEvidence(chunk);
         for (int k = 0; k <= len; k++) {
             char c = k < len ? chunk.charAt(k) : '.';
             if (c == '.' || c == '~' || c == '$' || c == '%') {
                 if (k - start >= MIN_SECRET_LENGTH) {
-                    if (isPathShaped(chunk, start, k)) {
-                        // A file path: each '/'-piece is judged on its own, as redactPath does.
+                    int path = indexOfAny(chunk, start, k, "/") < k ? pathKind(chunk, start, k) : NOT_A_PATH;
+                    if (path == PATH_WITH_SECRET && pathEvidence) {
+                        // A file path: each secret '/'-piece is replaced on its own, as redactPath does.
                         int p = start;
                         for (int m = start; m <= k; m++) {
                             if (m < k && chunk.charAt(m) != '/') continue;
@@ -706,7 +712,7 @@ public class Redactor {
                             }
                             p = m + 1;
                         }
-                    } else if (isSecretLabel(chunk, start, k)) {
+                    } else if (path == PATH_WITH_SECRET || (path == NOT_A_PATH && isSecretLabel(chunk, start, k))) {
                         if (out == null) out = new StringBuilder(len);
                         out.append(chunk, copied, start).append(SHAPE_PLACEHOLDER);
                         copied = k;
@@ -719,38 +725,137 @@ public class Redactor {
         return out.append(chunk, copied, len).toString();
     }
 
+    /** {@link #pathKind}: not made of path pieces (a base64 secret, or no {@code /}); judged whole. */
+    private static final int NOT_A_PATH = 0;
+    /** {@link #pathKind}: every piece is plain; kept. */
+    private static final int PLAIN_PATH = 1;
+    /** {@link #pathKind}: plain pieces and at least one secret-shaped piece of 16 or more characters. */
+    private static final int PATH_WITH_SECRET = 2;
+
+    /**
+     * Whether a label holding {@code /} is made of path pieces, and whether one of them is a
+     * secret. Standard base64 uses {@code /} too, so each piece has to look like part of a path:
+     * <ul>
+     *   <li>a piece shorter than {@value #MIN_SECRET_LENGTH} must not mix upper case, lower case
+     *       and digits ({@code aB3dE9fG});</li>
+     *   <li>a longer piece without a digit must be cased like words: each {@code _}/{@code -}
+     *       part all lower case, all upper case or Capitalized, or the piece a
+     *       {@linkplain #isNameLike name} ({@code AdminDashboardController}); the tail of AWS's
+     *       example key, {@code bPxRfiCYEXAMPLEKEY}, is not;</li>
+     *   <li>a longer piece with a digit and a letter is either a {@linkplain #isSecretLabel
+     *       secret} or plain (a UUID, a name such as {@code V3__create_users_table});</li>
+     *   <li>no {@code +} anywhere.</li>
+     * </ul>
+     * Any piece failing this makes the label {@link #NOT_A_PATH}. So does a secret piece next to
+     * a short piece that is not cased like words, simple camelCase ({@code MyApp},
+     * {@code getUserById}) or a name: {@code /IShbxYCPZpUDcmS/DPH/<28 more>} is one base64 value,
+     * not two directories and a token. Before the second review a label was a path unless a short
+     * piece mixed the three classes, and every piece was then judged alone:
+     * {@code wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY} survived whole.
+     */
+    private static int pathKind(String s, int from, int to) {
+        boolean secret = false;
+        boolean wordy = true;
+        int start = from;
+        for (int i = from; i <= to; i++) {
+            char c = i < to ? s.charAt(i) : '/';
+            if (c == '+') return NOT_A_PATH;
+            if (c != '/') continue;
+            if (i - start < MIN_SECRET_LENGTH) {
+                if (mixesCaseAndDigits(s, start, i)) return NOT_A_PATH;
+                if (wordy && !isCasedLikeWords(s, start, i) && !isSimpleCamel(s, start, i) && !isNameLike(s, start, i)) {
+                    wordy = false;
+                }
+            } else if (isSecretLabel(s, start, i)) {
+                secret = true;
+            } else if (!hasDigit(s, start, i) && !isCasedLikeWords(s, start, i) && !isNameLike(s, start, i)) {
+                return NOT_A_PATH;
+            }
+            start = i + 1;
+        }
+        if (!secret) return PLAIN_PATH;
+        return wordy ? PATH_WITH_SECRET : NOT_A_PATH;
+    }
+
+    /**
+     * {@code s[from, to)} is letters only, written as camelCase words of two or more letters:
+     * an optional lower-case word, then Capitalized words ({@code MyApp}, {@code getUserById}).
+     * No acronym, no one-letter word: {@code JPqyl}, {@code UlJypjT} and {@code iOS} are not.
+     */
+    private static boolean isSimpleCamel(String s, int from, int to) {
+        int i = from;
+        while (i < to && s.charAt(i) >= 'a' && s.charAt(i) <= 'z') i++;
+        if (i - from == 1 || i == to) return false;
+        while (i < to) {
+            char c = s.charAt(i);
+            if (c < 'A' || c > 'Z') return false;
+            int lower = ++i;
+            while (i < to && s.charAt(i) >= 'a' && s.charAt(i) <= 'z') i++;
+            if (i == lower) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Positive evidence that a run is a file path, which lets a secret piece be replaced alone
+     * ({@code /tmp/uploads/[redacted].tmp}) instead of the whole label: it starts with {@code /},
+     * {@code ./}, {@code ../} or {@code ~/} (a drive letter's {@code C:} is outside the run, so
+     * {@code C:/Users/...} starts with {@code /} too), or it ends in a file extension (a dot and
+     * 1 to 5 letters or digits, one of them a letter). Without it a label with a secret piece
+     * ({@code exports/<token>/data}) is replaced whole.
+     */
+    private static boolean hasPathEvidence(String chunk) {
+        if (chunk.startsWith("/") || chunk.startsWith("./") || chunk.startsWith("../") || chunk.startsWith("~/")) {
+            return true;
+        }
+        int dot = chunk.lastIndexOf('.');
+        int ext = chunk.length() - dot - 1;
+        if (dot <= 0 || ext < 1 || ext > 5) return false;
+        boolean letter = false;
+        for (int i = dot + 1; i < chunk.length(); i++) {
+            char c = chunk.charAt(i);
+            if (isAsciiLetter(c)) letter = true;
+            else if (!isAsciiDigit(c)) return false;
+        }
+        return letter;
+    }
+
+    private static boolean hasDigit(String s, int from, int to) {
+        for (int i = from; i < to; i++) if (isAsciiDigit(s.charAt(i))) return true;
+        return false;
+    }
+
+    /**
+     * Every {@code _}/{@code -}-separated part of {@code s[from, to)} is all lower case, all upper
+     * case, or Capitalized ({@code customer-orders-final}, {@code README}, {@code Documents}): no
+     * upper-case letter follows a lower-case one, and none but the first of a part precedes one.
+     */
+    private static boolean isCasedLikeWords(String s, int from, int to) {
+        int partStart = from;
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (c == '_' || c == '-') {
+                partStart = i + 1;
+            } else if (c >= 'A' && c <= 'Z' && i > partStart) {
+                char prev = s.charAt(i - 1);
+                boolean nextLower = i + 1 < to && s.charAt(i + 1) >= 'a' && s.charAt(i + 1) <= 'z';
+                if ((prev >= 'a' && prev <= 'z') || nextLower) return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * A label ({@code [A-Za-z0-9_\-+/]}, no dots) that is secret-shaped: at least
      * {@value #MIN_SECRET_LENGTH} characters with a digit and a letter, not a UUID, and not a
      * {@linkplain #isNameLike name made of words}. A label with {@code /} reaches here whole only
-     * when it is not {@linkplain #isPathShaped path-shaped}.
+     * when it is {@linkplain #pathKind not a path}; a piece of a path is judged by this too.
      */
     private static boolean isSecretLabel(String s, int from, int to) {
         if (to - from < MIN_SECRET_LENGTH) return false;
         if (to - from == 36 && UUID_SHAPE.matcher(s.substring(from, to)).matches()) return false;
         if (!hasDigitAndLetter(s, from, to)) return false;
         return !isNameLike(s, from, to);
-    }
-
-    /**
-     * A label that is a file or URL path rather than a standard-base64 secret: it holds {@code /},
-     * no {@code +}, and no {@code /}-piece shorter than {@value #MIN_SECRET_LENGTH} mixes upper
-     * case, lower case and digits. Its pieces are then judged one by one, so
-     * {@code /tmp/uploads/upload-<hex>} keeps its directories and {@code aB3dE/fG7hI9jK1/mN2oP4qR}
-     * is still judged whole.
-     */
-    private static boolean isPathShaped(String s, int from, int to) {
-        if (indexOfAny(s, from, to, "/") == to) return false;
-        int start = from;
-        for (int i = from; i <= to; i++) {
-            char c = i < to ? s.charAt(i) : '/';
-            if (c == '+') return false;
-            if (c == '/') {
-                if (i - start < MIN_SECRET_LENGTH && mixesCaseAndDigits(s, start, i)) return false;
-                start = i + 1;
-            }
-        }
-        return true;
     }
 
     /** Digits in a group of a name ({@code 20241105}, {@code 000482}); a longer group is an id or a token. */

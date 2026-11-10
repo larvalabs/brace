@@ -1174,6 +1174,49 @@ class RedactorTest {
     }
 
     @Test
+    void aBase64SecretHoldingASlashIsNotTakenForAPath() {
+        // M-2: a run with '/' was judged piece by piece whenever no short piece mixed upper case,
+        // lower case and digits, so a standard-base64 secret survived when its pieces were short
+        // or held no digit (AWS's documented example key, below).
+        String[][] cases = {
+            {"Invalid key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "Invalid key [redacted]"},
+            {"key /wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY bad", "key [redacted] bad"},
+            {"key UlEMvPsopWhuHgywaZzg/KPi1gJZ2tD8jNuxkSSL rejected", "key [redacted] rejected"},
+            {"key JzoyJi/theJNjBxXcccJm/dwWU12ydOACauKMgTsU0i rejected", "key [redacted] rejected"},
+            {"key /FmyLbFvatOwYUJSPtJFs/wI5fFAOpbl4oYt8s2Vr rejected", "key [redacted] rejected"},
+            {"key /dl/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY.pdf", "key [redacted].pdf"},
+            // A secret piece after short pieces that are not words: one base64 value, not a path.
+            {"key /IShbxYCPZpUDcmS/DPH/of7Na0GjC6bFm3ssSaxI rejected", "key [redacted] rejected"},
+            {"key /1mf7eoWGdELH4mW4Gg3S/HXtglNEQZmWVL/UlJypjT rejected", "key [redacted] rejected"},
+            {"open /Users/matt/MyApp/getUserById/" + T + ".tmp", "open /Users/matt/MyApp/getUserById/[redacted].tmp"},
+            // Nothing says this is a path (no leading /, ./, ../ or ~/, no file extension), and one
+            // piece is a secret: the whole run goes, as before the piece-by-piece rule.
+            {"open exports/" + T + "/data", "open [redacted]"},
+            // With that evidence the secret piece alone goes.
+            {"open /exports/" + T + "/data", "open /exports/[redacted]/data"},
+            {"open exports/" + T + "/data.csv", "open exports/[redacted]/data.csv"},
+            {"open ./exports/" + T + "/data", "open ./exports/[redacted]/data"},
+            {"open ../exports/" + T + "/data", "open ../exports/[redacted]/data"},
+            {"open ~/exports/" + T + "/data", "open ~/exports/[redacted]/data"},
+            {"open C:/Users/app/uploads/" + T + "/report.pdf", "open C:/Users/app/uploads/[redacted]/report.pdf"},
+            {"see /var/lib/app-1.2/releases/3f9a1c2b4d5e6f7a8b9c/current", "see /var/lib/app-1.2/releases/[redacted]/current"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        // Paths of words survive with or without that evidence.
+        for (String ok : List.of(
+                "open ./build/libs/app-1.0.jar ../conf/settings_v2.yaml ~/projects/app/target/classes",
+                "missing templates/layouts/main_layout_v2 and db/migration/V3__create_users_table",
+                "cannot read var/lib/app/data/reports/quarterly-report-2024q4-final.pdf",
+                "/Users/matt/code/app/target/classes/templates/layouts/main_layout_v2.jte",
+                "/opt/app/classes/com/example/AdminDashboardController2/Internationalization/x",
+                "GET /api/v2/users/12345/orders failed; see application/vnd.api+json")) {
+            assertEquals(ok, Redactor.redactMessage(ok), ok);
+        }
+    }
+
+    @Test
     void everyEntryPointFailsClosedWhenRedactionFailsInside() {
         // H-1: the redactor runs on error paths, so a bug inside it must cost one marker, never an
         // exception (the error being recorded would be lost) and never the raw input.
