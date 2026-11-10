@@ -507,7 +507,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     single-recipient API uses `new InternetAddress(to, true)`.
   - **Model: Sonnet 5.5.**
 
-- [ ] **L15: `QueryTaint` evasions; the cache class allow-check covers only `getOrSet`**, `Sort.java:73-89`, `Database.java:690, 702`, `QueryTaint.java:95-100, 143`, `Cache.java:294, 308`
+- [x] **L15: `QueryTaint` evasions; the cache class allow-check covers only `getOrSet`**, `Sort.java:73-89`, `Database.java:690, 702`, `QueryTaint.java:95-100, 143`, `Cache.java:294, 308`
   - `Sort.of` normalizes its input, so `secretField%20`, `secretField desc` and
     `secretField,id` no longer appear verbatim and nothing fires. Recording stops after 1,000
     values or 64 KB in path, query, form order, so a padded query string leaves the form
