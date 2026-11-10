@@ -1208,6 +1208,8 @@ app.ws("/status", ctx -> new StatusHandler(ctx)).publicRoute();
 
 The upgrade runs plain `before(...)` middleware, the Origin check, then the route's access
 requirements (see Access); any rejection declines the handshake (a login redirect becomes 401).
+The path is a literal: only a request for exactly that path upgrades (`/x/../chat`, `/%63hat`
+and `/chat;x` get 404).
 The socket's `session()` is the session the requirements read. Joining a room is still an
 authorization decision: check the user may see a room before `ctx.join(room)`.
 

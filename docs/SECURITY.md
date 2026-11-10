@@ -51,6 +51,12 @@ path, so a guard and a route can't disagree about a path: `/admin/x/`, `/admin/%
 read, so an unauthenticated client can't make the app buffer a body. Rejections go through the
 normal response path, so security headers and session write-back apply.
 
+A request whose raw path has a segment that is exactly `.` or `..` (`/items/../y`, `/one/.`)
+is a 404 before any route, mapping, middleware or guard sees it: no handler receives `..` as a
+path parameter, and a proxy that resolves dot segments for its own rules can't be made to
+disagree with Brace about which route is being called. The 404 passes through
+after-middleware, so it carries the app's security headers like any other 404.
+
 Plain `before(...)` middleware never counts as access. The previous model —
 `requireSession("/admin/*", …)` path-pattern guards — is removed.
 
@@ -1257,6 +1263,13 @@ A WebSocket upgrade runs plain `before(...)` middleware, then the `Origin` check
 the route's access requirements (see [Authorization](#authorization)); a rejection declines the
 handshake. Before 0.1.11 the upgrade ran no guard at all, so a socket under a guarded path
 accepted anonymous clients.
+
+A socket is upgraded only at its registered path, spelled exactly. `app.ws("/ws", ...)` answers
+`/ws` (with any query string); `/x/../ws`, `/%77s` and `/ws;x` get a 404 before any middleware
+or guard runs. Jetty matches upgrades against the decoded path with dot segments resolved, so
+without this check those spellings reached the socket while a reverse proxy matching the raw
+request target saw some other path. The path given to `app.ws(...)` is therefore a literal, not
+a pattern.
 
 WebSocket upgrades are validated against the request's `Origin`. A handshake is **not**
 subject to the same-origin policy, so without this an attacker's page could open a socket

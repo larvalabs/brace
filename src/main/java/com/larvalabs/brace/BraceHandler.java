@@ -330,13 +330,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // a proxy that normalizes dot segments for its own rules sees a different path than
             // Brace does). Only an exact "." / ".." segment: "..foo" and ".well-known" are fine.
             // Percent-encoded forms (%2e%2e) are not segments here and Jetty refuses them itself.
-            if (Router.hasDotSegment(path)) throw new NotFoundException();
+            // Decided here, so nothing below matches the path against a route or a mapping, and
+            // answered once the Request exists (L9 review): thrown from here, the 404 skipped
+            // after-middleware, so it alone went out without the app's security headers.
+            boolean dotSegment = Router.hasDotSegment(path);
 
             // M3: the static mapping whose prefix covers the path, chosen once. A guarded one is
             // flagged here, before anything below can answer (a malformed query's 400, a
             // before() short-circuit, the rejection itself), so every response under it gets the
             // no-shared-cache headers in send(). Un-flagged below if a route matches instead.
-            StaticFileMapping coveringMapping = staticMappingFor(path);
+            StaticFileMapping coveringMapping = dotSegment ? null : staticMappingFor(path);
             exchange.guardedStatic = coveringMapping != null && coveringMapping.guarded();
 
             // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
@@ -361,7 +364,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Match route first. Static files and 404s must not pay request-body or
             // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
             // body from being fully parsed into memory before the 404.)
-            RouteMatch match = router.match(method, path);
+            RouteMatch match = dotSegment ? null : router.match(method, path);
             // The choke point keys stats on the matched ROUTE PATTERN, not the concrete URL (H1).
             exchange.match = match;
             // A route wins over a mapping for the same path, and carries its own access; how its
@@ -412,6 +415,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             if (storage != null) {
                 braceRequest.setStorage(storage);
             }
+
+            // L9: the dot-segment 404. No middleware, guard or handler runs for the request;
+            // the catch below sends it through after-middleware like any thrown 404.
+            if (dotSegment) throw new NotFoundException();
 
             // Run before middleware
             for (var before : beforeMiddleware) {

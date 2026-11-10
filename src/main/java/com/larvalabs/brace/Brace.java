@@ -657,6 +657,9 @@ public class Brace {
      * the upgrade request runs plain {@code before()} middleware, the Origin check, then the
      * route's access requirements; any rejection declines the handshake. Inside the socket,
      * joining a room is still an authorization decision for the handler.
+     *
+     * <p>{@code path} is a literal path. The upgrade is accepted only when the request's raw
+     * path equals it exactly: an encoded, dot-segment or {@code ;parameter} spelling is a 404.
      */
     public RouteConfig ws(String path, Function<WsContext, Object> handlerFactory) {
         router.requireNotStarted("Registering WS " + path);
@@ -1399,6 +1402,15 @@ public class Brace {
                     Route wsRoute = entry.getValue().route();
                     Function<WsContext, Object> factory = entry.getValue().factory();
                     container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> {
+                        // L9 review: Jetty matches the mapping against the canonical path
+                        // (percent-decoded, dot segments resolved, path parameters dropped), so
+                        // "/x/../ws", "/%77s" and "/ws;x" all arrive here. A proxy that forwards
+                        // the raw target applied its rules to a different path than the one
+                        // being upgraded. The socket answers only at its registered path,
+                        // spelled exactly; anything else is a 404, like an unmatched path.
+                        if (!wsPath.equals(upgradeRequest.getHttpURI().getPath())) {
+                            return declineUpgrade(upgradeRequest, upgradeResponse, callback, 404);
+                        }
                         String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest);
                         // H2: the upgrade is a request like any other, so it runs plain before()
                         // middleware (a rate limiter sheds load first) and, below, the route's access

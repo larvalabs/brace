@@ -477,6 +477,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     dot segments for its own ACLs but forwards the raw URI sees a different path than Brace.
   - **Fix.** Return 404 when any raw segment is exactly `.` or `..`.
   - **Model: Sonnet 5.5.**
+  - **Review fixes.** Two gaps, tests in `DotSegmentReviewFixesTest`.
+    - The WebSocket upgrade path was not covered: Jetty matches the upgrade against the
+      canonical path, so `/ws/../ws`, `/files/../ws`, `/%77s` and `/ws;x` returned 101 (with
+      the route's access still enforced). The upgrade is now declined with 404 unless the raw
+      request path equals the registered path exactly.
+    - The dot-segment 404 was thrown before the `Request` existed, so it skipped
+      after-middleware and went out without the app's security headers. It is now answered
+      after the request is built, with no route or mapping matched for it.
 
 - [x] **L10: A `Route` whose access was never resolved is open, not closed**, `Route.java:27`, `BraceHandler.java:117-194, 351-352`
   - `access` starts as `List.of()`, and only `Brace.resolveAccess()` fills it. `BraceHandler` is
