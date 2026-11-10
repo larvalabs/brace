@@ -1752,7 +1752,6 @@ public class Brace {
         if (!stopped.compareAndSet(false, true)) {
             return;
         }
-        router.unfreeze(); // a stopped app may be reconfigured before the next start()
         var hook = shutdownHook;
         shutdownHook = null;
         if (hook != null && Thread.currentThread() != hook) {
@@ -1792,6 +1791,12 @@ public class Brace {
         if (server != null) {
             server.stop();
         }
+        // A stopped app may be reconfigured before the next start(). Only now, with Jetty
+        // stopped (L10 review): unfrozen at the top of stop(), a route registered while requests
+        // were still draining was matched with its access unresolved (a 500, so closed), and
+        // mutated the Router's plain collections under the request threads reading them. If
+        // server.stop() throws, the router stays frozen.
+        router.unfreeze();
         if (wsRegistry != null) {
             wsRegistry.close();
         }

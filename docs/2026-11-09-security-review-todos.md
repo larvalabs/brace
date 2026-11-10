@@ -492,6 +492,11 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     route with no requirement.
   - **Fix.** Initialise to null and have `Route.access()` throw when unresolved.
   - **Model: Sonnet 5.5.**
+  - **Review fixes.** `Brace.stop()` unfroze the router before Jetty had stopped, so a route
+    registered during shutdown was matched by requests still draining (answered 500, since its
+    access was unresolved) while the `Router`'s unsynchronised collections were mutated under
+    them. The router is now unfrozen only after `server.stop()` returns. Verified by reading;
+    reconfiguring a stopped app is still covered by `RouteAccessTest`.
 
 - [ ] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
   - **`followUp` injection.** `ops.env` from the committed `.brace` is spliced unvalidated into
