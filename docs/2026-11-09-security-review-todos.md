@@ -409,6 +409,44 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `aFullBufferOfAlwaysFailingKindsDoesNotLockOutANewKind`,
     `anOutageRetainsEntriesUpToTheCapThenDropsThemWithOneWarning`) and `ErrorStorePostgresIT`
     (a real lock timeout on every row, a read-only window longer than the cap).
+  - **Second review fixes** (four commits, `fix(security): M5 ...`). An independent reviewer
+    tested the fix commits and found:
+    - *The cap did not cover a batch being flushed.* `flushBatch` drained the pending map, then
+      blocked opening a session. `record()` saw an empty map and admitted another 1,000 kinds,
+      and the failed batch was merged back on top: 65,000 kinds held during an outage. The cap
+      now bounds the pending map plus the in-flight batch. The kinds buffered first are kept
+      (they carry the accumulated counts and first-seen times, and a flood of new kinds cannot
+      evict them); new kinds past the cap are dropped and counted as before, and a kind that is
+      in flight is still a known kind. `ErrorStoreTest`
+      `newKindsArrivingWhileAFlushWaitsOnADeadDatabaseDoNotGrowTheBufferPastTheCap`.
+    - *A made-up HTTP method minted error kinds.* The kind's route is `METHOD pattern`, the
+      pattern is bounded (`(unmatched)`, never the raw path) but the method was the client's
+      token: `ZZ0 /nope0`, `ZZ1 /nope1`, ... with a throwing global before-middleware gave one
+      kind and one regression notification each. The same key fed `Stats`, where any made-up
+      method, on a plain 404 too, added a permanent entry to the routes map. Both now use
+      `BraceHandler.methodKey`: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, TRACE, CONNECT,
+      anything else `OTHER`. The request log and the error's request detail keep the method as
+      sent. `MethodCardinalityTest`.
+    - *One row drawing a server-wide SQLState starved the batch* (0 of 400 healthy rows
+      stored). Such a state now aborts the flush only when no row of that flush could be
+      written; beside a written row it counts against its own row. Decided after the loop, so
+      the row's place in the batch does not matter. A real outage still keeps the batch
+      uncounted: a dead connection fails the next statement or the commit, and counting only
+      happens after a commit. `ErrorStoreTest`
+      `oneRowDrawingAServerWideStateDoesNotStarveTheHealthyRowsBesideIt`,
+      `anOutageThatStartsMidBatchKeepsTheWholeBatchUncounted`,
+      `aServerThatStopsTakingWritesMidBatchOnALiveConnectionDropsNothingEarly`.
+    - *Notes.* A throwing `RegressionListener` no longer fails the flush or costs the rest of
+      the batch its notifications (per-row catch, counted in the rate-limited warning by
+      exception class). A flush that fails after a payload-stripped write keeps the full entry,
+      not the placeholder, so a stripped copy never re-enters the pending map. The drop warning
+      says whether rejections or an outage dropped a kind. An `Error` during a flush keeps the
+      batch and the flusher thread; a direct `flush()` still rethrows a `VirtualMachineError`
+      after putting the batch back, and the flusher thread keeps running even after an
+      `OutOfMemoryError` (a dead flusher is the silent failure M5 is about).
+    - `ErrorStorePostgresIT` (14 tests) passes against Postgres with these changes.
+    - *Not changed, reported.* `Cache.PageCache.routeLabel` uses the raw method and path for a
+      hand-built request with no route, but only as a key of a dev-mode warn-once set.
 
 - [x] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches
@@ -837,6 +875,40 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     a cross-origin request (the meta token for a same-origin one). `CsrfHardeningTest` checks the
     script's text; the logic was replayed in Node against a model of htmx 2.0.10's header copy
     (19 cases), not run in a real browser.
+  - **Second review fixes** (`fix(security): L8 csrf-htmx.js sends no X-CSRF-Token to another
+    origin`). The verification fix above was a regression. The helper cannot tell a third
+    party's token from the app's own on `<body hx-headers='{"X-CSRF-Token": ...}'>`, and an
+    injected `<base href="http://other-origin/">` turns a relative `hx-post="/x"` into a
+    cross-origin request (htmx's `selfRequestsOnly` check resolves against `location.href`, the
+    XHR against the base), so the real token was sent to the other origin.
+    - A cross-origin htmx request now carries no `X-CSRF-Token` from the helper's listener,
+      whatever was in the headers when it ran, under any letter case, for every verb. GET is
+      included: the same injected markup with `hx-get` sent a body-level token too, which
+      predates the helper's fixes and which the helper is placed to stop.
+    - A deliberate cross-origin value goes through the documented escape hatch: an
+      `htmx:configRequest` listener added on `document` after the script assigns the header.
+      Chosen over a script-tag opt-in: no new configuration surface, per request, and markup
+      alone cannot add a listener.
+    - The own-value check was case-sensitive: `hx-headers='{"x-csrf-token":"A"}'` same-origin
+      sent `X-CSRF-Token: A, <token>`. Every spelling is removed and one `X-CSRF-Token` is
+      defined: the page's token on a same-origin non-GET, the page's own value on a same-origin
+      GET, nothing cross-origin.
+    - **Run in a real browser** (the app's Browser pane, htmx 2.0.10, two local ports as two
+      origins, headers logged by the server; the same 40 requests with the old script and the
+      new). Same-origin non-GET, 11 cases (plain, own value upper, lower and two spellings at
+      once, relative and absolute path, DELETE, PUT, `htmx.ajax`, body-level lower-case header):
+      the meta token exactly once; the old script sent `OWNLOWER, METATOKEN` and the like in the
+      6 with a lower-case own value. Same-origin GET, 3 cases: no header, or the page's own
+      value once. Cross-origin, 25 cases (absolute, `//host`, `\\host`, `/\host`, `http:\\host`,
+      tab and LF inside, leading spaces, userinfo, fragment, `localhost` for `127.0.0.1`,
+      DELETE, GET, a later listener rewriting the path, `htmx.ajax` with its own header, and
+      `<base>` injection with the token on `<body hx-headers>` in either case, by POST, GET and
+      DELETE): no `X-CSRF-Token`; the old script sent the page's value in 24 of them, the real
+      body token among them. The escape-hatch listener's value arrived (1 case).
+      `http:/host/...` resolves to the page's own origin in the browser and correctly got the
+      token (counted with the same-origin cases).
+    - `CsrfHardeningTest` still only checks the script's text; there is no browser tier in the
+      build.
 
 - [x] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
   - **Verified (scratch server).** `GET /items/../y` on `/items/{a}/{b}` gives `a=..`. A handler
