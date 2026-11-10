@@ -1793,7 +1793,9 @@ comment.
 requests, judged on the path the request is sent to (after every `htmx:configRequest` listener
 has run). No change unless a page turned off htmx's `selfRequestsOnly` and posts cross-origin.
 A page that wants the token on a cross-origin request sets the header in its own
-`htmx:configRequest` listener.
+`htmx:configRequest` listener. An `X-CSRF-Token` the page set itself for a cross-origin call
+(`hx-headers`, `htmx.ajax`'s `headers`) is still sent there; a same-origin request carries the
+page's own token.
 
 ## Breaking: page cache keys, bypasses and undeclared reads
 
@@ -1966,18 +1968,23 @@ No action needed unless noted.
   by name only. Now a `Referer` carrying `?token=…` or `/reset/<token>`, a JWT in any header,
   an OAuth `?code=`, a percent-encoded `?%74oken=`, or a 32-character random value under any
   parameter name shows as `[REDACTED]`. URLs quoted in exception messages are redacted like a
-  `Referer`, including any `user:password@` (`postgres://…`, `jdbc:postgresql://…`).
+  `Referer`, including any `user:password@` (`postgres://…`, `jdbc:postgresql://…`, a password
+  with an unencoded `/`) and `;password=` parameters (`jdbc:sqlserver://…`).
   `Forwarded` and `Via` are now redacted (their `for=`, `by=`, `proto=` and `host=` stay
   readable); the other protocol headers (`Accept*`, `Content-Type`, `User-Agent`, ETags,
   `X-Forwarded-For`/`-Host`/`-Port`/`-Proto`, request ids, trace context) are kept.
 - **A stricter shape rule.** A secret is now found wherever it sits: every run of 16 or more
   letters, digits, `-`, `_`, `+` or `/` with a digit and a letter is redacted, even next to
   punctuation or inside a dotted name (`/dl/<token>.pdf`), and percent-encoded or `;matrix`
-  path segments are checked too. One visible cost: a file name with a long content hash
+  path segments are checked too. Names made of words (`V3__create_users_table.sql`,
+  `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`) are kept, and a file
+  path in a message is judged piece by piece, so only its secret-shaped piece is replaced. One
+  visible cost: a file name with a long content hash
   (`/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css`) shows as `/assets/[redacted].css` in error
   records and logs.
 - **New sensitive names:** `jwt`, `assertion`, `signature`, `authkey`, `nonce` (anywhere in a
-  name), and a `code` paired with an auth word (`auth_code`, `verificationCode`, `passcode`).
+  name), a `code` or `codes` paired with an auth word (`auth_code`, `verificationCode`,
+  `passcode`, `backup_codes`), and `totp`.
   In query strings and headers only, `code` (the whole name), `sig`, `otp`, `pin`, `sid`,
   `ticket` and `session` are sensitive too, so `?code=` and `?ticket=` are redacted while
   `zip_code` and `status_code` are kept. Structured log fields and route parameters are not
@@ -1989,9 +1996,10 @@ No action needed unless noted.
   clipped to 255 characters, each row is written under its own savepoint, and a row the database
   rejects for its data is retried once without its payload (an existing row only gains the
   count, its stored details are kept), then dropped after 5 flushes with a rate-limited
-  `error store:` warning. A read-only or out-of-resources database (a failover window) keeps
-  every pending error for later instead. If you saw `ops_errors` stop updating, this was likely
-  why.
+  `error store:` warning. A read-only or out-of-resources database (a failover window) or an
+  unreachable one keeps every pending error for later instead, for up to about two minutes (60
+  flushes); past that the pending errors are counted as failed and dropped after 5 more flushes,
+  with the same warning. If you saw `ops_errors` stop updating, this was likely why.
 - **More exception messages are redacted** before they reach `/ops/status` (a scheduled job's
   `lastError`), the uncaught-exception log event, `scheduled_jobs.error` and warning logs. Ops
   bearer tokens (`payload.signature`) are recognised as secrets.
@@ -2110,10 +2118,11 @@ brace ops keypair --label oncall-agent --control
 - **CLI requests time out and cap what they read.** Every ops request has a 10 second connect
   timeout and a 30 second request timeout, and a response body is read within 30 seconds and
   at most 16 MB, so a server that never answers, sends a byte at a time or never stops sending
-  fails the command with a one-line error instead of hanging. Server text in an error message
-  is cut to about 300 characters. `ops.key` must be a regular file of at most 64 KB (a symlink
-  to one is fine; a pipe or device is refused). Toolchain downloads stop after 60 seconds
-  without data. An `OutOfMemoryError` or other `Error` exits 1 with a short message.
+  fails the command with a one-line error instead of hanging; `brace check`'s unauthenticated
+  `GET /` probe has the same limits (a root it cannot read in time is skipped). Server text in
+  an error message is cut to about 300 characters. `ops.key` must be a regular file of at most
+  64 KB (a symlink to one is fine; a pipe or device is refused). Toolchain downloads stop after
+  60 seconds without data, or after 30 minutes in all. An `OutOfMemoryError` or other `Error` exits 1 with a short message.
 - **`--json` output escapes control and format characters.** DEL, the C1 range (U+0080 to
   U+009F, including the 8-bit CSI), bidi and zero-width characters, the BOM, U+2028, U+2029
   and unpaired surrogates are written as `\uXXXX` escapes, in values and in key names. A JSON

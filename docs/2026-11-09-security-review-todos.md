@@ -398,6 +398,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     SQLState; a single poisoned row beside healthy ones is still counted and dropped. Unit tests
     in `ErrorStoreTest`; `ErrorStorePostgresIT` gains a read-only transaction window
     (`SET TRANSACTION READ ONLY`) and a real 55P03 lock timeout.
+  - **Verification fixes** (`fix(security): M5 the error store's uncounted retention is
+    bounded`). A batch whose rows all fail with one non-data SQLState is no longer kept
+    uncounted: only a server-wide failure is (connection failure or failure to open or begin,
+    08xxx, 53xxx, 57P0x, 58xxx, 25006), so two rows that always fail with a lock timeout are
+    dropped after 5 flushes and 1,000 such kinds no longer fill the buffer for good. Uncounted
+    retention is capped at `MAX_UNCOUNTED_RETENTIONS` (60) consecutive flushes per entry, after
+    which each failed flush counts like a row rejection. `ErrorStoreTest`
+    (`rowsAlwaysFailingWithOneStateThatIsNotServerWideAreCountedAndDropped`,
+    `aFullBufferOfAlwaysFailingKindsDoesNotLockOutANewKind`,
+    `anOutageRetainsEntriesUpToTheCapThenDropsThemWithOneWarning`) and `ErrorStorePostgresIT`
+    (a real lock timeout on every row, a read-only window longer than the cap).
 
 - [x] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches
@@ -450,6 +461,25 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     100,000 values. Cost: a 16+ character hash label in a file name is redacted; a short path
     (`/var/app/releases/20241105`) is no longer. Tables in `RedactorTest`, end to end in
     `ErrorStoreTest.finalReviewSecretsDoNotReachTheStoreOrTheLogs`.
+  - **Verification fixes.** `redactStackTrace` treats a line as a frame after any run of tabs or
+    spaces (`at ...`, `... N more`, `... N common frames omitted`), so the frames of a
+    `Suppressed:` exception and of the causes under it are kept; their message lines are still
+    redacted (`RedactorTest.framesOfSuppressedExceptionsAndTheirCausesAreKept`). A run with `/` in
+    a message is judged piece by piece as `redactPath` does (`/tmp/brace-uploads/[redacted].tmp`,
+    not `[redacted].tmp`), and a label made of words (`V3__create_users_table`,
+    `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`) is no longer
+    secret-shaped (`Redactor.isNameLike`); hex hashes, random tokens and look-alikes such as
+    `reset-8a7b6c5d4e3f2a1b9c0d` stay redacted, and a seeded test samples 12,000 random tokens
+    (`RedactorTest.namesAndFilePathsInMessagesSurvive`,
+    `aFilePathInAMessageIsRedactedSegmentBySegment`, `lookAlikesMixingWordsAndSecretsAreRedacted`).
+    `redactUrl` sends everything after the first `;` of the authority through the `name=value`
+    pass (`jdbc:sqlserver://…;password=[REDACTED]`), masks user info up to the last `@` when the
+    password holds an unencoded `/ ? #`, and known schemes are found inside a run
+    (`/proxy/https://`, `-https://`, `1https://`)
+    (`RedactorTest.credentialsInAUrlsParameterSectionAndOddPrefixesAreRedacted`; the linear-time
+    test gained these shapes). Both name rules match `totp` alone, and the plural `codes` next to
+    an auth word like the singular (`backup_codes`, `recovery_codes`, `passcodes`); the name
+    tables in `RedactorTest` gained these and `zip_codes`/`status_codes` as kept.
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current
@@ -800,6 +830,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     listener registered later that rewrote it to another origin was not rechecked. htmx has no
     later hook that can remove a header, so the header is defined with a getter that htmx reads
     when it copies the headers onto the request, after every `htmx:configRequest` listener.
+  - **Verification fixes** (`fix(security): L8 csrf-htmx.js keeps a token the page set itself`).
+    The getter returned null for a cross-origin request, which also wiped a value the page set
+    itself (`hx-headers='{"X-CSRF-Token":"THIRDPARTY"}'`, `htmx.ajax(..., {headers})`) for a
+    deliberate cross-origin call. The script now captures any own value first and returns it for
+    a cross-origin request (the meta token for a same-origin one). `CsrfHardeningTest` checks the
+    script's text; the logic was replayed in Node against a model of htmx 2.0.10's header copy
+    (19 cases), not run in a real browser.
 
 - [x] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
   - **Verified (scratch server).** `GET /items/../y` on `/items/{a}/{b}` gives `a=..`. A handler
@@ -872,6 +909,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     keys in `brace check`, trailing-slash ops URLs, an `Error` exits 1 with a short message.
     Docs: `maxUploadSize("10MB")` now parses, `SessionOptions.secure(config.get(...))` sample,
     the README's missing-key rate-limit bucket is per client IP.
+  - **Verification fixes** (`fix(security): L11 the brace check root probe is bounded`). The
+    unauthenticated `GET /` probe had its own client and a discarding body, so its 10 s timeout
+    covered the headers only: a root that drips a byte every 200 ms held `brace check`
+    indefinitely, and an endless one ran until the server stopped. It now goes through `CliHttp`
+    (request timeout, body deadline, 16 MB cap; that client never follows a redirect and sends no
+    credentials) and is skipped like an unreachable root when it cannot finish. Nits: `Cli.guarded`
+    no longer excerpts an `OpsAuthFailure` message a second time (that cut its "N more
+    characters" marker), and `Toolchains.readWithIdleTimeout` has a 30-minute total deadline
+    besides its idle timeout. Tests in `CliHttpLimitsTest` and `CliExcerptTest`.
 
 - [x] **L12: `WebhookNotifier` posts exception text as Slack markup, unbounded**, `WebhookNotifier.java:29-34`
   - The message is redacted but otherwise raw; Slack and Mattermost parse `<!channel>` and
@@ -1104,7 +1150,8 @@ either a hardening option, a limitation, or something that could not be verified
   hex list, a hash of 16 or more hex characters, and a free-form header whose whole value is an
   absolute path containing a digit are redacted in error records, because they look like a
   grouped recovery code or a secret. Unchanged by M6 and documented in `docs/SECURITY.md`;
-  narrowing it means changing the rule for paths and logs too.
+  narrowing it means changing the rule for paths and logs too. (The verification pass narrowed
+  it for names made of words, `2024-black-friday-sale` included; see M6.)
 - **Rate-limiter flush on the request thread.** The shared-counter flush still runs on the
   request thread that wins it. It is now chunked, bisects on a bad key and stops after 2 s, but
   it was not moved off-thread because the same request reads the result for its own decision.
@@ -1114,6 +1161,8 @@ either a hardening option, a limitation, or something that could not be verified
   that). Several unrelated test classes also failed once and passed on rerun while four suites
   ran on one machine; a serial run on the merged branch was clean.
 - **`csrf-htmx.js` was not executed in a browser.** L8's test checks the script's text only.
+  The verification fix (a page-set header is kept for a cross-origin request) was replayed in
+  Node against a model of htmx's header copy, not in a browser.
 - **Page-cache poisoning by inputs the framework cannot see.** The dev and test check flags
   undeclared reads through `Request`; a handler that depends on global state or reads the raw
   Jetty request is not detected.

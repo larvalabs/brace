@@ -165,8 +165,20 @@ final class Toolchains {
     /** A ceiling, not a small cap: a toolchain zip is tens of MB. It only stops an endless body filling the heap. */
     static final long DOWNLOAD_MAX_BYTES = 1024L * 1024 * 1024;
 
-    /** Reads {@code in} to its end; fails if no byte arrives for {@code idle}, or past {@code max} bytes. */
+    /** The longest a download may take in all, however steadily its bytes arrive. */
+    static final Duration DOWNLOAD_TOTAL_TIMEOUT = Duration.ofMinutes(30);
+
+    /** As below, with the {@link #DOWNLOAD_TOTAL_TIMEOUT} deadline. */
     static byte[] readWithIdleTimeout(java.io.InputStream in, Duration idle, long max) throws Exception {
+        return readWithIdleTimeout(in, idle, DOWNLOAD_TOTAL_TIMEOUT, max);
+    }
+
+    /**
+     * Reads {@code in} to its end; fails if no byte arrives for {@code idle}, if it has not ended
+     * within {@code total} (a drip just faster than the idle timeout), or past {@code max} bytes.
+     */
+    static byte[] readWithIdleTimeout(java.io.InputStream in, Duration idle, Duration total, long max) throws Exception {
+        long deadline = System.nanoTime() + total.toNanos();
         var out = new java.io.ByteArrayOutputStream();
         var lastProgress = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
         var reader = new java.util.concurrent.FutureTask<Void>(() -> {
@@ -190,6 +202,11 @@ final class Toolchains {
                 } catch (java.util.concurrent.TimeoutException stillRunning) {
                     if (System.nanoTime() - lastProgress.get() > idle.toNanos()) {
                         throw new java.io.IOException("download stalled: nothing received for " + idle.toSeconds() + " seconds");
+                    }
+                    if (System.nanoTime() - deadline > 0) {
+                        throw new java.io.IOException("download did not finish within "
+                            + (total.toSeconds() >= 60 ? total.toMinutes() + " minutes" : total.toSeconds() + " seconds")
+                            + ": the server is sending too slowly");
                     }
                 } catch (java.util.concurrent.ExecutionException e) {
                     if (e.getCause() instanceof java.io.IOException io) throw io;

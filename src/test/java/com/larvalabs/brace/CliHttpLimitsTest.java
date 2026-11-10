@@ -61,6 +61,25 @@ class CliHttpLimitsTest {
                         java.util.Arrays.fill(chunk, (byte) 'x');
                         for (int i = 0; i < 20_000; i++) out.write(chunk);
                     }
+                    // Until the client hangs up (the write then throws).
+                    case "drip-forever" -> {
+                        exchange.getResponseHeaders().set("Content-Type", "text/html");
+                        exchange.sendResponseHeaders(200, 0);
+                        var out = exchange.getResponseBody();
+                        while (true) {
+                            out.write('x');
+                            out.flush();
+                            Thread.sleep(200);
+                        }
+                    }
+                    case "endless-forever" -> {
+                        exchange.getResponseHeaders().set("Content-Type", "text/html");
+                        exchange.sendResponseHeaders(200, 0);
+                        var out = exchange.getResponseBody();
+                        byte[] chunk = new byte[16 * 1024];
+                        java.util.Arrays.fill(chunk, (byte) 'x');
+                        while (true) out.write(chunk);
+                    }
                     default -> {
                         String body = path.equals("/ops/auth")
                             ? "{\"token\":\"tok\",\"expiresAt\":\"" + Instant.now().plusSeconds(3600) + "\"}"
@@ -189,7 +208,47 @@ class CliHttpLimitsTest {
         }
     }
 
+    // ---------- brace check's unauthenticated GET / (verification pass) ----------
+
+    @Test
+    void theRootProbeIsBoundedAgainstADrippingRoot() {
+        // The probe had its own client with a discarding body: its 10 s timeout covered the headers
+        // only, so a root that drips a byte every 200 ms held `brace check` indefinitely.
+        modes.put("/", "drip-forever");
+        var probe = assertTimeoutPreemptively(Duration.ofSeconds(10),
+            () -> CliCheck.probeRoot("http://127.0.0.1:" + server.getAddress().getPort()));
+        assertNull(probe, "a probe that cannot finish is skipped, like an unreachable root");
+    }
+
+    @Test
+    void theRootProbeIsBoundedAgainstAnEndlessRoot() {
+        modes.put("/", "endless-forever");
+        var probe = assertTimeoutPreemptively(Duration.ofSeconds(10),
+            () -> CliCheck.probeRoot("http://127.0.0.1:" + server.getAddress().getPort()));
+        assertNull(probe);
+    }
+
     // ---------- toolchain downloads: idle timeout, large ceiling ----------
+
+    @Test
+    void aDownloadDrippedFasterThanTheIdleTimeoutStopsAtTheTotalDeadline() {
+        // Verification pass: a byte every 100 ms never trips a 60 s idle timeout, so without a
+        // total deadline it held the launcher indefinitely.
+        var drip = new java.io.InputStream() {
+            @Override public int read() throws java.io.IOException {
+                try { Thread.sleep(100); } catch (InterruptedException e) { throw new java.io.InterruptedIOException(); }
+                return 'x';
+            }
+            @Override public int read(byte[] b, int off, int len) throws java.io.IOException {
+                b[off] = (byte) read();
+                return 1;
+            }
+        };
+        var e = assertThrows(java.io.IOException.class, () -> assertTimeoutPreemptively(Duration.ofSeconds(10),
+            () -> Toolchains.readWithIdleTimeout(drip, Duration.ofSeconds(5), Duration.ofSeconds(1), 1L << 30)));
+        assertTrue(e.getMessage().contains("did not finish within"), e.getMessage());
+        assertEquals(Duration.ofMinutes(30), Toolchains.DOWNLOAD_TOTAL_TIMEOUT);
+    }
 
     @Test
     void aStalledDownloadIsAbandonedAfterTheIdleTimeout() throws Exception {

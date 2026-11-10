@@ -45,6 +45,37 @@ class CliExcerptTest {
     }
 
     @Test
+    void anAuthFailureThatReachesTheTopLevelIsNotExcerptedTwice() {
+        // Verification pass: Cli.guarded excerpted the already-excerpted message again, cutting the
+        // inner "N more characters" marker and adding a wrong count of its own.
+        var err = new ByteArrayOutputStream();
+        var prev = System.err;
+        System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+        int code;
+        try {
+            code = Cli.guarded(() -> {
+                throw new CliAuth.OpsAuthFailure(401, "y".repeat(2_000_000));
+            });
+        } finally {
+            System.setErr(prev);
+        }
+        String text = err.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code);
+        assertTrue(text.contains("y".repeat(300) + "… (1999700 more characters)"), text);
+        assertEquals(1, text.split("more characters", -1).length - 1, "one marker: " + text);
+        // Any other long message is still excerpted once.
+        System.setErr(new PrintStream(err = new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+        try {
+            Cli.guarded(() -> {
+                throw new IllegalStateException("z".repeat(1000));
+            });
+        } finally {
+            System.setErr(prev);
+        }
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("… (700 more characters)"), err.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
     void aTenMegabyteNonJsonReplyPrintsABoundedLine(@TempDir Path projectDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Files.writeString(projectDir.resolve("ops-private.key"), kp.privateKey() + "\n" + kp.publicKey() + "\n");

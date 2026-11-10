@@ -287,6 +287,48 @@ class RedactorTest {
     }
 
     @Test
+    void framesOfSuppressedExceptionsAndTheirCausesAreKept() {
+        // Verification pass: printStackTrace indents the frames of a Suppressed: exception (and of
+        // the causes nested under it) with two or more tabs; only "\tat " counted as a frame, so
+        // those frames got the run rule: Http2ConnectionHandlerImpl.java became [redacted].java.
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String other = "9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        var top = new RuntimeException("outer");
+        var suppressed = new java.io.IOException("close failed " + secret,
+            new IllegalStateException("cause under suppressed " + other));
+        StackTraceElement[] frames = {
+            new StackTraceElement("com.example.net.Http2ConnectionHandlerImpl", "run",
+                "Http2ConnectionHandlerImpl.java", 42),
+            new StackTraceElement("shop.Base64UrlDecoder2Impl", "decode", "Base64UrlDecoder2Impl.java", 9),
+            new StackTraceElement("com.example.Worker$$Lambda$Aa1bB2cC3dD4eE5fF6gG7", "run", null, -1)};
+        suppressed.setStackTrace(frames);
+        suppressed.getCause().setStackTrace(new StackTraceElement[] {frames[1], frames[0]});
+        top.addSuppressed(suppressed);
+
+        String trace = traceOf(top);
+        assertTrue(trace.contains("\t\tat com.example.net.Http2ConnectionHandlerImpl.run(Http2ConnectionHandlerImpl.java:42)"),
+            "precondition: suppressed frames are indented with two tabs: " + trace);
+        assertTrue(trace.contains("\tCaused by: java.lang.IllegalStateException"), "precondition: " + trace);
+
+        String redacted = Redactor.redactStackTrace(trace);
+        assertFalse(redacted.contains(secret), "Suppressed: message must be redacted: " + redacted);
+        assertFalse(redacted.contains(other), "nested Caused by: message must be redacted: " + redacted);
+        assertTrue(redacted.contains("\tSuppressed: java.io.IOException: close failed [redacted]"), redacted);
+        assertTrue(redacted.contains("\tCaused by: java.lang.IllegalStateException: cause under suppressed [redacted]"),
+            redacted);
+        // Every frame line, at any indent, is kept exactly.
+        for (String line : trace.split("\n")) {
+            String t = line.strip();
+            if (t.startsWith("at ") || t.startsWith("... ")) {
+                assertTrue(redacted.contains(line), "frame line changed: " + line + "\n" + redacted);
+            }
+        }
+        // Logback's "... N common frames omitted" is a frame line too.
+        String logback = "java.lang.RuntimeException: x\n\tat a.B.c(B.java:1)\n\t\t... 12 common frames omitted\n";
+        assertSame(logback, Redactor.redactStackTrace(logback));
+    }
+
+    @Test
     void redactStackTraceKeepsLineEndingsAndReturnsCleanTracesUnchanged() {
         String clean = "java.lang.RuntimeException: user not found\r\n\tat a.B.c(B.java:1)\r\n";
         assertSame(clean, Redactor.redactStackTrace(clean));
@@ -453,17 +495,15 @@ class RedactorTest {
     @Test
     void valuesTheShapeRuleCannotTellFromSecretsAreRedactedConsistently() {
         // Judgment calls, kept consistent with redactPath: a 16+ char run of base64url/hex
-        // characters with a digit and a letter is redacted wherever it appears. A dated slug and a
-        // dash-joined hex list look exactly like a grouped recovery code; a 16+ hex hash looks
-        // like a hex token. Short hex (< 16) and comma/#-separated colour lists survive above.
-        assertEquals("utm_campaign=[REDACTED]", Redactor.redactQuery("utm_campaign=2024-black-friday-sale"));
+        // characters with a digit and a letter is redacted wherever it appears, unless it is a
+        // name made of words (namesAndFilePathsInMessagesSurvive). A dash-joined hex list looks
+        // exactly like a grouped recovery code; a 16+ hex hash looks like a hex token. Short hex
+        // (< 16) and comma/#-separated colour lists survive above.
         assertEquals("colors=[REDACTED]", Redactor.redactQuery("colors=ff0000-00ff00-0000ff"));
         assertEquals("hash=[REDACTED]", Redactor.redactQuery("hash=3f9a1c2b4d5e6f70"));
-        assertEquals("/blog/[redacted]", Redactor.redactPath("/blog/2024-black-friday-sale"));
         // Final review costs (documented in docs/SECURITY.md, "Known over-redaction").
         assertEquals("/assets/[redacted].js", Redactor.redactPath("/assets/ProductDetail-a1B2c3D4.js"));
         assertEquals("[redacted]", Redactor.redactHeaders(Map.of("X-Path", "/files/Ab3dE9fG/raw")).get("X-Path"));
-        assertEquals("[redacted] failed", Redactor.redactMessage("UTF8StreamJsonParser failed"));
         assertEquals("ticket_id=[REDACTED]&sig_alg=[REDACTED]", Redactor.redactQuery("ticket_id=4521&sig_alg=hs256"));
         // An email is PII, not a credential: kept, as before.
         assertEquals("email=a%40b.c", Redactor.redactQuery("email=a%40b.c"));
@@ -547,6 +587,37 @@ class RedactorTest {
             // and so in every message line of a stored stack trace
             assertEquals("java.io.IOException: " + c[1] + "\n\tat a.B.c(B.java:1)\n",
                 Redactor.redactStackTrace("java.io.IOException: " + c[0] + "\n\tat a.B.c(B.java:1)\n"));
+        }
+    }
+
+    @Test
+    void credentialsInAUrlsParameterSectionAndOddPrefixesAreRedacted() {
+        // Verification pass: the authority was copied verbatim unless it held '@', a URL was found
+        // only at the start of a scheme-character run, and an unencoded '/', '?' or '#' in a
+        // password ended the authority before the '@'.
+        String[][] cases = {
+            {"jdbc:sqlserver://db.internal:1433;databaseName=app;user=sa;password=hunter2 failed",
+                "jdbc:sqlserver://db.internal:1433;databaseName=app;user=sa;password=[REDACTED] failed"},
+            {"-jdbc:sqlserver://db:1433;password=hunter2", "-jdbc:sqlserver://db:1433;password=[REDACTED]"},
+            {"GET /proxy/https://user:hunter2@host/x failed", "GET /proxy/https://[REDACTED]@host/x failed"},
+            {"-https://user:hunter2@host/x", "-https://[REDACTED]@host/x"},
+            {"1https://user:hunter2@host/x", "1https://[REDACTED]@host/x"},
+            {"via=mongodb+srv://app:hunter2@cluster0.example.net/db", "via=mongodb+srv://[REDACTED]@cluster0.example.net/db"},
+            {"postgres://user:pa/ss@host:5432/db refused", "postgres://[REDACTED]@host:5432/db refused"},
+            {"postgres://user:pa?ss@host/db?sslmode=require", "postgres://[REDACTED]@host/db?sslmode=require"},
+            {"redis://:p#w@cache:6379 unreachable", "redis://[REDACTED]@cache:6379 unreachable"},
+            {"https://user:pa/ss@app.example.com/x", "https://[REDACTED]@app.example.com/x"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        assertEquals("https://[REDACTED]@app.example.com/x",
+            Redactor.redactHeaders(Map.of("Referer", "https://user:pa/ss@app.example.com/x")).get("Referer"));
+        // An '@' in a web path or query, or in an object key, is not user info.
+        for (String ok : List.of("see https://example.com/search?email=a@b.c&lang=en",
+                "see https://example.com:8443/users/@bob/posts", "NoSuchKey s3://bucket/exports/a@b.csv",
+                "jdbc:postgresql://db.internal:5432/app;ApplicationName=web")) {
+            assertEquals(ok, Redactor.redactMessage(ok), ok);
         }
     }
 
@@ -657,6 +728,109 @@ class RedactorTest {
         }
     }
 
+    /**
+     * Verification pass: messages the run rule must keep. A file path in a message is judged
+     * segment by segment, as redactPath judges it, and a name made of words (snake_case,
+     * kebab-case, camelCase, with short digit groups) is not secret-shaped.
+     */
+    static final List<String> NAMES_AND_PATHS_THAT_SURVIVE = List.of(
+        "java.nio.file.NoSuchFileException: /var/lib/app/uploads/2024/11/05/invoice-48213-final-v2.pdf",
+        "Script V3__create_users_table.sql failed at db/migration/V3__create_users_table.sql",
+        "Migration V19__brace_cache_used_at.sql failed",
+        "NoSuchKey: exports/2024/11/05/customer-orders-2024-11-05.csv",
+        "ERROR: relation \"user_sessions_archive_2024q4\" does not exist",
+        "Unique index or primary key violation: \"CONSTRAINT_INDEX_4 ON PUBLIC.USERS(EMAIL)\"",
+        "Connection to db-primary-7f8c9d.internal:5432 refused",
+        "class com.example.Foo$$Lambda$142/0x0000000800c8a1b0 cannot be cast to class Bar",
+        "class com.example.Foo$$Lambda/0x000001f0a1047000 cannot be cast to class Bar",
+        "Version 2024.11.05-1423-g3f9a1c2 is not supported",
+        "ERROR: relation \"audit_log_entries_2024\" does not exist",
+        "Unrecognized field \"shippingAddressLine2\" (class Order), not marked as ignorable",
+        "Order ORD-2024-11-000482 not found",
+        "Invoice INV-20241105-000482 could not be sent",
+        "No enum constant Status.PARTIALLY_REFUNDED_V2",
+        "UTF8StreamJsonParser failed",
+        "Http2ConnectionHandlerImpl closed the stream",
+        "XMLHttpRequest2Handler failed",
+        "blog post 2024-black-friday-sale not found");
+
+    /**
+     * Names the word rule still cannot tell from a secret, and so redacts: a short hex group
+     * (a pod's ReplicaSet hash, a host suffix), a one-letter camelCase word, two words with digits,
+     * three parts of one length (a grouped code's shape), a 40-hex commit SHA.
+     */
+    static final List<String> NAMES_STILL_REDACTED = List.of(
+        "web-7d9f8b6c5-x2k4q", "db-primary-7f8c9d", "AmazonS3Exception", "utf8mb4_0900_ai_ci",
+        "test-case-data-2024", "3f9a1c2b4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90");
+
+    @Test
+    void namesAndFilePathsInMessagesSurvive() {
+        for (String m : NAMES_AND_PATHS_THAT_SURVIVE) {
+            assertEquals(m, Redactor.redactMessage(m), m);
+        }
+        // The same names in a request path and a query value.
+        assertEquals("/files/2024/11/invoice-48213-final-v2.pdf", Redactor.redactPath("/files/2024/11/invoice-48213-final-v2.pdf"));
+        assertEquals("/blog/2024-black-friday-sale", Redactor.redactPath("/blog/2024-black-friday-sale"));
+        assertEquals("utm_campaign=2024-black-friday-sale", Redactor.redactQuery("utm_campaign=2024-black-friday-sale"));
+        for (String v : NAMES_STILL_REDACTED) {
+            assertEquals("seen [redacted] here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+    }
+
+    @Test
+    void aFilePathInAMessageIsRedactedSegmentBySegment() {
+        String[][] cases = {
+            {"java.io.FileNotFoundException: /tmp/brace-uploads/upload-8a7b6c5d4e3f2a1b.tmp",
+                "java.io.FileNotFoundException: /tmp/brace-uploads/[redacted].tmp"},
+            {"Failed to load /assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css", "Failed to load /assets/[redacted].css"},
+            {"no such file /reset/" + T + "/confirm", "no such file /reset/[redacted]/confirm"},
+            {"NoSuchKey: exports/" + T + "/data.csv", "NoSuchKey: exports/[redacted]/data.csv"},
+            {"GET /v1/payment_intents/pi_3OaBcD2eFgHiJkLm failed", "GET /v1/payment_intents/[redacted] failed"},
+            // A standard-base64 secret holding '/' is still replaced whole.
+            {"key aB3dE/fG7hI9jK1/mN2oP4qR rejected", "key [redacted] rejected"},
+            {"key /aB3dE9fG/h1JkLmN0pQrS7tUv rejected", "key [redacted] rejected"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+    }
+
+    /** Look-alikes: a word next to a secret-shaped part, and tokens that must stay redacted. */
+    static final List<String> LOOK_ALIKES_THAT_ARE_REDACTED = List.of(
+        "reset-8a7b6c5d4e3f2a1b9c0d", "token_Ab3dE9fGh1JkLmN0pQrS", "upload-8a7b6c5d4e3f2a1b",
+        "8a7b6c5d4e3f2a1b", "3f9a1c2b4d5e6f7a8b9c0d1e", "3f9a1c2b4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90",
+        "pi_3OaBcD2eFgHiJkLm", "kqzrmw8pxtnbv7ab", "KQZR8MWPX3TNBV7A", "deadbeefcafe1234", "abcd-ef12-gh3i-4jkl",
+        HEX32, RANDOM32, T, "0x" + HEX32 + HEX32);
+
+    @Test
+    void lookAlikesMixingWordsAndSecretsAreRedacted() {
+        for (String v : LOOK_ALIKES_THAT_ARE_REDACTED) {
+            assertEquals("seen [redacted] here", Redactor.redactMessage("seen " + v + " here"), v);
+        }
+        // Random tokens of every common alphabet, 16 to 40 characters, are redacted.
+        var rnd = new java.util.Random(42);
+        String[] alphabets = {"0123456789abcdef", "0123456789ABCDEF", "0123456789abcdefghijklmnopqrstuvwxyz",
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"};
+        int kept = 0;
+        var keptExamples = new java.util.ArrayList<String>();
+        for (String alphabet : alphabets) {
+            for (int n = 0; n < 2_000; n++) {
+                int len = 16 + rnd.nextInt(25);
+                var sb = new StringBuilder(len);
+                for (int k = 0; k < len; k++) sb.append(alphabet.charAt(rnd.nextInt(alphabet.length())));
+                String tok = sb.toString();
+                if (!Redactor.isSecretShaped(tok)) continue; // all digits, all letters, a UUID: not candidates
+                if (Redactor.redactMessage("x " + tok).equals("x " + tok)) {
+                    kept++;
+                    if (keptExamples.size() < 5) keptExamples.add(tok);
+                }
+            }
+        }
+        assertEquals(0, kept, "random tokens kept as names: " + keptExamples);
+    }
+
     @Test
     void contentHashesInFileNamesAreRedactedDeliberately() {
         // A content hash of 16+ characters in a file name cannot be told from a download token
@@ -683,7 +857,9 @@ class RedactorTest {
         // auth as the last segment
         "X-Auth", "X-Upstream-Auth", "Proxy-Auth", "basic_auth",
         // the substring list (unchanged)
-        "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce");
+        "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce",
+        // verification pass: totp alone, and the plural "codes" next to an auth word
+        "totp", "TOTP", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
 
     /** Names {@link Redactor#isSensitive} must NOT match. */
     static final List<String> STRICT_NAMES_THAT_DONT = List.of(
@@ -692,18 +868,21 @@ class RedactorTest {
         "code_challenge", "user_code", "postcode", "barcode", "encode", "codec", "signal", "design", "assign",
         "sigma", "footprint", "hotpath", "otpauth_uri", "pinned", "is_pinned", "spin", "pinterest", "sessions",
         "sidebar", "side", "tickets", "author", "authority", "auth_method", "auth_provider", "oauth_provider",
-        "X-Auth-Request-User", "state", "username", "count", "path", "monkey");
+        "X-Auth-Request-User", "state", "username", "count", "path", "monkey",
+        "zip_codes", "status_codes", "country_codes", "error_codes", "barcodes");
 
     /** Names {@link Redactor#isSensitiveField} (log fields, route params) must match. */
     static final List<String> FIELD_NAMES_THAT_MATCH = List.of(
         "password", "token", "api_key", "secret", "csrf", "jwt", "sessionId", "session_id", "X-Auth-Token",
         "auth_code", "verification_code", "verificationCode", "reset_code", "pin_code", "passcode", "otp",
-        "otp_code", "code_verifier", "device_code");
+        "otp_code", "code_verifier", "device_code",
+        "totp", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
 
     /** Names {@link Redactor#isSensitiveField} must NOT match: the short words that are ordinary data in logs and routes. */
     static final List<String> FIELD_NAMES_THAT_DONT = List.of(
         "code", "Code", "sig", "pin", "session", "sid", "ticket", "state", "X-Auth", "otp_enabled",
-        "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user");
+        "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user",
+        "codes", "zip_codes", "status_codes", "totp_enabled");
 
     @Test
     void sensitiveNamesMatchBySegment() {
@@ -800,7 +979,10 @@ class RedactorTest {
         // ampersands, dots, %25 (decode rounds), '=' pairs, '<'+'/' spans, scheme scans, nested
         // URLs, quotes, name runs. 64 KB and 1 MB of each, through every entry point.
         List<String> units = List.of("%", "&", ".", "%25", "=", "</", "a:", "x://", "a=/", "\"", "a=\"",
-            "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25");
+            "https://h/?n=", "a[", "~", "$", "Ab1/", "a.b.c.", "%2", "x=%25",
+            // verification pass: mid-run schemes, user info to the last '@', ';' parameters, names
+            "1https://u:p@", "-https:/", "/https://", "x-jdbc:s://h;a=b", "postgres://a:b/c@", ";password=",
+            "@", "a://b:c/d@", "ab_cd-", "Ab3_", "2024q4-", "0x1/");
         long t0 = System.nanoTime();
         for (int size : List.of(64 * 1024, 1024 * 1024)) {
             for (String unit : units) {

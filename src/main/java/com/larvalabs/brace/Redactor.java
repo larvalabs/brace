@@ -36,9 +36,11 @@ import java.util.regex.Pattern;
  *   <li>Length ≥ {@value #MIN_SECRET_LENGTH} characters (of {@code [A-Za-z0-9_\-+/]}).</li>
  *   <li>Contains at least one ASCII digit <em>and</em> at least one ASCII letter
  *       (rules out purely numeric IDs and purely alphabetic slugs).</li>
- *   <li>It is not a standard UUID, and not an absolute path whose {@code /}-pieces are all short
- *       and none mixes upper case, lower case and digits.</li>
+ *   <li>It is not a standard UUID, and not a {@linkplain #isNameLike name made of words}
+ *       ({@code V3__create_users_table}, {@code invoice-48213-final-v2}).</li>
  * </ol>
+ * A label that is a file path (it holds {@code /} and no short piece mixes upper case, lower case
+ * and digits) is judged piece by piece instead, as {@link #redactPath} does.
  * So {@code T.}, {@code <T>}, {@code T~x}, {@code /dl/T.pdf} and {@code SG.x.y} lose T. A run
  * holding {@code %} is also percent-decoded (up to {@value #DECODE_ROUNDS} rounds) and replaced
  * whole when the decoded text holds anything to redact. Kept whole: a JWT or two-part
@@ -92,7 +94,7 @@ public class Redactor {
      * {@code account_sid}), but ordinary data in a log field or a route parameter. Matched by
      * {@link #isSensitive} only.
      */
-    private static final Set<String> TRANSIT_WORDS = Set.of("sig", "otp", "pin", "sid", "ticket", "session");
+    private static final Set<String> TRANSIT_WORDS = Set.of("sig", "otp", "totp", "pin", "sid", "ticket", "session");
 
     // ---- Value-shaped redaction constants ----
 
@@ -165,11 +167,11 @@ public class Redactor {
      *   <li>the normalized name (lowercased, {@code -}/{@code _} stripped) contains a
      *       {@link #SENSITIVE} substring ({@code token}, {@code password}, {@code apikey}, …); or</li>
      *   <li>a name segment (split on {@code _ - . [ ]} and other punctuation, and at camelCase
-     *       boundaries; a leading {@code X-} ignored) is {@code code} next to an auth-ish segment
-     *       ({@link #CODE_QUALIFIERS}), or is an auth-ish word plus {@code code}
-     *       ({@code passcode}, {@code authcode}); or</li>
-     *   <li>a segment is one of {@link #TRANSIT_WORDS} ({@code sig}, {@code otp}, {@code pin},
-     *       {@code sid}, {@code ticket}, {@code session}); or</li>
+     *       boundaries; a leading {@code X-} ignored) is {@code code} or {@code codes} next to an
+     *       auth-ish segment ({@link #CODE_QUALIFIERS}: {@code backup_codes}), or is an auth-ish
+     *       word plus {@code code} or {@code codes} ({@code passcode}, {@code authcode}); or</li>
+     *   <li>a segment is one of {@link #TRANSIT_WORDS} ({@code sig}, {@code otp}, {@code totp},
+     *       {@code pin}, {@code sid}, {@code ticket}, {@code session}); or</li>
      *   <li>the whole name is {@code code} (an OAuth authorization code), or its last segment is
      *       {@code auth} ({@code X-Auth}, {@code X-Upstream-Auth}).</li>
      * </ul>
@@ -183,8 +185,8 @@ public class Redactor {
     /**
      * The field name rule, for structured log fields ({@link #redact(Map)}, so every
      * {@code Log} entry) and route parameter names (analytics): the {@link #SENSITIVE} substrings
-     * and the auth-paired {@code code} rule of {@link #isSensitive}, plus a field named exactly
-     * {@code otp}, but not the short words that are ordinary data there: a field
+     * and the auth-paired {@code code}/{@code codes} rule of {@link #isSensitive}, plus a field
+     * named exactly {@code otp} or {@code totp}, but not the short words that are ordinary data there: a field
      * {@code code:"card_declined"}, a route {@code /countries/{code}}, {@code sig}, {@code pin},
      * {@code sid}, {@code ticket}, {@code session}, {@code X-Auth}.
      */
@@ -205,10 +207,11 @@ public class Redactor {
         boolean qualifier = false;
         for (int i = first; i < segs.size(); i++) {
             String seg = segs.get(i);
-            if (seg.equals("code")) {
+            // The plural is paired like the singular: backup_codes, recovery_codes, passcodes.
+            int stem = seg.endsWith("codes") ? seg.length() - 5 : seg.endsWith("code") ? seg.length() - 4 : -1;
+            if (stem == 0) {
                 code = true;
-            } else if (seg.length() > 4 && seg.endsWith("code")
-                    && CODE_QUALIFIERS.contains(seg.substring(0, seg.length() - 4))) {
+            } else if (stem > 0 && CODE_QUALIFIERS.contains(seg.substring(0, stem))) {
                 return true; // passcode, authcode, otpcode
             }
             if (CODE_QUALIFIERS.contains(seg)) qualifier = true;
@@ -216,7 +219,7 @@ public class Redactor {
         }
         if (code && qualifier) return true;
         boolean single = segs.size() - first == 1;
-        if (!strict) return single && segs.get(first).equals("otp");
+        if (!strict) return single && (segs.get(first).equals("otp") || segs.get(first).equals("totp"));
         return (single && segs.get(first).equals("code")) || segs.get(segs.size() - 1).equals("auth");
     }
 
@@ -392,18 +395,24 @@ public class Redactor {
         StringBuilder out = null;
         int copied = 0;
         int i = 0;
+        int urlAt = -1; // a known scheme found at the end of the previous run ("/proxy/https://")
         while (i < n) {
             char c = s.charAt(i);
             String replacement = null;
             int from = i;
             int to = i + 1;
-            if (isAsciiLetter(c) && (i == 0 || !isSchemeChar(s.charAt(i - 1)))) {
+            if (isAsciiLetter(c) && (i == 0 || !isSchemeChar(s.charAt(i - 1)) || i == urlAt)) {
                 int end = urlEnd(s, i);
                 if (end > i) {
                     to = end;
                     replacement = urlReplacement(s.substring(i, end), rounds, depth);
                 } else {
                     to = chunkEnd(s, i);
+                    int u = knownSchemeStart(s, i, to);
+                    if (u > i) {
+                        to = u;
+                        urlAt = u;
+                    }
                     replacement = redactChunk(s, i, to, strict, rounds, depth);
                 }
             } else if (c == '<' && i + 1 < n && s.charAt(i + 1) == '/') {
@@ -430,7 +439,17 @@ public class Redactor {
                 }
             } else if (isChunkChar(c)) {
                 to = chunkEnd(s, i);
-                replacement = redactChunk(s, i, to, strict, rounds, depth);
+                int u = knownSchemeStart(s, i, to);
+                if (u == i) {
+                    to = urlEnd(s, i); // jdbc:<subscheme>:// after a prefix ("-jdbc:sqlserver://")
+                    replacement = urlReplacement(s.substring(i, to), rounds, depth);
+                } else {
+                    if (u > i) {
+                        to = u;
+                        urlAt = u;
+                    }
+                    replacement = redactChunk(s, i, to, strict, rounds, depth);
+                }
             }
             if (replacement != null && !replacement.contentEquals(s.subSequence(from, to))) {
                 if (out == null) out = new StringBuilder(n);
@@ -486,6 +505,31 @@ public class Redactor {
             j++;
         }
         return -1;
+    }
+
+    /**
+     * Scheme names recognised even in the middle of a run, where a URL is otherwise not looked for
+     * ({@code GET /proxy/https://user:pw@host}, {@code -https://}, {@code 1https://}). Any other
+     * {@code [a-z][a-z0-9+.-]*://} is recognised at the start of a run only.
+     */
+    private static final List<String> KNOWN_SCHEMES = List.of(
+        "http", "https", "ws", "wss", "ftp", "postgres", "postgresql", "mysql", "mariadb", "mongodb",
+        "mongodb+srv", "redis", "rediss", "amqp", "amqps", "smtp", "smtps", "s3");
+
+    /**
+     * Where a URL starts inside the run {@code s[from, to)} that ends right before {@code ://}: at
+     * a {@link #KNOWN_SCHEMES known scheme} that ends the run, or at the run itself when it follows
+     * {@code jdbc:} ({@code -jdbc:sqlserver://}). Otherwise -1.
+     */
+    private static int knownSchemeStart(String s, int from, int to) {
+        if (!s.startsWith("://", to)) return -1;
+        int best = -1;
+        for (String k : KNOWN_SCHEMES) {
+            int st = to - k.length();
+            if (st >= from && (best < 0 || st < best) && s.regionMatches(true, st, k, 0, k.length())) best = st;
+        }
+        if (best < 0 && from >= 5 && s.regionMatches(true, from - 5, "jdbc:", 0, 5)) return from;
+        return best;
     }
 
     private static boolean endsUrl(char c) {
@@ -581,10 +625,24 @@ public class Redactor {
         for (int k = 0; k <= len; k++) {
             char c = k < len ? chunk.charAt(k) : '.';
             if (c == '.' || c == '~' || c == '$' || c == '%') {
-                if (k - start >= MIN_SECRET_LENGTH && isSecretLabel(chunk, start, k)) {
-                    if (out == null) out = new StringBuilder(len);
-                    out.append(chunk, copied, start).append(SHAPE_PLACEHOLDER);
-                    copied = k;
+                if (k - start >= MIN_SECRET_LENGTH) {
+                    if (isPathShaped(chunk, start, k)) {
+                        // A file path: each '/'-piece is judged on its own, as redactPath does.
+                        int p = start;
+                        for (int m = start; m <= k; m++) {
+                            if (m < k && chunk.charAt(m) != '/') continue;
+                            if (isSecretLabel(chunk, p, m)) {
+                                if (out == null) out = new StringBuilder(len);
+                                out.append(chunk, copied, p).append(SHAPE_PLACEHOLDER);
+                                copied = m;
+                            }
+                            p = m + 1;
+                        }
+                    } else if (isSecretLabel(chunk, start, k)) {
+                        if (out == null) out = new StringBuilder(len);
+                        out.append(chunk, copied, start).append(SHAPE_PLACEHOLDER);
+                        copied = k;
+                    }
                 }
                 start = k + 1;
             }
@@ -595,14 +653,212 @@ public class Redactor {
 
     /**
      * A label ({@code [A-Za-z0-9_\-+/]}, no dots) that is secret-shaped: at least
-     * {@value #MIN_SECRET_LENGTH} characters with a digit and a letter, not a UUID, and not
-     * {@linkplain #isPathLike path-like}.
+     * {@value #MIN_SECRET_LENGTH} characters with a digit and a letter, not a UUID, and not a
+     * {@linkplain #isNameLike name made of words}. A label with {@code /} reaches here whole only
+     * when it is not {@linkplain #isPathShaped path-shaped}.
      */
     private static boolean isSecretLabel(String s, int from, int to) {
         if (to - from < MIN_SECRET_LENGTH) return false;
         if (to - from == 36 && UUID_SHAPE.matcher(s.substring(from, to)).matches()) return false;
         if (!hasDigitAndLetter(s, from, to)) return false;
-        return !isPathLike(s, from, to);
+        return !isNameLike(s, from, to);
+    }
+
+    /**
+     * A label that is a file or URL path rather than a standard-base64 secret: it holds {@code /},
+     * no {@code +}, and no {@code /}-piece shorter than {@value #MIN_SECRET_LENGTH} mixes upper
+     * case, lower case and digits. Its pieces are then judged one by one, so
+     * {@code /tmp/uploads/upload-<hex>} keeps its directories and {@code aB3dE/fG7hI9jK1/mN2oP4qR}
+     * is still judged whole.
+     */
+    private static boolean isPathShaped(String s, int from, int to) {
+        if (indexOfAny(s, from, to, "/") == to) return false;
+        int start = from;
+        for (int i = from; i <= to; i++) {
+            char c = i < to ? s.charAt(i) : '/';
+            if (c == '+') return false;
+            if (c == '/') {
+                if (i - start < MIN_SECRET_LENGTH && mixesCaseAndDigits(s, start, i)) return false;
+                start = i + 1;
+            }
+        }
+        return true;
+    }
+
+    /** Digits in a group of a name ({@code 20241105}, {@code 000482}); a longer group is an id or a token. */
+    private static final int NAME_DIGITS = 8;
+
+    /**
+     * A label made of ordinary words, so not secret-shaped although it is long and holds a digit:
+     * {@code V3__create_users_table}, {@code invoice-48213-final-v2}, {@code CONSTRAINT_INDEX_4},
+     * {@code user_sessions_archive_2024q4}, {@code shippingAddressLine2},
+     * {@code Http2ConnectionHandlerImpl}. The label is split into parts on {@code _} and {@code -},
+     * and each part into words: a leading digit group, or a run of letters (cut at camelCase
+     * boundaries) with an optional trailing digit group. It is a name when all of these hold:
+     * <ul>
+     *   <li>it holds only {@code [A-Za-z0-9_-]};</li>
+     *   <li>it has two or more words, and at least one has three or more letters;</li>
+     *   <li>a digit group has at most {@value #NAME_DIGITS} digits on its own and at most
+     *       {@value #NAME_SUFFIX_DIGITS} after letters ({@code v2}, {@code V19}), and at most one
+     *       word in the label has both letters and digits;</li>
+     *   <li>a digit is followed directly by a letter (not at a camelCase boundary such as
+     *       {@code Http2Connection}) at most once, and only inside a part of at most 8 characters
+     *       ({@code 2024q4}): letters and digits interleaved within a long part
+     *       ({@code upload-8a7b6c5d4e3f2a1b}, a SHA, a random token) are a secret;</li>
+     *   <li>at most one word is a fragment (one or two letters inside a longer part, {@code q4});</li>
+     *   <li>in a part with both cases (camelCase), every word has four or more letters
+     *       ({@code Http}, {@code Line}), except a first lower-case word of three or more
+     *       ({@code get}) and one acronym of two to four capitals ({@code UTF}): random
+     *       mixed-case text cuts into short words ({@code Ym}, {@code Hf7}, {@code Oz});</li>
+     *   <li>it is not three or more parts of (nearly) one length, the shape of a grouped code
+     *       ({@code abcd5-efgh6-ijkl7}).</li>
+     * </ul>
+     * Also a name: a {@code 0x} literal of at most 16 hex digits (a lambda's address), and a
+     * {@code git describe} suffix ({@code 1423-g3f9a1c2}: {@code g} plus 7 to 12 hex digits after
+     * a digit group). A single word ({@code deadbeefcafe1234}, a 40-hex SHA) is never a name.
+     */
+    static boolean isNameLike(String s, int from, int to) {
+        if (to - from > 2 && to - from <= 18 && s.charAt(from) == '0' && s.charAt(from + 1) == 'x'
+                && isHex(s, from + 2, to)) {
+            return true;
+        }
+        int words = 0;
+        int longWords = 0;
+        int fragments = 0;
+        int interleaved = 0;
+        int digitWords = 0;
+        int parts = 0;
+        int minPart = Integer.MAX_VALUE;
+        int maxPart = 0;
+        boolean prevDigits = false;
+        int i = from;
+        while (i < to) {
+            char c = s.charAt(i);
+            if (c == '_' || c == '-') {
+                i++;
+                continue;
+            }
+            int end = i;
+            boolean partLower = false;
+            boolean partUpper = false;
+            while (end < to && (isAsciiLetter(s.charAt(end)) || isAsciiDigit(s.charAt(end)))) {
+                char e = s.charAt(end);
+                if (e >= 'a' && e <= 'z') partLower = true;
+                else if (e >= 'A' && e <= 'Z') partUpper = true;
+                end++;
+            }
+            boolean camel = partLower && partUpper;
+            if (end == i) return false; // '+', '/' or anything else: not a name
+            int partLen = end - i;
+            parts++;
+            minPart = Math.min(minPart, partLen);
+            maxPart = Math.max(maxPart, partLen);
+            if (prevDigits && partLen >= 8 && partLen <= 13 && s.charAt(i) == 'g' && isLowerHex(s, i + 1, end)) {
+                words++; // git describe: <tag>-<n>-g<hash>
+                longWords++;
+                prevDigits = false;
+                i = end;
+                continue;
+            }
+            int partWords = 0;
+            int partFragments = 0;
+            int acronyms = 0;
+            boolean digitsOnly = true;
+            int j = i;
+            while (j < end) {
+                int letters = 0;
+                boolean lower = false;
+                int wordStart = j;
+                if (isAsciiLetter(s.charAt(j))) {
+                    digitsOnly = false;
+                    letters = 1;
+                    int consonants = isConsonant(s.charAt(j)) ? 1 : 0;
+                    j++;
+                    while (j < end && isAsciiLetter(s.charAt(j)) && !camelBoundary(s, j, end)) {
+                        if (s.charAt(j) >= 'a') lower = true;
+                        consonants = isConsonant(s.charAt(j)) ? consonants + 1 : 0;
+                        if (consonants >= 5) return false; // not a word: bxsngv, Snzkmpf
+                        letters++;
+                        j++;
+                    }
+                }
+                int digits = 0;
+                while (j < end && isAsciiDigit(s.charAt(j))) {
+                    digits++;
+                    j++;
+                }
+                if (j == wordStart) return false;
+                if (digits > (letters > 0 ? NAME_SUFFIX_DIGITS : NAME_DIGITS)) return false;
+                if (letters > 0 && digits > 0 && ++digitWords > 1) return false;
+                if (camel) {
+                    boolean capital = letters > 0 && s.charAt(wordStart) <= 'Z';
+                    if (capital && letters >= 2 && !lower) {
+                        // one short acronym, first in the part or before digits (XMLHttp, UTF8Stream)
+                        if (letters > 4 || ++acronyms > 1 || (partWords > 0 && digits == 0)) return false;
+                    } else if (capital ? letters < 4 : partWords > 0 || letters < 3 || digits > 0) {
+                        return false; // also: a leading digit group, or digits on the first lower-case word
+                    }
+                }
+                if (j < end && digits > 0 && !camelBoundary(s, j, end)) {
+                    // a letter straight after a digit, not starting a camelCase word: only in a
+                    // part shaped like 2024q4 (1-4 digits, one letter, 1-2 digits), once
+                    if (!isQuarter(s, i, end) || ++interleaved > 1) return false;
+                }
+                partWords++;
+                if (letters >= 3) longWords++;
+                else if (letters > 0) partFragments++;
+            }
+            words += partWords;
+            if (partWords > 1) fragments += partFragments;
+            prevDigits = digitsOnly;
+            i = end;
+        }
+        // Three or more parts of (nearly) one length are a grouped code (abcd5-efgh6-ijkl7), not words.
+        if (parts >= 3 && maxPart - minPart <= 1) return false;
+        return words >= 2 && longWords >= 1 && fragments <= 1;
+    }
+
+    /** Digits after the letters of a word in a name ({@code v2}, {@code V19}, {@code sha256}). */
+    private static final int NAME_SUFFIX_DIGITS = 3;
+
+    /** {@code s[from, to)} is 1 to 4 digits, one letter, then 1 or 2 digits: {@code 2024q4}, {@code 2024H1}. */
+    private static boolean isQuarter(String s, int from, int to) {
+        int i = from;
+        while (i < to && isAsciiDigit(s.charAt(i))) i++;
+        int lead = i - from;
+        if (lead < 1 || lead > 4 || i >= to || !isAsciiLetter(s.charAt(i))) return false;
+        int tail = to - i - 1;
+        return tail >= 1 && tail <= 2 && isAsciiDigit(s.charAt(i + 1)) && (tail == 1 || isAsciiDigit(s.charAt(i + 2)));
+    }
+
+    /** A letter other than {@code a e i o u y}, either case. */
+    private static boolean isConsonant(char c) {
+        return "aeiouyAEIOUY".indexOf(c) < 0;
+    }
+
+    /** {@code s[j]} starts a camelCase word: an upper-case letter after a lower-case letter or a digit, or before a lower-case one. */
+    private static boolean camelBoundary(String s, int j, int end) {
+        char c = s.charAt(j);
+        if (c < 'A' || c > 'Z') return false;
+        char prev = s.charAt(j - 1);
+        if ((prev >= 'a' && prev <= 'z') || isAsciiDigit(prev)) {
+            // after a digit, only a Capitalized word counts ("Http2Connection", not "KQZR8MWPX")
+            return !isAsciiDigit(prev) || (j + 1 < end && s.charAt(j + 1) >= 'a' && s.charAt(j + 1) <= 'z');
+        }
+        return j + 1 < end && s.charAt(j + 1) >= 'a' && s.charAt(j + 1) <= 'z';
+    }
+
+    private static boolean isHex(String s, int from, int to) {
+        for (int i = from; i < to; i++) if (hexValue(s.charAt(i)) < 0) return false;
+        return true;
+    }
+
+    private static boolean isLowerHex(String s, int from, int to) {
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (!isAsciiDigit(c) && (c < 'a' || c > 'f')) return false;
+        }
+        return true;
     }
 
     /**
@@ -670,10 +926,22 @@ public class Redactor {
         return labels >= 3;
     }
 
-    /** A DNS name of three or more labels ({@code [A-Za-z0-9-]}, 1 to 63) whose last label is in {@link #HOST_TLDS}. */
+    /**
+     * Last labels of a private network name, which make a two-label name a hostname too:
+     * {@code db-primary-7f8c9d.internal}.
+     */
+    private static final Set<String> PRIVATE_TLDS = Set.of("internal", "local", "localhost", "lan", "corp");
+
+    /**
+     * A DNS name of three or more labels ({@code [A-Za-z0-9-]}, 1 to 63) whose last label is in
+     * {@link #HOST_TLDS}, or of two labels whose last is in {@link #PRIVATE_TLDS}.
+     */
     private static boolean isHostname(String v) {
         int lastDot = v.lastIndexOf('.');
-        if (lastDot < 0 || !HOST_TLDS.contains(v.substring(lastDot + 1).toLowerCase(Locale.ROOT))) return false;
+        if (lastDot < 0) return false;
+        String tld = v.substring(lastDot + 1).toLowerCase(Locale.ROOT);
+        if (!HOST_TLDS.contains(tld)) return false;
+        int minLabels = PRIVATE_TLDS.contains(tld) ? 2 : 3;
         int labels = 0;
         int start = 0;
         for (int i = 0; i <= v.length(); i++) {
@@ -687,7 +955,7 @@ public class Redactor {
                 return false;
             }
         }
-        return labels >= 3;
+        return labels >= minLabels;
     }
 
     /**
@@ -865,11 +1133,25 @@ public class Redactor {
             for (int i = authStart; i < authEnd; i++) {
                 if (url.charAt(i) == '@') at = i;
             }
-            if (at >= authStart) {
-                out.append(PLACEHOLDER).append(url, at, authEnd);
-            } else {
-                out.append(url, authStart, authEnd);
+            if (at < 0) {
+                // A password holding an unencoded '/', '?' or '#' (postgres://user:pa/ss@host): the
+                // user info runs to the last '@'.
+                int lastAt = url.lastIndexOf('@');
+                if (lastAt > authEnd && userInfoBeforeStop(url, sep, authStart, authEnd)) {
+                    at = lastAt;
+                    authEnd = indexOfAny(url, at, len, "/?#");
+                }
             }
+            int hostStart = authStart;
+            if (at >= authStart) {
+                out.append(PLACEHOLDER);
+                hostStart = at;
+            }
+            // Parameters after the host (jdbc:sqlserver://host:1433;user=sa;password=…) get the
+            // name=value pass.
+            int semi = indexOfAny(url, hostStart, authEnd, ";");
+            out.append(url, hostStart, semi);
+            if (semi < authEnd) out.append(redactText(url.substring(semi, authEnd), true, rounds, depth));
             pos = authEnd;
         } else if (url.charAt(0) == '/') {
             pos = 0;
@@ -887,6 +1169,25 @@ public class Redactor {
             out.append('#').append(redactQuery(url.substring(fragStart + 1), rounds, depth));
         }
         return out.toString();
+    }
+
+    /**
+     * The text between {@code ://} and the first {@code / ? #} looks like the start of a
+     * {@code user:password} rather than a host: it holds {@code :}, and either the scheme is not a
+     * web scheme or what follows the {@code :} is not a numeric port. So
+     * {@code https://example.com:8443/users/@bob} and {@code s3://bucket/a@b.csv} keep their path.
+     */
+    private static boolean userInfoBeforeStop(String url, int sep, int authStart, int authEnd) {
+        int colon = indexOfAny(url, authStart, authEnd, ":");
+        if (colon == authEnd) return false;
+        String scheme = url.substring(0, sep).toLowerCase(Locale.ROOT);
+        boolean web = scheme.equals("http") || scheme.equals("https") || scheme.equals("ws") || scheme.equals("wss");
+        if (!web) return true;
+        if (colon + 1 == authEnd) return true;
+        for (int i = colon + 1; i < authEnd; i++) {
+            if (!isAsciiDigit(url.charAt(i))) return true;
+        }
+        return false;
     }
 
     /** {@code scheme://…} or {@code /…} with no whitespace: what {@link #redactUrl} parses. */
@@ -995,7 +1296,8 @@ public class Redactor {
      * the exception message verbatim in the first line, in every {@code Caused by:} and
      * {@code Suppressed:} line, and on the continuation lines of a multi-line message, so
      * redacting {@code getMessage()} alone leaves the same text readable in the trace. Every line
-     * except a frame line ({@code \tat ...} or {@code \t... N more}) goes through
+     * except a frame line ({@code at ...} or {@code ... N more} after one or more tabs, so the
+     * frames of a {@code Suppressed:} exception and its causes too) goes through
      * {@link #redactMessage}; frame lines and line endings are kept exactly as they were. A trace
      * with nothing to redact is returned unchanged.
      */
@@ -1010,8 +1312,7 @@ public class Redactor {
             int next = nl < 0 ? len : nl + 1;
             int end = nl < 0 ? len : nl;
             if (end > pos && stackTrace.charAt(end - 1) == '\r') end--;
-            boolean frame = stackTrace.startsWith("\tat ", pos) || stackTrace.startsWith("\t... ", pos);
-            if (!frame && end > pos) {
+            if (!isFrameLine(stackTrace, pos, end) && end > pos) {
                 String line = stackTrace.substring(pos, end);
                 String redacted = redactMessage(line);
                 if (!redacted.equals(line)) {
@@ -1024,6 +1325,25 @@ public class Redactor {
         }
         if (out == null) return stackTrace;
         return out.append(stackTrace, copied, len).toString();
+    }
+
+    /**
+     * A frame line of a printed trace, at any indent: {@code printStackTrace} indents the frames of
+     * a {@code Suppressed:} exception, and of the causes nested under it, with two or more tabs.
+     * After at least one space or tab: {@code at ...}, {@code ... N more} or (Logback)
+     * {@code ... N common frames omitted}.
+     */
+    private static boolean isFrameLine(String s, int from, int end) {
+        int i = from;
+        while (i < end && (s.charAt(i) == '\t' || s.charAt(i) == ' ')) i++;
+        if (i == from) return false;
+        if (s.startsWith("at ", i)) return true;
+        if (!s.startsWith("... ", i)) return false;
+        int d = i + 4;
+        while (d < end && isAsciiDigit(s.charAt(d))) d++;
+        if (d == i + 4) return false;
+        String rest = s.substring(d, end);
+        return rest.equals(" more") || rest.equals(" common frames omitted");
     }
 
     /**
