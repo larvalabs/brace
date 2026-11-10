@@ -113,8 +113,10 @@ app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
 - `start()` refuses two mappings whose directories overlap (the same directory, or one inside
   the other, compared as written and with symlinks resolved) unless their access is the same:
   a guarded directory that a public mapping also serves, or one that a less strictly guarded
-  mapping also serves, would be reachable through the weaker prefix. Requirements are compared
-  by identity, so pass the same `Access` objects to both mappings if they are meant to match.
+  mapping also serves, would be reachable through the weaker prefix. Built-in requirements are
+  compared by value (two `Access.session("userId", "/login")` calls match); a custom
+  `Access.check(...)` or `Access.checkRequest(...)` matches only itself, so pass the same `Access`
+  object to both mappings if they are meant to match.
 - `start()` requires every mapping's directory to exist. A directory created later could be a
   symlink into another mapping's tree, or a case-variant sibling of one on a case-insensitive
   volume, which the overlap check would never have seen. As a second line, a mapping answers

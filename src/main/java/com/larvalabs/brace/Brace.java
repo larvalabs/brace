@@ -2042,9 +2042,10 @@ public class Brace {
                 throw new IllegalStateException("Static mappings " + a.urlPrefix() + " (" + a.directory() + ", "
                     + a.accessLabel() + ") and " + b.urlPrefix() + " (" + b.directory() + ", " + b.accessLabel()
                     + ") serve overlapping directories with different access requirements: a file under both "
-                    + "is reachable through whichever asks for less. Give each its own directory, or pass the "
-                    + "same Access objects to both (requirements are compared by identity, so two "
-                    + "Access.session(...) calls count as different).");
+                    + "is reachable through whichever asks for less. Give each its own directory, or give both "
+                    + "the same requirements (built-in ones such as Access.session(key, loginUrl) compare by "
+                    + "value; a custom Access.check/checkRequest compares by identity, so pass the same "
+                    + "Access object to both).");
             }
         }
         return resolved;

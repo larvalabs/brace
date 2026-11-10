@@ -395,6 +395,7 @@ class StaticMappingReviewFixesTest {
             a.staticFiles("/files", docsDir.toString()).access(login);
         }));
         assertTrue(e.getMessage().contains("/admin-files") && e.getMessage().contains("/files"), e.getMessage());
+        assertTrue(e.getMessage().contains("by value") && e.getMessage().contains("by identity"), e.getMessage());
 
         // Nested, stricter inside: the outer mapping would serve the inner files with less.
         Path inner;
@@ -424,6 +425,39 @@ class StaticMappingReviewFixesTest {
             a.staticFiles("/b", pubDir.toString()).publicFiles();
         });
         open.stop();
+    }
+
+    /**
+     * M3 review: the overlap check compared requirements by identity, so two separate
+     * {@code Access.session("userId", "/login")} calls on one directory were refused.
+     */
+    @Test
+    void separatelyBuiltIdenticalRequirementsCountAsTheSame() throws Exception {
+        var app = Brace.test().sessions(SECRET).start(a -> {
+            a.staticFiles("/a", docsDir.toString()).access(Access.session("userId", "/login"));
+            a.staticFiles("/b", docsDir.toString()).access(Access.session("userId", "/login"));
+        });
+        app.stop();
+    }
+
+    @Test
+    void builtInAccessKindsHaveValueEquality() {
+        assertEquals(Access.session("userId", "/login"), Access.session("userId", "/login"));
+        assertEquals(Access.session("userId", "/login").hashCode(), Access.session("userId", "/login").hashCode());
+        assertNotEquals(Access.session("userId", "/login"), Access.session("userId", "/signin"));
+        assertNotEquals(Access.session("userId", "/login"), Access.session("adminId", "/login"));
+        assertEquals(Access.none(), Access.none());
+        assertEquals(Access.insteadOfDefault(Access.session("k", "/l")), Access.insteadOfDefault(Access.session("k", "/l")));
+        assertNotEquals(Access.insteadOfDefault(Access.session("k", "/l")), Access.session("k", "/l"));
+        // Custom checks stay identity: two lambdas are two requirements, however alike.
+        Access.Check check = (req, s) -> null;
+        assertEquals(Access.check(check), Access.check(check));
+        assertNotEquals(Access.check((req, s) -> null), Access.check((req, s) -> null));
+        Access.RequestCheck requestCheck = req -> null;
+        assertEquals(Access.checkRequest(requestCheck), Access.checkRequest(requestCheck));
+        assertNotEquals(Access.checkRequest(req -> null), Access.checkRequest(req -> null));
+        var custom = Access.check(check);
+        assertEquals(Access.insteadOfDefault(custom), Access.insteadOfDefault(custom));
     }
 
     @Test

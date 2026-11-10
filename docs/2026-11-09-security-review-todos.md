@@ -229,6 +229,11 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       access (not only guarded versus public) and a mapping whose directory is missing;
       a duplicate prefix throws; at serve time a file inside a differently guarded mapping's
       real directory is a 404.
+    - *Access value equality (from the Track C limits review).* The overlap check compared
+      requirements by identity, so two separate `Access.session("userId", "/login")` calls on
+      overlapping directories were refused with a confusing message. The built-in kinds
+      (session, none, `insteadOfDefault`) now have value equality; custom checks and the ops
+      requirement stay identity; the message says so. Tests in `StaticMappingReviewFixesTest`.
 
 - [x] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
   - **What's wrong.**
