@@ -477,7 +477,9 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     password holds an unencoded `/ ? #`, and known schemes are found inside a run
     (`/proxy/https://`, `-https://`, `1https://`)
     (`RedactorTest.credentialsInAUrlsParameterSectionAndOddPrefixesAreRedacted`; the linear-time
-    test gained these shapes).
+    test gained these shapes). Both name rules match `totp` alone, and the plural `codes` next to
+    an auth word like the singular (`backup_codes`, `recovery_codes`, `passcodes`); the name
+    tables in `RedactorTest` gained these and `zip_codes`/`status_codes` as kept.
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current

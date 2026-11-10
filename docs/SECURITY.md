@@ -2271,28 +2271,30 @@ Both rules match:
   redacted too.
 - **An auth-paired `code`.** The name is split into segments on `_ - . [ ]`
   and other punctuation and at camelCase boundaries, ignoring a leading `X-`.
-  A `code` segment is sensitive next to one of `auth`, `authorization`,
+  A `code` (or plural `codes`) segment is sensitive next to one of `auth`, `authorization`,
   `authentication`, `oauth`, `verification`, `verify`, `verifier`, `reset`,
   `otp`, `totp`, `hotp`, `sms`, `mfa`, `2fa`, `tfa`, `pin`, `pass`,
   `password`, `invite`, `invitation`, `access`, `login`, `signin`, `confirm`,
   `confirmation`, `activation`, `activate`, `recovery`, `backup`, `security`,
   `magic`, `device`, `unlock` (`Redactor.CODE_QUALIFIERS`), and so is one of
-  those words fused with `code` (`passcode`, `authcode`, `otpcode`).
+  those words fused with `code` or `codes` (`passcode`, `authcode`, `otpcode`,
+  `passcodes`); `backup_codes` and `recovery_codes` are sensitive like
+  `backup_code`.
 
 The in-transit rule also matches a name that is exactly `code` (an OAuth
-authorization code; `X-Code` too), a segment `sig`, `otp`, `pin`, `sid`,
-`ticket` or `session` (`Redactor.TRANSIT_WORDS`), and a name whose last
+authorization code; `X-Code` too), a segment `sig`, `otp`, `totp`, `pin`,
+`sid`, `ticket` or `session` (`Redactor.TRANSIT_WORDS`), and a name whose last
 segment is `auth` (`X-Auth`, `X-Upstream-Auth`). The field rule instead
-matches only a field named exactly `otp`.
+matches only a field named exactly `otp` or `totp`.
 
 | Name | In transit | Field |
 |---|---|---|
 | `token`, `api_key`, `X-Auth-Token`, `password`, `session_id`, `client_assertion` | redacted | redacted |
-| `auth_code`, `verificationCode`, `reset_code`, `otp_code`, `pin_code`, `device_code`, `code_verifier`, `passcode` | redacted | redacted |
+| `auth_code`, `verificationCode`, `reset_code`, `otp_code`, `pin_code`, `device_code`, `code_verifier`, `passcode`, `backup_codes`, `recovery_codes` | redacted | redacted |
 | `code`, `X-Code` | redacted | kept (`code:"card_declined"`, `/countries/{code}`) |
 | `sig`, `pin`, `sid`, `ticket`, `session`, `user_session`, `account_sid`, `sms_otp`, `X-Auth`, `X-Upstream-Auth` | redacted | kept |
-| `otp` | redacted | redacted |
-| `zip_code`, `status_code`, `error_code`, `country_code`, `currency_code`, `postal_code`, `promo_code`, `code_challenge`, `user_code` | kept | kept |
+| `otp`, `totp` | redacted | redacted |
+| `zip_code`, `status_code`, `error_code`, `country_code`, `currency_code`, `postal_code`, `promo_code`, `code_challenge`, `user_code`, `zip_codes`, `status_codes` | kept | kept |
 | `postcode`, `barcode`, `encode`, `codec`, `signal`, `design`, `sigma`, `pinned`, `sessions`, `sidebar`, `tickets`, `author`, `authority`, `auth_method`, `X-Auth-Request-User`, `state` | kept | kept |
 
 `state` (the OAuth CSRF value) and `promo_code` are deliberately not

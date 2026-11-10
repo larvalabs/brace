@@ -94,7 +94,7 @@ public class Redactor {
      * {@code account_sid}), but ordinary data in a log field or a route parameter. Matched by
      * {@link #isSensitive} only.
      */
-    private static final Set<String> TRANSIT_WORDS = Set.of("sig", "otp", "pin", "sid", "ticket", "session");
+    private static final Set<String> TRANSIT_WORDS = Set.of("sig", "otp", "totp", "pin", "sid", "ticket", "session");
 
     // ---- Value-shaped redaction constants ----
 
@@ -167,11 +167,11 @@ public class Redactor {
      *   <li>the normalized name (lowercased, {@code -}/{@code _} stripped) contains a
      *       {@link #SENSITIVE} substring ({@code token}, {@code password}, {@code apikey}, …); or</li>
      *   <li>a name segment (split on {@code _ - . [ ]} and other punctuation, and at camelCase
-     *       boundaries; a leading {@code X-} ignored) is {@code code} next to an auth-ish segment
-     *       ({@link #CODE_QUALIFIERS}), or is an auth-ish word plus {@code code}
-     *       ({@code passcode}, {@code authcode}); or</li>
-     *   <li>a segment is one of {@link #TRANSIT_WORDS} ({@code sig}, {@code otp}, {@code pin},
-     *       {@code sid}, {@code ticket}, {@code session}); or</li>
+     *       boundaries; a leading {@code X-} ignored) is {@code code} or {@code codes} next to an
+     *       auth-ish segment ({@link #CODE_QUALIFIERS}: {@code backup_codes}), or is an auth-ish
+     *       word plus {@code code} or {@code codes} ({@code passcode}, {@code authcode}); or</li>
+     *   <li>a segment is one of {@link #TRANSIT_WORDS} ({@code sig}, {@code otp}, {@code totp},
+     *       {@code pin}, {@code sid}, {@code ticket}, {@code session}); or</li>
      *   <li>the whole name is {@code code} (an OAuth authorization code), or its last segment is
      *       {@code auth} ({@code X-Auth}, {@code X-Upstream-Auth}).</li>
      * </ul>
@@ -185,8 +185,8 @@ public class Redactor {
     /**
      * The field name rule, for structured log fields ({@link #redact(Map)}, so every
      * {@code Log} entry) and route parameter names (analytics): the {@link #SENSITIVE} substrings
-     * and the auth-paired {@code code} rule of {@link #isSensitive}, plus a field named exactly
-     * {@code otp}, but not the short words that are ordinary data there: a field
+     * and the auth-paired {@code code}/{@code codes} rule of {@link #isSensitive}, plus a field
+     * named exactly {@code otp} or {@code totp}, but not the short words that are ordinary data there: a field
      * {@code code:"card_declined"}, a route {@code /countries/{code}}, {@code sig}, {@code pin},
      * {@code sid}, {@code ticket}, {@code session}, {@code X-Auth}.
      */
@@ -207,10 +207,11 @@ public class Redactor {
         boolean qualifier = false;
         for (int i = first; i < segs.size(); i++) {
             String seg = segs.get(i);
-            if (seg.equals("code")) {
+            // The plural is paired like the singular: backup_codes, recovery_codes, passcodes.
+            int stem = seg.endsWith("codes") ? seg.length() - 5 : seg.endsWith("code") ? seg.length() - 4 : -1;
+            if (stem == 0) {
                 code = true;
-            } else if (seg.length() > 4 && seg.endsWith("code")
-                    && CODE_QUALIFIERS.contains(seg.substring(0, seg.length() - 4))) {
+            } else if (stem > 0 && CODE_QUALIFIERS.contains(seg.substring(0, stem))) {
                 return true; // passcode, authcode, otpcode
             }
             if (CODE_QUALIFIERS.contains(seg)) qualifier = true;
@@ -218,7 +219,7 @@ public class Redactor {
         }
         if (code && qualifier) return true;
         boolean single = segs.size() - first == 1;
-        if (!strict) return single && segs.get(first).equals("otp");
+        if (!strict) return single && (segs.get(first).equals("otp") || segs.get(first).equals("totp"));
         return (single && segs.get(first).equals("code")) || segs.get(segs.size() - 1).equals("auth");
     }
 

@@ -1959,7 +1959,8 @@ No action needed unless noted.
   (`/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css`) shows as `/assets/[redacted].css` in error
   records and logs.
 - **New sensitive names:** `jwt`, `assertion`, `signature`, `authkey`, `nonce` (anywhere in a
-  name), and a `code` paired with an auth word (`auth_code`, `verificationCode`, `passcode`).
+  name), a `code` or `codes` paired with an auth word (`auth_code`, `verificationCode`,
+  `passcode`, `backup_codes`), and `totp`.
   In query strings and headers only, `code` (the whole name), `sig`, `otp`, `pin`, `sid`,
   `ticket` and `session` are sensitive too, so `?code=` and `?ticket=` are redacted while
   `zip_code` and `status_code` are kept. Structured log fields and route parameters are not

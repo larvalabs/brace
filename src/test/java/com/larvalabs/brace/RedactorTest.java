@@ -857,7 +857,9 @@ class RedactorTest {
         // auth as the last segment
         "X-Auth", "X-Upstream-Auth", "Proxy-Auth", "basic_auth",
         // the substring list (unchanged)
-        "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce");
+        "token", "api_key", "x-api-key", "password", "csrf-token", "X-Auth-Token", "client_assertion", "jwt", "nonce",
+        // verification pass: totp alone, and the plural "codes" next to an auth word
+        "totp", "TOTP", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
 
     /** Names {@link Redactor#isSensitive} must NOT match. */
     static final List<String> STRICT_NAMES_THAT_DONT = List.of(
@@ -866,18 +868,21 @@ class RedactorTest {
         "code_challenge", "user_code", "postcode", "barcode", "encode", "codec", "signal", "design", "assign",
         "sigma", "footprint", "hotpath", "otpauth_uri", "pinned", "is_pinned", "spin", "pinterest", "sessions",
         "sidebar", "side", "tickets", "author", "authority", "auth_method", "auth_provider", "oauth_provider",
-        "X-Auth-Request-User", "state", "username", "count", "path", "monkey");
+        "X-Auth-Request-User", "state", "username", "count", "path", "monkey",
+        "zip_codes", "status_codes", "country_codes", "error_codes", "barcodes");
 
     /** Names {@link Redactor#isSensitiveField} (log fields, route params) must match. */
     static final List<String> FIELD_NAMES_THAT_MATCH = List.of(
         "password", "token", "api_key", "secret", "csrf", "jwt", "sessionId", "session_id", "X-Auth-Token",
         "auth_code", "verification_code", "verificationCode", "reset_code", "pin_code", "passcode", "otp",
-        "otp_code", "code_verifier", "device_code");
+        "otp_code", "code_verifier", "device_code",
+        "totp", "backup_codes", "recovery_codes", "recoveryCodes", "otp_codes", "passcodes");
 
     /** Names {@link Redactor#isSensitiveField} must NOT match: the short words that are ordinary data in logs and routes. */
     static final List<String> FIELD_NAMES_THAT_DONT = List.of(
         "code", "Code", "sig", "pin", "session", "sid", "ticket", "state", "X-Auth", "otp_enabled",
-        "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user");
+        "zip_code", "status_code", "error_code", "country_code", "postcode", "sessions", "count", "user",
+        "codes", "zip_codes", "status_codes", "totp_enabled");
 
     @Test
     void sensitiveNamesMatchBySegment() {
