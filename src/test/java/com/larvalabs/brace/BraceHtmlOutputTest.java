@@ -682,6 +682,112 @@ class BraceHtmlOutputTest {
                 Part.data("script", null, "\""), Part.text("\" href=\""), Part.data("script", null, "\""), Part.text("\">")));
     }
 
+    // --- H1 review (F1): a self-closing <script/> in SVG is a whole element ---
+    //
+    // The tokenizer took `<svg><script href="/a.js"/>` for the start of a script body that ran to
+    // the next </script> anywhere on the page: no value was held, and data in a URL attribute got
+    // script escaping with no scheme check.
+
+    @Test
+    void aSelfClosingScriptInSvgDoesntSwitchOffTheRules() {
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        for (String x : List.of("javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "JaVaScRiPt:alert(1)")) {
+            String html = both("xssSvg", Map.of("x", x, "y", "alert(1)"));
+            for (String id : List.of("a1", "a2", "a3", "a4", "a5", "a6", "a7")) assertEquals(blocked, attr(html, id), id + " <- " + x);
+            // Body text is body text again, not script-escaped.
+            assertTrue(html.contains("<p id=\"p1\">" + text(x) + "</p>"), html);
+            assertTrue(html.contains("</svg><p id=\"p2\">" + text(x) + "</p>"), html);
+            assertTrue(html.contains("<text id=\"t3\">" + text(x) + "</text>"), html);
+            assertTrue(html.contains("<p id=\"p4\">" + text(x) + "</p>"), html);
+            assertTrue(html.contains("<p id=\"p6\">" + text(x) + "</p>"), html);
+            assertTrue(html.contains(" title=\"" + attrEscaped(x) + "\">l</a>"), html);
+
+            html = both("xssSvgLayout", Map.of("x", x, "y", "alert(1)"));
+            assertEquals(blocked, attr(html, "a1"), x);
+            assertEquals(blocked, attr(html, "a2"), x);
+            assertTrue(html.contains("<p id=\"p1\">" + text(x) + "</p>"), html);
+        }
+        // The scheme in one piece and the code in the next: the value is held and judged whole.
+        String html = both("xssSvg", Map.of("x", "javascript", "y", "alert(1)"));
+        assertEquals(blocked, attr(html, "a2"));
+        assertEquals(blocked, attr(html, "a5"));
+        assertEquals(blocked, attr(both("xssSvgLayout", Map.of("x", "javascript", "y", "alert(1)")), "a2"));
+        html = both("xssSvg", Map.of("x", "https", "y", "//example.com/a"));
+        assertEquals("https://example.com/a", attr(html, "a2"));
+        assertEquals("https://example.com/a", attr(html, "a5"));
+        html = both("xssSvg", Map.of("x", "');alert(1)//", "y", ""));
+        assertEquals("go('\\u0027);alert(1)//')", named(html, "a7", "onclick"));
+        assertTrue(html.contains("<p id=\"p1\">');alert(1)//</p>"), html);
+    }
+
+    @Test
+    void foreignContentIsFollowedAsTheBrowserReadsIt() {
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        Part link = Part.data("a", "href", "javascript:alert(1)"), text = Part.data("p", null, "<i>'");
+        // In SVG and MathML a self-closing <script/> or <style/> is complete: what follows is markup.
+        for (String element : List.of("<svg><script href=\"/a.js\"/>", "<svg><script/>", "<svg><style/>", "<SVG><SCRIPT/>",
+                "<math><script />", "<svg><g><script\n/></g>", "<svg><svg><script/></svg><script/>",
+                "<svg><title>t</title><script/>", "<svg><foreignObject><b>x</b></foreignObject><script/>",
+                "<svg><desc><svg><script/></svg></desc><script/>", "<svg><path d=\"M0 0\"><script/>",
+                "<svg><![CDATA[ <script> \" ]] ]]><script/>", "<svg><script href=/a.js />")) {
+            assertEquals(element + "</svg><p>&lt;i&gt;'</p><a href=\"" + blocked + "\">", driven(Part.text(element + "</svg><p>"),
+                text, Part.text("</p><a href=\""), link, Part.text("\">")), element);
+            assertEquals(element + "<a href=\"" + blocked + "\">&lt;i&gt;'", driven(Part.text(element + "<a href=\""), link,
+                Part.text("\">"), text), element);
+        }
+        // In HTML content <script/> is not self-closing: the browser reads a script body up to
+        // </script>, and so does this, inside SVG too once the content is HTML again.
+        for (String element : List.of("<script src=\"/a.js\"/>", "<script/>", "<svg/><script/>", "<svg></svg><script/>",
+                "<svg><foreignObject><script/>", "<svg><desc><script/>", "<svg><title><script/>", "<math><mi><script/>",
+                "<math><annotation-xml encoding=\"text/html\"><script/>", "<svg><p><script/>", "<svg><g><div><script/>",
+                "<svg><g></p><script/>", "<svg><g></div><script/>", "<svg><font color=\"red\"><script/>",
+                "<svg><foreignObject><svg></svg><script/>", "<![CDATA[ x ]]><script/>", "<svg><script href=/a.js/>x</script></svg><script/>")) {
+            assertEquals(element + "<p>\\u003ci\\u003e\\u0027</p><a href=\"" + blocked + "\"></script><a href=\"" + blocked + "\">",
+                driven(Part.text(element + "<p>"), text, Part.text("</p><a href=\""), link, Part.text("\"></script><a href=\""),
+                    link, Part.text("\">")), element);
+        }
+        // A <script> with a body in SVG is markup to a browser: tags in it are tags.
+        assertEquals("<svg><script>var t = '<a href=\"" + blocked + "\">';</script><a href=\"" + blocked + "\">",
+            driven(Part.text("<svg><script>var t = '<a href=\""), link, Part.text("\">';</script><a href=\""), link, Part.text("\">")));
+    }
+
+    @Test
+    void disagreementWithJteResolvesToTheStricterReading() {
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        // JTE reports a URL attribute while the output's own reading is a script or style body,
+        // a comment or body text: the URL rule applies anyway, to each piece on its own.
+        for (String url : List.of("javascript:alert(1)", " JavaScript:alert(1)", "data:text/html,x", "javascript", "j", "42")) {
+            for (String open : List.of("<script>", "<!-- ", "</a ")) {
+                String html = driven(Part.text(open + "<a href=\""), Part.data("a", "href", url), Part.text(":alert(1)\">"));
+                assertEquals(open + "<a href=\"" + blocked + ":alert(1)\">", html, open + " <- " + url);
+            }
+            assertEquals("<style><a href=\"about\\3a invalid#blocked:alert(1)\">",
+                driven(Part.text("<style><a href=\""), Part.data("a", "href", url), Part.text(":alert(1)\">")), url);
+        }
+        // A piece that settles its own scheme, or is a path, is kept.
+        assertEquals("<script><a href=\"/ok\"><a href=\"https://example.com/a?b=\\u0026c\"><img src=\"data:image/png;base64,AA==\">",
+            driven(Part.text("<script><a href=\""), Part.data("a", "href", "/ok"), Part.text("\"><a href=\""),
+                Part.data("a", "href", "https://example.com/a?b=&c"), Part.text("\"><img src=\""),
+                Part.data("img", "src", "data:image/png;base64,AA=="), Part.text("\">")));
+        assertEquals("<p><a href=\"/ok?a=&amp;b\">",
+            driven(Part.text("<p><a href=\""), Part.data("a", "href", "/ok?a=&b"), Part.text("\">")));
+        // The other attribute rules, with script escaping on top where a script is involved.
+        assertEquals("<script><a onclick=\"go('\\u0027')\" title=\"\\u0022\\u003c\" style=\"a\\3b b\">",
+            driven(Part.text("<script><a onclick=\"go('"), Part.data("a", "onclick", "'"), Part.text("')\" title=\""),
+                Part.data("a", "title", "\"<"), Part.text("\" style=\""), Part.data("a", "style", "a;b"), Part.text("\">")));
+        assertEquals("<style><a title=\"\\22 \\3c \" hx-vals=''>",
+            driven(Part.text("<style><a title=\""), Part.data("a", "title", "\"<"), Part.text("\" hx-vals='"),
+                Part.data("a", "hx-vals", " js:alert(1)"), Part.text("'>")));
+        // The output is in one attribute's value and JTE reports another: both rules.
+        assertEquals("<a title=\"" + blocked + "\" data-x=\"\\u0027\">",
+            driven(Part.text("<a title=\""), Part.data("a", "href", "javascript:alert(1)"), Part.text("\" data-x=\""),
+                Part.data("a", "onclick", "'"), Part.text("\">")));
+        // JTE says script or style where the output is in an attribute value or a style body.
+        assertEquals("<a title=\"\\u0027\\u003c\"><i title='a\\3b b'><style>a{color:\\5c u0027\\3b }",
+            driven(Part.text("<a title=\""), Part.data("script", null, "'<"), Part.text("\"><i title='"),
+                Part.data("style", null, "a;b"), Part.text("'><style>a{color:"), Part.data("script", null, "';"), Part.text("}")));
+    }
+
     /**
      * Renders with static template text as pre-encoded bytes (how Brace runs, to a String and to
      * bytes) and as Strings (JTE's default), asserts all three agree, and returns the HTML.
@@ -695,6 +801,13 @@ class BraceHtmlOutputTest {
         html.finish();
         assertEquals(binary, out.toString(), template + ": String and binary static content differ");
         return binary;
+    }
+
+    /** JTE's escaping for body text. */
+    private static String text(String value) {
+        var out = new gg.jte.output.StringOutput();
+        gg.jte.html.escape.Escape.htmlContent(value, out);
+        return out.toString();
     }
 
     /** JTE's escaping for a script body. */

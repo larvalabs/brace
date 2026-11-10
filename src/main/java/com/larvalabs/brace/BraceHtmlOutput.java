@@ -199,25 +199,61 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     // <textarea> and <title> bodies are text to a browser as well, but are read as markup here:
     // the worst that does is attribute-escape data in text that looks like a tag, whereas reading
     // them as text would be wrong for <title> inside <svg>, whose body is markup.
+    //
+    // Foreign content (H1 review, F1). Inside <svg> and <math> the browser parses differently:
+    // `<script href="a.js"/>` and `<style/>` are complete elements (in HTML content the "/" is
+    // ignored and a script body follows), a <script> or <style> with a body is ordinary markup,
+    // tags in it included, and <![CDATA[ ... ]]> is text. So the elements open inside the
+    // outermost <svg>/<math> are kept in `open`, and the output is in foreign content while the
+    // innermost of them isn't an integration point (<foreignObject>, <desc>, <title>,
+    // <annotation-xml>, MathML's <mi> <mo> <mn> <ms> <mtext>), whose content is HTML again. What
+    // isn't modelled errs towards HTML: a tag that takes a browser out of foreign content (<p>,
+    // <div>, ... or an end tag that matches nothing open in it) empties the list down to the
+    // nearest integration point, every integration-point name counts under either root, and
+    // <annotation-xml> counts whatever its encoding. Believing HTML where the browser is in
+    // foreign content means a self-closing <script/> is read as the start of a script body, and
+    // data after it is then escaped for a script and for what JTE reports as well (see "user
+    // data" below): garbled, never unescaped. The reverse (believing foreign content where the
+    // browser reads HTML) needs markup this doesn't follow, such as an <svg> tag in the text of a
+    // <textarea> or an element left open across an integration point; the only thing it changes
+    // is that a <script/> or <style/> written self-closing is taken as complete.
 
     private static final int DATA = 0, LT = 1, END_TAG_OPEN = 2, TAG_NAME = 3, BEFORE_ATTR = 4,
         ATTR_NAME = 5, AFTER_ATTR_NAME = 6, BEFORE_VALUE = 7, VALUE_QUOTED = 8, VALUE_UNQUOTED = 9,
         RAW = 10, RAW_LT = 11, RAW_END = 12, MARKUP = 13, MARKUP_DASH = 14, COMMENT = 15,
-        COMMENT_DASH = 16, COMMENT_DASH_DASH = 17, COMMENT_BANG = 18, BOGUS = 19;
+        COMMENT_DASH = 16, COMMENT_DASH_DASH = 17, COMMENT_BANG = 18, BOGUS = 19,
+        CDATA_OPEN = 20, CDATA = 21, CDATA_BRACKET = 22, CDATA_BRACKETS = 23;
     private static final int MAX_NAME = 64;
+    private static final int MAX_OPEN = 256;
 
-    // Elements whose body is text up to their own end tag.
+    // Elements whose body is text up to their own end tag (in HTML content).
     private static final String[] RAW_TEXT = {"script", "style"};
+
+    private static final Set<String> FOREIGN_ROOTS = Set.of("svg", "math");
+    private static final Set<String> INTEGRATION_POINTS = Set.of(
+        "foreignobject", "desc", "title", "annotation-xml", "mi", "mo", "mn", "ms", "mtext");
+    // Start tags that end foreign content: the HTML parser's list, with <font> whatever its attributes.
+    private static final Set<String> BREAKOUT_TAGS = Set.of(
+        "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed",
+        "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr",
+        "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt", "u",
+        "ul", "var", "font");
+    private static final String CDATA_START = "CDATA[";
 
     private int state = DATA;
     private boolean endTag;                                // the tag being read is </name ...>
+    private boolean slash;                                 // inside a tag: the character just read was a '/' outside a value
     private final StringBuilder tag = new StringBuilder(); // its name, lower-cased
     private final StringBuilder attr = new StringBuilder(); // the attribute being read, lower-cased
     private String tagString, attrString;                  // those as Strings, made when asked for
     private char quote;                                    // in VALUE_QUOTED: the quote that closes it
     private String rawElement;                             // in RAW*: the element whose body this is
-    private int rawMatched;                                // in RAW_END: characters of its name matched
+    private int rawMatched;                                // in RAW_END: characters of its name matched; in CDATA_OPEN: of "CDATA["
     private int valueStart;                                // see scan
+    // Elements open inside the outermost <svg>/<math>, lower-cased, outermost first; empty in
+    // plain HTML content. Inside an integration point only what matters is added: a nested
+    // <svg>/<math>, and an element named like the integration point (so its end tag is counted).
+    private final java.util.ArrayList<String> open = new java.util.ArrayList<>();
 
     /**
      * Advances the tokenizer over template text. Afterwards {@code valueStart} is the index in
@@ -253,12 +289,27 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
     /** Whether the output is in the body of a {@code <script>} element, in any letter case. */
     private boolean inScriptBody() {
-        return (state == RAW || state == RAW_LT || state == RAW_END) && "script".equals(rawElement);
+        return inBody("script");
     }
 
     /** Whether the output is in the body of a {@code <style>} element, in any letter case. */
     private boolean inStyleBody() {
-        return (state == RAW || state == RAW_LT || state == RAW_END) && "style".equals(rawElement);
+        return inBody("style");
+    }
+
+    /** In HTML content, the raw text of that element; in foreign content, directly inside one. */
+    private boolean inBody(String element) {
+        if (inRawText()) return element.equals(rawElement);
+        return !open.isEmpty() && element.equals(open.get(open.size() - 1));
+    }
+
+    private boolean inRawText() {
+        return state == RAW || state == RAW_LT || state == RAW_END;
+    }
+
+    /** Whether the output is inside {@code <svg>} or {@code <math>} and not in an integration point. */
+    private boolean inForeignContent() {
+        return !open.isEmpty() && !INTEGRATION_POINTS.contains(open.get(open.size() - 1));
     }
 
     /** Whether the output is inside a quoted attribute value of a start tag. */
@@ -279,6 +330,10 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     private void step(char c, int index) {
+        // "/>" ends a tag as self-closing only when the '/' is outside a value and nothing
+        // follows it: not in <a href=/x/> or <br / >.
+        boolean selfClosing = slash;
+        slash = false;
         switch (state) {
             case DATA -> { if (c == '<') state = LT; }
             case LT -> {
@@ -293,27 +348,29 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
                 else state = c == '>' ? DATA : BOGUS;
             }
             case TAG_NAME -> {
-                if (isSpace(c) || c == '/') state = BEFORE_ATTR;
-                else if (c == '>') closeTag();
+                if (isSpace(c)) state = BEFORE_ATTR;
+                else if (c == '/') tagSlash();
+                else if (c == '>') closeTag(false);
                 else appendName(tag, c);
                 tagString = null;
             }
             case BEFORE_ATTR -> {
-                if (c == '>') closeTag();
-                else if (!isSpace(c) && c != '/') startAttribute(c);
+                if (c == '>') closeTag(selfClosing);
+                else if (c == '/') tagSlash();
+                else if (!isSpace(c)) startAttribute(c);
             }
             case ATTR_NAME -> {
                 if (isSpace(c)) state = AFTER_ATTR_NAME;
-                else if (c == '/') state = BEFORE_ATTR;
+                else if (c == '/') tagSlash();
                 else if (c == '=') state = BEFORE_VALUE;
-                else if (c == '>') closeTag();
+                else if (c == '>') closeTag(false);
                 else appendName(attr, c);
                 attrString = null;
             }
             case AFTER_ATTR_NAME -> {
                 if (c == '=') state = BEFORE_VALUE;
-                else if (c == '/') state = BEFORE_ATTR;
-                else if (c == '>') closeTag();
+                else if (c == '/') tagSlash();
+                else if (c == '>') closeTag(false);
                 else if (!isSpace(c)) startAttribute(c);
             }
             case BEFORE_VALUE -> {
@@ -322,7 +379,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
                     quote = c;
                     valueStart = index + 1;
                 } else if (c == '>') {
-                    closeTag();
+                    closeTag(false);
                 } else if (!isSpace(c)) {
                     state = VALUE_UNQUOTED;
                 }
@@ -335,7 +392,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             }
             case VALUE_UNQUOTED -> {
                 if (isSpace(c)) state = BEFORE_ATTR;
-                else if (c == '>') closeTag();
+                else if (c == '>') closeTag(false);
             }
             case RAW -> { if (c == '<') state = RAW_LT; }
             case RAW_LT -> {
@@ -359,7 +416,21 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
                     state = c == '<' ? RAW_LT : RAW; // </scripty: still the body
                 }
             }
-            case MARKUP -> state = c == '-' ? MARKUP_DASH : c == '>' ? DATA : BOGUS;
+            case MARKUP -> {
+                if (c == '[' && inForeignContent()) {
+                    state = CDATA_OPEN; // in HTML content "<![CDATA[" is a bogus comment, up to the first '>'
+                    rawMatched = 0;
+                } else {
+                    state = c == '-' ? MARKUP_DASH : c == '>' ? DATA : BOGUS;
+                }
+            }
+            case CDATA_OPEN -> {
+                if (c != CDATA_START.charAt(rawMatched)) state = c == '>' ? DATA : BOGUS;
+                else if (++rawMatched == CDATA_START.length()) state = CDATA;
+            }
+            case CDATA -> { if (c == ']') state = CDATA_BRACKET; }
+            case CDATA_BRACKET -> state = c == ']' ? CDATA_BRACKETS : CDATA;
+            case CDATA_BRACKETS -> { if (c != ']') state = c == '>' ? DATA : CDATA; }
             // "<!--" goes straight to COMMENT_DASH_DASH: "<!-->" and "<!--->" are whole comments.
             case MARKUP_DASH -> state = c == '-' ? COMMENT_DASH_DASH : c == '>' ? DATA : BOGUS;
             case COMMENT -> { if (c == '-') state = COMMENT_DASH; }
@@ -390,16 +461,65 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         attrString = null;
     }
 
-    private void closeTag() {
+    private void tagSlash() {
+        state = BEFORE_ATTR;
+        slash = true;
+    }
+
+    /** The '>' of a tag. {@code selfClosing}: it was written {@code />}. */
+    private void closeTag(boolean selfClosing) {
         state = DATA;
-        if (endTag) return;
+        if (endTag) {
+            if (!open.isEmpty()) closeElement(currentTag());
+            return;
+        }
+        if (inForeignContent()) {
+            if (!BREAKOUT_TAGS.contains(currentTag())) {
+                // Every element here is markup, <script> and <style> too: no raw text, and
+                // a self-closing one is complete.
+                if (!selfClosing) openElement(currentTag());
+                return;
+            }
+            leaveForeignContent(); // the browser closes the foreign elements and reads the tag as HTML
+        }
         for (String name : RAW_TEXT) {
             if (name.contentEquals(tag)) {
-                state = RAW;
+                state = RAW; // "/>" or not: HTML has no self-closing <script/>
                 rawElement = name;
                 return;
             }
         }
+        if (selfClosing) return;
+        if (open.isEmpty() ? "svg".contentEquals(tag) || "math".contentEquals(tag)
+                : FOREIGN_ROOTS.contains(currentTag()) || open.get(open.size() - 1).equals(currentTag())) {
+            openElement(currentTag());
+        }
+    }
+
+    private void openElement(String name) {
+        // Deeper than any real SVG: stop following it, which reads everything after as HTML.
+        if (open.size() >= MAX_OPEN) open.clear();
+        else open.add(name);
+    }
+
+    /** An end tag while something is open inside {@code <svg>} or {@code <math>}. */
+    private void closeElement(String name) {
+        int top = open.size() - 1;
+        if (INTEGRATION_POINTS.contains(open.get(top))) {
+            // HTML content: only the integration point's own end tag is of interest.
+            if (open.get(top).equals(name)) open.remove(top);
+            return;
+        }
+        int match = name.equals("p") || name.equals("br") ? -1 : open.lastIndexOf(name);
+        if (match < 0) leaveForeignContent(); // </p>, </br>, or nothing here by that name: HTML's rules, which may close it all
+        else open.subList(match, open.size()).clear();
+    }
+
+    /** Closes the foreign elements down to the nearest integration point, or all of them. */
+    private void leaveForeignContent() {
+        int keep = open.size();
+        while (keep > 0 && !INTEGRATION_POINTS.contains(open.get(keep - 1))) keep--;
+        open.subList(keep, open.size()).clear();
     }
 
     private static void appendName(StringBuilder name, char c) {
@@ -474,51 +594,94 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     // Two readings of where it lands: this class's tokenizer (where the output is) and JTE's
     // context (where the template source is). They differ when a @template call or content block
     // renders inside an attribute value, where JTE reports body text, and inside <Script>, which
-    // JTE doesn't know is a script. The output's reading decides; where JTE reports a script body
-    // and the output isn't in one, or the reverse, the data is escaped to be inert in both.
+    // JTE doesn't know is a script. They also differ whenever the tokenizer has lost its place,
+    // which no template should be able to make it do, but has (H1 review, F1: a self-closing
+    // <script/> in SVG was read as the start of a script body that ran on down the page).
+    //
+    // INVARIANT: disagreement between JTE's context and the tokenizer always resolves to the
+    // stricter of the two. Each reading names the rules for the place it believes the data
+    // lands in, and where the two name different places the data gets the rules of both: the
+    // URL scheme check if either says URL attribute, script escaping if either says script
+    // attribute or script body, CSS escaping if either says style, attribute escaping if either
+    // says attribute. Neither reading can switch off a rule the other calls for, so a tokenizer
+    // that has lost its place garbles data (script escapes in body text) and never unescapes it.
 
     @Override
     public void writeUserContent(String value) {
         if (value == null) return;
+        boolean jteAttribute = tagName != null && attributeName != null;
         boolean jteScript = attributeName == null && "script".equals(tagName);
+        boolean jteStyle = attributeName == null && "style".equals(tagName);
         if (valueOut != null) {
             appendToHeldValue(value, jteScript);
         } else if (inQuotedValue()) {
             // In an attribute value that isn't held. Also reached with no attribute context from
             // JTE (a @template call inside the value): JTE would escape that as body text, which
             // leaves quotes alone.
-            if (jteScript) target.writeContent(escapeScript(value));
-            else writeAttributeData(currentTag(), currentAttribute(), value);
-        } else if (inScriptBody() != jteScript) {
-            target.writeContent(escapeScript(value));
-        } else if (inStyleBody() || (attributeName == null && "style".equals(tagName))) {
-            // L7: JTE HTML-escapes data in a <style> body, which keeps it in the element but not
-            // in its declaration. (The result is inert as body text too, if JTE alone says style.)
-            target.writeContent(escapeCss(value));
-        } else if (tagName == null || attributeName == null) {
-            super.writeUserContent(value); // JTE's escaping for a script body, or for body text
+            writeAttributeData(currentTag(), currentAttribute(), jteAttribute ? tagName : null,
+                jteAttribute ? attributeName : null, value, jteScript, jteStyle);
+        } else if (jteAttribute) {
+            // JTE reports an attribute and the output isn't in a quoted value of a start tag
+            // (JTE refuses unquoted ones, so the two disagree): JTE's attribute, and whatever
+            // body the output is in.
+            writeAttributeData(null, null, tagName, attributeName, value, inScriptBody(), inStyleBody());
         } else {
-            // JTE reports an attribute and the output isn't in a quoted value (JTE's default
-            // policy refuses unquoted ones): the value is judged on its own.
-            writeAttributeData(tagName, attributeName, value);
+            boolean script = inScriptBody(), style = inStyleBody() || jteStyle;
+            if (script != jteScript) {
+                // One says script body: \\uXXXX escapes, inert in a script string and as text.
+                String escaped = escapeScript(value);
+                target.writeContent(style ? escapeCss(escaped) : escaped);
+            } else if (style) {
+                // L7: JTE HTML-escapes data in a <style> body, which keeps it in the element but not
+                // in its declaration. (The result is inert as body text too, if JTE alone says style.)
+                target.writeContent(escapeCss(value));
+            } else {
+                super.writeUserContent(value); // JTE's escaping for a script body, or for body text
+            }
         }
     }
 
-    private void writeAttributeData(String tag, String attribute, String value) {
-        if (isUrlAttribute(tag, attribute)) {
-            boolean safe = isSafeUrl(value) || mediaDataUrl(attribute, value);
-            Escape.htmlAttribute(safe ? value : BLOCKED_URL, target);
-        } else if (isScriptAttribute(attribute)) {
-            Escape.htmlAttribute(escapeScript(value), target);
-        } else if ("srcdoc".equals(attribute)) {
+    /**
+     * Data in an attribute value that isn't held, under the rules of the attribute the output is
+     * in ({@code tag}, {@code attribute}; null if it isn't in one) and of the one JTE reports
+     * ({@code jteTag}, {@code jteAttribute}; null if none), which are normally the same, plus
+     * script or CSS escaping when one of the two readings is a script or style body.
+     */
+    private void writeAttributeData(String tag, String attribute, String jteTag, String jteAttribute,
+                                    String value, boolean script, boolean css) {
+        boolean url = attribute != null && isUrlAttribute(tag, attribute);
+        boolean jteUrl = jteAttribute != null && isUrlAttribute(jteTag, jteAttribute);
+        if (url || jteUrl) {
+            // No whole value to judge here, only this piece, and the next piece could finish a
+            // scheme this one starts ("javascript" then ":..."): it has to settle its own.
+            boolean media = (!url || mediaDataUrl(attribute, value)) && (!jteUrl || mediaDataUrl(jteAttribute, value));
+            if (!settlesItsScheme(value) || !(isSafeUrl(value) || media)) value = BLOCKED_URL;
+        }
+        if ((isJsonAttribute(attribute) || isJsonAttribute(jteAttribute)) && evaluatedBecauseOfUserData(value, 0)) value = "";
+        if (script || isScriptAttribute(attribute) || isScriptAttribute(jteAttribute)) value = escapeScript(value);
+        if (css || "style".equals(attribute) || "style".equals(jteAttribute)) {
+            target.writeContent(escapeCss(value)); // nothing left in it for HTML escaping to do
+        } else if ("srcdoc".equals(attribute) || "srcdoc".equals(jteAttribute)) {
             var once = new StringBuilder(value.length() + 16);
             Escape.htmlAttribute(value, new Appender(once));
             Escape.htmlAttribute(once.toString(), target);
-        } else if ("style".equals(attribute)) {
-            target.writeContent(escapeCss(value)); // nothing left in it for HTML escaping to do
         } else {
             Escape.htmlAttribute(value, target);
         }
+    }
+
+    /**
+     * Whether a piece of a URL written outside a held value decides, by itself, what scheme the
+     * URL has or that it has none: it is empty, or has a {@code : / ? #} in it.
+     */
+    private static boolean settlesItsScheme(String piece) {
+        String url = normalize(piece);
+        if (url.isEmpty()) return true;
+        for (int i = 0; i < url.length(); i++) {
+            char c = url.charAt(i);
+            if (c == ':' || c == '/' || c == '?' || c == '#') return true;
+        }
+        return false;
     }
 
     /** User data inside the held value: a URL, or hx-vals/hx-headers. */
@@ -635,6 +798,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
     /** htmx attributes that take JSON (or, with a {@code js:} prefix, an expression). */
     private static boolean isJsonAttribute(String attribute) {
+        if (attribute == null) return false;
         String name = unprefixed(attribute);
         return name.equals("hx-vals") || name.equals("hx-headers");
     }
@@ -667,6 +831,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     private static boolean isScriptAttribute(String attribute) {
+        if (attribute == null) return false;
         String name = unprefixed(attribute);
         return name.startsWith("on") || name.startsWith("hx-on")
             || name.equals("hx-vals") || name.equals("hx-vars") || name.equals("hx-headers")
