@@ -2393,8 +2393,13 @@ public class Brace {
             }
 
             var mailer = new Mailer(null);
+            // Loopback only: TestApp connects to localhost. On the wildcard address the OS can hand
+            // port(0) a port another local process already holds on 127.0.0.1 (macOS allows a
+            // wildcard bind beside a specific one), start() succeeds, and the test's requests reach
+            // that process instead. Bound to 127.0.0.1, the OS never hands out a port held there.
             var app = Brace.app()
                 .port(0)
+                .host("127.0.0.1")
                 .banner(false)
                 .mailer(mailer);
             app.testHarness = true;
