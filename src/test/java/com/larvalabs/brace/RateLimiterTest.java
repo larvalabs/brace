@@ -260,7 +260,7 @@ class RateLimiterTest {
         // Install a Counters stub whose batch flush always throws, simulating a DB outage.
         var broken = new Counters(null) {
             @Override
-            java.util.Map<String, Long> incrementBatch(java.util.List<CounterUpdate> updates) {
+            java.util.Map<String, Long> incrementBatch(java.util.List<CounterUpdate> updates, long deadlineNanos) {
                 throw new RuntimeException("simulated DB outage");
             }
         };
@@ -286,7 +286,7 @@ class RateLimiterTest {
     void sharedBackendFailureLocalFallbackIsolatesKeys() {
         var broken = new Counters(null) {
             @Override
-            java.util.Map<String, Long> incrementBatch(java.util.List<CounterUpdate> updates) {
+            java.util.Map<String, Long> incrementBatch(java.util.List<CounterUpdate> updates, long deadlineNanos) {
                 throw new RuntimeException("simulated DB outage");
             }
         };
@@ -318,7 +318,7 @@ class RateLimiterTest {
         CountingCounters() { super(null); }
 
         @Override
-        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates, long deadlineNanos) {
             flushCalls.incrementAndGet();
             var result = new HashMap<String, Long>();
             for (var u : updates) {
@@ -327,11 +327,6 @@ class RateLimiterTest {
                 result.put(u.key(), v);
             }
             return result;
-        }
-
-        @Override
-        synchronized void deleteKeys(List<String> keys) {
-            keys.forEach(store::remove);
         }
     }
 
@@ -424,7 +419,7 @@ class RateLimiterTest {
         volatile boolean outage;
 
         @Override
-        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates, long deadlineNanos) {
             if (outage) {
                 throw new RuntimeException(new java.sql.SQLException("connection refused", "08001"));
             }
@@ -434,7 +429,7 @@ class RateLimiterTest {
                         "Zero bytes may not occur in string parameters.", "22023"));
                 }
             }
-            return super.incrementBatch(updates);
+            return super.incrementBatch(updates, deadlineNanos);
         }
     }
 
@@ -538,8 +533,11 @@ class RateLimiterTest {
             assertNull(limiter.handle(fakeRequestWithHeader("X-User", "flood-" + i)), "flood-" + i);
         }
         assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "a stays blocked");
-        // The rows of evicted keys are deleted at the next flush: the table stays near the cap.
-        assertTrue(counters.store.size() <= 3, "shared counter rows bounded: " + counters.store.keySet());
+        // L6 final review: an eviction never deletes a shared row (it let an instance with a stale
+        // view release a key the fleet had blocked). The instance's own state is what is capped;
+        // rows live until their windows end.
+        assertTrue(limiter.trackedEntries() <= 3, "instance state bounded: " + limiter.trackedEntries());
+        assertEquals(51, counters.store.size(), "one row per key counted in the window");
     }
 
     @Test

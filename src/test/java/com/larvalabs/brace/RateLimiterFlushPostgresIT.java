@@ -32,7 +32,7 @@ class RateLimiterFlushPostgresIT extends PostgresTestBase {
         InstrumentedCounters(DatabaseFactory f) { super(f); }
 
         @Override
-        Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+        Map<String, Long> incrementBatch(List<CounterUpdate> updates, long deadlineNanos) {
             if (outage) {
                 throw new RuntimeException(new java.sql.SQLException("connection refused", "08001"));
             }
@@ -41,7 +41,14 @@ class RateLimiterFlushPostgresIT extends PostgresTestBase {
             for (var u : updates) {
                 real.add(u.key().contains("poison") ? new CounterUpdate(u.key() + "\u0000", u.delta(), u.expiresAt()) : u);
             }
-            return super.incrementBatch(real);
+            var counts = super.incrementBatch(real, deadlineNanos);
+            // Callers look a result up by the key they sent.
+            var byRequestedKey = new java.util.HashMap<String, Long>();
+            for (var u : updates) {
+                Long n = counts.get(u.key());
+                if (n != null) byRequestedKey.put(u.key(), n);
+            }
+            return byRequestedKey;
         }
     }
 
@@ -64,6 +71,7 @@ class RateLimiterFlushPostgresIT extends PostgresTestBase {
     @AfterEach
     void reset() {
         RateLimiter.disableSharedBackend();
+        RateLimiter.flushTimeBudgetMillis = RateLimiter.DEFAULT_FLUSH_TIME_BUDGET_MILLIS;
     }
 
     private static long rows() throws Exception {
@@ -109,15 +117,101 @@ class RateLimiterFlushPostgresIT extends PostgresTestBase {
         assertEquals(25_001, rows());
     }
 
-    /** L6 review decision B: an evicted key's row is deleted, so a key flood leaves the table near the cap. */
+    /**
+     * L6 final review M-B: an eviction never deletes a counter row (the review round before
+     * deleted them, which let an instance with a stale view release a key the fleet had blocked).
+     * Rows live until their windows end, so a key flood leaves one row per key for the window.
+     */
     @Test
-    void evictedKeysRowsAreDeleted() throws Exception {
+    void evictionNeverDeletesACounterRow() throws Exception {
         RateLimiter.useSharedBackend(new Counters(dbFactory));
         var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1d").maxKeys(10); // flush every request
         for (int i = 0; i < 200; i++) {
             assertNull(limiter.handle(from("flood-" + i)));
         }
-        assertTrue(rows() <= 12, "rows: " + rows());
+        assertEquals(200, rows());
+        assertTrue(limiter.trackedEntries() <= 11, "the instance's own state is capped: " + limiter.trackedEntries());
+    }
+
+    private static long count(String user) throws Exception {
+        try (var c = connect(); var ps = c.prepareStatement(
+                "SELECT COALESCE(SUM(n), 0) FROM brace_counters WHERE counter_key LIKE ?")) {
+            ps.setString(1, "%:" + user + ":%");
+            try (var rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    /**
+     * M-B as reproduced: two limiters with one label are two instances of an app. The victim is
+     * blocked through B; a flood of other keys through A evicts A's entry for the victim; the
+     * victim's next attempt through A must still be refused.
+     */
+    @Test
+    void evictionOnOneInstanceDoesNotReleaseAKeyBlockedFleetWide() throws Exception {
+        RateLimiter.useSharedBackend(new Counters(dbFactory));
+        var a = RateLimiter.perKey(req -> req.header("X-User"), 5, "1d").maxKeys(100);
+        var b = RateLimiter.perKey(req -> req.header("X-User"), 5, "1d").maxKeys(100);
+        assertNull(a.handle(from("victim")));
+        Result last = null;
+        for (int i = 0; i < 6; i++) last = b.handle(from("victim"));
+        assertNotNull(last, "blocked through B");
+        for (int i = 0; i < 400; i++) a.handle(from("other-" + i));
+        for (int i = 0; i < 5; i++) {
+            assertNotNull(a.handle(from("victim")), "attempt " + (i + 1) + " through A after the flood");
+        }
+        assertTrue(count("victim") >= 6, "the victim's row survived: " + count("victim"));
+    }
+
+    /** The same with batched writes (flush every 10): the fleet count is read on re-admission. */
+    @Test
+    void reAdmittedKeyReadsItsFleetCountOnItsFirstCheck() throws Exception {
+        RateLimiter.useSharedBackend(new Counters(dbFactory));
+        var a = RateLimiter.perKey(req -> req.header("X-User"), 100, "1d").maxKeys(50);
+        var b = RateLimiter.perKey(req -> req.header("X-User"), 100, "1d").maxKeys(50);
+        for (int i = 0; i < 20; i++) assertNull(a.handle(from("victim")));
+        Result last = null;
+        for (int i = 0; i < 120; i++) last = b.handle(from("victim"));
+        assertNotNull(last);
+        for (int i = 0; i < 400; i++) a.handle(from("other-" + i));
+        assertNotNull(a.handle(from("victim")));
+    }
+
+    /**
+     * L6 final review L-G: the flush budget bounded the gaps between statements, not a statement.
+     * Here the flush's statement waits on a row lock held by another connection for 6 s; it must
+     * be cancelled at about the budget, and the count kept for the next flush.
+     */
+    @Test
+    void statementStuckBehindALockIsCancelledAtTheFlushBudget() throws Exception {
+        RateLimiter.useSharedBackend(new Counters(dbFactory));
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1d"); // flush every request
+        assertNull(limiter.handle(from("alice")));
+        RateLimiter.flushTimeBudgetMillis = 1_000;
+        long tookMillis;
+        try (var locker = connect()) {
+            locker.setAutoCommit(false);
+            try (var st = locker.createStatement()) {
+                st.executeUpdate("UPDATE brace_counters SET n = n");
+            }
+            var release = Thread.ofPlatform().start(() -> {
+                try {
+                    Thread.sleep(6_000);
+                    locker.rollback();
+                } catch (Exception ignored) {
+                }
+            });
+            long start = System.nanoTime();
+            assertNull(limiter.handle(from("alice")), "served on the instance's own count");
+            tookMillis = (System.nanoTime() - start) / 1_000_000;
+            release.join();
+        }
+        assertTrue(tookMillis < 3_500, "the request was held " + tookMillis + " ms by a 6 s statement");
+        Thread.sleep(1_100); // past the flush retry cooldown
+        assertNull(limiter.handle(from("alice")));
+        assertEquals(3, count("alice"), "the cancelled write was kept and flushed later");
     }
 
     @Test

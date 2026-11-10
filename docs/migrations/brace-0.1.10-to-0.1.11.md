@@ -1400,9 +1400,31 @@ Also changed:
 - **`before("/api", ...)` matches only the literal `/api`.** The docs showed it for a whole API;
   use `/api/*`.
 - **Distinct keys are capped per limiter** (default 100,000; `.maxKeys(n)` on `perIp(...)` and
-  `perKey(...)`). At the cap a new key takes the place of the least recently used key that is
-  under its limit; keys at their limit are kept until their window ends, and only when nothing
-  can be replaced does a key fall back to a per-IP overflow bucket, then a global one.
+  `perKey(...)`), so a limiter's memory is bounded: at most `maxKeys` keys plus `maxKeys`
+  per-address overflow buckets. At the cap a new key takes the place of the least recently used
+  key that is under its limit; keys at their limit are kept until their window ends. On Postgres
+  a forgotten key keeps its fleet count (its row is never deleted early, and the count is read
+  again when the key returns); with per-process counting it restarts from zero. When nothing
+  can be replaced a new key is counted against its client address.
+- **A saturated limiter fails closed by default.** When the key table and the per-address
+  buckets are all at their limit (for `perKey(…, 5, "15m")` at the default cap, a sustained
+  flood of about 1,300 requests a second from 100,000 addresses), requests the limiter has no
+  room to count share one last-resort bucket and are refused with 429: clients it is not
+  tracking are locked out for as long as the flood lasts. The alternative lets them through
+  uncounted, which gives the same flood unlimited attempts at untracked keys:
+
+  ```java
+  // default: no request goes uncounted
+  app.before("/login", RateLimiter.perKey(keyFn, 5, "15m"));
+
+  // opt in where an uncounted request is cheap and a lockout is worse
+  app.before("/api/*", RateLimiter.perIp(1000, "1m").onSaturation(RateLimiter.Saturation.FAIL_OPEN));
+  ```
+
+  `docs/SECURITY.md`, Rate Limiting, has what each choice costs.
+- **`brace_counters` can hold more rows during a key flood.** A row now always lives until its
+  window ends (about one row per distinct key counted in the window), then is swept. Nothing
+  to do; size the table for the flood you expect.
 - **`perIp` groups IPv6 clients by /64**, so rotating addresses inside one allocation no longer
   resets the count. Clients that share a /64 share a budget.
 - **Keys with control characters or unpaired surrogates are hashed.** One such key used to stop

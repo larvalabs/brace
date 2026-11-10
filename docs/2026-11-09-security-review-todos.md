@@ -582,6 +582,23 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     is bisected, the parameter-count error is not a key problem, and a flush stops after 2 s.
     F12: documented why same-label limiters share buckets only in shared mode. Tests in
     `Ipv6PeerSocketTest`, `RateLimiterReviewFixesTest`, `RateLimiterFlushPostgresIT`.
+    - **Final review fixes.** The shared-mode eviction was rebuilt: everything an instance knows
+      about a key is one object in one table, so no second map can hold orphans (M-C:
+      `lastKnownGlobal` grew without bound under concurrency). M-B: an eviction never deletes a
+      `brace_counters` row (an instance with a stale view released a key the fleet had blocked);
+      an evicted key's buffered count is still flushed, and a key that returns has its fleet
+      count read on its first check (a Bloom filter of evicted keys decides which new keys pay
+      that round trip). L-F: the flush trigger is a count of requests buffered since the last
+      flush, never decremented by eviction, so it cannot go negative or stall. L-G: every flush
+      statement carries a JDBC query timeout for the rest of the 2 s budget. L-H: recency is a
+      per-limiter sequence, and a key counted since the last flush is evicted last. M-D: per-address
+      overflow buckets are evictable and bounded by `maxKeys` (not `maxKeys / 10`), and what a
+      saturated limiter does is a named option, `onSaturation(FAIL_CLOSED | FAIL_OPEN)`, default
+      fail closed, with the attack cost of each documented. The dev warning redacts the path.
+      Tests in `RateLimiterFinalReviewTest`, `RateLimiterFlushPostgresIT`. Residual, documented:
+      with per-process counting an evicted key restarts from zero; `brace_counters` rows are
+      bounded by time (one per key per window), not by the cap; a wait for a pooled connection
+      is not covered by the flush budget.
 
 - [x] **L7: Smaller gaps in template output**, `BraceHtmlOutput.java:87-88, 190-194, 226-229, 318-335, 367-370, 432-435`
   - **Template-written `javascript:` URL.** `<a href="javascript:go('${x}')">` with

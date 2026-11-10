@@ -1599,26 +1599,89 @@ can rotate through billions of source addresses; keying each address separately 
 fresh budget per request. IPv4 clients (and IPv4-mapped IPv6 addresses such as `::ffff:203.0.113.7`)
 are keyed on the full address. Clients that share a /64 share a budget.
 
-**Distinct keys are capped per limiter** (default 100,000). Each key holds memory, and on Postgres
-a `brace_counters` row, for its whole window. Once a limiter tracks that many keys (a warning is
-logged, at most once a minute):
+#### The key cap, and what a flood can and cannot do
 
-1. A new key takes the place of a tracked key that is **under** its limit, the least recently
-   used of a small sample. The forgotten key loses its count so far (fewer than the limit), an
-   accepted bypass: a client that floods fresh keys to reset one key's count pays a whole table
-   of requests for fewer than `limit` extra attempts. On Postgres the forgotten key's row is
-   deleted at the next flush, so the table stays bounded too.
-2. A key **at or over** its limit is never forgotten before its window ends, so a flood cannot
+**A limiter's memory is bounded.** Each limiter tracks at most `maxKeys` keys (default 100,000)
+plus at most `maxKeys` per-address overflow buckets and one last-resort bucket: at most
+`2 × maxKeys + 1` entries per instance, however many distinct keys clients send. (Concurrent
+requests can put a table a few entries over for a moment, at most one per request in flight.)
+Change the cap per limiter with `.maxKeys(n)`, e.g. `RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+
+Once the key table is full (a warning is logged, at most once a minute), a request for a key the
+limiter is not tracking is handled in this order:
+
+1. **It takes the place of a tracked key that is under its limit**: the least recently used of a
+   small sample, by a per-limiter sequence number, so a key in active use is not the one chosen
+   while an idler one is in the sample.
+2. **A key at or over its limit is never forgotten before its window ends**, so a flood cannot
    unblock a client that is being limited.
-3. Only when the sample finds nothing but such blocked keys does a new key fall back to an overflow
-   bucket for its client address (`ipBucket(req.ip())`; at most `maxKeys / 10` of them), and past
-   those, to one shared overflow bucket.
+3. When the sample holds only such blocked keys, the request is counted in an **overflow bucket
+   for its client address** (`ipBucket(req.ip())`, an IPv6 client's /64), with the limiter's limit:
+   that address gets `limit` requests per window across all its untracked keys. Overflow buckets
+   are replaced by the same rule (under its limit: replaceable; at its limit: kept).
+4. When the overflow table too holds only buckets at their limit, the limiter is **saturated**
+   and `onSaturation(...)` decides (below).
 
-So a flood of fresh keys no longer locks out new legitimate keys (the earlier design sent every
-new key to one shared overflow bucket once the table was full). Eviction looks at a fixed number
-of keys under a per-limiter lock taken only on that full-table path, so no request scans the
-table. Raise or lower the cap per limiter with `.maxKeys(n)`, e.g.
-`RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+**What forgetting a key costs.** It differs by mode:
+
+- *Postgres (shared counters).* Nothing is lost fleet-wide. The key's `brace_counters` row is
+  never deleted by an eviction, a count the instance had buffered for it is still written at the
+  next flush, and when the key comes back the instance reads the fleet count before judging the
+  request. A key the fleet has blocked stays blocked whichever instance sees it next.
+  (Counts buffered but unwritten can be lost only while database writes are failing.)
+- *Per-process counting (no shared database).* The forgotten key's count so far, fewer than
+  `limit`, is gone: if it returns it starts again from zero. A client that wants extra attempts
+  at one key must therefore fill the table with fresh keys and keep it turning over; with the
+  default cap that is on the order of 6,000 requests for each time the target key is forgotten,
+  buying fewer than `limit` extra attempts. That is the price of bounded memory; a `perIp`
+  limiter in front caps how fast one address can turn the table over.
+
+**Saturation, and what it costs an attacker to get there.** With the documented login limiter,
+`perKey(…, 5, "15m")` and the default cap:
+
+1. Pinning the key table takes 100,000 keys driven to their limit: 600,000 requests in one
+   15-minute window, about 670 requests a second, from any number of addresses. From then on a
+   new key is counted against its client address (step 3), so each address still gets 5 attempts
+   per window, and keys already tracked are unaffected.
+2. Pinning the overflow table as well takes 100,000 distinct client addresses (IPv4 addresses or
+   IPv6 /64s, e.g. two /48 allocations), each driven to its limit: another 600,000 requests per
+   window. Sustained, that is about 1,300 requests a second from 100,000 networks.
+
+A saturated limiter cannot count a request for a key it is not tracking from an address it is
+not tracking. You choose what happens to those requests; each choice hands that attacker
+something:
+
+| `onSaturation(...)` | Such a request is | What the attacker gains while they sustain the flood |
+|---|---|---|
+| `RateLimiter.Saturation.FAIL_CLOSED` (default) | counted in one last-resort bucket with the limiter's limit, shared by all of them, so nearly all are refused with 429 | A lockout: clients the limiter is not already tracking (in practice, anyone who has not just used the endpoint) cannot use it. No request goes uncounted. |
+| `RateLimiter.Saturation.FAIL_OPEN` | let through uncounted | Unlimited attempts at any key the limiter is not tracking, which for a login limiter is unlimited password guessing against accounts of their choice. Nobody is locked out. |
+
+```java
+// The default, spelled out:
+app.before("/login", RateLimiter.perKey(keyFn, 5, "15m").onSaturation(RateLimiter.Saturation.FAIL_CLOSED));
+
+// Availability over the limit, for an endpoint where an uncounted request is cheap:
+app.before("/api/*", RateLimiter.perIp(1000, "1m").onSaturation(RateLimiter.Saturation.FAIL_OPEN));
+```
+
+In both modes a tracked key is still counted and a blocked key stays blocked, and a warning is
+logged at most once a minute while the limiter is saturated. The default is `FAIL_CLOSED`
+because the limiter exists to bound attempts, and an attacker with this much traffic can degrade
+availability in other ways regardless. Either way, raise the cost: a larger `maxKeys` raises both
+figures in proportion (memory grows with it, a few hundred bytes per entry), and a `perIp`
+limiter registered before the key limiter bounds how many of those requests one address can
+contribute. Neither removes the trade-off; a limiter with bounded memory has to do something
+with the request it has no room for.
+
+**`brace_counters` rows are bounded by time, not by the cap.** A row is written for each key
+counted in a window and removed only after the window ends (each instance sweeps expired rows
+once a minute). A flood of fresh keys therefore holds up to one row per distinct key per window:
+600 new keys a second against a 15-minute window is about 540,000 small rows at the peak, gone a
+minute after their windows end. Rows are not deleted earlier, because an instance that has
+forgotten a key cannot know the rest of the fleet has.
+
+Eviction looks at a fixed number of keys under a per-limiter lock taken only on that full-table
+path, so no request scans a table.
 
 **Two limiters with the same type, limit and window share buckets on Postgres.** The counter key
 is built from the limiter's label (`perKey(5/15m)`), the only identity a limiter has across a
@@ -1678,7 +1741,12 @@ key is isolated; that key's buffered count is dropped with a warning instead of 
 later flush, at a cost of a few dozen statements rather than one per key. Any other failure
 (the database unreachable, SQLState class 08, 53 or 57, or an error that is not about the data)
 restores every count not yet written and retries after a one-second back-off. A flush runs on the
-request that filled the buffer, so it stops after 2 seconds and keeps the rest for the next one.
+request that filled the buffer, so it has a 2-second budget: it stops between statements once
+the budget is spent, and each statement carries a JDBC query timeout for what is left of it, so
+a statement stuck behind a lock or a slow database is cancelled rather than holding the request.
+JDBC timeouts are whole seconds, rounded up, so the hold is bounded at about the budget plus one
+second; what was not written is kept for the next flush. (Waiting for a free pooled connection
+is bounded by the pool's own connection timeout, not by this budget.)
 
 ### Best Practices
 

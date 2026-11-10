@@ -182,7 +182,7 @@ class RateLimiterReviewFixesTest {
         volatile long sleepMillis;
 
         @Override
-        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates, long deadlineNanos) {
             if (!outage) statementSizes.add(updates.size());
             if (sleepMillis > 0) {
                 try { Thread.sleep(sleepMillis); } catch (InterruptedException e) { throw new RuntimeException(e); }
@@ -192,7 +192,7 @@ class RateLimiterReviewFixesTest {
                     + "parameters. Please consider using arrays, or splitting the query in several ones, or using "
                     + "COPY. Given query has " + updates.size() * 3 + " parameters", "22023"));
             }
-            return super.incrementBatch(updates);
+            return super.incrementBatch(updates, deadlineNanos);
         }
     }
 
