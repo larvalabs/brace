@@ -1195,12 +1195,15 @@ it reads (another query param, `req.url()`, a header such as `Accept-Language`, 
 `req.ip()`, the body) can differ between visitors, and whatever the first visitor sent is replayed
 to the rest for the TTL: `?msg=<b>PWNED</b>` on an undeclared param becomes everyone's page. In dev
 mode Brace logs such a read once per route, and under `Brace.test()` it throws, so a test of the
-route fails; production does no checking. `req.path()` (the raw, undecoded path) and
-`req.method()` are not recorded, so they are covered differently: a `HEAD` is never stored (it may
-be served an existing `GET` entry), and a request whose raw path is not in RFC 3986 normal form
-(an escaped unreserved character such as `/p/%62` for `/p/b`, lower-case hex, raw non-ASCII) is
-rendered but never stored, so a crafted spelling cannot choose the page served at the normal URL.
-Read path parameters with `req.pathParam(...)` in a cached handler.
+route fails; production does no checking. A read of `req.path()` (the raw, undecoded path, also
+behind `req.url()` and `req.urlWith(...)`) is reported the same way, because one key covers
+several spellings of a path: `/p/!` and `/p/%21` are both in normal form and decode to the same
+parameter. Read path parameters with `req.pathParam(...)` in a cached handler. `req.method()` is
+not recorded, and production checks nothing, so both are also covered structurally: a `HEAD` is
+never stored (it may be served an existing `GET` entry), and a request whose raw path is not in
+RFC 3986 normal form (an escaped unreserved character such as `/p/%62` for `/p/b`, lower-case hex,
+raw non-ASCII) is rendered but never stored, so a crafted spelling cannot choose the page served
+at the normal URL.
 
 Some inputs are refused outright rather than trusted to the handler: a request with
 `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or `HX-Prompt` is

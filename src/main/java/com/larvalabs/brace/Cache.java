@@ -840,7 +840,7 @@ public class Cache {
             // normal form. A HEAD shares the GET's entry, and req.method() is not a recorded read,
             // so a handler answering HEAD with an empty body would have that stored and served to
             // GET for the TTL. A non-normal spelling of the path (/p/%62 for /p/b) shares the
-            // normal one's key, and req.path() is not a recorded read either.
+            // normal one's key, and a req.path() read is only reported in dev mode and tests.
             boolean storable = !request.method().equals("HEAD")
                 && (request.route() == null || isNormalPath(request.path()));
             var views = new ArrayList<View>();
@@ -966,12 +966,17 @@ public class Cache {
             for (var name : reads.cookies) undeclared.add("cookie '" + name + "'");
             if (reads.ip) undeclared.add("the client address (req.ip())");
             if (reads.body) undeclared.add("the request body");
+            // The key holds the route's decoded path parameters; the raw path can be spelled
+            // several ways for one key (/p/! and /p/%21), so a handler reading it may store a page
+            // for one spelling that every other spelling is served.
+            if (reads.rawPath) undeclared.add("the raw request path (req.path(), url() or urlWith())");
             if (undeclared.isEmpty()) return;
             var label = routeLabel(request);
             var message = "Page-cached route " + label + " read " + String.join(", ", undeclared)
                 + ", which is not part of its cache key, so the page stored for one visitor is served to "
                 + "the next whatever they send. A cached handler may depend only on its path parameters and "
                 + "what it declares: .vary(\"param\") for a query param, .varyHeader(\"Name\") for a header. "
+                + (reads.rawPath ? "Read the path through req.pathParam(\"name\"), not req.path(). " : "")
                 + "Anything else (cookies, the client address, the body) means the route should not be page cached.";
             if (!"dev".equals(System.getProperty("brace.mode"))) {
                 throw new IllegalStateException(message + " (Thrown under Brace.test(); logged once per route in dev mode.)");

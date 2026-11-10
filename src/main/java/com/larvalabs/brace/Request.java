@@ -144,7 +144,12 @@ public class Request {
     }
 
     public String method() { return method; }
-    public String path() { return path; }
+    /**
+     * The request path as the client sent it (still percent-encoded). Under a page-cached
+     * handler in dev mode or a test this is a recorded read: the cache key holds the route's
+     * decoded path parameters, not this string (L4).
+     */
+    public String path() { readRawPath(); return path; }
     public Map<String, String> queryParams() { readQuery("*"); return queryParams; }
     public Map<String, String> pathParams() { return pathParams; }
 
@@ -252,6 +257,7 @@ public class Request {
      */
     public String url() {
         readQuery("*");
+        readRawPath();
         var qs = new StringBuilder();
         for (var pair : queryPairs()) Url.appendPair(qs, pair[0], pair[1]);
         return qs.isEmpty() ? path : path + "?" + qs;
@@ -266,6 +272,7 @@ public class Request {
      */
     public String urlWith(String name, Object value) {
         readQuery("*");
+        readRawPath();
         var text = Url.format(value);
         var qs = new StringBuilder();
         boolean placed = false;
@@ -896,6 +903,8 @@ public class Request {
         final java.util.Set<String> cookies = new java.util.LinkedHashSet<>();
         boolean body;
         boolean ip;
+        /** The raw path ({@code path()}, {@code url()}, {@code urlWith()}), not the decoded path params. */
+        boolean rawPath;
     }
 
     /** Non-null only while a page-cached handler runs in dev mode or a test; see {@link #strictInputChecks}. */
@@ -907,6 +916,7 @@ public class Request {
     private void readQuery(String name) { if (reads != null) reads.query.add(name); }
     private void readHeader(String name) { if (reads != null) reads.headers.add(name); }
     private void readBody() { if (reads != null) reads.body = true; }
+    private void readRawPath() { if (reads != null) reads.rawPath = true; }
 
     void setStorage(Storage storage) {
         this.storage = storage;

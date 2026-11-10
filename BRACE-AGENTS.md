@@ -928,10 +928,11 @@ that sets a cookie is never stored (and keeps its `Set-Cookie`). A `HEAD` may be
 
 **A cached handler must depend only on its route's path parameters and its declared `vary` /
 `varyHeader` values.** Reading anything else through `Request` (another query param, `req.url()`,
-a header, a cookie, `req.ip()`, the body) means the page stored for one visitor is served to the
-next whatever they send; in dev mode Brace logs this once per route, and under `Brace.test()` the
-request fails with an `IllegalStateException`, so a test catches it. Use `req.pathParam(...)`, not
-`req.path()`, in a cached handler: the raw path is not checked.
+the raw `req.path()`, a header, a cookie, `req.ip()`, the body) means the page stored for one
+visitor is served to the next whatever they send; in dev mode Brace logs this once per route, and
+under `Brace.test()` the request fails with an `IllegalStateException`, so a test catches it. Use
+`req.pathParam(...)`, not `req.path()`, in a cached handler: one key covers several spellings of
+the raw path (`/p/!` and `/p/%21`).
 
 Page-cache entries (keys starting `brace:page:`) never push out your own entries, and
 `set`/`getOrSet`/`delete` refuse an app key with that prefix (`IllegalArgumentException`);

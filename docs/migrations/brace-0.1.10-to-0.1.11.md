@@ -1828,7 +1828,7 @@ app.get("/feed", cache.wrap("10m", ctrl::feed).vary("page").varyHeader("HX-Targe
   body, throws `IllegalStateException` in tests and logs once per route in dev mode
   (production is unchanged). Declare the input with `.vary(...)`/`.varyHeader(...)`, or stop
   caching that route: a cached handler may depend only on its path parameters and what it
-  declares.
+  declares. Reading the raw `req.path()` is reported the same way: use `req.pathParam(...)`.
 - **Postgres caps page rows separately** from the app's own entries:
   `CacheBackend.postgres(db, maxEntries, maxPageEntries)`, defaults 100,000 rows in all and
   10,000 pages. A flood of page entries can no longer evict `cache.set(...)` data; in memory, a
