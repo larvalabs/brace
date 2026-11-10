@@ -512,8 +512,29 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             }
             return true;
         }
-        if (schemeWrittenByTemplate(raw, firstUserIndex)) return true;
+        // L7: a script URL the template wrote, with data in it (href="javascript:go('${x}')"), is
+        // code with data spliced in. Attribute escaping is undone by the browser before it runs,
+        // and so is percent-encoding, so there is no escaping to apply: it's blocked.
+        if (schemeWrittenByTemplate(raw, firstUserIndex)) return !isScriptUrl(raw);
         return isSafeUrl(raw) || mediaDataUrl(valueAttribute, raw);
+    }
+
+    private static boolean isScriptUrl(String url) {
+        String scheme = scheme(normalize(url));
+        return scheme != null && (scheme.equalsIgnoreCase("javascript") || scheme.equalsIgnoreCase("vbscript"));
+    }
+
+    /** The scheme of a normalized URL, or null if it is relative. */
+    private static String scheme(String normalized) {
+        int colon = normalized.indexOf(':');
+        if (colon < 0) return null;
+        // A scheme only if the ':' comes before any path, query or fragment delimiter.
+        for (int i = 0; i < colon; i++) {
+            char c = normalized.charAt(i);
+            if (c == '/' || c == '?' || c == '#') return null;
+        }
+        String scheme = normalized.substring(0, colon);
+        return isScheme(scheme) ? scheme : null; // not parseable as a scheme: a relative path
     }
 
     /**
@@ -600,17 +621,8 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
      * it: leading and trailing C0 controls and spaces dropped, tabs and newlines removed anywhere.
      */
     static boolean isSafeUrl(String url) {
-        String normalized = normalize(url);
-        int colon = normalized.indexOf(':');
-        if (colon < 0) return true;
-        // A scheme only if the ':' comes before any path, query or fragment delimiter.
-        for (int i = 0; i < colon; i++) {
-            char c = normalized.charAt(i);
-            if (c == '/' || c == '?' || c == '#') return true;
-        }
-        String scheme = normalized.substring(0, colon);
-        if (!isScheme(scheme)) return true; // not parseable as a scheme: a relative path
-        return SAFE_SCHEMES.contains(scheme.toLowerCase(Locale.ROOT));
+        String scheme = scheme(normalize(url));
+        return scheme == null || SAFE_SCHEMES.contains(scheme.toLowerCase(Locale.ROOT));
     }
 
     private static boolean isScheme(String s) {

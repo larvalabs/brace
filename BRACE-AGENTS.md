@@ -693,7 +693,8 @@ of JTE's escaping, Brace's template output:
   is kept; when user data decides the scheme, only `http`/`https`/`mailto`/`tel` pass (plus raster
   `data:image/png|jpeg|gif|webp|avif|bmp` on `src`/`poster`), and anything else (`javascript:`,
   `data:`, `java\tscript:`, `${scheme}://${host}` with a `javascript` scheme) renders as
-  `about:invalid#blocked`.
+  `about:invalid#blocked`. So does a `javascript:` URL the template wrote with any `${...}` in it
+  (`href="javascript:go('${id}')"`): use a `data-*` attribute and a script file instead.
 - **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request`,
   `hx-trigger`): user data is escaped with `\uXXXX` sequences, valid in a JavaScript string and in
   JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and

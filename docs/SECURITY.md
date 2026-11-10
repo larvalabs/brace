@@ -344,7 +344,10 @@ contexts where escaping alone doesn't stop script:
   if user data decides the scheme (`href="${url}"`, `href="${a}${b}"`, `href="${scheme}://${host}"`)
   only `http`, `https`, `mailto` and `tel` pass, plus raster `data:image/` URLs (png, jpeg, gif,
   webp, avif, bmp; never SVG) on `src` and `poster`. Anything else renders as
-  `about:invalid#blocked`.
+  `about:invalid#blocked`. One scheme the template can't choose for data: a `javascript:` or
+  `vbscript:` URL with any `${...}` in it (`href="javascript:go('${id}')"`) is blocked as well,
+  because the browser undoes both HTML escaping and percent-encoding before it runs the code.
+  Put the value in a `data-*` attribute and read it from a script file.
 - **Script attributes.** `on*`, `hx-on*` (`hx-on:click`, `hx-on-click`, `data-hx-on:*`),
   `hx-vals`, `hx-vars`, `hx-headers`, `hx-request` and `hx-trigger`. User data is escaped with
   `\uXXXX` sequences for every character that can end a string or start markup or a template

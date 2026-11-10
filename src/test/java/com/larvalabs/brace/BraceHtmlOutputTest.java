@@ -368,6 +368,25 @@ class BraceHtmlOutputTest {
         assertTrue(html.contains("<Script id=\"m3\">bar('\\\\')</Script>"), html);
     }
 
+    // --- L7 (2026-11): a javascript: URL the template wrote ---
+
+    @Test
+    void dataInAScriptUrlTheTemplateWroteIsBlocked() {
+        // href="javascript:go('${x}')": the template chose the scheme, so the value used to be
+        // only attribute-escaped, and the browser decodes that (and %27) before running the code.
+        for (String x : List.of("');alert(1);//", "%27);alert(1);//", "alert(1)", "5", "")) {
+            String html = both("xssJsUrl", Map.of("x", x));
+            for (String id : List.of("j1", "j2", "j3", "j4", "j6", "j7", "j8")) {
+                assertEquals(BraceHtmlOutput.BLOCKED_URL, attr(html, id), id + " <- " + x);
+            }
+            // Template text alone is the template's business; other schemes and paths are kept.
+            assertEquals("javascript:void(0)", attr(html, "k1"));
+            assertEquals("mailto:" + x, named(html, "k2", "href"));
+            assertEquals("/javascript:" + x, named(html, "k3", "href"));
+            assertEquals("?next=javascript:" + x, named(html, "k4", "href"));
+        }
+    }
+
     /**
      * Renders with static template text as pre-encoded bytes (how Brace runs, to a String and to
      * bytes) and as Strings (JTE's default), asserts all three agree, and returns the HTML.
