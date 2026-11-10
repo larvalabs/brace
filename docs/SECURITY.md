@@ -560,6 +560,17 @@ if `Content-Length` says the body is larger, otherwise as soon as the bytes read
 without downloading the rest. Raise or lower it per call with `.maxResponseBytes(n)`. `stream()`
 is not capped, because it hands you the body to read: bound what you read yourself.
 
+The same calls are bounded in **time**. `.timeout(...)` (default 30s) is the deadline for the
+whole exchange, response headers and body together, and `.idleTimeout(...)` (default 30s) bounds
+each wait for more body bytes. Either closes the connection and throws
+`Http.StreamTimeoutException`. Without them, a hostile server behind a user-supplied URL could
+send headers at once and then stall, or drip one byte every 29 seconds under the size cap, and
+hold the request thread (and its pooled database connection, in a `DbHandler`) indefinitely; a
+few dozen such requests would exhaust the pool. That was the case for buffered fetches until the
+2026-11 security review (M8): `timeout` used to cover only the wait for headers. The error body
+`fetchEvents` reads on a non-2xx status gets the same 30s default, though the event stream
+itself has no deadline unless you set one.
+
 ### DNS rebinding: what remains
 
 An attacker who controls a domain's DNS can answer with a public address when it's checked and a

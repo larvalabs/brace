@@ -94,10 +94,15 @@ public class Http {
     }
 
     /**
-     * For {@code fetch*} calls, how long to wait for the response headers (default 30s). For
-     * {@link #stream()} and {@link #fetchEvents}, the deadline for the whole call, headers and
-     * body together (default none): the connection is closed and {@link StreamTimeoutException}
-     * thrown when it passes. Time the machine spends asleep counts.
+     * The deadline for the whole call, response headers and body together. For {@code fetch*}
+     * calls it defaults to 30s; for {@link #stream()} and {@link #fetchEvents} to none, so a
+     * long stream isn't cut off (an error body {@link #fetchEvents} reads is buffered, and gets the
+     * 30s default too). When it passes, the connection is closed and
+     * {@link StreamTimeoutException} thrown. {@code null} removes it. Time the machine spends
+     * asleep counts.
+     *
+     * <p>Before the 2026-11 security review (M8) this bounded only the wait for the headers of a
+     * {@code fetch*} call, so a server that sent headers and then stalled held the caller forever.
      */
     public Http timeout(Duration timeout) {
         this.timeout = timeout;
@@ -106,11 +111,12 @@ public class Http {
     }
 
     /**
-     * For {@link #stream()} and {@link #fetchEvents}: close the connection and throw
-     * {@link StreamTimeoutException} when the response headers, or the next bytes of the body,
-     * take this long to arrive (default 30s; {@code null} or {@link Duration#ZERO} turns it off).
-     * Time the caller spends between reads doesn't count; time the machine spends asleep does.
-     * Ignored by {@code fetch*} calls.
+     * Close the connection and throw {@link StreamTimeoutException} when the next bytes of the
+     * body take this long to arrive (default 30s; {@code null} or {@link Duration#ZERO} turns it
+     * off). For {@link #stream()} and {@link #fetchEvents} it also bounds the wait for the
+     * response headers; for {@code fetch*} calls {@link #timeout} does that, so a slow API that
+     * takes a minute to answer only needs a longer {@code timeout}. Time the caller spends between
+     * reads doesn't count; time the machine spends asleep does.
      */
     public Http idleTimeout(Duration idleTimeout) {
         if (idleTimeout != null && idleTimeout.isNegative()) {
@@ -188,10 +194,6 @@ public class Http {
 
     // --- Execute ---
 
-    private HttpRequest buildRequest() {
-        return buildRequest(timeout);
-    }
-
     private HttpRequest buildRequest(Duration headerTimeout) {
         var builder = HttpRequest.newBuilder().uri(URI.create(url));
         if (headerTimeout != null) builder.timeout(headerTimeout);
@@ -220,13 +222,18 @@ public class Http {
      * <p>{@link #fetchBytes()} is the exception to the first rule: it throws on a non-2xx, because
      * a caller asking for bytes has nowhere to put an error body. (L7 — the asymmetry is
      * deliberate but was previously undocumented.)
+     *
+     * <p>Timeouts (M8): {@link #timeout} (default 30s) bounds the whole exchange, headers and body,
+     * and {@link #idleTimeout} (default 30s) each wait for the next bytes of the body. Either
+     * closes the connection and throws {@link StreamTimeoutException}. Raise {@code timeout} for a
+     * large download on a slow link.
      */
     public Response fetch() {
-        return exchange(() -> {
-            var raw = send(buildRequest());
-            var body = readBody(raw.body(), raw.headers());
-            return new Response(raw.statusCode(), raw.headers(), new String(body, charset(raw.headers())));
-        });
+        try (var response = open(bufferedWatchdog())) {
+            var headers = response.raw.headers();
+            var body = exchange(() -> readBody(response.body(), headers));
+            return new Response(response.status(), headers, new String(body, charset(headers)));
+        }
     }
 
     /**
@@ -251,13 +258,18 @@ public class Http {
      * has nowhere to put an error body, so failing loudly is the useful behavior. (L7)
      */
     public byte[] fetchBytes() {
-        var raw = exchange(() -> send(buildRequest()));
-        int status = raw.statusCode();
-        if (status < 200 || status >= 300) {
-            closeQuietly(raw.body());
-            throw new RuntimeException("HTTP request failed: " + method + " " + url + " (status " + status + ")");
+        try (var response = open(bufferedWatchdog())) {
+            int status = response.status();
+            if (status < 200 || status >= 300) {
+                throw new RuntimeException("HTTP request failed: " + method + " " + url + " (status " + status + ")");
+            }
+            return exchange(() -> readBody(response.body(), response.raw.headers()));
         }
-        return exchange(() -> readBody(raw.body(), raw.headers()));
+    }
+
+    /** The timeouts of a buffered read: {@link #timeout} as the deadline (default 30s), plus the idle timeout. */
+    private Watchdog bufferedWatchdog() {
+        return new Watchdog(this, timeout, true);
     }
 
     /** One blocking step of a call: send, or read the body. */
@@ -387,7 +399,11 @@ public class Http {
      * read yourself.
      */
     public StreamResponse stream() {
-        var watchdog = new Watchdog(this);
+        return open(new Watchdog(this, timeoutSet ? timeout : null, false));
+    }
+
+    /** Send, and hand back the response with its body read through {@code watchdog}. */
+    private StreamResponse open(Watchdog watchdog) {
         try {
             var raw = send(buildRequest(watchdog.headerTimeout()));
             return new StreamResponse(raw, watchdog.attach(raw.body()));
@@ -417,8 +433,9 @@ public class Http {
      * {@code onEvent} as it arrives, and return once the server ends the stream. The returned
      * {@link Response} carries the status and headers; on a non-2xx status no events are
      * parsed and its {@code body()} is the error body. Sends {@code Accept: text/event-stream}
-     * unless an Accept header is set. Timeouts are as for {@link #stream()}. The destination is
-     * checked as for {@link #fetch()}; an error body is capped at {@link #maxResponseBytes}, the
+     * unless an Accept header is set. Timeouts are as for {@link #stream()}, except that an error
+     * body is read like a buffered fetch: within {@link #timeout}, 30s unless set. The destination
+     * is checked as for {@link #fetch()}; an error body is capped at {@link #maxResponseBytes}, the
      * events are not.
      */
     public Response fetchEvents(Consumer<Event> onEvent) {
@@ -428,7 +445,10 @@ public class Http {
         try (var response = stream()) {
             if (!response.ok()) {
                 var responseHeaders = response.raw.headers();
-                var body = exchange(() -> readBody(response.body(), responseHeaders));
+                // M8: the stream's own watchdog has no deadline unless timeout() was set; the
+                // buffered one adds it, so a dripping error body can't hold the caller.
+                var errorBody = bufferedWatchdog().attach(response.body());
+                var body = exchange(() -> readBody(errorBody, responseHeaders));
                 return new Response(response.status(), responseHeaders, new String(body, charset(responseHeaders)));
             }
             response.events(onEvent);
@@ -915,8 +935,9 @@ public class Http {
     }
 
     /**
-     * A streamed call ran past its {@link #timeout} deadline or its {@link #idleTimeout}. The
-     * connection has been closed. An {@link UncheckedIOException}, so it also surfaces through
+     * A call ran past its {@link #timeout} deadline or its {@link #idleTimeout}: a stream, or
+     * (since the 2026-11 security review, M8) a buffered {@code fetch*}. The connection has been
+     * closed. An {@link UncheckedIOException}, so it also surfaces through
      * {@link StreamResponse#body()} reads and {@link StreamResponse#lines()}.
      */
     public static class StreamTimeoutException extends UncheckedIOException {
@@ -944,7 +965,7 @@ public class Http {
         private static String message(String method, String url, boolean idle, Duration limit) {
             var millis = limit.toMillis();
             var span = millis % 1000 == 0 ? (millis / 1000) + "s" : millis + "ms";
-            return "HTTP stream timed out: " + method + " " + url
+            return "HTTP request timed out: " + method + " " + url
                 + (idle ? " (no data for " + span + ")" : " (exceeded " + span + " deadline)");
         }
     }
@@ -1008,7 +1029,8 @@ public class Http {
     }
 
     /**
-     * Enforces a streamed call's timeouts. {@code HttpRequest.timeout} only covers the wait for
+     * Enforces a call's timeouts, streamed or buffered (M8: buffered reads used to loop on
+     * {@code body.read} with no bound). {@code HttpRequest.timeout} only covers the wait for
      * response headers, so a body that stalls would otherwise block forever: the watchdog closes
      * the body stream from a shared timer thread, which unblocks a pending read, and the
      * wrapped stream turns that into a {@link StreamTimeoutException}.
@@ -1031,6 +1053,8 @@ public class Http {
         private final String url;
         private final Duration timeout;
         private final Duration idleTimeout;
+        /** A buffered fetch: the idle timeout covers the body only; {@link #timeout} the headers. */
+        private final boolean buffered;
         private final LongSupplier wallClock;
         private final long startNanos;
         private final long startMillis;
@@ -1042,20 +1066,25 @@ public class Http {
         private volatile boolean done;
         private volatile InputStream stream;
 
-        Watchdog(Http http) {
+        Watchdog(Http http, Duration timeout, boolean buffered) {
             this.method = http.method;
             this.url = http.url;
-            this.timeout = http.timeoutSet ? http.timeout : null;
+            this.timeout = timeout;
             this.idleTimeout = http.idleTimeout;
+            this.buffered = buffered;
             this.wallClock = http.wallClock;
             this.startNanos = System.nanoTime();
             this.startMillis = wallClock.getAsLong();
             if (timeout != null) tick();
         }
 
-        /** The wait for response headers counts against the idle timeout too, when it's shorter. */
+        /**
+         * For a stream, the wait for response headers counts against the idle timeout too, when
+         * it's shorter. Not for a buffered fetch, where {@code timeout} has always been the
+         * header wait and a slow API only needs a longer one.
+         */
         private boolean headerWaitIsIdle() {
-            return idleTimeout != null && (timeout == null || idleTimeout.compareTo(timeout) < 0);
+            return !buffered && idleTimeout != null && (timeout == null || idleTimeout.compareTo(timeout) < 0);
         }
 
         Duration headerTimeout() {
@@ -1065,6 +1094,10 @@ public class Http {
         StreamTimeoutException headerTimeoutException() {
             var idle = headerWaitIsIdle();
             return new StreamTimeoutException(method, url, idle, idle ? idleTimeout : timeout);
+        }
+
+        static int pendingTasks() {
+            return TIMER.getQueue().size();
         }
 
         private static ScheduledThreadPoolExecutor timer() {
@@ -1154,6 +1187,11 @@ public class Http {
         private StreamTimeoutException timeoutException() {
             return new StreamTimeoutException(method, url, firedIdle, firedIdle ? idleTimeout : timeout);
         }
+    }
+
+    /** Timeout checks queued on the shared watchdog timer. Tests use it to prove none are left behind. */
+    static int pendingWatchdogTasks() {
+        return Watchdog.pendingTasks();
     }
 
     /** Routes every read through the {@link Watchdog} so a timeout surfaces as itself. */

@@ -317,7 +317,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `_abs` is rejected; ordinary rotation still works.
   - **Model: Sonnet 5.5.**
 
-- [ ] **M8: Buffered `Http.fetch*` has no timeout on the response body**, `Http.java:197, 224-230, 253-261, 315-329`
+- [x] **M8: Buffered `Http.fetch*` has no timeout on the response body**, `Http.java:197, 224-230, 253-261, 315-329`
   - **What's wrong.** `fetch()`, `fetchString()`, `fetchJson()`, `fetchBytes()` and the
     error-body path of `fetchEvents` send with `BodyHandlers.ofInputStream()` and loop on
     `body.read(buffer)` in `readBody`. `HttpRequest.timeout` covers only the wait for headers;

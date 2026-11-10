@@ -1097,6 +1097,11 @@ boolean ok = Arrays.stream(InetAddress.getAllByName(host)).allMatch(Http::isPubl
   throw `Http.ResponseTooLargeException` past it, without downloading the rest; change it with
   `.maxResponseBytes(n)`. `stream()` is uncapped: bound what you read. Both `.trusted()` and
   `.maxResponseBytes(n)` work on `multipart()` too.
+- Buffered fetches are bounded in time too: `.timeout()` (default 30s) is the deadline for the
+  whole exchange, headers **and body**, and `.idleTimeout()` (default 30s) each wait for more
+  body bytes. Either throws `Http.StreamTimeoutException`. A server that sends headers and then
+  stalls or drips can't hold the thread. Raise `.timeout(...)` for a big download on a slow
+  link or a slow API.
 - `Storage`, `WebhookNotifier` and raw `java.net.http` don't apply this check. Details, and the
   narrow DNS-rebinding window that remains, in `docs/SECURITY.md` ("Server-Side Request Forgery").
 
@@ -1138,7 +1143,8 @@ try (var s = Http.post(url).bodyJson(request).stream()) {
 - Stream timeouts differ from `fetch*`: `.idleTimeout()` (default 30s; `Duration.ZERO` or
   `null` turns it off) bounds each wait for the headers or the next bytes, and only counts
   time blocked in a read, so a slow consumer doesn't trip it. There is no total deadline
-  unless you call `.timeout()`, which then bounds the whole call. Either closes the
+  unless you call `.timeout()`, which then bounds the whole call (a `fetchEvents` error body
+  is buffered and gets the 30s default). Either closes the
   connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`). Both count time
   the machine spends asleep, so a laptop that sleeps through a call gives up within a second
   of waking instead of holding a dead connection.
