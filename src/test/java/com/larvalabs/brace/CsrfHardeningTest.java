@@ -132,12 +132,20 @@ class CsrfHardeningTest {
             assertTrue(js.body().contains("new URL(path, document.baseURI") && js.body().contains("location.origin"), js.body());
             // Final review: the origin is checked when htmx reads the header (a getter), after
             // every configRequest listener has run, not when this one runs. Still CSP-safe.
-            assertTrue(js.body().contains("Object.defineProperty(headers, HEADER") && js.body().contains("sameOrigin(detail.path) ? token : own"),
+            // Second review: a cross-origin request gets no X-CSRF-Token from here at all (null is
+            // a header htmx skips). The verification pass had it return a value already in the
+            // headers, which sent the app's own token on <body hx-headers> to another origin once
+            // an injected <base href> redirected a relative hx-post.
+            assertTrue(js.body().contains("Object.defineProperty(headers, HEADER")
+                && js.body().contains("return sameOrigin(detail.path) ? value : null;"), js.body());
+            assertFalse(js.body().contains("? token : own"), js.body());
+            // Every spelling of the header is taken out first (hx-headers='{"x-csrf-token": ...}'
+            // was sent beside the token: "A, token"), leaving the one X-CSRF-Token.
+            assertTrue(js.body().contains("name.toLowerCase() !== LOWER") && js.body().contains("delete headers[name]"),
                 js.body());
-            // Verification pass: a value the page set itself (hx-headers, htmx.ajax's headers) for a
-            // deliberate cross-origin call is captured first and sent cross-origin, not wiped.
-            assertTrue(js.body().contains("Object.prototype.hasOwnProperty.call(headers, HEADER) ? headers[HEADER] : null"),
-                js.body());
+            assertFalse(js.body().contains("hasOwnProperty.call(headers, HEADER)"), js.body());
+            // The behaviour itself needs a browser: see the L8 notes in the 2026-11 tracker for
+            // the cases run against htmx 2.0.10 (two local origins, headers logged server-side).
             assertFalse(js.body().contains("eval(") || js.body().contains("Function("), js.body());
             // What the helper does: the meta tag's token as X-CSRF-Token on a non-GET htmx request.
             var res = app.request("POST", "/like").header("HX-Request", "true").header("X-CSRF-Token", m.group(1)).send();
