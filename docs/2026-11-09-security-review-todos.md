@@ -114,6 +114,31 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     a check that attribute handling inside tags is unchanged.
   - **Model: Fable 5.2.** The class is a state machine across JTE callbacks, and this bug came
     from the last change to it.
+  - **Review fixes.** The fix replaced the pattern with an HTML tokenizer over all template
+    text. An independent review rendered about 110 templates through the old and new class,
+    fuzzed the chunking and checked in a browser. Its findings, each with a failing test first:
+    - **F1** (`4912bcb`, medium, a regression in the fix). `<svg><script href="/a.js"/></svg>`
+      was read as the start of a script body that ran to the next `</script>` on the page, so
+      no URL value was held and `href="${x}"` after it passed `javascript:`. Foreign content
+      is now tracked (elements open inside `<svg>`/`<math>`, integration points, breakout
+      tags, CDATA): a self-closing `<script/>`/`<style/>` there is complete, and one with a
+      body is markup. And disagreement between JTE's context and the tokenizer now resolves
+      to the stricter of the two: JTE's attribute rules (URL check included) apply even when
+      the tokenizer believes it is in a script body. Follow-up `911ba6a` applies the same rule
+      to data appended to a held value, and adds a seeded fuzz over every tokenizer state.
+      Not modelled, and read as HTML (the side that keeps every rule on): an end tag that
+      matches nothing open inside the `<svg>`, `<font>` without attributes, integration-point
+      names under the other root, `<annotation-xml>` whatever its encoding.
+    - **F2** (`a6d6864`, low to medium). In a script wrapped in `<!-- -->` that contains
+      `<script`, the browser does not end the element at the first `</script>`. The tokenizer
+      now has the script-data escaped and double-escaped states.
+    - **F3** (`2da49bf`, low, older than the fix). Data in `<svg><script>var a="${x}"` could
+      break out with `<img onerror=...>`, since an SVG script is tokenized as markup. `< > &`
+      are now `\uXXXX` in every script body, and quotes too in a script in foreign content.
+    - **F5** (`5b2d638`, nit). Data written in the middle of a match (`</scr${x}ipt>`) was
+      skipped over; it now ends the match.
+    - (F4 is under L7.)
+    - Regression corpus: `src/test/resources/xss-corpus.txt` (`BraceHtmlCorpusTest`).
 
 - [ ] **H2: The launcher's toolchain floor still admits CLIs with the token-cache symlink write**, `bin/brace:77, 79-87, 96-97, 164-183`
   - **What's wrong.**
@@ -438,6 +463,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     unchanged, since the escaping only protects data inside a quoted JavaScript string. The
     same file still lists `@template` inside an attribute as not covered; it now is.
   - **Model: Fable 5.2.** Same class and invariants as H1; one commit per item.
+  - **Review fixes.** From the same independent review as H1's (F1, F2, F3 and F5 are listed
+    there):
+    - **F4** (`afabcb0`, low). `hx-request` takes the same `js:`/`javascript:` prefix as
+      `hx-vals` (htmx reads both through one function) and was script-escaped but not held:
+      `hx-request='${x}'` with `x=js:x:alert(1)` was emitted unchanged. It is now held and
+      judged whole like `hx-vals` and `hx-headers`. Audit of the bundled htmx 2.0.10: that
+      function's callers are `hx-vals`, `hx-headers`, `hx-request` (prefix, now all guarded)
+      and `hx-vars` (always evaluated, so script-escaped only, as documented); the other
+      evaluating attributes are `hx-on*` and `hx-trigger` filters, also as documented.
 
 - [x] **L8: `csrf-htmx.js` attaches the token to every non-GET htmx request with no origin check**, `src/main/resources/brace/csrf-htmx.js:3-7`
   - Safe only while htmx's `selfRequestsOnly:true` default holds. An app that turns it off for

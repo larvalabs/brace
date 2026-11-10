@@ -698,7 +698,7 @@ of JTE's escaping, Brace's template output:
 - **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request`,
   `hx-trigger`): user data is escaped with `\uXXXX` sequences, valid in a JavaScript string and in
   JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and
-  `hx-vals='{"q": "${q}"}'` stays valid JSON. When data is the whole `hx-vals`/`hx-headers` value
+  `hx-vals='{"q": "${q}"}'` stays valid JSON. When data is the whole `hx-vals`/`hx-headers`/`hx-request` value
   (`hx-vals='${json}'`, JSON the handler built), it's attribute-escaped instead, so the JSON stays
   intact. If data supplies any of a leading `js:`/`javascript:` (which htmx evaluates), in one piece
   or several and behind any Unicode whitespace, the whole value becomes `{}`. Still, these attributes are code: prefer passing
@@ -712,6 +712,12 @@ of JTE's escaping, Brace's template output:
   `# % . _ -` are written as CSS hex escapes, so data can't end its declaration or rule. Plain
   values (`style="color: ${color}"`, `width: ${pct}%`) and data in a quoted CSS string
   (`url("${image}")`) work; `style="${wholeDeclarationList}"` and `rgb(...)` as data don't.
+- **`<script>` bodies**: JTE's JavaScript escaping plus `<`/`>`/`&` for `< > &`. Put
+  data only inside a quoted string (`var name = "${name}";`); `var n = ${count};` is code, not
+  data. Write `<script src="/app.js"></script>`, never `<script src="/app.js"/>`: HTML has no
+  self-closing script, and the browser swallows the page up to the next `</script>` (it is a
+  complete element only inside `<svg>`). For a JSON data block, serialize in the handler and put it
+  in a `data-*` attribute: values with `'` or `-` don't survive `<script type="application/json">`.
 - The same rules apply to data a `@template` call or content block writes inside an attribute
   value: the context comes from the HTML written so far, not from the template source.
 

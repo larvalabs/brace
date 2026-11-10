@@ -361,17 +361,38 @@ contexts where escaping alone doesn't stop script:
   that needs escaping). Never put user data there outside a quoted string. HTML escaping alone is undone by
   the browser before the code runs (`&#39;` is a quote again), and JTE's JavaScript escaping for
   `on*` left `&` alone, so an entity in user data still closed the string. When data is the whole
-  `hx-vals`/`hx-headers` value (`hx-vals='${json}'`) it is attribute-escaped instead, so JSON the
-  handler built stays intact. htmx evaluates such a value when it starts with `js:` or
-  `javascript:` after trimming (JavaScript's `trim()`, which strips U+00A0, U+FEFF and the other
-  Unicode spaces): if user data supplies any part of that prefix, in one `${...}` or several, the
-  value renders as `{}`. A `js:` the template wrote itself is kept.
+  `hx-vals`/`hx-headers`/`hx-request` value (`hx-vals='${json}'`) it is attribute-escaped
+  instead, so JSON the handler built stays intact. htmx evaluates such a value when it starts
+  with `js:` or `javascript:` after trimming (JavaScript's `trim()`, which strips U+00A0, U+FEFF
+  and the other Unicode spaces): if user data supplies any part of that prefix, in one `${...}`
+  or several, the value renders as `{}`. A `js:` the template wrote itself is kept. (`hx-vars`
+  has no such prefix: htmx evaluates all of it, always. It is deprecated in htmx; use `hx-vals`.)
 - **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup. Template
   markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
   `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.
 - **`<script>` bodies.** JavaScript-escaped (JTE), for a `<script>` tag written in any letter
-  case. As in a script attribute, that protects data inside a quoted string
-  (`var name = "${name}";`), not data written as code.
+  case, with `<`, `>` and `&` written as `<`, `>` and `&` on top, so data can
+  never read as markup whatever the browser makes of the script. As in a script attribute, that
+  protects data **inside a quoted string** (`var name = "${name}";`, a template literal, a regex
+  literal). Data outside a string is not supported: `var n = ${count};` runs whatever the value
+  says, and a value with `<`, `>` or `&` in it is now a syntax error there. Pass numbers and
+  objects as JSON in a string or a `data-*` attribute and parse them. Things to know:
+  - *Data blocks.* `<script type="application/json">{"name": "${name}"}</script>` gets the same
+    escaping. `<` is valid JSON and reads back as `<`. JTE's escapes for `'`, `-`, `` ` ``
+    and `$` (`\'`, `\-`) are not valid JSON, so a value containing one of those fails to parse:
+    for a JSON block, serialize the whole object in the handler and write it into a `data-*`
+    attribute, or fetch it. Markup in a `<script type="text/template">` block is not escaped as
+    markup: data there is JavaScript-string-escaped.
+  - *Scripts inside `<svg>` or `<math>`.* A browser reads these as markup, not as raw text:
+    `<img onerror=...>` in a JavaScript string there is a tag, and after `a<b` in the code a
+    quote ends an attribute. Data in such a script is written with `\uXXXX` for quotes too (as
+    in script attributes), which a JavaScript string reads back unchanged.
+    A self-closing `<script href="a.js"/>` or `<style/>` is a complete element there. In HTML
+    it is not: `<script src="a.js"/>` opens a script that runs to the next `</script>`, so
+    always write `<script src="a.js"></script>`.
+  - *Scripts wrapped in `<!-- ... -->`.* After `<!--` and a `<script` in the text (as in
+    `document.write("<script src=x></script>")`), a browser does not end the element at the
+    next `</script>`. Brace follows that, so data after it is still escaped as script.
 - **CSS.** In a `<style>` body and in a `style=""` attribute, every character of user data other
   than letters, digits, spaces, `# % . _ -` and non-ASCII characters is written as a CSS hex
   escape (`;` becomes `\3b `). An escaped character is never CSS syntax, so data can't close its
@@ -385,7 +406,14 @@ contexts where escaping alone doesn't stop script:
 
 Brace decides the context from the HTML it has written so far, not only from where the `${...}`
 sits in the template source, so the rules above also apply to data a `@template` call or a
-content block writes inside an attribute value (JTE alone escapes that as body text).
+content block writes inside an attribute value (JTE alone escapes that as body text). It follows
+the HTML parser's rules for tags, comments, `<script>`/`<style>` bodies and SVG/MathML content.
+Where its reading and JTE's differ, the data gets the rules of both: the URL check if either says
+URL attribute, script escaping if either says script. That shows as over-escaped text (`'`
+for a quote), never as unescaped data. Two things it reads differently from a browser, on
+purpose: the text of `<title>` and `<textarea>` is read as markup, and SVG/MathML content that
+isn't well formed (an end tag with no matching start tag inside the `<svg>`) is read as HTML from
+there on.
 
 Both the hot-reload and precompiled render paths use this output. `$unsafe{...}` bypasses it, as
 does `Result.html(...)`, which is a raw sink.
