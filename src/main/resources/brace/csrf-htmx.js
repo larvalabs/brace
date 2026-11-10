@@ -1,14 +1,40 @@
 // Brace: send the page's CSRF token with every non-GET htmx request to the same origin.
 // Include after htmx, with <meta name="csrf-token" content="..."> in the page (${csrfMeta}).
-document.addEventListener('htmx:configRequest', function (event) {
-  if (event.detail.verb === 'get') return;
-  var meta = document.querySelector('meta[name="csrf-token"]');
-  if (!meta) return;
-  var sameOrigin = false;
-  try {
-    sameOrigin = new URL(event.detail.path, document.baseURI || location.href).origin === location.origin;
-  } catch (e) {
-    sameOrigin = false;
+//
+// Which origin the request goes to is settled when htmx sends it, not when this listener runs:
+// another htmx:configRequest listener, registered later, can still rewrite event.detail.path.
+// So the header is defined with a getter. htmx reads it when it copies the headers onto the
+// request, after every htmx:configRequest listener has run, and skips a header whose value is
+// null: the origin checked is the one the request goes to. What this can't see: a listener that
+// replaces event.detail.headers with a copy (the copy holds the value as it was then) and
+// changes the path afterwards. A page that wants the token on a cross-origin request sets the
+// header itself, which replaces the getter.
+(function () {
+  var HEADER = 'X-CSRF-Token';
+
+  function sameOrigin(path) {
+    try {
+      return new URL(path, document.baseURI || location.href).origin === location.origin;
+    } catch (e) {
+      return false;
+    }
   }
-  if (sameOrigin) event.detail.headers['X-CSRF-Token'] = meta.content;
-});
+
+  document.addEventListener('htmx:configRequest', function (event) {
+    var detail = event.detail;
+    if (detail.verb === 'get') return;
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    if (!meta) return;
+    var token = meta.content;
+    Object.defineProperty(detail.headers, HEADER, {
+      enumerable: true,
+      configurable: true,
+      get: function () {
+        return sameOrigin(detail.path) ? token : null;
+      },
+      set: function (value) {
+        Object.defineProperty(detail.headers, HEADER, { value: value, writable: true, enumerable: true, configurable: true });
+      }
+    });
+  });
+})();

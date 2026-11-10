@@ -139,6 +139,39 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       skipped over; it now ends the match.
     - (F4 is under L7.)
     - Regression corpus: `src/test/resources/xss-corpus.txt` (`BraceHtmlCorpusTest`).
+  - **Final review fixes.** The final whole-branch review rendered real templates through JTE
+    3.2.1 in both static-content modes and confirmed execution in Chromium. Each with a failing
+    test first, and the fixed output loaded in a browser again (no handler fires, values read
+    back).
+    - **M1** (`1991622`, medium; F3 was incomplete). In a script or style body inside
+      `<svg>`/`<math>`, `0<i ?` or `a<b &&` opens a tag, and a string that does not follow `=`
+      is in attribute-name position: `<svg><script>var n = 0<i ? "${x}" : "";</script></svg>`
+      rendered an `<i>` with attacker-chosen attributes. The tokenizer knew it was inside a tag;
+      the data got script escaping only. Data written while the tokenizer is inside a tag and
+      not in a quoted value (or straight after `<` or `</`) now has every character written as
+      an escape, letters and digits included (`\uXXXX`, or CSS hex escapes in a style), whatever
+      JTE reports. It joins the "stricter reading wins" invariant.
+    - **L1, L3 and the reviewer's recommendation** (`0f8bdc0`). Script-body data is no longer
+      JTE's escaping plus `< > &`: everything but ASCII letters, digits, `_`, `,` and non-ASCII
+      is `\uXXXX`, in HTML and foreign scripts alike. JTE's `\'`, `\-`, `` \` `` and `\$` broke
+      `JSON.parse` of a JSON script block (L3), and its `\"` still ended a pseudo-attribute when
+      the browser read the script as markup and the tokenizer did not (L1, a regression against
+      the base commit). A regex literal now matches the data literally. Script attributes keep
+      their lighter escaping.
+    - **`<font>`** (`b74e20e`). Ends foreign content only with a `color`, `face` or `size`
+      attribute, as in the HTML parser; an SVG font definition no longer desyncs the tokenizer.
+    - **JTE drops template text** (corpus, `c2b68c4`). The probe whose script began
+      `// <![CDATA[` lost its first and last lines in JTE, not in this class: JTE strips
+      script comments, and JTE 3.2.1 also drops ALL the text before a template's first
+      comment when the text after it has a `<letter` still open at the next `${...}`
+      (`<script>` included, so the script source becomes body text and `i<n;` a real tag with
+      data in attribute-name position: executes before M1, inert after). Documented in
+      `docs/SECURITY.md`; worth reporting upstream.
+    - Not modelled, and listed as residual: `<annotation-xml>` by its `encoding`, integration
+      point names under the other root, an end tag that matches nothing open in the `<svg>`.
+      With the tokenizer wrong there, script data is still escaped whole, so what is left is a
+      letters-only value in attribute-name position (a boolean attribute such as `hidden`),
+      and only where the template wrote whitespace before it inside the string.
 
 - [ ] **H2: The launcher's toolchain floor still admits CLIs with the token-cache symlink write**, `bin/brace:77, 79-87, 96-97, 164-183`
   - **What's wrong.**
@@ -655,6 +688,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       function's callers are `hx-vals`, `hx-headers`, `hx-request` (prefix, now all guarded)
       and `hx-vars` (always evaluated, so script-escaped only, as documented); the other
       evaluating attributes are `hx-on*` and `hx-trigger` filters, also as documented.
+  - **Final review fixes.** From the final whole-branch review (M1, L1 and L3 are under H1):
+    - **L2** (`9febd05`, low). During a tokenizer desync no value is held, and `hx-vals` was
+      judged one `${...}` at a time: `hx-vals='${x}${y}'` with `j` and `s:alert(1)` rendered
+      `js:alert(1)`. When JTE reports `hx-vals`, `hx-headers` or `hx-request` and the tokenizer
+      is not in that value, none of the data is written: `{}` for the first non-empty piece,
+      nothing for the rest, until template text with a quote in it. URL attributes in the same
+      situation were already blocked piece by piece (pinned in the corpus).
 
 - [x] **L8: `csrf-htmx.js` attaches the token to every non-GET htmx request with no origin check**, `src/main/resources/brace/csrf-htmx.js:3-7`
   - Safe only while htmx's `selfRequestsOnly:true` default holds. An app that turns it off for
@@ -662,6 +702,10 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Add the header only when
     `new URL(event.detail.path, location.href).origin === location.origin`.
   - **Model: Haiku 5.5.**
+  - **Final review fixes** (`33fd77d`, nit). The path was read when the listener ran, so an app
+    listener registered later that rewrote it to another origin was not rechecked. htmx has no
+    later hook that can remove a header, so the header is defined with a getter that htmx reads
+    when it copies the headers onto the request, after every `htmx:configRequest` listener.
 
 - [x] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
   - **Verified (scratch server).** `GET /items/../y` on `/items/{a}/{b}` gives `a=..`. A handler

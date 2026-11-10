@@ -404,7 +404,7 @@ at startup.
 ### htmx
 
 `${csrfMeta}` renders `<meta name="csrf-token" content="…">` with a masked token, and the bundled
-`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it.
+`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it. The origin is checked when htmx sends the request, so a `htmx:configRequest` listener of the page's own that rewrites the path afterwards is covered too.
 
 ### Exemptions
 
@@ -474,29 +474,50 @@ contexts where escaping alone doesn't stop script:
 - **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup. Template
   markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
   `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.
-- **`<script>` bodies.** JavaScript-escaped (JTE), for a `<script>` tag written in any letter
-  case, with `<`, `>` and `&` written as `\u003c`, `\u003e` and `\u0026` on top, so data can
-  never read as markup whatever the browser makes of the script. As in a script attribute, that
-  protects data **inside a quoted string** (`var name = "${name}";`, a template literal, a regex
-  literal). Data outside a string is not supported: `var n = ${count};` runs whatever the value
-  says, and a value with `<`, `>` or `&` in it is now a syntax error there. Pass numbers and
-  objects as JSON in a string or a `data-*` attribute and parse them. Things to know:
+- **`<script>` bodies.** In a `<script>` tag written in any letter case, in HTML or inside
+  `<svg>`/`<math>`, every character of user data other than ASCII letters, digits, `_`, `,` and
+  non-ASCII characters is written as a `\uXXXX` escape (`O'Brien` is written `O\u0027Brien`;
+  a backslash is written `\\`). A JavaScript string in either quote style, a template literal
+  and a JSON string read the escapes back as the original text, and a regex literal matches it
+  literally, so the value the script sees is unchanged: only the page source looks different.
+  What is left has nothing in it that is syntax to JavaScript or to an HTML parser (no quote,
+  `<`, `>`, `&`, space, `=`, `/`, `` ` `` or `$`), so data can't end its string, can't spell
+  `</script>`, `<!--` or `${`, and can't read as markup whatever the browser makes of the
+  script. As in a script attribute, that protects data **inside a quoted string**
+  (`var name = "${name}";`, a template literal, a regex literal). Data outside a string is not
+  supported: `var n = ${count};` runs whatever the value says while it is all letters and
+  digits, and is a syntax error as soon as it has anything else in it (`1.5`, `-3`). Pass
+  numbers and objects in a string (`Number("${price}")`, `JSON.parse`) or in a `data-*`
+  attribute. Things to know:
   - *Data blocks.* `<script type="application/json">{"name": "${name}"}</script>` gets the same
-    escaping. `\u003c` is valid JSON and reads back as `<`. JTE's escapes for `'`, `-`, `` ` ``
-    and `$` (`\'`, `\-`) are not valid JSON, so a value containing one of those fails to parse:
-    for a JSON block, serialize the whole object in the handler and write it into a `data-*`
-    attribute, or fetch it. Markup in a `<script type="text/template">` block is not escaped as
-    markup: data there is JavaScript-string-escaped.
+    escaping, which is valid JSON for any value: `JSON.parse` returns the original text. A
+    block that is neither JavaScript nor JSON (`<script type="text/template">`) gets it too, and
+    there the escapes show as text: put client-side template markup in a `<template>` element,
+    where `${...}` is escaped as HTML.
   - *Scripts inside `<svg>` or `<math>`.* A browser reads these as markup, not as raw text:
-    `<img onerror=...>` in a JavaScript string there is a tag, and after `a<b` in the code a
-    quote ends an attribute. Data in such a script is written with `\uXXXX` for quotes too (as
-    in script attributes), which a JavaScript string reads back unchanged.
+    `a<b` or `0<i ?` in the code opens a tag, and what follows it is attribute names and values
+    to the HTML parser while it is still JavaScript to the script. The escaping above holds in a
+    string wherever the HTML parser takes it to be. Where Brace sees that a `${...}` lands
+    inside such a tag and outside a quoted value (a string that doesn't follow `=` is in
+    attribute-name position), it writes every character as an escape, letters and digits
+    included (`ok` is written `\u006f\u006b`); the script still reads the text back.
     A self-closing `<script href="a.js"/>` or `<style/>` is a complete element there. In HTML
     it is not: `<script src="a.js"/>` opens a script that runs to the next `</script>`, so
     always write `<script src="a.js"></script>`.
   - *Scripts wrapped in `<!-- ... -->`.* After `<!--` and a `<script` in the text (as in
     `document.write("<script src=x></script>")`), a browser does not end the element at the
     next `</script>`. Brace follows that, so data after it is still escaped as script.
+  - *Comments in a script or style.* JTE removes comments when it compiles a template:
+    `<!-- -->` in markup, `//` to the end of the line and `/* */` in a `<script>`, `/* */` in a
+    `<style>`. So a `// <![CDATA[` line in a script is not in the page. JTE 3.2.1 also has a
+    bug here: when a template's first comment comes before its first `${...}` or `@if`, and the
+    text between that comment and the next `${...}` has a `<` directly followed by a letter
+    with no `>` after it (`for (i = 0; i<n; i++) { f("${x}"); }`), JTE drops all the template
+    text before the comment, the `<script>` tag included. The script's source then shows as
+    page text on every render, and `i<n; ...` is a real tag. Brace can't put the text back; it
+    escapes the data in that tag whole (as above), so the result is a visibly broken page and
+    not an injection. If a page loses its top, write the comparison with spaces (`i < n`), or
+    move or remove the comment.
 - **CSS.** In a `<style>` body and in a `style=""` attribute, every character of user data other
   than letters, digits, spaces, `# % . _ -` and non-ASCII characters is written as a CSS hex
   escape (`;` becomes `\3b `). An escaped character is never CSS syntax, so data can't close its
@@ -513,11 +534,17 @@ sits in the template source, so the rules above also apply to data a `@template`
 content block writes inside an attribute value (JTE alone escapes that as body text). It follows
 the HTML parser's rules for tags, comments, `<script>`/`<style>` bodies and SVG/MathML content.
 Where its reading and JTE's differ, the data gets the rules of both: the URL check if either says
-URL attribute, script escaping if either says script. That shows as over-escaped text (`'`
-for a quote), never as unescaped data. Two things it reads differently from a browser, on
+URL attribute, script escaping if either says script. That shows as over-escaped text (`\u0027`
+for a quote), never as unescaped data. Two cases get the strictest treatment. Data that lands
+inside a tag but outside a quoted value, whatever JTE reports, is written with every character
+escaped (JTE refuses `${...}` there at compile time, so a template reaches it only in a script
+or style body that a browser reads as markup). And an `hx-vals`, `hx-headers` or `hx-request`
+value that Brace's reading is not inside of can't be judged whole, so none of its data is
+written: it renders as `{}`. Two things Brace reads differently from a browser, on
 purpose: the text of `<title>` and `<textarea>` is read as markup, and SVG/MathML content that
 isn't well formed (an end tag with no matching start tag inside the `<svg>`) is read as HTML from
-there on.
+there on. Also read as HTML: `<annotation-xml>` whatever its `encoding`, and a MathML text
+element inside `<svg>` or an SVG one inside `<math>`.
 
 Both the hot-reload and precompiled render paths use this output. `$unsafe{...}` bypasses it, as
 does `Result.html(...)`, which is a raw sink.

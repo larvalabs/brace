@@ -129,7 +129,12 @@ class CsrfHardeningTest {
             assertTrue(js.header("Content-Type").startsWith("text/javascript"), js.header("Content-Type"));
             assertTrue(js.body().contains("X-CSRF-Token") && js.body().contains("htmx:configRequest"), js.body());
             // L8: the token is only attached when the htmx request target is same-origin.
-            assertTrue(js.body().contains("new URL(event.detail.path") && js.body().contains("location.origin"), js.body());
+            assertTrue(js.body().contains("new URL(path, document.baseURI") && js.body().contains("location.origin"), js.body());
+            // Final review: the origin is checked when htmx reads the header (a getter), after
+            // every configRequest listener has run, not when this one runs. Still CSP-safe.
+            assertTrue(js.body().contains("Object.defineProperty(detail.headers") && js.body().contains("sameOrigin(detail.path) ? token : null"),
+                js.body());
+            assertFalse(js.body().contains("eval(") || js.body().contains("Function("), js.body());
             // What the helper does: the meta tag's token as X-CSRF-Token on a non-GET htmx request.
             var res = app.request("POST", "/like").header("HX-Request", "true").header("X-CSRF-Token", m.group(1)).send();
             assertEquals(200, res.status());
