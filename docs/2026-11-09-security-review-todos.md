@@ -450,6 +450,10 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     100,000 values. Cost: a 16+ character hash label in a file name is redacted; a short path
     (`/var/app/releases/20241105`) is no longer. Tables in `RedactorTest`, end to end in
     `ErrorStoreTest.finalReviewSecretsDoNotReachTheStoreOrTheLogs`.
+  - **Verification fixes.** `redactStackTrace` treats a line as a frame after any run of tabs or
+    spaces (`at ...`, `... N more`, `... N common frames omitted`), so the frames of a
+    `Suppressed:` exception and of the causes under it are kept; their message lines are still
+    redacted (`RedactorTest.framesOfSuppressedExceptionsAndTheirCausesAreKept`).
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current

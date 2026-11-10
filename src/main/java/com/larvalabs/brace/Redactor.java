@@ -995,7 +995,8 @@ public class Redactor {
      * the exception message verbatim in the first line, in every {@code Caused by:} and
      * {@code Suppressed:} line, and on the continuation lines of a multi-line message, so
      * redacting {@code getMessage()} alone leaves the same text readable in the trace. Every line
-     * except a frame line ({@code \tat ...} or {@code \t... N more}) goes through
+     * except a frame line ({@code at ...} or {@code ... N more} after one or more tabs, so the
+     * frames of a {@code Suppressed:} exception and its causes too) goes through
      * {@link #redactMessage}; frame lines and line endings are kept exactly as they were. A trace
      * with nothing to redact is returned unchanged.
      */
@@ -1010,8 +1011,7 @@ public class Redactor {
             int next = nl < 0 ? len : nl + 1;
             int end = nl < 0 ? len : nl;
             if (end > pos && stackTrace.charAt(end - 1) == '\r') end--;
-            boolean frame = stackTrace.startsWith("\tat ", pos) || stackTrace.startsWith("\t... ", pos);
-            if (!frame && end > pos) {
+            if (!isFrameLine(stackTrace, pos, end) && end > pos) {
                 String line = stackTrace.substring(pos, end);
                 String redacted = redactMessage(line);
                 if (!redacted.equals(line)) {
@@ -1024,6 +1024,25 @@ public class Redactor {
         }
         if (out == null) return stackTrace;
         return out.append(stackTrace, copied, len).toString();
+    }
+
+    /**
+     * A frame line of a printed trace, at any indent: {@code printStackTrace} indents the frames of
+     * a {@code Suppressed:} exception, and of the causes nested under it, with two or more tabs.
+     * After at least one space or tab: {@code at ...}, {@code ... N more} or (Logback)
+     * {@code ... N common frames omitted}.
+     */
+    private static boolean isFrameLine(String s, int from, int end) {
+        int i = from;
+        while (i < end && (s.charAt(i) == '\t' || s.charAt(i) == ' ')) i++;
+        if (i == from) return false;
+        if (s.startsWith("at ", i)) return true;
+        if (!s.startsWith("... ", i)) return false;
+        int d = i + 4;
+        while (d < end && isAsciiDigit(s.charAt(d))) d++;
+        if (d == i + 4) return false;
+        String rest = s.substring(d, end);
+        return rest.equals(" more") || rest.equals(" common frames omitted");
     }
 
     /**

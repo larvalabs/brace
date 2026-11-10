@@ -287,6 +287,48 @@ class RedactorTest {
     }
 
     @Test
+    void framesOfSuppressedExceptionsAndTheirCausesAreKept() {
+        // Verification pass: printStackTrace indents the frames of a Suppressed: exception (and of
+        // the causes nested under it) with two or more tabs; only "\tat " counted as a frame, so
+        // those frames got the run rule: Http2ConnectionHandlerImpl.java became [redacted].java.
+        String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String other = "9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        var top = new RuntimeException("outer");
+        var suppressed = new java.io.IOException("close failed " + secret,
+            new IllegalStateException("cause under suppressed " + other));
+        StackTraceElement[] frames = {
+            new StackTraceElement("com.example.net.Http2ConnectionHandlerImpl", "run",
+                "Http2ConnectionHandlerImpl.java", 42),
+            new StackTraceElement("shop.Base64UrlDecoder2Impl", "decode", "Base64UrlDecoder2Impl.java", 9),
+            new StackTraceElement("com.example.Worker$$Lambda$Aa1bB2cC3dD4eE5fF6gG7", "run", null, -1)};
+        suppressed.setStackTrace(frames);
+        suppressed.getCause().setStackTrace(new StackTraceElement[] {frames[1], frames[0]});
+        top.addSuppressed(suppressed);
+
+        String trace = traceOf(top);
+        assertTrue(trace.contains("\t\tat com.example.net.Http2ConnectionHandlerImpl.run(Http2ConnectionHandlerImpl.java:42)"),
+            "precondition: suppressed frames are indented with two tabs: " + trace);
+        assertTrue(trace.contains("\tCaused by: java.lang.IllegalStateException"), "precondition: " + trace);
+
+        String redacted = Redactor.redactStackTrace(trace);
+        assertFalse(redacted.contains(secret), "Suppressed: message must be redacted: " + redacted);
+        assertFalse(redacted.contains(other), "nested Caused by: message must be redacted: " + redacted);
+        assertTrue(redacted.contains("\tSuppressed: java.io.IOException: close failed [redacted]"), redacted);
+        assertTrue(redacted.contains("\tCaused by: java.lang.IllegalStateException: cause under suppressed [redacted]"),
+            redacted);
+        // Every frame line, at any indent, is kept exactly.
+        for (String line : trace.split("\n")) {
+            String t = line.strip();
+            if (t.startsWith("at ") || t.startsWith("... ")) {
+                assertTrue(redacted.contains(line), "frame line changed: " + line + "\n" + redacted);
+            }
+        }
+        // Logback's "... N common frames omitted" is a frame line too.
+        String logback = "java.lang.RuntimeException: x\n\tat a.B.c(B.java:1)\n\t\t... 12 common frames omitted\n";
+        assertSame(logback, Redactor.redactStackTrace(logback));
+    }
+
+    @Test
     void redactStackTraceKeepsLineEndingsAndReturnsCleanTracesUnchanged() {
         String clean = "java.lang.RuntimeException: user not found\r\n\tat a.B.c(B.java:1)\r\n";
         assertSame(clean, Redactor.redactStackTrace(clean));
