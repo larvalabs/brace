@@ -537,6 +537,28 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `Request` are recorded and an undeclared query param, header, cookie, `ip()` or body read is
     logged once per route (dev) or thrown (test); a response that sets a cookie is returned
     intact and not stored. Tests in `PageCacheReviewFixesTest`, `PageCacheCapPostgresIT`.
+  - **Final review fixes** (`fix(security): L4 final review fixes`). Tests in
+    `PageCacheFinalReviewTest`, `PageCacheCapPostgresIT`.
+    - `HX-Request` other than exactly `true` stored a `hasHeader`-based partial under the
+      full-page key: it is keyed as absent / `true`, and any other value bypasses the cache, so
+      every read of the header is fixed by the key and the detector's excuse for it is sound.
+    - A `HEAD` miss stored its (possibly empty) body for `GET`: a `HEAD` may be served a `GET`
+      entry but never stores. A raw path not in RFC 3986 normal form (`/p/%62` for `/p/b`) never
+      stores either, since `req.path()` is an unrecorded raw read. Flagging `req.path()` reads in
+      the detector needs a hook in `Request.java` (outside this fix's files); not done.
+    - In memory, a flood of twice the page cap locked the real pages out (they hit 3%): pages are
+      now evicted by CLOCK (approximate LRU), a new page always displaces a cold page (never an
+      app entry), and a store full of app entries no longer costs two scans per page request
+      (inline expiry sweeps at most once a second; O(1) refusal with no page to displace).
+    - On Postgres, page rows were trimmed soonest-expiring first (600 of 600 requests ran the
+      handler in the reviewer's 1d/5m scenario): new migration `V19__brace_cache_used_at.sql`
+      adds `used_at` (write time, refreshed on a hit at most once a minute per row), and page rows
+      are trimmed least recently used first.
+    - `varyHeader` values are SHA-256 hex in the key (`Authorization` was stored in clear in
+      `brace_cache.cache_key`).
+    - App `set`/`getOrSet`/`delete` on `brace:page:` throw `IllegalArgumentException`
+      (`deletePrefix("brace:page:")`, tags and `clear()` still clear pages); `deletePrefix(null)`
+      throws `IllegalArgumentException`.
 
 - [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a

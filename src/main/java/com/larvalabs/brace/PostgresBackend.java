@@ -10,7 +10,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Shared {@link CacheBackend} over the {@code brace_cache} / {@code brace_cache_counters} tables
- * (migration {@code migration_pg/V8__brace_cache.sql}). Cross-server-consistent and durable: every
+ * (migrations {@code migration_pg/V8__brace_cache.sql}, {@code V19__brace_cache_used_at.sql}).
+ * Cross-server-consistent and durable: every
  * instance reads and writes one row set, so {@code delete}/{@code clearTag} invalidate the whole
  * fleet and {@code incr} is a single atomic SQL statement (no per-instance drift).
  *
@@ -72,6 +73,16 @@ class PostgresBackend implements CacheBackend {
         this.trimEvery = Math.max(1, Math.min(1_000, Math.min(maxEntries, Math.max(1, maxPageEntries)) / 10));
     }
 
+    int trimEvery() { return trimEvery; }
+
+    /**
+     * How stale a page row's {@code used_at} must be before a hit refreshes it (L4 final review).
+     * A hot page then costs at most one write per interval, not one per hit. Tests set it to zero.
+     */
+    private volatile long touchIntervalSeconds = 60;
+
+    void touchInterval(Duration interval) { this.touchIntervalSeconds = interval.toSeconds(); }
+
     @Override
     public boolean requiresSerialization() {
         return true;
@@ -84,15 +95,45 @@ class PostgresBackend implements CacheBackend {
 
     @Override
     public byte[] getBytes(String key) {
+        if (!Cache.isPageKey(key)) {
+            return run(conn -> {
+                try (var ps = conn.prepareStatement(
+                        "SELECT value FROM brace_cache " +
+                        "WHERE cache_key = ? AND (expires_at IS NULL OR expires_at > now())")) {
+                    ps.setString(1, key);
+                    try (var rs = ps.executeQuery()) {
+                        return rs.next() ? rs.getBytes(1) : null;
+                    }
+                }
+            });
+        }
+        // A page hit records use (used_at), so the page cap trims cold pages first; at most once
+        // per touchInterval per row, so a hot page is not a write per request (L4 final review).
+        long interval = touchIntervalSeconds;
         return run(conn -> {
+            byte[] value;
+            boolean stale;
             try (var ps = conn.prepareStatement(
-                    "SELECT value FROM brace_cache " +
+                    "SELECT value, used_at < now() - make_interval(secs => ?) FROM brace_cache " +
                     "WHERE cache_key = ? AND (expires_at IS NULL OR expires_at > now())")) {
-                ps.setString(1, key);
+                ps.setLong(1, interval);
+                ps.setString(2, key);
                 try (var rs = ps.executeQuery()) {
-                    return rs.next() ? rs.getBytes(1) : null;
+                    if (!rs.next()) return null;
+                    value = rs.getBytes(1);
+                    stale = rs.getBoolean(2);
                 }
             }
+            if (stale) {
+                try (var ps = conn.prepareStatement(
+                        "UPDATE brace_cache SET used_at = now() " +
+                        "WHERE cache_key = ? AND used_at < now() - make_interval(secs => ?)")) {
+                    ps.setString(1, key);
+                    ps.setLong(2, interval);
+                    ps.executeUpdate();
+                }
+            }
+            return value;
         });
     }
 
@@ -103,10 +144,11 @@ class PostgresBackend implements CacheBackend {
         run(conn -> {
             var tagArray = conn.createArrayOf("text", tags == null ? new String[0] : tags);
             try (var ps = conn.prepareStatement(
-                    "INSERT INTO brace_cache (cache_key, value, tags, expires_at) " +
-                    "VALUES (?, ?, ?, ?) " +
+                    "INSERT INTO brace_cache (cache_key, value, tags, expires_at, used_at) " +
+                    "VALUES (?, ?, ?, ?, now()) " +
                     "ON CONFLICT (cache_key) DO UPDATE SET " +
-                    "value = EXCLUDED.value, tags = EXCLUDED.tags, expires_at = EXCLUDED.expires_at")) {
+                    "value = EXCLUDED.value, tags = EXCLUDED.tags, expires_at = EXCLUDED.expires_at, " +
+                    "used_at = EXCLUDED.used_at")) {
                 ps.setString(1, key);
                 ps.setBytes(2, value);
                 ps.setArray(3, tagArray);
@@ -136,11 +178,15 @@ class PostgresBackend implements CacheBackend {
      * Hold {@code brace_cache} to its caps (L4, L4 review F5): drop expired rows; hold page-cache
      * rows ({@link Cache#PAGE_KEY_PREFIX}, hashed forms included, since a hashed key keeps its
      * prefix) to {@link #maxPageEntries}; then hold the whole table to {@link #maxEntries},
-     * deleting page rows before any other. Within each group the rows that expire soonest go
-     * first (rows with no expiry last). So the app's own entries are only ever trimmed when they
-     * alone exceed {@link #maxEntries}, never because pages grew. Checked every {@link #trimEvery}
-     * inserts by this instance and on every {@link #evictExpired()} sweep, so the table can
-     * overshoot by about one check interval per instance between checks. No schema change.
+     * deleting page rows before any other. Page rows go least recently used first ({@code used_at}:
+     * last written, or last hit, recorded at most once per {@link #touchIntervalSeconds}; L4 final
+     * review, migration {@code V19__brace_cache_used_at.sql}); trimmed soonest-expiring first, rows
+     * on a long-TTL route pinned the cap and every short-TTL page was trimmed as soon as it was
+     * written. App rows go soonest-expiring first (rows with no expiry last). So the app's own
+     * entries are only ever trimmed when they alone exceed {@link #maxEntries}, never because pages
+     * grew. Checked every {@link #trimEvery} inserts by this instance and on every
+     * {@link #evictExpired()} sweep, so the table can overshoot by about one check interval per
+     * instance between checks.
      *
      * @return rows removed
      */
@@ -154,23 +200,29 @@ class PostgresBackend implements CacheBackend {
             String pagePattern = escapeLike(Cache.PAGE_KEY_PREFIX) + "%";
             long pages = count(conn, " WHERE cache_key LIKE ? ESCAPE '\\'", pagePattern);
             if (pages > maxPageEntries) {
-                removed += deleteSoonestExpiring(conn, "cache_key LIKE ? ESCAPE '\\'", pagePattern, pages - maxPageEntries);
+                removed += deleteFirst(conn, "cache_key LIKE ? ESCAPE '\\'", pagePattern, PAGE_TRIM_ORDER,
+                    pages - maxPageEntries);
                 pages = maxPageEntries;
             }
             long total = count(conn, "", null);
             if (total > maxEntries) {
                 long fromPages = Math.min(pages, total - maxEntries);
                 if (fromPages > 0) {
-                    removed += deleteSoonestExpiring(conn, "cache_key LIKE ? ESCAPE '\\'", pagePattern, fromPages);
+                    removed += deleteFirst(conn, "cache_key LIKE ? ESCAPE '\\'", pagePattern, PAGE_TRIM_ORDER, fromPages);
                 }
                 if (total - fromPages > maxEntries) {
-                    removed += deleteSoonestExpiring(conn, "cache_key NOT LIKE ? ESCAPE '\\'", pagePattern,
+                    removed += deleteFirst(conn, "cache_key NOT LIKE ? ESCAPE '\\'", pagePattern, APP_TRIM_ORDER,
                         total - fromPages - maxEntries);
                 }
             }
             return removed;
         });
     }
+
+    /** Page rows: least recently used first (L4 final review). */
+    private static final String PAGE_TRIM_ORDER = "used_at ASC";
+    /** App rows: soonest-expiring first, rows with no expiry last. */
+    private static final String APP_TRIM_ORDER = "expires_at ASC NULLS LAST";
 
     private static long count(java.sql.Connection conn, String where, String param) throws java.sql.SQLException {
         try (var ps = conn.prepareStatement("SELECT count(*) FROM brace_cache" + where)) {
@@ -182,11 +234,11 @@ class PostgresBackend implements CacheBackend {
         }
     }
 
-    private static long deleteSoonestExpiring(java.sql.Connection conn, String where, String param, long n)
+    private static long deleteFirst(java.sql.Connection conn, String where, String param, String order, long n)
             throws java.sql.SQLException {
         try (var ps = conn.prepareStatement(
                 "DELETE FROM brace_cache WHERE cache_key IN (SELECT cache_key FROM brace_cache WHERE " + where
-                    + " ORDER BY expires_at ASC NULLS LAST LIMIT ?)")) {
+                    + " ORDER BY " + order + " LIMIT ?)")) {
             ps.setString(1, param);
             ps.setLong(2, n);
             return ps.executeUpdate();

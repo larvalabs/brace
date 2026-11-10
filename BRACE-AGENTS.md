@@ -902,30 +902,36 @@ cache.clearTag("posts");  // invalidate all cached pages with this tag
 page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
 or the cache will serve the same entry for every value. Undeclared params never key the cache
 (so `?utm_source=...` junk can't mint entries). A param given twice (`?t=a&t=b`) keys on all its
-values. Headers key the cache only when declared: `.varyHeader("Accept-Language")`. A request
-carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or
+values. Headers key the cache only when declared: `.varyHeader("Accept-Language")` (the value
+enters the key as a SHA-256 digest, so a declared `Authorization` is never stored in clear). A
+request carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or
 `HX-Prompt` bypasses the cache (served by the handler, nothing stored) unless that header is
-declared with `.varyHeader(...)`. A response that sets a cookie is never stored (and keeps its
-`Set-Cookie`).
+declared with `.varyHeader(...)`; so does an `HX-Request` with any value but `true`. A response
+that sets a cookie is never stored (and keeps its `Set-Cookie`). A `HEAD` may be served a cached
+`GET` page but never stores one, and a request whose raw path is not in normal form (`/p/%62` for
+`/p/b`, lower-case hex, raw non-ASCII) may be served the entry but never stores it.
 
 **A cached handler must depend only on its route's path parameters and its declared `vary` /
 `varyHeader` values.** Reading anything else through `Request` (another query param, `req.url()`,
 a header, a cookie, `req.ip()`, the body) means the page stored for one visitor is served to the
 next whatever they send; in dev mode Brace logs this once per route, and under `Brace.test()` the
-request fails with an `IllegalStateException`, so a test catches it.
+request fails with an `IllegalStateException`, so a test catches it. Use `req.pathParam(...)`, not
+`req.path()`, in a cached handler: the raw path is not checked.
 
-Page-cache entries (keys starting `brace:page:`; don't use that prefix for your own keys) never
-push out your own entries. The in-memory backend is capped at 10,000 entries (expired first, then
-page entries, then arbitrary ones; a new page entry only displaces another page entry;
-`CacheBackend.inMemory(maxEntries)` to size). The Postgres backend is capped at 100,000 rows, of
-which at most 10,000 page rows (expired first, then page rows, then soonest-to-expire, rows
+Page-cache entries (keys starting `brace:page:`) never push out your own entries, and
+`set`/`getOrSet`/`delete` refuse an app key with that prefix (`IllegalArgumentException`);
+`deletePrefix("brace:page:")`, tags and `clear()` still clear pages. The in-memory backend is
+capped at 10,000 entries (expired first, then the page entries least recently hit, then arbitrary
+ones; a new page entry only displaces another page entry; `CacheBackend.inMemory(maxEntries)` to
+size). The Postgres backend is capped at 100,000 rows, of which at most 10,000 page rows (expired
+first, then page rows least recently written or hit, then app rows soonest-to-expire, rows
 without a TTL last; `CacheBackend.postgres(dbFactory, maxEntries)` or
 `CacheBackend.postgres(dbFactory, maxEntries, maxPageEntries)` to size).
 
 **Only 2xx responses are stored.** An error, a redirect or a 304 is served uncached, so one bad
 request can't pin it for everyone. The key is the matched **route pattern plus its decoded path
-parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method, the `HX-Request`
-variant, and the declared `vary` params and `varyHeader` headers.
+parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method (`HEAD` reads the
+`GET` entry), the `HX-Request` variant, and the declared `vary` params and `varyHeader` headers.
 
 **A cached page is shared by every visitor**, so it must not contain per-visitor content. A
 response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose

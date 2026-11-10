@@ -69,4 +69,86 @@ class PageCacheCapPostgresIT extends PostgresTestBase {
             cache.close();
         }
     }
+
+    // ---- L4 final review: page rows are trimmed least recently used first, not soonest-expiring ----
+
+    private static int render(Cache.CachedHandler page, String path, java.util.Map<String, Integer> renders) {
+        page.apply(PageCacheReviewFixesTest.request(path));
+        return renders.getOrDefault(path, 0);
+    }
+
+    @Test
+    void shortTtlPagesSurviveALongTtlFlood() throws Exception {
+        // The reviewer's scenario: 200 rows on a 1d route, then 30 pages on a 5m route requested 20
+        // times each. Trimmed soonest-expiring first, the 5m pages were deleted on every check:
+        // 600 of 600 requests ran the handler.
+        var backend = new PostgresBackend(factory, 100_000, 100);
+        var cache = new Cache(backend);
+        try {
+            var renders = new java.util.HashMap<String, Integer>();
+            var flood = cache.wrap("1d", req -> Result.text("flood"));
+            for (int i = 0; i < 200; i++) flood.apply(PageCacheReviewFixesTest.request("/flood/" + i));
+            var pages = cache.wrap("5m", req -> {
+                renders.merge(req.path(), 1, Integer::sum);
+                return Result.text("page");
+            });
+            for (int round = 0; round < 20; round++) {
+                for (int i = 0; i < 30; i++) render(pages, "/p/" + i, renders);
+            }
+            int ran = renders.values().stream().mapToInt(Integer::intValue).sum();
+            assertTrue(ran <= 40, "handler runs for 600 requests on 30 pages: " + ran);
+            assertTrue(rows(" WHERE cache_key LIKE 'brace:page:%'") <= 100 + backend.trimEvery());
+        } finally {
+            cache.close();
+        }
+    }
+
+    @Test
+    void hotPagesSurviveALaterFloodThroughRecordedHits() throws Exception {
+        var backend = new PostgresBackend(factory, 100_000, 100);
+        backend.touchInterval(java.time.Duration.ZERO); // record every hit, for the test
+        var cache = new Cache(backend);
+        try {
+            var renders = new java.util.HashMap<String, Integer>();
+            var pages = cache.wrap("1h", req -> {
+                renders.merge(req.path(), 1, Integer::sum);
+                return Result.text("page");
+            });
+            for (int i = 0; i < 30; i++) render(pages, "/hot/" + i, renders);
+            var flood = cache.wrap("1h", req -> Result.text("flood"));
+            for (int f = 0; f < 400; f++) {
+                flood.apply(PageCacheReviewFixesTest.request("/flood/" + f));
+                if (f % 20 == 19) {
+                    for (int i = 0; i < 30; i++) render(pages, "/hot/" + i, renders);
+                }
+            }
+            int ran = renders.values().stream().mapToInt(Integer::intValue).sum();
+            assertTrue(ran <= 40, "hot pages re-rendered during the flood: " + ran + " (30 first renders)");
+        } finally {
+            cache.close();
+        }
+    }
+
+    @Test
+    void aHitRecordsUseAtMostOncePerInterval() throws Exception {
+        var backend = new PostgresBackend(factory, 100_000, 100);
+        var cache = new Cache(backend);
+        try {
+            var page = cache.wrap("1h", req -> Result.text("page"));
+            page.apply(PageCacheReviewFixesTest.request("/once"));
+            String before = usedAt();
+            for (int i = 0; i < 5; i++) page.apply(PageCacheReviewFixesTest.request("/once"));
+            assertEquals(before, usedAt(), "a hit within the interval must not write");
+        } finally {
+            cache.close();
+        }
+    }
+
+    private static String usedAt() throws Exception {
+        try (var c = connect(); var st = c.createStatement();
+             var rs = st.executeQuery("SELECT used_at::text FROM brace_cache WHERE cache_key LIKE 'brace:page:%'")) {
+            rs.next();
+            return rs.getString(1);
+        }
+    }
 }

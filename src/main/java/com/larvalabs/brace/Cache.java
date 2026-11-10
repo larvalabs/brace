@@ -195,8 +195,9 @@ public class Cache {
      * Prefix of every key the page cache ({@link #wrap}) stores (L4 review F5). The backends treat
      * keys with it as page entries: they are capped on their own and evicted before any other
      * entry, so page-cache growth (cheap for a client to cause) never pushes out the app's own
-     * values. It survives hashing ({@link #storageKey} keeps a key's first characters). Use another
-     * prefix for the app's own keys.
+     * values. It survives hashing ({@link #storageKey} keeps a key's first characters). An app key
+     * with this prefix is refused by {@code set}, {@code getOrSet} and {@code delete} (L4 final
+     * review).
      */
     static final String PAGE_KEY_PREFIX = "brace:page:";
 
@@ -385,19 +386,33 @@ public class Cache {
     }
 
     public void set(String key, Object value) {
-        store(key, value, null, NO_TAGS);
+        store(requireAppKey(key), value, null, NO_TAGS);
     }
 
     public void set(String key, Object value, String ttl) {
-        store(key, value, parseTtl(ttl), NO_TAGS);
+        store(requireAppKey(key), value, parseTtl(ttl), NO_TAGS);
     }
 
     public void set(String key, Object value, String ttl, String... tags) {
-        store(key, value, parseTtl(ttl), tags);
+        store(requireAppKey(key), value, parseTtl(ttl), tags);
+    }
+
+    /**
+     * Refuses an app key on the page cache's reserved prefix (L4 final review): an app key that
+     * starts with {@value #PAGE_KEY_PREFIX} could replace or break a cached page. Clear pages with
+     * tags, {@link #deletePrefix} or {@code /ops/cache/clear} instead.
+     */
+    private static String requireAppKey(String key) {
+        if (key != null && key.startsWith(PAGE_KEY_PREFIX)) {
+            throw new IllegalArgumentException("Cache key '" + (key.length() > 64 ? key.substring(0, 64) + "..." : key)
+                + "' uses the page cache's reserved prefix " + PAGE_KEY_PREFIX + "; use another prefix for your own keys");
+        }
+        return key;
     }
 
     @SuppressWarnings("unchecked")
     public <T> T getOrSet(String key, String ttl, Supplier<T> supplier) {
+        requireAppKey(key);
         String original = key;
         key = storageKey(key);
         if (!serializes) {
@@ -426,7 +441,7 @@ public class Cache {
     }
 
     public void delete(String key) {
-        backend.delete(storageKey(key));
+        backend.delete(storageKey(requireAppKey(key)));
     }
 
     /**
@@ -445,11 +460,16 @@ public class Cache {
      * 200-character prefix also clears hashed keys that share its first 128 characters. A prefix
      * that ends in the first half of a surrogate pair clears every key starting with the rest of
      * it. Over-deletion is a cache miss, never a stale entry.
+     *
+     * <p>A prefix covering page-cache keys ({@code "brace:page:"}, {@code "brace:"} or
+     * {@code ""}) clears cached pages too; deleting is always safe, unlike writing under that
+     * prefix, which {@link #set} refuses.
+     *
+     * @throws IllegalArgumentException if {@code prefix} is null
      */
     public void deletePrefix(String prefix) {
         if (prefix == null) {
-            backend.deletePrefix(null);
-            return;
+            throw new IllegalArgumentException("deletePrefix needs a prefix; use clear() to remove everything");
         }
         if (!prefix.isEmpty() && Character.isHighSurrogate(prefix.charAt(prefix.length() - 1))) {
             // A key can complete the pair, so its stored form may hold a character the prefix
@@ -731,7 +751,9 @@ public class Cache {
          * different keys. Declaring one of the headers that otherwise make a request bypass the
          * cache ({@code Authorization}, {@code HX-Target}, {@code HX-Trigger},
          * {@code HX-Trigger-Name}, {@code HX-Boosted}, {@code HX-Prompt}) keys on it instead.
-         * {@code HX-Request} is always part of the key.
+         * Values enter the key as SHA-256 digests, so a declared credential header is never stored
+         * in clear. {@code HX-Request} is always part of the key: absent or exactly {@code true};
+         * any other value bypasses the cache.
          */
         public CachedHandler varyHeader(String... names) {
             var sorted = new java.util.TreeSet<String>();
@@ -751,10 +773,53 @@ public class Cache {
         static final List<String> BYPASS_HEADERS = List.of(
             "Authorization", "HX-Target", "HX-Trigger", "HX-Trigger-Name", "HX-Boosted", "HX-Prompt");
 
-        /** Reads the framework itself makes, or that the key already covers. */
+        /**
+         * Reads the key already covers. {@code HX-Request} is keyed as absent or exactly
+         * {@code true}, and any other value bypasses the cache, so whatever a handler reads of it
+         * ({@code isHtmx()}, {@code hasHeader}, {@code header}) is the same for every request
+         * sharing an entry (L4 final review).
+         */
         private static final Set<String> ALWAYS_KEYED_HEADERS = Set.of("hx-request");
 
         boolean warnedUndeclaredReads() { return !warnedReads.isEmpty(); }
+
+        /**
+         * True if {@code rawPath} is in the form a browser sends (RFC 3986 normal form): only
+         * unreserved characters, sub-delimiters, {@code :}, {@code @} and {@code /} appear as is,
+         * and every percent-escape uses upper-case hex and stands for a character that has to be
+         * escaped. {@code /p/%62}, {@code /p/%7e} and a raw {@code é} are not: they spell the same
+         * decoded path parameters as the normal form (so they share its cache key) but a handler
+         * reading {@code req.path()} sees a different string. Such a request may be served an
+         * existing entry, but its own render is never stored (L4 final review), so a crafted
+         * spelling cannot pick the page every visitor of the normal URL gets.
+         */
+        static boolean isNormalPath(String rawPath) {
+            for (int i = 0; i < rawPath.length(); i++) {
+                char c = rawPath.charAt(i);
+                if (c == '%') {
+                    if (i + 2 >= rawPath.length()) return false;
+                    int hi = upperHex(rawPath.charAt(i + 1));
+                    int lo = upperHex(rawPath.charAt(i + 2));
+                    if (hi < 0 || lo < 0) return false;
+                    if (isUnreserved((char) (hi * 16 + lo))) return false;
+                    i += 2;
+                } else if (!isUnreserved(c) && "!$&'()*+,;=:@/".indexOf(c) < 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static int upperHex(char c) {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        }
+
+        private static boolean isUnreserved(char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || c == '-' || c == '.' || c == '_' || c == '~';
+        }
 
         @Override
         public Result apply(Request request) {
@@ -771,6 +836,13 @@ public class Cache {
             var key = pageKey(request);
             var cached = cache.get(key, RenderedResponse.class);
             if (cached != null) return cached.toResult();
+            // L4 final review: a miss is rendered, but stored only for a GET whose raw path is in
+            // normal form. A HEAD shares the GET's entry, and req.method() is not a recorded read,
+            // so a handler answering HEAD with an empty body would have that stored and served to
+            // GET for the TTL. A non-normal spelling of the path (/p/%62 for /p/b) shares the
+            // normal one's key, and req.path() is not a recorded read either.
+            boolean storable = !request.method().equals("HEAD")
+                && (request.route() == null || isNormalPath(request.path()));
             var views = new ArrayList<View>();
             // L4 review F6: in dev mode and tests, record what the handler reads (nothing in production).
             Request.InputReads reads = request.strictInputChecks() ? new Request.InputReads() : null;
@@ -803,6 +875,7 @@ public class Cache {
                 warnSessionDerived(request.path());
                 return rendered.toResult();
             }
+            if (!storable) return rendered.toResult();
             cache.setInternal(key, rendered, ttl, tags);
             // Replay the snapshot (not the original Result) so a miss and a hit return the same
             // materialized shape — downstream code sees identical bytes either way.
@@ -824,15 +897,20 @@ public class Cache {
         private String pageKey(Request request) {
             // Vary on HX-Request: a handler may return a partial for htmx and a full page otherwise
             // (the Vary: HX-Request the framework sets), so the two must not share a cache entry.
+            // Only "absent" and exactly "true" reach here; any other value bypasses the cache
+            // (bypassesCache), so every read of the header is determined by the key.
             var prefix = request.isHtmx() ? PAGE_KEY_PREFIX + "hx:" : PAGE_KEY_PREFIX;
-            // A HEAD reaches a GET route's handler and its response differs only in the body the
-            // framework drops on the way out, so it shares the GET's entry rather than storing a
-            // second copy of the page.
+            // A HEAD reaches a GET route's handler and may be served the GET's entry; it never
+            // stores one (apply).
             var method = request.method().equals("HEAD") ? "GET" : request.method();
             return prefix + method + ":" + pathKey(request) + queryKey(request) + headerKey(request);
         }
 
         private boolean bypassesCache(Request request) {
+            // L4 final review: HX-Request is keyed as absent or exactly "true" (isHtmx()); any other
+            // value ("1", "True") bypasses. Keyed as two states, "HX-Request: 1" with a handler
+            // testing hasHeader(...) stored its partial under the full-page key.
+            if (request.hasHeader("HX-Request") && !request.isHtmx()) return true;
             for (var name : BYPASS_HEADERS) {
                 if (request.hasHeader(name) && Arrays.binarySearch(varyHeaders, name.toLowerCase(java.util.Locale.ROOT)) < 0) {
                     return true;
@@ -844,7 +922,9 @@ public class Cache {
         /**
          * The header component of the key: each {@link #varyHeader} in sorted order, present or
          * absent distinguished. Starts with {@code '#'}, which {@link #percentEncode} never emits,
-         * so it cannot be confused with the path or query components.
+         * so it cannot be confused with the path or query components. Each value is its SHA-256
+         * hex digest (L4 final review): {@code varyHeader("Authorization")} put the credential
+         * itself in the key, which on Postgres is {@code brace_cache.cache_key}, in clear.
          */
         private String headerKey(Request request) {
             if (varyHeaders.length == 0) return "";
@@ -852,7 +932,7 @@ public class Cache {
             for (var name : varyHeaders) {
                 var value = request.hasHeader(name) ? request.header(name) : null;
                 if (value == null) continue;
-                sb.append(sb.isEmpty() ? '#' : '&').append(percentEncode(name)).append('=').append(percentEncode(value));
+                sb.append(sb.isEmpty() ? '#' : '&').append(percentEncode(name)).append('=').append(sha256Hex(value));
             }
             return sb.toString();
         }

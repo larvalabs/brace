@@ -1099,20 +1099,31 @@ it reads (another query param, `req.url()`, a header such as `Accept-Language`, 
 `req.ip()`, the body) can differ between visitors, and whatever the first visitor sent is replayed
 to the rest for the TTL: `?msg=<b>PWNED</b>` on an undeclared param becomes everyone's page. In dev
 mode Brace logs such a read once per route, and under `Brace.test()` it throws, so a test of the
-route fails; production does no checking.
+route fails; production does no checking. `req.path()` (the raw, undecoded path) and
+`req.method()` are not recorded, so they are covered differently: a `HEAD` is never stored (it may
+be served an existing `GET` entry), and a request whose raw path is not in RFC 3986 normal form
+(an escaped unreserved character such as `/p/%62` for `/p/b`, lower-case hex, raw non-ASCII) is
+rendered but never stored, so a crafted spelling cannot choose the page served at the normal URL.
+Read path parameters with `req.pathParam(...)` in a cached handler.
 
 Some inputs are refused outright rather than trusted to the handler: a request with
 `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or `HX-Prompt` is
 served by the handler without reading or writing the cache, unless the route declares that
-header with `.varyHeader(...)`. A response that sets a cookie is never stored (it is returned with
-its `Set-Cookie` intact). Only 2xx responses are stored, and a response carrying the visitor's
-CSRF token or flash is not.
+header with `.varyHeader(...)`. `HX-Request` is keyed as absent or exactly `true`; any other value
+(`1`, `True`) bypasses the cache, so a handler testing `req.hasHeader("HX-Request")` cannot store
+its partial under the full-page key. A declared header's value enters the key as its SHA-256
+digest, so `varyHeader("Authorization")` never puts the credential in `brace_cache.cache_key`. A
+response that sets a cookie is never stored (it is returned with its `Set-Cookie` intact). Only 2xx
+responses are stored, and a response carrying the visitor's CSRF token or flash is not.
 
-Page entries are kept apart from the app's own cache entries (keys starting `brace:page:`): on
-Postgres they have their own row cap (10,000 by default) and are trimmed first when the table is
-over its overall cap; in memory they are evicted before any other entry, and a new page never
+Page entries are kept apart from the app's own cache entries (keys starting `brace:page:`, which
+`set`, `getOrSet` and `delete` refuse for app keys): on Postgres they have their own row cap
+(10,000 by default), are trimmed least recently used first (written, or hit, recorded at most once
+a minute per row) and are trimmed before app rows when the table is over its overall cap; in
+memory a full cache evicts the page least recently hit (an approximate LRU), and a new page never
 displaces an app entry. A client minting pages (any declared `vary` value or path parameter)
-therefore churns only the page cache.
+therefore churns only the page cache, and pages nobody reads again go before the hot ones, so a
+flood cannot lock the real pages out.
 
 ### Shared cache values (`CacheBackend.postgres`)
 
