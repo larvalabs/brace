@@ -646,6 +646,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     - App `set`/`getOrSet`/`delete` on `brace:page:` throw `IllegalArgumentException`
       (`deletePrefix("brace:page:")`, tags and `clear()` still clear pages); `deletePrefix(null)`
       throws `IllegalArgumentException`.
+    - **Verification fixes.** The in-memory page clock (a regression from the CLOCK fix): a
+      `clear()` (`/ops/cache/clear`) during a page flood, or `clearTag`/`deletePrefix` mixed into
+      page traffic, left up to 997 of 1,000 pages off the clock, unevictable until their TTL, and
+      app entries were then evicted in their place. One `ReentrantLock` now guards the clock, the
+      page count and every insert or removal of a page key in the store (one remove path for
+      `clear`, tags, prefixes, expiry and deletes); eviction and compaction are mutually
+      exclusive; the hand rebuilds from the store if it ever finds pages counted but none on the
+      clock. App entries never take the lock. Tests in `PageClockConsistencyTest`.
 
 - [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a

@@ -58,11 +58,19 @@ class InMemoryBackend implements CacheBackend {
     private final AtomicLong capacityEvictions = new AtomicLong();
 
     // Page entries (Cache.isPageKey) on a CLOCK (second-chance) ring, oldest first (L4 final
-    // review). A key may appear more than once or after its entry is gone; both are skipped when
-    // the hand reaches them, and the ring is rebuilt when such leftovers dominate it.
-    private final java.util.concurrent.ConcurrentLinkedQueue<String> pageClock = new java.util.concurrent.ConcurrentLinkedQueue<>();
-    private final java.util.concurrent.atomic.AtomicInteger pageClockSize = new java.util.concurrent.atomic.AtomicInteger();
-    private final java.util.concurrent.atomic.AtomicInteger pageCount = new java.util.concurrent.atomic.AtomicInteger();
+    // review). A key may appear after its entry is gone; it is skipped when the hand reaches it,
+    // and the ring is compacted when such leftovers dominate it.
+    //
+    // pageLock guards the ring, pageCount, AND every insert or removal of a page key in the store
+    // (L4 verification): put() and remove() are the only paths that touch a page key, so clear(),
+    // clearTag, deletePrefix, expiry and explicit deletes cannot desynchronise the ring from the
+    // store, and eviction and compaction never interleave. A plain lock rather than lock-free code:
+    // app entries never take it (their reads and writes stay lock-free), a page hit only sets a
+    // volatile flag, and a page store, which already rendered a page, takes it once, uncontended
+    // in the common case. A ReentrantLock, not synchronized, so a virtual thread does not pin.
+    private final java.util.concurrent.locks.ReentrantLock pageLock = new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.ArrayDeque<String> pageClock = new java.util.ArrayDeque<>(); // guarded by pageLock
+    private int pageCount; // guarded by pageLock
     // Inline expiry sweeps on a full store, at most one a second: the background sweep runs every
     // 30 s, and a sweep per insert into a store full of live entries was O(n) per request.
     private static final long INLINE_SWEEP_INTERVAL_NANOS = 1_000_000_000L;
@@ -115,54 +123,78 @@ class InMemoryBackend implements CacheBackend {
 
     /** Evicts one page entry by CLOCK; false when there is none to evict. */
     private boolean evictOnePage() {
-        // Two passes are enough: the first clears every referenced flag it meets.
-        int budget = 2 * pageClockSize.get() + 16;
-        for (int i = 0; i < budget && pageCount.get() > 0; i++) {
-            String key = pageClock.poll();
-            if (key == null) return false;
-            pageClockSize.decrementAndGet();
-            var entry = store.get(key);
-            if (entry == null) continue; // removed already: a leftover
-            if (entry.referenced && !entry.expired()) {
-                entry.referenced = false;
-                pageClock.add(key);
-                pageClockSize.incrementAndGet();
-                continue;
+        pageLock.lock();
+        try {
+            for (int attempt = 0; attempt < 2 && pageCount > 0; attempt++) {
+                // Two passes are enough: the first clears every referenced flag it meets.
+                int budget = 2 * pageClock.size() + 16;
+                for (int i = 0; i < budget && pageCount > 0; i++) {
+                    String key = pageClock.poll();
+                    if (key == null) break;
+                    var entry = store.get(key);
+                    if (entry == null) continue; // removed already: a leftover
+                    if (entry.referenced && !entry.expired()) {
+                        entry.referenced = false;
+                        pageClock.add(key);
+                        continue;
+                    }
+                    if (remove(key)) {
+                        capacityEvictions.incrementAndGet();
+                        return true;
+                    }
+                }
+                // Pages are counted but the hand found none to take: never expected with the lock,
+                // but heal from the store rather than leave pages that can never be evicted.
+                if (pageCount > 0) rebuildPageClockFromStore();
             }
-            if (remove(key)) {
-                capacityEvictions.incrementAndGet();
-                return true;
-            }
+            return false;
+        } finally {
+            pageLock.unlock();
         }
-        return false;
     }
 
     /** Stores {@code entry}, keeping the page count and clock in step. */
     private void put(String key, Entry entry) {
-        var previous = store.put(key, entry);
-        if (previous == null && Cache.isPageKey(key)) {
-            pageCount.incrementAndGet();
-            pageClock.add(key);
-            if (pageClockSize.incrementAndGet() > 2 * Math.max(pageCount.get(), 0) + 1024) {
-                rebuildPageClock();
+        if (!Cache.isPageKey(key)) {
+            store.put(key, entry);
+            return;
+        }
+        pageLock.lock();
+        try {
+            if (store.put(key, entry) == null) {
+                pageCount++;
+                pageClock.add(key);
+                if (pageClock.size() > 2 * pageCount + 1024) compactPageClock();
             }
+        } finally {
+            pageLock.unlock();
         }
     }
 
-    /** Drops leftovers (removed or duplicate keys) from the clock; amortized by the 1,024 slack. */
-    private synchronized void rebuildPageClock() {
+    /** Drops leftovers (removed or duplicate keys) from the clock, keeping its order; amortized by
+     *  the 1,024 slack. Caller holds {@link #pageLock}. */
+    private void compactPageClock() {
         var seen = new java.util.HashSet<String>();
-        int kept = 0;
-        for (int n = pageClockSize.get(); n > 0; n--) {
-            String key = pageClock.poll();
-            if (key == null) break;
-            pageClockSize.decrementAndGet();
-            if (store.containsKey(key) && seen.add(key)) {
+        var kept = new java.util.ArrayDeque<String>(pageCount);
+        for (var key : pageClock) {
+            if (store.containsKey(key) && seen.add(key)) kept.add(key);
+        }
+        pageClock.clear();
+        pageClock.addAll(kept);
+        if (kept.size() != pageCount) rebuildPageClockFromStore();
+    }
+
+    /** Self-heal: puts every stored page on the clock and recounts. Caller holds {@link #pageLock}. */
+    private void rebuildPageClockFromStore() {
+        pageClock.clear();
+        int pages = 0;
+        for (var key : store.keySet()) {
+            if (Cache.isPageKey(key)) {
                 pageClock.add(key);
-                kept++;
+                pages++;
             }
         }
-        pageClockSize.addAndGet(kept);
+        pageCount = pages;
     }
 
     @Override
@@ -278,23 +310,23 @@ class InMemoryBackend implements CacheBackend {
         if (keys == null) return 0;
         long removed = 0;
         for (var key : keys) {
-            var entry = store.remove(key);
-            if (entry != null) {
-                removed++;
-                if (Cache.isPageKey(key)) pageCount.decrementAndGet();
-            }
+            if (remove(key)) removed++;
         }
         return removed;
     }
 
     @Override
-    public synchronized void clear() {
-        store.clear();
-        tagIndex.clear();
-        counters.clear();
-        pageCount.set(0);
-        pageClock.clear();
-        pageClockSize.set(0);
+    public void clear() {
+        pageLock.lock();
+        try {
+            store.clear();
+            tagIndex.clear();
+            counters.clear();
+            pageCount = 0;
+            pageClock.clear();
+        } finally {
+            pageLock.unlock();
+        }
     }
 
     @Override
@@ -315,6 +347,35 @@ class InMemoryBackend implements CacheBackend {
 
     private final AtomicLong fullScans = new AtomicLong();
     long fullScans() { return fullScans.get(); }
+
+    /** Test hook: stored page entries with no slot on the clock (they could never be evicted). */
+    int pagesOffClock() {
+        pageLock.lock();
+        try {
+            var onClock = new java.util.HashSet<>(pageClock);
+            int off = 0;
+            for (var key : store.keySet()) {
+                if (Cache.isPageKey(key) && !onClock.contains(key)) off++;
+            }
+            return off;
+        } finally {
+            pageLock.unlock();
+        }
+    }
+
+    /** Test hook: the page count minus the page entries actually stored. */
+    int pageCountDrift() {
+        pageLock.lock();
+        try {
+            int pages = 0;
+            for (var key : store.keySet()) {
+                if (Cache.isPageKey(key)) pages++;
+            }
+            return pageCount - pages;
+        } finally {
+            pageLock.unlock();
+        }
+    }
 
     private long sweepExpired() {
         fullScans.incrementAndGet();
@@ -339,11 +400,24 @@ class InMemoryBackend implements CacheBackend {
         return tagIndex.size();
     }
 
-    /** Removes {@code key}; true if it was there. Its clock slot, if any, is skipped later. */
+    /**
+     * Removes {@code key}; true if it was there. The only removal path, so the page count stays
+     * exact; a removed page's clock slot is skipped later.
+     */
     private boolean remove(String key) {
-        var entry = store.remove(key);
+        Entry entry;
+        if (Cache.isPageKey(key)) {
+            pageLock.lock();
+            try {
+                entry = store.remove(key);
+                if (entry != null) pageCount--;
+            } finally {
+                pageLock.unlock();
+            }
+        } else {
+            entry = store.remove(key);
+        }
         if (entry == null) return false;
-        if (Cache.isPageKey(key)) pageCount.decrementAndGet();
         if (entry.tags().length > 0) {
             for (var tag : entry.tags()) {
                 var keys = tagIndex.get(tag);
