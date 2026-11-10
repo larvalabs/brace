@@ -1989,13 +1989,22 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
   the parameter.
 - **Bounded growth.** Only matched routes returning HTML are counted, so a scanner requesting
   random URLs produces 404s, not rows. The in-memory buffer is capped at 20,000 views; beyond that
-  views are dropped and tallied. Two more caps bound table growth against a client that sends
+  views are dropped and tallied. More caps bound table growth against a client that sends
   browser-looking requests in a loop: one visitor (host, IP, user agent) adds at most 30 rows per
-  10-second flush window (`maxViewsPerVisitorPerFlush`), and an instance inserts at most 500,000
-  rows a day (`dailyRowBudget`, one warning when it is reached). Views over either cap are not
-  stored but are tallied as `dropped`, which the dashboard and `notCounted` show, so a capped day
-  reads as capped rather than silently low. Every stored string is length-capped, and every value the page
-  renders is HTML-escaped.
+  10-second flush window (`maxViewsPerVisitorPerFlush`); one client address (an IPv6 address by
+  its /64), whatever user agents it rotates through, at most 300 (`maxViewsPerIpPerFlush`); and an
+  instance inserts at most 500,000 rows a day (`dailyRowBudget`). Views over a cap are not stored
+  but are tallied as `dropped`, which the dashboard and `notCounted` show, so a capped day reads
+  as capped rather than silently low. Every stored string is length-capped, and every value the
+  page renders is HTML-escaped.
+- **The daily budget is not a blinding switch for one client.** Once the budget is spent nothing
+  more is stored until midnight, so a single client that could spend it (500,000 requests, about
+  four minutes at 2,000 req/s) could hide everyone else's traffic for the rest of the day. One
+  client address may use at most 2% of the budget a day (`maxDailyRowsPerIp`, tallied for up to
+  50,000 addresses), so after one source hits its share, other visitors' views are still stored.
+  Many sources together can still spend it; when that happens, `/ops/analytics` shows "Row budget
+  reached at HH:MM, N views not stored", the JSON report carries `rowBudget`, and a warning is
+  logged once that day.
 - **The "don't count" cookie.** `POST /ops/analytics/ignore` sets `__brace_analytics_ignore=1`
   (HttpOnly, `SameSite=Lax`, `Path=/`, `Secure` except on localhost). It carries no credential;
   it only marks the browser's visits as excluded. The endpoint is CSRF-exempt like the other ops

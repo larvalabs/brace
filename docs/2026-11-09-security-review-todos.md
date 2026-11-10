@@ -772,6 +772,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** A per-visitor cap per flush window and a daily row budget; reject timestamps before
     process start, give each key its own quota, sweep on a timer.
   - **Model: Sonnet 5.5.** Deferrable.
+  - **Final review fixes** (`fix(security): L16 final review fixes`). The per-visitor cap did
+    nothing against one IP rotating `User-Agent` (one IP stored 20,000 of 25,000 views per
+    window), and the daily row budget was a blinding primitive (about 250 s at 2,000 req/s spent
+    it; legitimate views then stored 0 rows until midnight, shown only as one WARN and "Dropped").
+    Now: a cap keyed on the client address alone (`RateLimiter.ipBucket`, IPv6 by /64) per flush
+    window, `maxViewsPerIpPerFlush`, default 300 (1.5% of the 20,000-view buffer); each address
+    may use at most `maxDailyRowsPerIp` of the daily budget, default 2% (10,000 of 500,000),
+    tallied for up to 50,000 addresses a day; when the budget is reached the time and the views
+    refused since are recorded and shown on `/ops/analytics` ("Row budget reached at HH:MM, N
+    views not stored", through `esc()`) and in the JSON report (`rowBudget`). Totals stay honest
+    (refused views under "Not counted: dropped"). Tests in `AnalyticsCapsTest`.
 
 ## Documentation errors
 

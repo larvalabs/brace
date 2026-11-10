@@ -1820,16 +1820,27 @@ No action needed unless noted.
 
 **Analytics**
 
-- **Row growth is capped.** At most 30 rows per visitor per 10-second flush window, and 500,000
-  rows per instance per day. Views over a cap are counted under "Not counted" on the dashboard
-  instead of being stored, so a capped day reads as capped. A site above about 500,000 views a
-  day, or with many people behind one IP and user agent, should raise them:
+- **Row growth is capped.** At most 30 rows per visitor per 10-second flush window, 300 per client
+  address per window whatever user agents it sends (an IPv6 address counts by its /64; rotating
+  the `User-Agent` made every request a new visitor), and 500,000 rows per instance per day, of
+  which one client address may use at most 2% (so one source cannot spend the day's budget and
+  leave everyone else unrecorded until midnight). Views over a cap are counted under "Not
+  counted" on the dashboard instead of being stored, so a capped day reads as capped. When the
+  daily budget is reached, `/ops/analytics` shows "Row budget reached at HH:MM, N views not
+  stored" and the JSON report (`/ops/analytics/data`) has a new `rowBudget` field (`null`
+  otherwise). A site above about 500,000 views a day, or with many people behind one address,
+  should raise them:
 
 ```java
 app.analytics(Analytics.options()
     .maxViewsPerVisitorPerFlush(100)   // 0 turns the cap off
-    .dailyRowBudget(5_000_000));       // 0 turns the budget off
+    .maxViewsPerIpPerFlush(1_000)      // a large office or campus behind one address
+    .dailyRowBudget(5_000_000)         // 0 turns the budget off
+    .maxDailyRowsPerIp(100_000));      // default 2% of the budget; 0 turns it off
 ```
+
+`Analytics.Report` (returned to code that reads reports directly) has a new last component,
+`rowBudget`.
 
 **Ops auth**
 

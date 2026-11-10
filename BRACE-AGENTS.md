@@ -1458,7 +1458,9 @@ app.analytics(Analytics.options()
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
     .rawRetention("35d")                         // raw rows only; daily summaries are kept
     .maxViewsPerVisitorPerFlush(30)              // row cap per visitor per 10 s; over it is "Not counted: dropped"
-    .dailyRowBudget(500_000));                   // rows per instance per day; 0 turns a cap off
+    .maxViewsPerIpPerFlush(300)                  // per client address (IPv6 /64) per 10 s, any user agents
+    .dailyRowBudget(500_000)                     // rows per instance per day; 0 turns a cap off
+    .maxDailyRowsPerIp(10_000));                 // one address's share of the budget (default 2%)
 
 app.get("/invite/{code}", ctrl::invite).analytics(false);      // URL carries a secret the name doesn't reveal
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}
