@@ -344,6 +344,54 @@ it's "q" <b>||javascript:alert(1)
 --- expect
 <svg><font face="x"></font><script>if (a<b) { t = "\u0022\u0020onload\u003d\u0022alert\u00281\u0029"; }</script></svg><p>&lt;b&gt;</p>
 
+#! ------------------------------------- Final review, L2: hx-vals that can't be held and judged whole
+#! The tokenizer reads <annotation-xml> as HTML content whatever its encoding, so here it takes
+#! the self-closing <script/> for a script body that runs to the last </script>: no value is held
+#! in between, and each ${...} of an attribute JTE reports is on its own. An hx-vals, hx-headers
+#! or hx-request value is then "{}" once, whatever the data, so it can't be put together piecewise.
+### l2-hx-vals-in-pieces-during-a-desync
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='${x}${y}' hx-headers='{"a": "${x}", "b": "${y}"}' data-hx-request=' ${x}:${y}'></div><script>var q = 1;</script>
+--- values
+j||s:alert(1)
+js||:alert(1)
+||js:alert(1)
+{"a":1}||
+ok||fine
+--- expect
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": "{}"}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": "{}"}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "", "b": "{}"}' data-hx-request=' :{}'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": ""}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": "{}"}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+--- forbid
+(?i)(js|javascript)\s*:
+### l2-url-in-pieces-during-a-desync
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="${x}${y}">k</a><a href="${x}:${y}">k</a><a href="javascript:go('${x}')">l</a><script>var q = 1;</script>
+--- values
+j||avascript:alert(1)
+javascript||:alert(1)
+java||script:alert(1)
+');alert(1)//||x
+/a||/b
+--- expect
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="about:invalid#blockedabout:invalid#blocked">k</a><a href="about:invalid#blocked:about:invalid#blocked">k</a><a href="javascript:go('about:invalid#blocked')">l</a><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="about:invalid#blocked:alert(1)">k</a><a href="about:invalid#blocked::alert(1)">k</a><a href="javascript:go('about:invalid#blocked')">l</a><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="about:invalid#blockedabout:invalid#blocked">k</a><a href="about:invalid#blocked:about:invalid#blocked">k</a><a href="javascript:go('about:invalid#blocked')">l</a><script>var q = 1;</script>
+*
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="/a/b">k</a><a href="/a:/b">k</a><a href="javascript:go('/a')">l</a><script>var q = 1;</script>
+--- forbid
+(?i)href="\s*javascript:(?!go)
+go\(('|&#39;)\)
+#! Without the desync the values are held and judged whole, as before.
+### l2-hx-vals-in-pieces-held
+<div hx-vals='${x}${y}' hx-headers='{"a": "${x}", "b": "${y}"}' data-hx-request=' ${x}:${y}'></div><a href="${x}${y}">k</a>
+--- values
+j||s:alert(1)
+ok||fine
+--- expect
+<div hx-vals='{}' hx-headers='{"a": "j", "b": "s:alert(1)"}' data-hx-request=' j:s:alert(1)'></div><a href="about:invalid#blocked">k</a>
+<div hx-vals='okfine' hx-headers='{"a": "ok", "b": "fine"}' data-hx-request=' ok:fine'></div><a href="okfine">k</a>
+
 #! ------------------------------------- Final review, M1: data inside a tag, outside a quoted value
 #! A script or style body in <svg>/<math> is markup to a browser, so "0<i ?" opens a tag and a
 #! string that doesn't follow "=" is in attribute-name position. Every character there is escaped.

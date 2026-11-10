@@ -98,6 +98,9 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private int userWrites;             // pieces of user data in the held value
     private String soleUser;            // the last of them (the only one, if userWrites == 1)
     private boolean scriptEscaped;      // some of them were script-escaped on top (JTE reads a script there)
+    // An hx-vals/hx-headers/hx-request value JTE reports that is NOT held (the tokenizer isn't in
+    // it): "{}" has been written for it, and no template text with a quote in it since.
+    private boolean unheldJsonWritten;
 
     public BraceHtmlOutput(TemplateOutput target) {
         super(target);
@@ -129,6 +132,14 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     public void writeBinaryContent(byte[] value) {
         // Template text pre-encoded as UTF-8: read as bytes and passed through untouched unless
         // it's inside, or opens, a held value, which needs it as text.
+        if (unheldJsonWritten) {
+            for (byte b : value) {
+                if (b == '"' || b == '\'') {
+                    unheldJsonWritten = false;
+                    break;
+                }
+            }
+        }
         if (valueOut != null) {
             String text = new String(value, StandardCharsets.UTF_8);
             writeStatic(text, 0, text.length());
@@ -146,6 +157,12 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     private void writeStatic(String s, int begin, int end) {
+        if (unheldJsonWritten) {
+            for (int i = begin; i < end && unheldJsonWritten; i++) {
+                char c = s.charAt(i);
+                unheldJsonWritten = c != '"' && c != '\'';
+            }
+        }
         scan(s, begin, end);
         if (valueOut != null) {
             // The tokenizer was in this value, so the first quote of its kind is where it left.
@@ -824,7 +841,15 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             boolean media = (!url || mediaDataUrl(attribute, value)) && (!jteUrl || mediaDataUrl(jteAttribute, value));
             if (!settlesItsScheme(value) || !(isSafeUrl(value) || media)) value = BLOCKED_URL;
         }
-        if ((isJsonAttribute(attribute) || isJsonAttribute(jteAttribute)) && evaluatedBecauseOfUserData(value, 0)) value = "";
+        if ((isJsonAttribute(attribute) || isJsonAttribute(jteAttribute)) && !value.isEmpty()) {
+            // L7 final review. An hx-vals, hx-headers or hx-request value that isn't held can't
+            // be judged whole, and judged a piece at a time "j" then "s:alert(1)" both pass. So
+            // none of the data is written: "{}" for the first piece, nothing for the rest, until
+            // template text with a quote in it shows the value is over (or, for the other kind
+            // of quote, isn't: then the next piece is "{}" again, and still none of it is data).
+            value = unheldJsonWritten ? "" : "{}";
+            unheldJsonWritten = true;
+        }
         css |= "style".equals(attribute) || "style".equals(jteAttribute);
         boolean scriptAttribute = isScriptAttribute(attribute) || isScriptAttribute(jteAttribute);
         if (insideTag) {

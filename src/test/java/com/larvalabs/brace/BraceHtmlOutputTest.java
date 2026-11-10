@@ -1008,7 +1008,7 @@ class BraceHtmlOutputTest {
         assertEquals("<script><a onclick=\"go('\\u0027')\" title=\"\\u0022\\u003c\" style=\"a\\3b b\">",
             driven(Part.text("<script><a onclick=\"go('"), Part.data("a", "onclick", "'"), Part.text("')\" title=\""),
                 Part.data("a", "title", "\"<"), Part.text("\" style=\""), Part.data("a", "style", "a;b"), Part.text("\">")));
-        assertEquals("<style><a title=\"\\22 \\3c \" hx-vals=''>",
+        assertEquals("<style><a title=\"\\22 \\3c \" hx-vals='\\7b \\7d '>",
             driven(Part.text("<style><a title=\""), Part.data("a", "title", "\"<"), Part.text("\" hx-vals='"),
                 Part.data("a", "hx-vals", " js:alert(1)"), Part.text("'>")));
         // The output is in one attribute's value and JTE reports another: both rules.
@@ -1023,6 +1023,35 @@ class BraceHtmlOutputTest {
         assertEquals("<a title=\"\\u0027\\u003c\"><i title='a\\3b b'><style>a{color:\\5c u0027\\5c u003b}",
             driven(Part.text("<a title=\""), Part.data("script", null, "'<"), Part.text("\"><i title='"),
                 Part.data("style", null, "a;b"), Part.text("'><style>a{color:"), Part.data("script", null, "';"), Part.text("}")));
+    }
+
+    // --- Final review (L2): an hx-vals value that isn't held can't be judged whole ---
+    //
+    // During a desync (the tokenizer believes a script body, say, where the browser reads tags)
+    // no value is held, and each ${...} of hx-vals='${x}${y}' was judged on its own: "j" and
+    // "s:alert(1)" each passed, and htmx evaluated js:alert(1).
+
+    @Test
+    void anHxValsValueThatIsntHeldIsWrittenAsAnEmptyObjectOnce() {
+        Part j = Part.data("div", "hx-vals", "j"), s = Part.data("div", "hx-vals", "s:alert(1)"), empty = Part.data("div", "hx-vals", "");
+        for (String open : List.of("<script>", "<!-- ", "<svg><![CDATA[", "</p ")) {
+            assertEquals(open + "<div hx-vals='{}'>", driven(Part.text(open + "<div hx-vals='"), j, s, Part.text("'>")), open);
+            assertEquals(open + "<div hx-vals='{}'>", driven(Part.text(open + "<div hx-vals='"), empty, j, empty, s, j, Part.text("'>")), open);
+            assertEquals(open + "<div hx-vals=' {}:' hx-request=\"{}\">", driven(Part.text(open + "<div hx-vals=' "), j, Part.text(":"), s,
+                Part.text("' hx-request=\""), Part.data("div", "hx-request", "{\"timeout\":1}"), Part.text("\">")), open);
+            // The other quote inside the value starts over, which still leaves nothing of the data.
+            assertEquals(open + "<div data-hx-headers='{\"a\": \"{}\", \"b\": \"{}\"}'>",
+                driven(Part.text(open + "<div data-hx-headers='{\"a\": \""), Part.data("div", "data-hx-headers", "j"),
+                    Part.text("\", \"b\": \""), Part.data("div", "data-hx-headers", "s:alert(1)"), Part.text("\"}'>")), open);
+            // Other attributes there are as before: a script attribute is only escaped.
+            assertEquals(open + "<div hx-vars='js:alert(1)' title=\"j\">", driven(Part.text(open + "<div hx-vars='"),
+                Part.data("div", "hx-vars", "j"), Part.data("div", "hx-vars", "s:alert(1)"), Part.text("' title=\""),
+                Part.data("div", "title", "j"), Part.text("\">")), open);
+        }
+        // Held, it is judged whole and kept when the data doesn't make it an expression.
+        assertEquals("<div hx-vals='{\"q\": \"js:1\"}' hx-vals='{}' hx-vals='ok'>", driven(Part.text("<div hx-vals='{\"q\": \""),
+            Part.data("div", "hx-vals", "js:1"), Part.text("\"}' hx-vals='"), j, s, Part.text("' hx-vals='"), Part.data("div", "hx-vals", "ok"),
+            Part.text("'>")));
     }
 
     // --- Final review (M1): data inside a tag, outside a quoted value ---
