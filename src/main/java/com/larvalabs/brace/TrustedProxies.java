@@ -370,9 +370,12 @@ public class TrustedProxies {
      * candidate must consist of hex digits, {@code :} and {@code .} (plus an optional
      * {@code %zone}): {@link InetAddress#getByName} only parses a string as a literal when it
      * starts with a hex digit or {@code :}, and sends anything else (say {@code "zz:1"}, which has
-     * a colon) to the resolver. An IPv4-mapped IPv6 literal parses to its IPv4 address.
+     * a colon) to the resolver. An IPv4-mapped IPv6 literal parses to its IPv4 address. One
+     * surrounding pair of brackets is accepted ({@code [::1]}, the form Jetty reports an IPv6 peer
+     * in; L6 review): refusing it meant no IPv6 proxy was ever trusted.
      */
     static InetAddress parseLiteral(String s) {
+        s = unbracket(s);
         if (s == null || s.isEmpty() || !isIpLiteral(s)) return null;
         if (s.indexOf(':') >= 0) {
             int zone = s.indexOf('%');
@@ -389,6 +392,19 @@ public class TrustedProxies {
         } catch (UnknownHostException e) {
             return null;
         }
+    }
+
+    /**
+     * {@code s} without one surrounding pair of brackets: {@code [0:0:0:0:0:0:0:1]} becomes
+     * {@code 0:0:0:0:0:0:0:1}. Anything else (no brackets, an unbalanced or doubled pair) is
+     * returned unchanged. A zone id inside the brackets is kept.
+     */
+    static String unbracket(String s) {
+        if (s != null && s.length() > 2 && s.charAt(0) == '[' && s.charAt(s.length() - 1) == ']'
+                && s.indexOf('[', 1) < 0 && s.indexOf(']') == s.length() - 1) {
+            return s.substring(1, s.length() - 1);
+        }
+        return s;
     }
 
     private static class CidrRange {

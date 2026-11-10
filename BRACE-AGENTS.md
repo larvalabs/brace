@@ -1271,9 +1271,11 @@ case-sensitive): lower-case usernames and emails in the extractor. Key on what t
 `formParam` and, on POST/PUT/PATCH/DELETE, `req.form` read the body only.
 
 `perIp` keys an IPv6 client on its /64 (one site rotating addresses is one client); IPv4 on the full
-address. Each limiter tracks at most 100,000 distinct keys at a time; past that, new keys share one
-overflow bucket until windows expire (existing keys keep their own counts). Change it per limiter
-with `.maxKeys(n)` on `perIp(...)` or `perKey(...)`.
+address. Each limiter tracks at most 100,000 distinct keys at a time; at the cap a new key replaces
+the least recently used key that is under its limit, keys at their limit are kept until their
+windows end, and only when nothing can be replaced does a new key fall back to an overflow bucket
+per client IP. Change the cap per limiter with `.maxKeys(n)` on `perIp(...)` or `perKey(...)`. On
+Postgres, two limiters with the same type, limit and window share their buckets.
 
 **Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see `BRACE-OPS.md` → "Scaling horizontally" and [`docs/scaling.md`](docs/scaling.md).
 

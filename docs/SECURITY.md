@@ -818,6 +818,10 @@ can connect over either, list both:
 app.trustedProxies("127.0.0.1", "::1");
 ```
 
+An IPv6 peer is matched and reported without brackets: Jetty gives the socket address as
+`[0:0:0:0:0:0:0:1]`, and Brace strips the brackets where the address enters the framework, so a
+trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `0:0:0:0:0:0:0:1`.
+
 ### Supported Headers
 
 - `X-Forwarded-For` (the default client-address header)
@@ -1423,10 +1427,31 @@ fresh budget per request. IPv4 clients (and IPv4-mapped IPv6 addresses such as `
 are keyed on the full address. Clients that share a /64 share a budget.
 
 **Distinct keys are capped per limiter** (default 100,000). Each key holds memory, and on Postgres
-a `brace_counters` row, for its whole window. Once a limiter tracks that many keys, new keys share
-one overflow bucket until windows expire and a warning is logged (at most once a minute): a client
-inventing keys is throttled as one client, while keys already tracked keep their own counts. Raise
-or lower it per limiter with `.maxKeys(n)`, e.g. `RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+a `brace_counters` row, for its whole window. Once a limiter tracks that many keys (a warning is
+logged, at most once a minute):
+
+1. A new key takes the place of a tracked key that is **under** its limit, the least recently
+   used of a small sample. The forgotten key loses its count so far (fewer than the limit), an
+   accepted bypass: a client that floods fresh keys to reset one key's count pays a whole table
+   of requests for fewer than `limit` extra attempts. On Postgres the forgotten key's row is
+   deleted at the next flush, so the table stays bounded too.
+2. A key **at or over** its limit is never forgotten before its window ends, so a flood cannot
+   unblock a client that is being limited.
+3. Only when the sample finds nothing but such blocked keys does a new key fall back to an overflow
+   bucket for its client address (`ipBucket(req.ip())`; at most `maxKeys / 10` of them), and past
+   those, to one shared overflow bucket.
+
+So a flood of fresh keys no longer locks out new legitimate keys (the earlier design sent every
+new key to one shared overflow bucket once the table was full). Eviction looks at a fixed number
+of keys under a per-limiter lock taken only on that full-table path, so no request scans the
+table. Raise or lower the cap per limiter with `.maxKeys(n)`, e.g.
+`RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+
+**Two limiters with the same type, limit and window share buckets on Postgres.** The counter key
+is built from the limiter's label (`perKey(5/15m)`), the only identity a limiter has across a
+fleet, so on Postgres two such limiters count every key together, their missing-key and overflow
+buckets included. In per-process mode each limiter object counts on its own. Give limiters on
+different paths different limits or windows if they must be independent.
 
 Cache keys get the same treatment in the `Cache` facade, on both backends: a key with a control
 character, or longer than 512 UTF-8 bytes (a page path or `vary` value near the 8 KB URI limit
@@ -1461,10 +1486,14 @@ approximately `limit × N`, so brief over-admission is possible — this is inte
 alternative (turning every rate-limited endpoint into a 500) is worse. A warning is logged at
 `WARN` level for each request that falls back.
 
-Buffered counts are restored and retried only while the database is unreachable (a connection
-error, or an SQLState in class 08, 53 or 57). When a batch fails for any other reason, each key is
-written on its own; a key the database refuses while the others succeed, or refuses with a data
-error, has its buffered count dropped (with a warning) rather than failing every later flush.
+Buffered counts are written in statements of at most 5,000 keys (Postgres refuses a statement
+with more than 65,535 parameters). A statement the database refuses with a data error (SQLState
+class 22 or 54: a key it cannot store) is split in half, and the halves again, until the refused
+key is isolated; that key's buffered count is dropped with a warning instead of failing every
+later flush, at a cost of a few dozen statements rather than one per key. Any other failure
+(the database unreachable, SQLState class 08, 53 or 57, or an error that is not about the data)
+restores every count not yet written and retries after a one-second back-off. A flush runs on the
+request that filled the buffer, so it stops after 2 seconds and keeps the rest for the next one.
 
 ### Best Practices
 

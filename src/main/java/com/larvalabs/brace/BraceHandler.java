@@ -357,7 +357,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Resolve the session cookie's Secure attribute from this request (H2). Computed here,
             // before the first response can be sent, and threaded through the choke point so every
             // exit path agrees. See SessionOptions.resolveSecure for the rule.
-            cookieSpec = cookieSpec(headers, org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest));
+            cookieSpec = cookieSpec(headers, peerAddress(jettyRequest));
             // M10: the name this request reads its session from, the same one it writes.
             final String sessionCookieName = cookieSpec.name();
 
@@ -397,7 +397,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                               : () -> readRequestBody(jettyRequest, headers);
 
             // Extract remote address from socket
-            String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
+            String remoteAddr = peerAddress(jettyRequest);
             warnIfProxyNotTrusted(headers, remoteAddr);
 
             // Build Brace Request (path params come from match, or empty if no match)
@@ -1815,6 +1815,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             return sessionOptions.maxAge().getSeconds();
         }
         return 0;
+    }
+
+    /**
+     * The socket peer's address as every part of Brace sees it (L6 review): Jetty reports an IPv6
+     * peer in brackets ({@code [0:0:0:0:0:0:0:1]}), which is stripped here, once, where the
+     * address enters the framework, so trust checks, {@code perIp} buckets, {@code req.ip()},
+     * logs, analytics and the ops audit all see the same unbracketed literal. A zone id is kept.
+     */
+    static String peerAddress(org.eclipse.jetty.server.Request request) {
+        return TrustedProxies.unbracket(org.eclipse.jetty.server.Request.getRemoteAddr(request));
     }
 
     /**

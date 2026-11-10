@@ -435,6 +435,16 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Key IPv6 on its /64; cap distinct keys per limiter and fold the excess into one
     overflow bucket.
   - **Model: Opus 5.5.**
+  - **Review fixes.** F1 (regression): Jetty reports an IPv6 peer as `[0:0:0:0:0:0:0:1]` and the
+    strict literal parser refused the brackets, so no IPv6 proxy was trusted and direct IPv6
+    clients were not grouped by /64; the peer address is now unbracketed where it enters the
+    framework (HTTP and WebSocket) and `parseLiteral` accepts one bracket pair. Decision B: at the
+    cap a new key evicts the least recently used under-limit key of a bounded sample (blocked keys
+    stay pinned; evicted rows are deleted on Postgres), then falls back to a per-IP overflow
+    bucket, then the global one. F4: counter statements are chunked at 5,000 rows, a refused chunk
+    is bisected, the parameter-count error is not a key problem, and a flush stops after 2 s.
+    F12: documented why same-label limiters share buckets only in shared mode. Tests in
+    `Ipv6PeerSocketTest`, `RateLimiterReviewFixesTest`, `RateLimiterFlushPostgresIT`.
 
 - [ ] **L7: Smaller gaps in template output**, `BraceHtmlOutput.java:87-88, 190-194, 226-229, 318-335, 367-370, 432-435`
   - **Template-written `javascript:` URL.** `<a href="javascript:go('${x}')">` with

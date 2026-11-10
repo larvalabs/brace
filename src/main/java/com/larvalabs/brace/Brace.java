@@ -1411,7 +1411,7 @@ public class Brace {
                         if (!wsPath.equals(upgradeRequest.getHttpURI().getPath())) {
                             return declineUpgrade(upgradeRequest, upgradeResponse, callback, 404);
                         }
-                        String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest);
+                        String remoteAddr = BraceHandler.peerAddress(upgradeRequest); // L6 review: unbracketed
                         // H2: the upgrade is a request like any other, so it runs plain before()
                         // middleware (a rate limiter sheds load first) and, below, the route's access
                         // requirements. Before this, every guard was skipped and a socket under a

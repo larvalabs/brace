@@ -328,6 +328,11 @@ class RateLimiterTest {
             }
             return result;
         }
+
+        @Override
+        synchronized void deleteKeys(List<String> keys) {
+            keys.forEach(store::remove);
+        }
     }
 
     /**
@@ -503,21 +508,20 @@ class RateLimiterTest {
     }
 
     @Test
-    void distinctKeysPastTheCapShareOneOverflowBucket() {
+    void distinctKeysPastTheCapReplaceUnderLimitKeys() {
+        // L6 review decision B: at the cap a new key replaces the least recently used key under
+        // its limit (the old design folded new keys into one overflow bucket, which a flood
+        // drained for every new legitimate key).
         var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1m").maxKeys(3);
         for (var user : new String[]{"a", "b", "c"}) {
             assertNull(limiter.handle(fakeRequestWithHeader("X-User", user)));
         }
-        // Past the cap: d, e, f are new keys and fold into one overflow bucket of 2.
-        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "d")));
-        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "e")));
-        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "f")),
-            "a key flood is throttled as one bucket");
-        // Existing identities keep their own counts: a has used 1 of 2.
-        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "existing key keeps its own budget");
-        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "a")));
-        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "b")));
-        assertEquals(4, limiter.windowCount(), "state stays bounded: 3 keys + overflow");
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "c")), "c is now at its limit");
+        for (var user : new String[]{"d", "e", "f"}) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-User", user)), user + " gets its own budget");
+        }
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "c")), "c, blocked, was not evicted");
+        assertEquals(3, limiter.windowCount(), "state stays bounded at the cap");
     }
 
     @Test
@@ -526,12 +530,13 @@ class RateLimiterTest {
         RateLimiter.useSharedBackend(counters);
         var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1m").maxKeys(2); // flush every request
         assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")));
-        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "b")));
-        for (int i = 0; i < 2; i++) {
-            assertNull(limiter.handle(fakeRequestWithHeader("X-User", "flood-" + i)));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")));
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "a is blocked");
+        for (int i = 0; i < 50; i++) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-User", "flood-" + i)), "flood-" + i);
         }
-        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "flood-99")));
-        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "a keeps its own budget");
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "a stays blocked");
+        // The rows of evicted keys are deleted at the next flush: the table stays near the cap.
         assertTrue(counters.store.size() <= 3, "shared counter rows bounded: " + counters.store.keySet());
     }
 

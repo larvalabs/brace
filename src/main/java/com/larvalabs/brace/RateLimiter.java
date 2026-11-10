@@ -74,6 +74,20 @@ public class RateLimiter {
     /** After a failed flush, back off DB retries this long while counting per-instance. */
     private static final long FLUSH_RETRY_COOLDOWN_MILLIS = 1_000;
 
+    /**
+     * Longest one flush may write to the database (L6 review F4). The flush runs on the request
+     * thread that crossed the batch threshold, so a slow or failing batch held that request; past
+     * the budget the deltas not yet written are put back for the next flush.
+     */
+    static final long DEFAULT_FLUSH_TIME_BUDGET_MILLIS = 2_000;
+    static volatile long flushTimeBudgetMillis = DEFAULT_FLUSH_TIME_BUDGET_MILLIS;
+
+    /**
+     * Rows per counter statement (L6 review F4). Three parameters a row; Postgres refuses a
+     * statement with more than 65,535, so one statement for a large buffer failed outright.
+     */
+    static final int FLUSH_CHUNK_ROWS = Counters.MAX_BATCH_ROWS;
+
     /** Set the global flush-batch divisor (Brace builder). Clamped to ≥ 1. */
     static void setBatchDivisor(int divisor) {
         batchDivisor = Math.max(1, divisor);
@@ -94,7 +108,7 @@ public class RateLimiter {
     // (lastKnownGlobal at last flush) + (local pending) — best-effort: the fleet view lags by up to
     // one flush, so the effective limit can overshoot by ~flushThreshold × instances. Documented.
     private final ConcurrentHashMap<String, AtomicLong> pending = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> windowEndByKey = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, SharedKey> windowEndByKey = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastKnownGlobal = new ConcurrentHashMap<>();
     private final LongAdder totalPending = new LongAdder();
     private final AtomicBoolean flushing = new AtomicBoolean(false);
@@ -108,23 +122,48 @@ public class RateLimiter {
      * Default cap on the distinct keys one limiter tracks at a time (L6). Each key holds map entries
      * (and, on Postgres, a {@code brace_counters} row) for its whole window, so without a cap a
      * client that can mint keys (a rotating source address, a made-up username) grows the state
-     * without bound. Past the cap, new keys share {@link #OVERFLOW_KEY}. Change per limiter with
+     * without bound. What happens at the cap is described on {@link #admit}. Change per limiter with
      * {@code maxKeys(int)}.
      */
     static final int DEFAULT_MAX_KEYS = 100_000;
 
     /**
-     * Bucket for new keys once a limiter tracks {@link #maxKeys} of them. Like {@link #MISSING_KEY}
-     * it starts with a space, which no normalized key can, so a client cannot address it directly.
-     * A key flood is therefore throttled as one client while existing keys keep their own counts.
+     * Last-resort bucket for new keys once the table is full of keys at their limit and the per-IP
+     * overflow buckets are used up too. Like {@link #MISSING_KEY} it starts with a space, which no
+     * normalized key can, so a client cannot address it directly; the per-IP overflow buckets are
+     * this followed by {@code ":"} and the client's {@link #ipBucket}.
      */
     static final String OVERFLOW_KEY = " (overflow)";
 
     /** Minimum gap between two "key cap reached" warnings from one limiter. */
     private static final long OVERFLOW_WARN_INTERVAL_MILLIS = 60_000;
 
+    /** Keys examined per eviction attempt (L6 review): bounded work, an approximate LRU. */
+    static final int EVICTION_SAMPLE = 16;
+
     private volatile int maxKeys = DEFAULT_MAX_KEYS;
     private final AtomicLong lastOverflowWarnMillis = new AtomicLong();
+
+    /** Tracked keys (local key or shared counter key) of the per-IP overflow buckets, to bound them. */
+    private final java.util.Set<String> overflowKeys = ConcurrentHashMap.newKeySet();
+    /** Serializes eviction only: taken on the full-table, new-key path, never otherwise. */
+    private final java.util.concurrent.locks.ReentrantLock evictLock = new java.util.concurrent.locks.ReentrantLock();
+    /** Where the eviction sampler resumes in each table, so successive attempts look at new keys. */
+    private java.util.Iterator<String> localCursor;
+    private java.util.Iterator<String> sharedCursor;
+
+    /** A key the shared path tracks: its window end, when it was last used, and whether it is an overflow bucket. */
+    private static final class SharedKey {
+        final long windowEnd;
+        final boolean overflow;
+        volatile long lastTouch;
+
+        SharedKey(long windowEnd, boolean overflow, long now) {
+            this.windowEnd = windowEnd;
+            this.overflow = overflow;
+            this.lastTouch = now;
+        }
+    }
 
     private RateLimiter(int maxRequests, Duration windowDuration, Function<Request, String> keyExtractor, String label) {
         this.maxRequests = maxRequests;
@@ -186,8 +225,9 @@ public class RateLimiter {
 
         /**
          * Track at most {@code maxKeys} distinct clients at a time (default
-         * {@value RateLimiter#DEFAULT_MAX_KEYS}); past that, new clients share one overflow
-         * bucket until windows expire.
+         * {@value RateLimiter#DEFAULT_MAX_KEYS}). At the cap a new client takes the place of
+         * one under its limit; clients at their limit are kept until their windows end (see
+         * {@link RateLimiter#perKey} for the details).
          *
          * @return this middleware, for registration
          */
@@ -210,21 +250,174 @@ public class RateLimiter {
     }
 
     /**
-     * {@code key}, or {@link #OVERFLOW_KEY} when it is new and {@code tracked} already holds
-     * {@link #maxKeys} keys. The size check is not atomic with the insert that follows, so under
-     * concurrency the cap can be overshot by a few entries; it bounds growth, not an exact count.
+     * The key a request is counted under (L6, review decision B). {@code key} itself while the
+     * table has room or already tracks it. At the cap ({@link #maxKeys} keys):
+     * <ol>
+     *   <li>a tracked key that is <em>under</em> its limit is forgotten to make room, the least
+     *       recently used of a bounded sample ({@link #EVICTION_SAMPLE}; an expired key goes
+     *       first). Forgetting it forfeits fewer than {@code maxRequests} counted requests for
+     *       that key, an accepted bypass; a key at or over its limit is never forgotten before its
+     *       window ends, so a flood cannot release a blocked client;</li>
+     *   <li>when the sample holds only such pinned keys, the request is counted in a per-client
+     *       overflow bucket, {@link #OVERFLOW_KEY}{@code + ":" + ipBucket(req.ip())}, so one
+     *       flooder does not lock out everyone else; at most {@code max(1, maxKeys / 10)} of
+     *       these are tracked;</li>
+     *   <li>past that, in the single {@link #OVERFLOW_KEY} bucket.</li>
+     * </ol>
+     * The size check is not atomic with the insert that follows, so under concurrency the cap can
+     * be overshot by a few entries; it bounds growth, not an exact count. Eviction takes a
+     * per-limiter lock and examines a fixed number of keys, so no request scans the table.
+     *
+     * @param trackedKey maps a bucket key to the key the table stores it under
      */
-    private String admit(String key, String trackedKey, java.util.Map<String, ?> tracked) {
-        if (tracked.size() < maxKeys || tracked.containsKey(trackedKey)) {
+    private String admit(String key, Request req, java.util.Map<String, ?> tracked, boolean shared,
+                         Function<String, String> trackedKey, long nowMillis) {
+        if (tracked.size() < maxKeys || tracked.containsKey(trackedKey.apply(key))) {
             return key;
         }
+        warnKeyCap();
+        if (evictOne(shared, nowMillis)) {
+            return key;
+        }
+        var ip = req == null ? null : req.ip();
+        String perIp = OVERFLOW_KEY + ":" + (ip != null ? ipBucket(ip) : "unknown");
+        String tracking = trackedKey.apply(perIp);
+        if (overflowKeys.contains(tracking) || overflowKeys.size() < Math.max(1, maxKeys / 10)) {
+            overflowKeys.add(tracking);
+            return perIp;
+        }
+        return OVERFLOW_KEY;
+    }
+
+    private void warnKeyCap() {
         long now = System.currentTimeMillis();
         long last = lastOverflowWarnMillis.get();
         if (now - last >= OVERFLOW_WARN_INTERVAL_MILLIS && lastOverflowWarnMillis.compareAndSet(last, now)) {
             Log.warn("rate-limiter: " + label + " is tracking its maximum of " + maxKeys
-                + " keys; new keys share one overflow bucket until windows expire");
+                + " keys; new keys replace keys under their limit (keys at their limit are kept until "
+                + "their windows end), and fall back to a per-client overflow bucket when none can be replaced");
         }
-        return OVERFLOW_KEY;
+    }
+
+    private static final long EVICT_PINNED = Long.MAX_VALUE;
+    private static final long EVICT_EXPIRED = Long.MIN_VALUE;
+
+    /**
+     * Forget one tracked key that is under its limit (or expired), chosen from the next
+     * {@link #EVICTION_SAMPLE} keys of a cursor that walks the table across calls: the least
+     * recently used of them. Returns false when every sampled key is pinned.
+     */
+    private boolean evictOne(boolean shared, long nowMillis) {
+        evictLock.lock();
+        try {
+            java.util.Iterator<String> cursor = shared ? sharedCursor : localCursor;
+            String best = null;
+            long bestTouch = EVICT_PINNED;
+            boolean restarted = false;
+            for (int examined = 0; examined < EVICTION_SAMPLE; ) {
+                if (cursor == null || !cursor.hasNext()) {
+                    if (restarted) break;
+                    restarted = true;
+                    cursor = (shared ? windowEndByKey : windows).keySet().iterator();
+                    continue;
+                }
+                String candidate = cursor.next();
+                examined++;
+                long touch = shared ? sharedEvictionRank(candidate, nowMillis) : localEvictionRank(candidate, nowMillis);
+                if (touch == EVICT_PINNED) continue;
+                if (touch < bestTouch) {
+                    best = candidate;
+                    bestTouch = touch;
+                    if (touch == EVICT_EXPIRED) break;
+                }
+            }
+            if (shared) sharedCursor = cursor; else localCursor = cursor;
+            return best != null && (shared ? evictShared(best, nowMillis) : evictLocal(best, nowMillis));
+        } finally {
+            evictLock.unlock();
+        }
+    }
+
+    /** Last-use time of an evictable local key, {@link #EVICT_EXPIRED}, or {@link #EVICT_PINNED}. */
+    private long localEvictionRank(String key, long nowMillis) {
+        var w = windows.get(key);
+        if (w == null || key.startsWith(OVERFLOW_KEY)) return EVICT_PINNED;
+        if (w.expired(nowMillis)) return EVICT_EXPIRED;
+        return w.count < maxRequests ? w.lastTouch : EVICT_PINNED;
+    }
+
+    private boolean evictLocal(String key, long nowMillis) {
+        boolean[] removed = {false};
+        windows.computeIfPresent(key, (k, w) -> {
+            if (w.expired(nowMillis) || w.count < maxRequests) {
+                removed[0] = true;
+                return null;
+            }
+            return w;
+        });
+        return removed[0];
+    }
+
+    /** As {@link #localEvictionRank}, for a shared counter key. */
+    private long sharedEvictionRank(String counterKey, long nowMillis) {
+        var tracked = windowEndByKey.get(counterKey);
+        if (tracked == null || tracked.overflow) return EVICT_PINNED;
+        if (tracked.windowEnd <= nowMillis) return EVICT_EXPIRED;
+        if (blockedUntil.containsKey(counterKey)) return EVICT_PINNED;
+        long estimate = lastKnownGlobal.getOrDefault(counterKey, 0L) + currentPending(counterKey);
+        return estimate < maxRequests ? tracked.lastTouch : EVICT_PINNED;
+    }
+
+    /**
+     * Forget a shared key. Its buffered (unflushed) count is dropped with it: fewer than
+     * {@code maxRequests}, since only an under-limit key is evicted.
+     */
+    private boolean evictShared(String counterKey, long nowMillis) {
+        var tracked = windowEndByKey.get(counterKey);
+        if (tracked == null || sharedEvictionRank(counterKey, nowMillis) == EVICT_PINNED
+                || !windowEndByKey.remove(counterKey, tracked)) {
+            return false;
+        }
+        // A key this instance has flushed has a brace_counters row; delete it at the next flush
+        // so a flood of fresh keys leaves no row per key behind for a whole window. Bounded: past
+        // maxKeys queued, the row is left to expire with its window.
+        if (lastKnownGlobal.containsKey(counterKey) && evictedRowCount.get() < maxKeys) {
+            evictedRows.add(counterKey);
+            evictedRowCount.incrementAndGet();
+        }
+        forgetShared(counterKey);
+        return true;
+    }
+
+    /** Counter keys evicted after a flush, whose rows the next flush deletes (see {@link #evictShared}). */
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> evictedRows = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final java.util.concurrent.atomic.AtomicInteger evictedRowCount = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Delete the rows of evicted keys that were not tracked again since; best effort. */
+    private void deleteEvictedRows(Counters counters) {
+        var keys = new ArrayList<String>();
+        for (String k; keys.size() < MAX_FLUSH_BATCH && (k = evictedRows.poll()) != null; ) {
+            evictedRowCount.decrementAndGet();
+            if (!windowEndByKey.containsKey(k)) keys.add(k);
+        }
+        if (keys.isEmpty()) return;
+        try {
+            counters.deleteKeys(keys);
+        } catch (RuntimeException e) {
+            Log.debug("rate-limiter: deleting the rows of evicted keys failed; they expire with their windows: "
+                + e.getMessage());
+        }
+    }
+
+    /** Drop every per-key map entry of a shared counter key except its {@link #windowEndByKey} entry. */
+    private void forgetShared(String counterKey) {
+        var adder = pending.remove(counterKey);
+        if (adder != null) {
+            totalPending.add(-adder.get());
+        }
+        lastKnownGlobal.remove(counterKey);
+        blockedUntil.remove(counterKey);
+        overflowKeys.remove(counterKey);
     }
 
     /**
@@ -290,9 +483,9 @@ public class RateLimiter {
 
         /**
          * Track at most {@code maxKeys} distinct keys at a time (default
-         * {@value RateLimiter#DEFAULT_MAX_KEYS}); past that, new keys share one overflow bucket
-         * until windows expire, so a client inventing keys is throttled as one client and keys
-         * already tracked keep their own counts.
+         * {@value RateLimiter#DEFAULT_MAX_KEYS}). At the cap a new key takes the place of a key
+         * under its limit, and keys at their limit are kept until their windows end; see
+         * {@link RateLimiter#perKey}.
          *
          * @return this middleware, for registration
          */
@@ -363,7 +556,7 @@ public class RateLimiter {
         var counters = sharedCounters;
         if (counters != null) {
             try {
-                return checkShared(key, counters);
+                return checkShared(key, req, counters);
             } catch (RuntimeException e) {
                 // Postgres (or any shared-counter) failure: fall back to per-instance counting
                 // rather than returning a 500 or silently admitting every request.  A brief DB
@@ -371,10 +564,10 @@ public class RateLimiter {
                 // becomes limit × N for the duration of the outage), which is far better than
                 // turning every rate-limited endpoint into an error.
                 Log.warn("rate-limiter: shared-counter DB error, falling back to local counting — " + e.getMessage());
-                return checkLocal(key);
+                return checkLocal(key, req);
             }
         }
-        return checkLocal(key);
+        return checkLocal(key, req);
     }
 
     /**
@@ -429,14 +622,15 @@ public class RateLimiter {
     }
 
     /** Per-process fixed-window count (default; single-process apps, H2, no database). */
-    private Result checkLocal(String key) {
+    private Result checkLocal(String key, Request req) {
         var now = Instant.now();
-        key = admit(key, key, windows);
+        long nowMillis = now.toEpochMilli();
+        key = admit(key, req, windows, false, Function.identity(), nowMillis);
         var window = windows.compute(key, (k, existing) -> {
-            if (existing == null || existing.expired(now)) {
-                return new Window(now, 1);
+            if (existing == null || existing.expired(nowMillis)) {
+                return new Window(now, 1, nowMillis);
             }
-            return new Window(existing.start, existing.count + 1);
+            return new Window(existing.start, existing.count + 1, nowMillis);
         });
 
         if (window.count > maxRequests) {
@@ -461,7 +655,7 @@ public class RateLimiter {
      * comments and {@code docs/2026-06-07-rate-limiter-load.md}. An already-blocked key is served
      * from the local negative cache with no DB at all.
      */
-    private Result checkShared(String key, Counters counters) {
+    private Result checkShared(String key, Request req, Counters counters) {
         long windowMillis = Math.max(1, windowDuration.toMillis());
         long nowMillis = Instant.now().toEpochMilli();
         long slot = nowMillis / windowMillis;
@@ -469,14 +663,18 @@ public class RateLimiter {
         // Key must be stable across instances for the same logical limiter: label encodes type +
         // limit + window, key is the per-client value, slot rotates each window. (Two limiters with
         // identical type/limit/window on different paths would share a budget — name them apart if
-        // that matters; uncommon, and the failure mode is conservative.)
-        String counterKey = "rl:" + label + ":" + key + ":" + slot;
+        // that matters; uncommon, and the failure mode is conservative.) The label is the only
+        // identity a limiter has across the fleet, so this sharing covers its internal missing-key
+        // and overflow buckets too (L6 review F12): two same-label limiters count keyless and
+        // overflowed requests from one client together. In local mode each limiter object has its
+        // own table, so nothing is shared; making local mode share by label would couple limiters
+        // the app built separately, so the difference is documented instead.
+        Function<String, String> counterKeyOf = k -> "rl:" + label + ":" + k + ":" + slot;
         // L6: cap distinct keys. windowEndByKey holds every key this instance tracks for the shared
         // path; pending, lastKnownGlobal and blockedUntil hold only keys it holds too (bar a brief
         // race with expiry, which the next flush or sweep clears), so capping it caps them all.
-        if (OVERFLOW_KEY.equals(admit(key, counterKey, windowEndByKey))) {
-            counterKey = "rl:" + label + ":" + OVERFLOW_KEY + ":" + slot;
-        }
+        String bucket = admit(key, req, windowEndByKey, true, counterKeyOf, nowMillis);
+        String counterKey = counterKeyOf.apply(bucket);
 
         // Negative cache: a key already over the limit for this window is rejected locally — no DB
         // call, no buffering. Fixed-window counts are monotonic within a slot, so once a key is over
@@ -493,7 +691,9 @@ public class RateLimiter {
 
         // Buffer this request's increment locally; the batch flush below writes it to the shared
         // counter. windowEndByKey records the key's expiry for the flush and for eviction.
-        windowEndByKey.putIfAbsent(counterKey, windowEndMillis);
+        boolean overflowBucket = bucket.startsWith(OVERFLOW_KEY);
+        windowEndByKey.computeIfAbsent(counterKey, k -> new SharedKey(windowEndMillis, overflowBucket, nowMillis))
+            .lastTouch = nowMillis;
         pending.computeIfAbsent(counterKey, k -> new AtomicLong()).incrementAndGet();
         totalPending.increment();
 
@@ -555,8 +755,13 @@ public class RateLimiter {
             return; // another thread is flushing
         }
         try {
-            flush(counters, nowMillis);
-            flushCooldownUntilMillis = 0L;
+            if (flush(counters, nowMillis)) {
+                flushCooldownUntilMillis = 0L;
+            } else {
+                // Out of time (L6 review F4): what was not written is back in the buffer. Back off
+                // like a failure, so the next requests are not each held for another budget.
+                flushCooldownUntilMillis = nowMillis + FLUSH_RETRY_COOLDOWN_MILLIS;
+            }
         } catch (RuntimeException e) {
             // Shared-counter (DB) error. The buffered counts were restored (see flush), so the
             // limiter keeps enforcing per-instance — mirroring the old per-request fallback ("a
@@ -573,23 +778,33 @@ public class RateLimiter {
      * Drain the pending buffer and write it as one batch. Entries whose window has already rolled
      * are dropped (their counter row is irrelevant). On a DB outage every captured delta is added
      * back to the buffer so no count is lost and per-instance enforcement continues; the exception
-     * propagates so {@link #maybeFlush} arms the retry cooldown. Any other batch failure is retried
-     * key by key ({@link #flushKeyByKey}), so one key the database refuses cannot keep every flush
-     * failing (L5).
+     * propagates so {@link #maybeFlush} arms the retry cooldown.
+     *
+     * <p>L6 review F4: the batch is written in statements of {@link #FLUSH_CHUNK_ROWS} rows (one
+     * statement for a large buffer exceeded Postgres's parameter limit). A statement the database
+     * refuses with a data error (SQLState class 22 or 54: a key it cannot store) is bisected until
+     * the refused key(s) are isolated and dropped, O(log n) statements per bad key instead of one
+     * per key (L5 had retried key by key). Any other failure restores everything not yet written
+     * and propagates, like an outage: it is not a key's fault. The flush stops after
+     * {@link #flushTimeBudgetMillis}, restoring what it did not get to.
+     *
+     * @return false if the time budget ran out
      */
-    private void flush(Counters counters, long nowMillis) {
+    private boolean flush(Counters counters, long nowMillis) {
         var updates = new ArrayList<Counters.CounterUpdate>();
         long pulled = 0;
         for (var entry : pending.entrySet()) {
             String counterKey = entry.getKey();
-            Long windowEnd = windowEndByKey.get(counterKey);
-            if (windowEnd == null || windowEnd <= nowMillis) {
-                // Window rolled: drop the key entirely (new requests use a new slot's key).
+            SharedKey tracked = windowEndByKey.get(counterKey);
+            if (tracked == null || tracked.windowEnd <= nowMillis) {
+                // Window rolled (or the key was evicted): drop it entirely (new requests use a new
+                // slot's key).
                 pulled += entry.getValue().getAndSet(0);
                 pending.remove(counterKey);
-                windowEndByKey.remove(counterKey);
+                if (tracked != null) windowEndByKey.remove(counterKey, tracked);
                 lastKnownGlobal.remove(counterKey);
                 blockedUntil.remove(counterKey);
+                overflowKeys.remove(counterKey);
                 continue;
             }
             long delta = entry.getValue().getAndSet(0);
@@ -597,62 +812,56 @@ public class RateLimiter {
                 continue;
             }
             pulled += delta;
-            updates.add(new Counters.CounterUpdate(counterKey, delta, Instant.ofEpochMilli(windowEnd)));
+            updates.add(new Counters.CounterUpdate(counterKey, delta, Instant.ofEpochMilli(tracked.windowEnd)));
         }
         totalPending.add(-pulled);
+        deleteEvictedRows(counters);
         if (updates.isEmpty()) {
-            return;
+            return true;
         }
-        try {
-            counters.incrementBatch(updates).forEach(lastKnownGlobal::put);
-        } catch (RuntimeException e) {
-            if (Counters.isOutage(e)) {
-                restore(updates);
-                throw e;
-            }
-            flushKeyByKey(counters, updates, e);
-        }
+        return writeBisecting(counters, updates, System.nanoTime() + flushTimeBudgetMillis * 1_000_000L);
     }
 
-    /**
-     * A batch failed without the database being down: write each key on its own to find the one(s)
-     * the database refuses. A key that fails while others succeed, or fails with a data error
-     * (SQLState class 22 or 54), is discarded: restoring it would fail every later flush for its
-     * whole window and stop the fleet sharing counts. If the database turns out to be down, or
-     * every key fails for an unrecognized reason, the remaining counts are restored as for an
-     * outage.
-     */
-    private void flushKeyByKey(Counters counters, List<Counters.CounterUpdate> updates, RuntimeException batchError) {
-        var failed = new ArrayList<Counters.CounterUpdate>();
-        RuntimeException lastError = batchError;
-        boolean anySucceeded = false;
-        boolean allDataErrors = true;
-        for (int i = 0; i < updates.size(); i++) {
-            var u = updates.get(i);
+    /** Write {@code updates} in chunks, bisecting a chunk refused for its data; see {@link #flush}. */
+    private boolean writeBisecting(Counters counters, List<Counters.CounterUpdate> updates, long deadlineNanos) {
+        var work = new java.util.ArrayDeque<List<Counters.CounterUpdate>>();
+        for (int from = 0; from < updates.size(); from += FLUSH_CHUNK_ROWS) {
+            work.addLast(updates.subList(from, Math.min(updates.size(), from + FLUSH_CHUNK_ROWS)));
+        }
+        int refused = 0;
+        boolean inTime = true;
+        while (!work.isEmpty()) {
+            var part = work.pollFirst();
+            if (System.nanoTime() - deadlineNanos > 0) {
+                restore(part);
+                work.forEach(this::restore);
+                inTime = false;
+                Log.warn("rate-limiter: writing the shared counters of " + label + " took over "
+                    + flushTimeBudgetMillis + " ms; the rest is kept for the next flush");
+                break;
+            }
             try {
-                counters.incrementBatch(List.of(u)).forEach(lastKnownGlobal::put);
-                anySucceeded = true;
+                counters.incrementBatch(part).forEach(lastKnownGlobal::put);
             } catch (RuntimeException e) {
-                if (Counters.isOutage(e)) {
-                    failed.addAll(updates.subList(i, updates.size()));
-                    restore(failed);
+                if (Counters.isOutage(e) || !Counters.isDataError(e)) {
+                    restore(part);
+                    work.forEach(this::restore);
                     throw e;
                 }
-                failed.add(u);
-                lastError = e;
-                allDataErrors &= Counters.isDataError(e);
+                if (part.size() == 1) {
+                    refused++;
+                    continue;
+                }
+                int mid = part.size() / 2;
+                work.addFirst(part.subList(mid, part.size()));
+                work.addFirst(part.subList(0, mid));
             }
         }
-        if (failed.isEmpty()) {
-            return;
-        }
-        if (anySucceeded || allDataErrors) {
-            Log.warn("rate-limiter: the database refused " + failed.size() + " shared-counter key(s) of "
+        if (refused > 0) {
+            Log.warn("rate-limiter: the database refused " + refused + " shared-counter key(s) of "
                 + label + "; their buffered counts were dropped");
-            return;
         }
-        restore(failed);
-        throw lastError;
+        return inTime;
     }
 
     /** Put the deltas of a failed write back into the buffer so the next flush retries them. */
@@ -705,7 +914,8 @@ public class RateLimiter {
 
     private void evictExpired() {
         var now = Instant.now();
-        windows.entrySet().removeIf(entry -> entry.getValue().expired(now));
+        long sweepMillis = now.toEpochMilli();
+        windows.entrySet().removeIf(entry -> entry.getValue().expired(sweepMillis));
 
         // M17: drop batched-counter state for windows that have rolled. Without traffic a flush
         // never runs, so keys for an expired window would otherwise sit in the maps until the next
@@ -715,19 +925,16 @@ public class RateLimiter {
         // flush batch; this sweep is what frees them once their windows end.
         long nowMillis = now.toEpochMilli();
         windowEndByKey.entrySet().removeIf(entry -> {
-            if (entry.getValue() > nowMillis) {
+            if (entry.getValue().windowEnd > nowMillis) {
                 return false;
             }
-            String counterKey = entry.getKey();
-            var adder = pending.remove(counterKey);
-            if (adder != null) {
-                totalPending.add(-adder.get());
-            }
-            lastKnownGlobal.remove(counterKey);
-            blockedUntil.remove(counterKey);
+            forgetShared(entry.getKey());
             return true;
         });
         blockedUntil.entrySet().removeIf(entry -> entry.getValue() <= nowMillis);
+        // Per-IP overflow buckets whose windows are gone from both tables no longer count against
+        // their own cap. Bounded by that cap, so this is cheap.
+        overflowKeys.removeIf(k -> !windows.containsKey(k) && !windowEndByKey.containsKey(k));
 
         // Reap expired shared-counter rows (space reclamation; expiry is enforced on read too). The
         // delete is global and idempotent, so running it from each limiter's cleanup is redundant
@@ -750,14 +957,17 @@ public class RateLimiter {
     private class Window {
         final Instant start;
         final int count;
+        /** When the key was last counted, for the eviction sampler's least-recently-used choice. */
+        final long lastTouch;
 
-        Window(Instant start, int count) {
+        Window(Instant start, int count, long lastTouch) {
             this.start = start;
             this.count = count;
+            this.lastTouch = lastTouch;
         }
 
-        boolean expired(Instant now) {
-            return now.isAfter(start.plus(windowDuration));
+        boolean expired(long nowMillis) {
+            return nowMillis > start.toEpochMilli() + windowDuration.toMillis();
         }
     }
 }
