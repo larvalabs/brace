@@ -247,17 +247,20 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private static final Set<String> FOREIGN_ROOTS = Set.of("svg", "math");
     private static final Set<String> INTEGRATION_POINTS = Set.of(
         "foreignobject", "desc", "title", "annotation-xml", "mi", "mo", "mn", "ms", "mtext");
-    // Start tags that end foreign content: the HTML parser's list, with <font> whatever its attributes.
+    // Start tags that end foreign content: the HTML parser's list. <font> is on it only with a
+    // color, face or size attribute (see fontBreakout): an SVG font definition (<font id="f"
+    // horiz-adv-x="10">) stays in the SVG.
     private static final Set<String> BREAKOUT_TAGS = Set.of(
         "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed",
         "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr",
         "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt", "u",
-        "ul", "var", "font");
+        "ul", "var");
     private static final String CDATA_START = "CDATA[";
 
     private int state = DATA;
     private boolean endTag;                                // the tag being read is </name ...>
     private boolean slash;                                 // inside a tag: the character just read was a '/' outside a value
+    private boolean fontBreakout;                          // the tag being read has an attribute named color, face or size
     private final StringBuilder tag = new StringBuilder(); // its name, lower-cased
     private final StringBuilder attr = new StringBuilder(); // the attribute being read, lower-cased
     private String tagString, attrString;                  // those as Strings, made when asked for
@@ -387,6 +390,10 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
                 else if (!isSpace(c)) startAttribute(c);
             }
             case ATTR_NAME -> {
+                boolean named = isSpace(c) || c == '/' || c == '=' || c == '>';
+                if (named && !fontBreakout) {
+                    fontBreakout = "color".contentEquals(attr) || "face".contentEquals(attr) || "size".contentEquals(attr);
+                }
                 if (isSpace(c)) state = AFTER_ATTR_NAME;
                 else if (c == '/') tagSlash();
                 else if (c == '=') state = BEFORE_VALUE;
@@ -508,6 +515,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private void startTagName(char c, boolean end) {
         state = TAG_NAME;
         endTag = end;
+        fontBreakout = false;
         tag.setLength(0);
         tag.append(lower(c));
         tagString = null;
@@ -563,7 +571,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             return;
         }
         if (inForeignContent()) {
-            if (!BREAKOUT_TAGS.contains(currentTag())) {
+            if (!BREAKOUT_TAGS.contains(currentTag()) && !(fontBreakout && "font".contentEquals(tag))) {
                 // Every element here is markup, <script> and <style> too: no raw text, and
                 // a self-closing one is complete.
                 if (!selfClosing) openElement(currentTag());

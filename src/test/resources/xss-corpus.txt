@@ -327,6 +327,22 @@ x/;alert(1);/
 --- expect
 <table><svg><desc><td></td></desc><script>var a = "\u0022\u003balert\u00281\u0029\u002f\u002f", b = "ok";</script></svg></table>
 <table><svg><desc><td></td></desc><script>var a = "\\", b = "\u003balert\u00281\u0029\u002f\u002f";</script></svg></table>
+#! <font> ends foreign content only with a color, face or size attribute: an SVG font doesn't, so
+#! the self-closing <script/> after it is complete and the rest of the page is read as it is.
+### svg-font-without-color-face-size-is-foreign
+<svg><defs><font id="f" horiz-adv-x="10"></font></defs><script href="/a.js"/></svg><p title="${x}">${x}</p><a href="${y}">l</a><div hx-vals='{"q": "${x}"}'></div>
+--- values
+it's "q" <b>||/ok?a=1&b=2
+it's "q" <b>||javascript:alert(1)
+--- expect
+<svg><defs><font id="f" horiz-adv-x="10"></font></defs><script href="/a.js"/></svg><p title="it&#39;s &#34;q&#34; &lt;b>">it's "q" &lt;b&gt;</p><a href="/ok?a=1&amp;b=2">l</a><div hx-vals='{"q": "it\u0027s \u0022q\u0022 \u003cb\u003e"}'></div>
+<svg><defs><font id="f" horiz-adv-x="10"></font></defs><script href="/a.js"/></svg><p title="it&#39;s &#34;q&#34; &lt;b>">it's "q" &lt;b&gt;</p><a href="about:invalid#blocked">l</a><div hx-vals='{"q": "it\u0027s \u0022q\u0022 \u003cb\u003e"}'></div>
+### svg-font-with-face-is-html
+<svg><font face="x"></font><script>if (a<b) { t = "${x}"; }</script></svg><p>${y}</p>
+--- values
+" onload="alert(1)||<b>
+--- expect
+<svg><font face="x"></font><script>if (a<b) { t = "\u0022\u0020onload\u003d\u0022alert\u00281\u0029"; }</script></svg><p>&lt;b&gt;</p>
 
 #! ------------------------------------- Final review, M1: data inside a tag, outside a quoted value
 #! A script or style body in <svg>/<math> is markup to a browser, so "0<i ?" opens a tag and a

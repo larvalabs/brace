@@ -796,7 +796,11 @@ class BraceHtmlOutputTest {
                 "<math><script />", "<svg><g><script\n/></g>", "<svg><svg><script/></svg><script/>",
                 "<svg><title>t</title><script/>", "<svg><foreignObject><b>x</b></foreignObject><script/>",
                 "<svg><desc><svg><script/></svg></desc><script/>", "<svg><path d=\"M0 0\"><script/>",
-                "<svg><![CDATA[ <script> \" ]] ]]><script/>", "<svg><script href=/a.js />")) {
+                "<svg><![CDATA[ <script> \" ]] ]]><script/>", "<svg><script href=/a.js />",
+                // <font> ends foreign content only with a color, face or size attribute (final
+                // review): an SVG font definition doesn't.
+                "<svg><font><script/>", "<svg><defs><font id=\"f\" horiz-adv-x=\"10\"><glyph unicode=\"a\" d=\"M0 0\"/></font></defs><script/>",
+                "<svg><font id=f data-color=\"red\" colors faces=1 x=\"size\"><script/>", "<svg><font/><script/>")) {
             assertEquals(element + "</svg><p>&lt;i&gt;'</p><a href=\"" + blocked + "\">", driven(Part.text(element + "</svg><p>"),
                 text, Part.text("</p><a href=\""), link, Part.text("\">")), element);
             assertEquals(element + "<a href=\"" + blocked + "\">&lt;i&gt;'", driven(Part.text(element + "<a href=\""), link,
@@ -809,12 +813,14 @@ class BraceHtmlOutputTest {
                 "<math><annotation-xml encoding=\"text/html\"><script/>", "<svg><p><script/>", "<svg><g><div><script/>",
                 "<svg><g></p><script/>", "<div><svg><g></div><script/>", "<svg><font color=\"red\"><script/>",
                 "<svg><foreignObject><svg></svg><script/>", "<![CDATA[ x ]]><script/>", "<svg><script href=/a.js/>x</script></svg><script/>",
+                "<svg><font face=\"x\"><script/>", "<svg><font id=f SIZE=3><script/>", "<svg><font color><script/>",
+                "<svg><font\ncolor = 'red'/><script/>", "<svg><g><font size=1></font><script/>",
                 // Not modelled, and read as HTML, the side that keeps every rule on. To a browser
                 // these are still foreign content and the <script/> is complete: an end tag that
                 // matches nothing open (it would close the SVG if it matched an element around
-                // it), <font> without color/face/size, a MathML integration point in SVG or an
-                // SVG one in MathML, <annotation-xml> without an HTML encoding.
-                "<svg><g></div><script/>", "<svg><font><script/>", "<svg><mi><script/>", "<math><desc><script/>",
+                // it), a MathML integration point in SVG or an SVG one in MathML,
+                // <annotation-xml> without an HTML encoding.
+                "<svg><g></div><script/>", "<svg><mi><script/>", "<math><desc><script/>",
                 "<math><annotation-xml><script/>")) {
             assertEquals(element + "<p>\\u003ci\\u003e\\u0027</p><a href=\"" + blocked + "\"></script><a href=\"" + blocked + "\">",
                 driven(Part.text(element + "<p>"), text, Part.text("</p><a href=\""), link, Part.text("\"></script><a href=\""),
