@@ -286,6 +286,49 @@ class Counters {
         }
     }
 
+    /**
+     * True when {@code e} means the database could not be reached or used at all (L5): a
+     * connection exception, or an SQLState in class 08 (connection exception), 53 (insufficient
+     * resources) or 57 (operator intervention, e.g. shutdown). Every key in a batch would fail the
+     * same way, so its counts are kept and retried rather than blamed on a key.
+     */
+    static boolean isOutage(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLTransientConnectionException
+                    || t instanceof java.sql.SQLNonTransientConnectionException
+                    || t instanceof java.net.SocketException
+                    || t instanceof java.net.SocketTimeoutException) {
+                return true;
+            }
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                String state = sql.getSQLState();
+                if (state.startsWith("08") || state.startsWith("53") || state.startsWith("57")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when {@code e} is the database refusing this statement's data (L5): an SQLState in
+     * class 22 (data exception: a NUL, an invalid byte sequence, a bad parameter) or 54 (program
+     * limit exceeded: an index row too large). Such an error follows the key, not the database.
+     */
+    static boolean isDataError(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                String state = sql.getSQLState();
+                if (state.startsWith("22") || state.startsWith("54")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static void setNullableTimestamp(java.sql.PreparedStatement ps, int idx, Timestamp ts)
             throws java.sql.SQLException {
         if (ts == null) {

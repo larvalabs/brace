@@ -581,6 +581,86 @@ class CacheTest {
         assertEquals(2, counter.get(), "Re-requesting should hit cache");
     }
 
+    // ---- L5: control characters and oversized keys are stored hashed ----
+
+    private static int utf8(String s) {
+        return s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
+    @Test
+    void storageKeyLeavesOrdinaryKeysAlone() {
+        for (var key : new String[]{"user:42", "page:GET:/posts/héllo", "x".repeat(Cache.MAX_KEY_BYTES)}) {
+            assertSame(key, Cache.storageKey(key));
+        }
+    }
+
+    @Test
+    void storageKeyHashesControlCharactersLongKeysAndTheMarker() {
+        var nul = Cache.storageKey("user:a\u0000b");
+        assertFalse(nul.chars().anyMatch(Character::isISOControl), "no control character reaches a backend");
+        assertTrue(nul.startsWith("user:a" + Cache.HASHED_KEY_MARKER), nul);
+        assertNotEquals(nul, Cache.storageKey("user:a\u0001b"));
+        assertNotEquals(nul, Cache.storageKey("user:a"));
+
+        var longKey = "page:GET:/posts/" + "€".repeat(3_000);
+        var hashed = Cache.storageKey(longKey);
+        assertTrue(utf8(hashed) <= Cache.MAX_KEY_BYTES, "hashed form fits: " + utf8(hashed));
+        assertNotEquals(hashed, Cache.storageKey(longKey + "x"));
+        assertEquals(hashed, Cache.storageKey(longKey), "stable");
+
+        // A caller cannot pass a stored hashed form raw and land on that entry.
+        assertNotEquals(nul, Cache.storageKey(nul));
+    }
+
+    @Test
+    void storageKeyNeverSplitsASurrogatePair() {
+        var key = "k".repeat(Cache.RETAINED_PREFIX_CHARS - 1) + "😀".repeat(300);
+        var hashed = Cache.storageKey(key);
+        var retained = hashed.substring(0, hashed.indexOf(Cache.HASHED_KEY_MARKER));
+        assertFalse(Character.isHighSurrogate(retained.charAt(retained.length() - 1)));
+        // ...and a prefix clear of that same 128-char prefix still reaches it.
+        cache.set(key, "v");
+        cache.deletePrefix(key.substring(0, Cache.RETAINED_PREFIX_CHARS));
+        assertNull(cache.get(key, String.class));
+    }
+
+    @Test
+    void hashedKeysBehaveLikeAnyOtherKey() {
+        var nulKey = "posts:\u0000";
+        var longKey = "posts:" + "y".repeat(2_000);
+        cache.set(nulKey, "nul", "5m", "posts");
+        cache.set(longKey, "long", "5m", "posts");
+        cache.set("posts:", "plain");
+        assertEquals("nul", cache.get(nulKey, String.class));
+        assertEquals("long", cache.get(longKey, String.class));
+        assertEquals("plain", cache.get("posts:", String.class), "a NUL key does not shadow its stripped form");
+        assertEquals("g", cache.getOrSet("g:\u0000", "5m", () -> "g"));
+        assertEquals(1, cache.incr("n:\u0000"));
+        assertEquals(0, cache.decr("n:\u0000"));
+
+        cache.clearTag("posts");
+        assertNull(cache.get(nulKey, String.class), "tag invalidation reaches hashed keys");
+        assertNull(cache.get(longKey, String.class));
+
+        cache.set(nulKey, "nul");
+        cache.set(longKey, "long");
+        cache.set("other:" + "y".repeat(2_000), "keep");
+        cache.deletePrefix("posts:");
+        assertNull(cache.get(nulKey, String.class), "prefix clear reaches hashed keys");
+        assertNull(cache.get(longKey, String.class));
+        assertEquals("keep", cache.get("other:" + "y".repeat(2_000), String.class));
+
+        // A prefix longer than the retained part still clears the long keys under it.
+        cache.set(longKey, "long");
+        cache.deletePrefix(longKey.substring(0, 1_000));
+        assertNull(cache.get(longKey, String.class));
+
+        // A tag with a control character works the same on set and clear.
+        cache.set("t", "v", "5m", "tag\u0000");
+        cache.clearTag("tag\u0000");
+        assertNull(cache.get("t", String.class));
+    }
+
     /** A simple test record for cache serialization. */
     public static class TestRecord {
         public String name;

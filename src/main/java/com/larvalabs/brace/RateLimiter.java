@@ -298,10 +298,11 @@ public class RateLimiter {
         if (rawKey.isEmpty()) {
             return null;
         }
-        if (rawKey.length() <= MAX_KEY_LENGTH) {
+        if (rawKey.length() <= MAX_KEY_LENGTH && !hasControlCharacter(rawKey)) {
             return rawKey;
         }
-        // Replace long keys with their SHA-256 hex digest (exactly 64 chars, fixed).
+        // Replace long keys, and keys with a control character (L5: a NUL is refused by pgjdbc and
+        // failed the whole shared-counter batch), with their SHA-256 hex digest (64 chars, fixed).
         try {
             var digest = MessageDigest.getInstance("SHA-256");
             var hash = digest.digest(rawKey.getBytes(StandardCharsets.UTF_8));
@@ -310,6 +311,16 @@ public class RateLimiter {
             // SHA-256 is mandatory in every Java SE implementation — unreachable.
             throw new AssertionError("SHA-256 not available", e);
         }
+    }
+
+    /** True if any char is an ISO control character: below 0x20, 0x7F, or 0x80 to 0x9F. */
+    private static boolean hasControlCharacter(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isISOControl(s.charAt(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Per-process fixed-window count (default; single-process apps, H2, no database). */
@@ -448,9 +459,11 @@ public class RateLimiter {
 
     /**
      * Drain the pending buffer and write it as one batch. Entries whose window has already rolled
-     * are dropped (their counter row is irrelevant). On a DB failure every captured delta is added
+     * are dropped (their counter row is irrelevant). On a DB outage every captured delta is added
      * back to the buffer so no count is lost and per-instance enforcement continues; the exception
-     * propagates so {@link #maybeFlush} arms the retry cooldown.
+     * propagates so {@link #maybeFlush} arms the retry cooldown. Any other batch failure is retried
+     * key by key ({@link #flushKeyByKey}), so one key the database refuses cannot keep every flush
+     * failing (L5).
      */
     private void flush(Counters counters, long nowMillis) {
         var updates = new ArrayList<Counters.CounterUpdate>();
@@ -481,14 +494,63 @@ public class RateLimiter {
         try {
             counters.incrementBatch(updates).forEach(lastKnownGlobal::put);
         } catch (RuntimeException e) {
-            long restored = 0;
-            for (var u : updates) {
-                pending.computeIfAbsent(u.key(), k -> new AtomicLong()).addAndGet(u.delta());
-                restored += u.delta();
+            if (Counters.isOutage(e)) {
+                restore(updates);
+                throw e;
             }
-            totalPending.add(restored);
-            throw e;
+            flushKeyByKey(counters, updates, e);
         }
+    }
+
+    /**
+     * A batch failed without the database being down: write each key on its own to find the one(s)
+     * the database refuses. A key that fails while others succeed, or fails with a data error
+     * (SQLState class 22 or 54), is discarded: restoring it would fail every later flush for its
+     * whole window and stop the fleet sharing counts. If the database turns out to be down, or
+     * every key fails for an unrecognized reason, the remaining counts are restored as for an
+     * outage.
+     */
+    private void flushKeyByKey(Counters counters, List<Counters.CounterUpdate> updates, RuntimeException batchError) {
+        var failed = new ArrayList<Counters.CounterUpdate>();
+        RuntimeException lastError = batchError;
+        boolean anySucceeded = false;
+        boolean allDataErrors = true;
+        for (int i = 0; i < updates.size(); i++) {
+            var u = updates.get(i);
+            try {
+                counters.incrementBatch(List.of(u)).forEach(lastKnownGlobal::put);
+                anySucceeded = true;
+            } catch (RuntimeException e) {
+                if (Counters.isOutage(e)) {
+                    failed.addAll(updates.subList(i, updates.size()));
+                    restore(failed);
+                    throw e;
+                }
+                failed.add(u);
+                lastError = e;
+                allDataErrors &= Counters.isDataError(e);
+            }
+        }
+        if (failed.isEmpty()) {
+            return;
+        }
+        if (anySucceeded || allDataErrors) {
+            Log.warn("rate-limiter: the database refused " + failed.size() + " shared-counter key(s) of "
+                + label + "; their buffered counts were dropped");
+            return;
+        }
+        restore(failed);
+        throw lastError;
+    }
+
+    /** Put the deltas of a failed write back into the buffer so the next flush retries them. */
+    private void restore(List<Counters.CounterUpdate> updates) {
+        long restored = 0;
+        for (var u : updates) {
+            pending.computeIfAbsent(u.key(), k -> new AtomicLong()).addAndGet(u.delta());
+            restored += u.delta();
+        }
+        totalPending.add(restored);
     }
 
     private static Result tooMany(long retryAfterSeconds) {

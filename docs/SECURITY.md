@@ -1315,9 +1315,18 @@ normalized before use:
   storage — millions of bytes of map entries locally, or arbitrarily large rows in
   `brace_counters`. Hashing caps the key size while preserving the collision-resistance needed
   for correct bucketing.
+- **Keys containing a control character → SHA-256 hex digest** too. Postgres refuses a NUL in a
+  text parameter, so a raw `username=a%00` key would otherwise fail every shared-counter write.
 
 The cap is applied before any prefix or window-slot decoration, so it holds equally in
 per-process and shared (Postgres) modes.
+
+Cache keys get the same treatment in the `Cache` facade, on both backends: a key with a control
+character, or longer than 512 UTF-8 bytes (a page path or `vary` value near the 8 KB URI limit
+exceeds Postgres's index row limit), is stored as its first characters (up to 128, stopping at a
+control character) followed by a SHA-256 digest of the whole key. This is invisible to callers;
+tags still invalidate the entry, and `deletePrefix` still reaches it through the kept prefix (a
+prefix longer than 128 characters is cut to 128, so it may clear a little more than asked).
 
 ### Trusted proxies and IP spoofing
 
@@ -1344,6 +1353,11 @@ without any check. During an outage the effective limit across a fleet of N inst
 approximately `limit × N`, so brief over-admission is possible — this is intentional: the
 alternative (turning every rate-limited endpoint into a 500) is worse. A warning is logged at
 `WARN` level for each request that falls back.
+
+Buffered counts are restored and retried only while the database is unreachable (a connection
+error, or an SQLState in class 08, 53 or 57). When a batch fails for any other reason, each key is
+written on its own; a key the database refuses while the others succeed, or refuses with a data
+error, has its buffered count dropped (with a warning) rather than failing every later flush.
 
 ### Best Practices
 

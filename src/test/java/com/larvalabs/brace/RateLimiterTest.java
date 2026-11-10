@@ -395,6 +395,85 @@ class RateLimiterTest {
         assertEquals(100, counters.keysWritten.get(), "every key is counted exactly once");
     }
 
+    // ---- L5: control characters in keys; a failing counter batch ----
+
+    @Test
+    void normalizeKey_controlCharactersAreHashed() {
+        for (var raw : new String[]{"a\u0000", "a\u0001b", "a\u001fb", "a\u007fb", "a\u0085b", "\u0000"}) {
+            var normalized = RateLimiter.normalizeKey(raw);
+            assertTrue(normalized.matches("[0-9a-f]{64}"), "control character in '" + raw.replace("\u0000", "\\0")
+                + "' must be hashed, got " + normalized);
+        }
+        assertNotEquals(RateLimiter.normalizeKey("a\u0000"), RateLimiter.normalizeKey("a\u0001"));
+        assertNotEquals(RateLimiter.normalizeKey("a\u0000"), RateLimiter.normalizeKey("a"));
+        // Ordinary printable keys, non-ASCII included, are untouched.
+        assertEquals("josé@example.com", RateLimiter.normalizeKey("josé@example.com"));
+    }
+
+    /**
+     * Counters stand-in that refuses (as Postgres refuses a NUL or an oversized key) any statement
+     * containing a key with {@code poison} in it, with a data-exception SQLState, and can be put in
+     * an outage that fails every statement with a connection SQLState.
+     */
+    static class PickyCounters extends CountingCounters {
+        volatile boolean outage;
+
+        @Override
+        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+            if (outage) {
+                throw new RuntimeException(new java.sql.SQLException("connection refused", "08001"));
+            }
+            for (var u : updates) {
+                if (u.key().contains("poison")) {
+                    throw new RuntimeException(new java.sql.SQLException(
+                        "Zero bytes may not occur in string parameters.", "22023"));
+                }
+            }
+            return super.incrementBatch(updates);
+        }
+    }
+
+    /**
+     * Before the fix one refused key failed the whole batch, every delta was restored, and the key
+     * kept every later flush failing until its window rolled: no innocent key reached the shared
+     * counter, so the fleet limit became limit × instances.
+     */
+    @Test
+    void refusedKeyIsDiscardedInsteadOfPoisoningEveryFlush() {
+        var counters = new PickyCounters();
+        RateLimiter.useSharedBackend(counters);
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1m"); // flush every request
+
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "poison")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "alice")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "bob")));
+
+        assertTrue(counters.store.keySet().stream().anyMatch(k -> k.contains(":alice:")),
+            "alice's count must reach the shared counter despite the refused key");
+        assertTrue(counters.store.keySet().stream().anyMatch(k -> k.contains(":bob:")),
+            "the refused key must not be restored into the next flush");
+    }
+
+    /** A whole-database outage still restores every delta (nothing is discarded) and retries later. */
+    @Test
+    void outageRestoresCountsRatherThanDiscardingThem() throws Exception {
+        var counters = new PickyCounters();
+        RateLimiter.useSharedBackend(counters);
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1m");
+        var alice = fakeRequestWithHeader("X-User", "alice");
+
+        counters.outage = true;
+        assertNull(limiter.handle(alice));
+        assertNull(limiter.handle(alice));
+        assertTrue(counters.store.isEmpty());
+
+        counters.outage = false;
+        Thread.sleep(1_100); // past the flush retry cooldown
+        assertNull(limiter.handle(alice));
+        assertEquals(3L, counters.store.values().stream().mapToLong(Long::longValue).sum(),
+            "the counts buffered during the outage were kept and flushed once it ended");
+    }
+
     // Integration test with a real Brace app
 
     static Brace app;

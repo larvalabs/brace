@@ -392,7 +392,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `PostgresBackend` a row cap.
   - **Model: Opus 5.5.**
 
-- [ ] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
+- [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a
     NUL; the multi-row counter statement is rejected, every delta is restored, and the poison
     key keeps each flush failing until its window rolls. Each instance then counts only its own

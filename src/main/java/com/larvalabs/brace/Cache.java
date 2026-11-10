@@ -72,8 +72,125 @@ public class Cache {
         cleanupThread.interrupt();
     }
 
+    /**
+     * A key longer than this many UTF-8 bytes is stored hashed (L5). Postgres refuses a btree entry
+     * over about 2.7 KB, so a page path or {@code vary} value near Jetty's 8 KB URI limit failed the
+     * insert; 512 keeps every stored key well clear of that on both backends.
+     */
+    static final int MAX_KEY_BYTES = 512;
+
+    /** How much of a hashed key is kept readable in front of the digest, for prefix clears. */
+    static final int RETAINED_PREFIX_CHARS = 128;
+
+    /**
+     * Separates a hashed key's retained prefix from its digest. A key that itself contains this is
+     * hashed too, so a stored hashed form can never be produced by passing some other key raw.
+     */
+    static final String HASHED_KEY_MARKER = "#sha256:";
+
+    /**
+     * The key as the backend stores it (L5). A key with an ISO control character (Postgres refuses
+     * a NUL in a text parameter), longer than {@link #MAX_KEY_BYTES} UTF-8 bytes, or containing
+     * {@link #HASHED_KEY_MARKER} becomes its leading characters, up to the first of those
+     * characters or {@link #RETAINED_PREFIX_CHARS}, then the marker, then the SHA-256 hex digest of
+     * the whole key. Applied in this facade for every key and tag, so both backends store the same
+     * thing, the mapping is invisible to callers, and {@link #deletePrefix} still reaches a hashed
+     * key through its retained prefix.
+     */
+    static String storageKey(String key) {
+        if (key == null) return null;
+        if (!hasControlCharacter(key) && !key.contains(HASHED_KEY_MARKER) && !exceedsKeyBytes(key)) {
+            return key;
+        }
+        return key.substring(0, retainedLength(key)) + HASHED_KEY_MARKER + sha256Hex(key);
+    }
+
+    /**
+     * The prefix {@link #deletePrefix} sends to the backend. A key starting with {@code prefix} is
+     * stored either raw (so it still starts with it) or hashed, keeping its characters up to its
+     * first control character, its first marker, or {@link #RETAINED_PREFIX_CHARS}; a prefix that
+     * reaches any of those is cut there too. A cut prefix can clear more than was asked, never
+     * less: a cache miss, never a stale entry.
+     */
+    static String storagePrefix(String prefix) {
+        if (prefix == null) return null;
+        int cut = retainedLength(prefix);
+        if (cut == RETAINED_PREFIX_CHARS && Character.isHighSurrogate(prefix.charAt(cut - 1))) {
+            cut--; // a key continuing this prefix had its cut moved back off the surrogate pair
+        }
+        return prefix.substring(0, cut);
+    }
+
+    /**
+     * Length of the part of {@code s} kept in front of a digest: up to its first control
+     * character, its first {@link #HASHED_KEY_MARKER}, or {@link #RETAINED_PREFIX_CHARS} characters,
+     * whichever comes first, never splitting a surrogate pair.
+     */
+    private static int retainedLength(String s) {
+        int limit = Math.min(s.length(), RETAINED_PREFIX_CHARS);
+        for (int i = 0; i < limit; i++) {
+            if (Character.isISOControl(s.charAt(i))) {
+                limit = i;
+                break;
+            }
+        }
+        int marker = s.indexOf(HASHED_KEY_MARKER);
+        if (marker >= 0 && marker < limit) {
+            limit = marker;
+        }
+        if (limit > 0 && limit < s.length()
+                && Character.isHighSurrogate(s.charAt(limit - 1)) && Character.isLowSurrogate(s.charAt(limit))) {
+            limit--;
+        }
+        return limit;
+    }
+
+    private static boolean hasControlCharacter(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isISOControl(s.charAt(i))) return true;
+        }
+        return false;
+    }
+
+    private static boolean exceedsKeyBytes(String s) {
+        if (s.length() * 3 <= MAX_KEY_BYTES) return false; // fast path: at most 3 UTF-8 bytes per char
+        int bytes = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) bytes += 1;
+            else if (c < 0x800) bytes += 2;
+            else if (Character.isHighSurrogate(c)) { bytes += 4; i++; }
+            else bytes += 3;
+            if (bytes > MAX_KEY_BYTES) return true;
+        }
+        return false;
+    }
+
+    private static String sha256Hex(String s) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            return java.util.HexFormat.of().formatHex(digest.digest(s.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new AssertionError("SHA-256 not available", e);
+        }
+    }
+
+    private static String[] storageTags(String[] tags) {
+        if (tags == null || tags.length == 0) return tags;
+        String[] out = null;
+        for (int i = 0; i < tags.length; i++) {
+            String stored = storageKey(tags[i]);
+            if (stored != tags[i]) {
+                if (out == null) out = tags.clone();
+                out[i] = stored;
+            }
+        }
+        return out == null ? tags : out;
+    }
+
     @SuppressWarnings("unchecked")
     public <T> T get(String key, Class<T> type) {
+        key = storageKey(key);
         if (serializes) {
             byte[] bytes = backend.getBytes(key);
             if (bytes == null) {
@@ -115,12 +232,14 @@ public class Cache {
 
     @SuppressWarnings("unchecked")
     public <T> T getOrSet(String key, String ttl, Supplier<T> supplier) {
+        String original = key;
+        key = storageKey(key);
         if (!serializes) {
             // M9: through the SPI, not a cast to the built-in backend. getOrSet is the cache call
             // the docs recommend most, and casting here meant any third-party non-serializing
             // backend hit a ClassCastException on it.
             var computed = backend.getOrCompute(
-                    key, parseTtl(ttl), () -> requireValue(key, supplier.get()));
+                    key, parseTtl(ttl), () -> requireValue(original, supplier.get()));
             if (computed.hit()) hits.increment(); else misses.increment();
             return (T) computed.value();
         }
@@ -135,17 +254,22 @@ public class Cache {
             }
         }
         misses.increment();
-        T value = requireValue(key, supplier.get());
+        T value = requireValue(original, supplier.get());
         backend.setBytes(key, serialize(value), parseTtl(ttl), NO_TAGS);
         return value;
     }
 
     public void delete(String key) {
-        backend.delete(key);
+        backend.delete(storageKey(key));
     }
 
+    /**
+     * Delete every entry whose key starts with {@code prefix}. A prefix longer than
+     * {@value #RETAINED_PREFIX_CHARS} characters, or containing a control character, also clears
+     * other keys that share its first part (see {@link #storagePrefix}).
+     */
     public void deletePrefix(String prefix) {
-        backend.deletePrefix(prefix);
+        backend.deletePrefix(storagePrefix(prefix));
     }
 
     public void clear() {
@@ -156,15 +280,15 @@ public class Cache {
     }
 
     public long incr(String key) {
-        return backend.incr(key, 1);
+        return backend.incr(storageKey(key), 1);
     }
 
     public long decr(String key) {
-        return backend.incr(key, -1);
+        return backend.incr(storageKey(key), -1);
     }
 
     public void clearTag(String tag) {
-        evictions.add(backend.clearTag(tag));
+        evictions.add(backend.clearTag(storageKey(tag)));
     }
 
     /** True when a shared (cross-server) backend is configured — invalidation and clear are fleet-wide. */
@@ -239,6 +363,8 @@ public class Cache {
 
     private void store(String key, Object value, Duration ttl, String[] tags) {
         requireValue(key, value);
+        key = storageKey(key);
+        tags = storageTags(tags);
         if (serializes) {
             backend.setBytes(key, serialize(value), ttl, tags);
         } else {
