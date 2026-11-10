@@ -131,6 +131,104 @@ class CliOpsTest {
         assertEquals(2, keyLines);
     }
 
+    // L1 follow-up (docs/2026-11-09-security-review-todos.md): the label is written after the key
+    // unvalidated, and the server's keys-file grammar refuses some labels outright (startup fails)
+    // and truncates others (a comment). Every label the CLI accepts must load to the scope asked for.
+
+    static final java.util.List<String> ACCEPTED_LABELS = java.util.List.of(
+        "ci", "ci-agent", "alice@laptop", "tester@example.com@mbp", "scope-ci", "read-agent", "readonly-bot",
+        "my label", "foo #bar", "a#b", "x.y/z", "--x", "ünïcödé", "a #b", "tab\tsep", "Control-Plane");
+
+    @Test
+    void everyAcceptedLabelRoundTripsThroughTheKeysFileAtTheIntendedScope() throws Exception {
+        int n = 0;
+        for (String label : ACCEPTED_LABELS) {
+            for (boolean readOnly : new boolean[]{true, false}) {
+                assertRoundTrips(label, readOnly, projectDir.resolve("p" + n++));
+            }
+        }
+        // A bare scope word is a fine label on a read-only key: the scope token comes first.
+        for (String word : java.util.List.of("read", "ro", "readonly", "read-only", "control", "READ")) {
+            assertRoundTrips(word, true, projectDir.resolve("p" + n++));
+        }
+    }
+
+    private void assertRoundTrips(String label, boolean readOnly, Path dir) throws Exception {
+        Files.createDirectories(dir);
+        String[] args = readOnly ? new String[]{"--label", label, "--read-only"} : new String[]{"--label", label};
+        String what = "label '" + label + "' readOnly=" + readOnly;
+        assertEquals(0, CliOps.keypair(dir, args), what);
+        String pub = OpsKeys.readKeyFile(dir.resolve("ops-private.key").toString()).publicKey();
+        var loaded = OpsKeys.loadAuthorizedKeys(dir.resolve("ops-authorized-keys").toString());
+        assertEquals(readOnly ? OpsScope.READ : OpsScope.CONTROL, loaded.get(pub), what);
+        // The whole label survives on the line (no comment cut it short)...
+        String line = Files.readAllLines(dir.resolve("ops-authorized-keys")).stream()
+            .filter(l -> l.startsWith(pub)).findFirst().orElseThrow();
+        String written = OpsKeys.stripComment(line).strip();
+        assertEquals(line.strip(), written, what + ": the label must not start a comment");
+        // ...and a rotation with the same label replaces the entry instead of orphaning it.
+        Files.delete(dir.resolve("ops-private.key"));
+        assertEquals(0, CliOps.keypair(dir, args), what);
+        String pub2 = OpsKeys.readKeyFile(dir.resolve("ops-private.key").toString()).publicKey();
+        var reloaded = OpsKeys.loadAuthorizedKeys(dir.resolve("ops-authorized-keys").toString());
+        assertEquals(java.util.Map.of(pub2, readOnly ? OpsScope.READ : OpsScope.CONTROL), reloaded, what);
+    }
+
+    @Test
+    void labelsTheKeysFileWouldRefuseAreRejectedBeforeAnyKeyIsGenerated() throws Exception {
+        record Case(String label, boolean readOnly, String mentions) {}
+        var cases = new java.util.ArrayList<Case>();
+        for (String word : java.util.List.of("read", "ro", "readonly", "read-only", "control", "READ", " read ")) {
+            cases.add(new Case(word, false, "--read-only"));
+        }
+        for (boolean ro : new boolean[]{true, false}) {
+            for (String l : java.util.List.of("a:b", "k=v", "scope:read", "scope:control", "role:read", "x=")) {
+                cases.add(new Case(l, ro, "':' or '='"));
+            }
+            for (String l : java.util.List.of("#team", " #x", "#")) cases.add(new Case(l, ro, "'#'"));
+            cases.add(new Case("bell\u0007", ro, "control character"));
+            cases.add(new Case("nul\u0000x", ro, "control character"));
+        }
+        int n = 0;
+        var originalErr = System.err;
+        for (var c : cases) {
+            Path dir = projectDir.resolve("r" + n++);
+            Files.createDirectories(dir);
+            var err = new java.io.ByteArrayOutputStream();
+            System.setErr(new java.io.PrintStream(err, true, java.nio.charset.StandardCharsets.UTF_8));
+            int code;
+            try {
+                code = CliOps.keypair(dir, c.readOnly()
+                    ? new String[]{"--label", c.label(), "--read-only"} : new String[]{"--label", c.label()});
+            } finally {
+                System.setErr(originalErr);
+            }
+            String what = "label '" + c.label() + "' readOnly=" + c.readOnly();
+            assertEquals(1, code, what);
+            assertFalse(Files.exists(dir.resolve("ops-private.key")), what + ": no key may be generated");
+            assertFalse(Files.exists(dir.resolve("ops-authorized-keys")), what + ": the keys file is untouched");
+            String message = err.toString(java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(message.contains(c.mentions()), what + ": the message names the rule: " + message);
+        }
+    }
+
+    @Test
+    void defaultLabelIsAlwaysAcceptedByTheKeysFile() {
+        // The default label comes from git user.email and the host name, which the user didn't
+        // type: characters the keys file reserves are replaced instead of refused.
+        assertEquals("a-b-c@host", CliOps.safeDefaultLabel("a=b:c@host"));
+        assertEquals("team@host", CliOps.safeDefaultLabel("#team@host"));
+        assertNull(CliOps.labelProblem(CliOps.safeDefaultLabel("#=:#"), false));
+    }
+
+    @Test
+    void aLabelOfOnlyUnicodeSpaceFallsBackToTheDefault() throws Exception {
+        // An empty label would match (and replace) another developer's unlabeled entry.
+        assertEquals(0, CliOps.keypair(projectDir, new String[]{"--label", "  "}));
+        String content = Files.readString(projectDir.resolve("ops-authorized-keys"));
+        assertTrue(content.contains(CliOps.defaultLabel(projectDir)), content);
+    }
+
     @Test
     void dashboardFailsWithoutKey() throws Exception {
         Files.writeString(projectDir.resolve(".brace"), "ops.local.url=http://localhost:8080\n");

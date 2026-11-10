@@ -21,8 +21,15 @@ public class CliOps {
             if ("--label".equals(args[i]) && i + 1 < args.length) { label = args[i + 1]; }
             else if ("--read-only".equals(args[i])) { readOnly = true; }
         }
-        if (label == null || label.isBlank()) label = defaultLabel(projectDir);
-        label = sanitizeLabel(label);
+        label = label == null ? "" : sanitizeLabel(label);
+        if (label.isEmpty()) label = defaultLabel(projectDir);
+        // Refuse, before any key exists, a label the server's keys-file grammar would reject at
+        // startup or cut short as a comment (L1 follow-up).
+        String problem = labelProblem(label, readOnly);
+        if (problem != null) {
+            CliOutput.printError(problem);
+            return 1;
+        }
         var kp = OpsKeys.generateKeypair();
 
         // Write the private key first. Format must match OpsKeys.readKeyFile: private key on the
@@ -59,7 +66,7 @@ public class CliOps {
         Path file = projectDir.resolve("ops-authorized-keys");
         // A read-only key carries a `scope:read` marker; the server caps any token it mints at
         // READ, so it can pull status/errors/logs but never hit a control endpoint. Hand this to
-        // an autonomous agent. Without the flag the entry is unscoped (server default: CONTROL).
+        // an autonomous agent. Without the flag the entry has no scope token (server: CONTROL).
         String entry = readOnly
             ? kp.publicKey() + "  scope:read  " + label
             : kp.publicKey() + "  " + label;
@@ -107,7 +114,7 @@ public class CliOps {
         if (identity == null || identity.isBlank()) identity = System.getProperty("user.name");
         if (identity == null || identity.isBlank()) identity = "user";
         String host = hostname();
-        return sanitizeLabel(host == null || host.isBlank() ? identity : identity + "@" + host);
+        return safeDefaultLabel(sanitizeLabel(host == null || host.isBlank() ? identity : identity + "@" + host));
     }
 
     /** Project-local git user.email, or null if git is unavailable, not a repo, or unset. */
@@ -138,9 +145,70 @@ public class CliOps {
         return dot > 0 ? h.substring(0, dot) : h;
     }
 
-    /** Collapse whitespace so the label stays a single trailing token on its line. */
+    /**
+     * Why the server's authorized-keys grammar ({@link OpsKeys#loadAuthorizedKeys(String)}) would
+     * refuse or cut short the line {@code KEY [scope:read] LABEL}, or null when it loads as
+     * written. {@code label} is already sanitized (one token, no whitespace). L1 follow-up.
+     */
+    static String labelProblem(String label, boolean readOnly) {
+        String rule = " The ops-authorized-keys format is KEY [scope:read|scope:control] [label] [# comment].";
+        for (int i = 0; i < label.length(); i++) {
+            if (Character.isISOControl(label.charAt(i))) {
+                return "The label may not contain a control character." + rule;
+            }
+        }
+        if (label.indexOf(':') >= 0 || label.indexOf('=') >= 0) {
+            return "The label may not contain ':' or '=': after the key, a token with either must be"
+                + " exactly scope:read or scope:control, and the server refuses to start otherwise."
+                + " Use --read-only for a read-only key." + rule;
+        }
+        if (label.startsWith("#")) {
+            return "The label may not start with '#': after whitespace, '#' starts a comment, so the"
+                + " label would be dropped." + rule;
+        }
+        if (!readOnly && BARE_SCOPE_WORDS.contains(label.toLowerCase(java.util.Locale.ROOT))) {
+            return "The label '" + label + "' alone after the key reads as a mistyped scope, and the"
+                + " server refuses to start. For a read-only key pass --read-only (it writes"
+                + " scope:read); otherwise choose another label." + rule;
+        }
+        return null;
+    }
+
+    /** {@code OpsKeys}' words that, as the only token after a key, fail startup. */
+    private static final java.util.Set<String> BARE_SCOPE_WORDS =
+        java.util.Set.of("read", "ro", "readonly", "read-only", "control");
+
+    /**
+     * The default label, made acceptable to the keys file: it comes from git {@code user.email}
+     * and the host name, which the user didn't type, so {@code :} and {@code =} become {@code -}
+     * and leading {@code #} are dropped rather than refused.
+     */
+    static String safeDefaultLabel(String s) {
+        String safe = s.replace(':', '-').replace('=', '-');
+        int start = 0;
+        while (start < safe.length() && safe.charAt(start) == '#') start++;
+        safe = safe.substring(start);
+        return safe.isEmpty() ? "user" : safe;
+    }
+
+    /**
+     * Collapse whitespace so the label stays a single trailing token on its line. Any Unicode
+     * whitespace or space separator counts: the server treats a {@code #} after one as a comment.
+     */
     private static String sanitizeLabel(String s) {
-        return s.strip().replaceAll("\\s+", "-");
+        var out = new StringBuilder(s.length());
+        boolean pendingSpace = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isWhitespace(c) || Character.isSpaceChar(c)) {
+                pendingSpace = out.length() > 0;
+            } else {
+                if (pendingSpace) out.append('-');
+                pendingSpace = false;
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     /**

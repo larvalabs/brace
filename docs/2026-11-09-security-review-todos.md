@@ -474,6 +474,14 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     except a lone scope word after the key; `#` after whitespace is a comment; a leading BOM is
     stripped. A token with no scope claim is READ. Tests for unknown/missing token scope and an
     unknown requested scope on `/ops/auth`.
+  - **Follow-up** (`fix(security): L1 brace ops keypair rejects labels the keys file would
+    refuse`). `brace ops keypair --label` wrote the label unvalidated, so `--label read` (no
+    `--read-only`), `a:b`, `k=v` or a label starting with `#` produced a line that stopped the
+    server or lost the label to a comment. `CliOps.labelProblem` refuses those (and control
+    characters) with a message naming the rule, before any key is generated; Unicode spaces are
+    collapsed like ASCII ones (a `#` after one starts a comment); the default label replaces
+    `:`/`=` and drops a leading `#`. `CliOpsTest` round-trips a table of labels through
+    `OpsKeys.loadAuthorizedKeys` at both scopes, including a same-label rotation.
 
 - [x] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
   - With the mode unset, startup succeeds unpinned and `originIsThisServer` falls back to

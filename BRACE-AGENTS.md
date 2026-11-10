@@ -1427,7 +1427,7 @@ all-lowercase-letters) log a warning but are allowed. Use 32+ random characters.
 Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`, plus
 `app.opsOrigins("https://your-app")` (or `BRACE_OPS_ORIGINS`), the public origin CLI logins are
 signed for, which every mode except `dev` (and tests) requires when ops is on; scaffold config with
-`brace init`, keys with `brace ops keypair`. In `ops-authorized-keys` (`KEY [scope:read|scope:control] [label...] [# comment]`) any token with `:` or `=` must be exactly `scope:read` or `scope:control`, at most once, or startup fails (`scope: read`, `--scope=read`, `role:read`); other words are labels, except a lone `read`/`ro`/`control` after the key, which fails; a duplicate key keeps the lower scope; no scope token means control. **Operating in production?** Start with
+`brace init`, keys with `brace ops keypair`. In `ops-authorized-keys` (`KEY [scope:read|scope:control] [label...] [# comment]`) any token with `:` or `=` must be exactly `scope:read` or `scope:control`, at most once, or startup fails (`scope: read`, `--scope=read`, `role:read`); other words are labels, except a lone `read`/`ro`/`control` after the key, which fails; a duplicate key keeps the lower scope; no scope token means control. `brace ops keypair --label` refuses a label the file would reject or cut short (`:`, `=`, a leading `#`, a lone scope word without `--read-only`). **Operating in production?** Start with
 `brace check --env prod --json` — not `brace status`. The full ops reference — auth keys and
 scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, storage/retention —
 is **`BRACE-OPS.md`** in the project root (written by `brace new`, refreshed together with this
