@@ -64,12 +64,11 @@ public class CliOps {
         // than leaving an orphaned, still-trusted line. Different developers get different labels
         // (identity@host), so they never clobber each other's entry.
         Path file = projectDir.resolve("ops-authorized-keys");
-        // A read-only key carries a `scope:read` marker; the server caps any token it mints at
-        // READ, so it can pull status/errors/logs but never hit a control endpoint. Hand this to
-        // an autonomous agent. Without the flag the entry has no scope token (server: CONTROL).
-        String entry = readOnly
-            ? kp.publicKey() + "  scope:read  " + label
-            : kp.publicKey() + "  " + label;
+        // Every entry states its scope (L1 final review: the server refuses a key line without a
+        // scope token, so that no line means CONTROL by omission). A read-only key is
+        // `scope:read`: the server caps any token it mints at READ, so it can pull
+        // status/errors/logs but never hit a control endpoint. Hand that to an autonomous agent.
+        String entry = kp.publicKey() + "  " + (readOnly ? "scope:read" : "scope:control") + "  " + label;
         boolean replaced = false;
         try {
             if (Files.exists(file)) {
@@ -85,7 +84,7 @@ public class CliOps {
                 SecretFiles.writeProjectFile(file, String.join("\n", lines) + "\n");
             } else {
                 SecretFiles.writeProjectFile(file,
-                    "# Ops authorized public keys — one per line, optional label\n" + entry + "\n");
+                    "# Ops authorized public keys, one per line: KEY scope:read|scope:control label\n" + entry + "\n");
             }
         } catch (Exception e) {
             CliOutput.printError("Failed to write ops-authorized-keys: " + e.getMessage());
@@ -147,15 +146,21 @@ public class CliOps {
 
     /**
      * Why the server's authorized-keys grammar ({@link OpsKeys#loadAuthorizedKeys(String)}) would
-     * refuse or cut short the line {@code KEY [scope:read] LABEL}, or null when it loads as
-     * written. {@code label} is already sanitized (one token, no whitespace). L1 follow-up.
+     * refuse or cut short the line {@code KEY scope:read|scope:control LABEL}, or null when it
+     * loads as written. {@code label} is already sanitized (one token, no whitespace). L1
+     * follow-up; since the final review the scope token is always written, so a label that is a
+     * scope word ({@code read}, {@code control}) is only a label and is accepted.
      */
     static String labelProblem(String label, boolean readOnly) {
-        String rule = " The ops-authorized-keys format is KEY [scope:read|scope:control] [label] [# comment].";
+        String rule = " The ops-authorized-keys format is KEY scope:read|scope:control [label] [# comment].";
         for (int i = 0; i < label.length(); i++) {
             if (Character.isISOControl(label.charAt(i))) {
                 return "The label may not contain a control character." + rule;
             }
+        }
+        String confusing = OpsKeys.confusingCharacter(label);
+        if (confusing != null) {
+            return "The label has a character the server refuses in a keys file: " + confusing + "." + rule;
         }
         if (label.indexOf(':') >= 0 || label.indexOf('=') >= 0) {
             return "The label may not contain ':' or '=': after the key, a token with either must be"
@@ -166,17 +171,8 @@ public class CliOps {
             return "The label may not start with '#': after whitespace, '#' starts a comment, so the"
                 + " label would be dropped." + rule;
         }
-        if (!readOnly && BARE_SCOPE_WORDS.contains(label.toLowerCase(java.util.Locale.ROOT))) {
-            return "The label '" + label + "' alone after the key reads as a mistyped scope, and the"
-                + " server refuses to start. For a read-only key pass --read-only (it writes"
-                + " scope:read); otherwise choose another label." + rule;
-        }
         return null;
     }
-
-    /** {@code OpsKeys}' words that, as the only token after a key, fail startup. */
-    private static final java.util.Set<String> BARE_SCOPE_WORDS =
-        java.util.Set.of("read", "ro", "readonly", "read-only", "control");
 
     /**
      * The default label, made acceptable to the keys file: it comes from git {@code user.email}

@@ -57,7 +57,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | **2026-11 review:** `RateLimiter.perKey` limits a request with a missing key (per client IP); distinct keys are capped; `perIp` groups IPv6 by /64 | security, **breaking** for limiters whose key can be absent | apply a login limiter to the `POST` only, or add `.exemptMissingKey()` | [§](#breaking-rate-limiter-keys) |
 | **2026-11 review:** `req.form()` ignores the query string on `POST`/`PUT`/`PATCH`/`DELETE` | security, **breaking** | send form fields in the body | [§](#breaking-reqform-ignores-the-query-string-on-mutating-methods) |
 | **2026-11 review:** `smtp://` requires STARTTLS (`smtp+plain://` opts out); `to`/`cc`/`from`/`replyTo` take one address each; `replyTo` is now applied | security, **breaking** for plain relays and comma-separated recipients | use `smtp+plain://` for a relay without TLS; send one message per recipient | [§](#breaking-smtp-requires-starttls-mail-addresses-are-single) |
-| **2026-11 review:** `opsOrigins` required whenever ops is on outside dev mode; `ops-authorized-keys` format is strict | security, **breaking** for deployments with no `brace.mode` and for keys files with scope typos | set `BRACE_OPS_ORIGINS`; write scopes exactly `scope:read` or `scope:control` | [§](#breaking-ops-origins-required-outside-dev-authorized-keys-format) |
+| **2026-11 review:** `opsOrigins` required whenever ops is on outside dev mode; every `ops-authorized-keys` line must state `scope:read` or `scope:control` | security, **breaking** for deployments with no `brace.mode` and for every keys file with a line that has no scope token (startup fails) | set `BRACE_OPS_ORIGINS`; add `scope:control` to each key line that has no scope | [§](#breaking-ops-origins-required-outside-dev-authorized-keys-format) |
 | **2026-11 review:** `Http.timeout(...)` bounds the whole buffered exchange, body included; `idleTimeout(...)` applies to `fetch*` | security, **breaking** for buffered calls that take over 30 s | add `.timeout(Duration...)` to slow downloads and slow APIs | [§](#breaking-http-timeouts-cover-the-response-body) |
 | **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; `req.ip()` is canonical (`::1`, `2001:db8::5`) and is `unknown`, not the proxy's address, when a trusted proxy's header names no client | security, **breaking** behind a proxy that sends only `Forwarded`, and for code comparing `req.ip()` with another spelling | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host`; compare against the canonical form | [§](#breaking-proxy-headers-and-reqip) |
 | **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are JavaScript-escaped again; `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"` | move the data to `data-*` attributes; pass CSS values, not CSS syntax | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
@@ -1521,26 +1521,47 @@ A generated project already reads `OPS_ORIGINS` in its compose file and pins `op
 dev. Test code that starts a real `Brace.app()` with ops should use `Brace.test()` or run with
 `-Dbrace.mode=dev`.
 
-**The `ops-authorized-keys` format is strict.** A mistyped scope silently meant full control
-(`KEY scope:read-only ci-agent` loaded as a control key). The format is now:
+**Every line of `ops-authorized-keys` must state its scope.** A mistyped scope silently meant
+full control (`KEY scope:read-only ci-agent` and `KEY read ci-agent` both loaded as control
+keys), because a line with no scope token meant control. Now a key line without `scope:read` or
+`scope:control` stops the server from starting:
 
 ```
-KEY [scope:read|scope:control] [label words...] [# comment]
+Invalid ops authorized keys file ops-authorized-keys, line 2: the line has no scope. Every key
+line must say scope:read (status, logs and errors only) or scope:control (everything). A line
+without one used to mean control: add scope:control to keep that, or scope:read if the key was
+meant to be read-only. ...
 ```
 
-- After the key, any token containing `:` or `=` must be exactly `scope:read` or
-  `scope:control` (the value is case-insensitive), at most once per line. Anything else fails
-  startup with the file and line number: `scope: read`, `Scope:read`, `--scope=read`,
-  `role:read`, `scpoe:read`, `scope:read-only`.
-- A lone `read`, `ro`, `readonly`, `read-only` or `control` as the only token after the key
-  fails startup, with a message saying to write `scope:read`.
-- Every other token is label text. `#` at the start of a line or after whitespace starts a
-  comment. A leading byte-order mark is ignored.
-- No scope token still means control, and is logged at boot along with each key's fingerprint
-  and scope. A key listed twice keeps the lower scope.
+**This affects every keys file written before 0.1.11**, including ones `brace ops keypair` and
+`brace new` wrote for full-control keys. The fix is one token per line:
 
-Check your file before deploying: a line that loaded as control by accident now stops the
-server from starting. Files written by `brace ops keypair` are unaffected. Also: an ops token
+```
+# before
+MCowBQYDK2VwAyEA...  alice@laptop
+MCowBQYDK2VwAyEA...  scope:read  oncall-agent
+
+# after: add scope:control to each line that has no scope (that is what it meant)
+MCowBQYDK2VwAyEA...  scope:control  alice@laptop
+MCowBQYDK2VwAyEA...  scope:read  oncall-agent
+```
+
+Edit the file, commit it and deploy it with the upgrade. While you are there, check that each
+`scope:control` line is a key you mean to have full control. The rest of the format:
+
+- After the key, any other token containing `:` or `=` fails startup with the file and line
+  number: `scope: read`, `Scope:read`, `--scope=read`, `role:read`, `scpoe:read`,
+  `scope:read-only`, a second scope token. The value is case-insensitive (`scope:READ`).
+- Every other token is label text, `read` and `control` included. `#` at the start of a line or
+  after whitespace starts a comment; a comment on a key line may not contain `scope:`.
+- The key must be the base64 Ed25519 key `brace ops keypair` prints. A truncated key or an
+  OpenSSH `ssh-ed25519 …` line fails startup instead of silently never matching.
+- A key line may not contain whitespace other than space and tab, a byte-order mark (one at the
+  very start of the file is ignored), or a look-alike of `:` or `=` such as a fullwidth colon.
+- A key listed twice keeps the lower scope. Each key's fingerprint and scope is logged at boot.
+
+`brace ops keypair` from 0.1.11 writes `scope:control` or (with `--read-only`) `scope:read` on
+every entry, and accepts `read`, `control` and similar words as plain labels. Also: an ops token
 whose payload has no scope claim, or an unrecognised one, is now `read`, not `control`.
 
 ## Breaking: `Http` timeouts cover the response body

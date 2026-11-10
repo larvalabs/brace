@@ -32,7 +32,7 @@ class RegressionIntegrationTest {
         readKey = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile,
-            controlKey.publicKey() + "  ops-laptop\n" +
+            controlKey.publicKey() + "  scope:control  ops-laptop\n" +
             readKey.publicKey() + "  scope:read  oncall-agent\n");
 
         var db = new DatabaseFactory(

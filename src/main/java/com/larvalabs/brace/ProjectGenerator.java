@@ -173,8 +173,8 @@ public class ProjectGenerator {
             // Generate ops keypair
             var opsKeypair = OpsKeys.generateKeypair();
             Files.writeString(root.resolve("ops-authorized-keys"),
-                "# Authorized public keys for ops dashboard access\n" +
-                opsKeypair.publicKey() + " dev\n");
+                "# Authorized public keys for ops access, one per line: KEY scope:read|scope:control label\n" +
+                opsKeypair.publicKey() + " scope:control dev\n");
             SecretFiles.writeStringWithOwnerOnlyPermissions(root.resolve("ops-private.key"),
                 "# Private key for ops dashboard access (do not commit)\n" +
                 opsKeypair.privateKey() + "\n" +

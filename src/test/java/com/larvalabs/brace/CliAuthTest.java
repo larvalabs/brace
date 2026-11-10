@@ -25,7 +25,7 @@ class CliAuthTest {
     static void start() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         // readKeyFile expects: line 0 = private key, line 1 = public key
         Files.writeString(tmp.resolve("ops-private.key"), keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
@@ -178,7 +178,7 @@ class CliAuthTest {
         // Run a second app whose authorized-keys file does NOT include this client's key.
         var serverKey = OpsKeys.generateKeypair();
         Path serverKeysFile = tmp.resolve("server-only-keys");
-        Files.writeString(serverKeysFile, serverKey.publicKey() + " server-only\n");
+        Files.writeString(serverKeysFile, serverKey.publicKey() + " scope:control server-only\n");
 
         var unauthorizedApp = Brace.app().opsUnpinnedForTests().port(0).ops(serverKeysFile.toString());
         unauthorizedApp.start();

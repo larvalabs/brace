@@ -34,7 +34,7 @@ class OpsRoutesAndCachingTest {
     static void start() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keys = tmp.resolve("authorized-keys");
-        Files.writeString(keys, keypair.publicKey() + " test\n");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
         Path assets = Files.createDirectories(tmp.resolve("assets"));
         Files.writeString(assets.resolve("app.css"), "body{}");
 

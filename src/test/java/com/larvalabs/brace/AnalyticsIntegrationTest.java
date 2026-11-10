@@ -33,7 +33,7 @@ class AnalyticsIntegrationTest {
     static void startApp() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test-key\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test-key\n");
         dbFactory = new DatabaseFactory("jdbc:h2:mem:analyticsit;DB_CLOSE_DELAY=-1", null, null, List.of(Post.class));
 
         app = Brace.app().opsUnpinnedForTests().port(0).banner(false).database(dbFactory).ops(keysFile.toString())

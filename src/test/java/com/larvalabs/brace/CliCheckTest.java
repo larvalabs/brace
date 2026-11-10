@@ -328,7 +328,7 @@ class CliCheckTest {
     static void startApp() throws Exception {
         integrationKeypair = OpsKeys.generateKeypair();
         Path keysFile = integrationProjectDir.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, integrationKeypair.publicKey() + " test\n");
+        Files.writeString(keysFile, integrationKeypair.publicKey() + " scope:control test\n");
         Files.writeString(integrationProjectDir.resolve("ops-private.key"),
             integrationKeypair.privateKey() + "\n" + integrationKeypair.publicKey() + "\n");
 

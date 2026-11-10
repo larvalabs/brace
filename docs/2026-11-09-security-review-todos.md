@@ -482,6 +482,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     collapsed like ASCII ones (a `#` after one starts a comment); the default label replaces
     `:`/`=` and drops a leading `#`. `CliOpsTest` round-trips a table of labels through
     `OpsKeys.loadAuthorizedKeys` at both scopes, including a same-label rotation.
+    - **Final review fixes.** L-A: scope words written as labels still loaded as CONTROL
+      (`KEY read ci-agent`, `KEY ci-agent read-only`, `KEY (read)`, `KEY scope：read`,
+      `KEY label #1 scope:read`), because the rule refused a bare scope word only when it was
+      the sole token. The scope token is now mandatory: a key line without `scope:read` or
+      `scope:control` fails startup with the line number and what to add (`scope:control` keeps
+      the old meaning). Breaking for every existing file with an unscoped line. Also refused: a
+      scope inside a key line's comment, non-ASCII whitespace, a mid-file BOM, invisible
+      format characters, look-alikes of `:` and `=`, and a key token that is not a 44-byte
+      Ed25519 public key (OpenSSH lines get their own message). `brace ops keypair` and the
+      scaffold always write the token; a scope word is accepted as a label at either scope.
+      Tests in `OpsKeysFinalReviewTest`, `CliOpsTest`; every fixture now writes `scope:control`.
 
 - [x] **L2: Ops origin pinning is required only when `brace.mode` is exactly `prod`**, `Brace.java:1243-1246`, `OpsHandler.java:1021-1031`
   - With the mode unset, startup succeeds unpinned and `originIsThisServer` falls back to

@@ -29,7 +29,7 @@ class StrictSecurityHeadersTest {
     static void startApp() throws Exception {
         key = OpsKeys.generateKeypair();
         Path keys = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keys, key.publicKey() + " test\n");
+        Files.writeString(keys, key.publicKey() + " scope:control test\n");
         Path assets = Files.createDirectories(tmp.resolve("public"));
         Files.writeString(assets.resolve("app.css"), "body{}");
 

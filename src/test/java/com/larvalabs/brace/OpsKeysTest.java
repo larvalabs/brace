@@ -50,16 +50,15 @@ class OpsKeysTest {
         Path file = tmpDir.resolve("authorized-keys");
         Files.writeString(file,
             "# This is a comment\n" +
-            kp1.publicKey() + " deploy-bot\n" +
+            kp1.publicKey() + " scope:control deploy-bot\n" +
             "\n" +
-            kp2.publicKey() + "\n" +
+            kp2.publicKey() + " scope:control\n" +
             "# Another comment\n");
 
         var keys = OpsKeys.loadAuthorizedKeys(file.toString());
         assertEquals(2, keys.size());
         assertTrue(keys.containsKey(kp1.publicKey()));
         assertTrue(keys.containsKey(kp2.publicKey()));
-        // Unscoped entries default to the CONTROL ceiling (backward compatible).
         assertEquals(OpsScope.CONTROL, keys.get(kp1.publicKey()));
         assertEquals(OpsScope.CONTROL, keys.get(kp2.publicKey()));
     }
@@ -73,13 +72,15 @@ class OpsKeysTest {
         Path file = tmpDir.resolve("scoped-keys");
         Files.writeString(file,
             readKp.publicKey() + "  scope:read  oncall-agent\n" +
-            controlKp.publicKey() + "  scope:control  ops-laptop\n" +
-            bareKp.publicKey() + "  some-label\n");
+            controlKp.publicKey() + "  scope:control  ops-laptop\n");
 
         var keys = OpsKeys.loadAuthorizedKeys(file.toString());
         assertEquals(OpsScope.READ, keys.get(readKp.publicKey()));
         assertEquals(OpsScope.CONTROL, keys.get(controlKp.publicKey()));
-        assertEquals(OpsScope.CONTROL, keys.get(bareKp.publicKey()), "no marker defaults to control");
+
+        // L1 final review: no marker used to default to control; it now fails startup.
+        Files.writeString(file, bareKp.publicKey() + "  some-label\n");
+        assertThrows(IllegalStateException.class, () -> OpsKeys.loadAuthorizedKeys(file.toString()));
     }
 
     @Test
@@ -120,15 +121,16 @@ class OpsKeysTest {
             new Case("scope:read control", OpsScope.READ),          // a label equal to a scope word
             new Case("scope:control ro", OpsScope.CONTROL),
             new Case("scope:read read", OpsScope.READ),
-            new Case("--label scope-ci", OpsScope.CONTROL),         // a label starting with "scope"
-            new Case("scope-ci", OpsScope.CONTROL),
+            new Case("scope:control --label scope-ci", OpsScope.CONTROL), // a label starting with "scope"
+            new Case("scope:control scope-ci", OpsScope.CONTROL),
             new Case("scope:read # read-only CI key", OpsScope.READ),
             new Case("scope:READ ci", OpsScope.READ),              // the value is case-insensitive
             new Case("ci-agent scope:control", OpsScope.CONTROL),   // any order
-            new Case("read-only agent", OpsScope.CONTROL),          // two label words, no scope token
+            new Case("scope:control read-only agent", OpsScope.CONTROL), // scope words are only labels
             new Case("ci#1 scope:read", OpsScope.READ),             // '#' not after whitespace is text
-            new Case("# all comment", OpsScope.CONTROL),
-            new Case("", OpsScope.CONTROL),
+            // L1 final review: a line with no scope token ("--label scope-ci", "read-only agent",
+            // "# all comment", nothing at all) used to load as CONTROL and now fails startup;
+            // see OpsKeysFinalReviewTest.
         };
         for (var c : cases) {
             var kp = OpsKeys.generateKeypair();
@@ -139,12 +141,14 @@ class OpsKeysTest {
     }
 
     @Test
-    void aCommentAfterTheKeyDoesNotMakeTheLineReadOnlyByAccident(@TempDir Path tmpDir) throws Exception {
-        // "scope:read" inside a comment is not a scope token.
+    void aScopeInsideACommentIsRefusedNotIgnored(@TempDir Path tmpDir) throws Exception {
+        // "scope:read" inside a comment is not a scope token. It used to be ignored, leaving the
+        // line CONTROL; since the final review a scope in a key line's comment fails startup.
         var kp = OpsKeys.generateKeypair();
         Path file = tmpDir.resolve("comment");
-        Files.writeString(file, kp.publicKey() + " deploy-bot # TODO scope:read\n");
-        assertEquals(OpsScope.CONTROL, OpsKeys.loadAuthorizedKeys(file.toString()).get(kp.publicKey()));
+        Files.writeString(file, kp.publicKey() + " scope:control deploy-bot # TODO scope:read\n");
+        var ex = assertThrows(IllegalStateException.class, () -> OpsKeys.loadAuthorizedKeys(file.toString()));
+        assertTrue(ex.getMessage().contains("comment"), ex.getMessage());
     }
 
     @Test
@@ -160,9 +164,9 @@ class OpsKeysTest {
     void duplicateKeyKeepsLowerScope(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path file = tmpDir.resolve("dup");
-        Files.writeString(file, kp.publicKey() + " scope:read a\n" + kp.publicKey() + " b\n");
+        Files.writeString(file, kp.publicKey() + " scope:read a\n" + kp.publicKey() + " scope:control b\n");
         assertEquals(OpsScope.READ, OpsKeys.loadAuthorizedKeys(file.toString()).get(kp.publicKey()));
-        Files.writeString(file, kp.publicKey() + " b\n" + kp.publicKey() + " scope:read a\n");
+        Files.writeString(file, kp.publicKey() + " scope:control b\n" + kp.publicKey() + " scope:read a\n");
         assertEquals(OpsScope.READ, OpsKeys.loadAuthorizedKeys(file.toString()).get(kp.publicKey()));
     }
 
@@ -182,7 +186,7 @@ class OpsKeysTest {
         // must still match the raw base64 the client presents, so the prefix is stripped on load.
         var kp = OpsKeys.generateKeypair();
         Path file = tmpDir.resolve("authorized-keys");
-        Files.writeString(file, "ed25519:" + kp.publicKey() + "  legacy-bot\n");
+        Files.writeString(file, "ed25519:" + kp.publicKey() + "  scope:control  legacy-bot\n");
 
         var keys = OpsKeys.loadAuthorizedKeys(file.toString());
         assertTrue(keys.containsKey(kp.publicKey()),

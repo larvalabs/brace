@@ -1928,30 +1928,54 @@ restarting or redeploying takes effect on its outstanding tokens immediately, al
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
 
-**Scope tokens in `ops-authorized-keys`.** The file is UTF-8 (a leading byte-order mark is
-ignored), one key per line:
+**The `ops-authorized-keys` format: every key line states its scope.** The file is UTF-8 (a
+byte-order mark at the very start is ignored), one key per line, in one of two forms:
 
 ```
-KEY [scope:read | scope:control] [label words ...] [# comment]
+KEY scope:read    [label words ...] [# comment]
+KEY scope:control [label words ...] [# comment]
 ```
+
+`scope:read` allows status, logs, errors and the other read endpoints; `scope:control` allows
+everything. Nothing is inferred: **a key line with no scope token fails startup.** (Until
+0.1.11 such a line meant control, so `KEY read ci-agent`, `KEY ci-agent read-only` and
+`KEY (read)` all quietly loaded as full-control keys.) The rules:
 
 - `#` at the start of a line, or after whitespace, starts a comment that runs to the end of the
   line. Blank and comment-only lines are ignored. (`ci#1` is label text: no whitespace before
   the `#`.)
-- The first token is the public key. The rest may come in any order.
-- Any token containing `:` or `=` must be exactly `scope:read` or `scope:control` (`scope:` in
-  lowercase, the value case-insensitive), and at most one appears per line. Anything else with
-  a `:` or `=` fails startup: `scope: read`, `Scope:read`, `scope=read`, `--scope=read`,
-  `role:read`, `scpoe:read`, `scope:read-only`, or a second scope token.
-- Every other token is label text, including `control`, `ro`, `read` and `scope-ci`, with one
-  exception: `read`, `ro`, `readonly`, `read-only` or `control` as the **only** token after the
-  key (`KEY read`, the classic mistake) fails startup with a message to write `scope:read`.
-- A line with no scope token is `control` (backward compatible) and is logged as such at boot.
+- The first token is the public key: the base64 Ed25519 key that `brace ops keypair` prints.
+  Anything that could never match a client's key fails startup with its own message: truncated
+  or padded base64, a key of another type, an OpenSSH `ssh-ed25519 AAAA…` line.
+- Exactly one of the remaining tokens is `scope:read` or `scope:control` (`scope:` in lowercase,
+  the value case-insensitive); the tokens may come in any order.
+- Any other token containing `:` or `=` fails startup: `scope: read`, `Scope:read`,
+  `scope=read`, `--scope=read`, `role:read`, `scpoe:read`, `scope:read-only`, or a second scope
+  token.
+- Every other token is label text, including `control`, `ro`, `read` and `scope-ci`: with the
+  scope stated, a label is only a label.
+- A comment on a key line may not contain `scope:` or `scope=` (`KEY label #1 scope:read` has
+  its scope inside the comment, where it would be ignored). Comment-only lines may say anything.
+- A key line may not contain whitespace other than space and tab (a no-break space joins two
+  tokens invisibly), a byte-order mark, an invisible control or format character, or a
+  look-alike of `:` or `=` such as the fullwidth colon (`scope：read`). The error names the
+  column and the code point.
 
-Failures name the file and line number, never the key: a silent fallback would hand an agent a
-full-privilege key. A key listed twice keeps the lower scope. Each key's fingerprint and scope
-is logged at boot (`ops.key`). A token whose payload has no scope claim, or one the server does
-not recognise, is treated as `read`, as is an unrecognised `scope` requested at `/ops/auth`.
+Failures name the file and line number, never the key. The message for a missing scope reads:
+
+```
+Invalid ops authorized keys file ops-authorized-keys, line 3: the line has no scope. Every key
+line must say scope:read (status, logs and errors only) or scope:control (everything). A line
+without one used to mean control: add scope:control to keep that, or scope:read if the key was
+meant to be read-only. Format, one of:  KEY scope:read [label words...] [# comment]  or
+KEY scope:control [label words...] [# comment]. ...
+```
+
+`brace ops keypair` always writes the token (`scope:control`, or `scope:read` with
+`--read-only`), as does the file `brace new` generates. A key listed twice keeps the lower
+scope. Each key's fingerprint and scope is logged at boot (`ops.key`). A token whose payload has
+no scope claim, or one the server does not recognise, is treated as `read`, as is an
+unrecognised `scope` requested at `/ops/auth`.
 
 ### Ops pages in the browser
 
