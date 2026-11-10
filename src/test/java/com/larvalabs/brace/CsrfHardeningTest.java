@@ -128,6 +128,8 @@ class CsrfHardeningTest {
             assertEquals(200, js.status());
             assertTrue(js.header("Content-Type").startsWith("text/javascript"), js.header("Content-Type"));
             assertTrue(js.body().contains("X-CSRF-Token") && js.body().contains("htmx:configRequest"), js.body());
+            // L8: the token is only attached when the htmx request target is same-origin.
+            assertTrue(js.body().contains("new URL(event.detail.path") && js.body().contains("location.origin"), js.body());
             // What the helper does: the meta tag's token as X-CSRF-Token on a non-GET htmx request.
             var res = app.request("POST", "/like").header("HX-Request", "true").header("X-CSRF-Token", m.group(1)).send();
             assertEquals(200, res.status());

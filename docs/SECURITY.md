@@ -300,7 +300,7 @@ at startup.
 ### htmx
 
 `${csrfMeta}` renders `<meta name="csrf-token" content="…">` with a masked token, and the bundled
-`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request.
+`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it.
 
 ### Exemptions
 

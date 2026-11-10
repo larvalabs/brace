@@ -439,7 +439,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     same file still lists `@template` inside an attribute as not covered; it now is.
   - **Model: Fable 5.2.** Same class and invariants as H1; one commit per item.
 
-- [ ] **L8: `csrf-htmx.js` attaches the token to every non-GET htmx request with no origin check**, `src/main/resources/brace/csrf-htmx.js:3-7`
+- [x] **L8: `csrf-htmx.js` attaches the token to every non-GET htmx request with no origin check**, `src/main/resources/brace/csrf-htmx.js:3-7`
   - Safe only while htmx's `selfRequestsOnly:true` default holds. An app that turns it off for
     a cross-origin `hx-post` sends the token to the third party.
   - **Fix.** Add the header only when
