@@ -522,7 +522,10 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     - **L-2, host lists** (`... an "@" beyond an evident host is not user info`).
       `mongodb://h1:27017,h2:27017/db?authSource=a@b` is kept. The tie (one dotless
       `name:digits` before an `@`) goes to redaction: `redis://cache:6379/0?client=a@b` is still
-      `redis://[REDACTED]@b`.
+      `redis://[REDACTED]@b`. A follow-up (`... a dotted user name with a numeric password is
+      still masked outside web schemes`) keeps `postgres://first.last:12345/678@db` masked: for
+      one evident host in a non-web scheme an `@` inside a path segment still ends the user
+      info, one in the query does not.
     - **L-3, schemes** (`... a URL of any scheme is found inside a run`). `backup_ldap://cn:pw@host`
       is masked; the list of known schemes is gone, and a secret-shaped "scheme" is replaced.
     - **L-1, the name rule** (`... the name rule keeps words, not two groups of random letters`).

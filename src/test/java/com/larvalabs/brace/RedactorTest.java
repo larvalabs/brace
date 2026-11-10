@@ -1396,6 +1396,33 @@ class RedactorTest {
     }
 
     @Test
+    void aDottedUserNameWithANumericPasswordIsStillMaskedOutsideWebSchemes() {
+        // The other side of L-2: "first.last:12345/678@db" reads as host.name:port/path. Before
+        // L-2 every non-web URL with ':' was masked to the last '@', so this one was; keeping an
+        // evident host's query must not start leaking it. For one evident host in a non-web
+        // scheme an '@' inside a path segment still ends the user info; one in the query, or one
+        // that starts a segment (/@handle), does not. Web schemes keep their path as before
+        // (http://localhost:3000/assets/logo@2x.png).
+        String[][] cases = {
+            {"Failed postgres://first.last:12345/678@db.internal/x", "Failed postgres://[REDACTED]@db.internal/x"},
+            {"Failed postgres://localhost:5432/678@db.internal/x?sslmode=require",
+                "Failed postgres://[REDACTED]@db.internal/x?sslmode=require"},
+            {"Failed redis://first.last:12345/6@cache/0?client=a@b", "Failed redis://[REDACTED]@cache/0?client=a@b"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1], Redactor.redactMessage(c[0]), c[0]);
+        }
+        for (String same : List.of(
+                "Failed postgres://db.internal:5432/app?email=a@b.c",
+                "Failed sftp://files.example.com:22/home/@shared/x",
+                "Failed mongodb://h1.internal:27017,h2.internal:27017/db/a@b",
+                "see http://localhost:3000/assets/logo@2x.png",
+                "see https://example.com:8443/users/@bob/posts and https://unpkg.example.com:443/react@18.2.0/x.js")) {
+            assertEquals(same, Redactor.redactMessage(same), same);
+        }
+    }
+
+    @Test
     void anySchemeIsFoundInsideARun() {
         // L-3: inside a run only a fixed list of schemes was looked for, so a URL of any other
         // scheme glued to a prefix kept its user info.

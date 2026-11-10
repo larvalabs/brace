@@ -2401,13 +2401,19 @@ once:
      (`postgres://user:pa/ss@host`, `redis://:pa?ss@host`): masked up to the
      last `@` of the URL, when the text before the first `/ ? #` holds a `:`
      and is not evidently a host. A list of two or more `host[:port]`
-     (`mongodb://h1:27017,h2:27017/db?authSource=a@b`), or one host with a
-     dot, `localhost` or an IPv6 literal
-     (`https://example.com:8443/users/@bob`), is evidently a host and keeps
-     its path and query. One dotless `name:digits` can be a host and port
-     (`db:5432`) or a user and a numeric password cut at its `/`
-     (`user:12345/678@host`): redaction wins the tie, so
-     `redis://cache:6379/0?client=a@b` is stored as `redis://[REDACTED]@b`.
+     (`mongodb://h1:27017,h2:27017/db?authSource=a@b`) is evidently hosts
+     and keeps its path and query. So does one host with a dot, `localhost`
+     or an IPv6 literal when the scheme is `http`, `https`, `ws` or `wss`
+     (`https://example.com:8443/users/@bob`,
+     `http://localhost:3000/assets/logo@2x.png`) or when the `@` is in the
+     query (`postgres://db.internal:5432/app?email=a@b.c`); in any other
+     scheme an `@` inside a path segment still ends the user info, because
+     `postgres://first.last:12345/678@db` (a dotted user name, a numeric
+     password with a `/`) looks exactly like a host, a port and a path. One
+     dotless `name:digits` can be a host and port (`db:5432`) or a user and
+     a numeric password cut at its `/` (`user:12345/678@host`): redaction
+     wins the tie in every scheme, so `redis://cache:6379/0?client=a@b` is
+     stored as `redis://[REDACTED]@b`.
    - A password with `^ { } | \` a backtick, `'`, `<` or `>`
      (`jdbc:postgresql://app:p^ssw0rd@db/x`): the URL does not end there when
      the authority so far holds `:`, no `@` and no `/ ? #`, is not evidently
@@ -2560,7 +2566,7 @@ rule.
 | Names made of words | `V3__create_users_table.sql` (any Flyway file name, Brace's own included), `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`, `Http2ConnectionHandlerImpl`, `2024-black-friday-sale` |
 | File paths | `/srv/app/uploads/2024/11/report-final.pdf`, `/var/app/releases/20241105`, `exports/2024/11/05/customer-orders-2024-11-05.csv`; in a path that starts with `/`, `./`, `../` or `~/` or ends in a file extension only a secret-shaped piece is replaced (`/tmp/brace-uploads/[redacted].tmp`) |
 | Stack frame lines | `at pkg.Class.method(File.java:12)` and `... N more` at any indent, the frames of `Suppressed:` exceptions included |
-| Host lists and hosts with a dot | `mongodb://h1:27017,h2:27017/db?authSource=a@b`, `https://example.com:8443/users/@bob`: an `@` in the path or query is not user info |
+| Host lists and hosts with a dot | `mongodb://h1:27017,h2:27017/db?authSource=a@b`, `postgres://db.internal:5432/app?email=a@b.c`, `https://example.com:8443/users/@bob`: an `@` beyond them is not user info (outside the web schemes, one inside a path segment still is) |
 | Email addresses | PII, not a credential; `@` is outside the run alphabet and each label is short |
 | Comma- or `#`-separated lists (`#ff0000,#00ff00`) | Each item is short |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
@@ -2584,6 +2590,10 @@ redact:
   or query: `http://api:8080/users/@bob` and
   `redis://cache:6379/0?client=a@b` are stored as `http://[REDACTED]@bob` and
   `redis://[REDACTED]@b`, because `user:12345/678@host` has the same shape.
+  Outside the web schemes the same holds for a host with a dot and a port
+  when the `@` is inside a path segment:
+  `s3://bucket.example.com:443/exports/a@b.csv` is stored as
+  `s3://[REDACTED]@b.csv`.
 - A relative path with no file extension and a secret-shaped piece
   (`exports/<token>/data`) is replaced whole, and so is a path where a secret
   piece sits next to a directory that is not cased like words (`/opt/iOS/…`).
@@ -2638,9 +2648,13 @@ messages and URLs where you can:
   `wmb5q8pnsd23k9i.ok5g34xcrge1ztx`), whatever it is.
 - **A request path is judged segment by segment** (`redactPath`), so a base64
   value with `/` inside a URL path is several short segments.
-- **User info that looks like a host.** `user.name:12345/x@host` (a dot in
-  the user name, a numeric password, then `/`) reads as a host, a port and a
-  path, and is kept.
+- **User info that looks like a host.** A dot in the user name and a numeric
+  password cut by an unencoded `/`, `?` or `#` read as a host, a port and a
+  path or query. `https://first.last:12345/x@host` is kept (in a web scheme
+  the path wins, for `logo@2x.png`), and so is
+  `postgres://first.last:12345?x@host` in any scheme (the query wins).
+  Percent-encode such a password, as the URL syntax requires, and it is
+  masked.
 - **A line shaped exactly like a stack frame** inside a multi-line exception
   message is taken for one and kept.
 

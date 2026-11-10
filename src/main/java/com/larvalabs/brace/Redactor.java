@@ -692,7 +692,7 @@ public class Redactor {
         }
         if (!colon) return -1;
         int kind = hostKind(s, authStart, stop);
-        if (kind == HOST || (t == ' ' && kind != USERINFO)) return -1;
+        if (kind == HOST || kind == HOST_LIST || (t == ' ' && kind != USERINFO)) return -1;
         int limit = Math.min(s.length(), stop + 1 + USERINFO_LOOKAHEAD);
         for (int i = stop + 1; i < limit; i++) {
             char c = s.charAt(i);
@@ -702,8 +702,10 @@ public class Redactor {
         return -1;
     }
 
-    /** {@link #hostKind}: evidently a host or a host list; an {@code @} further on is not user info. */
+    /** {@link #hostKind}: one evident host (a dot, {@code localhost}, an IPv6 literal), with or without a port. */
     private static final int HOST = 0;
+    /** {@link #hostKind}: a list of two or more hosts; an {@code @} further on is never user info. */
+    private static final int HOST_LIST = 3;
     /** {@link #hostKind}: one dotless {@code name:digits}; a host and port, or a user and a numeric password. */
     private static final int AMBIGUOUS = 1;
     /** {@link #hostKind}: not {@code host[:port]} at all ({@code user:pa}, {@code :pw}): the start of user info. */
@@ -714,11 +716,11 @@ public class Redactor {
      * {@code ;}, where connection parameters start) looks like, given that it holds {@code :} and
      * no {@code @}. It is a comma-separated list of {@code host[:port]} (host: letters, digits,
      * {@code . -}, starting with a letter or holding a dot, or a bracketed IPv6 literal; port: 1
-     * to 5 digits) or it is {@link #USERINFO}. Such a list is {@link #HOST} when it has two or
-     * more members ({@code h1:27017,h2:27017}) or its host holds a dot, is {@code localhost} or
-     * is an IPv6 literal; a single dotless {@code name:digits} ({@code db:5432},
-     * {@code user:12345}) is {@link #AMBIGUOUS}, and treated as user info when an {@code @}
-     * follows: redaction wins the tie.
+     * to 5 digits) or it is {@link #USERINFO}. Such a list is a {@link #HOST_LIST} when it has
+     * two or more members ({@code h1:27017,h2:27017}) and a {@link #HOST} when its one host holds
+     * a dot, is {@code localhost} or is an IPv6 literal; a single dotless {@code name:digits}
+     * ({@code db:5432}, {@code user:12345}) is {@link #AMBIGUOUS}, and treated as user info when
+     * an {@code @} follows: redaction wins the tie.
      */
     private static int hostKind(String s, int from, int to) {
         to = indexOfAny(s, from, to, ";");
@@ -753,7 +755,7 @@ public class Redactor {
             if (s.charAt(i) != ',') return USERINFO;
             i++;
         }
-        return members > 1 || evident ? HOST : AMBIGUOUS;
+        return members > 1 ? HOST_LIST : evident ? HOST : AMBIGUOUS;
     }
 
     /**
@@ -1614,7 +1616,7 @@ public class Redactor {
                 part = i + 1;
             }
             out.append("://");
-            int at = userInfoEnd(url, authStart, authEnd);
+            int at = userInfoEnd(url, sep, authStart, authEnd);
             int hostStart = authStart;
             if (at >= authStart) {
                 out.append(PLACEHOLDER);
@@ -1661,12 +1663,17 @@ public class Redactor {
      *       ({@code user:pa}, {@code :pw}): yes. {@link #AMBIGUOUS} ({@code user:12345}, which
      *       is also what {@code db:5432} looks like): yes, unless parameters follow the port
      *       ({@code db:1433;user=sa;password=p@ss}: the parameter pass redacts that value).
-     *       {@link #HOST}: no, in any scheme: {@code https://example.com:8443/users/@bob} and
-     *       {@code mongodb://h1:27017,h2:27017/db?authSource=a@b} keep their hosts, path and
-     *       query.</li>
+     *       {@link #HOST_LIST}: no ({@code mongodb://h1:27017,h2:27017/db?authSource=a@b}).
+     *       {@link #HOST}: no for a web scheme ({@code https://example.com:8443/users/@bob},
+     *       {@code http://localhost:3000/logo@2x.png}) and no for an {@code @} in the query
+     *       ({@code postgres://db.internal:5432/app?email=a@b.c}); but in any other scheme an
+     *       {@code @} inside a path segment still ends the user info, because
+     *       {@code first.last:12345/678@db} (a dotted user name, a numeric password with a
+     *       {@code /}) has exactly this shape. An {@code @} that starts a segment
+     *       ({@code /@handle}) does not.</li>
      * </ol>
      */
-    private static int userInfoEnd(String url, int authStart, int authEnd) {
+    private static int userInfoEnd(String url, int sep, int authStart, int authEnd) {
         int semi = indexOfAny(url, authStart, authEnd, ";");
         if (semi < authEnd) {
             // Parameters are name=value: a ';' with no '=' before the next '@' is part of the
@@ -1681,7 +1688,17 @@ public class Redactor {
         if (at >= 0) return at;
         if (indexOfAny(url, authStart, semi, ":") == semi) return -1;
         int kind = hostKind(url, authStart, semi);
-        if (kind == HOST || (kind == AMBIGUOUS && semi < authEnd)) return -1;
+        if (kind == HOST_LIST || (kind != USERINFO && semi < authEnd)) return -1;
+        if (kind == HOST) {
+            String scheme = url.substring(0, sep).toLowerCase(Locale.ROOT);
+            if (scheme.equals("http") || scheme.equals("https") || scheme.equals("ws") || scheme.equals("wss")) return -1;
+            int pathEnd = indexOfAny(url, authEnd, url.length(), "?#");
+            int pathAt = -1;
+            for (int i = authEnd; i < pathEnd; i++) {
+                if (url.charAt(i) == '@') pathAt = i;
+            }
+            return pathAt > authEnd && url.charAt(pathAt - 1) != '/' ? pathAt : -1;
+        }
         int lastAt = url.lastIndexOf('@');
         return lastAt > semi ? lastAt : -1;
     }
