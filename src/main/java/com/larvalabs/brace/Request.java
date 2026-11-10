@@ -471,13 +471,13 @@ public class Request {
      * sent it, else {@code Host}. Null if neither is present.
      */
     String host() {
-        String h = ProxyHeaders.effectiveHost(this::header, remoteAddr, trustedProxies);
+        String h = ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies);
         return h == null ? null : stripPort(h.strip());
     }
 
     /** The host the client addressed, with its port if it gave one. */
     String hostWithPort() {
-        String h = ProxyHeaders.effectiveHost(this::header, remoteAddr, trustedProxies);
+        String h = ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies);
         return h == null ? null : h.strip().toLowerCase(java.util.Locale.ROOT);
     }
 
@@ -496,28 +496,68 @@ public class Request {
     private String forwardingChain;
     private boolean forwardingChainCaptured;
 
+    /** Set once the "trusted proxy sends only the other forwarding header" warning is logged (L3 review F3). */
+    private static final java.util.concurrent.atomic.AtomicBoolean warnedForwardingHeader =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    static boolean warnedForwardingHeader() { return warnedForwardingHeader.get(); }
+
+    static void resetForwardingHeaderWarning() { warnedForwardingHeader.set(false); }
+
     void setForwardingChain(String joinedValues) {
         this.forwardingChain = joinedValues;
         this.forwardingChainCaptured = true;
     }
 
+    /**
+     * The client's address: an IP literal, or {@code "unknown"} (L3 review F8: never anything
+     * else). The socket peer, unless it is a trusted proxy, in which case the rightmost untrusted
+     * entry of the one forwarding header {@link TrustedProxies} names. An entry that is not an
+     * address ({@code unknown}, {@code _hidden}, anything a non-appending proxy let a client put
+     * there) yields the socket address rather than being returned.
+     */
     public String ip() {
         // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
             // L3: exactly one forwarding header is read, the one TrustedProxies names
             // (X-Forwarded-For unless useForwardedHeader()); the other is ignored, so a client
             // cannot supply its own address in the header the proxy doesn't overwrite.
-            var chain = forwardingChainCaptured ? forwardingChain : header(trustedProxies.clientIpHeader());
-            if (chain != null && !chain.isEmpty()) {
+            var chain = forwardingChainCaptured ? forwardingChain : headers.get(trustedProxies.clientIpHeader());
+            if (chain != null && !chain.isBlank()) {
                 var result = trustedProxies.usesForwardedHeader()
                     ? extractForwardedFor(chain)
                     : rightmostUntrusted(chain.split(","));
-                if (result != null) return result;
+                if (result != null && TrustedProxies.parseLiteral(result) != null) return result;
+            } else {
+                warnIfOnlyTheOtherForwardingHeader();
             }
         }
 
         // Default: use socket remote address
-        return remoteAddr != null ? remoteAddr : "unknown";
+        return remoteAddr != null && TrustedProxies.parseLiteral(remoteAddr) != null ? remoteAddr : "unknown";
+    }
+
+    /**
+     * L3 review F3: a trusted proxy sent the forwarding header Brace was not told to read, and not
+     * the one it was. Typically a proxy that writes only RFC 7239 {@code Forwarded} while the app
+     * reads {@code X-Forwarded-For} (the default), so every client's address silently became the
+     * proxy's. Logged once per process.
+     */
+    private void warnIfOnlyTheOtherForwardingHeader() {
+        if (warnedForwardingHeader.get()) return;
+        boolean forwardedChosen = trustedProxies.usesForwardedHeader();
+        String other = forwardedChosen ? "X-Forwarded-For" : "Forwarded";
+        String otherValue = headers.get(other);
+        if (otherValue == null || otherValue.isBlank()) return;
+        if (warnedForwardingHeader.compareAndSet(false, true)) {
+            Log.warn("Trusted proxy " + remoteAddr + " sent " + other + " but not "
+                + trustedProxies.clientIpHeader() + ", the header req.ip() reads, so req.ip() is the proxy's "
+                + "address for every client. " + (forwardedChosen
+                    ? "If the proxy writes X-Forwarded-For, drop useForwardedHeader() from app.trustedProxies(...)."
+                    : "If the proxy writes RFC 7239 Forwarded, use app.trustedProxies(new TrustedProxies(...)"
+                        + ".useForwardedHeader()).")
+                + " See docs/SECURITY.md, Trusted Proxies. Logged once.");
+        }
     }
 
     /**
@@ -601,30 +641,58 @@ public class Request {
         return true;
     }
 
+    /**
+     * The {@code for=} value of each RFC 7239 element, in order, then the rightmost-untrusted walk.
+     * L3 review F8: commas and semicolons inside a quoted-string are not separators, and a
+     * backslash escapes the next character in one, so {@code for="a,b"} is one value (which is not
+     * an address, so {@link #ip()} falls back to the socket peer) rather than {@code "a} and
+     * {@code b"}. An element without {@code for=} contributes nothing.
+     */
     private String extractForwardedFor(String forwarded) {
-        // RFC 7239 parser: each list-element is separated by ","; within each element,
-        // parameters are separated by ";". Extract "for=" values and apply rightmost-untrusted walk.
-        var elements = forwarded.split(",");
-        var forValues = new java.util.ArrayList<String>(elements.length);
-        for (var element : elements) {
-            // Split the element's parameters on ";"
-            for (var param : element.split(";")) {
-                var trimmed = param.trim();
-                if (trimmed.toLowerCase().startsWith("for=")) {
-                    var value = trimmed.substring(4);
-                    // Remove surrounding quotes if present (RFC 7239 allows quoted-string)
-                    if (value.startsWith("\"") && value.endsWith("\"") && value.length() >= 2) {
-                        value = value.substring(1, value.length() - 1);
-                    }
-                    // Strip port suffix (handles IPv4:port and [IPv6]:port forms)
-                    value = stripPort(value);
-                    forValues.add(value);
-                    break; // only one "for=" per list-element
-                }
+        var forValues = new java.util.ArrayList<String>();
+        for (var element : splitForwarded(forwarded, ',')) {
+            for (var param : splitForwarded(element, ';')) {
+                var trimmed = param.strip();
+                int eq = trimmed.indexOf('=');
+                if (eq < 0 || !trimmed.substring(0, eq).strip().equalsIgnoreCase("for")) continue;
+                forValues.add(unquote(trimmed.substring(eq + 1).strip()));
+                break; // only one "for=" per list-element
             }
         }
         if (forValues.isEmpty()) return null;
         return rightmostUntrusted(forValues.toArray(new String[0]));
+    }
+
+    /** Split on {@code separator} outside quoted-strings (backslash escapes inside them). */
+    static List<String> splitForwarded(String s, char separator) {
+        var parts = new java.util.ArrayList<String>();
+        boolean quoted = false;
+        int start = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (quoted && c == '\\') {
+                i++; // the escaped character, whatever it is
+            } else if (c == '"') {
+                quoted = !quoted;
+            } else if (c == separator && !quoted) {
+                parts.add(s.substring(start, i));
+                start = i + 1;
+            }
+        }
+        parts.add(s.substring(start));
+        return parts;
+    }
+
+    /** A quoted-string's content with escapes resolved, or {@code s} unchanged if it is a token. */
+    private static String unquote(String s) {
+        if (s.length() < 2 || s.charAt(0) != '"' || s.charAt(s.length() - 1) != '"') return s;
+        var out = new StringBuilder(s.length());
+        for (int i = 1; i < s.length() - 1; i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length() - 1) c = s.charAt(++i);
+            out.append(c);
+        }
+        return out.toString();
     }
 
     /**

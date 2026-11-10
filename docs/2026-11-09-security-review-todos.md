@@ -409,6 +409,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Make the forwarding header an explicit choice on `TrustedProxies` (default XFF
     only) and ignore the other; build the list from all field instances, in order.
   - **Model: Opus 5.5.**
+  - **Review fixes.** F3: a trusted peer that sends only the unchosen forwarding header now gets
+    one warning naming `useForwardedHeader()` (both directions). F8: `Forwarded` is split
+    respecting quoted-strings and escapes, and a selected entry that is not an IP literal
+    (`<script>`, `"a,b"`, `_hidden`, `unknown`) yields the socket address: `req.ip()` is only ever
+    a literal or `unknown`. F9: `X-Forwarded-Proto`/`Host` take the rightmost entry across all
+    lines (one header-map builder joins them for HTTP and WebSocket); the docs say the proxy must
+    overwrite them. F10: `Cookie` lines are joined with `"; "` on both paths and the WebSocket
+    upgrade parses the session cookie as HTTP does (first occurrence of a name wins). Tests in
+    `ProxyHeadersReviewFixesTest`.
 
 - [x] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
   - `RenderedResponse.from(result)` is stored regardless of status. The key ignores undeclared

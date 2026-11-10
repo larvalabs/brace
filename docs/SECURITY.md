@@ -826,12 +826,28 @@ trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `0:0:0
 
 - `X-Forwarded-For` (the default client-address header)
 - `Forwarded` (RFC 7239), instead of `X-Forwarded-For`, with `useForwardedHeader()`: elements
-  split on `,`, parameters on `;`
+  split on `,`, parameters on `;`, neither inside a quoted-string (`for="[2001:db8::1]:4711"`)
 - `X-Forwarded-Proto` — the original scheme, for the session cookie's `Secure` attribute
-- `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision and the
-  WebSocket `Origin` check (leftmost entry)
+- `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision, the session
+  cookie's `__Host-` name, the cross-site `Origin` checks (CSRF, WebSocket, ops) and analytics
 
-All of them are ignored unless the immediate peer is a trusted proxy.
+All of them are ignored unless the immediate peer is a trusted proxy. Each is read from every
+line it arrives on, in order, as one list. For `X-Forwarded-Proto` and `X-Forwarded-Host` Brace
+takes the **rightmost** entry, the one the nearest proxy added: behind a proxy that appends to
+these headers, or passes a client's copy through, the leftmost entry is whatever the client sent.
+**Your proxy must set (overwrite) both headers**, as the nginx example below does with
+`proxy_set_header`; a proxy that only passes them through lets a client choose them.
+
+`req.ip()` is always an IP address literal (or `unknown` when there is no socket address). If
+the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
+identifier, or anything a client managed to put there), the socket address is used instead.
+
+If a trusted proxy sends the forwarding header Brace was not told to read, and not the one it
+was (say only `Forwarded` while the app reads `X-Forwarded-For`), every client would silently get
+the proxy's address; Brace logs one warning naming `TrustedProxies.useForwardedHeader()`.
+
+Repeated `Cookie` lines are joined (with `; `) into one list on every request and WebSocket
+upgrade, and a cookie name that appears twice resolves to its first occurrence on both.
 
 ### Pass the real `Host` through
 

@@ -349,10 +349,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Extract headers into a case-insensitive map. HTTP header names are
             // case-insensitive (and arrive lowercased over HTTP/2), so lookups like
             // headers.get("Cookie") / "Content-Type" must not depend on the wire casing.
-            Map<String, String> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            for (var field : jettyRequest.getHeaders()) {
-                headers.put(field.getName(), field.getValue());
-            }
+            Map<String, String> headers = headerMap(jettyRequest.getHeaders());
 
             // Resolve the session cookie's Secure attribute from this request (H2). Computed here,
             // before the first response can be sent, and threaded through the choke point so every
@@ -1100,13 +1097,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         if (sessionOptions == null) return false; // legacy fallback cookie: unchanged behavior
         boolean forwardedHttps = false;
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            String proto = headers.get("X-Forwarded-Proto");
-            if (proto != null) {
-                // A multi-hop chain appends, so the original client's scheme is the leftmost entry.
-                int comma = proto.indexOf(',');
-                if (comma >= 0) proto = proto.substring(0, comma);
-                forwardedHttps = "https".equalsIgnoreCase(proto.strip());
-            }
+            // L3 review F9: the rightmost entry, from every line. The leftmost was taken before, but
+            // behind a proxy that appends (or passes a client's header through) the leftmost entry
+            // is the client's own claim. The proxy should set (overwrite) the header.
+            String proto = rightmostEntry(headers.get("X-Forwarded-Proto"));
+            forwardedHttps = "https".equalsIgnoreCase(proto);
         }
         boolean loopback = isLoopbackHost(ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies));
         if (loopback) {
@@ -1825,6 +1820,56 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     static String peerAddress(org.eclipse.jetty.server.Request request) {
         return TrustedProxies.unbracket(org.eclipse.jetty.server.Request.getRemoteAddr(request));
+    }
+
+    /**
+     * The request's headers as the single-value, case-insensitive map {@link Request} reads, built
+     * the same way for HTTP requests and WebSocket upgrades (L3 review). A header sent on several
+     * lines keeps its last line, except those whose lines the framework reads as one list, which
+     * are joined in wire order: {@code Cookie} with {@code "; "} (RFC 9113 8.2.3), so both paths
+     * see every cookie and a repeated name resolves to its first occurrence, and the forwarding
+     * headers ({@code X-Forwarded-For}, {@code Forwarded}, {@code X-Forwarded-Proto},
+     * {@code X-Forwarded-Host}) with {@code ","} (RFC 9110 5.3), so the rightmost entry is the
+     * last proxy's however a client split its own lines.
+     */
+    static Map<String, String> headerMap(org.eclipse.jetty.http.HttpFields fields) {
+        Map<String, String> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (var field : fields) {
+            String name = field.getName();
+            String value = field.getValue() == null ? "" : field.getValue();
+            String separator = listSeparator(name);
+            if (separator == null) {
+                headers.put(name, value);
+            } else {
+                headers.merge(name, value, (earlier, later) -> earlier + separator + later);
+            }
+        }
+        return headers;
+    }
+
+    private static String listSeparator(String name) {
+        if (name.equalsIgnoreCase("Cookie")) return "; ";
+        if (name.equalsIgnoreCase("X-Forwarded-For") || name.equalsIgnoreCase("Forwarded")
+                || name.equalsIgnoreCase("X-Forwarded-Proto") || name.equalsIgnoreCase("X-Forwarded-Host")) {
+            return ",";
+        }
+        return null;
+    }
+
+    /**
+     * The rightmost entry of a comma-separated forwarding header value (L3 review F9), stripped;
+     * null if there is none. A proxy that appends puts its own entry last, so this is the value the
+     * nearest trusted proxy vouched for; anything to its left came from further away, ultimately
+     * the client.
+     */
+    static String rightmostEntry(String list) {
+        if (list == null) return null;
+        String[] entries = list.split(",");
+        for (int i = entries.length - 1; i >= 0; i--) {
+            String entry = entries[i].strip();
+            if (!entry.isEmpty()) return entry;
+        }
+        return null;
     }
 
     /**

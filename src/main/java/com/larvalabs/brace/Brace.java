@@ -1416,8 +1416,9 @@ public class Brace {
                         // middleware (a rate limiter sheds load first) and, below, the route's access
                         // requirements. Before this, every guard was skipped and a socket under a
                         // guarded prefix accepted anonymous clients.
-                        Map<String, String> headers = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-                        for (var field : upgradeRequest.getHeaders()) headers.put(field.getName(), field.getValue());
+                        // L3 review: the same header map as an HTTP request (Cookie and forwarding
+                        // lines joined), so both paths read the same cookies and forwarding values.
+                        Map<String, String> headers = BraceHandler.headerMap(upgradeRequest.getHeaders());
                         var request = new Request("GET", wsPath, Map.of(),
                             Request.parseSingleValues(upgradeRequest.getHttpURI().getQuery(), true),
                             headers, "", Map.of(), remoteAddr, wsTrustedProxies);
@@ -1435,8 +1436,7 @@ public class Brace {
                         // proxy sent it, else Host. Cheap and decrypts nothing, so it runs before
                         // the access requirements.
                         String origin = upgradeRequest.getHeaders().get("Origin");
-                        String host = ProxyHeaders.effectiveHost(upgradeRequest.getHeaders()::get,
-                            remoteAddr, wsTrustedProxies);
+                        String host = ProxyHeaders.effectiveHost(headers::get, remoteAddr, wsTrustedProxies);
                         if (!originAllowed(origin, host, allowedOrigins)) {
                             if (host != null && BraceHandler.isLoopbackHost(host)) {
                                 ProxyHeaders.warnWebSocketHostRewrite(origin, host);
@@ -1448,13 +1448,10 @@ public class Brace {
                         if (sessionSecret != null) {
                             // M10: the name this request would be given (__Host- when Secure).
                             String cookieName = handler.cookieSpec(headers, remoteAddr).name();
-                            var cookies = org.eclipse.jetty.server.Request.getCookies(upgradeRequest);
-                            for (var cookie : cookies) {
-                                if (cookieName.equals(cookie.getName())) {
-                                    braceSession = handler.decodeSession(cookie.getValue());
-                                    break;
-                                }
-                            }
+                            // L3 review F10: parsed as the HTTP path parses it (all Cookie lines,
+                            // first occurrence of the name), not by Jetty's parser.
+                            String cookieValue = request.cookie(cookieName);
+                            if (cookieValue != null) braceSession = handler.decodeSession(cookieValue);
                             if (braceSession == null) braceSession = new Session();
                         }
                         // H2: the route's resolved access requirements. The session they read is the
