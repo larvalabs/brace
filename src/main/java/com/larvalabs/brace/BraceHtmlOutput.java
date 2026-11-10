@@ -42,14 +42,21 @@ import java.util.regex.Pattern;
  *   <li><strong>CSS</strong> ({@code <style>} bodies and {@code style=""}): user data is written
  *       with CSS hex escapes for everything but plain value characters, so it can't end its
  *       declaration or rule. See {@link #escapeCss}.</li>
+ *   <li><strong>Script bodies</strong>: on top of JTE's JavaScript escaping, {@code < > &} are
+ *       written as {@code \}{@code uXXXX}, and in a {@code <script>} inside {@code <svg>} or
+ *       {@code <math>}, which a browser tokenizes as markup, quotes are too. See
+ *       {@link #writeScriptData}.</li>
  * </ul>
  *
  * Where each {@code ${...}} lands is read from the output itself, by a small HTML tokenizer over
  * the template's text (H1 and L7, 2026-11 review): a value is held only while the output is
- * inside a quoted URL or {@code hx-vals}/{@code hx-headers} value of a start tag, never in a
- * {@code <script>} or {@code <style>} body or in body text, and data a {@code @template} call
- * writes inside an attribute value is escaped for that attribute. JTE's own context is the second
- * opinion: where the two disagree about a script body, data is escaped to be inert in both.
+ * inside a quoted URL or {@code hx-vals}/{@code hx-headers}/{@code hx-request} value of a start
+ * tag, never in a {@code <script>} or {@code <style>} body or in body text, and data a
+ * {@code @template} call writes inside an attribute value is escaped for that attribute. The
+ * tokenizer follows the script-data escaped states ({@code <!--} in a script) and foreign content
+ * ({@code <svg>}, {@code <math>}), where {@code <script/>} is a complete element. JTE's own
+ * context is the second opinion, and disagreement between the two always resolves to the stricter:
+ * data gets the rules of both readings (see "user data" below).
  *
  * <p>JTE uses an output it's given as is when it is already an HTML output, so dev (hot-reload) and
  * precompiled templates both go through this class. {@link TemplateEngine} calls {@link #finish}
@@ -72,7 +79,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private String tagName;
     private String attributeName;
 
-    // A URL or hx-vals/hx-headers value that's open: held back, not yet written, because if user
+    // A URL or hx-vals/hx-headers/hx-request value that's open: held back, not yet written, because if user
     // data turns out to make it unsafe the whole value is replaced. Which value is open, and on
     // which attribute of which tag, comes from the tokenizer below, so a value is held exactly
     // while the output is inside it (L7: a pattern match on the text before a ${...} could pick
@@ -80,7 +87,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private StringBuilder valueOut;     // the value as HTML to emit: template text, escaped user data; null when none is held
     private String valueAttribute;      // its attribute, lower-cased
     private char valueQuote;
-    private boolean urlValue;           // a URL attribute; otherwise hx-vals or hx-headers
+    private boolean urlValue;           // a URL attribute; otherwise hx-vals, hx-headers or hx-request
     private boolean templateText;       // the template wrote some of the value itself
     private int firstUser;              // where in valueOut user data first appears; -1 if none
     private int userWrites;             // pieces of user data in the held value
@@ -682,7 +689,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         boolean jteScript = attributeName == null && "script".equals(tagName);
         boolean jteStyle = attributeName == null && "style".equals(tagName);
         if (valueOut != null) {
-            appendToHeldValue(value, jteScript);
+            appendToHeldValue(value, jteScript, jteStyle);
         } else if (inQuotedValue()) {
             // In an attribute value that isn't held. Also reached with no attribute context from
             // JTE (a @template call inside the value): JTE would escape that as body text, which
@@ -828,13 +835,15 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     /** User data inside the held value: a URL, or hx-vals/hx-headers. */
-    private void appendToHeldValue(String value, boolean jteScript) {
+    private void appendToHeldValue(String value, boolean jteScript, boolean jteStyle) {
         if (firstUser < 0) firstUser = valueOut.length();
-        userWrites += jteScript ? 2 : 1; // never "the whole value is one piece of JSON" then
+        // JTE reads a script, a style or a script attribute here: its escaping as well.
+        boolean jteDiffers = jteScript || jteStyle || (urlValue && isScriptAttribute(attributeName));
+        userWrites += jteDiffers ? 2 : 1; // never "the whole value is one piece of JSON" then
         soleUser = value;
-        var out = new Appender(valueOut);
-        if (urlValue && !jteScript) Escape.htmlAttribute(value, out);
-        else Escape.htmlAttribute(escapeScript(value), out);
+        if (jteDiffers || !urlValue) value = escapeScript(value);
+        if (jteStyle) value = escapeCss(value);
+        Escape.htmlAttribute(value, new Appender(valueOut));
     }
 
     @Override
@@ -953,7 +962,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     /**
-     * Whether a held {@code hx-vals}/{@code hx-headers} value starts with {@code js:} or
+     * Whether a held {@code hx-vals}/{@code hx-headers}/{@code hx-request} value starts with {@code js:} or
      * {@code javascript:}, which htmx evaluates as code, and user data supplied any of that
      * prefix. Judged on the whole value as the browser reads it ({@code raw}), however many
      * pieces it was written in, after the trimming htmx does: JavaScript's {@code trim()}, which

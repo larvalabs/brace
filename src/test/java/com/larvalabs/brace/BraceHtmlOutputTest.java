@@ -687,6 +687,43 @@ class BraceHtmlOutputTest {
     }
 
     @Test
+    void randomDocumentsRenderTheSameHoweverTheyAreCut() {
+        // Every state the tokenizer has, in orders no template would write: the output must not
+        // depend on where the template text is cut, or on whether it arrives as Strings or bytes.
+        String[] fragments = {"<a href=\"", "\"", "'", ">", "<script>", "</script>", "<style>", "</style >", "<!--", "-->", " title='",
+            " hx-vals='", " hx-request=\"", "&#", "106;", "javascript:", "é", " ", "=", "/", "<", "x", " onclick=\"", " style=\"", "<svg>",
+            "</svg>", "<set to=\"", "&colon;", "\n", "<div", "</div>", " src=\"", "</a>", "<p>", "js:", "</Script\t>", " srcdoc='", "<!",
+            "?", "<a", " href='", "\f", "<textarea>", "</", "<img", "<script", "<script href=\"/a.js\"/>", "<style/>", "/>", "<math>",
+            "</math>", "<foreignObject>", "</foreignObject>", "<title>", "</title>", "<desc>", "<mi>", "</p>", "<![CDATA[", "]]>", "]",
+            "-", "--", "!", "<!--<script>", "</script ", "<g>", "</g>", "<annotation-xml>", "<SCRIPT/>", "<br/>", "scr", "ipt"};
+        String[] values = {"javascript:alert(1)", "\"", "'", ">", "<", "</script>", "-->", " x=y ", "&#58;", "js:alert(1)", "\\", "a", "",
+            "é", ";", ":", "script:alert(1)", "java", "/ok", "</style>", "`${1}`", "\t", " js:1", "58;", "<!--", "<script>", "]]>", "/", "!", "-"};
+        String[][] contexts = {{null, null}, {"script", null}, {"a", "href"}, {"div", "title"}, {"style", null}, {"div", "onclick"},
+            {"p", null}, {"div", "hx-request"}, {"div", "style"}};
+        var random = new java.util.Random(42);
+        for (int n = 0; n < 3000; n++) {
+            var parts = new java.util.ArrayList<Part>();
+            var text = new StringBuilder();
+            String[] context = contexts[random.nextInt(contexts.length)];
+            for (int i = 3 + random.nextInt(22); i > 0; i--) {
+                if (random.nextInt(8) > 0) {
+                    text.append(fragments[random.nextInt(fragments.length)]);
+                    continue;
+                }
+                if (text.length() > 0) parts.add(Part.text(text.toString()));
+                text.setLength(0);
+                parts.add(new Part(values[random.nextInt(values.length)], context[0] == null ? "html" : context[0], context[1]));
+            }
+            if (text.length() > 0) parts.add(Part.text(text.toString()));
+            String whole = drive(parts, 0, false);
+            for (int chunk : new int[] {0, 1, 2, 5}) {
+                assertEquals(whole, drive(parts, chunk, false), () -> "String chunks: " + parts);
+                assertEquals(whole, drive(parts, chunk, true), () -> "byte chunks: " + parts);
+            }
+        }
+    }
+
+    @Test
     void whereTheOutputIsDecidesNotWhereJteSaysItIs() {
         // JTE reports body text for a @template call's output, wherever the call was written.
         assertEquals("<a title=\"x&#34; onmouseover=&#34;alert(1)\">",
@@ -768,8 +805,15 @@ class BraceHtmlOutputTest {
         for (String element : List.of("<script src=\"/a.js\"/>", "<script/>", "<svg/><script/>", "<svg></svg><script/>",
                 "<svg><foreignObject><script/>", "<svg><desc><script/>", "<svg><title><script/>", "<math><mi><script/>",
                 "<math><annotation-xml encoding=\"text/html\"><script/>", "<svg><p><script/>", "<svg><g><div><script/>",
-                "<svg><g></p><script/>", "<svg><g></div><script/>", "<svg><font color=\"red\"><script/>",
-                "<svg><foreignObject><svg></svg><script/>", "<![CDATA[ x ]]><script/>", "<svg><script href=/a.js/>x</script></svg><script/>")) {
+                "<svg><g></p><script/>", "<div><svg><g></div><script/>", "<svg><font color=\"red\"><script/>",
+                "<svg><foreignObject><svg></svg><script/>", "<![CDATA[ x ]]><script/>", "<svg><script href=/a.js/>x</script></svg><script/>",
+                // Not modelled, and read as HTML, the side that keeps every rule on. To a browser
+                // these are still foreign content and the <script/> is complete: an end tag that
+                // matches nothing open (it would close the SVG if it matched an element around
+                // it), <font> without color/face/size, a MathML integration point in SVG or an
+                // SVG one in MathML, <annotation-xml> without an HTML encoding.
+                "<svg><g></div><script/>", "<svg><font><script/>", "<svg><mi><script/>", "<math><desc><script/>",
+                "<math><annotation-xml><script/>")) {
             assertEquals(element + "<p>\\u003ci\\u003e\\u0027</p><a href=\"" + blocked + "\"></script><a href=\"" + blocked + "\">",
                 driven(Part.text(element + "<p>"), text, Part.text("</p><a href=\""), link, Part.text("\"></script><a href=\""),
                     link, Part.text("\">")), element);
@@ -960,6 +1004,10 @@ class BraceHtmlOutputTest {
         assertEquals("<a title=\"" + blocked + "\" data-x=\"\\u0027\">",
             driven(Part.text("<a title=\""), Part.data("a", "href", "javascript:alert(1)"), Part.text("\" data-x=\""),
                 Part.data("a", "onclick", "'"), Part.text("\">")));
+        // In a held value too: JTE says style, or a script attribute, where the output is in href.
+        assertEquals("<a href=\"/a\\3b b\"><a href=\"/x?\\u0027\"><a href=\"javascript\\3a alert\\28 1\\29 \">",
+            driven(Part.text("<a href=\"/"), Part.data("style", null, "a;b"), Part.text("\"><a href=\"/x?"),
+                Part.data("a", "onclick", "'"), Part.text("\"><a href=\""), Part.data("style", null, "javascript:alert(1)"), Part.text("\">")));
         // JTE says script or style where the output is in an attribute value or a style body.
         assertEquals("<a title=\"\\u0027\\u003c\"><i title='a\\3b b'><style>a{color:\\5c u0027\\3b }",
             driven(Part.text("<a title=\""), Part.data("script", null, "'<"), Part.text("\"><i title='"),
