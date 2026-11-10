@@ -1825,11 +1825,11 @@ attempt. Binding the public key means a captured signature is only valid for the
 produced it; the nonce makes each signed request single-use; the origin makes it valid only at
 the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
 
-The nonce memory is per instance and empty at startup, so the server also refuses a request whose
-timestamp is earlier than its own start time (a request captured during a deploy cannot be
-replayed once after the restart). Each key has its own quota of remembered nonces (5,000 of the
-100,000 overall), so one key, even a read-scoped one, cannot fill the memory and block other
-operators' logins.
+Each key has its own quota of remembered nonces: 5,000 per two minutes, or less when there are
+more than 20 authorized keys, so that every key's share fits inside the overall 100,000. One
+key, even a read-scoped one, cannot fill the memory and block other operators' logins, and no
+group of keys can either. A key over its quota gets a 401 saying so. What "single-use" covers,
+across instances and restarts, is set out under "Replay suppression" below.
 
 **The signature is bound to a server.** The CLI reads the server's URL from the committed
 `.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
@@ -1893,14 +1893,32 @@ hits a different instance than the one that issued the token (B5). Within the 60
 login token can be exchanged more than once; single-use would require fleet-wide shared state
 that ops can't assume. The TTL is kept very short to limit the replay window.
 
-**Replay suppression (auth, per-instance, best-effort).** Used nonces are tracked in memory on
-each server instance, never fleet-wide — ops deliberately works without shared state (no
-database required), so behind a load balancer a captured auth request remains replayable against
-a *different* instance until the ±30s timestamp window closes. This residual window is accepted;
-the mitigations are HTTPS (an attacker should never observe the request body) plus the
-recommendations below. A captured request also cannot be replayed against an instance that
-started after it was signed: auth requests timestamped before the process started are refused.
-The old v1 and v2 protocols are removed (see above).
+**Replay suppression (auth).** A sign-in request that a server has accepted must not be accepted
+again. Two layers do that, and which guarantee you get depends on whether the app has a database:
+
+- *With a database* (`app.database(...)`): each accepted nonce is also recorded in the framework's
+  `brace_counters` table (a 64-character digest and an expiry two minutes on; no migration, no
+  configuration). The record is shared by every instance and outlives the process, so **an
+  accepted request is refused by every instance and after any restart or deploy**. Nothing is
+  refused after a start. If the write fails (database down), sign-in still works and the rules
+  of the next bullet apply until it succeeds again.
+- *Without a database, or while it is unreachable:* accepted nonces are remembered in each
+  instance's memory only. A replay to the same instance is refused. A restart empties that
+  memory, so for the first minute after a start the server **refuses any sign-in whose timestamp
+  is earlier than 30 seconds after it started**: the previous process accepted only timestamps
+  within 30 seconds of its clock and had stopped before this one started, so everything it
+  accepted falls in that range. The cost: a sign-in during the first 30 seconds after a start
+  (up to 60 for a client whose clock runs behind) gets a 401 that names the restart and says to
+  retry. Dev mode and the test harness skip this window. **Residual in this mode:** behind a
+  load balancer a request accepted by one live instance can be replayed against a *different*
+  instance until its ±30 s timestamp window closes; that includes the old instance of a
+  rolling deploy while both run.
+
+In both modes the checks run only after the signature and the origin have been verified, so a
+caller without an authorized key learns nothing from them, and a request no server ever accepted
+(the client's connection failed before delivery) is, like any bearer of a valid signature, good
+once within its 30 seconds. HTTPS is what keeps an attacker from observing a request in the first
+place; see the recommendations below. The old v1 and v2 protocols are removed (see above).
 
 **Key revocation.** Tokens are bound to the key that minted them. At startup the server takes
 the fingerprints of the keys in `ops-authorized-keys` and rejects any bearer token, ops session

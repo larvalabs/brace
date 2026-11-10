@@ -101,11 +101,22 @@ public class Brace {
     private int regressionsWarmupSeconds = 30;
     private final List<Notifier> regressionNotifiers = new ArrayList<>();
 
-    /** Package-private for tests that start a real server with ops on and no pinned origin. */
+    /**
+     * Package-private for tests that start a real server with ops on: no pinned origin is
+     * required, and the post-start sign-in window (L16) is off, as in dev mode.
+     */
     Brace opsUnpinnedForTests() {
         this.opsOriginsOptional = true;
+        return opsNoRestartWindowForTests();
+    }
+
+    /** Package-private for tests that sign in to a real ops server the moment it starts (L16). */
+    Brace opsNoRestartWindowForTests() {
+        this.opsRestartWindowOff = true;
         return this;
     }
+
+    private boolean opsRestartWindowOff;
 
     public static Brace app() {
         JulLogging.init();
@@ -1333,6 +1344,16 @@ public class Brace {
                     + "talking to the app directly can choose.");
             }
             opsHandler.setPinnedOrigins(opsOrigins);
+            // L16 final review: with a database, accepted sign-in nonces are recorded there, so a
+            // replay is refused fleet-wide and across restarts. Without one (or while it is down)
+            // the handler refuses sign-ins for a short window after each start instead; not in dev
+            // mode or the test harness, where servers restart constantly.
+            if (databaseFactory != null) {
+                opsHandler.setDurableNonces(new Counters(databaseFactory));
+            }
+            if (testHarness || opsRestartWindowOff || "dev".equals(System.getProperty("brace.mode"))) {
+                opsHandler.disableRestartWindow();
+            }
             opsHandler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
             opsHandler.setStaticMappings(() -> resolvedStaticMappings);
 

@@ -30,7 +30,7 @@ class OpsOriginPinTest {
         Path keys = tmp.resolve("authorized-keys");
         Files.writeString(keys, keypair.publicKey() + " test\n");
         app = Brace.app().port(0).ops(keys.toString()).trustedProxies("127.0.0.1", "::1")
-            .opsOrigins("https://app.example.com");
+            .opsOrigins("https://app.example.com").opsNoRestartWindowForTests();
         app.start();
         port = app.actualPort();
     }

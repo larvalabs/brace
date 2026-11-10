@@ -750,6 +750,18 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** A per-visitor cap per flush window and a daily row budget; reject timestamps before
     process start, give each key its own quota, sweep on a timer.
   - **Model: Sonnet 5.5.** Deferrable.
+    - **Final review fixes** (ops auth). L-B: the start-time floor did not stop a replay after a
+      restart when the client's clock ran ahead. L-C: it ran before the signature was verified
+      and refused clients whose clocks ran slightly behind. Now: with a database, accepted
+      nonces are recorded in `brace_counters` (fleet-wide, survives restarts; no migration) and
+      nothing is refused after a start; without one, or while it is down, sign-ins timestamped
+      earlier than 30 s after the start are refused, with a message naming the restart and the
+      clock (off in dev mode and the test harness). All replay checks follow the signature and
+      origin checks. The nonce cache evicts from an expiry-ordered queue, at most 64 entries a
+      call, instead of sweeping the map; each key's quota is sized so all quotas fit under the
+      cap. Tests in `OpsAuthFinalReviewTest`, `OpsNoncePostgresIT`. Residual, documented: with
+      no database, a request accepted by one live instance can be replayed against another
+      within its window.
 
 ## Documentation errors
 

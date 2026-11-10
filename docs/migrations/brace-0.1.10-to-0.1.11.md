@@ -1826,11 +1826,28 @@ app.analytics(Analytics.options()
 
 **Ops auth**
 
-- **A signed login request timestamped before the server started is refused**, so a captured
-  request can't be replayed after a deploy. A CLI whose clock runs a few seconds ahead of the
-  server can see one 401 right after a deploy; retrying works.
-- **Each key has its own nonce quota**, so one key holder can't exhaust the replay cache and
-  block other operators' logins.
+- **An accepted sign-in can't be replayed after a deploy.** With a database
+  (`app.database(...)`) each accepted nonce is recorded in the framework's `brace_counters`
+  table, so a replay is refused by every instance and after any restart, and nothing changes
+  for the CLI. Without a database (or while it is down), the server instead refuses sign-ins
+  timestamped earlier than 30 seconds after it started:
+
+  ```
+  # before: `brace check --env prod` the moment a no-database app came up
+  ok
+
+  # after: for the first 30 to 60 seconds after a start
+  401 This server started less than a minute ago and cannot yet tell a new sign-in from a
+      replay of one made before the restart ... Retry in up to a minute.
+  ```
+
+  Wait and retry, or give the app a database. Dev mode (`brace dev`) and `Brace.test()` are
+  not affected.
+- **Each key has its own nonce quota**, sized so every key's share fits (5,000 per two minutes
+  with up to 20 keys), so no key holder or group of them can exhaust the replay cache and block
+  other operators' logins. A key over its quota gets `401 Too many sign-ins with this key ...`.
+- **`401 Stale timestamp` is exact.** A timestamp more than 30.0 seconds from the server's clock
+  is refused (it was truncated to whole seconds, allowing up to 30.9).
 
 **Development checks**
 
