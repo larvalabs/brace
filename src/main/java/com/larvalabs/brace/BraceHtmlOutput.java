@@ -907,11 +907,17 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         return attribute.startsWith("data-hx-") ? attribute.substring(5) : attribute;
     }
 
-    /** htmx attributes that take JSON (or, with a {@code js:} prefix, an expression). */
+    /**
+     * htmx attributes that take JSON (or, with a {@code js:} prefix, an expression): the three
+     * that htmx 2.0.10 reads through its one evaluating function with "evaluate only on the
+     * prefix". {@code hx-request} was missing (L7 review, F4). The fourth caller of that
+     * function, {@code hx-vars}, is evaluated whatever it starts with, so it has no prefix to
+     * guard and is a script attribute only.
+     */
     private static boolean isJsonAttribute(String attribute) {
         if (attribute == null) return false;
         String name = unprefixed(attribute);
-        return name.equals("hx-vals") || name.equals("hx-headers");
+        return name.equals("hx-vals") || name.equals("hx-headers") || name.equals("hx-request");
     }
 
     /**

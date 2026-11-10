@@ -411,6 +411,34 @@ class BraceHtmlOutputTest {
         assertEquals("{}", named(both("xssHxVals", Map.of("a", "", "b", "s:alert(1)")), "v7", "hx-headers"));
     }
 
+    // L7 review (F4): htmx reads hx-request through the same function as hx-vals and hx-headers,
+    // and evaluates it on the same js: / javascript: prefix.
+    @Test
+    void dataCantMakeAnHxRequestValueAnExpression() throws Exception {
+        for (String code : List.of("js:x:alert(1)", " javascript:{x:alert(1)}", " js:{timeout: alert(1)}", "﻿JS:alert(1)")) {
+            String html = both("xssHxRequest", Map.of("a", code, "b", ""));
+            for (String id : List.of("r1", "r3", "r4", "r5")) assertEquals("{}", named(html, id, "hx-request"), id + " <- " + code);
+            assertEquals("{}", named(html, "r2", "data-hx-request"), code);
+            assertFalse(html.contains("alert(1)\"></div>\n<div id=\"r3\""), html);
+        }
+        for (var parts : List.of(List.of("js", ":alert(1)"), List.of("j", "s:alert(1)"), List.of(" ", "javascript:alert(1)"))) {
+            String html = both("xssHxRequest", Map.of("a", parts.get(0), "b", parts.get(1)));
+            assertEquals("{}", named(html, "r4", "hx-request"), parts.toString());
+        }
+        // What the template wrote is kept, and JSON stays JSON.
+        var mapper = Json.mapper();
+        String html = both("xssHxRequest", Map.of("a", "js:alert(1)", "b", ""));
+        assertEquals("js:alert(1)", mapper.readTree(named(html, "k3", "hx-request")).get("credentials").asText());
+        assertEquals("js:{timeout: \"js:alert(1)\"}", named(html, "k2", "hx-request"));
+        html = both("xssHxRequest", Map.of("a", "3000", "b", ""));
+        assertEquals(3000, mapper.readTree(named(html, "k1", "hx-request")).get("timeout").asInt());
+        html = both("xssHxRequest", Map.of("a", "{\"timeout\":100,\"credentials\":true}", "b", ""));
+        assertEquals(100, mapper.readTree(named(html, "r1", "hx-request")).get("timeout").asInt());
+        assertEquals(100, mapper.readTree(named(html, "r2", "data-hx-request")).get("timeout").asInt());
+        html = both("xssHxRequest", Map.of("a", "\"+alert(1)+\"", "b", ""));
+        assertEquals("js:{timeout: \"\\u0022+alert(1)+\\u0022\"}", named(html, "k2", "hx-request"));
+    }
+
     @Test
     void scriptEscapingRoundTrips() {
         for (String s : List.of("", "plain", "\\", "\\u0041", "a\tb\n\"'`$&<>  \\\\u0022", "\\u00zz", "end\\")) {
