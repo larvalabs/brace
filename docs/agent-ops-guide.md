@@ -77,7 +77,7 @@ check.log_window_minutes=30
 | `brace cache clear [--env prod]` | Empty the cache | 0 / 2 unreachable |
 | `brace resolve <id> [--env prod]` | Mark an error as resolved | 0 / 1 not found / 2 unreachable |
 | `brace init` | Scaffold `.brace`/`.brace.local` and run ops readiness checks | 0 ok / 1 issues |
-| `brace ops keypair [--label <l>] [--read-only]` | Generate an Ed25519 keypair and wire it up (see Setup) | 0 / 1 |
+| `brace ops keypair [--label <l>] [--read-only\|--control]` | Generate an Ed25519 keypair and wire it up (see Setup); replacing a label keeps its scope unless a flag is given | 0 / 1 |
 | `brace ops dashboard [--analytics]` | Open the ops dashboard (or, with `--analytics`, the analytics page) in a browser (login handled via token exchange) | 0 / 1 |
 | `brace analytics [--range today\|7d\|30d\|12mo] [--env prod]` | Visitors, pageviews, top pages, sources, devices, browsers and what was filtered (apps with `app.analytics()`; default range 7d) | 0 / 1 not enabled / 2 unreachable |
 
@@ -453,9 +453,13 @@ green.
 - **Rotate your own key:** `rm ops-private.key && brace ops keypair`, then redeploy.
   Because the label is stable (`email@host`), the new public key *replaces* your existing
   line in `ops-authorized-keys` in place — no orphaned, still-trusted key left behind.
-  That includes a line written before 0.1.11 with no scope token. The new line gets
-  `scope:control` unless you pass `--read-only` again: rotate a read-only key with
-  `brace ops keypair --read-only --label <its label>`.
+  **The new line keeps the old line's scope**: rotating a read-only key with
+  `brace ops keypair --label <its label>` gives a read-only key again. To change it, say
+  so: `--control` raises it, `--read-only` lowers it, and the command prints
+  `scope changed: read -> control` (or the reverse). A line written before 0.1.11 with no
+  scope token is replaced too, but there is no scope to keep: the command refuses (exit 1,
+  nothing written) until you pass `--read-only` or `--control`. A label nobody has used
+  yet gets `scope:control` unless you pass `--read-only`.
 - **Add another developer:** they run `brace ops keypair` on their own machine. Their
   distinct `email@host` label gets its own line; committing it never clobbers anyone
   else's entry. Commit the updated `ops-authorized-keys` and deploy so servers accept

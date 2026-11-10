@@ -143,7 +143,7 @@ public class Cli {
         System.out.println("Usage: brace ops <command>");
         System.out.println();
         System.out.println("Ops commands:");
-        System.out.println("  brace ops keypair [--label <l>] [--read-only]  Generate an Ed25519 keypair for ops auth and add it to ops-authorized-keys");
+        System.out.println("  brace ops keypair [--label <l>] [--read-only|--control]  Generate an Ed25519 keypair for ops auth and add it to ops-authorized-keys (a new label is control unless --read-only; replacing a label keeps its scope unless a flag is given)");
         System.out.println("  brace ops dashboard [--analytics]              Open the ops dashboard (or the analytics page) in a browser (login via token exchange)");
         System.out.println();
         System.out.println("Inspecting a running app: brace check, status, errors, logs, cache, analytics, resolve (see 'brace help').");

@@ -1590,7 +1590,8 @@ Edit the file, commit it and deploy it with the upgrade. While you are there, ch
 - A key listed twice keeps the lower scope. Each key's fingerprint and scope is logged at boot.
 
 `brace ops keypair` from 0.1.11 writes `scope:control` or (with `--read-only`) `scope:read` on
-every entry, and accepts `read`, `control` and similar words as plain labels. Also: an ops token
+every entry, keeps an existing entry's scope when it replaces it (see "CLI and launcher on an
+untrusted checkout" below), and accepts `read`, `control` and similar words as plain labels. Also: an ops token
 whose payload has no scope claim, or an unrecognised one, is now `read`, not `control`.
 
 ## Breaking: `Http` timeouts cover the response body
@@ -2054,9 +2055,25 @@ ops.prod-eu.url=https://eu.example.com
 ```
 
 - **`brace ops keypair --label` validates the label.** A label containing `:` or `=`, starting
-  with `#`, or a lone `read`/`ro`/`readonly`/`read-only`/`control` without `--read-only`, is
-  refused before any key is generated: it would have produced a keys-file line the server
-  refuses.
+  with `#`, or holding an unpaired surrogate (which UTF-8 cannot encode) is refused before any
+  key is generated: it would have produced a keys-file line the server refuses, or left a
+  private key with no keys-file entry. Words such as `read` and `control` are plain labels now
+  that every line states its scope.
+- **Behavior change: rotating a key keeps its scope.** `brace ops keypair --label X` for a label
+  that already has an entry keeps that entry's scope; before, it wrote `scope:control` unless
+  `--read-only` was passed again, so rotating an agent's read-only key without the flag handed it
+  full control on the next deploy. Change the scope explicitly with `--control` (new) or
+  `--read-only`; the command then prints `scope changed: read -> control` (or the reverse). An
+  entry with no scope token (written before 0.1.11) has no scope to keep, so the command exits 1
+  without writing anything until you pass one of the two flags. A new label still defaults to
+  `scope:control`.
+
+```bash
+# before: silently became scope:control
+brace ops keypair --label oncall-agent
+# after: stays scope:read; to raise it, say so
+brace ops keypair --label oncall-agent --control
+```
 - **Project files are never written through a symlink.** `brace agents-md`, `brace init` and
   `brace ops keypair` refuse to write `BRACE-AGENTS.md`, `BRACE-OPS.md`, `.brace`,
   `.brace.local`, `.gitignore` or `ops-authorized-keys` when that path is a symbolic link, a
