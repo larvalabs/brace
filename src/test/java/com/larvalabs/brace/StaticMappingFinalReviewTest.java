@@ -236,11 +236,12 @@ class StaticMappingFinalReviewTest {
         assertEquals("kelvin?", result.header("k"));
         assertNull(result.header("K"), "U+212A KELVIN SIGN is not K");
         assertNull(result.header("ı"), "dotless i is not I");
-        // A name put straight into the map (bypassing header(...)) is still a different header.
+        // A name put through the map is validated like header(...) (verification fix: it used to
+        // bypass the check and was stored as a second, invalid header).
         int before = result.headers().size();
-        result.headers().put("K", "other");
+        assertThrows(IllegalArgumentException.class, () -> result.headers().put("K", "other"));
         assertEquals("kelvin?", result.header("K"));
-        assertEquals(before + 1, result.headers().size());
+        assertEquals(before, result.headers().size());
     }
 
     // ---- nit: a mapping prefix must start with "/" ----

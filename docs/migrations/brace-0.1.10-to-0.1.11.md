@@ -1910,7 +1910,11 @@ No action needed unless noted.
   result.header("X-Request-Id", id);
   ```
 
-  Only ASCII letter case is folded when names are compared.
+  Only ASCII letter case is folded when names are compared. `result.headers().put(name, value)`
+  is checked the same way (it used to skip the check), and a `Set-Cookie` put there is added to
+  `setCookies()`; reads and removals through `headers()` work as before.
+- **A plain `GET` or `HEAD` of a WebSocket path under a static mapping is `426 Upgrade Required`**
+  even when another method's route shares the path (it was a `405` naming `GET` in `Allow`).
 - **WebSocket paths are exact.** A socket registered with `app.ws("/ws", ...)` upgrades only for
   the raw path `/ws` (any query string). `/x/../ws`, `/%77s` and `/ws;x` get 404. The path is a
   literal, not a pattern.

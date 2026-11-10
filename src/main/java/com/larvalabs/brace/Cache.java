@@ -61,7 +61,9 @@ public class Cache {
      * {@code Set.of} and {@code Collections.unmodifiable*} classes are stored under their JDK
      * names and read back as {@code ArrayList} or an unmodifiable wrapper. {@code EnumMap},
      * {@code EnumSet} and {@code Collections.unmodifiableCollection} do not round-trip through
-     * Jackson at all and are not listed.
+     * Jackson at all and are not listed; nor are {@code Collections.unmodifiableSortedSet}/
+     * {@code SortedMap} (verification fix), which Jackson reads back as a plain unmodifiable
+     * set/map, not a {@code SortedSet}/{@code SortedMap}.
      */
     static final Set<String> BUILT_IN_VALUE_CLASSES = Set.of(
         // Containers
@@ -74,8 +76,7 @@ public class Cache {
         "java.util.Arrays$ArrayList",
         "java.util.Collections$UnmodifiableList",
         "java.util.Collections$UnmodifiableRandomAccessList", "java.util.Collections$UnmodifiableSet",
-        "java.util.Collections$UnmodifiableSortedSet", "java.util.Collections$UnmodifiableMap",
-        "java.util.Collections$UnmodifiableSortedMap",
+        "java.util.Collections$UnmodifiableMap",
         "java.util.Collections$EmptyList", "java.util.Collections$EmptySet", "java.util.Collections$EmptyMap",
         "java.util.Collections$SingletonList", "java.util.Collections$SingletonSet", "java.util.Collections$SingletonMap",
         // Values
@@ -664,11 +665,21 @@ public class Cache {
             warnRefusal(storedName, expected.getName());
             throw new CacheCorruptionException("cached class not trusted by this process: " + storedName);
         }
+        Object value;
         try {
-            return (T) Json.mapper().readValue(data, offset, data.length - offset, stored);
-        } catch (java.io.IOException e) {
+            value = Json.mapper().readValue(data, offset, data.length - offset, stored);
+        } catch (java.io.IOException | RuntimeException e) {
+            // Verification fix: Jackson's JDK-container deserializers throw unchecked exceptions
+            // too (a SingletonList row with two elements: IllegalArgumentException). A bad row is
+            // a miss, whatever it throws.
             throw new CacheCorruptionException("cached value body did not deserialize as " + storedName);
         }
+        if (expected != null && !expected.isInstance(value)) {
+            // Rebuilt as something the caller did not ask for (a sorted wrapper read back unsorted):
+            // a miss, not a ClassCastException at the caller's assignment.
+            throw new CacheCorruptionException("cached value " + storedName + " did not read back as " + expected.getName());
+        }
+        return (T) value;
     }
 
     /** Thrown internally when a stored byte payload is unreadable; the facade treats it as a miss. */

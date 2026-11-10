@@ -573,19 +573,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                     if (!owners.isEmpty() || !readMethod) {
                         exchange.noMatchKey = STATIC_ROUTE_KEY;
                         var routeMethods = new java.util.LinkedHashSet<String>();
-                        boolean webSocketOnly = !owners.isEmpty();
+                        boolean socketOwned = false;
                         for (Route owner : owners) {
                             if (owner.method().equals("WS")) {
+                                socketOwned = true;
                                 routeMethods.add("GET");
                             } else {
-                                webSocketOnly = false;
                                 routeMethods.add(owner.method());
                                 if (owner.method().equals("GET")) routeMethods.add("HEAD");
                             }
                         }
                         Result refused;
-                        if (webSocketOnly && readMethod) {
-                            // The path is a socket: a plain request for it is asked to upgrade.
+                        if (socketOwned && readMethod) {
+                            // The path is a socket: a plain request for it is asked to upgrade,
+                            // whatever other methods' routes share the path (verification fix:
+                            // a POST route there made this a 405 naming GET in Allow).
                             refused = Result.error(426, "Upgrade Required").header("Upgrade", "websocket");
                         } else {
                             refused = Result.error(405, "Method Not Allowed")

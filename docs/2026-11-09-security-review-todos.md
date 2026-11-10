@@ -935,6 +935,16 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
       requested type) naming `allowType`. A planted foreign class through `Object` still misses.
       Elements inside a container still come back as Jackson's natural types (unchanged). Tests
       in `CacheSerializationTest` (two `Cache` instances over one backend).
+    - **Verification fixes** (`fix: small cache and response nits from verification`). Only an
+      `IOException` from Jackson was a miss, so a `Collections$SingletonList` row with two
+      elements threw `IllegalArgumentException` out of `get`/`getOrSet`: any `RuntimeException`
+      is now a miss too, and so is a value that rebuilds as something other than the requested
+      type. `Collections$UnmodifiableSortedSet`/`SortedMap` read back unsorted (a
+      `ClassCastException` at the caller) and are off the allowlist; a test round-trips every
+      allowlisted container. Same commit, outside L15: `Result.headers().put` validates the name
+      (OpsHandler removes headers through the view, so it stays a live view rather than an
+      unmodifiable one), and a plain `GET`/`HEAD` of a socket path under a static mapping is 426
+      even when a `POST` route shares the path. Tests in `VerificationNitsTest`.
 
 - [x] **L16: Analytics growth is rate-bounded only; ops nonce cache gaps**, `Analytics.java:81, 315-319`, `OpsHandler.java:129, 1114-1120`
   - The 20,000-row buffer per 10 s flush allows about 2,000 inserted rows per second, kept 35

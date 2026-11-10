@@ -1243,10 +1243,15 @@ reach Jackson for an arbitrary class. A row is deserialized only when its class 
 - a class this process has itself stored;
 - a built-in JDK container or value (`ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`,
   `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `ArrayDeque`, the `List.of`/`Map.of`/
-  `Set.of` and `Collections.unmodifiable*`/`empty*`/`singleton*` classes, boxed primitives,
-  `String`, `BigDecimal`, `BigInteger`, `UUID`, the `java.time` value types, and arrays of
-  these), which Jackson rebuilds without running app code;
+  `Set.of` and `Collections.unmodifiable*`/`empty*`/`singleton*` classes except the sorted
+  unmodifiable wrappers, boxed primitives, `String`, `BigDecimal`, `BigInteger`, `UUID`, the
+  `java.time` value types, and arrays of these), which Jackson rebuilds without running app code;
 - or a class registered with `cache.allowType(...)`.
+
+A row whose body does not rebuild (Jackson throws, checked or not: a `SingletonList` row holding
+two elements), or rebuilds as something other than the type the caller asked for (an
+`unmodifiableSortedSet` comes back as a plain unmodifiable set), is a miss, never an exception
+from `get`/`getOrSet`.
 
 Anything else (an app class read through `Object`, an interface or a base class, or by
 `getOrSet`, on an instance that has not stored it) is treated as a miss and logged at WARN once
