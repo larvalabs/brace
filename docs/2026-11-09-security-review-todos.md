@@ -659,6 +659,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `BRACE-AGENTS.md -> ~/.ssh/authorized_keys` is overwritten with the reference doc. Fix: one
     helper that refuses a symlink target or writes by temp file and move, as `SecretFiles` does.
   - **Model: Sonnet 5.5.** Three commits.
+  - **Final review fixes** (`fix(security): L11 final review fixes: ...`, four commits plus
+    `fix(cli)` nits). The CLI had no request timeout or body cap (one shared client, 30 s
+    request deadline, 16 MB cap, `CliHttp`; `ops.key` must be a regular file under 64 KB);
+    `--json` passed C1 controls, bidi, format and line-separator characters raw (now escaped as
+    `\uXXXX`, keys included); `brace ops keypair --label` missed an old entry whose scope token
+    was not second or that had a trailing comment, leaving its key trusted (now parsed with the
+    server's rules; the three rules are duplicated from `OpsKeys` and should be shared);
+    server text in error messages is cut to 300 characters. Nits: non-integer `statusCodes`
+    keys in `brace check`, trailing-slash ops URLs, an `Error` exits 1 with a short message.
+    Docs: `maxUploadSize("10MB")` now parses, `SessionOptions.secure(config.get(...))` sample,
+    the README's missing-key rate-limit bucket is per client IP.
 
 - [x] **L12: `WebhookNotifier` posts exception text as Slack markup, unbounded**, `WebhookNotifier.java:29-34`
   - The message is redacted but otherwise raw; Slack and Mattermost parse `<!channel>` and

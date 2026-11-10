@@ -84,6 +84,11 @@ check.log_window_minutes=30
 All commands auto-detect output: human-readable table when stdout is a TTY, JSON when
 piped. Force with `--json` or `--pretty`.
 
+Each request times out after 30 seconds and a response body is capped at 16 MB, so a server
+that stalls or never stops sending fails the command with a one-line error instead of hanging.
+`--json` output escapes control, format and line-separator characters (and unpaired
+surrogates) as `\uXXXX`; a JSON parser reads them back as the original text.
+
 ## HTTP endpoints
 
 The CLI commands call these under the hood. Use them directly when you need raw JSON or
