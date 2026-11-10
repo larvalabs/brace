@@ -40,8 +40,10 @@ import java.util.*;
  * the whole batch is kept uncounted and retried, as for an outage: a connection-level failure
  * (database down, pool exhausted, the session cannot be opened or begun, a connection-classed
  * SQLState on a connection that then fails {@code isValid}) and a server-wide SQLState
- * ({@link #isServerWide}: 25006 read-only during a failover, 53xxx, 57P0x, 58xxx, 08xxx) on any
- * row. That retention is capped at {@value #MAX_UNCOUNTED_RETENTIONS} consecutive flushes per
+ * ({@link #isServerWide}: 25006 read-only during a failover, 53xxx, 57P0x, 58xxx, 08xxx) when no
+ * row of that flush could be written. When another row of the same flush was written, the server
+ * is taking writes, so such a state is that row's own (one oversized row drawing 53100 or 53200)
+ * and counts against it alone, instead of starving the rows beside it. That retention is capped at {@value #MAX_UNCOUNTED_RETENTIONS} consecutive flushes per
  * entry (about two minutes), after which each failed flush counts like a row rejection. Any other
  * rejection counts, even when every row of the batch got it (a lock timeout on all of them), and
  * so does a connection-classed SQLState on a connection that is still valid (a statement timeout
@@ -310,6 +312,9 @@ public class ErrorStore {
 
         var outcome = new byte[batch.size()];
         var rowErrors = new Throwable[batch.size()];
+        // Rows written in this flush, and the first server-wide SQLState a row drew, if any.
+        int[] written = {0};
+        Throwable[] serverWide = {null};
         boolean postgres = databaseFactory.isPostgres();
         boolean committed = false;
         Database db = null;
@@ -321,9 +326,13 @@ public class ErrorStore {
                     var p = batch.get(i);
                     try {
                         outcome[i] = writeRow(connection, p, postgres);
+                        written[0]++;
                     } catch (RowRejected first) {
                         outcome[i] = REJECTED;
                         rowErrors[i] = first.getCause();
+                        if (serverWide[0] == null && isServerWide(sqlState(first.getCause()))) {
+                            serverWide[0] = first.getCause();
+                        }
                         // Only a rejection of the DATA (22xxx, 23xxx, 54xxx) is retried without
                         // the payload, so the count and the regression signal survive what was
                         // refused. A transient error (a lock timeout) is retried in full on the
@@ -333,10 +342,22 @@ public class ErrorStore {
                         try {
                             outcome[i] = writeRow(connection, stripped, postgres);
                             batch.set(i, stripped);
+                            written[0]++;
                         } catch (RowRejected second) {
                             // stays REJECTED with the first error
                         }
                     }
+                }
+                // A server-wide SQLState (read-only, out of resources, shutting down) is the
+                // database's, not a row's, when nothing in this flush could be written: abort,
+                // so the whole batch is kept uncounted. When another row was written, the server
+                // is taking writes and the state is that row's own (one oversized row drawing
+                // 53100 or 53200), so it is counted below like any rejection. Decided after the
+                // loop, not at the failing row, so the order of the batch does not matter: before
+                // this, one such row aborted every flush and starved the healthy rows beside it
+                // for as long as it stayed buffered (second review).
+                if (serverWide[0] != null && written[0] == 0) {
+                    throw new FlushAborted(serverWide[0]);
                 }
                 prune(connection);
             });
@@ -355,7 +376,7 @@ public class ErrorStore {
             // MAX_UNCOUNTED_RETENTIONS cap.
             retainUncounted(batch);
             failedFlushes++;
-            lastFailure = describe(e);
+            lastFailure = describe(e instanceof FlushAborted ? e.getCause() : e);
         } finally {
             if (db != null) {
                 try {
@@ -370,7 +391,8 @@ public class ErrorStore {
         }
 
         // Rows the database rejected: retry a few times, then give up on that entry. A server-wide
-        // SQLState never gets here (it aborts the flush, above); every other rejection counts,
+        // SQLState gets here only beside a row that was written (with none written it aborts the
+        // flush, above); every other rejection counts,
         // even when every row of the batch got the same one (a lock timeout on all of them): kept
         // uncounted, two rows that always fail that way were retried forever (verification pass).
         for (int i = 0; i < batch.size(); i++) {
@@ -399,6 +421,13 @@ public class ErrorStore {
                 if (outcome[i] == INSERTED) listener.onNew(p.type, p.route, p.message, p.firstSeen);
                 else if (outcome[i] == UPDATED) listener.onRepeat(p.type, p.route, p.count);
             }
+        }
+    }
+
+    /** No row could be written and one drew a server-wide SQLState (the cause): nothing commits. */
+    private static final class FlushAborted extends RuntimeException {
+        FlushAborted(Throwable cause) {
+            super(null, cause, false, false);
         }
     }
 
@@ -432,14 +461,16 @@ public class ErrorStore {
 
     /**
      * Rolls back to {@code savepoint} after {@code e}, or rethrows {@code e} when the connection
-     * is gone or the server cannot take any write. A server-wide SQLState
-     * ({@link #isServerWide}: 25006 read-only transaction, during a failover; 53xxx out of
-     * resources; 57P0x shutdown; 58xxx system error; 08xxx connection) aborts the flush whatever
-     * the connection's liveness, so the batch is kept uncounted (final review L10). Another
-     * connection-classed SQLState (40, 57014, other 25) is not trusted on its own: 57014 is a
-     * statement timeout on one huge row, 40P01 a deadlock on one key. Only when the connection
-     * also fails its liveness check does the flush abort; otherwise the error is the row's (M5
-     * review). The rollback itself throws if the connection is gone.
+     * is gone. A connection-classed SQLState (08, 53, 57, 40, 25) is not trusted on its own:
+     * 57014 is a statement timeout on one huge row, 40P01 a deadlock on one key. Only when the
+     * connection also fails its liveness check does the flush abort here; otherwise the error is
+     * handed back as the row's (M5 review). The rollback itself throws if the connection is gone.
+     *
+     * <p>A server-wide SQLState ({@link #isServerWide}: 25006 read-only transaction, during a
+     * failover; 53xxx out of resources; 57P0x shutdown; 58xxx system error; 08xxx connection) on
+     * a connection that is still usable is handed back too. {@code flushBatch} aborts the flush
+     * for it when no row of the flush could be written, so the batch is kept uncounted (final
+     * review L10), and counts it against the row when another row was (second review).
      */
     private void recoverOrAbort(java.sql.Connection connection, java.sql.Savepoint savepoint, Exception e)
             throws SQLException {
@@ -449,7 +480,6 @@ public class ErrorStore {
             if (e instanceof SQLException se) throw se;
             throw rollbackFailed;
         }
-        if (e instanceof SQLException se && isServerWide(se.getSQLState())) throw se;
         if (e instanceof SQLException se && isConnectionFailure(se)) {
             boolean alive;
             try {

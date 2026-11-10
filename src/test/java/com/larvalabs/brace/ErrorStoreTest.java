@@ -557,6 +557,91 @@ class ErrorStoreTest {
         assertEquals(0, errorStore.bufferedKinds());
     }
 
+    @Test
+    void oneRowDrawingAServerWideStateDoesNotStarveTheHealthyRowsBesideIt() {
+        // Second review: a server-wide SQLState on any row aborted the flush, so one row that
+        // always draws one (an oversized row and 53100 disk full, 53200 out of memory) kept every
+        // healthy row beside it out of the table for as long as it stayed buffered (0 of 400).
+        for (String state : List.of("53100", "53200", "58030", "08P01")) {
+            errorStore.close();
+            cleanTable();
+            errorStore.rowFault = (type, message) -> {
+                if (type.startsWith("Poison")) throw new java.sql.SQLException("server-wide failure " + state, state);
+            };
+            // Several poisoned rows, so some come before and some after a healthy row in the batch.
+            for (int i = 0; i < 400; i++) {
+                errorStore.record("Healthy" + i, "m", "GET /h" + i, "s", "req");
+                if (i % 50 == 0) errorStore.record("Poison" + i, "m", "GET /p" + i, "s", "req");
+            }
+            errorStore.flush();
+            var stored = errorStore.list(null, java.time.Instant.EPOCH);
+            assertEquals(400, stored.size(), "healthy rows stored on the first flush: " + state);
+            assertEquals(8, errorStore.bufferedKinds(), "the poisoned rows are kept for retry: " + state);
+
+            // The poisoned rows are counted, like any row rejection, while a healthy row is written
+            // beside them, and dropped after MAX_FLUSH_FAILURES such flushes.
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.record("Healthy0", "m", "GET /h0", "s", "req");
+                errorStore.flush();
+            }
+            assertEquals(0, errorStore.bufferedKinds(), "poisoned rows dropped: " + state);
+            errorStore.rowFault = null;
+            errorStore.flush();
+            assertEquals(400, errorStore.list(null, java.time.Instant.EPOCH).size());
+        }
+    }
+
+    @Test
+    void anOutageThatStartsMidBatchKeepsTheWholeBatchUncounted() {
+        // The other side of the rule above: rows written, then the server goes away. The next
+        // statement on the dead connection fails the flush, nothing commits, and no row is
+        // counted, however many flushes the outage lasts (up to the uncounted cap).
+        int[] calls = {0};
+        errorStore.rowFault = (type, message) -> {
+            if (++calls[0] > 3) throw new java.sql.SQLException("terminating connection", "57P01");
+        };
+        errorStore.connectionCheck = connection -> false;
+        for (int i = 0; i < 10; i++) {
+            errorStore.record("E" + i, "m", "GET /e" + i, "s", "req");
+        }
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            calls[0] = 0;
+            errorStore.flush();
+            assertEquals(List.of(), types(), "nothing commits from an aborted flush");
+        }
+        errorStore.rowFault = null;
+        errorStore.connectionCheck = connection -> connection.isValid(1);
+        errorStore.flush();
+        assertEquals(10, types().size());
+    }
+
+    @Test
+    void aServerThatStopsTakingWritesMidBatchOnALiveConnectionDropsNothingEarly() {
+        // Disk fills up mid-batch and the connection stays usable: the rows after that point are
+        // counted once (rows before them were written in the same flush). Every later flush of
+        // the outage writes nothing, so it is kept uncounted, and they are stored when it ends.
+        boolean[] full = {false};
+        int[] calls = {0};
+        errorStore.rowFault = (type, message) -> {
+            if (full[0] || ++calls[0] > 3) {
+                full[0] = true;
+                throw new java.sql.SQLException("could not extend file: No space left on device", "53100");
+            }
+        };
+        for (int i = 0; i < 10; i++) {
+            errorStore.record("E" + i, "m", "GET /e" + i, "s", "req");
+        }
+        errorStore.flush();
+        assertEquals(3, types().size());
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        assertEquals(7, errorStore.bufferedKinds(), "kept through the outage");
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(10, types().size());
+    }
+
     private static java.util.Map<String, Object> find(String type) {
         return errorStore.list(null).stream().filter(e -> type.equals(e.get("errorType"))).findFirst().orElseThrow();
     }
