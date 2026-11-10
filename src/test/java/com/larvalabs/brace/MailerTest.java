@@ -67,6 +67,51 @@ class MailerTest {
         assertNull(props.get("mail.smtp.starttls.required"));
     }
 
+    // --- M9 review fixes ---
+
+    @Test
+    void schemeIsComparedCaseInsensitively() {
+        var smtps = new Mailer("SMTPS://mail.example.com:465").smtpProperties("mail.example.com", 465, "SMTPS");
+        assertEquals("true", smtps.get("mail.smtp.ssl.enable"), "SMTPS:// is implicit TLS, not STARTTLS");
+        assertNull(smtps.get("mail.smtp.starttls.required"));
+
+        var plain = new Mailer("SMTP+Plain://localhost:25").smtpProperties("localhost", 25, "SMTP+Plain");
+        assertNull(plain.get("mail.smtp.starttls.required"));
+
+        var smtp = new Mailer("SMTP://mail.example.com:587").smtpProperties("mail.example.com", 587, "SMTP");
+        assertEquals("true", smtp.get("mail.smtp.starttls.required"));
+    }
+
+    @Test
+    void credentialsOnAPlainUrlWarnOnceWithoutTheCredentials() {
+        LogTap.clear();
+        new Mailer("smtp+plain://mailuser:hunter2-secret@relay.internal:25");
+        var warnings = mailerWarnings();
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertTrue(warnings.get(0).contains("smtp+plain"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("hunter2-secret"), "never log the password");
+        assertFalse(warnings.get(0).contains("mailuser"), "nor the user name");
+
+        LogTap.clear();
+        new Mailer("SMTP+PLAIN://mailuser:pw@relay.internal:25");
+        assertEquals(1, mailerWarnings().size(), "case-insensitive scheme");
+
+        LogTap.clear();
+        new Mailer("smtp+plain://relay.internal:25");
+        new Mailer("smtp://mailuser:pw@mail.example.com:587");
+        new Mailer("smtps://mailuser:pw@mail.example.com:465");
+        new Mailer(null);
+        assertEquals(java.util.List.of(), mailerWarnings(), "no credentials, or TLS: no warning");
+    }
+
+    private static java.util.List<String> mailerWarnings() {
+        return LogTap.snapshot().stream()
+            .filter(e -> "WARN".equals(e.fields().get("level")))
+            .map(e -> String.valueOf(e.fields().get("message")))
+            .filter(m -> m.contains("cleartext"))
+            .toList();
+    }
+
     @Test
     void captureModeUnaffectedBySchemeRules() {
         var mailer = new Mailer(null);

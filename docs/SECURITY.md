@@ -1676,8 +1676,11 @@ Postgres, so nothing reached `ops_errors` and regression alerts stopped until re
 instead of continuing in cleartext, so a network attacker cannot strip the offer and read the
 SMTP password and mail bodies (password-reset links). `smtps://` is implicit TLS. A trusted
 local relay that cannot do TLS (a sidecar on localhost) opts out explicitly with
-`smtp+plain://localhost:25`, which uses STARTTLS when offered but never requires it. Dev mode
-(no SMTP URL) only captures mail and is unaffected.
+`smtp+plain://localhost:25`, which uses STARTTLS when offered but never requires it. Credentials
+on an `smtp+plain://` URL are allowed but logged as a warning once, when the `Mailer` is
+constructed (the host is named; the user and password never are), because without TLS the AUTH
+exchange is cleartext. The scheme is compared case-insensitively (`SMTPS://` is implicit TLS).
+Dev mode (no SMTP URL) only captures mail and is unaffected.
 
 `Mailer.to(...)` takes exactly one address and parses it strictly, so a recipient taken from a form
 cannot add recipients (`"a@b.c, victim@x.y"` throws). `@Email` likewise rejects `,` `;` `<` `>`,

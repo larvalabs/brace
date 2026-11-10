@@ -33,6 +33,32 @@ public class Mailer {
 
     public Mailer(String smtpUrl) {
         this.smtpUrl = smtpUrl;
+        warnIfCleartextCredentials(smtpUrl);
+    }
+
+    /**
+     * M9 review: {@code smtp+plain://user:pass@host} never requires TLS, so if the relay does not
+     * offer STARTTLS the AUTH exchange (the password) goes in cleartext. Allowed, for a trusted
+     * local relay, but said out loud once at construction. Never logs the user info.
+     */
+    private static void warnIfCleartextCredentials(String smtpUrl) {
+        if (smtpUrl == null) return;
+        try {
+            var url = new java.net.URI(smtpUrl);
+            if ("smtp+plain".equals(lowerScheme(url)) && url.getRawUserInfo() != null) {
+                Log.warn("Mailer: credentials are configured on an smtp+plain:// URL (host "
+                    + url.getHost() + "), which does not require TLS: if the relay does not offer "
+                    + "STARTTLS, the SMTP password is sent in cleartext. Use smtp:// (STARTTLS "
+                    + "required) or smtps:// unless the relay is local and trusted.");
+            }
+        } catch (java.net.URISyntaxException e) {
+            // Reported when a send parses it.
+        }
+    }
+
+    /** The URL scheme, lowercased: URI schemes are case-insensitive ({@code SMTPS://} is smtps). */
+    private static String lowerScheme(java.net.URI url) {
+        return url.getScheme() == null ? null : url.getScheme().toLowerCase(java.util.Locale.ROOT);
     }
 
     public Mailer from(String from) { this.defaultFrom = from; return this; }
@@ -133,7 +159,7 @@ public class Mailer {
             var url = new java.net.URI(smtpUrl);
             var host = url.getHost();
             var port = url.getPort() > 0 ? url.getPort() : 587;
-            var scheme = url.getScheme(); // "smtp" or "smtps"
+            var scheme = lowerScheme(url); // "smtp", "smtps" or "smtp+plain"
             String user = null;
             String pass = null;
             if (url.getUserInfo() != null) {
@@ -197,6 +223,8 @@ public class Mailer {
         var props = new Properties();
         props.put("mail.smtp.host", host);
         props.put("mail.smtp.port", String.valueOf(port));
+        // Case-insensitive (M9 review): `SMTPS://` used to land on the STARTTLS-required path.
+        scheme = scheme == null ? null : scheme.toLowerCase(java.util.Locale.ROOT);
 
         if ("smtps".equals(scheme)) {
             props.put("mail.smtp.ssl.enable", "true");

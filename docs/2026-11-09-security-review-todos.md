@@ -361,6 +361,9 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     builder flag).
   - **Tests.** The session properties for each scheme; the opt-out.
   - **Model: Sonnet 5.5.**
+  - **Review fixes** (`fix(security): M9 review fixes`). Credentials on an `smtp+plain://` URL
+    log one warning at construction (never the credentials); the scheme is compared
+    case-insensitively, so `SMTPS://` is implicit TLS.
 
 ## Low
 
