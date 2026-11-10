@@ -522,6 +522,12 @@ public class Cache {
             if (cached != null) return cached.toResult();
             var views = new ArrayList<View>();
             var result = View.recordingViews(views, () -> handler.apply(request));
+            if (result.status() < 200 || result.status() > 299) {
+                // L4: only a success is the page. An error, a redirect or a 304 depends on this
+                // request (a query param the key ignores, a missing record, a login bounce), and
+                // storing it would replay it to every visitor for the TTL. Served uncached, as is.
+                return result;
+            }
             var rendered = RenderedResponse.from(result);
             if (!views.isEmpty() && View.sessionDerived(views, rendered.textForTokenScan())) {
                 // M1: this response carries one visitor's CSRF token and/or pending flash. Storing it
@@ -555,7 +561,29 @@ public class Cache {
             // framework drops on the way out, so it shares the GET's entry rather than storing a
             // second copy of the page.
             var method = request.method().equals("HEAD") ? "GET" : request.method();
-            return prefix + method + ":" + request.path() + queryKey(request);
+            return prefix + method + ":" + pathKey(request) + queryKey(request);
+        }
+
+        /**
+         * The path component of the key (L4): the matched route's pattern plus its decoded path
+         * parameters, in pattern order, each URL-encoded. Keying on the raw path made
+         * {@code /posts/hello} and {@code /posts/hell%6f} two entries for one page, so one route
+         * could mint unlimited entries. Encoding keeps it injective: no parameter value can spell
+         * a separator, another parameter or a query component, and the pattern itself names the
+         * route, so two routes never share a key. A request built by hand (no matched route)
+         * keys on its raw path, as before.
+         */
+        private static String pathKey(Request request) {
+            var route = request.route();
+            if (route == null) {
+                return "path:" + request.path();
+            }
+            var sb = new StringBuilder("route:").append(percentEncode(route.pattern()));
+            for (var name : route.paramNames()) {
+                var value = request.pathParam(name);
+                sb.append('/').append(value == null ? "" : percentEncode(value));
+            }
+            return sb.toString();
         }
 
         /**

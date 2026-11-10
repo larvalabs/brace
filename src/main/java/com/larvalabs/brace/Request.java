@@ -706,6 +706,13 @@ public class Request {
         this.rawQuery = rawQuery;
     }
 
+    /** The route this request matched, set by {@link BraceHandler}; null for a hand-built Request. */
+    private Route route;
+
+    Route route() { return route; }
+
+    void setRoute(Route route) { this.route = route; }
+
     /** Verified ops credential, attached by the ops routes' access requirement (H1). */
     private OpsToken.Claims opsClaims;
 

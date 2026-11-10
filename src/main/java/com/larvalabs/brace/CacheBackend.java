@@ -137,7 +137,16 @@ public interface CacheBackend {
         return new InMemoryBackend(maxEntries);
     }
 
+    /**
+     * Shared Postgres backend, capped at 100,000 value rows: past the cap, expired rows go first,
+     * then the rows that expire soonest (rows with no expiry last). Counters are not capped.
+     */
     static CacheBackend postgres(DatabaseFactory factory) {
         return new PostgresBackend(factory);
+    }
+
+    /** Shared Postgres backend with a custom value-row cap (see {@link #postgres(DatabaseFactory)}). */
+    static CacheBackend postgres(DatabaseFactory factory, int maxEntries) {
+        return new PostgresBackend(factory, maxEntries);
     }
 }

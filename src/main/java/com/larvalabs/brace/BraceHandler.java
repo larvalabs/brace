@@ -377,6 +377,9 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
             braceRequest = new Request(method, path, pathParams, queryParams, headers, bodySource, remoteAddr, trustedProxies);
             braceRequest.setRawQuery(rawQuery);
+            if (match != null) {
+                braceRequest.setRoute(match.route()); // the page cache keys on it (L4)
+            }
             if (storage != null) {
                 braceRequest.setStorage(storage);
             }

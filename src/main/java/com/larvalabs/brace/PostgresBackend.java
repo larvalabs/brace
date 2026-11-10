@@ -5,6 +5,8 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Shared {@link CacheBackend} over the {@code brace_cache} / {@code brace_cache_counters} tables
@@ -22,7 +24,19 @@ class PostgresBackend implements CacheBackend {
 
     private static final long SIZE_CACHE_NANOS = TimeUnit.SECONDS.toNanos(5);
 
+    /**
+     * Default cap on {@code brace_cache} value rows (L4). The in-memory backend has always capped
+     * its entries; this table had no bound, so anything that mints keys (a page-cached route with
+     * a free-form path parameter) grew it until the disk filled.
+     */
+    static final int DEFAULT_MAX_ENTRIES = 100_000;
+
     private final DatabaseFactory factory;
+    private final int maxEntries;
+    /** Inserts by this instance between two cap checks: a tenth of the cap, at most 1,000. */
+    private final int trimEvery;
+    private final AtomicInteger insertsSinceTrim = new AtomicInteger();
+    private final AtomicBoolean trimming = new AtomicBoolean();
 
     // size() is a count(*) the ops dashboard polls every few seconds; cache it briefly so repeated
     // dashboard renders don't each scan the table.
@@ -30,7 +44,16 @@ class PostgresBackend implements CacheBackend {
     private volatile long cachedSizeAt;
 
     PostgresBackend(DatabaseFactory factory) {
+        this(factory, DEFAULT_MAX_ENTRIES);
+    }
+
+    PostgresBackend(DatabaseFactory factory, int maxEntries) {
+        if (maxEntries < 1) {
+            throw new IllegalArgumentException("maxEntries must be at least 1, got " + maxEntries);
+        }
         this.factory = factory;
+        this.maxEntries = maxEntries;
+        this.trimEvery = Math.max(1, Math.min(1_000, maxEntries / 10));
     }
 
     @Override
@@ -79,6 +102,51 @@ class PostgresBackend implements CacheBackend {
                 ps.executeUpdate();
             }
             return null;
+        });
+        if (insertsSinceTrim.incrementAndGet() >= trimEvery && trimming.compareAndSet(false, true)) {
+            try {
+                insertsSinceTrim.set(0);
+                trimToCap();
+            } catch (RuntimeException e) {
+                // The value is stored; a failed trim is retried on the next check or sweep.
+                Log.debug("cache: trimming brace_cache to its cap failed: " + e.getMessage());
+            } finally {
+                trimming.set(false);
+            }
+        }
+    }
+
+    /**
+     * Hold {@code brace_cache} to {@link #maxEntries} value rows (L4): drop expired rows, then, if
+     * still over, the rows that expire soonest (rows with no expiry last). Checked every
+     * {@link #trimEvery} inserts by this instance and on every {@link #evictExpired()} sweep, so
+     * the table can overshoot by about one check interval per instance between checks. Uses the
+     * existing {@code expires_at} index; no schema change.
+     *
+     * @return rows removed
+     */
+    long trimToCap() {
+        return run(conn -> {
+            long removed;
+            try (var ps = conn.prepareStatement(
+                    "DELETE FROM brace_cache WHERE expires_at IS NOT NULL AND expires_at < now()")) {
+                removed = ps.executeUpdate();
+            }
+            long count;
+            try (var ps = conn.prepareStatement("SELECT count(*) FROM brace_cache");
+                 var rs = ps.executeQuery()) {
+                rs.next();
+                count = rs.getLong(1);
+            }
+            if (count > maxEntries) {
+                try (var ps = conn.prepareStatement(
+                        "DELETE FROM brace_cache WHERE cache_key IN (" +
+                        "SELECT cache_key FROM brace_cache ORDER BY expires_at ASC NULLS LAST LIMIT ?)")) {
+                    ps.setLong(1, count - maxEntries);
+                    removed += ps.executeUpdate();
+                }
+            }
+            return removed;
         });
     }
 
@@ -180,12 +248,9 @@ class PostgresBackend implements CacheBackend {
 
     @Override
     public long evictExpired() {
-        return run(conn -> {
-            try (var ps = conn.prepareStatement(
-                    "DELETE FROM brace_cache WHERE expires_at IS NOT NULL AND expires_at < now()")) {
-                return (long) ps.executeUpdate();
-            }
-        });
+        // Expired rows, then the cap (L4): the sweep is the backstop for instances that insert
+        // fewer than trimEvery rows between sweeps.
+        return trimToCap();
     }
 
     /** Run one statement in its own transaction, reusing the framework's session/tx plumbing. */

@@ -872,7 +872,14 @@ cache.clearTag("posts");  // invalidate all cached pages with this tag
 page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
 or the cache will serve the same entry for every value. Undeclared params never key the cache
 (so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
-entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
+entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size);
+the Postgres backend at 100,000 rows (expired first, then soonest-to-expire, rows without a TTL
+last; `CacheBackend.postgres(dbFactory, maxEntries)` to size).
+
+**Only 2xx responses are stored.** An error, a redirect or a 304 is served uncached, so one bad
+request can't pin it for everyone. The key is the matched **route pattern plus its decoded path
+parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method, the `HX-Request`
+variant and the declared `vary` params.
 
 **A cached page is shared by every visitor**, so it must not contain per-visitor content. A
 response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose

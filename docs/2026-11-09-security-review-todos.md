@@ -379,7 +379,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     only) and ignore the other; build the list from all field instances, in order.
   - **Model: Opus 5.5.**
 
-- [ ] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
+- [x] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
   - `RenderedResponse.from(result)` is stored regardless of status. The key ignores undeclared
     query params and headers, but the handler still receives them. The key uses the undecoded
     `request.path()`, so `/posts/hello` and `/posts/hell%6f` are separate entries for one page.
