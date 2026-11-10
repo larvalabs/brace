@@ -801,6 +801,58 @@ class BraceHtmlOutputTest {
         }
     }
 
+    // --- H1 review (F3): markup characters in script bodies ---
+    //
+    // A <script> inside <svg> is tokenized as markup, so `<img onerror=...>` in a JavaScript
+    // string there is a tag, and <img> ends the SVG. JTE's script escaping leaves '<' alone.
+
+    @Test
+    void dataInAScriptBodyCantStartMarkup() throws Exception {
+        for (String x : List.of("<img src=x onerror=alert(1)>", "</script><script>alert(1)</script>", "' onmouseover='alert(1) x='",
+                "\" onmouseover=\"alert(1)", "\\", "a<b>&c", "]]><img src=x onerror=alert(1)>", "&lt;img src=x onerror=alert(1)&gt;",
+                "&#39;;alert(1)//", "<!--<script>", "plain 1.5 (ok)")) {
+            String html = both("xssSvgScript", Map.of("x", x));
+            String all = BraceHtmlOutput.escapeScript(x), body = js(x);
+            // In SVG nothing that is syntax to an HTML parser is left: no < > & or quotes.
+            assertTrue(html.contains("<svg><script id=\"g1\">var a=\"" + all + "\";</script></svg><p id=\"p1\">" + text(x) + "</p>"), html);
+            assertTrue(html.contains("<![CDATA[ if (a < b) { var c = '" + all + "'; } ]]></script><text id=\"t2\">" + text(x) + "</text>"), html);
+            assertTrue(html.contains("<style id=\"g3\">a{color:" + BraceHtmlOutput.escapeCss(x) + "}</style>"), html);
+            // In HTML, JTE's escaping with < > & as \\uXXXX on top.
+            assertTrue(html.contains("<script id=\"h1\">var a = \"" + body + "\", t = `" + body + "`, r = /" + body + "/;</script>"), html);
+            assertTrue(html.contains("<script id=\"j1\" type=\"application/json\">{\"a\":\"" + body + "\"}</script>"), html);
+            assertFalse(body.contains("<") || body.contains(">") || body.contains("&"), body);
+            assertFalse(all.matches(".*[<>&\"'].*"), all);
+            assertTrue(html.contains("<p id=\"p2\">" + text(x) + "</p>"), html);
+            assertFalse(html.contains("<img"), html);
+            assertEquals(4, html.split("<script", -1).length - 1, html);
+        }
+        assertEquals("\\u003c\\/script\\u003e\\u0026amp;", js("</script>&amp;"));
+        // Valid JSON stays valid, and reads back as the data.
+        String x = "a<b>&c \"q\" \\ / \n é";
+        var m = Pattern.compile("type=\"application/json\">(.*?)</script>").matcher(both("xssSvgScript", Map.of("x", x)));
+        assertTrue(m.find());
+        assertEquals(x, Json.mapper().readTree(m.group(1)).get("a").asText());
+    }
+
+    @Test
+    void scriptsInForeignContentAreMarkup() {
+        // With a body (the '/' is part of the unquoted value): a script, escaped for markup too.
+        assertEquals("<svg><script href=/a.js/>a('\\u0027\\u003c\\u0026')</script><p>'&lt;&amp;</p>",
+            driven(Part.text("<svg><script href=/a.js/>a('"), Part.data("script", null, "'<&"), Part.text("')</script><p>"),
+                Part.data("p", null, "'<&"), Part.text("</p>")));
+        // "a<b" in it opens a tag, as it does in the browser: data in what is then an attribute
+        // value can't close it.
+        assertEquals("<svg><script>if (a<b) x = '\\u0027 onload=\\u0027alert(1)'></script></svg>",
+            driven(Part.text("<svg><script>if (a<b) x = '"), Part.data("script", null, "' onload='alert(1)"), Part.text("'></script></svg>")));
+        // CDATA is text: tags in it aren't tags, and "]]>" is all that ends it.
+        assertEquals("<svg><script><![CDATA[ a < b; s = '</script>'; t = \"\\u0022\\u003e\" ]]></script></svg><a href=\"" + BraceHtmlOutput.BLOCKED_URL + "\">",
+            driven(Part.text("<svg><script><![CDATA[ a < b; s = '</script>'; t = \""), Part.data("script", null, "\">"),
+                Part.text("\" ]]></script></svg><a href=\""), Part.data("a", "href", "javascript:alert(1)"), Part.text("\">")));
+        // In HTML the same body is raw text, and JTE's escaping (\\' for a quote) is kept.
+        assertEquals("<script>a('\\'\\u003c\\u0026\\u003e')</script>",
+            driven(Part.text("<script>a('"), Part.data("script", null, "'<&>"), Part.text("')</script>")));
+    }
+
     @Test
     void disagreementWithJteResolvesToTheStricterReading() {
         String blocked = BraceHtmlOutput.BLOCKED_URL;
@@ -860,11 +912,11 @@ class BraceHtmlOutputTest {
         return out.toString();
     }
 
-    /** JTE's escaping for a script body. */
+    /** JTE's escaping for a script body, with {@code < > &} as {@code \}{@code uXXXX} (H1 review, F3). */
     private static String js(String value) {
         var out = new gg.jte.output.StringOutput();
         gg.jte.html.escape.Escape.javaScriptBlock(value, out);
-        return out.toString();
+        return out.toString().replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026");
     }
 
     // --- helpers ---

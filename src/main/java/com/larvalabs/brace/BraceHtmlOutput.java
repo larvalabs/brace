@@ -703,10 +703,53 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
                 // L7: JTE HTML-escapes data in a <style> body, which keeps it in the element but not
                 // in its declaration. (The result is inert as body text too, if JTE alone says style.)
                 target.writeContent(escapeCss(value));
+            } else if (script) {
+                writeScriptData(value);
             } else {
-                super.writeUserContent(value); // JTE's escaping for a script body, or for body text
+                super.writeUserContent(value); // JTE's escaping for body text
             }
         }
+    }
+
+    /**
+     * Data in a script body, where JTE and the tokenizer agree that it is one (H1 review, F3).
+     *
+     * <p>In HTML content: JTE's script escaping, with {@code < > &} written as
+     * {@code \}{@code uXXXX} on top (JTE leaves them alone, and escapes nothing into them). In a
+     * JavaScript string, template literal or regex literal and in a JSON string that reads back
+     * as the same character; anywhere else in a script it is a syntax error, and data there was
+     * code already. It costs nothing in HTML, where a script body is raw text, and it is what
+     * keeps the data text if the browser is tokenizing the body as markup after all.
+     *
+     * <p>In foreign content ({@code <svg><script>}) it is tokenized as markup: {@code <img} in a
+     * string is a tag, a character reference is decoded, and after a {@code <} the template wrote
+     * ({@code if (a<b)}) a quote ends an attribute value. So everything that is syntax to either
+     * parser goes: {@link #escapeScript}, which leaves no {@code < > & " '} at all.
+     */
+    private void writeScriptData(String value) {
+        if (!inRawText()) {
+            target.writeContent(escapeScript(value));
+            return;
+        }
+        int i = 0, n = value.length();
+        while (i < n && !isMarkup(value.charAt(i))) i++;
+        if (i == n) {
+            Escape.javaScriptBlock(value, target);
+            return;
+        }
+        var escaped = new StringBuilder(n + 32);
+        Escape.javaScriptBlock(value, new Appender(escaped));
+        var out = new StringBuilder(escaped.length() + 16);
+        for (i = 0; i < escaped.length(); i++) {
+            char c = escaped.charAt(i);
+            if (isMarkup(c)) out.append(c == '<' ? "\\u003c" : c == '>' ? "\\u003e" : "\\u0026");
+            else out.append(c);
+        }
+        target.writeContent(out.toString());
+    }
+
+    private static boolean isMarkup(char c) {
+        return c == '<' || c == '>' || c == '&';
     }
 
     /**
