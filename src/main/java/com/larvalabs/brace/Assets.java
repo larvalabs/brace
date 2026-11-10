@@ -19,6 +19,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * Initialized automatically by {@link Brace#start()} from the registered
  * {@code app.staticFiles(...)} mappings.
+ *
+ * <p>This class only builds URLs; it never serves bytes. A file in a mapping with access
+ * requirements is fingerprinted like any other, but its response stays
+ * {@code private, no-cache}: the {@code ?v=} earns no long-lived caching there (M3).
  */
 public class Assets {
 
@@ -106,6 +110,9 @@ public class Assets {
         for (var mapping : mappings) {
             var prefix = mapping.prefix();
             if (!urlPath.startsWith(prefix)) continue;
+            // Segment boundary (M1): same rule as the static-file handler.
+            if (urlPath.length() > prefix.length() && !prefix.endsWith("/")
+                    && urlPath.charAt(prefix.length()) != '/') continue;
             var relative = urlPath.substring(prefix.length());
             if (relative.startsWith("/")) relative = relative.substring(1);
             if (relative.isEmpty() || relative.contains("..")) return null;

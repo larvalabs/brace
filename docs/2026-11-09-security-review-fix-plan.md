@@ -184,4 +184,199 @@ Collected for the migration guide.
 | Projects pinned below `0.1.11` need an override to use the launcher | D5 | Upgrade the pin |
 | Unknown `scope:` fails startup; `opsOrigins` required outside dev | D6 | Fix the key file; set `BRACE_OPS_ORIGINS` |
 | A percent-encoded unreserved character in a static path is a 404 | M2 | None expected; browsers don't send these |
+| A static file requested with a trailing slash or an empty segment is a 404 | M2 review | None expected; link to the file's own URL |
 | Page cache stores only 2xx | L4 | None expected |
+| A static mapping answers 405 to methods other than GET and HEAD, and never serves a path a route pattern matches | M3 review | Serve anything that takes another method from a route |
+| A static mapping's directory must exist at `start()` | M3 review | Create it at deploy time or before `start()` |
+| Mappings on overlapping directories need the same access; a prefix is registered once | M3 review | Separate the directories, or pass the same `Access` objects |
+| Under a guarded mapping, and on any access rejection, caching headers from the app are replaced (`private, no-cache` for the file, `no-store` otherwise) | M3 review | None expected |
+| `Result` header names are case-insensitive; `headers()` iterates in name order | M3 review | None expected; don't rely on two spellings being two headers |
+| A response carrying the session cookie gets `private` added to an explicit `Cache-Control` without `private`/`no-store` | M3 review | None expected |
+
+## M3 design: static mapping access
+
+Written before the M3 code, per the Track C table. It extends the route access model
+([H1 design](2026-10-26-security-review-fix-plan.md#h1-design-the-route-access-model)) to
+`staticFiles` mappings, per decision D1.
+
+### The rule
+
+Every static mapping carries either a list of access requirements or an explicit public marker,
+attached to the mapping object. `start()` (and so `Brace.test()`) refuses to run while a mapping
+has neither. No mapping is public unless the code says so.
+
+### API
+
+`staticFiles(...)` returns a `StaticFilesConfig` in place of the `Brace` it returned before. It
+has two methods, and each returns the `Brace`, so a builder chain continues after the declaration:
+
+```java
+app.staticFiles("/assets", "public").publicFiles();                    // served to everyone
+
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));                        // logged-in users only
+
+app.staticFiles("/reports", "/var/app/reports")
+   .access(Access.session("userId", "/login"), Access.check(Reports::canRead));   // all must pass
+```
+
+- `.publicFiles()` reads like `.publicRoute()`; `.access(Access, Access...)` reads like a
+  route's `.access(...)`, and takes any `Access` a route takes (`session`, `check`,
+  `checkRequest`).
+- Returning a config changes the type of an existing chain
+  (`Brace.app().staticFiles(...).port(...)`), so most callers get a compile error at the exact
+  line that needs the declaration. A call whose return value is dropped still compiles; the
+  startup check catches that one.
+- `StaticFiles.UNTRUSTED` is unchanged and orthogonal: the mode decides how a file is served
+  (type allowlist, attachment, sandbox), the access decides who gets it. Any combination works.
+
+### Resolution, and how `defaultAccess` relates
+
+**`defaultAccess(...)` does not apply to static mappings.** A mapping's effective list is
+exactly what its `.access(...)` call declared. Reasons:
+
+1. Inheriting the default would silently put the login in front of the stylesheet, scripts and
+   images of the login page itself in every app that has one. The failure is a broken page with
+   no error, not a startup refusal.
+2. Defaulting to public is the bug being fixed.
+3. So neither default is safe, and the route model's answer to "no safe default" is a startup
+   refusal that names the two choices. It costs one method call per mapping, and an app has one
+   or two mappings.
+
+Consequences of "exactly what was declared":
+
+- `Access.none()` is rejected in `.access(...)` (as on a route): the public marker is
+  `.publicFiles()`. `defaultAccess(Access.none())` does not make a mapping public either.
+- `Access.insteadOfDefault(x)` is accepted and means `x`: there is no default to replace.
+- Calling both `.publicFiles()` and `.access(...)` on one mapping throws at the call.
+- A session-reading requirement without `.sessions(...)` fails `start()`, as for routes.
+- The framework test suite's fallback default (`frameworkTestDefaultAccess`) does not cover
+  mappings either: every test declares its mapping.
+
+The startup error:
+
+```
+IllegalStateException: 1 static mapping has no access declaration:
+  /uploads  ->  /var/app/uploads
+Say who may fetch each one: app.staticFiles(...).publicFiles() serves it to everyone,
+app.staticFiles(...).access(Access.session("userId", "/login")) guards it. defaultAccess(...)
+does not apply to static mappings.
+```
+
+**Overlapping directories need the same access.** `start()` refuses two mappings whose
+directories overlap (one contains, or is contained in, the other; compared as written and with
+symlinks resolved, like the existing trusted/untrusted check) unless both are public or both
+list the same requirements: the files would be reachable around the stricter guard through the
+other prefix. The first version of this check covered only guarded-versus-public; the review
+found that `/admin-files` (login + admin) and `/files` (login) on one directory started fine.
+Requirements are compared by identity (`Access` has no equality), so two
+`Access.session("userId", "/login")` calls count as different: the fail-closed reading.
+
+**A mapping's directory must exist at `start()`.** The overlap check reads the filesystem once.
+A directory missing at start could be created later as a symlink into another mapping's tree,
+or as a case-variant sibling (`data/Private` beside `data/private`) on a case-insensitive
+volume. As a second line, at serve time a mapping answers 404 for a file whose real path is
+inside the directory of a mapping with different access; that covers a directory replaced by a
+symlink after startup. A symlink created later from inside one mapping's directory into
+another's was already a 404: the real path is outside the serving mapping's own directory.
+
+**A URL prefix is registered once.** `staticFiles` throws on a duplicate (`/files` and
+`/files/` are the same prefix): the second was silently dead.
+
+### Where it runs in a request
+
+```
+no route matched this method and path, a mapping's prefix covers the path
+  → plain before()                         unchanged; rate limiters shed load first
+  → the mapping's access requirements      one Session, built on first session-reading requirement
+  → session-aware before()                 gets that same Session instance
+  → a route pattern matches the path       405, Allow: that route's methods (review fix)
+    under another method
+  → method is not GET or HEAD              405, Allow: GET, HEAD (review fix)
+  → file lookup and response
+```
+
+- The mapping is chosen once, by the M1 prefix rule (longest prefix, segment boundary), and the
+  requirements run against that mapping object, before any decoding or filesystem access. Every
+  spelling that can reach the mapping's files passes through its guard; M1 and M2 already turn
+  the other spellings into 404s.
+- A rejection is sent before the file is looked up, so it is the same response for a file that
+  exists, one that doesn't, a dotfile and a non-canonical spelling. Only a request that passed
+  the guard can learn whether a file exists.
+- A route still wins over a mapping for the same path, and carries its own access. Review fix:
+  that has to hold for every method, not only the route's. The router matches on method and
+  path, so `POST /docs/payroll.pdf` found no route when only `GET` was registered, fell through
+  to the mapping, and was served the file under the mapping's weaker access. Now the mapping
+  never serves a path that any route pattern matches (`Router.methodsMatching`), and serves
+  only `GET` and `HEAD` anywhere. Both 405s come after the mapping's access, so an anonymous
+  caller gets the same rejection as for any other path under the mapping and learns nothing
+  about the route or the file. A caller who passes the mapping's access learns from `Allow`
+  which methods the route has, which it could already learn by trying them. The route's own
+  access is not evaluated for the 405: several routes with different access can share the
+  path, and nothing of theirs is served.
+- The router had no 404-versus-405 distinction to reuse (`noRouteFound` only adds dev-mode
+  suggestions to a 404), and a path outside every mapping that matches a route only under
+  another method is still a 404. Changing that app-wide is a separate decision.
+- `start()` warns, once per mapping, when routes are registered under its prefix (not for a
+  mapping at `/`, which every route is under). It does not refuse: a route over a mapped file
+  is the documented way to decide per file.
+- The bundled `/__brace/*` assets and `/__brace/health` are not mappings: they stay public and
+  need no declaration, also when a mapping is registered at `/`.
+
+### Caching
+
+- A public mapping keeps today's headers (`public, max-age=0, must-revalidate`; `public,
+  max-age=31536000, immutable` for a current `?v=` fingerprint).
+- A guarded mapping sends `Cache-Control: private, no-cache`: the browser may keep the file but
+  revalidates on every use, and the revalidation runs the guard, so a file is not shown from
+  cache after logout. A `?v=` fingerprint earns no `immutable` here. `ETag`/`Last-Modified`,
+  conditional requests and `Range` work as before.
+- That is enforced at the response choke point, after after-middleware. The first version
+  rewrote `public` to `private` in `Cache-Control`; the review showed that was not enough
+  (`s-maxage`, a bare `max-age`, `Expires`, `CDN-Cache-Control` and `Surrogate-Control` passed,
+  a lowercase `cache-control` was not found at all, and with no after-middleware the 404, 416
+  and rejection carried no `Cache-Control`). Now, for every response under a guarded mapping,
+  `Cache-Control`, `Expires`, `Pragma`, `CDN-Cache-Control`, `Surrogate-Control`,
+  `Cloudflare-CDN-Cache-Control` and `Vercel-CDN-Cache-Control` are removed in any letter case
+  and one `Cache-Control` is set: `private, no-cache` for the file (200, 206, 304), `no-store`
+  for everything else (rejection, 404, 405, 416, a `before()` short-circuit, an error).
+- An access rejection on a route gets the same treatment (`no-store`, plus
+  `Vary: Accept, HX-Request`): a cached login redirect would be served to logged-in users.
+  Successful responses on guarded routes are left to the app; dev mode warns once per route
+  when one is sent `public` or `s-maxage`.
+- `Result` header names are case-insensitive (the class of bug behind the lowercase miss), and
+  a response carrying the session cookie gets `private` added unless it already says `private`
+  or `no-store`, so the cookie never rides `max-age` or `s-maxage` alone either.
+
+### `Assets`
+
+`Assets.url(...)` keeps fingerprinting files in any mapping. For a guarded mapping the `?v=` is
+harmless but buys no long-lived caching. `Assets` only ever returns a URL with a short content
+hash; it serves no bytes.
+
+### Visibility
+
+- **Startup banner:** a `static (n)` block after the routes, one line per mapping: prefix,
+  access (`public` or the requirement labels joined with ` + `), and `untrusted` for that mode.
+- **`/ops/routes`:** one entry per mapping, `{"method":"STATIC","pattern":"/uploads/*",
+  "access":"session:userId"}`, plus `"mode":"untrusted"` where it applies.
+- **`brace check`:** unchanged, as for routes: it probes a running server, and an app that
+  breaks the rule cannot start.
+
+### Tests
+
+`StaticMappingAccessTest`: startup refusal (plain `start()` and `Brace.test()`), both markers
+together, `Access.none()`, session requirement without sessions, guarded/public directory
+overlap; anonymous rejected and authenticated served; the M1/M2 variants never return 200;
+rejection identical for existing and missing files; cache headers for guarded and public
+mappings, including under a `public` after-middleware; UNTRUSTED plus access; `/ops/routes` and
+the banner; `/__brace/*` served with no declaration.
+
+`StaticMappingReviewFixesTest` (review fixes), over raw sockets: POST, OPTIONS, QUERY, PUT,
+DELETE and PATCH on a guarded and a public mapping, with and without a route at the path; the
+405 and its `Allow`; the uniform rejection for anonymous requests whatever the method; cache
+headers on the 200, 206, 304, 404, 405, 416 and the rejection under an after-middleware that
+sets every caching header in mixed case, and with no after-middleware; a session cookie under a
+lowercase `cache-control: public`; route rejections `no-store` with `Vary`; the dev-mode
+warning; the startup refusals (different access on one directory, missing directory, duplicate
+prefix) and the startup warning; a directory relinked after start.

@@ -31,7 +31,7 @@ class ServerDisclosureTest {
     static void startApp() throws Exception {
         assetDir = Files.createTempDirectory("brace-l1-assets");
         Files.writeString(assetDir.resolve("plain.css"), "body{}");
-        app = Brace.app().port(0).staticFiles("/assets", assetDir.toString());
+        app = Brace.app().port(0).staticFiles("/assets", assetDir.toString()).publicFiles();
         app.get("/hello", req -> Result.text("hi"));
         app.start();
         port = app.actualPort();

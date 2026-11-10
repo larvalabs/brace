@@ -45,21 +45,31 @@ class InMemoryBackend implements CacheBackend {
 
     /**
      * Entry-count safety net (perf review H8), not an LRU: before inserting a NEW key into a full
-     * store, drop expired entries, then — still full — arbitrary ones ({@code ConcurrentHashMap}
-     * iteration order), until there's room. Sized so a runaway keyspace degrades the hit rate
-     * instead of exhausting the heap. The bound is approximate under concurrent inserts (racing
-     * writers may briefly overshoot by a few entries); counters and the tag index are not capped.
+     * store, drop expired entries, then — still full — page-cache entries ({@link Cache#isPageKey}),
+     * and only then arbitrary ones ({@code ConcurrentHashMap} iteration order), until there's room.
+     * Page entries go first (L4 review F5): a client can mint them cheaply (any {@code vary} value
+     * or path parameter), and they must never push out the app's own entries. Sized so a runaway
+     * keyspace degrades the hit rate instead of exhausting the heap. The bound is approximate under
+     * concurrent inserts (racing writers may briefly overshoot by a few entries); counters and the
+     * tag index are not capped.
      */
-    private void ensureCapacity(String newKey) {
+    private boolean ensureCapacity(String newKey) {
         if (store.size() < maxEntries || store.containsKey(newKey)) {
-            return;
+            return true;
         }
         sweepExpired();
-        var it = store.keySet().iterator();
-        while (store.size() >= maxEntries && it.hasNext()) {
-            remove(it.next());
-            capacityEvictions.incrementAndGet();
+        // A new page entry may only displace other page entries; with none left it is not stored.
+        boolean newPage = Cache.isPageKey(newKey);
+        for (boolean pagesOnly : newPage ? new boolean[]{true} : new boolean[]{true, false}) {
+            var it = store.keySet().iterator();
+            while (store.size() >= maxEntries && it.hasNext()) {
+                var key = it.next();
+                if (pagesOnly && !Cache.isPageKey(key)) continue;
+                remove(key);
+                capacityEvictions.incrementAndGet();
+            }
         }
+        return !newPage || store.size() < maxEntries;
     }
 
     @Override
@@ -80,7 +90,9 @@ class InMemoryBackend implements CacheBackend {
 
     @Override
     public void setObject(String key, Object value, Duration ttl, String[] tags) {
-        ensureCapacity(key);
+        if (!ensureCapacity(key)) {
+            return; // a page entry into a store full of the app's own entries: not cached (L4 review F5)
+        }
         var expiry = ttl == null ? null : Instant.now().plus(ttl);
         store.put(key, new Entry(value, expiry, tags));
         for (var tag : tags) {
@@ -128,8 +140,9 @@ class InMemoryBackend implements CacheBackend {
             }
             var expiry = ttl == null ? null : Instant.now().plus(ttl);
             var entry = new Entry(supplier.get(), expiry, new String[0]);
-            ensureCapacity(key);
-            store.put(key, entry);
+            if (ensureCapacity(key)) {
+                store.put(key, entry);
+            }
             myFuture.complete(entry);
             return new Computed(entry.value(), false);
         } catch (RuntimeException | Error e) {

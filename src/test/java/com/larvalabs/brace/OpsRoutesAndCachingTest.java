@@ -40,7 +40,7 @@ class OpsRoutesAndCachingTest {
 
         app = Brace.app().port(0).banner(false).ops(keys.toString())
             .sessions("ops-routes-caching-test-secret-0123456789")
-            .staticFiles("/assets", assets.toString());
+            .staticFiles("/assets", assets.toString()).publicFiles();
         // An app that marks everything publicly cacheable.
         app.after((req, res) -> res.header("Cache-Control", "public, max-age=300"));
         // A session-touching middleware: every response carries the session cookie.

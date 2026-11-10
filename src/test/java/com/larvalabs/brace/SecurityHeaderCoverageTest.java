@@ -27,7 +27,7 @@ class SecurityHeaderCoverageTest {
 
         app = Brace.app().port(0)
             .maxUploadSize(1024)
-            .staticFiles("/assets", assets.toString())
+            .staticFiles("/assets", assets.toString()).publicFiles()
             .sessions("header-coverage-secret-at-least-32-chars");
         app.after(SecurityHeaders.defaults());
         // Scoped after-middleware must stay scoped — the fix must not make everything global.

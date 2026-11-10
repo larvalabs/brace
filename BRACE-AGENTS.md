@@ -85,7 +85,7 @@ var app = Brace.app()
     .storage(Storage.s3(config))
     .ops("ops-authorized-keys")
     .opsOrigins(config.get("ops.origins"))           // the app's public origin: required in prod with ops
-    .staticFiles("/assets", "public")
+    .staticFiles("/assets", "public").publicFiles()   // a mapping must say .publicFiles() or .access(...)
     .maxUploadSize("10MB")
     .after(SecurityHeaders.strict());
 ```
@@ -233,6 +233,37 @@ app.postDb("/billing/refund", billing::refund)
 - `/ops/*` has its own credential; the app default never applies there. The startup banner and
   `/ops/routes` show each route's access.
 
+**Static mappings need a declaration too.** `staticFiles(...)` returns a config, and `start()`
+refuses a mapping that says neither of these:
+
+```java
+app.staticFiles("/assets", "public").publicFiles();                 // everyone (CSS, JS, images)
+app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));                     // all listed requirements must pass
+```
+
+- `defaultAccess(...)` does **not** apply to mappings (not `Access.none()` either): a mapping's
+  access is exactly what `.access(...)` lists. Both methods return the app, so a builder chain
+  continues.
+- The requirements are bound to the mapping and run before the file is looked up, for every
+  method, at the same point as a route's, with the same `Session`. A rejection looks the same
+  whether or not the file exists. A served file is `Cache-Control: private, no-cache`; every
+  other response under a guarded mapping (rejection, 404, 405) is `no-store`, and caching
+  headers set by an `after(...)` are removed there.
+- A mapping serves `GET`/`HEAD` only; other methods get `405`. A route registered under a
+  mapping's prefix owns its path: the mapping never serves it, under any method (`start()`
+  logs a warning listing such routes).
+- `start()` throws if a mapping's directory doesn't exist, or if two mappings' directories
+  overlap (same, nested, or via a symlink) with different access: pass the same `Access`
+  objects to both if they should match. Registering the same prefix twice throws.
+  `/__brace/*` assets are always public. The banner and `/ops/routes` (`STATIC`) list mappings.
+- An access rejection (route or mapping) is always sent `Cache-Control: no-store` with
+  `Vary: Accept, HX-Request`. In dev mode a guarded route answering `Cache-Control: public` or
+  `s-maxage` logs a warning once.
+- A mapping answers "may this user fetch from this directory". For a per-file check (the
+  file's owner), serve from a route: `db.findOwnedOr404(...)`, then `Result.fileUnder(dir, name)`
+  (add `.untrusted()` for uploads).
+
 This is route-level access — whether a user may call the endpoint. Whether they may touch a
 particular row (`/posts/{id}/edit` for someone else's post) is still the handler's check.
 
@@ -340,7 +371,8 @@ path written. `saveTo(Path)` takes a full path and does no checking. `contentTyp
 uploader's claim; never serve or store by it.
 
 **Serving uploads:** an uploaded `.html`/`.svg` served inline runs script on your origin. Serve
-upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED)` and handler
+upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED).access(...)` (or
+`.publicFiles()` if anyone may fetch them; see Access) and handler
 responses with `.untrusted()` (`Result.fileUnder(dir, name).untrusted()`). Untrusted responses get
 an allowlisted type (else `application/octet-stream`), `Content-Disposition: attachment` unless a
 raster image (png/jpeg/gif/webp/avif/bmp/ico; not svg), and always `CSP: sandbox` + `nosniff`,
@@ -441,7 +473,11 @@ result.cookie("t", "v", 3600, true, true, "Lax", "/admin")  // ...plus an explic
 
 `Set-Cookie` is the one repeatable header: multiple `result.cookie(...)` calls all reach the
 wire (and your app cookies are never clobbered by the framework session cookie). Every other
-header is single-value — setting it again replaces the prior value.
+header is single-value — setting it again replaces the prior value. Header names are
+case-insensitive: `result.header("cache-control", ...)` replaces `Cache-Control`, and
+`result.header("Cache-Control")` reads either spelling. A response that carries the session
+cookie is always sent `Cache-Control: private` (added to whatever the handler set, unless it
+already says `private` or `no-store`).
 
 Note: `Json.of()`, `View.of()`, and `Redirect.to()` still work (called by the `Result.*` methods).
 
@@ -648,6 +684,10 @@ if (jf.hasErrors()) return Result.json(Map.of("errors", jf.allErrors()), 422);
 ```
 
 `Form` methods: `hasErrors()`, `value()`, `errors()`, `allErrors()`, `errors(field)`, `raw(field)`.
+
+**Where `req.form` reads from:** on `POST`/`PUT`/`PATCH`/`DELETE`, the body only (the same
+source as `req.formParam`); a query-string value never fills a missing body field. On `GET`/`HEAD`
+(search and filter forms) it binds from the query string.
 
 **JSON APIs use the same pipeline** via `req.jsonForm(Class)` — never hand-roll per-field
 null checks or wrap `bodyAs` in try/catch. It binds the JSON body to the record, runs the
@@ -858,8 +898,31 @@ cache.clearTag("posts");  // invalidate all cached pages with this tag
 **Query params are ignored by default** — a cached route serves one entry per path. If the
 page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
 or the cache will serve the same entry for every value. Undeclared params never key the cache
-(so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
-entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
+(so `?utm_source=...` junk can't mint entries). A param given twice (`?t=a&t=b`) keys on all its
+values. Headers key the cache only when declared: `.varyHeader("Accept-Language")`. A request
+carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or
+`HX-Prompt` bypasses the cache (served by the handler, nothing stored) unless that header is
+declared with `.varyHeader(...)`. A response that sets a cookie is never stored (and keeps its
+`Set-Cookie`).
+
+**A cached handler must depend only on its route's path parameters and its declared `vary` /
+`varyHeader` values.** Reading anything else through `Request` (another query param, `req.url()`,
+a header, a cookie, `req.ip()`, the body) means the page stored for one visitor is served to the
+next whatever they send; in dev mode Brace logs this once per route, and under `Brace.test()` the
+request fails with an `IllegalStateException`, so a test catches it.
+
+Page-cache entries (keys starting `brace:page:`; don't use that prefix for your own keys) never
+push out your own entries. The in-memory backend is capped at 10,000 entries (expired first, then
+page entries, then arbitrary ones; a new page entry only displaces another page entry;
+`CacheBackend.inMemory(maxEntries)` to size). The Postgres backend is capped at 100,000 rows, of
+which at most 10,000 page rows (expired first, then page rows, then soonest-to-expire, rows
+without a TTL last; `CacheBackend.postgres(dbFactory, maxEntries)` or
+`CacheBackend.postgres(dbFactory, maxEntries, maxPageEntries)` to size).
+
+**Only 2xx responses are stored.** An error, a redirect or a 304 is served uncached, so one bad
+request can't pin it for everyone. The key is the matched **route pattern plus its decoded path
+parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method, the `HX-Request`
+variant, and the declared `vary` params and `varyHeader` headers.
 
 **A cached page is shared by every visitor**, so it must not contain per-visitor content. A
 response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose
@@ -1041,9 +1104,11 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 
 ## Asset Fingerprinting
 
-`staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
+Every mapping ends in `.publicFiles()` or `.access(...)` (see Access); the examples here are
+public assets. `staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
 serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
-leading `.well-known/`. The longest matching prefix wins. For a directory users write to, use
+leading `.well-known/`. The longest matching prefix wins. The directory must exist at `start()`,
+and only `GET`/`HEAD` are served (other methods: `405`). For a directory users write to, use
 `staticFiles(prefix, dir, StaticFiles.UNTRUSTED)` (see Serving uploads); it must not be inside
 a trusted mapping's directory, or `staticFiles` throws.
 
@@ -1052,7 +1117,8 @@ Cache-bust static assets by appending a content-hash query parameter — in a JT
 `"/assets/app.css?v=a1b2c3d4"`. The hash is the first 8 hex chars of MD5 of the file
 contents, cached per `(path, mtime)`. Unknown URLs (no matching `staticFiles` mapping,
 missing file, or path traversal) return unchanged. Pair with long `Cache-Control: max-age`
-so redeploys with unchanged files don't invalidate browser/CDN caches.
+so redeploys with unchanged files don't invalidate browser/CDN caches. In a mapping with
+`.access(...)` the URL still gets its `?v=`, but the file stays `private, no-cache`.
 
 ## HTTP Client
 
@@ -1171,6 +1237,8 @@ app.ws("/status", ctx -> new StatusHandler(ctx)).publicRoute();
 
 The upgrade runs plain `before(...)` middleware, the Origin check, then the route's access
 requirements (see Access); any rejection declines the handshake (a login redirect becomes 401).
+The path is a literal: only a request for exactly that path upgrades (`/x/../chat`, `/%63hat`
+and `/chat;x` get 404).
 The socket's `session()` is the session the requirements read. Joining a room is still an
 authorization decision: check the user may see a room before `ctx.join(room)`.
 
@@ -1213,8 +1281,33 @@ app.get("/feed", req -> Result.sse(events -> {
 
 ```java
 app.before("/api/*", RateLimiter.perIp(100, "1m"));
-app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
+
+// Login attempts per account: count the POST only, normalize the identity
+var loginLimit = RateLimiter.perKey(req -> {
+    var email = req.formParam("email");
+    return email == null ? null : email.strip().toLowerCase(Locale.ROOT);
+}, 5, "15m");
+app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
 ```
+
+**A null or blank key is limited, not skipped:** a request without a key is counted in a
+missing-key bucket for its client IP (an IPv6 /64), with the limiter's limit and window, so
+leaving the key out is not a bypass and one client's keyless requests never lock out another.
+That is why the login limiter above runs only for the POST: on `GET /login` (no email) every page
+view would use up one of that visitor's `limit` keyless requests (dev mode warns once when a key
+limiter counts a keyless GET or HEAD). Opt out only where requests without a key are bounded some
+other way:
+`RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h").exemptMissingKey()` behind a
+`perIp` limiter. Keys are stripped of surrounding whitespace but **not case-folded** (tokens are
+case-sensitive): lower-case usernames and emails in the extractor. Key on what the handler uses:
+`formParam` and, on POST/PUT/PATCH/DELETE, `req.form` read the body only.
+
+`perIp` keys an IPv6 client on its /64 (one site rotating addresses is one client); IPv4 on the full
+address. Each limiter tracks at most 100,000 distinct keys at a time; at the cap a new key replaces
+the least recently used key that is under its limit, keys at their limit are kept until their
+windows end, and only when nothing can be replaced does a new key fall back to an overflow bucket
+per client IP. Change the cap per limiter with `.maxKeys(n)` on `perIp(...)` or `perKey(...)`. On
+Postgres, two limiters with the same type, limit and window share their buckets.
 
 **Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see `BRACE-OPS.md` → "Scaling horizontally" and [`docs/scaling.md`](docs/scaling.md).
 
@@ -1243,7 +1336,7 @@ app Dokploy routes joins that network, so on a host shared with apps you don't t
 Traefik's own (fixed) address instead. The scaffold reads the value from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
 without being trusted, Brace logs a one-time warning naming its address.
 
-Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
+Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries (or lines), Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples. Exactly one forwarding header is read: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` with `app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader())`; the other is ignored, so a client can't supply its address in the header your proxy doesn't overwrite (a trusted proxy sending only the other one gets a one-time warning). `req.ip()` is always an IP literal: an entry that isn't one (`unknown`, `_hidden`) falls back to the socket address. `X-Forwarded-Proto` and `X-Forwarded-Host` use their **rightmost** entry across all lines, so the proxy must set (overwrite) them, not pass a client's through. An IPv4 CIDR also matches the IPv4-mapped form (`::ffff:10.1.2.3`); list `::1` separately from `127.0.0.1`. A direct IPv6 client's `req.ip()` has no brackets (`0:0:0:0:0:0:0:1`).
 
 For apps behind Cloudflare, `TrustedProxies.cloudflare()` is pre-loaded with Cloudflare's published egress ranges:
 

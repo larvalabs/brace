@@ -22,7 +22,7 @@ class AssetsTest {
         var subDir = Files.createDirectory(tempDir.resolve("sub"));
         Files.writeString(subDir.resolve("nested.css"), ".x { }");
 
-        app = Brace.app().port(0).staticFiles("/assets", tempDir.toString());
+        app = Brace.app().port(0).staticFiles("/assets", tempDir.toString()).publicFiles();
         app.start();
     }
 
@@ -90,6 +90,13 @@ class AssetsTest {
     void urlOutsideStaticPrefixReturnsUnchanged() {
         var url = Assets.url("/some/other/path.css");
         assertEquals("/some/other/path.css", url);
+    }
+
+    @Test
+    void prefixWithoutSegmentBoundaryReturnsUnchanged() {
+        // M1: "/assetsapp.css" is not under "/assets"
+        assertEquals("/assetsapp.css", Assets.url("/assetsapp.css"));
+        assertEquals("/assetssub/nested.css", Assets.url("/assetssub/nested.css"));
     }
 
     @Test

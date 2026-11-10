@@ -34,7 +34,9 @@ class UntrustedUploadServingTest {
         for (Path dir : new Path[] {uploads, assets}) {
             Files.writeString(dir.resolve("x.html"), SCRIPT_PAGE);
             Files.writeString(dir.resolve("x.svg"), SCRIPT_SVG);
-            Files.writeString(dir.resolve("X.SVG"), SCRIPT_SVG);
+            // Its own name, not "X.SVG": on a case-insensitive volume that is x.svg again, and
+            // since M2 a file is only served under its stored name.
+            Files.writeString(dir.resolve("Y.SVG"), SCRIPT_SVG);
             Files.writeString(dir.resolve("x.svg.png"), "not really a png");
             Files.writeString(dir.resolve("x.js"), "alert(1)");
             Files.writeString(dir.resolve("x.xml"), "<x/>");
@@ -47,8 +49,8 @@ class UntrustedUploadServingTest {
         // "/assets" first on purpose: the more specific "/assets/uploads" must still serve its
         // own directory (longest prefix wins), not 404 from the trusted one.
         app = Brace.test().start(a -> {
-            a.staticFiles("/assets", assets.toString())
-             .staticFiles("/assets/uploads", uploads.toString(), StaticFiles.UNTRUSTED);
+            a.staticFiles("/assets", assets.toString()).publicFiles()
+             .staticFiles("/assets/uploads", uploads.toString(), StaticFiles.UNTRUSTED).publicFiles();
             a.after(SecurityHeaders.builder().contentSecurityPolicy("default-src 'self'").build());
             a.get("/files/{name}", req -> Result.fileUnder(uploads, req.pathParam("name")).untrusted());
             a.get("/download/{name}", req ->
@@ -86,7 +88,7 @@ class UntrustedUploadServingTest {
 
     @Test
     void uploadedHtmlAndSvgAreSandboxedOctetStreamAttachments() {
-        for (String name : new String[] {"x.html", "x.svg", "X.SVG", "x.js", "x.xml", "noext"}) {
+        for (String name : new String[] {"x.html", "x.svg", "Y.SVG", "x.js", "x.xml", "noext"}) {
             String path = "/assets/uploads/" + name;
             var r = app.get(path);
             assertEquals(200, r.status(), path);
@@ -160,7 +162,7 @@ class UntrustedUploadServingTest {
         assertFalse(html.headers("Content-Security-Policy").contains("sandbox"));
 
         assertEquals("image/svg+xml", app.get("/assets/x.svg").header("Content-Type"));
-        assertEquals("image/svg+xml", app.get("/assets/X.SVG").header("Content-Type"));
+        assertEquals("image/svg+xml", app.get("/assets/Y.SVG").header("Content-Type"));
         assertEquals("text/javascript; charset=utf-8", app.get("/assets/x.js").header("Content-Type"));
         // Only the final extension decides the type, so a double extension is its last part.
         assertEquals("image/png", app.get("/assets/x.svg.png").header("Content-Type"));
@@ -242,15 +244,15 @@ class UntrustedUploadServingTest {
     void anUntrustedDirectoryInsideATrustedOneIsRefused(@TempDir Path root) throws Exception {
         Path inner = Files.createDirectories(root.resolve("uploads"));
         var e = assertThrows(IllegalArgumentException.class, () -> Brace.app()
-            .staticFiles("/assets", root.toString())
-            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED));
+            .staticFiles("/assets", root.toString()).publicFiles()
+            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED).publicFiles());
         assertTrue(e.getMessage().contains("overlaps"), e.getMessage());
         assertThrows(IllegalArgumentException.class, () -> Brace.app()
-            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED)
-            .staticFiles("/assets", root.toString()));
+            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED).publicFiles()
+            .staticFiles("/assets", root.toString()).publicFiles());
         assertDoesNotThrow(() -> Brace.app()
-            .staticFiles("/assets", root.resolve("public").toString())
-            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED));
+            .staticFiles("/assets", root.resolve("public").toString()).publicFiles()
+            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED).publicFiles());
     }
 
     @Test
@@ -260,14 +262,14 @@ class UntrustedUploadServingTest {
         Path link = Files.createSymbolicLink(root.resolve("uploads-link"), inner);
         Path current = Files.createSymbolicLink(root.resolve("current"), root.resolve("releases/42"));
         assertThrows(IllegalArgumentException.class, () -> Brace.app()
-            .staticFiles("/assets", pub.toString())
-            .staticFiles("/uploads", link.toString(), StaticFiles.UNTRUSTED));
+            .staticFiles("/assets", pub.toString()).publicFiles()
+            .staticFiles("/uploads", link.toString(), StaticFiles.UNTRUSTED).publicFiles());
         assertThrows(IllegalArgumentException.class, () -> Brace.app()
-            .staticFiles("/assets", current.resolve("public").toString())
-            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED));
+            .staticFiles("/assets", current.resolve("public").toString()).publicFiles()
+            .staticFiles("/uploads", inner.toString(), StaticFiles.UNTRUSTED).publicFiles());
         assertThrows(IllegalArgumentException.class, () -> Brace.app()
-            .staticFiles("/uploads", link.toString(), StaticFiles.UNTRUSTED)
-            .staticFiles("/assets", pub.toString()));
+            .staticFiles("/uploads", link.toString(), StaticFiles.UNTRUSTED).publicFiles()
+            .staticFiles("/assets", pub.toString()).publicFiles());
     }
 
     @Test
@@ -276,11 +278,13 @@ class UntrustedUploadServingTest {
         Path pub = Files.createDirectories(root.resolve("public"));
         Path inner = Files.createDirectories(pub.resolve("u"));
         Files.writeString(inner.resolve("x.html"), SCRIPT_PAGE);
-        Path later = root.resolve("uploads");
+        // start() requires the directory to exist, so the link replaces a real directory.
+        Path later = Files.createDirectory(root.resolve("uploads"));
         var linked = Brace.test().start(a -> a
-            .staticFiles("/assets", pub.toString())
-            .staticFiles("/uploads", later.toString(), StaticFiles.UNTRUSTED));
+            .staticFiles("/assets", pub.toString()).publicFiles()
+            .staticFiles("/uploads", later.toString(), StaticFiles.UNTRUSTED).publicFiles());
         try {
+            Files.delete(later);
             Files.createSymbolicLink(later, inner);
             var r = linked.get("/assets/u/x.html");
             assertEquals("application/octet-stream", r.header("Content-Type"));

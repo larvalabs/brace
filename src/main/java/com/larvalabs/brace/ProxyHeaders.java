@@ -23,17 +23,19 @@ final class ProxyHeaders {
     private ProxyHeaders() {}
 
     /**
-     * The host the client addressed: the leftmost {@code X-Forwarded-Host} when the immediate peer
-     * is a configured trusted proxy and sent one, otherwise {@code Host}. The same trust gate as
-     * {@code X-Forwarded-Proto} and {@link Request#ip()} — a client that connects directly cannot
-     * claim a host by sending the header itself.
+     * The host the client addressed: the rightmost {@code X-Forwarded-Host} entry, across all its
+     * lines, when the immediate peer is a configured trusted proxy and sent one, otherwise
+     * {@code Host}. The same trust gate as {@code X-Forwarded-Proto} and {@link Request#ip()}: a
+     * client that connects directly cannot claim a host by sending the header itself. Rightmost
+     * (L3 review F9): behind a proxy that appends to the header, or passes a client's copy
+     * through, the leftmost entry is the client's choice. The proxy should set (overwrite) it.
+     * {@code header} must read the request's header map, where the lines are joined.
      */
     static String effectiveHost(UnaryOperator<String> header, String remoteAddr, TrustedProxies trustedProxies) {
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            String forwarded = header.apply("X-Forwarded-Host");
-            if (forwarded != null && !forwarded.isBlank()) {
-                int comma = forwarded.indexOf(',');
-                return (comma >= 0 ? forwarded.substring(0, comma) : forwarded).strip();
+            String forwarded = BraceHandler.rightmostEntry(header.apply("X-Forwarded-Host"));
+            if (forwarded != null) {
+                return forwarded;
             }
         }
         return header.apply("Host");

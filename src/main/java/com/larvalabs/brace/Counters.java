@@ -114,8 +114,30 @@ class Counters {
         }
     }
 
-    /** Postgres batch upsert: one multi-row statement, one round trip, RETURNING every new count. */
+    /**
+     * Most rows in one Postgres counter statement (L6 review F4). Each row binds three parameters
+     * and Postgres refuses a statement with more than 65,535, so a single statement for a buffer
+     * of over 21,845 keys failed outright; larger batches are split into statements of this size,
+     * still inside one transaction.
+     */
+    static final int MAX_BATCH_ROWS = 5_000;
+
+    /** Postgres batch upsert: multi-row statements of at most {@link #MAX_BATCH_ROWS}, RETURNING every new count. */
     private static Map<String, Long> incrementBatchPostgres(java.sql.Connection conn,
+                                                            List<CounterUpdate> updates, Timestamp now)
+            throws java.sql.SQLException {
+        if (updates.size() <= MAX_BATCH_ROWS) {
+            return incrementChunkPostgres(conn, updates, now);
+        }
+        var result = new HashMap<String, Long>();
+        for (int from = 0; from < updates.size(); from += MAX_BATCH_ROWS) {
+            result.putAll(incrementChunkPostgres(conn,
+                updates.subList(from, Math.min(updates.size(), from + MAX_BATCH_ROWS)), now));
+        }
+        return result;
+    }
+
+    private static Map<String, Long> incrementChunkPostgres(java.sql.Connection conn,
                                                             List<CounterUpdate> updates, Timestamp now)
             throws java.sql.SQLException {
         var sql = new StringBuilder(
@@ -258,6 +280,42 @@ class Counters {
     }
 
     /**
+     * Delete the given counters, whatever their expiry: the rate limiter forgets a key it evicted
+     * (L6 review), so a flood of fresh keys does not leave a row per key behind for a whole window.
+     * Statements of at most {@link #MAX_BATCH_ROWS} keys, in one transaction.
+     */
+    void deleteKeys(List<String> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        var db = new Database(dbFactory.openSession());
+        try {
+            db.beginTransaction();
+            db.jdbc(conn -> {
+                for (int from = 0; from < keys.size(); from += MAX_BATCH_ROWS) {
+                    var chunk = keys.subList(from, Math.min(keys.size(), from + MAX_BATCH_ROWS));
+                    var sql = new StringBuilder("DELETE FROM brace_counters WHERE counter_key IN (");
+                    for (int i = 0; i < chunk.size(); i++) sql.append(i == 0 ? "?" : ", ?");
+                    try (var ps = conn.prepareStatement(sql.append(')').toString())) {
+                        for (int i = 0; i < chunk.size(); i++) ps.setString(i + 1, chunk.get(i));
+                        ps.executeUpdate();
+                    }
+                }
+                return null;
+            });
+            db.commitTransaction();
+        } catch (RuntimeException e) {
+            db.rollbackTransaction();
+            throw e;
+        } catch (Exception e) {
+            db.rollbackTransaction();
+            throw new RuntimeException(e);
+        } finally {
+            db.close();
+        }
+    }
+
+    /**
      * Delete expired counter rows (space reclamation; expiry is already enforced on read/increment).
      * @return number of rows removed
      */
@@ -284,6 +342,55 @@ class Counters {
         } finally {
             db.close();
         }
+    }
+
+    /**
+     * True when {@code e} means the database could not be reached or used at all (L5): a
+     * connection exception, or an SQLState in class 08 (connection exception), 53 (insufficient
+     * resources) or 57 (operator intervention, e.g. shutdown). Every key in a batch would fail the
+     * same way, so its counts are kept and retried rather than blamed on a key.
+     */
+    static boolean isOutage(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLTransientConnectionException
+                    || t instanceof java.sql.SQLNonTransientConnectionException
+                    || t instanceof java.net.SocketException
+                    || t instanceof java.net.SocketTimeoutException) {
+                return true;
+            }
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                String state = sql.getSQLState();
+                if (state.startsWith("08") || state.startsWith("53") || state.startsWith("57")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when {@code e} is the database refusing this statement's data (L5): an SQLState in
+     * class 22 (data exception: a NUL, an invalid byte sequence, a bad parameter) or 54 (program
+     * limit exceeded: an index row too large). Such an error follows the key, not the database.
+     * Not pgjdbc's "at most 65,535 parameters" refusal, which reuses SQLState 22023 but is about
+     * the statement's size (L6 review F4).
+     */
+    static boolean isDataError(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                String message = sql.getMessage();
+                if (message != null && message.contains("at most") && message.contains("parameters")) {
+                    return false;
+                }
+                String state = sql.getSQLState();
+                if (state.startsWith("22") || state.startsWith("54")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static void setNullableTimestamp(java.sql.PreparedStatement ps, int idx, Timestamp ts)

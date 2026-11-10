@@ -24,7 +24,9 @@ public class Route {
     private List<Access> groupAccess = List.of();
     private final List<Access> declaredAccess = new ArrayList<>();
     private boolean publicRoute;
-    private List<Access> access = List.of();
+    // null until Brace.start() resolves it: an unresolved route must fail closed (L10), never
+    // read as "no requirements".
+    private List<Access> access;
     // Registered by the framework itself (/ops/*): the app's default access never applies.
     private boolean framework;
 
@@ -84,7 +86,13 @@ public class Route {
     public Analytics.Track analytics() { return analytics; }
 
     /** Effective access requirements, resolved by {@link Brace#start()}; run in order. */
-    public List<Access> access() { return access; }
+    public List<Access> access() {
+        if (access == null) {
+            throw new IllegalStateException("access for " + method + " " + pattern
+                + " was never resolved; Brace.start() resolves it, so a route cannot be served without it");
+        }
+        return access;
+    }
 
     /**
      * The route's resolved access in one line, for the startup banner and {@code /ops/routes}:
@@ -93,12 +101,18 @@ public class Route {
      * {@code defaultAccess(Access.none())}.
      */
     public String accessLabel() {
+        if (access == null) return "unresolved";
         if (!access.isEmpty()) {
             var labels = new ArrayList<String>();
             for (Access a : access) labels.add(a.label());
             return String.join(" + ", labels);
         }
         return publicRoute ? "public" : "none";
+    }
+
+    /** True once access is resolved and at least one requirement guards the route. Never throws. */
+    boolean isGuarded() {
+        return access != null && !access.isEmpty();
     }
 
     /** True if the route opted out of the app's default access with {@code .publicRoute()}. */
@@ -157,7 +171,7 @@ public class Route {
     /** True if the handler takes the Session or a resolved access requirement reads it (M2). */
     boolean usesCookieSession() {
         if (invoker != null && invoker.needsSession()) return true;
-        for (Access a : access) if (a.usesSession()) return true;
+        if (access != null) for (Access a : access) if (a.usesSession()) return true;
         return false;
     }
 

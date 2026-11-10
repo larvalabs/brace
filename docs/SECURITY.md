@@ -51,6 +51,12 @@ path, so a guard and a route can't disagree about a path: `/admin/x/`, `/admin/%
 read, so an unauthenticated client can't make the app buffer a body. Rejections go through the
 normal response path, so security headers and session write-back apply.
 
+A request whose raw path has a segment that is exactly `.` or `..` (`/items/../y`, `/one/.`)
+is a 404 before any route, mapping, middleware or guard sees it: no handler receives `..` as a
+path parameter, and a proxy that resolves dot segments for its own rules can't be made to
+disagree with Brace about which route is being called. The 404 passes through
+after-middleware, so it carries the app's security headers like any other 404.
+
 Plain `before(...)` middleware never counts as access. The previous model —
 `requireSession("/admin/*", …)` path-pattern guards — is removed.
 
@@ -60,6 +66,87 @@ ops route registered without one fails `start()`. The app's default access never
 `/ops`.
 
 `/ops/routes` and the startup banner list each route's resolved access.
+
+### Static mappings are covered too
+
+A `staticFiles` mapping is not a route, but it is inside the same model. Every mapping says who
+may fetch its files, and `start()` (so also `Brace.test()`) refuses to run while one says
+neither:
+
+```java
+app.staticFiles("/assets", "public").publicFiles();                    // everyone
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));                        // logged-in users
+```
+
+- **`defaultAccess(...)` does not apply to a mapping**, and neither does
+  `defaultAccess(Access.none())`. A mapping's access is exactly what its `.access(...)` lists
+  (all must pass). Inheriting a login default would put the login in front of the login page's
+  own stylesheet; defaulting to public would publish an upload directory by omission. So there
+  is no default, and an undeclared mapping is a startup error.
+- The requirements are bound to the mapping, not to a path pattern. They run when no route
+  matched the request's method and path and the mapping's prefix covers the path, at the same
+  point as a route's: after plain `before(...)`, before session-aware `before(...)`, with the
+  one `Session` the request uses. They run before the path is decoded or the disk is touched,
+  for every method, so every spelling that reaches the mapping's files is guarded, and a
+  rejected request gets the same response whether or not the file exists.
+- **A mapping serves `GET` and `HEAD` only.** Any other method on a path under a mapping
+  (`POST`, `OPTIONS`, an unknown method) gets `405` with `Allow: GET, HEAD`, after the mapping's
+  access has run, so an anonymous request to a guarded mapping still gets the rejection. The
+  bundled `/__brace/*` assets answer other methods with `405` too.
+- **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
+  `app.get("/docs/payroll.pdf", ...)`, the route answers `GET` (and `HEAD`) with its own access,
+  and the mapping never serves `/docs/payroll.pdf` under any method: a request the route does
+  not handle gets `405` with the route's methods in `Allow`, after the mapping's access. (Before
+  this, `POST /docs/payroll.pdf` skipped the route and was served the file by the mapping.)
+  `start()` logs a warning naming each mapping that has routes under its prefix, because every
+  other file in that directory is still served under the mapping's access alone; a mapping at
+  `/` is not warned about. Outside a mapping, a path that only matches a route under another
+  method is a `404`, as before.
+- Nothing under a guarded mapping can be stored by a shared cache. A served file (200, 206, 304)
+  is sent `Cache-Control: private, no-cache`, and a `?v=` fingerprint earns no `immutable`
+  there. Every other response under the mapping (the access rejection, a 404, 405 or 416, an
+  early response from `before(...)`, an error) is sent `Cache-Control: no-store`. This is
+  enforced after after-middleware: `Cache-Control`, `Expires`, `Pragma`, `CDN-Cache-Control`,
+  `Surrogate-Control`, `Cloudflare-CDN-Cache-Control` and `Vercel-CDN-Cache-Control` are removed
+  in any letter case, whatever set them, and the one `Cache-Control` above is set.
+- `start()` refuses two mappings whose directories overlap (the same directory, or one inside
+  the other, compared as written and with symlinks resolved) unless their access is the same:
+  a guarded directory that a public mapping also serves, or one that a less strictly guarded
+  mapping also serves, would be reachable through the weaker prefix. Built-in requirements are
+  compared by value (two `Access.session("userId", "/login")` calls match); a custom
+  `Access.check(...)` or `Access.checkRequest(...)` matches only itself, so pass the same `Access`
+  object to both mappings if they are meant to match.
+- `start()` requires every mapping's directory to exist. A directory created later could be a
+  symlink into another mapping's tree, or a case-variant sibling of one on a case-insensitive
+  volume, which the overlap check would never have seen. As a second line, a mapping answers
+  404 for a file whose real path is inside the directory of a mapping with different access,
+  which covers a directory replaced by a symlink after startup.
+- The same URL prefix cannot be registered twice (`staticFiles` throws; `/files` and `/files/`
+  are the same prefix): only one of the two could ever serve.
+- The bundled `/__brace/*` assets and `/__brace/health` are not mappings and stay public.
+- `/ops/routes` (method `STATIC`) and the startup banner list each mapping with its access.
+
+A path-pattern `before("/uploads/*", ...)` is still not access, for the reasons above. For a
+per-file decision (the owner of this file, not any logged-in user), serve the file from a route
+instead: look the record up with `db.findOwnedOr404(...)` and return
+`Result.fileUnder(dir, name)` or `Result.download(...)`, with `.untrusted()` for uploads. Keep
+those files in a directory no mapping serves. If the route does sit under a mapping's prefix,
+the route wins for its methods and the mapping never serves that path, as described above.
+
+### Access rejections are never cached
+
+When an access requirement rejects a request, on a route or a mapping, the response is sent
+`Cache-Control: no-store` with the same header stripping as above, and
+`Vary: Accept, HX-Request` is added (merged with any existing `Vary`), because
+`Access.session` answers a page request with a 302, a JSON client with a 401 and an htmx
+request with a 401 plus `HX-Redirect`. Without this, an app-wide `after(...)` that marks
+responses `public` let a shared cache store the anonymous login redirect for a guarded URL and
+serve it to logged-in users.
+
+How a *successful* response from a guarded route is cached stays the app's decision. In dev
+mode Brace warns once per route when such a response carries `Cache-Control: public` or
+`s-maxage`.
 
 ### Object-level authorization
 
@@ -743,13 +830,32 @@ because Cloudflare itself appends the true connecting address to `X-Forwarded-Fo
 ### Behavior
 
 - **Without configuration:** `req.ip()` uses socket remote address only (ignores headers)
-- **With configuration:** `req.ip()` parses `X-Forwarded-For` / `Forwarded` **only if** the immediate peer is trusted
+- **With configuration:** `req.ip()` parses the forwarding header **only if** the immediate peer is trusted
 
-When forwarding headers are consulted, Brace uses **rightmost-untrusted** semantics: it walks
-the `X-Forwarded-For` list from right to left, skips any entry whose address falls inside a
-trusted CIDR, and returns the first untrusted address. This is the correct algorithm because
-real proxies **append** the connecting client's address — the leftmost entries were written by
-the client and can be forged.
+**One forwarding header, chosen explicitly.** Brace reads the client address chain from exactly
+one header: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` (its `for=` parameters) when
+you opt in. The other header is ignored. Reading both was a spoofing hole: a proxy that sets one
+of them usually passes a client-sent copy of the other through untouched, so a client behind a
+`Forwarded`-only proxy could send `X-Forwarded-For: 6.6.6.6` and become `6.6.6.6`.
+
+```java
+app.trustedProxies("10.0.0.5");                                           // X-Forwarded-For
+app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());  // Forwarded
+```
+
+Choose the header your outermost trusted proxy writes. nginx (`$proxy_add_x_forwarded_for`),
+Caddy, Traefik, Cloudflare and the common cloud load balancers write `X-Forwarded-For`. If
+your proxy writes only `Forwarded`, opt in, and if it might pass a client's `X-Forwarded-For`
+through, that header is now harmless.
+
+If the header arrives on several lines (two proxies that each add a line, or a client line plus
+the proxy's), every line is read, in wire order, as one list.
+
+When the forwarding header is consulted, Brace uses **rightmost-untrusted** semantics: it walks
+the list from right to left, skips any entry whose address falls inside a trusted CIDR, and
+returns the first untrusted address. This is the correct algorithm because real proxies
+**append** the connecting client's address — the leftmost entries were written by the client and
+can be forged.
 
 Examples:
 
@@ -760,26 +866,46 @@ Examples:
 | `client, 10.0.0.2, 10.0.0.1` | `10.0.0.0/8` | `client` (both proxies trusted) |
 | `10.0.0.1, 10.0.0.2` | `10.0.0.0/8` | `10.0.0.1` (all trusted → leftmost) |
 
-**Dual-stack / representation mismatch.** `TrustedProxies` matches addresses by binary value
-after resolution, but it **fails closed** when the address family differs — a CIDR expressed as
-an IPv4 address does not match the IPv6-mapped form `::ffff:a.b.c.d`, and `127.0.0.1` does not
-match `::1` on a dual-stack bind. If your proxy can connect over both IPv4 and IPv6, list both
-representations explicitly:
+**Dual-stack.** `TrustedProxies` matches addresses by binary value and never resolves names. An
+IPv4 CIDR also matches the IPv4-mapped IPv6 form of its addresses (`10.0.0.0/8` matches
+`::ffff:10.1.2.3`), so no extra entry is needed for a proxy seen through a dual-stack socket. IPv4
+and IPv6 loopback are different addresses, though: `127.0.0.1` does not match `::1`. If your proxy
+can connect over either, list both:
 
 ```java
 app.trustedProxies("127.0.0.1", "::1");
-app.trustedProxies("10.0.0.0/8", "::ffff:10.0.0.0/104");  // if proxies may use IPv6-mapped addresses
 ```
+
+An IPv6 peer is matched and reported without brackets: Jetty gives the socket address as
+`[0:0:0:0:0:0:0:1]`, and Brace strips the brackets where the address enters the framework, so a
+trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `0:0:0:0:0:0:0:1`.
 
 ### Supported Headers
 
-- `X-Forwarded-For` (most common)
-- `Forwarded` (RFC 7239) — elements correctly split on `,`, parameters on `;`
+- `X-Forwarded-For` (the default client-address header)
+- `Forwarded` (RFC 7239), instead of `X-Forwarded-For`, with `useForwardedHeader()`: elements
+  split on `,`, parameters on `;`, neither inside a quoted-string (`for="[2001:db8::1]:4711"`)
 - `X-Forwarded-Proto` — the original scheme, for the session cookie's `Secure` attribute
-- `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision and the
-  WebSocket `Origin` check (leftmost entry)
+- `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision, the session
+  cookie's `__Host-` name, the cross-site `Origin` checks (CSRF, WebSocket, ops) and analytics
 
-All of them are ignored unless the immediate peer is a trusted proxy.
+All of them are ignored unless the immediate peer is a trusted proxy. Each is read from every
+line it arrives on, in order, as one list. For `X-Forwarded-Proto` and `X-Forwarded-Host` Brace
+takes the **rightmost** entry, the one the nearest proxy added: behind a proxy that appends to
+these headers, or passes a client's copy through, the leftmost entry is whatever the client sent.
+**Your proxy must set (overwrite) both headers**, as the nginx example below does with
+`proxy_set_header`; a proxy that only passes them through lets a client choose them.
+
+`req.ip()` is always an IP address literal (or `unknown` when there is no socket address). If
+the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
+identifier, or anything a client managed to put there), the socket address is used instead.
+
+If a trusted proxy sends the forwarding header Brace was not told to read, and not the one it
+was (say only `Forwarded` while the app reads `X-Forwarded-For`), every client would silently get
+the proxy's address; Brace logs one warning naming `TrustedProxies.useForwardedHeader()`.
+
+Repeated `Cookie` lines are joined (with `; `) into one list on every request and WebSocket
+upgrade, and a cookie name that appears twice resolves to its first occurrence on both.
 
 ### Pass the real `Host` through
 
@@ -900,11 +1026,22 @@ This sets: `HttpOnly=true`, `Secure=true` (explicitly, regardless of request),
 
 ### Session Cookies and Shared Caches
 
-Any response Brace attaches a session `Set-Cookie` to also gets `Cache-Control: private`
-(unless the handler set an explicit `Cache-Control`, which always wins). A response
-carrying a session cookie is per-user by definition — without this header it is
-*heuristically cacheable*, and a misconfigured shared cache (e.g. an nginx recipe that
+Any response Brace attaches a session `Set-Cookie` to is sent `private`. With no
+`Cache-Control` it gets `Cache-Control: private`. With one set by the handler or an
+after-middleware, `public` is rewritten to `private`, and `private` is added in front when the
+value has neither `private` nor `no-store` (`max-age=600` becomes `private, max-age=600`; so
+does `s-maxage=600`, which a shared cache then ignores); the other directives are kept. A
+response carrying a session cookie is per-user by definition — without this it is
+*heuristically cacheable*, or explicitly storable, and a shared cache (e.g. an nginx recipe that
 force-caches everything under `/static/`) would replay user A's cookie to every user.
+
+Response header names are case-insensitive in `Result`: `res.header("cache-control", ...)` and
+`res.header("Cache-Control", ...)` are the same header, and the second write replaces the
+first. (Before 0.1.11 they were two entries; Brace checked one spelling and the other reached
+the wire, so a lowercase `cache-control: public` rode out with the session cookie.) Brace does
+not strip `CDN-Cache-Control`, `Surrogate-Control` or `Expires` from a cookie-carrying response
+outside a guarded static mapping or an access rejection, so don't set those app-wide on
+responses that can carry a session.
 
 The riskiest shape is a session-mutating middleware whose path pattern covers static
 prefixes — for example a `lastSeen`-touch guard on `/*`. Every static file response then
@@ -912,6 +1049,37 @@ carries a fresh session cookie. The `private` default makes that safe for spec-c
 caches, but prefer scoping such middleware to application routes (`/app/*`) rather than
 `/*`, and never configure a proxy to ignore response headers for paths a session
 middleware can touch.
+
+A static mapping with access requirements never sends anything a shared cache may store: a
+served file is `private, no-cache` and every other response under it is `no-store`, with or
+without a session cookie (see
+[Static mappings are covered too](#static-mappings-are-covered-too)). Access rejections are
+`no-store` everywhere (see [Access rejections are never cached](#access-rejections-are-never-cached)).
+
+### The page cache (`cache.wrap`)
+
+A page-cached route stores one rendered response per key and serves it to every visitor. The
+key is the route pattern, its decoded path parameters, the method, the `HX-Request` variant, and
+the query params and headers the route declares with `.vary(...)` and `.varyHeader(...)` (a param
+given twice keys on all its values). **A cached handler must depend only on those.** Anything else
+it reads (another query param, `req.url()`, a header such as `Accept-Language`, a cookie,
+`req.ip()`, the body) can differ between visitors, and whatever the first visitor sent is replayed
+to the rest for the TTL: `?msg=<b>PWNED</b>` on an undeclared param becomes everyone's page. In dev
+mode Brace logs such a read once per route, and under `Brace.test()` it throws, so a test of the
+route fails; production does no checking.
+
+Some inputs are refused outright rather than trusted to the handler: a request with
+`Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or `HX-Prompt` is
+served by the handler without reading or writing the cache, unless the route declares that
+header with `.varyHeader(...)`. A response that sets a cookie is never stored (it is returned with
+its `Set-Cookie` intact). Only 2xx responses are stored, and a response carrying the visitor's
+CSRF token or flash is not.
+
+Page entries are kept apart from the app's own cache entries (keys starting `brace:page:`): on
+Postgres they have their own row cap (10,000 by default) and are trimmed first when the table is
+over its overall cap; in memory they are evicted before any other entry, and a new page never
+displaces an app entry. A client minting pages (any declared `vary` value or path parameter)
+therefore churns only the page cache.
 
 ---
 
@@ -1013,9 +1181,17 @@ the object from the key.
 **Static directory.** Register an upload directory as untrusted:
 
 ```java
-app.staticFiles("/assets", "public");                                       // your files
-app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);     // users' files
+app.staticFiles("/assets", "public").publicFiles();                          // your files
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)       // users' files
+   .access(Access.session("userId", "/login"));
 ```
+
+`UNTRUSTED` decides how a file is served; the access declaration decides who gets it, and every
+mapping needs one (see [Static mappings are covered too](#static-mappings-are-covered-too)).
+`.publicFiles()` on an upload directory means anyone who can guess or enumerate a name can fetch
+the file: choose it only for uploads that are meant to be public, such as avatars. A static
+mapping can only ask "may this user fetch from this directory"; when the answer depends on the
+file, serve it from a handler (below).
 
 In `UNTRUSTED` mode:
 
@@ -1070,6 +1246,16 @@ than letting CR/LF terminate the part headers and forge extra parts in the reque
 
 ## Static Files
 
+Every mapping declares its access: `app.staticFiles(urlPrefix, directory).publicFiles()` or
+`.access(...)`. `start()` refuses a mapping with neither, and `defaultAccess(...)` does not cover
+mappings; see [Static mappings are covered too](#static-mappings-are-covered-too). Prefer
+`.access(...)` to a path guard for anything private: it is bound to the mapping, so it cannot
+disagree with the path that is served.
+
+A mapping serves `GET` and `HEAD`; every other method gets `405` with `Allow: GET, HEAD`. Its
+directory must exist when the app starts, a URL prefix can be registered once, and two mappings
+may share or nest directories only when their access is the same.
+
 `app.staticFiles(urlPrefix, directory)` confines serving to `directory`. The check resolves
 symlinks (`toRealPath`) before comparing, so a symlink under the served tree cannot serve a
 file outside it — a lexical `normalize()` + `startsWith` check does not catch that, because
@@ -1080,14 +1266,41 @@ served (404), whatever the mapping; the only exception is a leading `.well-known
 challenges and `security.txt` keep working. The check runs on the decoded path, so `%2eenv`
 is refused too.
 
+**A static file is served only at its canonical spelling.** Path guards (`before("/files/private/*", ...)`,
+a path-scoped `after(...)`, a reverse proxy's `location` block) match the raw, still-encoded
+request path, while the file lookup decodes it. Any second spelling of the same file would
+skip a guard written for the first, so these get a 404:
+
+- A percent-escape of an RFC 3986 unreserved character (`A-Z a-z 0-9 - . _ ~`), in either hex
+  case: `/files/%70rivate/secret.txt`, `/files/a%7Eb.txt`. Browsers, `encodeURIComponent` and
+  `Url.to` never encode these.
+- An encoded or literal separator: `%2F`, `%5C`, `\`. Jetty already answers these with a 400;
+  the static handler refuses them as well in case URI compliance is relaxed.
+- A trailing slash or an empty segment: `/files/exact.txt/`, `/files/v2//app.js`. The path that
+  would be opened, written back out, has to equal the requested path character for character.
+  (A trailing slash on a file was served before 0.1.11, past a guard on the exact path.) A
+  directory is a 404 with or without the slash; there are no index files or listings.
+- A name that differs from the name stored on disk: `/files/PRIVATE/secret.txt` on a
+  case-insensitive volume (macOS, Windows), or a decomposed (NFD) spelling of an accented name
+  on APFS. Each requested segment is compared, case-sensitively, with the stored name.
+
+Escapes that a canonical URL needs keep working: `%20`, UTF-8 bytes for non-ASCII names
+(`caf%C3%A9.txt`, either hex case), and reserved characters (`%26`, `%40`, `%3D`, which may also
+be written literally). Two consequences for guards: write the guarded path in unreserved
+characters, because a guard pattern containing `&`, `@`, `=`, a space or non-ASCII can still
+be reached by the other legitimate spelling of that character; and the case check relies on `Path.toRealPath` reporting
+stored names, which it does on macOS and Windows; a Linux directory with the `casefold`
+attribute is untested and may not be covered.
+
 Symlinks that stay inside the served directory keep working. To serve a directory that
 lives elsewhere, register it as its own mapping rather than linking it into the web root. A
 directory users write to is registered `UNTRUSTED` (see
 [Serving uploaded files](#serving-uploaded-files)):
 
 ```java
-app.staticFiles("/assets", "public");
-app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);
+app.staticFiles("/assets", "public").publicFiles();
+app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));
 ```
 
 When prefixes overlap, the longest one serves the request regardless of registration order, so
@@ -1153,6 +1366,13 @@ A WebSocket upgrade runs plain `before(...)` middleware, then the `Origin` check
 the route's access requirements (see [Authorization](#authorization)); a rejection declines the
 handshake. Before 0.1.11 the upgrade ran no guard at all, so a socket under a guarded path
 accepted anonymous clients.
+
+A socket is upgraded only at its registered path, spelled exactly. `app.ws("/ws", ...)` answers
+`/ws` (with any query string); `/x/../ws`, `/%77s` and `/ws;x` get a 404 before any middleware
+or guard runs. Jetty matches upgrades against the decoded path with dot segments resolved, so
+without this check those spellings reached the socket while a reverse proxy matching the raw
+request target saw some other path. The path given to `app.ws(...)` is therefore a literal, not
+a pattern.
 
 WebSocket upgrades are validated against the request's `Origin`. A handshake is **not**
 subject to the same-origin policy, so without this an attacker's page could open a socket
@@ -1239,39 +1459,122 @@ read a room: joining one is still an authorization decision the handler makes be
 Protect endpoints from abuse with rate limiting:
 
 ```java
-// Per-IP rate limiting
-app.before("/api", RateLimiter.perIp(100, "1m"));
+// Per-IP rate limiting (`/api/*`: the bare `/api` pattern matches only the literal path /api)
+app.before("/api/*", RateLimiter.perIp(100, "1m"));
 
-// Per-user rate limiting
-app.before("/api", RateLimiter.perKey(
+// Per-client rate limiting: requests without the header are limited per IP (see below)
+app.before("/api/*", RateLimiter.perKey(
     req -> req.header("Authorization"),
     1000,
     "1h"
 ));
 
-// Custom key function
-app.before("/login", RateLimiter.perKey(
-    req -> req.formParam("username"),
-    5,
-    "15m"
-));
+// Login attempts per account: count submissions only (not views of the login page), and
+// normalize the username so "Alice", "alice" and "alice " are one account
+var loginLimit = RateLimiter.perKey(req -> {
+    var username = req.formParam("username");
+    return username == null ? null : username.strip().toLowerCase(Locale.ROOT);
+}, 5, "15m");
+app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
 ```
+
+**Key the limiter on the value the handler uses.** `req.formParam(...)` reads the request body
+only, and so does `req.form(...)` on `POST`, `PUT`, `PATCH` and `DELETE`: a field in the query
+string never fills a form field on those methods. (Only `GET` and `HEAD` forms bind from the
+query string.) A limiter keyed on `formParam("username")` therefore counts exactly the username
+the login handler checks; `POST /login?username=victim` with no username in the body is counted
+in the client's missing-key bucket and binds no username.
 
 ### Key normalization (DoS protection)
 
 Rate-limit keys extracted from requests (usernames, tokens, IP addresses, custom headers) are
 normalized before use:
 
-- **Null or blank extractor result → `"(none)"`** bucket. Requests with a missing header or null
-  key are counted together rather than silently bypassing the limiter.
+- **Null or blank extractor result → a missing-key bucket per client address** (`(none):` plus
+  the address, an IPv6 client's /64, with the limiter's own limit and window). A request with a
+  missing header or form field is limited exactly as `perIp` would limit it, rather than silently
+  bypassing the limiter, and keyless requests from one address never use up another's budget (an
+  earlier design counted them all in one global bucket, so five visitors viewing a page the
+  limiter covered locked out the sixth). The bucket keys cannot be produced from a request, so a
+  client that sends the literal value `(none):203.0.113.9` gets its own bucket and cannot drain
+  that address's. Where a missing key genuinely means "nothing to limit", opt out explicitly, and
+  bound those requests some other way (here, per IP):
+
+  ```java
+  app.before("/api/*", RateLimiter.perIp(300, "1m"));
+  app.before("/api/*", RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h")
+      .exemptMissingKey());
+  ```
+
+  Don't register a key limiter on a path whose page views carry no key (a `GET /login` with no
+  username) without restricting it to the submissions, as the login example above does:
+  otherwise each view uses up one of that visitor's keyless requests, and a visitor who reloads
+  the page `limit` times is locked out of it. Dev mode logs a warning, once per limiter, the first
+  time a key limiter counts a keyless `GET` or `HEAD`.
+- **Surrounding whitespace is stripped**, so `"victim "` and `"victim"` are one bucket. **Case is
+  not folded**: tokens and API keys are case-sensitive. When the key is an identity that is
+  case-insensitive (a username, an email address), lower-case it in the extractor, as above.
 - **Keys longer than 64 characters → SHA-256 hex digest** (always exactly 64 chars). Long
   user-controlled values (e.g. bearer tokens, forged headers) would otherwise create unbounded
   storage — millions of bytes of map entries locally, or arbitrarily large rows in
   `brace_counters`. Hashing caps the key size while preserving the collision-resistance needed
   for correct bucketing.
+- **Keys containing a control character → SHA-256 hex digest** too. Postgres refuses a NUL in a
+  text parameter, so a raw `username=a%00` key would otherwise fail every shared-counter write.
 
 The cap is applied before any prefix or window-slot decoration, so it holds equally in
 per-process and shared (Postgres) modes.
+
+**`perIp` keys an IPv6 client on its /64.** A site is normally given at least a /64, so one client
+can rotate through billions of source addresses; keying each address separately would give it a
+fresh budget per request. IPv4 clients (and IPv4-mapped IPv6 addresses such as `::ffff:203.0.113.7`)
+are keyed on the full address. Clients that share a /64 share a budget.
+
+**Distinct keys are capped per limiter** (default 100,000). Each key holds memory, and on Postgres
+a `brace_counters` row, for its whole window. Once a limiter tracks that many keys (a warning is
+logged, at most once a minute):
+
+1. A new key takes the place of a tracked key that is **under** its limit, the least recently
+   used of a small sample. The forgotten key loses its count so far (fewer than the limit), an
+   accepted bypass: a client that floods fresh keys to reset one key's count pays a whole table
+   of requests for fewer than `limit` extra attempts. On Postgres the forgotten key's row is
+   deleted at the next flush, so the table stays bounded too.
+2. A key **at or over** its limit is never forgotten before its window ends, so a flood cannot
+   unblock a client that is being limited.
+3. Only when the sample finds nothing but such blocked keys does a new key fall back to an overflow
+   bucket for its client address (`ipBucket(req.ip())`; at most `maxKeys / 10` of them), and past
+   those, to one shared overflow bucket.
+
+So a flood of fresh keys no longer locks out new legitimate keys (the earlier design sent every
+new key to one shared overflow bucket once the table was full). Eviction looks at a fixed number
+of keys under a per-limiter lock taken only on that full-table path, so no request scans the
+table. Raise or lower the cap per limiter with `.maxKeys(n)`, e.g.
+`RateLimiter.perIp(100, "1m").maxKeys(500_000)`.
+
+**Two limiters with the same type, limit and window share buckets on Postgres.** The counter key
+is built from the limiter's label (`perKey(5/15m)`), the only identity a limiter has across a
+fleet, so on Postgres two such limiters count every key together, their missing-key and overflow
+buckets included. In per-process mode each limiter object counts on its own. Give limiters on
+different paths different limits or windows if they must be independent.
+
+Cache keys get the same treatment in the `Cache` facade, on both backends: a key with a control
+character, or longer than 512 UTF-8 bytes (a page path or `vary` value near the 8 KB URI limit
+exceeds Postgres's index row limit), is stored as its first characters (up to 128, stopping at a
+control character) followed by a SHA-256 digest of the whole key. This is invisible to callers;
+tags still invalidate the entry, and `deletePrefix` still reaches it through the kept prefix.
+
+A key (rate-limit or cache) with an **unpaired surrogate** is hashed too, from an encoding that
+keeps it distinct: pgjdbc sends a lone surrogate as `?`, so `"a\uD800"` and `"a\uD801"` were one
+row on Postgres.
+
+`deletePrefix` with a prefix that reaches past what a hashed key keeps readable (one containing a
+control character, an unpaired surrogate or `#sha256:`, or longer than 128 characters) deletes the
+keys stored as-is that start with the whole prefix, plus the hashed keys whose readable part is
+exactly the prefix's readable part (every hashed key that starts with the prefix has that). So
+`deletePrefix("search:\u0001")` and `deletePrefix("search:#sha256:")` no longer clear
+`search:alpha` (they used to clear all of `search:`), but they do clear other hashed keys that
+share the readable part, such as `search:\u0002`; a 200-character prefix clears hashed keys that
+share its first 128 characters. Over-deletion is a cache miss, never a stale entry.
 
 ### Trusted proxies and IP spoofing
 
@@ -1298,6 +1601,15 @@ without any check. During an outage the effective limit across a fleet of N inst
 approximately `limit × N`, so brief over-admission is possible — this is intentional: the
 alternative (turning every rate-limited endpoint into a 500) is worse. A warning is logged at
 `WARN` level for each request that falls back.
+
+Buffered counts are written in statements of at most 5,000 keys (Postgres refuses a statement
+with more than 65,535 parameters). A statement the database refuses with a data error (SQLState
+class 22 or 54: a key it cannot store) is split in half, and the halves again, until the refused
+key is isolated; that key's buffered count is dropped with a warning instead of failing every
+later flush, at a cost of a few dozen statements rather than one per key. Any other failure
+(the database unreachable, SQLState class 08, 53 or 57, or an error that is not about the data)
+restores every count not yet written and retries after a one-second back-off. A flush runs on the
+request that filled the buffer, so it stops after 2 seconds and keeps the rest for the next one.
 
 ### Best Practices
 

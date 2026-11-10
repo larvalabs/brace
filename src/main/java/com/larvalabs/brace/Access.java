@@ -35,17 +35,27 @@ public final class Access {
     private final boolean usesSession;
     private final Check check; // null only for none()
     private final boolean replacesDefault;
+    /**
+     * What makes two requirements the same one (M3 review): the arguments of a built-in kind
+     * ({@link #session}), or the caller's own check object for a custom one, which therefore
+     * compares by identity. Used by {@link #equals}.
+     */
+    private final Object identity;
 
-    private Access(String label, boolean usesSession, Check check) {
-        this(label, usesSession, check, false);
+    private Access(String label, boolean usesSession, Check check, Object identity) {
+        this(label, usesSession, check, false, identity);
     }
 
-    private Access(String label, boolean usesSession, Check check, boolean replacesDefault) {
+    private Access(String label, boolean usesSession, Check check, boolean replacesDefault, Object identity) {
         this.label = label;
         this.usesSession = usesSession;
         this.check = check;
         this.replacesDefault = replacesDefault;
+        this.identity = identity;
     }
+
+    /** The arguments of {@link #session}: two calls with the same ones are the same requirement. */
+    private record SessionRequirement(String key, String loginUrl) {}
 
     /**
      * Allow the request when the session has {@code key}; otherwise send the client to
@@ -57,13 +67,13 @@ public final class Access {
         if (key == null || key.isBlank()) throw new IllegalArgumentException("Access.session needs a session key");
         if (loginUrl == null || loginUrl.isBlank()) throw new IllegalArgumentException("Access.session needs a login URL");
         return new Access("session:" + key, true, (req, session) ->
-            session.has(key) ? null : notLoggedIn(req, loginUrl));
+            session.has(key) ? null : notLoggedIn(req, loginUrl), new SessionRequirement(key, loginUrl));
     }
 
     /** A custom requirement with the session. Return {@code null} to allow, a Result to reject. */
     public static Access check(Check check) {
         if (check == null) throw new IllegalArgumentException("Access.check needs a check");
-        return new Access("check", true, check);
+        return new Access("check", true, check, check);
     }
 
     /**
@@ -72,7 +82,7 @@ public final class Access {
      */
     public static Access checkRequest(RequestCheck check) {
         if (check == null) throw new IllegalArgumentException("Access.checkRequest needs a check");
-        return new Access("checkRequest", false, (req, session) -> check.check(req));
+        return new Access("checkRequest", false, (req, session) -> check.check(req), check);
     }
 
     /**
@@ -88,7 +98,7 @@ public final class Access {
         if (requirement.isNone()) {
             throw new IllegalArgumentException("Access.insteadOfDefault(Access.none()) is a public route: use .publicRoute()");
         }
-        return new Access(requirement.label, requirement.usesSession, requirement.check, true);
+        return new Access(requirement.label, requirement.usesSession, requirement.check, true, requirement.identity);
     }
 
     /**
@@ -99,11 +109,16 @@ public final class Access {
         return NONE;
     }
 
-    private static final Access NONE = new Access("none", false, null);
+    private static final Access NONE = new Access("none", false, null, "none");
 
-    /** Framework-internal requirement with a fixed label (the {@code /ops} routes). */
+    /**
+     * Framework-internal requirement with a fixed label (the {@code /ops} routes). Its check
+     * closes over the ops handler, so two are the same requirement only when built from the same
+     * check object: compared by identity, like a custom check. (Apps cannot attach these to a
+     * static mapping, the one place requirements are compared.)
+     */
     static Access internal(String label, RequestCheck check) {
-        return new Access(label, false, (req, session) -> check.check(req));
+        return new Access(label, false, (req, session) -> check.check(req), check);
     }
 
     boolean isNone() {
@@ -141,6 +156,28 @@ public final class Access {
     private static boolean wantsJson(Request req) {
         String accept = req.header("Accept");
         return req.isJson() || (accept != null && accept.toLowerCase().contains("application/json"));
+    }
+
+    /**
+     * Value equality for the built-in kinds (M3 review): two {@code Access.session(key, loginUrl)}
+     * calls with the same arguments are equal, as are {@link #none()} and two
+     * {@link #insteadOfDefault} wrappers of equal requirements. A custom {@link #check} or
+     * {@link #checkRequest} is equal only to one built from the same check object, since two
+     * lambdas cannot be compared. {@code insteadOfDefault(r)} never equals {@code r} itself.
+     */
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Access other)) return false;
+        return replacesDefault == other.replacesDefault
+            && usesSession == other.usesSession
+            && label.equals(other.label)
+            && java.util.Objects.equals(identity, other.identity);
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(label, usesSession, replacesDefault, identity);
     }
 
     @Override

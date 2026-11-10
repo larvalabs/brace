@@ -103,35 +103,82 @@ class RateLimiterTest {
         assertNull(limiter.handle(reqB));
     }
 
+    // ---- M4 / D2: a missing key is limited by default; the exemption is opt-in ----
+
     /**
-     * Null key → request is not rate-limited (intentional exemption).
-     *
-     * <p>A null key means "no identity established yet" (e.g., a GET to a login page before the
-     * user has entered an email). Bucketing all such requests together would cause site-wide
-     * lockout — the documented login example {@code RateLimiter.perKey(req -> req.formParam("email"), …)}
-     * would drain the "(none)" bucket on every unauthenticated GET and lock out the page.
+     * Null key → counted in the client address's missing-key bucket (M4). Before the fix a request without
+     * the key header skipped the limiter entirely, so the documented API limiter
+     * {@code perKey(req -> req.header("Authorization"), …)} admitted unlimited anonymous traffic.
      */
     @Test
-    void nullKeyIsAllowed() {
+    void nullKeyIsLimitedByDefault() {
         var limiter = RateLimiter.perKey(req -> req.header("X-Missing"), 2, "1m");
         var req = fakeRequest("10.0.0.4");
-        // All requests pass — null key is exempted, no bucket is consumed.
+        assertNull(limiter.handle(req));
+        assertNull(limiter.handle(req));
+        var blocked = limiter.handle(req);
+        assertNotNull(blocked, "a missing key must not bypass the limiter");
+        assertEquals(429, blocked.status());
+    }
+
+    /** Blank and null keys from one address share its missing-key bucket. */
+    @Test
+    void blankAndNullKeysShareOneBucket() {
+        var calls = new AtomicInteger();
+        var limiter = RateLimiter.perKey(req -> calls.getAndIncrement() % 2 == 0 ? null : " \t ", 2, "1m");
+        var req = fakeRequest("10.0.0.5");
+        assertNull(limiter.handle(req)); // null
+        assertNull(limiter.handle(req)); // blank
+        assertNotNull(limiter.handle(req), "null and blank keys count against the same bucket");
+    }
+
+    /** {@code exemptMissingKey()} restores the old pass-through for null and blank keys. */
+    @Test
+    void exemptMissingKeyOptInPassesNullAndBlankKeys() {
+        var limiter = RateLimiter.perKey(req -> req.header("X-Missing"), 1, "1m").exemptMissingKey();
+        var req = fakeRequest("10.0.0.6");
         for (int i = 0; i < 10; i++) {
-            assertNull(limiter.handle(req), "null-key request should be exempt from rate limiting");
+            assertNull(limiter.handle(req), "opted-in limiter exempts a missing key");
         }
+        var blank = RateLimiter.perKey(r -> "  ", 1, "1m").exemptMissingKey();
+        for (int i = 0; i < 5; i++) {
+            assertNull(blank.handle(req));
+        }
+        // A present key is still limited on an opted-in limiter.
+        var keyed = RateLimiter.perKey(r -> r.header("X-User"), 1, "1m").exemptMissingKey();
+        var alice = fakeRequestWithHeader("X-User", "alice");
+        assertNull(keyed.handle(alice));
+        assertNotNull(keyed.handle(alice));
     }
 
     /**
-     * Blank key (all whitespace) → request is not rate-limited (same exemption as null).
+     * A client cannot reach the missing-key bucket by sending a key that spells its label: neither
+     * draining it for everyone else nor riding on it.
      */
     @Test
-    void blankKeyIsAllowed() {
-        var limiter = RateLimiter.perKey(req -> "   ", 1, "1m");
-        var req = fakeRequest("10.0.0.5");
-        // All requests pass — blank key is treated like null.
-        for (int i = 0; i < 5; i++) {
-            assertNull(limiter.handle(req), "blank-key request should be exempt from rate limiting");
+    void clientSentLiteralCannotTouchMissingKeyBucket() {
+        for (var literal : new String[]{"(none)", " (none)", "(none) ", RateLimiter.MISSING_KEY}) {
+            var limiter = RateLimiter.perKey(req -> req.header("X-User"), 1, "1m");
+            var attacker = fakeRequestWithHeader("X-User", literal);
+            var anonymous = fakeRequest("10.0.0.7");
+
+            assertNull(limiter.handle(attacker), "literal '" + literal + "' gets its own bucket");
+            assertNotNull(limiter.handle(attacker));
+            assertNull(limiter.handle(anonymous),
+                "literal '" + literal + "' must not have drained the missing-key bucket");
+            assertNotNull(limiter.handle(anonymous));
         }
+    }
+
+    /** Keys are stripped, so a trailing space is not a fresh bucket. Case is left to the extractor. */
+    @Test
+    void keysAreStrippedButNotCaseFolded() {
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 1, "1m");
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "victim")));
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", " victim ")),
+            "' victim ' must share the 'victim' bucket");
+        // Tokens are case-sensitive: the framework does not fold case.
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "Victim")));
     }
 
     // ---- Key normalization (M7a) ----
@@ -281,6 +328,11 @@ class RateLimiterTest {
             }
             return result;
         }
+
+        @Override
+        synchronized void deleteKeys(List<String> keys) {
+            keys.forEach(store::remove);
+        }
     }
 
     /**
@@ -348,6 +400,155 @@ class RateLimiterTest {
         assertEquals(100, counters.keysWritten.get(), "every key is counted exactly once");
     }
 
+    // ---- L5: control characters in keys; a failing counter batch ----
+
+    @Test
+    void normalizeKey_controlCharactersAreHashed() {
+        for (var raw : new String[]{"a\u0000", "a\u0001b", "a\u001fb", "a\u007fb", "a\u0085b", "\u0000"}) {
+            var normalized = RateLimiter.normalizeKey(raw);
+            assertTrue(normalized.matches("[0-9a-f]{64}"), "control character in '" + raw.replace("\u0000", "\\0")
+                + "' must be hashed, got " + normalized);
+        }
+        assertNotEquals(RateLimiter.normalizeKey("a\u0000"), RateLimiter.normalizeKey("a\u0001"));
+        assertNotEquals(RateLimiter.normalizeKey("a\u0000"), RateLimiter.normalizeKey("a"));
+        // Ordinary printable keys, non-ASCII included, are untouched.
+        assertEquals("josé@example.com", RateLimiter.normalizeKey("josé@example.com"));
+    }
+
+    /**
+     * Counters stand-in that refuses (as Postgres refuses a NUL or an oversized key) any statement
+     * containing a key with {@code poison} in it, with a data-exception SQLState, and can be put in
+     * an outage that fails every statement with a connection SQLState.
+     */
+    static class PickyCounters extends CountingCounters {
+        volatile boolean outage;
+
+        @Override
+        synchronized Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+            if (outage) {
+                throw new RuntimeException(new java.sql.SQLException("connection refused", "08001"));
+            }
+            for (var u : updates) {
+                if (u.key().contains("poison")) {
+                    throw new RuntimeException(new java.sql.SQLException(
+                        "Zero bytes may not occur in string parameters.", "22023"));
+                }
+            }
+            return super.incrementBatch(updates);
+        }
+    }
+
+    /**
+     * Before the fix one refused key failed the whole batch, every delta was restored, and the key
+     * kept every later flush failing until its window rolled: no innocent key reached the shared
+     * counter, so the fleet limit became limit × instances.
+     */
+    @Test
+    void refusedKeyIsDiscardedInsteadOfPoisoningEveryFlush() {
+        var counters = new PickyCounters();
+        RateLimiter.useSharedBackend(counters);
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1m"); // flush every request
+
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "poison")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "alice")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "bob")));
+
+        assertTrue(counters.store.keySet().stream().anyMatch(k -> k.contains(":alice:")),
+            "alice's count must reach the shared counter despite the refused key");
+        assertTrue(counters.store.keySet().stream().anyMatch(k -> k.contains(":bob:")),
+            "the refused key must not be restored into the next flush");
+    }
+
+    /** A whole-database outage still restores every delta (nothing is discarded) and retries later. */
+    @Test
+    void outageRestoresCountsRatherThanDiscardingThem() throws Exception {
+        var counters = new PickyCounters();
+        RateLimiter.useSharedBackend(counters);
+        // A day-long window: the sleep below must not cross a window boundary (with "1m" it did
+        // whenever it straddled a minute, and the old slot's counts were rightly dropped).
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 5, "1d");
+        var alice = fakeRequestWithHeader("X-User", "alice");
+
+        counters.outage = true;
+        assertNull(limiter.handle(alice));
+        assertNull(limiter.handle(alice));
+        assertTrue(counters.store.isEmpty());
+
+        counters.outage = false;
+        Thread.sleep(1_100); // past the flush retry cooldown
+        assertNull(limiter.handle(alice));
+        assertEquals(3L, counters.store.values().stream().mapToLong(Long::longValue).sum(),
+            "the counts buffered during the outage were kept and flushed once it ended");
+    }
+
+    // ---- L6: IPv6 /64 bucketing; a cap on distinct keys ----
+
+    @Test
+    void ipBucketKeysIpv6OnItsSlash64() {
+        assertEquals(RateLimiter.ipBucket("2001:db8:1:2:3:4:5:6"), RateLimiter.ipBucket("2001:db8:1:2:ffff::1"));
+        assertEquals("2001:db8:1:2::/64", RateLimiter.ipBucket("2001:0db8:0001:0002:aaaa:bbbb:cccc:dddd"));
+        assertNotEquals(RateLimiter.ipBucket("2001:db8:1:2::1"), RateLimiter.ipBucket("2001:db8:1:3::1"));
+        // IPv4 and IPv4-mapped IPv6 are one client, keyed on the full IPv4 address.
+        assertEquals("203.0.113.7", RateLimiter.ipBucket("203.0.113.7"));
+        assertEquals("203.0.113.7", RateLimiter.ipBucket("::ffff:203.0.113.7"));
+        assertNotEquals(RateLimiter.ipBucket("203.0.113.7"), RateLimiter.ipBucket("203.0.113.8"));
+        // Not an address literal: used as is, and never resolved.
+        assertEquals("unknown", RateLimiter.ipBucket("unknown"));
+        assertEquals("zz:not-an-address", RateLimiter.ipBucket("zz:not-an-address"));
+        assertEquals("example.com", RateLimiter.ipBucket("example.com"));
+    }
+
+    @Test
+    void perIpRotatingWithinASlash64SharesOneBucket() {
+        var limiter = RateLimiter.perIp(2, "1m");
+        assertNull(limiter.handle(fakeRequest("2001:db8:aa:bb::1")));
+        assertNull(limiter.handle(fakeRequest("2001:db8:aa:bb::2")));
+        var blocked = limiter.handle(fakeRequest("2001:db8:aa:bb:dead:beef:0:3"));
+        assertNotNull(blocked, "a client rotating source addresses inside its /64 is one client");
+        assertEquals(429, blocked.status());
+        assertNull(limiter.handle(fakeRequest("2001:db8:aa:bc::1")), "the next /64 is someone else");
+    }
+
+    @Test
+    void distinctKeysPastTheCapReplaceUnderLimitKeys() {
+        // L6 review decision B: at the cap a new key replaces the least recently used key under
+        // its limit (the old design folded new keys into one overflow bucket, which a flood
+        // drained for every new legitimate key).
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1m").maxKeys(3);
+        for (var user : new String[]{"a", "b", "c"}) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-User", user)));
+        }
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "c")), "c is now at its limit");
+        for (var user : new String[]{"d", "e", "f"}) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-User", user)), user + " gets its own budget");
+        }
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "c")), "c, blocked, was not evicted");
+        assertEquals(3, limiter.windowCount(), "state stays bounded at the cap");
+    }
+
+    @Test
+    void sharedModeAlsoCapsDistinctKeys() {
+        var counters = new CountingCounters();
+        RateLimiter.useSharedBackend(counters);
+        var limiter = RateLimiter.perKey(req -> req.header("X-User"), 2, "1m").maxKeys(2); // flush every request
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")));
+        assertNull(limiter.handle(fakeRequestWithHeader("X-User", "a")));
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "a is blocked");
+        for (int i = 0; i < 50; i++) {
+            assertNull(limiter.handle(fakeRequestWithHeader("X-User", "flood-" + i)), "flood-" + i);
+        }
+        assertNotNull(limiter.handle(fakeRequestWithHeader("X-User", "a")), "a stays blocked");
+        // The rows of evicted keys are deleted at the next flush: the table stays near the cap.
+        assertTrue(counters.store.size() <= 3, "shared counter rows bounded: " + counters.store.keySet());
+    }
+
+    @Test
+    void defaultKeyCapIsGenerousAndValidated() {
+        assertEquals(100_000, RateLimiter.DEFAULT_MAX_KEYS);
+        assertThrows(IllegalArgumentException.class, () -> RateLimiter.perKey(req -> "k", 1, "1m").maxKeys(0));
+        assertThrows(IllegalArgumentException.class, () -> RateLimiter.perIp(1, "1m").maxKeys(-1));
+    }
+
     // Integration test with a real Brace app
 
     static Brace app;
@@ -360,6 +561,19 @@ class RateLimiterTest {
         app.before("/limited", RateLimiter.perIp(3, "1m"));
         app.get("/limited", req -> Result.text("ok"));
         app.get("/unlimited", req -> Result.text("ok"));
+
+        // The documented login setup (docs/SECURITY.md "Rate Limiting"): count submissions only,
+        // one bucket per normalized username.
+        var loginLimit = RateLimiter.perKey(req -> {
+            var username = req.formParam("username");
+            return username == null ? null : username.strip().toLowerCase(java.util.Locale.ROOT);
+        }, 2, "1m");
+        app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
+        app.get("/login", req -> Result.text("login page"));
+        app.post("/login", req -> {
+            var form = req.form(LoginForm.class);
+            return Result.text("username=" + form.value().username());
+        }).csrf(false);
         app.start();
         port = app.actualPort();
     }
@@ -396,6 +610,41 @@ class RateLimiterTest {
             var response = get("/unlimited");
             assertEquals(200, response.statusCode());
         }
+    }
+
+    public record LoginForm(String username, String password) {}
+
+    private HttpResponse<String> postForm(String path, String body) throws IOException, InterruptedException {
+        var request = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + path))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * M4 repro: {@code POST /login?username=victim} with only {@code password=} in the body. Before
+     * the fix the limiter saw no username (body only) and skipped, while {@code req.form()} bound
+     * {@code username=victim} from the query: unlimited guesses against the victim's account.
+     */
+    @Test
+    void documentedLoginSetupLimitsUsernameInQueryString() throws Exception {
+        for (int i = 0; i < 2; i++) {
+            var r = postForm("/login?username=victim", "password=guess" + i);
+            assertEquals(200, r.statusCode());
+            assertEquals("username=null", r.body(), "the handler must not bind username from the query");
+        }
+        assertEquals(429, postForm("/login?username=victim", "password=guess3").statusCode(),
+            "a submission without a username is counted, not exempt");
+        // The login page itself is not counted.
+        for (int i = 0; i < 5; i++) {
+            assertEquals(200, get("/login").statusCode());
+        }
+        // A normalized username has its own bucket: case and padding variants share it.
+        assertEquals(200, postForm("/login", "username=Alice&password=a").statusCode());
+        assertEquals(200, postForm("/login", "username=+alice+&password=b").statusCode());
+        assertEquals(429, postForm("/login", "username=ALICE&password=c").statusCode());
     }
 
     @Test

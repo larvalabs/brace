@@ -40,7 +40,7 @@ class CompressionTest {
         Files.write(staticDir.resolve("photo.png"), new byte[4096]);
 
         app = Brace.app().port(0).banner(false)
-            .staticFiles("/assets", staticDir.toString())
+            .staticFiles("/assets", staticDir.toString()).publicFiles()
             .maxUploadSize("64k");
         app.get("/page", req -> Result.html(PAGE));
         app.get("/small", req -> Result.html("<p>hi</p>"));

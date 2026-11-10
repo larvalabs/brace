@@ -104,8 +104,10 @@ class SessionCookieSecureTest {
 
     @Test
     void forwardedHostIsHonouredOnlyFromATrustedProxy() {
-        Map<String, String> headers = Map.of("Host", "127.0.0.1:8080", "X-Forwarded-Host", "app.example.com, edge");
+        Map<String, String> headers = Map.of("Host", "127.0.0.1:8080", "X-Forwarded-Host", "evil.example, app.example.com");
         var trusted = new TrustedProxies("10.0.0.0/8");
+        // L3 review F9: the rightmost entry, the one the nearest proxy wrote; the leftmost can be
+        // a client's own, passed through.
         assertEquals("app.example.com", ProxyHeaders.effectiveHost(headers::get, "10.1.2.3", trusted));
         assertEquals("127.0.0.1:8080", ProxyHeaders.effectiveHost(headers::get, "203.0.113.9", trusted),
             "a direct client cannot claim a host");

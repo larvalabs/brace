@@ -142,7 +142,7 @@ public class App {
             .storage(storage)
             .ops("ops-authorized-keys")
             .opsOrigins("https://app.example.com")          // the origin ops CLI logins are signed for
-            .staticFiles("/assets", "public");
+            .staticFiles("/assets", "public").publicFiles();  // a mapping declares who may fetch it
 
         var posts = new PostController();
         var pages = new PageController();
@@ -171,7 +171,7 @@ public class App {
 
 Components included in the framework jar as of this release:
 
-- **HTTP** — Jetty 12 with virtual threads, programmatic routing with a required access rule per route (`app.defaultAccess(...)`, `Access.*`, `.publicRoute()`), middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting, gzip response compression on by default (`.compression(false)` to opt out), `GET /__brace/health` for container and load-balancer health checks
+- **HTTP** — Jetty 12 with virtual threads, programmatic routing with a required access rule per route (`app.defaultAccess(...)`, `Access.*`, `.publicRoute()`), middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting and a required access declaration per mapping (`.publicFiles()` or `.access(...)`), gzip response compression on by default (`.compression(false)` to opt out), `GET /__brace/health` for container and load-balancer health checks
 - **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks, `findOwnedOr404()` for user-owned rows, `Sort` for request-chosen orders. PostgreSQL JDBC driver bundled — no extra dependency to add
 - **Templates** — JTE compiled type safe templates with explicit parameters, `javascript:` and other script URLs blocked in URL attributes, hot-reload in dev, precompiled ahead of time for prod by `brace run`
 - **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless; `__Host-` cookie name in production, absolute lifetime, `session.regenerate()` at login and logout
@@ -185,7 +185,7 @@ Components included in the framework jar as of this release:
 - **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs. Refuses loopback, private and cloud-metadata destinations by default (SSRF protection; `.trusted()` for your own internal services) and caps buffered responses at 10 MB
 - **WebSocket** — `app.ws()` with rooms, broadcast, and session access; upgrades run access requirements and an Origin check
 - **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
-- **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support
+- **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support; a request without a key is counted in a shared bucket, not let through
 - **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, confined saving with `safeFilename()`/`saveTo(dir, name)`, served sandboxed with `StaticFiles.UNTRUSTED`, built in S3 support
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
@@ -333,7 +333,9 @@ if (form.hasErrors()) return Result.view("posts/new", "form", form);
 var jsonForm = req.jsonForm(PostForm.class);
 ```
 
-A `boolean` component binds an HTML checkbox directly (`on` is true, absent is false).
+A `boolean` component binds an HTML checkbox directly (`on` is true, absent is false). On
+`POST`, `PUT`, `PATCH` and `DELETE`, `req.form` binds the request body only; `GET` and `HEAD`
+forms bind from the query string.
 
 In the template, put `${csrfField}` inside each `<form>` (declared `@param gg.jte.Content
 csrfField = null`). Never bind a request body into an `@Entity`: `req.json`/`bodyAs` throw for
@@ -562,8 +564,12 @@ cache.clearTag("simulation");                        // remove by tag
 app.get("/", cache.wrap("30m", ctrl::index).tags("simulation"));
 app.get("/team/{id}", cache.wrap("30m", ctrl::team).tags("simulation"));
 app.get("/posts", cache.wrap("10m", ctrl::list).vary("page"));  // ?page= keys the cache; other params ignored
+app.get("/news", cache.wrap("10m", ctrl::news).varyHeader("Accept-Language"));  // headers key it only when declared
 cache.clearTag("simulation");  // invalidate all cached pages at once
 ```
+
+A cached handler must depend only on its path parameters and what it declares with `vary` /
+`varyHeader`: dev mode warns, and `Brace.test()` fails, when it reads anything else.
 
 The default cache is per-process. For a multi-server deploy, opt into a shared, durable,
 cross-server-consistent backend in one line — it reuses your Postgres database, no new infra:
@@ -583,9 +589,14 @@ its own hit rate — so a clear resets counters only on the box that handled it.
 ## Static Files
 
 ```java
-app.staticFiles("/assets", "public");   // serve public/ directory at /assets/*
-app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);  // files users uploaded
+app.staticFiles("/assets", "public").publicFiles();   // serve public/ at /assets/* to everyone
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)   // files users uploaded
+   .access(Access.session("userId", "/login"));                         // logged-in users only
 ```
+
+Every mapping ends in `.publicFiles()` or `.access(...)`; `start()` refuses one with neither, and
+`defaultAccess(...)` does not cover mappings. The access check is bound to the mapping and runs
+before the file is looked up.
 
 `UNTRUSTED` serves user files so nothing in them can run on your origin: an uploaded `.html` or
 `.svg` is a sandboxed `application/octet-stream` download, and only raster images display inline.

@@ -335,7 +335,7 @@ class ProjectGeneratorTest {
         assertTrue(app.indexOf("app.after(SecurityHeaders.strict());") > routes,
             "strict headers are registered in routes(), so tests see them too");
         // The layout links /public/css/style.css, so public/ must be served.
-        assertTrue(app.indexOf("app.staticFiles(\"/public\", \"public\");") > routes, app);
+        assertTrue(app.indexOf("app.staticFiles(\"/public\", \"public\").publicFiles();") > routes, app);
 
         var layout = Files.readString(projDir.resolve("views/layout/main.jte"));
         assertTrue(layout.contains("@param gg.jte.Content csrfMeta = null"), layout);

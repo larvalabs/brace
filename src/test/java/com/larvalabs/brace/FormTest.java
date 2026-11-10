@@ -127,6 +127,40 @@ class FormTest {
         assertEquals("This is long enough content", form.value().body());
     }
 
+    // ---- D3 (M4): mutating methods bind the body only, never the query string ----
+
+    @Test
+    void postFormIgnoresQueryStringValueForFieldAbsentFromBody() {
+        // POST /posts?title=fromQuery with only body= in the body: title must not come from the
+        // URL, or a rate limiter keyed on formParam("title") and the handler see different values.
+        for (var method : new String[]{"POST", "PUT", "PATCH", "DELETE"}) {
+            var req = new Request(method, "/posts", Map.of(), Map.of("title", "fromQuery"),
+                Map.of(), "body=This+is+long+enough+content");
+            var form = req.form(SimpleForm.class);
+            assertNull(form.value().title(), method + " must not bind a field from the query string");
+            assertFalse(form.errors("title").isEmpty(), method + ": the missing body field is required");
+        }
+    }
+
+    @Test
+    void postFormBodyValueStillWinsAndQueryIsNotMerged() {
+        var req = new Request("POST", "/posts", Map.of(), Map.of("title", "fromQuery", "extra", "x"),
+            Map.of(), "title=fromBody&body=This+is+long+enough+content");
+        var form = req.form(SimpleForm.class);
+        assertEquals("fromBody", form.value().title());
+    }
+
+    @Test
+    void getFormStillBindsFromQueryString() {
+        for (var method : new String[]{"GET", "HEAD"}) {
+            var req = new Request(method, "/search", Map.of(),
+                Map.of("title", "Hello", "body", "This is long enough content"), Map.of(), "");
+            var form = req.form(SimpleForm.class);
+            assertFalse(form.hasErrors(), method + " forms bind from the query string");
+            assertEquals("Hello", form.value().title());
+        }
+    }
+
     @Test
     void richTypesBindFromStrings() {
         var form = FormBinder.bind(RichTypesForm.class, Map.of(

@@ -77,6 +77,13 @@ public class TrustedProxies {
     /** CIDRs from constructors and {@link #plus} — retained as strings so ranges can be rebuilt. */
     private final List<String> staticCidrs = new ArrayList<>();
 
+    /**
+     * Which header carries the client address chain (L3). Exactly one is read; the other is
+     * ignored, because a proxy that sets one usually passes a client-sent copy of the other
+     * straight through. {@code X-Forwarded-For} unless {@link #useForwardedHeader()} was called.
+     */
+    private volatile boolean useForwarded;
+
     private final boolean cloudflarePreset;
     /** Set by {@link #autoRefresh()}; {@code Brace.start()} resumes refreshing when it is. */
     private volatile boolean refreshRequested;
@@ -131,6 +138,34 @@ public class TrustedProxies {
         staticCidrs.addAll(List.of(cidrs));
         ranges = buildRanges();
         return this;
+    }
+
+    /**
+     * Read the client address from the RFC 7239 {@code Forwarded} header ({@code for=}) instead of
+     * {@code X-Forwarded-For}. Brace reads exactly one of the two, {@code X-Forwarded-For} by
+     * default, and ignores the other: a proxy that writes one typically passes a client-sent copy
+     * of the other through untouched, so reading both lets the client pick its own address. Call
+     * this only when your proxy sets {@code Forwarded} (and you have checked it does not also
+     * forward the client's {@code X-Forwarded-For}, which is then ignored). Fluent; returns
+     * {@code this}.
+     *
+     * <pre>{@code
+     * app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());
+     * }</pre>
+     */
+    public TrustedProxies useForwardedHeader() {
+        this.useForwarded = true;
+        return this;
+    }
+
+    /** The one header {@link Request#ip()} reads the client chain from. */
+    String clientIpHeader() {
+        return useForwarded ? "Forwarded" : "X-Forwarded-For";
+    }
+
+    /** True when the chain is RFC 7239 {@code Forwarded} rather than {@code X-Forwarded-For}. */
+    boolean usesForwardedHeader() {
+        return useForwarded;
     }
 
     /**
@@ -321,18 +356,55 @@ public class TrustedProxies {
      * DoS and DNS side-channel attacks from attacker-controlled forwarding headers.
      */
     public boolean isTrusted(String ip) {
-        if (ip == null || ip.isEmpty()) return false;
         // Reject non-literal input before touching InetAddress — never do DNS on hot path.
-        if (!isIpLiteral(ip)) return false;
-        try {
-            var addr = InetAddress.getByName(ip);
-            for (var range : ranges) {
-                if (range.contains(addr)) return true;
-            }
-            return false;
-        } catch (UnknownHostException e) {
-            return false;
+        var addr = parseLiteral(ip);
+        if (addr == null) return false;
+        for (var range : ranges) {
+            if (range.contains(addr)) return true;
         }
+        return false;
+    }
+
+    /**
+     * Parse an IPv4 or IPv6 address literal, or return null; never resolves a name. An IPv6
+     * candidate must consist of hex digits, {@code :} and {@code .} (plus an optional
+     * {@code %zone}): {@link InetAddress#getByName} only parses a string as a literal when it
+     * starts with a hex digit or {@code :}, and sends anything else (say {@code "zz:1"}, which has
+     * a colon) to the resolver. An IPv4-mapped IPv6 literal parses to its IPv4 address. One
+     * surrounding pair of brackets is accepted ({@code [::1]}, the form Jetty reports an IPv6 peer
+     * in; L6 review): refusing it meant no IPv6 proxy was ever trusted.
+     */
+    static InetAddress parseLiteral(String s) {
+        s = unbracket(s);
+        if (s == null || s.isEmpty() || !isIpLiteral(s)) return null;
+        if (s.indexOf(':') >= 0) {
+            int zone = s.indexOf('%');
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                boolean ok = zone >= 0 && i > zone
+                    ? Character.isLetterOrDigit(c) && c < 0x80 || c == '_' || c == '.' || c == '-'
+                    : i == zone || Character.digit(c, 16) >= 0 && c < 0x80 || c == ':' || c == '.';
+                if (!ok) return null;
+            }
+        }
+        try {
+            return InetAddress.getByName(s);
+        } catch (UnknownHostException e) {
+            return null;
+        }
+    }
+
+    /**
+     * {@code s} without one surrounding pair of brackets: {@code [0:0:0:0:0:0:0:1]} becomes
+     * {@code 0:0:0:0:0:0:0:1}. Anything else (no brackets, an unbalanced or doubled pair) is
+     * returned unchanged. A zone id inside the brackets is kept.
+     */
+    static String unbracket(String s) {
+        if (s != null && s.length() > 2 && s.charAt(0) == '[' && s.charAt(s.length() - 1) == ']'
+                && s.indexOf('[', 1) < 0 && s.indexOf(']') == s.length() - 1) {
+            return s.substring(1, s.length() - 1);
+        }
+        return s;
     }
 
     private static class CidrRange {

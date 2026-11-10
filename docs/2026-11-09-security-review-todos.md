@@ -190,7 +190,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
 
 ## Medium
 
-- [ ] **M1: Static mapping prefix has no segment boundary**, `BraceHandler.java:1337-1344`, `Assets.java:108-110`
+- [x] **M1: Static mapping prefix has no segment boundary**, `BraceHandler.java:1337-1344`, `Assets.java:108-110`
   - **What's wrong.** `serveStaticFile` tests `requestPath.startsWith(prefix)` and strips the
     prefix, so `/filesX` is treated as `/files` + `X`. `Middleware.PathPattern.matches`
     (`Middleware.java:82-87`) requires `path.equals("/files") || path.startsWith("/files/")`,
@@ -207,7 +207,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     registered with a trailing slash still works.
   - **Model: Sonnet 5.5.**
 
-- [ ] **M2: Path guards see the raw path; static serving decodes it afterwards**, `BraceHandler.java:335-341, 369-384, 1351`
+- [x] **M2: Path guards see the raw path; static serving decodes it afterwards**, `BraceHandler.java:335-341, 369-384, 1351`
   - **What's wrong.** Before-middleware and session middleware match the raw request path. The
     static handler then calls `Route.decodePath(relativePath)`. This is the normalization
     mismatch the 2026-10 route fix removed, still present for static mappings.
@@ -223,8 +223,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Tests.** `%70rivate` returns 404; `my%20file.css` is still served; the case variant
     returns 404 on a case-insensitive volume (assume-guarded).
   - **Model: Opus 5.5.** The rule has to match the route fix and not break legitimate encoding.
+  - **Review fixes.** A trailing slash was a second spelling that still served the file
+    (`GET /files/exact.txt/` returned 200 past `before("/files/exact.txt", ...)`), because
+    `Path.normalize()` drops the trailing separator. The static handler now returns 404 unless
+    the path it would open, rendered with `/`, equals the requested relative path exactly (no
+    trailing slash, no empty segment). The comment claiming safety under relaxed Jetty URI
+    compliance now says what each check covers. Tests in `StaticCanonicalPathTest`, including
+    the non-ASCII hex-digit case the reviewer's mutation check found unpinned.
 
-- [ ] **M3: Static mappings are outside deny-by-default, and the docs don't say so**, `BraceHandler.java:351-362, 390-396`, `Brace.java` (`staticFiles`), `docs/SECURITY.md` (Authorization, Static Files)
+- [x] **M3: Static mappings are outside deny-by-default, and the docs don't say so**, `BraceHandler.java:351-362, 390-396`, `Brace.java` (`staticFiles`), `docs/SECURITY.md` (Authorization, Static Files)
   - **What's wrong.** Access runs only `if (match != null)`; static files are served when
     `match == null`. `staticFiles(...)` takes no access argument. `docs/SECURITY.md` says plain
     `before(...)` never counts as access, so the only way to gate a mapping is a path `before`,
@@ -243,8 +250,31 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     anonymous requests in every path variant from M1 and M2; `/ops/routes` and the startup
     banner show the mapping's access.
   - **Model: Fable 5.2.** A public API and a startup invariant every app changes for.
+  - **Review fixes.** An independent review reproduced four gaps in the first fix; all fixed,
+    tests in `StaticMappingReviewFixesTest`.
+    - *Method bypass (Medium).* A non-GET/HEAD request found no route for its method and was
+      served the mapping's file, around a route registered at that path with stricter access.
+      A mapping now serves only GET and HEAD (405 otherwise, after its access) and never serves
+      a path any route pattern matches; `start()` warns about routes under a mapping's prefix.
+    - *Shared-cacheable guarded responses (Medium).* The `public`→`private` rewrite missed a
+      lowercase header name, `s-maxage`, bare `max-age`, `Expires` and the CDN headers, and
+      left the 404/416/rejection with no `Cache-Control`. Every caching header is now stripped
+      (any case) under a guarded mapping and one is set: `private, no-cache` for the file,
+      `no-store` otherwise. `Result` header names are case-insensitive, and a session cookie
+      always rides `private`.
+    - *Cacheable route rejections (Low).* Any access rejection is now `no-store` with
+      `Vary: Accept, HX-Request`; dev mode warns when a guarded route's success is `public`.
+    - *Directory checks (Low).* `start()` refuses overlapping directories with different
+      access (not only guarded versus public) and a mapping whose directory is missing;
+      a duplicate prefix throws; at serve time a file inside a differently guarded mapping's
+      real directory is a 404.
+    - *Access value equality (from the Track C limits review).* The overlap check compared
+      requirements by identity, so two separate `Access.session("userId", "/login")` calls on
+      overlapping directories were refused with a confusing message. The built-in kinds
+      (session, none, `insteadOfDefault`) now have value equality; custom checks and the ops
+      requirement stay identity; the message says so. Tests in `StaticMappingReviewFixesTest`.
 
-- [ ] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
+- [x] **M4: `RateLimiter.perKey` is skipped when the key is null or blank, and the docs say the opposite**, `RateLimiter.java:196-198`, `Request.java:621-627`, `docs/SECURITY.md:1187-1190, 1208-1209`
   - **What's wrong.**
     - `check()` returns `null` (not limited) for a null or blank key. The Javadoc calls this
       intentional; `docs/SECURITY.md` says such requests go to a `"(none)"` bucket "rather than
@@ -270,6 +300,12 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     ignores a query-string value for a field absent from the body; GET forms still bind from
     the query.
   - **Model: Opus 5.5.** Two breaking semantics plus docs and a migration entry.
+  - **Review fixes.** Decision A: the one global missing-key bucket let ordinary traffic lock
+    everyone out (five keyless `GET /login` views from five addresses and the sixth visitor got
+    429). A missing key is now counted in a per-address bucket (`" (none):" + ipBucket(ip)`, out
+    of a client key's reach) with the limiter's limit and window, so keyless traffic is limited
+    exactly as `perIp` would; `.exemptMissingKey()` is unchanged. Dev mode warns once per limiter
+    when it counts a keyless GET/HEAD. Tests in `RateLimiterReviewFixesTest`.
 
 - [ ] **M5: One request containing `%00` stops error persistence and regression alerts on Postgres**, `ErrorStore.java:100-133, 141-204, 228-256`, `BraceHandler.java:586-626`, `Request.java:158-207, 289, 326-330`
   - **What's wrong.**
@@ -406,7 +442,7 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Decision D6. Require `opsOrigins` unless the mode is `dev` or the test harness.
   - **Model: Sonnet 5.5.**
 
-- [ ] **L3: `req.ip()` prefers client-sent `X-Forwarded-For` over the proxy's `Forwarded`; repeated header lines are last-wins**, `Request.java:493-507`, `BraceHandler.java:283-286`, `Brace.java:1369`
+- [x] **L3: `req.ip()` prefers client-sent `X-Forwarded-For` over the proxy's `Forwarded`; repeated header lines are last-wins**, `Request.java:493-507`, `BraceHandler.java:283-286`, `Brace.java:1369`
   - `X-Forwarded-For` is checked first and `Forwarded` only when it is absent. The comment says
     Jetty joins repeated headers with ", "; the header map is built with `put`, so the last
     line wins.
@@ -417,8 +453,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Make the forwarding header an explicit choice on `TrustedProxies` (default XFF
     only) and ignore the other; build the list from all field instances, in order.
   - **Model: Opus 5.5.**
+  - **Review fixes.** F3: a trusted peer that sends only the unchosen forwarding header now gets
+    one warning naming `useForwardedHeader()` (both directions). F8: `Forwarded` is split
+    respecting quoted-strings and escapes, and a selected entry that is not an IP literal
+    (`<script>`, `"a,b"`, `_hidden`, `unknown`) yields the socket address: `req.ip()` is only ever
+    a literal or `unknown`. F9: `X-Forwarded-Proto`/`Host` take the rightmost entry across all
+    lines (one header-map builder joins them for HTTP and WebSocket); the docs say the proxy must
+    overwrite them. F10: `Cookie` lines are joined with `"; "` on both paths and the WebSocket
+    upgrade parses the session cookie as HTTP does (first occurrence of a name wins). Tests in
+    `ProxyHeadersReviewFixesTest`.
 
-- [ ] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
+- [x] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
   - `RenderedResponse.from(result)` is stored regardless of status. The key ignores undeclared
     query params and headers, but the handler still receives them. The key uses the undecoded
     `request.path()`, so `/posts/hello` and `/posts/hell%6f` are separate entries for one page.
@@ -430,8 +475,18 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Cache only 2xx; key on the route pattern plus decoded path parameters; give
     `PostgresBackend` a row cap.
   - **Model: Opus 5.5.**
+  - **Review fixes.** F5: the row cap covered the whole table, so a page flood evicted the app's
+    own entries (reviewer: 0 of 50 survived). Page keys now carry `brace:page:`; Postgres caps
+    page rows separately (default 10,000) and trims them first under the overall cap; in memory
+    page entries are evicted first and a new page never displaces an app entry (50 of 50
+    survive). F6: a declared `vary` param keys on all its values; `Authorization`, `HX-Target`,
+    `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` and `HX-Prompt` bypass the cache unless declared
+    with the new `varyHeader(...)`; in dev mode and `Brace.test()` the handler's reads through
+    `Request` are recorded and an undeclared query param, header, cookie, `ip()` or body read is
+    logged once per route (dev) or thrown (test); a response that sets a cookie is returned
+    intact and not stored. Tests in `PageCacheReviewFixesTest`, `PageCacheCapPostgresIT`.
 
-- [ ] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
+- [x] **L5: A NUL or oversized value in a rate-limit or cache key breaks the Postgres path**, `RateLimiter.java:234-251, 393-430`, `Counters.java:118-147`, `Cache.java:441-451`, `PostgresBackend.java:47-83`
   - Rate-limit keys of 64 characters or fewer are used raw. `username=a%00` yields a key with a
     NUL; the multi-row counter statement is rejected, every delta is restored, and the poison
     key keeps each flush failing until its window rolls. Each instance then counts only its own
@@ -442,13 +497,30 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
   - **Fix.** Hash any key containing a control character (both classes); hash cache keys over
     about 512 bytes; on a failed counter batch, retry per key and discard the one that fails.
   - **Model: Opus 5.5.** Same Postgres-IT caveat as M5.
+  - **Review fixes.** F7: `deletePrefix("search:#sha256:")` and `deletePrefix("search:\u0001")`
+    deleted `search:alpha`. A prefix that had to be cut now deletes plain keys starting with the
+    whole prefix plus hashed keys whose readable part is exactly the cut prefix; the Javadoc
+    states the over-deletion that remains. F11: a rate-limit or cache key with an unpaired
+    surrogate is hashed (from 0xFF plus its UTF-16 units, so lone surrogates stay distinct);
+    pgjdbc had sent them as `?`. Tests in `CacheKeyReviewFixesTest`,
+    `CacheKeyReviewFixesPostgresIT`.
 
-- [ ] **L6: Rate-limiter state has no cap on distinct keys; `perIp` buckets full IPv6 addresses**, `RateLimiter.java:82, 96-98, 116-121, 256, 311-313`
+- [x] **L6: Rate-limiter state has no cap on distinct keys; `perIp` buckets full IPv6 addresses**, `RateLimiter.java:82, 96-98, 116-121, 256, 311-313`
   - Each distinct key holds map entries and a `brace_counters` row for the whole window. A
     client with a routed IPv6 /64 rotates source addresses and never trips `perIp`.
   - **Fix.** Key IPv6 on its /64; cap distinct keys per limiter and fold the excess into one
     overflow bucket.
   - **Model: Opus 5.5.**
+  - **Review fixes.** F1 (regression): Jetty reports an IPv6 peer as `[0:0:0:0:0:0:0:1]` and the
+    strict literal parser refused the brackets, so no IPv6 proxy was trusted and direct IPv6
+    clients were not grouped by /64; the peer address is now unbracketed where it enters the
+    framework (HTTP and WebSocket) and `parseLiteral` accepts one bracket pair. Decision B: at the
+    cap a new key evicts the least recently used under-limit key of a bounded sample (blocked keys
+    stay pinned; evicted rows are deleted on Postgres), then falls back to a per-IP overflow
+    bucket, then the global one. F4: counter statements are chunked at 5,000 rows, a refused chunk
+    is bisected, the parameter-count error is not a key problem, and a flush stops after 2 s.
+    F12: documented why same-label limiters share buckets only in shared mode. Tests in
+    `Ipv6PeerSocketTest`, `RateLimiterReviewFixesTest`, `RateLimiterFlushPostgresIT`.
 
 - [x] **L7: Smaller gaps in template output**, `BraceHtmlOutput.java:87-88, 190-194, 226-229, 318-335, 367-370, 432-435`
   - **Template-written `javascript:` URL.** `<a href="javascript:go('${x}')">` with
@@ -494,19 +566,32 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     `new URL(event.detail.path, location.href).origin === location.origin`.
   - **Model: Haiku 5.5.**
 
-- [ ] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
+- [x] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
   - **Verified (scratch server).** `GET /items/../y` on `/items/{a}/{b}` gives `a=..`. A handler
     resolving a path from parameters serves a sibling directory, and a proxy that normalizes
     dot segments for its own ACLs but forwards the raw URI sees a different path than Brace.
   - **Fix.** Return 404 when any raw segment is exactly `.` or `..`.
   - **Model: Sonnet 5.5.**
+  - **Review fixes.** Two gaps, tests in `DotSegmentReviewFixesTest`.
+    - The WebSocket upgrade path was not covered: Jetty matches the upgrade against the
+      canonical path, so `/ws/../ws`, `/files/../ws`, `/%77s` and `/ws;x` returned 101 (with
+      the route's access still enforced). The upgrade is now declined with 404 unless the raw
+      request path equals the registered path exactly.
+    - The dot-segment 404 was thrown before the `Request` existed, so it skipped
+      after-middleware and went out without the app's security headers. It is now answered
+      after the request is built, with no route or mapping matched for it.
 
-- [ ] **L10: A `Route` whose access was never resolved is open, not closed**, `Route.java:27`, `BraceHandler.java:117-194, 351-352`
+- [x] **L10: A `Route` whose access was never resolved is open, not closed**, `Route.java:27`, `BraceHandler.java:117-194, 351-352`
   - `access` starts as `List.of()`, and only `Brace.resolveAccess()` fills it. `BraceHandler` is
     public with public constructors, so a handler built without `Brace.start()` serves every
     route with no requirement.
   - **Fix.** Initialise to null and have `Route.access()` throw when unresolved.
   - **Model: Sonnet 5.5.**
+  - **Review fixes.** `Brace.stop()` unfroze the router before Jetty had stopped, so a route
+    registered during shutdown was matched by requests still draining (answered 500, since its
+    access was unresolved) while the `Router`'s unsynchronised collections were mutated under
+    them. The router is now unfrozen only after `server.stop()` returns. Verified by reading;
+    reconfiguring a stopped app is still covered by `RouteAccessTest`.
 
 - [x] **L11: The CLI on a hostile checkout**, `CliConfig.java:38-42`, `CliCheck.java:259-261, 328, 436, 441`, `CliCommands.java` (render paths), `CliAuth.java:28`, `CliAgentsMd.java:58, 62`, `CliInit.java:20-21, 34-35, 62`, `CliOps.java:70-73`
   - **`followUp` injection.** `ops.env` from the committed `.brace` is spliced unvalidated into
@@ -570,9 +655,9 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
 
 Fixed in the commit of the finding named, or the closeout docs commit.
 
-- [ ] `docs/SECURITY.md:1208-1209`: the `"(none)"` bucket claim (M4).
-- [ ] `docs/SECURITY.md:1187, 1190`: `before("/api", …)` limits only the literal `/api` (M4).
-- [ ] `docs/SECURITY.md:707-716`: recommends `::ffff:10.0.0.0/104`, which throws at startup
+- [x] `docs/SECURITY.md:1208-1209`: the `"(none)"` bucket claim (M4).
+- [x] `docs/SECURITY.md:1187, 1190`: `before("/api", …)` limits only the literal `/api` (M4).
+- [x] `docs/SECURITY.md:707-716`: recommends `::ffff:10.0.0.0/104`, which throws at startup
   ("Prefix length must be 0..32"); the mapped form already matches the IPv4 CIDR. Remove it.
 - [ ] `docs/SECURITY.md:1389`: says ops auth v1 "is accepted for one release"; it is removed.
 - [ ] `docs/SECURITY.md:348-354` and the `@template` "Not covered" note (L7).

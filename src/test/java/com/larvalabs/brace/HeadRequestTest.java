@@ -38,7 +38,7 @@ class HeadRequestTest {
         bigFile = staticDir.resolve("big.bin");
         Files.write(bigFile, new byte[200_000]);
 
-        app = Brace.app().port(0).staticFiles("/assets", staticDir.toString());
+        app = Brace.app().port(0).staticFiles("/assets", staticDir.toString()).publicFiles();
         app.get("/", req -> Result.html("<h1>home</h1>"));
         app.get("/users/{id}", req -> Result.text("user " + req.pathParam("id")));
         app.get("/method", req -> Result.text("method=" + req.method()));

@@ -38,7 +38,7 @@ class StaticFileSymlinkTest {
         // A directory symlink pointing out of the tree — traversal through the link, not to it.
         Files.createSymbolicLink(assets.resolve("outdir"), outside);
 
-        app = Brace.app().port(0).staticFiles("/assets", assets.toString());
+        app = Brace.app().port(0).staticFiles("/assets", assets.toString()).publicFiles();
         app.start();
         port = app.actualPort();
     }

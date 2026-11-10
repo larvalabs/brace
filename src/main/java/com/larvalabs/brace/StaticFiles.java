@@ -4,9 +4,13 @@ package com.larvalabs.brace;
  * How {@link Brace#staticFiles(String, String, StaticFiles)} serves a directory.
  *
  * <pre>{@code
- * app.staticFiles("/assets", "public")                                         // your own files
- *    .staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);       // users' files
+ * app.staticFiles("/assets", "public").publicFiles();                          // your own files
+ * app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)       // users' files
+ *    .access(Access.session("userId", "/login"));
  * }</pre>
+ *
+ * <p>The mode is how files are served; who may fetch them is declared separately on the returned
+ * {@link StaticFilesConfig}, and every mapping must declare it.
  */
 public enum StaticFiles {
 
