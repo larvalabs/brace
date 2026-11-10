@@ -75,10 +75,13 @@ public class CliOps {
             if (Files.exists(file)) {
                 var lines = new ArrayList<>(Files.readAllLines(file));
                 for (int i = 0; i < lines.size(); i++) {
-                    if (label.equals(labelOf(lines.get(i)))) {
-                        lines.set(i, entry);
-                        replaced = true;
-                        break;
+                    if (label.equals(labelOfServerGrammar(lines.get(i), i == 0))) {
+                        if (replaced) {
+                            lines.remove(i--);   // a second entry for the label: its key must not stay trusted either
+                        } else {
+                            lines.set(i, entry);
+                            replaced = true;
+                        }
                     }
                 }
                 if (!replaced) lines.add(entry);
@@ -212,17 +215,30 @@ public class CliOps {
     }
 
     /**
-     * The label portion of an authorized-keys line, or null for blank/comment lines. Skips the
-     * key and an optional {@code scope:...} marker so rotation still matches by label when an
-     * entry carries a scope.
+     * The label of an authorized-keys line, or null for a blank or comment-only line, parsed with
+     * the same rules as the server's {@code OpsKeys.loadAuthorizedKeys}: a {@code #} at the start
+     * of the line or after whitespace starts a comment that runs to the end of the line; the first
+     * token is the key; a {@code scope:...} token is the scope wherever it stands; the remaining
+     * tokens are the label. A rotation that missed an existing entry for its label left the old
+     * key trusted, so this must not be stricter than the server. (These rules are duplicated from
+     * {@code OpsKeys}; they should be shared in one helper.)
      */
-    private static String labelOf(String line) {
-        String t = line.strip();
-        if (t.isEmpty() || t.startsWith("#")) return null;
-        String[] tokens = t.split("\\s+");
-        int i = 1; // skip the key
-        if (i < tokens.length && tokens[i].startsWith("scope:")) i++; // skip optional scope marker
-        return i >= tokens.length ? "" : String.join(" ", java.util.Arrays.copyOfRange(tokens, i, tokens.length));
+    private static String labelOfServerGrammar(String line, boolean firstLine) {
+        if (firstLine && line.startsWith("﻿")) line = line.substring(1);   // the server drops a leading BOM
+        for (int i = 0; i < line.length(); i++) {
+            if (line.charAt(i) == '#' && (i == 0 || Character.isWhitespace(line.charAt(i - 1)))) {
+                line = line.substring(0, i);
+                break;
+            }
+        }
+        line = line.strip();
+        if (line.isEmpty()) return null;
+        String[] tokens = line.split("\\s+");
+        var label = new ArrayList<String>();
+        for (int i = 1; i < tokens.length; i++) {
+            if (!tokens[i].startsWith("scope:")) label.add(tokens[i]);
+        }
+        return String.join(" ", label);
     }
 
     public static int dashboard(Path projectDir, String[] args) {
@@ -232,11 +248,11 @@ public class CliOps {
             // Exchange bearer for single-use login token
             var loginResponse = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.url() + "/ops/auth/login-token"))
+                    .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/auth/login-token"))
                     .POST(HttpRequest.BodyPublishers.noBody()));
 
             if (loginResponse.statusCode() != 200) {
-                CliOutput.printError("Failed to get login token: " + loginResponse.body());
+                CliOutput.printError("Failed to get login token: " + CliOutput.excerpt(loginResponse.body()));
                 return 1;
             }
 
@@ -249,7 +265,7 @@ public class CliOps {
                 CliOutput.printError("Server returned a malformed login token; refusing to open it.");
                 return 1;
             }
-            String dashboardUrl = cfg.url() + "/ops/auth/exchange?token=" + loginToken
+            String dashboardUrl = CliAuth.baseUrl(cfg) + "/ops/auth/exchange?token=" + loginToken
                 + (CliCommands.hasFlag(args, "--analytics") ? "&next=analytics" : "");
             if (!dashboardUrl.startsWith("http://") && !dashboardUrl.startsWith("https://")) {
                 CliOutput.printError("Refusing to open a non-http(s) dashboard URL: " + dashboardUrl);

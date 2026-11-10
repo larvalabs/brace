@@ -22,7 +22,7 @@ public class CliCommands {
             return errorDetail(cfg, projectDir, args[0], mode);
         }
 
-        String url = cfg.url() + "/ops/errors";
+        String url = CliAuth.baseUrl(cfg) + "/ops/errors";
         var params = new ArrayList<String>();
         String since = parseFlag(args, "--since");
         if (since != null) params.add("since=" + parseDuration(since));
@@ -38,7 +38,7 @@ public class CliCommands {
                 .GET());
 
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
 
@@ -55,7 +55,7 @@ public class CliCommands {
     private static int errorDetail(CliConfig cfg, Path projectDir, String id, CliOutput.Mode mode) throws Exception {
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/errors/" + id))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/errors/" + id))
                 .header("Accept", "application/json")
                 .GET());
 
@@ -65,7 +65,7 @@ public class CliCommands {
             return 1;
         }
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
 
@@ -140,7 +140,7 @@ public class CliCommands {
         boolean follow = hasFlag(args, "-f") || hasFlag(args, "--follow");
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
 
-        String baseUrl = cfg.url() + "/ops/logs";
+        String baseUrl = CliAuth.baseUrl(cfg) + "/ops/logs";
         StringBuilder query = new StringBuilder();
         if (since != null) {
             Instant cutoff = parseDuration(since);
@@ -176,7 +176,7 @@ public class CliCommands {
                 .header("Accept", "application/json")
                 .GET());
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 0;
         }
         JsonNode entries = Json.mapper().readTree(response.body());
@@ -216,7 +216,7 @@ public class CliCommands {
 
     public static int status(Path projectDir, String[] args) throws Exception {
         var cfg = CliConfig.load(projectDir, args);
-        String url = cfg.url() + "/ops/status" + statusQuery(args);
+        String url = CliAuth.baseUrl(cfg) + "/ops/status" + statusQuery(args);
 
         HttpResponse<String> response;
         try {
@@ -226,7 +226,7 @@ public class CliCommands {
                     .header("Accept", "application/json")
                     .GET());
         } catch (Exception e) {
-            CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+            CliOutput.printError("Cannot reach " + CliOutput.excerpt(cfg.url()) + ": " + CliOutput.excerpt(e.getMessage()));
             return 2;
         }
 
@@ -394,7 +394,7 @@ public class CliCommands {
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/cache"))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/cache"))
                 .header("Accept", "application/json")
                 .GET());
 
@@ -433,11 +433,11 @@ public class CliCommands {
         try {
             response = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.url() + "/ops/analytics/data?range=" + range))
+                    .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/analytics/data?range=" + range))
                     .header("Accept", "application/json")
                     .GET());
         } catch (Exception e) {
-            CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+            CliOutput.printError("Cannot reach " + CliOutput.excerpt(cfg.url()) + ": " + CliOutput.excerpt(e.getMessage()));
             return 2;
         }
         if (response.statusCode() == 404) {
@@ -506,7 +506,7 @@ public class CliCommands {
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/cache/clear"))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/cache/clear"))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody()));
 
@@ -516,7 +516,7 @@ public class CliCommands {
             return 0;
         }
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));
@@ -529,7 +529,7 @@ public class CliCommands {
 
     /**
      * JSON mode for a command whose server reply is passed on: parse it and print it
-     * re-serialized (compact, control characters escaped by Jackson), never the raw body, which
+     * re-serialized (compact, unsafe characters escaped by {@link CliOutput#json}), never the raw body, which
      * a hostile server could fill with terminal escape sequences (L11). A body that isn't JSON
      * gets the same one-line error, and exit code, as an HTTP error status.
      */
@@ -541,7 +541,7 @@ public class CliCommands {
             body = null;
         }
         if (body == null || body.isMissingNode()) {
-            CliOutput.printError("HTTP " + response.statusCode() + " but the response is not JSON: " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + " but the response is not JSON: " + CliOutput.excerpt(response.body()));
             return 2;
         }
         System.out.println(CliOutput.json(body));
@@ -561,7 +561,7 @@ public class CliCommands {
 
         var response = CliAuth.sendAuthenticated(cfg, projectDir,
             HttpRequest.newBuilder()
-                .uri(URI.create(cfg.url() + "/ops/errors/" + id + "/resolve"))
+                .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/errors/" + id + "/resolve"))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody()));
 
@@ -570,7 +570,7 @@ public class CliCommands {
             return 1;
         }
         if (response.statusCode() != 200) {
-            CliOutput.printError("HTTP " + response.statusCode() + ": " + response.body());
+            CliOutput.printError("HTTP " + response.statusCode() + ": " + CliOutput.excerpt(response.body()));
             return 2;
         }
         var mode = CliOutput.autoMode(hasFlag(args, "--json"), hasFlag(args, "--pretty"));

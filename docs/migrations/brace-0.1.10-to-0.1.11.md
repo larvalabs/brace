@@ -1832,6 +1832,27 @@ ops.prod-eu.url=https://eu.example.com
   its request, headers, queries and stack-trace sections behind a `  | ` gutter (it was a plain
   indent). `--json` output goes through the JSON serializer; `cache clear --json` and
   `resolve --json` now print re-serialized JSON, and exit 2 on a body that isn't JSON.
+- **CLI requests time out and cap what they read.** Every ops request has a 10 second connect
+  timeout and a 30 second request timeout, and a response body is read within 30 seconds and
+  at most 16 MB, so a server that never answers, sends a byte at a time or never stops sending
+  fails the command with a one-line error instead of hanging. Server text in an error message
+  is cut to about 300 characters. `ops.key` must be a regular file of at most 64 KB (a symlink
+  to one is fine; a pipe or device is refused). Toolchain downloads stop after 60 seconds
+  without data. An `OutOfMemoryError` or other `Error` exits 1 with a short message.
+- **`--json` output escapes control and format characters.** DEL, the C1 range (U+0080 to
+  U+009F, including the 8-bit CSI), bidi and zero-width characters, the BOM, U+2028, U+2029
+  and unpaired surrogates are written as `\uXXXX` escapes, in values and in key names. A JSON
+  parser reads them back as the original text; ordinary non-ASCII text is unchanged.
+- **`brace ops keypair --label` replaces the existing entry for that label** whatever its
+  shape: the `scope:` token may stand anywhere on the line and a trailing `# comment` is
+  ignored, as the server reads it, and every entry for the label is replaced, so a rotation
+  can no longer leave the old key trusted. A commented-out line and a different label with the
+  same prefix are left alone.
+- **A trailing slash in `ops.<env>.url`** no longer produces `//ops/auth` (a 400); requests
+  are built from the normalised origin.
+- **`maxUploadSize` and the other size settings accept `KB`, `MB` and `GB`** (any case) as
+  well as `K`, `M` and `G`: `app.maxUploadSize("10MB")` used to throw
+  `NumberFormatException`.
 - **One `<brace.version>` per `pom.xml`.** A pom with more than one `<brace.version>` element
   is refused, commented-out copies and copies in profiles included, so the toolchain the
   launcher picks is the version Maven builds. Keep exactly one.

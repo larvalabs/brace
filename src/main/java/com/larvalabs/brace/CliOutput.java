@@ -56,7 +56,8 @@ public class CliOutput {
      * the operator can see what was there. Other text,
      * accents, CJK, emoji and NBSP included, is unchanged; a zero width joiner is a FORMAT
      * character, so a joined emoji sequence shows its parts with the joiner escaped. JSON mode
-     * doesn't need this: Jackson escapes control characters.
+     * does not use this: Jackson escapes only U+0000 to U+001F, so {@link #json} escapes the rest
+     * of these characters itself.
      */
     public static String sanitizeLine(String s) {
         return escape(s, false);
@@ -204,15 +205,62 @@ public class CliOutput {
 
     /**
      * Serialize a value for JSON (agent) mode: compact, one line. JSON mode exists for
-     * programs — agents, `jq`, scripts — where pretty-printing only costs tokens. The
+     * programs (agents, `jq`, scripts) where pretty-printing only costs tokens. The
      * human/`--pretty` mode renders tables and summaries, not pretty-printed JSON.
+     *
+     * <p>Jackson escapes only U+0000 to U+001F, but the output also reaches terminals and logs,
+     * and the values and key names may come from a hostile server. So after serializing, every
+     * code point {@link #sanitizeLine} treats as unsafe and that is still raw (DEL and the C1
+     * range, including U+009B, an 8-bit CSI; FORMAT characters such as bidi overrides, zero-width
+     * characters and the BOM, in any plane; U+2028 and U+2029; an unpaired surrogate) is written
+     * as a backslash-u-hex escape (four digits), a supplementary one as a surrogate pair. This is valid JSON
+     * that parses back to the same strings, and it applies to key names as well as values. A
+     * structural character is never one of these, so a text replacement over the whole output
+     * is safe. Ordinary non-ASCII text stays readable.
      */
     public static String json(Object value) {
         try {
-            return Json.mapper().writeValueAsString(value);
+            return escapeJsonUnsafe(Json.mapper().writeValueAsString(value));
         } catch (Exception e) {
-            return String.valueOf(value);
+            return sanitizeLine(String.valueOf(value));
         }
+    }
+
+    /** Escapes the unsafe code points of already-serialized JSON text as backslash-u-hex escapes. */
+    static String escapeJsonUnsafe(String json) {
+        StringBuilder sb = null;
+        for (int i = 0; i < json.length(); ) {
+            int cp = json.codePointAt(i);
+            int n = Character.charCount(cp);
+            boolean bad = unsafe(cp);
+            if (bad && sb == null) sb = new StringBuilder(json.length() + 16).append(json, 0, i);
+            if (sb != null) {
+                if (bad) {
+                    for (int k = i; k < i + n; k++) sb.append(String.format("\\u%04x", (int) json.charAt(k)));
+                } else {
+                    sb.appendCodePoint(cp);
+                }
+            }
+            i += n;
+        }
+        return sb == null ? json : sb.toString();
+    }
+
+    /** The most server-derived text an error message carries. */
+    static final int EXCERPT_LIMIT = 300;
+
+    /**
+     * Server-derived text for an error message, cut to {@value #EXCERPT_LIMIT} code points (never
+     * through a surrogate pair) with a visible marker, so a hostile server cannot make the CLI
+     * print megabytes on one line. Null is the empty string. Not sanitized: {@link #printError}
+     * and the other one-line printers do that.
+     */
+    public static String excerpt(String s) {
+        if (s == null) return "";
+        int points = s.codePointCount(0, s.length());
+        if (points <= EXCERPT_LIMIT) return s;
+        int end = s.offsetByCodePoints(0, EXCERPT_LIMIT);
+        return s.substring(0, end) + "… (" + (points - EXCERPT_LIMIT) + " more characters)";
     }
 
     /** One line on stderr; the message goes through {@link #sanitizeLine}. */

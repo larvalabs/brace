@@ -1900,8 +1900,12 @@ public class Brace {
         return instanceId;
     }
 
-    private static long parseSize(String size) {
-        var s = size.strip().toLowerCase();
+    static long parseSize(String size) {
+        var s = size.strip().toLowerCase(java.util.Locale.ROOT);
+        // KB, MB and GB mean the same as K, M and G (binary units, as always).
+        if (s.length() > 2 && s.endsWith("b") && "kmg".indexOf(s.charAt(s.length() - 2)) >= 0) {
+            s = s.substring(0, s.length() - 1);
+        }
         if (s.endsWith("k")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024;
         if (s.endsWith("m")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024;
         if (s.endsWith("g")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024 * 1024;

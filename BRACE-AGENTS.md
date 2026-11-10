@@ -86,7 +86,7 @@ var app = Brace.app()
     .ops("ops-authorized-keys")
     .opsOrigins(config.get("ops.origins"))           // the app's public origin: required in prod with ops
     .staticFiles("/assets", "public").publicFiles()   // a mapping must say .publicFiles() or .access(...)
-    .maxUploadSize("10MB")
+    .maxUploadSize("10MB")                            // K/KB, M/MB, G/GB, any case; or a byte count
     .after(SecurityHeaders.strict());
 ```
 
@@ -831,7 +831,7 @@ session.remove("userId");             // remove key
 session.clear();                       // remove all
 ```
 
-Configure cookie security with `app.sessions(SessionOptions.secure("secret").maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `absoluteMaxAge(Duration)`, `previousSecrets(String...)`, `path(String)`, `domain(String)`.
+Configure cookie security with `app.sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `absoluteMaxAge(Duration)`, `previousSecrets(String...)`, `path(String)`, `domain(String)`.
 
 **The `Secure` attribute is on by default.** With no explicit `.secure(...)`, Brace resolves it per request: on unless the request's host is a loopback address, and always on when a trusted proxy reports `X-Forwarded-Proto: https`. The host is `X-Forwarded-Host` when a trusted proxy sends it, else `Host`; a loopback host is still treated as production when the browser's `Origin`/`Referer` is an `https://` page on a real host (a proxy rewriting `Host` — nginx's default — logs a one-time warning naming the fix: `proxy_set_header Host $host;`). So production gets `Secure` with no configuration and `http://localhost` (dev, `Brace.test()`) keeps working. An app genuinely served over plain HTTP on a real hostname must opt out with `.secure(false)`, which logs a startup warning. Do not add `.secure(false)` to make a local setup work — check the Host first.
 

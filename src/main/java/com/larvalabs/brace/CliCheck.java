@@ -31,33 +31,33 @@ public class CliCheck {
         // Fetch all three endpoints
         JsonNode status, errors, logs;
         try {
-            status = fetchJson(cfg, projectDir, cfg.url() + "/ops/status");
+            status = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/status");
         } catch (Exception e) {
             if (mode == CliOutput.Mode.JSON) {
-                var result = new CheckResult(false, "App unreachable: " + e.getMessage(), List.of(
-                    new Check("reachability", "fail", "Cannot connect: " + e.getMessage())
+                var result = new CheckResult(false, "App unreachable: " + CliOutput.excerpt(e.getMessage()), List.of(
+                    new Check("reachability", "fail", "Cannot connect: " + CliOutput.excerpt(e.getMessage()))
                 ));
                 System.out.println(CliOutput.json(result));
             } else {
-                CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+                CliOutput.printError("Cannot reach " + CliOutput.excerpt(cfg.url()) + ": " + CliOutput.excerpt(e.getMessage()));
             }
             return 2;
         }
 
         try {
-            errors = fetchJson(cfg, projectDir, cfg.url() + "/ops/errors");
+            errors = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/errors");
         } catch (Exception e) {
             errors = Json.mapper().valueToTree(List.of());
         }
 
         try {
             Instant since = Instant.now().minusSeconds(thresholds.logWindowMinutes() * 60L);
-            logs = fetchJson(cfg, projectDir, cfg.url() + "/ops/logs?level=warn&since_ts=" + since.toString());
+            logs = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/logs?level=warn&since_ts=" + since.toString());
         } catch (Exception e) {
             logs = Json.mapper().valueToTree(List.of());
         }
 
-        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(cfg.url())));
+        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(CliAuth.baseUrl(cfg))));
 
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(result));
@@ -263,13 +263,18 @@ public class CliCheck {
 
     static Check checkHttp5xx(JsonNode status) {
         var codes = status.path("http").path("statusCodes");
-        int total5xx = 0;
-        int totalRequests = 0;
+        long total5xx = 0;
+        long totalRequests = 0;
         var it = codes.fields();
         while (it.hasNext()) {
             var entry = it.next();
-            int code = Integer.parseInt(entry.getKey());
-            int count = entry.getValue().asInt(0);
+            int code;
+            try {
+                code = Integer.parseInt(entry.getKey());
+            } catch (NumberFormatException notAStatusCode) {
+                continue;   // a key the server made up: not a status code, so not counted
+            }
+            long count = entry.getValue().asLong(0);
             totalRequests += count;
             if (code >= 500) total5xx += count;
         }

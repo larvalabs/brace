@@ -78,6 +78,33 @@ class CliCheckTest {
     }
 
     @Test
+    void http5xxCheckSkipsNonIntegerStatusCodeKeys() {
+        var status = json(Map.of("http", Map.of(
+            "statusCodes", Map.of("200", 100, "500", 3, "abc", 7, "", 1, "99999999999", 2, "5xx", 4)
+        )));
+        var check = CliCheck.checkHttp5xx(status);
+        assertEquals("fail", check.status());
+        assertTrue(check.message().contains("3 server errors in 103 requests"), check.message());
+    }
+
+    @Test
+    void checksToleratePayloadsOfTheWrongType() throws Exception {
+        // A server (or an old/new version) may send any JSON type for any field: no check may throw.
+        String[] wrong = {"null", "\"text\"", "42", "[1,\"a\",null,{}]", "{\"x\":[]}", "true"};
+        var mapper = Json.mapper();
+        for (String w : wrong) {
+            String status = "{\"app\":" + w + ",\"http\":{\"statusCodes\":" + w + ",\"slowestRoutes\":" + w
+                + ",\"topRoutes\":" + w + "},\"jvm\":{\"heap\":" + w + ",\"gc\":{\"avgPauseMs\":" + w
+                + ",\"recentPauses\":" + w + "}},\"jobs\":{\"scheduled\":" + w + "},\"cache\":" + w
+                + ",\"errors\":" + w + "}";
+            var s = mapper.readTree(status);
+            var e = mapper.readTree(w);
+            assertDoesNotThrow(() -> CliCheck.evaluate(s, e, e, CheckThresholds.DEFAULTS, "prod"), w);
+            assertDoesNotThrow(() -> CliCommands.renderStatus(s), w);
+        }
+    }
+
+    @Test
     void slowRoutesWarnOverThreshold() {
         var status = json(Map.of("http", Map.of(
             "slowestRoutes", List.of(
