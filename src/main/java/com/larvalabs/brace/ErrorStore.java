@@ -31,13 +31,15 @@ import java.util.*;
  * rejection (a lock timeout) is not retried stripped. A rejected entry is retried on later
  * flushes and dropped after {@value #MAX_FLUSH_FAILURES} rejections. Not the entry's fault, so
  * the whole batch is kept uncounted and retried, as for an outage: a connection-level failure
- * (database down, pool exhausted, a connection-classed SQLState on a connection that then fails
- * {@code isValid}); a server-wide SQLState ({@link #isServerWide}: 25006 read-only during a
- * failover, 53xxx, 57P0x, 58xxx, 08xxx) on any row; and every row of a batch of two or more
- * failing with the same non-data SQLState. A connection-classed SQLState on a connection that is
- * still valid (a statement timeout on one huge row, a deadlock) beside healthy rows counts as a
- * row rejection. Failures are logged at most once a minute, naming the exception class, SQLState
- * and error type, never the request-derived payload.
+ * (database down, pool exhausted, the session cannot be opened or begun, a connection-classed
+ * SQLState on a connection that then fails {@code isValid}) and a server-wide SQLState
+ * ({@link #isServerWide}: 25006 read-only during a failover, 53xxx, 57P0x, 58xxx, 08xxx) on any
+ * row. That retention is capped at {@value #MAX_UNCOUNTED_RETENTIONS} consecutive flushes per
+ * entry (about two minutes), after which each failed flush counts like a row rejection. Any other
+ * rejection counts, even when every row of the batch got it (a lock timeout on all of them), and
+ * so does a connection-classed SQLState on a connection that is still valid (a statement timeout
+ * on one huge row, a deadlock). Failures are logged at most once a minute, naming the exception
+ * class, SQLState and error type, never the request-derived payload.
  */
 public class ErrorStore {
 
@@ -56,6 +58,13 @@ public class ErrorStore {
     static final int MAX_PENDING_KINDS = 1_000;
     /** Flushes in which the database rejected an entry before that entry is dropped. */
     static final int MAX_FLUSH_FAILURES = 5;
+    /**
+     * Consecutive flushes an entry is kept uncounted through a server-wide failure (an outage,
+     * a read-only failover window), about two minutes; after that each further one counts like a
+     * row rejection, so an entry is dropped after {@value #MAX_UNCOUNTED_RETENTIONS} plus
+     * {@value #MAX_FLUSH_FAILURES} failed flushes.
+     */
+    static final int MAX_UNCOUNTED_RETENTIONS = 60;
     /** Width of the {@code error_type} and {@code route} columns ({@code VARCHAR(255)}). */
     static final int MAX_KEY_LENGTH = 255;
     static final long FAILURE_LOG_INTERVAL_NANOS = 60_000_000_000L;
@@ -72,6 +81,8 @@ public class ErrorStore {
         final Instant firstSeen;
         /** Flushes in which the database rejected this entry; reset only by a successful write. */
         int failures;
+        /** Consecutive flushes this entry was kept uncounted through a server-wide failure. */
+        int uncounted;
         long count;
         String message;
         String stackTrace;
@@ -314,10 +325,9 @@ public class ErrorStore {
                 }
             }
             // DB unavailable (the storm case): put the batch back so counts keep accumulating —
-            // bounded by kind cardinality, not error rate — and retry next interval.
-            for (var p : batch) {
-                mergeBack(p);
-            }
+            // bounded by kind cardinality, not error rate — and retry next interval, up to the
+            // MAX_UNCOUNTED_RETENTIONS cap.
+            retainUncounted(batch);
             failedFlushes++;
             lastFailure = describe(e);
         } finally {
@@ -333,26 +343,16 @@ public class ErrorStore {
             return;
         }
 
-        // Every row of a multi-row batch refused with the same non-data SQLState (a lock timeout
-        // on all of them, a statement timeout on all of them): that is the database's state, not
-        // any row's fault, so keep the batch uncounted, as for an outage (final review L10). A
-        // single poisoned row among healthy ones is still counted and eventually dropped.
-        String common = commonNonDataState(outcome, rowErrors);
-        if (common != null) {
-            for (var p : batch) {
-                mergeBack(p);
-            }
-            failedFlushes++;
-            lastFailure = describe(rowErrors[0]);
-            return;
-        }
-
-        // Rows the database rejected: retry a few times, then give up on that entry.
+        // Rows the database rejected: retry a few times, then give up on that entry. A server-wide
+        // SQLState never gets here (it aborts the flush, above); every other rejection counts,
+        // even when every row of the batch got the same one (a lock timeout on all of them): kept
+        // uncounted, two rows that always fail that way were retried forever (verification pass).
         for (int i = 0; i < batch.size(); i++) {
             if (outcome[i] != REJECTED) continue;
             var p = batch.get(i);
             rejectedRows++;
             lastFailure = describe(rowErrors[i]);
+            p.uncounted = 0;
             if (++p.failures >= MAX_FLUSH_FAILURES) {
                 droppedEntries++;
                 if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
@@ -507,19 +507,22 @@ public class ErrorStore {
     }
 
     /**
-     * The SQLState every row of a batch of two or more was rejected with, when they all share one
-     * that is not a data error; otherwise null.
+     * Puts back a batch the database could not take at all (the connection could not be opened or
+     * begun, or a server-wide SQLState aborted the flush), without counting it against any entry,
+     * for up to {@value #MAX_UNCOUNTED_RETENTIONS} consecutive flushes per entry. Past that cap a
+     * further failure counts like a row rejection, so a long outage drops entries after
+     * {@value #MAX_FLUSH_FAILURES} more, reported by the rate-limited warning, instead of keeping
+     * the pending buffer full for good.
      */
-    private static String commonNonDataState(byte[] outcome, Throwable[] rowErrors) {
-        if (outcome.length < 2) return null;
-        String common = null;
-        for (int i = 0; i < outcome.length; i++) {
-            if (outcome[i] != REJECTED || isDataError(rowErrors[i])) return null;
-            String state = sqlState(rowErrors[i]);
-            if (state == null || (common != null && !common.equals(state))) return null;
-            common = state;
+    private void retainUncounted(List<Pending> batch) {
+        for (var p : batch) {
+            if (++p.uncounted > MAX_UNCOUNTED_RETENTIONS && ++p.failures >= MAX_FLUSH_FAILURES) {
+                droppedEntries++;
+                if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
+            } else {
+                mergeBack(p);
+            }
         }
-        return common;
     }
 
     /** Exception class and SQLState only: driver messages can echo the request-derived values. */
@@ -579,6 +582,7 @@ public class ErrorStore {
             p.count += old.count; // keep p's payload — it's newer
             // Carry the rejection count, so a key the database always rejects is still dropped.
             p.failures = Math.max(p.failures, old.failures);
+            p.uncounted = Math.max(p.uncounted, old.uncounted);
             return p;
         });
     }

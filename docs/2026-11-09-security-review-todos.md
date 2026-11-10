@@ -398,6 +398,17 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     SQLState; a single poisoned row beside healthy ones is still counted and dropped. Unit tests
     in `ErrorStoreTest`; `ErrorStorePostgresIT` gains a read-only transaction window
     (`SET TRANSACTION READ ONLY`) and a real 55P03 lock timeout.
+  - **Verification fixes** (`fix(security): M5 the error store's uncounted retention is
+    bounded`). A batch whose rows all fail with one non-data SQLState is no longer kept
+    uncounted: only a server-wide failure is (connection failure or failure to open or begin,
+    08xxx, 53xxx, 57P0x, 58xxx, 25006), so two rows that always fail with a lock timeout are
+    dropped after 5 flushes and 1,000 such kinds no longer fill the buffer for good. Uncounted
+    retention is capped at `MAX_UNCOUNTED_RETENTIONS` (60) consecutive flushes per entry, after
+    which each failed flush counts like a row rejection. `ErrorStoreTest`
+    (`rowsAlwaysFailingWithOneStateThatIsNotServerWideAreCountedAndDropped`,
+    `aFullBufferOfAlwaysFailingKindsDoesNotLockOutANewKind`,
+    `anOutageRetainsEntriesUpToTheCapThenDropsThemWithOneWarning`) and `ErrorStorePostgresIT`
+    (a real lock timeout on every row, a read-only window longer than the cap).
 
 - [x] **M6: Error-store redaction of headers and query strings is by name only**, `BraceHandler.java:599-600, 1693-1704`, `Redactor.java` (`redact`, `redactQuery`, `SENSITIVE`)
   - **What's wrong.** `captureRedactedHeaders` runs `Redactor.redact(headers)`, which matches

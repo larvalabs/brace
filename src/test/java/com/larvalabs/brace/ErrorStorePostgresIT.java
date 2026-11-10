@@ -371,6 +371,65 @@ class ErrorStorePostgresIT extends PostgresTestBase {
         assertEquals(2, row.get("occurrenceCount"));
     }
 
+    // --- Verification fixes (docs/2026-11-09-security-review-todos.md, M5) ---
+
+    @Test
+    void rowsThatAreAlwaysLockedOutAreCountedAndDroppedNotKeptForever() throws Exception {
+        // Every row of the batch fails with the same real 55P03 lock timeout. That is not a
+        // server-wide state: it counts against the rows, which are dropped after
+        // MAX_FLUSH_FAILURES flushes instead of being retried, uncounted, forever.
+        errorStore.record("LockA", "a", "GET /a", "s", "req");
+        errorStore.record("LockB", "b", "GET /b", "s", "req");
+        errorStore.flush();
+
+        var locked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var holder = Thread.startVirtualThread(() -> {
+            try (var c = connect()) {
+                c.setAutoCommit(false);
+                try (var st = c.createStatement()) {
+                    st.execute("SELECT id FROM ops_errors WHERE error_type IN ('LockA', 'LockB') FOR UPDATE");
+                }
+                locked.countDown();
+                release.await();
+                c.rollback();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        locked.await();
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET LOCAL lock_timeout = '100ms'");
+        errorStore.record("LockA", "a2", "GET /a", "s", "req");
+        errorStore.record("LockB", "b2", "GET /b", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        release.countDown();
+        holder.join();
+
+        errorStore.flushSession = normal;
+        errorStore.flush();
+        for (var row : errorStore.list(null)) {
+            assertEquals(1, row.get("occurrenceCount"), "the locked-out occurrences were dropped: " + row);
+            assertNotEquals("a2", row.get("message"));
+            assertNotEquals("b2", row.get("message"));
+        }
+    }
+
+    @Test
+    void aReadOnlyWindowLongerThanTheCapDropsTheEntries() {
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET TRANSACTION READ ONLY");
+        errorStore.record("A", "a", "GET /a", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_UNCOUNTED_RETENTIONS + ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.flushSession = normal;
+        errorStore.flush();
+        assertEquals(List.of(), types(), "kept up to the cap, then counted and dropped");
+    }
+
     @Test
     void concurrentDistinctRoutesEachGetTheirOwnRow() throws Exception {
         int routes = 40;

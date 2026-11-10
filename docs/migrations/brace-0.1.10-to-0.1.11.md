@@ -1969,9 +1969,10 @@ No action needed unless noted.
   clipped to 255 characters, each row is written under its own savepoint, and a row the database
   rejects for its data is retried once without its payload (an existing row only gains the
   count, its stored details are kept), then dropped after 5 flushes with a rate-limited
-  `error store:` warning. A read-only or out-of-resources database (a failover window) keeps
-  every pending error for later instead. If you saw `ops_errors` stop updating, this was likely
-  why.
+  `error store:` warning. A read-only or out-of-resources database (a failover window) or an
+  unreachable one keeps every pending error for later instead, for up to about two minutes (60
+  flushes); past that the pending errors are counted as failed and dropped after 5 more flushes,
+  with the same warning. If you saw `ops_errors` stop updating, this was likely why.
 - **More exception messages are redacted** before they reach `/ops/status` (a scheduled job's
   `lastError`), the uncaught-exception log event, `scheduled_jobs.error` and warning logs. Ops
   bearer tokens (`payload.signature`) are recognised as secrets.

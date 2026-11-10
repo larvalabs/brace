@@ -430,20 +430,82 @@ class ErrorStoreTest {
     }
 
     @Test
-    void everyRowFailingWithTheSameNonDataStateIsRetainedUncounted() {
-        // L10, generalized: when every row of a batch fails with one non-data SQLState (a lock
-        // timeout on all of them), it's not any row's fault.
+    void rowsAlwaysFailingWithOneStateThatIsNotServerWideAreCountedAndDropped() {
+        // Verification pass: L10 kept a batch whose rows all failed with one non-data SQLState
+        // uncounted, with no bound, so two rows that always fail that way were retried forever.
+        // Only a server-wide state (read-only, out of resources, shutdown, connection) is the
+        // database's; a lock timeout on every row is counted like any row rejection.
         errorStore.rowFault = (type, message) -> {
             throw new java.sql.SQLException("canceling statement due to lock timeout", "55P03");
         };
         errorStore.record("A", "a", "GET /a", "s", "req");
         errorStore.record("B", "b", "GET /b", "s", "req");
-        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
             errorStore.flush();
         }
         errorStore.rowFault = null;
         errorStore.flush();
-        assertEquals(List.of("A", "B"), types());
+        assertEquals(List.of(), types(), "dropped after MAX_FLUSH_FAILURES, not retried forever");
+    }
+
+    @Test
+    void aFullBufferOfAlwaysFailingKindsDoesNotLockOutANewKind() {
+        // 1,000 such kinds filled the pending buffer for good, so a healthy new kind was dropped
+        // at record().
+        errorStore.rowFault = (type, message) -> {
+            if (type.startsWith("Stuck")) {
+                throw new java.sql.SQLException("canceling statement due to lock timeout", "55P03");
+            }
+        };
+        for (int i = 0; i < ErrorStore.MAX_PENDING_KINDS; i++) {
+            errorStore.record("Stuck" + i, "m", "GET /s" + i, "s", "req");
+        }
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types());
+    }
+
+    @Test
+    void anOutageRetainsEntriesUpToTheCapThenDropsThemWithOneWarning() {
+        var real = errorStore.flushSession;
+        java.util.function.Supplier<Database> down = () -> {
+            throw new org.hibernate.exception.JDBCConnectionException("Unable to acquire JDBC Connection",
+                new java.sql.SQLTransientConnectionException("Connection is not available", "08001"));
+        };
+        // While the outage lasts up to the cap, everything is kept.
+        errorStore.flushSession = down;
+        errorStore.record("Kept", "k", "GET /k", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_UNCOUNTED_RETENTIONS; i++) {
+            errorStore.flush();
+        }
+        errorStore.flushSession = real;
+        errorStore.flush();
+        assertEquals(List.of("Kept"), types(), "kept through an outage as long as the cap");
+
+        // Past the cap, an entry is counted like a row rejection and dropped; a kind that arrived
+        // later is still kept.
+        errorStore.close();
+        cleanTable();
+        LogTap.clear();
+        errorStore.flushSession = down;
+        errorStore.record("Old", "secret-payload", "GET /old", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_UNCOUNTED_RETENTIONS + ErrorStore.MAX_FLUSH_FAILURES - 1; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("New", "n", "GET /new", "s", "req");
+        errorStore.expireFailureLogWindow();
+        errorStore.flush();
+        errorStore.flushSession = real;
+        errorStore.flush();
+        assertEquals(List.of("New"), types());
+        var dropWarnings = errorStoreWarnings().stream().filter(w -> w.contains("dropped")).toList();
+        assertEquals(1, dropWarnings.size(), errorStoreWarnings().toString());
+        assertTrue(dropWarnings.get(0).contains("dropped 1 error kind(s)") && dropWarnings.get(0).contains("Old"),
+            dropWarnings.get(0));
+        assertFalse(dropWarnings.get(0).contains("secret-payload"));
     }
 
     private static java.util.Map<String, Object> find(String type) {

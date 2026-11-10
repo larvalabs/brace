@@ -2498,15 +2498,17 @@ block the others:
     `25006` (read-only transaction, as during a failover), class `53` (disk full, out of
     memory, too many connections), `57P01` to `57P05` (shutdown), class `58` (system error),
     class `08` (connection);
-  - a batch of two or more rows that **all** fail with the same SQLState that is not a data
-    error (a lock timeout on every row);
   - another connection-classed SQLState (`40`, other `57`, other `25`) when the connection also
     fails `isValid`.
 
-  On a live connection, a row error beside healthy rows (for example `57014`, a statement
-  timeout on one huge row) is a row rejection like any other, so a single poisoned row is still
-  isolated and eventually dropped. A lone row in its batch failing with such a state is counted
-  too.
+  That retention is capped at 60 consecutive flushes per entry (about two minutes). After that
+  each further failed flush counts like a row rejection, so an outage longer than about two
+  minutes drops the entries it holds after 5 more flushes, reported by the rate-limited warning,
+  instead of keeping the pending buffer full for good. Every other row error is a row rejection
+  like any other, even when every row of the batch gets the same one (a lock timeout on every
+  row), and so is a connection-classed error on a live connection (for example `57014`, a
+  statement timeout on one huge row): a single poisoned row is still isolated and dropped after
+  5, and kinds that always fail that way cannot fill the buffer and lock out a new kind.
 - Failures are logged at most once a minute, naming the exception class, SQLState and the error
   type of any dropped entry. Request-derived content (messages, paths, headers) is never logged.
 
