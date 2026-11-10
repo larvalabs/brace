@@ -48,7 +48,9 @@ import java.util.*;
  * rejection counts, even when every row of the batch got it (a lock timeout on all of them), and
  * so does a connection-classed SQLState on a connection that is still valid (a statement timeout
  * on one huge row, a deadlock). Failures are logged at most once a minute, naming the exception
- * class, SQLState and error type, never the request-derived payload.
+ * class, SQLState and error type, never the request-derived payload. A {@link RegressionListener}
+ * that throws costs only its own notification (counted in the same warning), and an
+ * {@link Error} during a flush keeps the batch and the flusher thread like any failed flush.
  */
 public class ErrorStore {
 
@@ -112,10 +114,16 @@ public class ErrorStore {
             this.firstSeen = firstSeen;
         }
 
-        /** Same kind, count and times; the payload replaced by {@link #STRIPPED_MESSAGE}. */
+        /**
+         * Same kind, count, times and failure counters; the payload replaced by
+         * {@link #STRIPPED_MESSAGE}. The copy lives for one flush only: it is written and
+         * reported to the listener, and never put back in the pending map (a flush that fails
+         * keeps the entry it was made from), so {@link #record} never refreshes one.
+         */
         Pending stripped() {
             var s = new Pending(type, route, firstSeen);
             s.failures = failures;
+            s.uncounted = uncounted;
             s.count = count;
             s.lastSeen = lastSeen;
             s.message = STRIPPED_MESSAGE;
@@ -164,7 +172,12 @@ public class ErrorStore {
     private long failedFlushes;
     private long droppedEntries;
     private final Set<String> droppedTypes = new LinkedHashSet<>();
+    /** Entries dropped because no flush could be written for too long, not because they were rejected. */
+    private long outageDroppedEntries;
+    private final Set<String> outageDroppedTypes = new LinkedHashSet<>();
     private String lastFailure;
+    private long listenerFailures;
+    private String lastListenerFailure;
 
     public ErrorStore(DatabaseFactory databaseFactory, int maxErrors) {
         this.databaseFactory = databaseFactory;
@@ -179,8 +192,17 @@ public class ErrorStore {
                 }
                 try {
                     flush();
-                } catch (Exception e) {
-                    // Never let the flusher die; the next interval retries.
+                } catch (Throwable e) {
+                    // Never let the flusher die; the next interval retries. That includes an
+                    // Error, an OutOfMemoryError among them: flushBatch has already put the batch
+                    // back, a JVM that should not outlive one is run with -XX:+ExitOnOutOfMemoryError,
+                    // and in one that carries on, a dead flusher would mean no error is persisted
+                    // and no regression is reported until restart, with nothing to show for it.
+                    try {
+                        Log.warn("error store: flush failed with " + e.getClass().getName() + ", retrying next interval");
+                    } catch (Throwable ignored) {
+                        // Logging allocates; if that fails too there is nothing left to do here.
+                    }
                 }
             }
         });
@@ -310,6 +332,9 @@ public class ErrorStore {
             return;
         }
 
+        // The entries as drained. batch.set() below swaps in a payload-stripped copy where that is
+        // what got written; if the flush then fails, these (with their payloads) are what is kept.
+        var drained = new ArrayList<>(batch);
         var outcome = new byte[batch.size()];
         var rowErrors = new Throwable[batch.size()];
         // Rows written in this flush, and the first server-wide SQLState a row drew, if any.
@@ -363,7 +388,10 @@ public class ErrorStore {
             });
             db.commitTransaction();
             committed = true;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Throwable, not Exception: an Error here (a NoClassDefFoundError out of a driver, an
+            // OutOfMemoryError building a statement) must not lose the drained batch, nor leave
+            // its keys counted as in flight for good.
             if (db != null) {
                 try {
                     db.rollbackTransaction();
@@ -374,9 +402,12 @@ public class ErrorStore {
             // DB unavailable (the storm case): put the batch back so counts keep accumulating —
             // bounded by kind cardinality, not error rate — and retry next interval, up to the
             // MAX_UNCOUNTED_RETENTIONS cap.
-            retainUncounted(batch);
+            retainUncounted(drained);
             failedFlushes++;
             lastFailure = describe(e instanceof FlushAborted ? e.getCause() : e);
+            // The batch is safe; a VirtualMachineError is still the caller's to see. The flusher
+            // thread logs it and carries on (see the constructor).
+            if (e instanceof VirtualMachineError vme) throw vme;
         } finally {
             if (db != null) {
                 try {
@@ -418,8 +449,17 @@ public class ErrorStore {
         if (listener != null) {
             for (int i = 0; i < batch.size(); i++) {
                 var p = batch.get(i);
-                if (outcome[i] == INSERTED) listener.onNew(p.type, p.route, p.message, p.firstSeen);
-                else if (outcome[i] == UPDATED) listener.onRepeat(p.type, p.route, p.count);
+                // Per row: a listener that throws for one kind must not cost the rest of the
+                // batch its notifications, nor fail a flush whose rows are already committed.
+                try {
+                    if (outcome[i] == INSERTED) listener.onNew(p.type, p.route, p.message, p.firstSeen);
+                    else if (outcome[i] == UPDATED) listener.onRepeat(p.type, p.route, p.count);
+                } catch (VirtualMachineError e) {
+                    throw e;
+                } catch (Throwable e) {
+                    listenerFailures++;
+                    lastListenerFailure = describe(e);
+                }
             }
         }
     }
@@ -577,8 +617,8 @@ public class ErrorStore {
     private void retainUncounted(List<Pending> batch) {
         for (var p : batch) {
             if (++p.uncounted > MAX_UNCOUNTED_RETENTIONS && ++p.failures >= MAX_FLUSH_FAILURES) {
-                droppedEntries++;
-                if (droppedTypes.size() < 5) droppedTypes.add(forLog(p.type));
+                outageDroppedEntries++;
+                if (outageDroppedTypes.size() < 5) outageDroppedTypes.add(forLog(p.type));
                 settle(p);
             } else {
                 mergeBack(p);
@@ -608,27 +648,45 @@ public class ErrorStore {
 
     /** At most one warning per {@link #FAILURE_LOG_INTERVAL_NANOS}, summarising what failed since the last. */
     private void logFailures() {
-        if (rejectedRows == 0 && failedFlushes == 0 && droppedEntries == 0) return;
+        boolean notPersisted = rejectedRows > 0 || failedFlushes > 0 || droppedEntries > 0 || outageDroppedEntries > 0;
+        if (!notPersisted && listenerFailures == 0) return;
         long now = System.nanoTime();
         if (now - nextFailureLogNanos < 0) return;
         nextFailureLogNanos = now + FAILURE_LOG_INTERVAL_NANOS;
-        var msg = new StringBuilder("error store: could not persist errors");
-        if (failedFlushes > 0) {
-            msg.append("; ").append(failedFlushes).append(" flush(es) failed, entries kept for retry");
+        var msg = new StringBuilder("error store: ");
+        if (notPersisted) {
+            msg.append("could not persist errors");
+            if (failedFlushes > 0) {
+                msg.append("; ").append(failedFlushes).append(" flush(es) failed, entries kept for retry");
+            }
+            if (rejectedRows > 0) {
+                msg.append("; database rejected ").append(rejectedRows).append(" row write(s)");
+            }
+            if (droppedEntries > 0) {
+                msg.append("; dropped ").append(droppedEntries).append(" error kind(s) after ")
+                    .append(MAX_FLUSH_FAILURES).append(" rejected flushes: ").append(String.join(", ", droppedTypes));
+            }
+            if (outageDroppedEntries > 0) {
+                msg.append("; dropped ").append(outageDroppedEntries)
+                    .append(" error kind(s) the database could not take through ")
+                    .append(MAX_UNCOUNTED_RETENTIONS + MAX_FLUSH_FAILURES).append(" failed flushes: ")
+                    .append(String.join(", ", outageDroppedTypes));
+            }
+            msg.append("; last failure: ").append(lastFailure);
         }
-        if (rejectedRows > 0) {
-            msg.append("; database rejected ").append(rejectedRows).append(" row write(s)");
+        if (listenerFailures > 0) {
+            // Exception class only, like the rest: its message can carry the error's payload.
+            msg.append(notPersisted ? "; " : "").append("regression listener threw for ").append(listenerFailures)
+                .append(" notification(s), the errors themselves are stored; last: ").append(lastListenerFailure);
         }
-        if (droppedEntries > 0) {
-            msg.append("; dropped ").append(droppedEntries).append(" error kind(s) after ")
-                .append(MAX_FLUSH_FAILURES).append(" rejected flushes: ").append(String.join(", ", droppedTypes));
-        }
-        msg.append("; last failure: ").append(lastFailure);
         Log.warn(msg.toString());
         rejectedRows = 0;
         failedFlushes = 0;
         droppedEntries = 0;
         droppedTypes.clear();
+        outageDroppedEntries = 0;
+        outageDroppedTypes.clear();
+        listenerFailures = 0;
     }
 
     /** Test hook: distinct kinds waiting in the pending map (not counting a batch being flushed). */

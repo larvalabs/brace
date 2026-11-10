@@ -506,6 +506,11 @@ class ErrorStoreTest {
         assertTrue(dropWarnings.get(0).contains("dropped 1 error kind(s)") && dropWarnings.get(0).contains("Old"),
             dropWarnings.get(0));
         assertFalse(dropWarnings.get(0).contains("secret-payload"));
+        // Second review: this said "after 5 rejected flushes", though the database rejected nothing.
+        assertFalse(dropWarnings.get(0).contains("rejected flushes"), dropWarnings.get(0));
+        assertTrue(dropWarnings.get(0).contains("the database could not take through "
+            + (ErrorStore.MAX_UNCOUNTED_RETENTIONS + ErrorStore.MAX_FLUSH_FAILURES) + " failed flushes"),
+            dropWarnings.get(0));
     }
 
     @Test
@@ -640,6 +645,137 @@ class ErrorStoreTest {
         errorStore.rowFault = null;
         errorStore.flush();
         assertEquals(10, types().size());
+    }
+
+    @Test
+    void aThrowingRegressionListenerDoesNotStopTheOtherNotificationsOrTheFlush() {
+        var notified = new java.util.ArrayList<String>();
+        errorStore.setRegressionListener(new ErrorStore.RegressionListener() {
+            public void onNew(String type, String route, String message, java.time.Instant firstSeen) {
+                notified.add("new " + type);
+                if (type.equals("Bad")) throw new IllegalStateException("listener failed on " + message);
+            }
+            public void onRepeat(String type, String route, long count) {
+                notified.add("repeat " + type);
+                if (type.equals("Bad")) throw new IllegalStateException("listener failed again");
+            }
+        });
+        LogTap.clear();
+        for (String type : List.of("A", "Bad", "C", "D")) {
+            errorStore.record(type, "secret-payload", "GET /" + type, "s", "req");
+        }
+        errorStore.expireFailureLogWindow();
+        assertDoesNotThrow(() -> errorStore.flush());
+        assertEquals(List.of("new A", "new Bad", "new C", "new D"), notified.stream().sorted().toList());
+        assertEquals(List.of("A", "Bad", "C", "D"), types(), "the rows are stored whatever the listener does");
+
+        notified.clear();
+        for (String type : List.of("A", "Bad", "C", "D")) {
+            errorStore.record(type, "secret-payload", "GET /" + type, "s", "req");
+        }
+        assertDoesNotThrow(() -> errorStore.flush());
+        assertEquals(List.of("repeat A", "repeat Bad", "repeat C", "repeat D"), notified.stream().sorted().toList());
+
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertTrue(warnings.get(0).contains("regression listener threw")
+            && warnings.get(0).contains("java.lang.IllegalStateException"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("could not persist"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("secret-payload"), warnings.get(0));
+    }
+
+    @Test
+    void aFlushThatAbortsAfterAStrippedWriteKeepsTheFullPayloadForTheRetry() {
+        // The stripped copy replaced the entry in the batch, so when the flush then aborted the
+        // placeholder was what got merged back: the payload was lost though nothing was stored.
+        boolean[] strippedWritten = {false};
+        errorStore.rowFault = (type, message) -> {
+            if (strippedWritten[0]) throw new java.sql.SQLException("terminating connection", "57P01");
+            if (ErrorStore.STRIPPED_MESSAGE.equals(message)) {
+                strippedWritten[0] = true;
+            } else {
+                throw new java.sql.SQLException("value too long", "22001");
+            }
+        };
+        errorStore.connectionCheck = connection -> false;
+        errorStore.record("A", "payload A", "GET /a", "s", "req");
+        errorStore.record("B", "payload B", "GET /b", "s", "req");
+        errorStore.flush();
+        assertTrue(strippedWritten[0]);
+        assertEquals(List.of(), types(), "the flush aborted");
+
+        errorStore.rowFault = null;
+        errorStore.connectionCheck = connection -> connection.isValid(1);
+        errorStore.flush();
+        assertEquals("payload A", find("A").get("message"));
+        assertEquals("payload B", find("B").get("message"));
+    }
+
+    @Test
+    void anErrorDuringAFlushKeepsTheBatchAndIsNotMistakenForARejection() {
+        // The flusher caught Exception only: an Error (a NoClassDefFoundError from a driver or a
+        // listener's dependency) lost the drained batch.
+        var real = errorStore.flushSession;
+        errorStore.record("Kept", "k", "GET /k", "s", "req");
+        errorStore.flushSession = () -> {
+            throw new NoClassDefFoundError("some/driver/Class");
+        };
+        LogTap.clear();
+        errorStore.expireFailureLogWindow();
+        assertDoesNotThrow(() -> errorStore.flush());
+        assertEquals(1, errorStore.pendingKinds(), "the batch is merged back");
+        assertEquals(1, errorStore.bufferedKinds());
+        assertTrue(errorStoreWarnings().stream().anyMatch(w -> w.contains("java.lang.NoClassDefFoundError")),
+            errorStoreWarnings().toString());
+
+        // A VirtualMachineError is not swallowed by a direct flush(), but the batch is still kept.
+        errorStore.flushSession = () -> {
+            throw new StackOverflowError();
+        };
+        assertThrows(StackOverflowError.class, () -> errorStore.flush());
+        assertEquals(1, errorStore.pendingKinds());
+        assertEquals(1, errorStore.bufferedKinds());
+
+        errorStore.flushSession = real;
+        errorStore.flush();
+        assertEquals(List.of("Kept"), types());
+        assertEquals(0, errorStore.bufferedKinds());
+    }
+
+    @Test
+    void theFlusherThreadSurvivesAnError() {
+        var real = errorStore.flushSession;
+        var thrown = new java.util.concurrent.atomic.AtomicInteger();
+        errorStore.flushSession = () -> {
+            thrown.incrementAndGet();
+            throw new OutOfMemoryError("simulated");
+        };
+        errorStore.record("Kept", "k", "GET /k", "s", "req");
+        TestWait.until(java.time.Duration.ofSeconds(15), () -> thrown.get() >= 1,
+            () -> "the flusher never ran");
+        errorStore.flushSession = real;
+        // Only the flusher thread can write it now: nothing here calls flush().
+        TestWait.until(java.time.Duration.ofSeconds(15), () -> types().contains("Kept"),
+            () -> "the flusher thread died with the Error: " + types());
+    }
+
+    @Test
+    void theDropWarningSaysWhetherRejectionsOrAnOutageDroppedTheKind() {
+        LogTap.clear();
+        errorStore.rowFault = (type, message) -> {
+            if (type.equals("Refused")) throw new java.sql.SQLException("lock timeout", "55P03");
+        };
+        errorStore.record("Refused", "m", "GET /r", "s", "req");
+        errorStore.record("Fine", "m", "GET /f", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.expireFailureLogWindow();
+            errorStore.flush();
+        }
+        var rejected = errorStoreWarnings().stream().filter(w -> w.contains("dropped")).toList();
+        assertEquals(1, rejected.size(), errorStoreWarnings().toString());
+        assertTrue(rejected.get(0).contains("after " + ErrorStore.MAX_FLUSH_FAILURES + " rejected flushes: Refused"),
+            rejected.get(0));
+        assertFalse(rejected.get(0).contains("outage"), rejected.get(0));
     }
 
     private static java.util.Map<String, Object> find(String type) {
