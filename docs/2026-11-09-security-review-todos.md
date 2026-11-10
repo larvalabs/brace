@@ -480,6 +480,69 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     test gained these shapes). Both name rules match `totp` alone, and the plural `codes` next to
     an auth word like the singular (`backup_codes`, `recovery_codes`, `passcodes`); the name
     tables in `RedactorTest` gained these and `zip_codes`/`status_codes` as kept.
+  - **Second review fixes.** An independent review of the four verification commits (probes, a
+    3,000,000-input fuzz and survival statistics against a standalone compile) found one crash and
+    several regressions against c136520. One commit each, every fix with a test seen failing
+    first, and the fuzz, the statistics and the probe corpus rerun after each:
+    - **H-1, the redactor threw** (`fix(security): M6 a run after jdbc: that is not a scheme name
+      no longer throws out of the redactor`). `jdbc:` before a run holding `_ / ~ $ %` and then
+      `://` (`jdbc:my_driver://host/db`, `?x=jdbc:_x://h`, also percent-encoded) made
+      `substring(i, -1)` throw from every entry point. Inside the 500 handler that skipped
+      `http.error`, `stats.recordError`, `errorStore.record` and `respondToError`: a client that
+      could cause a 500 could hide it from the error store and the regression notifier.
+    - **Fail closed** (`fix(security): M6 every public Redactor method fails closed`). No public
+      method throws; on an internal error the result is `[redaction failed]` (`Redactor.FAILED`),
+      per line for a trace, per header for `redactHeaders`, per value for `redact(Map)`, and
+      `true` for the name rules. `Redactor.faultForTest` is a test seam.
+      `RedactorFuzzTest` (200,000 seeded inputs, every entry point, no throw and no marker) and
+      `ErrorPathRobustnessTest` (a failing route with `?x=jdbc:_x://h` still records the error
+      and logs `http.error`) hold it.
+    - **The 500 path** (`fix(security): M5 a throw while a request error is being recorded no
+      longer loses the record or the response`). `BraceHandler.recordFailure`: the message and
+      trace are read once, guarded, each sink has its own `try`, and `respondToError` always runs
+      (an exception whose `getMessage()` throws was the other way in).
+    - **M-1, frame lines** (`... only a line shaped like a stack frame is kept unredacted in a
+      trace`). ff969bc took any line of whitespace then `at ` for a frame, so Jackson's
+      ` at [Source: (String)"{...}"; line: 1, column: 3]` kept its secrets. The line must now be
+      `[loader/][module[@version]/]pkg.Class.method(Source)` with an optional Logback
+      `~[jar:version]`; real traces (lambda, virtual thread, reflection, cause, suppressed) and a
+      table of frame shapes are checked to survive.
+    - **M-2, base64 with a slash** (`... a base64 secret holding a slash is no longer taken for a
+      file path`). 4d4c768 judged any `/`-label piece by piece, so
+      `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` survived. A label is a path only when every piece
+      looks like part of one (`Redactor.pathKind`); a secret piece is replaced alone only with
+      evidence of a path (leading `/`, `./`, `../`, `~/`, or a file extension), otherwise the
+      whole label. Base64 survival is back at the c136520 figures.
+    - **M-3, values and user info** (`... bracketed values, odd-character passwords and parameter
+      sections of a URL are redacted whole`). A sensitive value that opens with `' ( [ { <` is
+      replaced to its closer (`password={hunter2}`, `backupCodes=[...]`); a password holding a
+      character that ends a URL (`^ { } | \ ' < >`, a backtick, one space) no longer hides the
+      `@`; `user:12345/678@host` is masked; with `;name=value` after the host the rest of the URL
+      gets the pair pass (`password=abc/def123`).
+    - **L-2, host lists** (`... an "@" beyond an evident host is not user info`).
+      `mongodb://h1:27017,h2:27017/db?authSource=a@b` is kept. The tie (one dotless
+      `name:digits` before an `@`) goes to redaction: `redis://cache:6379/0?client=a@b` is still
+      `redis://[REDACTED]@b`.
+    - **L-3, schemes** (`... a URL of any scheme is found inside a run`). `backup_ldap://cn:pw@host`
+      is masked; the list of known schemes is gone, and a secret-shaped "scheme" is replaced.
+    - **L-1, the name rule** (`... the name rule keeps words, not two groups of random letters`).
+      Words of five or more letters must read like words (a letter-pair table), two equal parts
+      get a stricter score, digit groups are capped at 6 (8 for a date), `0x` is a name only as a
+      zero-padded JVM address, `git describe` needs a tag and a count of at most 5 digits.
+      Two-group tokens went from 0.76% kept (base32 8-8) to 0.005%;
+      `RedactorTest.randomTokensOfEveryShapeAreRedacted` holds 41 shapes at 1 in 10,000 and
+      standard base64 at the c136520 figures.
+    - **L-4, names** (`... one-time and second-factor names are sensitive in transit`).
+      `onetimecode`, `one_time_code`, `twoFactorCode` in both rules; `mfa`, `2fa`, `two_factor`,
+      `verification` in transit only, and only as the last segment. The field rule is not
+      widened to plain words.
+    - **Not changed, documented** in `docs/SECURITY.md` (Error Store Redaction, "Known limits"):
+      a sensitive name written as JSON or with a colon (`{"password":"hunter2"}`,
+      `password: hunter2`), a secret made of words (`CorrectHorseBattery1`), a space in an
+      unquoted value, base64 that reads as a path of short pieces, user info that looks like a
+      dotted host. Class names with a digit in a long camelCase word
+      (`OAuth2AuthorizationCodeGrantFilter`, `S3ObjectStorageClient`) are still over-redacted
+      outside frame lines and qualified names.
 
 - [x] **M7: `previousSecrets(...)` accepts the public scaffold placeholder**, `SessionOptions.java:157-165`, `Brace.java:268-273, 356-379`, `Session.java:317-328, 397-398`, `docs/migrations/brace-0.1.10-to-0.1.11.md:633`
   - **What's wrong.** `Brace.sessions(SessionOptions)` runs `validateSecret` on the current

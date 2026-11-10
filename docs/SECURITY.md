@@ -2303,6 +2303,20 @@ Two placeholders tell the passes apart: `[REDACTED]` means the value was
 replaced because of its **name** (or it was URL user info), `[redacted]`
 because of its **shape**.
 
+**Redaction fails closed.** No public `Redactor` method throws. If one hits an
+internal error it returns the marker `[redaction failed]` in place of the text
+it was given, never the text itself: `redactMessage`, `redactQuery`,
+`redactUrl` and `redactPath` return the marker alone, `redactStackTrace` puts
+it in place of the line concerned (frames are kept), `redactHeaders` in place
+of the header value concerned, `redact(Map)` in place of every value, and
+`isSensitive`/`isSensitiveField` answer true. The redactor runs inside the 500
+handler, so a throw there used to lose the error being recorded. If you see
+`[redaction failed]` in an error record or a log line, that is a bug in the
+redactor worth reporting; nothing leaked. The 500 handler itself also keeps
+going when recording fails: each of the stats, the `http.error` log line and
+the error store is written on its own, and the client always gets the
+framework's 500.
+
 ### Name-based redaction
 
 There are two name rules, because a short word such as `code` is a credential
@@ -2328,26 +2342,33 @@ Both rules match:
   `otp`, `totp`, `hotp`, `sms`, `mfa`, `2fa`, `tfa`, `pin`, `pass`,
   `password`, `invite`, `invitation`, `access`, `login`, `signin`, `confirm`,
   `confirmation`, `activation`, `activate`, `recovery`, `backup`, `security`,
-  `magic`, `device`, `unlock` (`Redactor.CODE_QUALIFIERS`), and so is one of
-  those words fused with `code` or `codes` (`passcode`, `authcode`, `otpcode`,
-  `passcodes`); `backup_codes` and `recovery_codes` are sensitive like
-  `backup_code`.
+  `magic`, `device`, `unlock`, `onetime`, `twofactor`
+  (`Redactor.CODE_QUALIFIERS`), and so is one of those words fused with `code`
+  or `codes` (`passcode`, `authcode`, `otpcode`, `onetimecode`, `passcodes`);
+  `backup_codes` and `recovery_codes` are sensitive like `backup_code`. Two
+  pairs of segments qualify a `code` as well: `one` + `time` (`one_time_code`)
+  and `two`, `2`, `multi` or `second` + `factor` (`twoFactorCode`).
 
 The in-transit rule also matches a name that is exactly `code` (an OAuth
 authorization code; `X-Code` too), a segment `sig`, `otp`, `totp`, `pin`,
 `sid`, `ticket` or `session` (`Redactor.TRANSIT_WORDS`), and a name whose last
-segment is `auth` (`X-Auth`, `X-Upstream-Auth`). The field rule instead
-matches only a field named exactly `otp` or `totp`.
+segment is `auth`, `mfa`, `2fa`, `tfa`, `verification` or a second factor
+(`X-Auth`, `X-Upstream-Auth`, `X-MFA`, `email_verification`, `two_factor`;
+`Redactor.TRANSIT_LAST_WORDS`). Those last words name the value only when they
+end the name: `mfa_enabled`, `two_factor_enabled` and `verification_status`
+are kept. The field rule instead matches only a field named exactly `otp` or
+`totp`.
 
 | Name | In transit | Field |
 |---|---|---|
 | `token`, `api_key`, `X-Auth-Token`, `password`, `session_id`, `client_assertion` | redacted | redacted |
-| `auth_code`, `verificationCode`, `reset_code`, `otp_code`, `pin_code`, `device_code`, `code_verifier`, `passcode`, `backup_codes`, `recovery_codes` | redacted | redacted |
+| `auth_code`, `verificationCode`, `reset_code`, `otp_code`, `pin_code`, `device_code`, `code_verifier`, `passcode`, `backup_codes`, `recovery_codes`, `onetimecode`, `one_time_code`, `twoFactorCode`, `mfa_code` | redacted | redacted |
 | `code`, `X-Code` | redacted | kept (`code:"card_declined"`, `/countries/{code}`) |
 | `sig`, `pin`, `sid`, `ticket`, `session`, `user_session`, `account_sid`, `sms_otp`, `X-Auth`, `X-Upstream-Auth` | redacted | kept |
+| `mfa`, `2fa`, `two_factor`, `verification`, `email_verification` | redacted | kept (`mfa:true`, `verification:"pending"`) |
 | `otp`, `totp` | redacted | redacted |
 | `zip_code`, `status_code`, `error_code`, `country_code`, `currency_code`, `postal_code`, `promo_code`, `code_challenge`, `user_code`, `zip_codes`, `status_codes` | kept | kept |
-| `postcode`, `barcode`, `encode`, `codec`, `signal`, `design`, `sigma`, `pinned`, `sessions`, `sidebar`, `tickets`, `author`, `authority`, `auth_method`, `X-Auth-Request-User`, `state` | kept | kept |
+| `postcode`, `barcode`, `encode`, `codec`, `signal`, `design`, `sigma`, `pinned`, `sessions`, `sidebar`, `tickets`, `author`, `authority`, `auth_method`, `X-Auth-Request-User`, `state`, `mfa_enabled`, `two_factor_enabled`, `verification_status` | kept | kept |
 
 `state` (the OAuth CSRF value) and `promo_code` are deliberately not
 sensitive. A malformed percent-escape in a name is kept literally, never an
@@ -2366,23 +2387,48 @@ once:
    `redactUrl`: any `user:password@` becomes `[REDACTED]` whatever its shape,
    the path through `redactPath`, the query and fragment through
    `redactQuery`; scheme, host and port are kept. A URL ends at whitespace, a
-   quote, `< > \ ^ { } |`, and loses trailing `. , ; : ! ? ) ]`. A known
-   scheme (`http`, `https`, `ws`, `wss`, `ftp`, `postgres`, `postgresql`,
-   `mysql`, `mariadb`, `mongodb`, `mongodb+srv`, `redis`, `rediss`, `amqp`,
-   `amqps`, `smtp`, `smtps`, `s3`, and `jdbc:<anything>`) is found even inside
-   a run (`GET /proxy/https://user:pw@host`, `-https://`, `1https://`); any
-   other scheme only where a run starts. A password holding an unencoded
-   `/`, `?` or `#` (`postgres://user:pa/ss@host`) is masked up to the last
-   `@` when the text before the first `/ ? #` holds a `:` (for `http`,
-   `https`, `ws` and `wss`, a `:` not followed by a numeric port, so
-   `https://example.com:8443/users/@bob` keeps its path). Parameters after
-   the host (`jdbc:sqlserver://db:1433;user=sa;password=…`) get the
-   `name=value` pass.
+   quote, `< > \ ^ { } |`, and loses trailing `. , ; : ! ? ) ]`. A scheme is
+   found inside a run too, whatever it is: at `://` the scan backs up over
+   letters, digits and `+ - .` (`GET /proxy/https://user:pw@host`,
+   `1https://`, `backup_ldap://cn:pw@host` is `ldap://`,
+   `jdbc:my_driver://` is `driver://`). A "scheme" that is itself
+   secret-shaped (a token glued to `://`) is replaced.
+
+   **User info.** An `@` before the first `/ ? #` ends the user info, as in
+   any URL parser. A password can also hold a character that would end the
+   URL or the authority, so two more cases are masked:
+   - A password with an unencoded `/`, `?`, `#` or `;`
+     (`postgres://user:pa/ss@host`, `redis://:pa?ss@host`): masked up to the
+     last `@` of the URL, when the text before the first `/ ? #` holds a `:`
+     and is not evidently a host. A list of two or more `host[:port]`
+     (`mongodb://h1:27017,h2:27017/db?authSource=a@b`), or one host with a
+     dot, `localhost` or an IPv6 literal
+     (`https://example.com:8443/users/@bob`), is evidently a host and keeps
+     its path and query. One dotless `name:digits` can be a host and port
+     (`db:5432`) or a user and a numeric password cut at its `/`
+     (`user:12345/678@host`): redaction wins the tie, so
+     `redis://cache:6379/0?client=a@b` is stored as `redis://[REDACTED]@b`.
+   - A password with `^ { } | \` a backtick, `'`, `<` or `>`
+     (`jdbc:postgresql://app:p^ssw0rd@db/x`): the URL does not end there when
+     the authority so far holds `:`, no `@` and no `/ ? #`, is not evidently
+     a host, and an `@` follows within 256 characters before any whitespace.
+     One space is passed the same way when what follows the `:` cannot be a
+     port and the next word holds the `@` (`postgres://app:my pass@db`). A
+     double quote always ends the URL.
+
+   **Parameters after the host** (`jdbc:sqlserver://db:1433;user=sa;password=…`,
+   a `;name=value` before any `/ ? #`): the whole rest of the URL gets the
+   `name=value` pass, so a password there may hold `/`, `?`, `#` or `@`.
 2. **`name=value` pairs.** When the name before `=` is sensitive (the
    in-transit rule, or the field rule inside exception messages), the value
-   becomes `[REDACTED]`: up to the closing quote if it is quoted, otherwise up
-   to whitespace or one of `& ; , " ' < > ( ) [ ] { } | \`. The next parameter
-   is never swallowed.
+   becomes `[REDACTED]`: up to whitespace or one of
+   `& ; , " ' < > ( ) [ ] { } | \`, so the next parameter is never swallowed;
+   or, when the value opens with `"`, `'`, `(`, `[`, `{` or `<`, up to the
+   matching closer (`password={a;b}` is `password={[REDACTED]}`,
+   `backupCodes=[a1b2c-d3e4f, g5h6i-j7k8l]` is `backupCodes=[[REDACTED]]`).
+   Brackets of one kind nest, a doubled `}` or `'` inside is an escaped one
+   (SQL Server's `{a}}b}`, SQL's `'it''s'`), and with no closer the value
+   runs to the end of the line.
 3. **The run rule.** Every other maximal run of `[A-Za-z0-9_\-+/.~$%]` is
    tested wherever it sits (next to a quote, a `<`, a full stop):
    - A run holding `%` is percent-decoded up to 3 rounds (`%252F` is `/`); if
@@ -2398,17 +2444,25 @@ once:
      or more DNS labels ending in a common TLD such as `com`, `net`, `io`,
      `internal`, `local`, or two labels ending in `internal`, `local`,
      `localhost`, `lan` or `corp`: `db-primary-7f8c9d.internal`) are kept whole.
-   - A **file path** (a label with `/`, no `+`, and no `/`-piece under 16
-     characters that mixes upper case, lower case and digits) is judged piece
-     by piece, as `redactPath` judges a request path: the directories survive
-     and only a secret-shaped piece is replaced.
+   - A label with `/` is a **file path** when every `/`-piece looks like part
+     of one: no `+` anywhere; no piece under 16 characters mixes upper case,
+     lower case and digits; and a piece of 16 or more characters without a
+     digit is cased like words (lower case, upper case, Capitalized, or a
+     camelCase name such as `AdminDashboardController`). Standard base64 uses
+     `/` too, and this is what tells the two apart: the tail of AWS's example
+     key, `bPxRfiCYEXAMPLEKEY`, is not cased like words, so
+     `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` is judged whole and redacted.
+     A path whose pieces are all plain is kept
+     (`/var/lib/app/uploads/2024/11/05/invoice-48213-final-v2.pdf`,
+     `db/migration/V3__create_users_table`). A path with a secret-shaped piece
+     loses that piece alone when the run starts like a path (`/`, `./`, `../`,
+     `~/`; a drive letter's `C:` is outside the run) or ends in a file
+     extension, and its short pieces are words or simple camelCase:
      `/tmp/brace-uploads/upload-8a7b6c5d4e3f2a1b.tmp` is
      `/tmp/brace-uploads/[redacted].tmp`, `Failed to load
      /assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is `Failed to load
-     /assets/[redacted].css`, and
-     `/var/lib/app/uploads/2024/11/05/invoice-48213-final-v2.pdf` is kept. A
-     label with `/` that is not path-shaped (`aB3dE/fG7hI9jK1/mN2oP4qR`, a
-     standard-base64 secret) is judged whole.
+     /assets/[redacted].css`. Without that evidence the whole label is
+     replaced (`exports/<token>/data` is `[redacted]`).
    - Otherwise each **label** between `. ~ $ %` is redacted when **all** of
      these hold: it is at least **16** characters of `[A-Za-z0-9_\-+/]`; it
      contains an ASCII digit **and** an ASCII letter; it is not a UUID
@@ -2422,9 +2476,14 @@ once:
    `-` and each part into words (a leading digit group, or letters cut at
    camelCase boundaries with an optional trailing digit group), and:
    - it has two or more words, at least one of three or more letters;
-   - a digit group has at most 8 digits on its own (`20241105`, `000482`) and
-     at most 3 after letters (`v2`, `V19`), and at most one word has both
-     letters and digits;
+   - every word of five or more letters reads like a word: each pair of
+     adjacent letters is scored by how usual it is (a 26 by 26 table ranked
+     over English and identifier text), and the score may not pass two thirds
+     of a point per pair, so one unusual pair is forgiven and a run of them is
+     not (`create`, `users`, `Handler`; not `ZAXVVMA`, `htvmuprj`);
+   - a digit group has at most 6 digits on its own (`48213`, `000482`), or 8
+     that read as a date (`20241105`), and at most 3 after letters (`v2`,
+     `V19`), and at most one word has both letters and digits;
    - letters and digits are not interleaved: a digit followed directly by a
      letter, other than at a camelCase boundary (`Http2Connection`), is
      allowed once and only in a part shaped like `2024q4`;
@@ -2434,23 +2493,39 @@ once:
      acronym of two to four capitals that starts the part or carries the
      digits (`UTF8`, `XML`); no word has five consonants in a row;
    - it is not three or more parts of (nearly) one length (the shape of a
-     grouped code, `abcd5-efgh6-ijkl7`).
+     grouped code, `abcd5-efgh6-ijkl7`); and two parts of (nearly) one length,
+     seven or more characters each, are a name only under a stricter word
+     score, half a point per pair (`shipping_address2` is kept,
+     `PZEEBRLL_HGZUZTU3` is not).
 
-   Also names: a `0x` literal of at most 16 hex digits (a lambda's address,
-   `$$Lambda/0x000001f0a1047000`) and a `git describe` suffix
-   (`2024.11.05-1423-g3f9a1c2`). So `V3__create_users_table`,
-   `invoice-48213-final-v2`, `user_sessions_archive_2024q4`,
-   `CONSTRAINT_INDEX_4`, `audit_log_entries_2024`, `PARTIALLY_REFUNDED_V2`,
-   `ORD-2024-11-000482`, `shippingAddressLine2`,
-   `Http2ConnectionHandlerImpl` and `UTF8StreamJsonParser` are kept, while a
-   hex hash (`8a7b6c5d4e3f2a1b`, a 40-hex commit SHA), a random token, a
-   Stripe id (`pi_3OaBcD2eFgHiJkLm`) and a word joined to a secret
-   (`reset-8a7b6c5d4e3f2a1b9c0d`, `token_Ab3dE9fGh1JkLmN0pQrS`) are
-   redacted. Measured on random tokens (a test samples 12,000 of them): none
-   of a million hex, base32 or base36 tokens of 16 to 40 characters, or of
-   grouped codes, is kept; of base62 and base64url tokens with a digit, about
-   1 in 10,000 at 16 characters, 1 in 100,000 at 20, and none in a million at
-   32 or more, happen to read as camelCase words and are kept.
+   Also names: a JVM address, `0x` and 16 hex digits of which the first four
+   are zero (a lambda's `$$Lambda/0x000001f0a1047000`), and a `git describe`
+   suffix after a tag part, with a count of at most 5 digits
+   (`2024.11.05-1423-g3f9a1c2`, `v1-1423-g3f9a1c2`). So
+   `V3__create_users_table`, `invoice-48213-final-v2`,
+   `user_sessions_archive_2024q4`, `CONSTRAINT_INDEX_4`,
+   `audit_log_entries_2024`, `PARTIALLY_REFUNDED_V2`, `ORD-2024-11-000482`,
+   `shippingAddressLine2`, `Http2ConnectionHandlerImpl` and
+   `UTF8StreamJsonParser` are kept, while a hex hash (`8a7b6c5d4e3f2a1b`, a
+   40-hex commit SHA), a random token, a two-group code
+   (`ZAXVVMA5-LAHQRWYU`), a Stripe id (`pi_3OaBcD2eFgHiJkLm`), a word joined
+   to a secret or to a long number (`reset-8a7b6c5d4e3f2a1b9c0d`,
+   `token_Ab3dE9fGh1JkLmN0pQrS`, `reset-code-48213977`) and any other `0x`
+   literal of 16 or more characters are redacted.
+
+   **Measured.** A seeded test
+   (`RedactorTest.randomTokensOfEveryShapeAreRedacted`) draws 100,000 random
+   tokens of each of 41 shapes and fails when more than 1 in 10,000 of a shape
+   the name rule judges keeps half or more of itself. On 300,000 tokens per
+   shape: hex, base32, base36, Crockford and base64url tokens of 16 to 43
+   characters, ungrouped or in groups of 4 to 6, none kept; base62 of 16
+   characters 1 in 40,000, of 20 or more none; two groups of 8 or 9 (the
+   worst shape) 1 in 20,000 for base32, 1 in 50,000 for base62, 1 in 100,000
+   for base36, none for hex. Standard base64 can also read as a path of
+   short pieces (`YGw/A0C3B/hJOQFgnBClnm`): 22 characters 1 in 1,250, 27
+   characters 1 in 5,500, 40 characters 1 in 150,000, 43 or more none in
+   300,000. These base64 figures are the same as before paths and names were
+   told apart.
 
 `=` is not part of a run (it separates a name from its value, and base64
 padding is not secret). Recursion through URL-inside-URL values stops at 4
@@ -2463,7 +2538,7 @@ Where it runs:
 | Where | How |
 |---|---|
 | Request path (error record, logs, stats, analytics) | `redactPath`: each `/`-segment gets the free-form pass with the in-transit rule. A segment is also tested percent-decoded (up to 3 rounds), and a `;name=value` matrix parameter is redacted by name (`;jsessionid=`, `;token=` become `[REDACTED]`) or by shape. A path whose segments are all under 16 characters and that has no `=` is returned at once |
-| Exception message and stack trace | `redactMessage` / `redactStackTrace`: the free-form pass with the field rule for pairs. In a stack trace every message line (`Caused by:`, `Suppressed:`, at any indent, and multi-line messages) is redacted; frame lines (`at …`, `... N more`, `... N common frames omitted` after one or more tabs or spaces, so the frames of a `Suppressed:` exception and of the causes under it too) are kept |
+| Exception message and stack trace | `redactMessage` / `redactStackTrace`: the free-form pass with the field rule for pairs. In a stack trace every message line (`Caused by:`, `Suppressed:`, at any indent, and multi-line messages) is redacted; frame lines are kept: `... N more`, `... N common frames omitted`, and `at` followed by a frame as the JVM prints it, `[loader/][module[@version]/]pkg.Class.method(File.java:12)` with `(Native Method)` or `(Unknown Source)` and an optional Logback `~[jar:version]`, after one or more tabs or spaces (so the frames of a `Suppressed:` exception and of the causes under it too). A line that merely starts with `at ` is message text and is redacted: Jackson's ` at [Source: (String)"{…}"; line: 1, column: 3]` quotes the document it failed on |
 | Query string (error record `requestDetail`, stats) | `redactQuery`: a part whose percent-decoded name is sensitive (in-transit rule), or whose value, as sent or after up to 3 rounds of decoding, has anything the free-form pass would redact (a secret-shaped run, a URL with something to redact such as `?next=https%3A…%3Ftoken%3D…`, a sensitive pair), becomes `name=[REDACTED]`; a bare `?<token>` part becomes `[REDACTED]` |
 | URL-valued request headers (`Referer`, `Origin`, `Location`, `Content-Location`, `X-Original-URL`, `X-Forwarded-Uri`, `X-Rewrite-URL`, `HX-Current-URL`) | `redactUrl`, as in pass 1. A value that is not a URL gets the free-form pass |
 | Other request headers, `Forwarded` and `Via` included | `redactValue`: a value that is one URL or path with no whitespace goes through `redactUrl` (or becomes `[redacted]` whole if it is secret-shaped as a whole, since a standard-base64 secret can start with `/`); anything else gets the free-form pass with the in-transit rule. `Forwarded: for=…;by=…;proto=…;host=…` stays readable while its `uri="…"` is redacted; a JWT in `X-Amzn-Oidc-Data` or `Sec-WebSocket-Protocol` (`base64url.bearer.authorization.k8s.io.<token>`) is caught |
@@ -2483,8 +2558,9 @@ rule.
 | Short labels (< 16 chars) | Route labels, action names, dotted versions (`4.12.0-beta.3+build.20241105`), file names whose labels are short (`app.3f9a1c2b.js`, Brace's own `?v=a1b2c3d4` fingerprint) |
 | Java qualified names, hostnames ending in a common TLD | `com.amazonaws.services.s3.model.AmazonS3Exception`, `my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com`, `db-primary-7f8c9d.internal`, a CloudFront `Via` |
 | Names made of words | `V3__create_users_table.sql` (any Flyway file name, Brace's own included), `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`, `Http2ConnectionHandlerImpl`, `2024-black-friday-sale` |
-| File paths, piece by piece | `/srv/app/uploads/2024/11/report-final.pdf`, `/var/app/releases/20241105`, `exports/2024/11/05/customer-orders-2024-11-05.csv`; only a secret-shaped piece is replaced (`/tmp/brace-uploads/[redacted].tmp`) |
-| Stack frame lines | `at …` and `... N more` at any indent, the frames of `Suppressed:` exceptions included |
+| File paths | `/srv/app/uploads/2024/11/report-final.pdf`, `/var/app/releases/20241105`, `exports/2024/11/05/customer-orders-2024-11-05.csv`; in a path that starts with `/`, `./`, `../` or `~/` or ends in a file extension only a secret-shaped piece is replaced (`/tmp/brace-uploads/[redacted].tmp`) |
+| Stack frame lines | `at pkg.Class.method(File.java:12)` and `... N more` at any indent, the frames of `Suppressed:` exceptions included |
+| Host lists and hosts with a dot | `mongodb://h1:27017,h2:27017/db?authSource=a@b`, `https://example.com:8443/users/@bob`: an `@` in the path or query is not user info |
 | Email addresses | PII, not a credential; `@` is outside the run alphabet and each label is short |
 | Comma- or `#`-separated lists (`#ff0000,#00ff00`) | Each item is short |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
@@ -2497,9 +2573,22 @@ redact:
   `ff0000-00ff00-0000ff`, a 16+ character hex hash (a commit SHA in a
   message), a pod name `web-7d9f8b6c5-x2k4q`, `db-primary-7f8c9d` outside a
   hostname, a name with a one-letter camelCase word or two words holding digits
-  (`AmazonS3Exception`, `utf8mb4_0900_ai_ci`), and three parts of one length
-  (`test-case-data-2024`). These look exactly like a grouped recovery code or
-  a token.
+  (`AmazonS3Exception`, `OAuth2AuthorizationCodeGrantFilter`,
+  `utf8mb4_0900_ai_ci`), three parts of one length (`test-case-data-2024`), a
+  name with a 7 or 8 digit group that is not a date (`test-user-12345678`), and
+  a name holding a word the letter-pair table scores as unusual (`proxy`,
+  `nginx`, `jsonb`; about 1 use in 200 of the five-letter-or-longer words in
+  Brace's own sources). These look exactly like a grouped recovery code or a
+  token.
+- A dotless host with a port, in any scheme, when an `@` follows in the path
+  or query: `http://api:8080/users/@bob` and
+  `redis://cache:6379/0?client=a@b` are stored as `http://[REDACTED]@bob` and
+  `redis://[REDACTED]@b`, because `user:12345/678@host` has the same shape.
+- A relative path with no file extension and a secret-shaped piece
+  (`exports/<token>/data`) is replaced whole, and so is a path where a secret
+  piece sits next to a directory that is not cased like words (`/opt/iOS/…`).
+- A sensitive value that opens with a bracket or a quote and never closes it
+  takes the rest of its line.
 - **A content hash of 16 or more characters in a file name**:
   `/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as
   `/assets/[redacted].css`, and so is a bundler chunk such as
@@ -2513,8 +2602,47 @@ redact:
   secret can contain `/`.
 - In transit, names that only look sensitive: `ticket_id`, `session_count`,
   `pin=1`, `otp_enabled`, `sig_alg`, `account_sid` (an identifier), and any
-  name ending in `auth`. In exception messages, `token=…` or `password=…` text
-  that is not a credential.
+  name ending in `auth`, `mfa`, `2fa` or `verification`
+  (`?verification=pending`). In exception messages, `token=…` or `password=…`
+  text that is not a credential.
+
+**Known limits.** What the rules do not redact. Treat the error store and the
+logs as holding secrets of these kinds, and keep them out of exception
+messages and URLs where you can:
+
+- **A secret under a sensitive name that is not written `name=value`.** The
+  name pass reads `=` only. JSON (`{"password":"hunter2"}`), a colon
+  (`password: hunter2`), spaces around the sign (`password = hunter2`) and
+  prose (`the password hunter2 was rejected`) are not matched by name. A
+  value there is still caught when its shape is secret-like (16 or more
+  characters with a digit and a letter, a JWT), so a long API key in a JSON
+  excerpt goes and a short password stays.
+- **A short secret under a name the rules do not know.** Under 16 characters
+  nothing is redacted by shape: a 6-digit code in `?c=123456`, a short
+  password in a message.
+- **A secret made of words.** `CorrectHorseBattery1`,
+  `monkey_dragon_letmein_2024` and any passphrase of dictionary words with a
+  short number read as names, by design of the name rule above, and are kept
+  unless a sensitive name stands before them.
+- **A secret of letters only or digits only**, of any length: the shape rule
+  needs both a digit and a letter.
+- **A space inside an unquoted value.** `password=abc def123` loses `abc`
+  only. The one exception is the single space inside URL user info described
+  above.
+- **Standard base64 that reads as a path of short pieces.** A base64 value
+  whose `/`-pieces are all under 16 characters and none of which mixes upper
+  case, lower case and digits is kept
+  (`abcdefghijklm/NOPQRSTUVWXYZ/0123456789012`): the measured rates are
+  above. Likewise a value cut by `/` or `.` into pieces that are each under
+  16 characters is never redacted by shape (`a69a83f4/07210da8/180c9c1b`,
+  `wmb5q8pnsd23k9i.ok5g34xcrge1ztx`), whatever it is.
+- **A request path is judged segment by segment** (`redactPath`), so a base64
+  value with `/` inside a URL path is several short segments.
+- **User info that looks like a host.** `user.name:12345/x@host` (a dot in
+  the user name, a numeric password, then `/`) reads as a host, a port and a
+  path, and is kept.
+- **A line shaped exactly like a stack frame** inside a multi-line exception
+  message is taken for one and kept.
 
 If your application routes embed raw bearer tokens or reset secrets in path
 positions, consider moving them to opaque database-lookup keys so the route
