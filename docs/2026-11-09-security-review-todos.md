@@ -782,6 +782,13 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     listener registered later that rewrote it to another origin was not rechecked. htmx has no
     later hook that can remove a header, so the header is defined with a getter that htmx reads
     when it copies the headers onto the request, after every `htmx:configRequest` listener.
+  - **Verification fixes** (`fix(security): L8 csrf-htmx.js keeps a token the page set itself`).
+    The getter returned null for a cross-origin request, which also wiped a value the page set
+    itself (`hx-headers='{"X-CSRF-Token":"THIRDPARTY"}'`, `htmx.ajax(..., {headers})`) for a
+    deliberate cross-origin call. The script now captures any own value first and returns it for
+    a cross-origin request (the meta token for a same-origin one). `CsrfHardeningTest` checks the
+    script's text; the logic was replayed in Node against a model of htmx 2.0.10's header copy
+    (19 cases), not run in a real browser.
 
 - [x] **L9: Literal `.` and `..` reach handlers as path-parameter values**, `BraceHandler.java:243-244`, `Route.java:52`
   - **Verified (scratch server).** `GET /items/../y` on `/items/{a}/{b}` gives `a=..`. A handler
@@ -1072,6 +1079,8 @@ either a hardening option, a limitation, or something that could not be verified
   that). Several unrelated test classes also failed once and passed on rerun while four suites
   ran on one machine; a serial run on the merged branch was clean.
 - **`csrf-htmx.js` was not executed in a browser.** L8's test checks the script's text only.
+  The verification fix (a page-set header is kept for a cross-origin request) was replayed in
+  Node against a model of htmx's header copy, not in a browser.
 - **Page-cache poisoning by inputs the framework cannot see.** The dev and test check flags
   undeclared reads through `Request`; a handler that depends on global state or reads the raw
   Jetty request is not detected.

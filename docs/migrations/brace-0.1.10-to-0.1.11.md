@@ -1783,7 +1783,9 @@ comment.
 requests, judged on the path the request is sent to (after every `htmx:configRequest` listener
 has run). No change unless a page turned off htmx's `selfRequestsOnly` and posts cross-origin.
 A page that wants the token on a cross-origin request sets the header in its own
-`htmx:configRequest` listener.
+`htmx:configRequest` listener. An `X-CSRF-Token` the page set itself for a cross-origin call
+(`hx-headers`, `htmx.ajax`'s `headers`) is still sent there; a same-origin request carries the
+page's own token.
 
 ## Breaking: page cache keys, bypasses and undeclared reads
 

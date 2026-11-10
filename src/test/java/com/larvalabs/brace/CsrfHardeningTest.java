@@ -132,7 +132,11 @@ class CsrfHardeningTest {
             assertTrue(js.body().contains("new URL(path, document.baseURI") && js.body().contains("location.origin"), js.body());
             // Final review: the origin is checked when htmx reads the header (a getter), after
             // every configRequest listener has run, not when this one runs. Still CSP-safe.
-            assertTrue(js.body().contains("Object.defineProperty(detail.headers") && js.body().contains("sameOrigin(detail.path) ? token : null"),
+            assertTrue(js.body().contains("Object.defineProperty(headers, HEADER") && js.body().contains("sameOrigin(detail.path) ? token : own"),
+                js.body());
+            // Verification pass: a value the page set itself (hx-headers, htmx.ajax's headers) for a
+            // deliberate cross-origin call is captured first and sent cross-origin, not wiped.
+            assertTrue(js.body().contains("Object.prototype.hasOwnProperty.call(headers, HEADER) ? headers[HEADER] : null"),
                 js.body());
             assertFalse(js.body().contains("eval(") || js.body().contains("Function("), js.body());
             // What the helper does: the meta tag's token as X-CSRF-Token on a non-GET htmx request.

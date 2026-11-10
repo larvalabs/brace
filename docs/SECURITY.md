@@ -425,7 +425,7 @@ at startup.
 ### htmx
 
 `${csrfMeta}` renders `<meta name="csrf-token" content="…">` with a masked token, and the bundled
-`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it. The origin is checked when htmx sends the request, so a `htmx:configRequest` listener of the page's own that rewrites the path afterwards is covered too.
+`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it. The origin is checked when htmx sends the request, so a `htmx:configRequest` listener of the page's own that rewrites the path afterwards is covered too. An `X-CSRF-Token` value the page set itself for a deliberate cross-origin call (`hx-headers='{"X-CSRF-Token": "..."}'`, `htmx.ajax(..., {headers})`, an earlier listener) is captured first and still sent to that origin; a same-origin request gets the framework's token from the meta tag.
 
 ### Exemptions
 
