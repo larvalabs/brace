@@ -881,6 +881,54 @@ class BraceHtmlOutputTest {
             driven(Part.text("<script>a('"), Part.data("script", null, "'<&>"), Part.text("')</script>")));
     }
 
+    // --- H1 review (F5): data written while the tokenizer is in the middle of a match ---
+    //
+    // `</scr${x}ipt>` isn't an end tag unless x is empty, but the tokenizer, which doesn't read
+    // data, carried "</scr" across it and matched "ipt>".
+
+    @Test
+    void dataInTheMiddleOfAMatchBreaksIt() {
+        String y = "\";alert(1)//";
+        String html = both("xssScriptSplit", Map.of("x", "z", "y", y));
+        assertTrue(html.contains("<script id=\"s12\">var a = \"</scrzipt>\"; var b = \"" + js(y) + "\";</script><p id=\"p\">" + text(y) + "</p>"), html);
+        // With nothing written the template's text is one end tag, to the browser as well: the
+        // rest is body text that JTE takes for script, and is escaped for both.
+        html = both("xssScriptSplit", Map.of("x", "", "y", y));
+        assertTrue(html.contains("<script id=\"s12\">var a = \"</script>\"; var b = \"\\u0022;alert(1)//\";</script><p id=\"p\">" + text(y) + "</p>"), html);
+
+        Part quote = Part.data("script", null, "\""), text = Part.data("p", null, "'"), z = Part.data("script", null, "z");
+        Part scheme = Part.data("a", "href", "javascript");
+        String blocked = BraceHtmlOutput.BLOCKED_URL;
+        // In a script body: "<", "</scr", "<!-", and the dashes of "-->".
+        assertEquals("<script>a = \"<z/script>\"; b = \"\\\"\";</script>",
+            driven(Part.text("<script>a = \"<"), z, Part.text("/script>\"; b = \""), quote, Part.text("\";</script>")));
+        assertEquals("<script>a = \"</scriptz>\"; b = \"\\\"\";</script>",
+            driven(Part.text("<script>a = \"</script"), z, Part.text(">\"; b = \""), quote, Part.text("\";</script>")));
+        assertEquals("<script><!z--<script></script>'",
+            driven(Part.text("<script><!"), z, Part.text("--<script></script>"), text));
+        assertEquals("<script><!-- -z-><script></script>\\u0027--></script>'",
+            driven(Part.text("<script><!-- -"), z, Part.text("-><script></script>"), text, Part.text("--></script>"), text));
+        assertEquals("<script><!-- <scrzipt></script>'",
+            driven(Part.text("<script><!-- <scr"), z, Part.text("ipt></script>"), text));
+        // In a comment and in CDATA: what follows the data is still inside, so no value is held
+        // and JTE's attribute is judged a piece at a time.
+        assertEquals("<!-- a -'-> <a href=\"" + blocked + ":alert(1)\"> -->",
+            driven(Part.text("<!-- a -"), text, Part.text("-> <a href=\""), scheme, Part.text(":alert(1)\"> -->")));
+        assertEquals("<svg><![CDATA[ a ]']><a href=\"" + blocked + ":alert(1)\"> ]]><a href=\"" + blocked + "\">",
+            driven(Part.text("<svg><![CDATA[ a ]"), text, Part.text("]><a href=\""), scheme, Part.text(":alert(1)\"> ]]><a href=\""),
+                scheme, Part.text(":alert(1)\">")));
+        // After a "<" in markup the data's first character decides, as it does for the browser:
+        // a letter starts a tag (so the quoted value after it is an attribute's), a digit doesn't.
+        Part breakout = Part.data("p", null, "\" onmouseover=\"alert(1)");
+        assertEquals("<p><xa title=\"&#34; onmouseover=&#34;alert(1)\">",
+            driven(Part.text("<p><"), Part.data("p", null, "x"), Part.text("a title=\""), breakout, Part.text("\">")));
+        assertEquals("<p><1a title=\"\" onmouseover=\"alert(1)\">",
+            driven(Part.text("<p><"), Part.data("p", null, "1"), Part.text("a title=\""), breakout, Part.text("\">")));
+        assertEquals("<p></xa title=\"\" onmouseover=\"alert(1)\"><a href=\"" + blocked + "\">",   // on an end tag: not an attribute
+            driven(Part.text("<p><"), Part.data("p", null, "/x"), Part.text("a title=\""), breakout, Part.text("\"><a href=\""),
+                scheme, Part.text(":alert(1)\">")));
+    }
+
     @Test
     void disagreementWithJteResolvesToTheStricterReading() {
         String blocked = BraceHtmlOutput.BLOCKED_URL;

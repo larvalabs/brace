@@ -193,8 +193,8 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     // the tag JTE reports with setContext: JTE's context says where the *template source* is,
     // which isn't where the output is when a @template call renders inside an attribute value.
     //
-    // User data never changes the state: it is escaped so that it can't close a tag, a quoted
-    // value or a raw-text element.
+    // User data isn't read: it is escaped so that it can't close a tag, a quoted value or a
+    // raw-text element. It does end a match the template text was in the middle of (dataWritten).
     //
     // <textarea> and <title> bodies are text to a browser as well, but are read as markup here:
     // the worst that does is attribute-escape data in text that looks like a tag, whereas reading
@@ -677,6 +677,7 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     @Override
     public void writeUserContent(String value) {
         if (value == null) return;
+        if (!value.isEmpty()) dataWritten(value.charAt(0));
         boolean jteAttribute = tagName != null && attributeName != null;
         boolean jteScript = attributeName == null && "script".equals(tagName);
         boolean jteStyle = attributeName == null && "style".equals(tagName);
@@ -750,6 +751,37 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
     private static boolean isMarkup(char c) {
         return c == '<' || c == '>' || c == '&';
+    }
+
+    /**
+     * Data is about to be written (not empty; {@code first} is its first character). The
+     * tokenizer doesn't read data, which is escaped so that it can't open or close anything, but
+     * data does separate the template text before it from the text after it (H1 review, F5):
+     * {@code </scr${x}ipt>} is not an end tag, {@code -${x}->} doesn't end a comment. So a match
+     * in progress is dropped. The one place where what the data is matters is straight after a
+     * {@code <} in markup, where a browser takes a letter for the start of a tag; reading that as
+     * a tag too keeps a quoted value written after it an attribute value. (Its name starts with
+     * data, so it is never taken for a script, style or svg tag: '?' stands in for the data.)
+     */
+    private void dataWritten(char first) {
+        slash = false;
+        dashes = 0;
+        switch (state) {
+            case LT -> {
+                if (isAsciiLetter(first)) startTagName('?', false);
+                else state = first == '/' ? END_TAG_OPEN : first == '!' ? MARKUP : first == '?' ? BOGUS : DATA;
+            }
+            case END_TAG_OPEN -> {
+                if (isAsciiLetter(first)) startTagName('?', true);
+                else state = BOGUS;
+            }
+            case MARKUP, CDATA_OPEN -> state = BOGUS;
+            case MARKUP_DASH -> state = first == '-' ? COMMENT : BOGUS;
+            case COMMENT_DASH, COMMENT_DASH_DASH, COMMENT_BANG -> state = COMMENT;
+            case CDATA_BRACKET, CDATA_BRACKETS -> state = CDATA;
+            case RAW_LT, RAW_END, RAW_BANG, RAW_BANG_DASH, RAW_OPEN -> state = RAW;
+            default -> { }
+        }
     }
 
     /**
