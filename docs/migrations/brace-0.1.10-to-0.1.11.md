@@ -59,7 +59,7 @@ server-side analytics, gzips responses by default, masks the CSRF token rendered
 | **2026-11 review:** `smtp://` requires STARTTLS (`smtp+plain://` opts out); `to`/`cc`/`from`/`replyTo` take one address each; `replyTo` is now applied | security, **breaking** for plain relays and comma-separated recipients | use `smtp+plain://` for a relay without TLS; send one message per recipient | [§](#breaking-smtp-requires-starttls-mail-addresses-are-single) |
 | **2026-11 review:** `opsOrigins` required whenever ops is on outside dev mode; `ops-authorized-keys` format is strict | security, **breaking** for deployments with no `brace.mode` and for keys files with scope typos | set `BRACE_OPS_ORIGINS`; write scopes exactly `scope:read` or `scope:control` | [§](#breaking-ops-origins-required-outside-dev-authorized-keys-format) |
 | **2026-11 review:** `Http.timeout(...)` bounds the whole buffered exchange, body included; `idleTimeout(...)` applies to `fetch*` | security, **breaking** for buffered calls that take over 30 s | add `.timeout(Duration...)` to slow downloads and slow APIs | [§](#breaking-http-timeouts-cover-the-response-body) |
-| **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; IPv6 addresses are unbracketed | security, **breaking** behind a proxy that sends only `Forwarded` | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host` | [§](#breaking-proxy-headers-and-reqip) |
+| **2026-11 review:** `req.ip()` reads one chosen forwarding header (`X-Forwarded-For` by default); `X-Forwarded-Proto`/`Host` use the rightmost entry; `req.ip()` is canonical (`::1`, `2001:db8::5`) and is `unknown`, not the proxy's address, when a trusted proxy's header names no client | security, **breaking** behind a proxy that sends only `Forwarded`, and for code comparing `req.ip()` with another spelling | `new TrustedProxies(...).useForwardedHeader()`; make the proxy overwrite `X-Forwarded-Proto`/`Host`; compare against the canonical form | [§](#breaking-proxy-headers-and-reqip) |
 | **2026-11 review:** template output: data in a `javascript:` URL is blocked; data in CSS is CSS-escaped; script bodies are JavaScript-escaped again; `hx-request` guarded like `hx-vals` | security, **breaking** for templates that put data in a `javascript:` URL or CSS syntax in `style="${...}"` | move the data to `data-*` attributes; pass CSS values, not CSS syntax | [§](#breaking-template-output-in-scripts-script-urls-css-and-htmx-values) |
 | **2026-11 review:** page cache stores only 2xx, keys on the route, bypasses on `Authorization` and htmx targeting headers; `Brace.test()` throws when a cached handler reads undeclared input | security, **breaking** for tests of cached handlers that read undeclared input | declare inputs with `.vary(...)`/`.varyHeader(...)`, or stop caching the route | [§](#breaking-page-cache-keys-bypasses-and-undeclared-reads) |
 | **2026-11 review:** access rejections and guarded static responses are never shared-cacheable; `Result` header names are case-insensitive; dot segments are 404; WebSocket paths are exact | security | none, unless code relied on two spellings of a header name being two headers, or on `result.headers()` order | [§](#security-access-rejections-and-guarded-responses-are-never-shared-cacheable) |
@@ -1561,20 +1561,38 @@ app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());
 ```
 
 A trusted proxy that sends only the header Brace is not reading logs a one-time warning naming
-`useForwardedHeader()`. If you see every visitor with the proxy's IP after upgrading, this is
-why.
+`useForwardedHeader()`, and `req.ip()` is `unknown` for those requests. If you see every visitor
+as `unknown` after upgrading, this is why.
 
 Also changed:
 
 - **Repeated header lines are read as one list**, in order. The last line used to win.
 - **`X-Forwarded-Proto` and `X-Forwarded-Host` use the rightmost entry** across all lines, the
   one the nearest proxy added (it was the leftmost). Make sure your proxy sets (overwrites)
-  these headers; nginx `proxy_set_header`, Traefik and Caddy do.
-- **`req.ip()` is always an IP literal.** When the selected forwarding entry is not an address
-  (`unknown`, `_hidden`, anything else) it returns the socket address.
-- **IPv6 addresses are unbracketed.** `req.ip()` for a direct IPv6 client is
-  `0:0:0:0:0:0:0:1`, where 0.1.10 returned `[0:0:0:0:0:0:0:1]`. Update code or stored data that
-  compares against the bracketed form.
+  these headers; nginx `proxy_set_header`, Traefik and Caddy do. An `X-Forwarded-Host` entry
+  that is not a `host` or `host:port` is ignored and `Host` is used.
+- **`req.ip()` is always a canonical IP literal or the string `unknown`.** When the request
+  comes from a trusted proxy and the selected forwarding entry is not an address (`unknown`,
+  `_hidden`, a malformed element), or the header is empty, or the proxy sent only the header
+  Brace does not read, it returns `unknown`. 0.1.10 returned the entry as written, or the
+  proxy's own address. A trusted peer that sends no forwarding header at all is still returned
+  as itself, and an untrusted peer is always its socket address.
+
+  ```java
+  // before: a malformed header made req.ip() the proxy's address, which this admitted
+  if (req.ip().equals("127.0.0.1")) { /* local admin */ }
+
+  // after: unchanged code is safe ("unknown" equals no address); a denylist must name it
+  if (req.ip().equals("unknown") || blocked.contains(req.ip())) return Result.error(403, "Forbidden");
+  ```
+
+  `RateLimiter.perIp` counts every `unknown` request in one shared bucket.
+- **`req.ip()` is canonical.** IPv4 is dotted decimal. IPv6 follows RFC 5952: lower-case, no
+  leading zeros, the longest zero run written `::`, no brackets, no port. An IPv4-mapped IPv6
+  address is returned as IPv4, and a zone id is kept. A direct IPv6 loopback client is `::1`,
+  where 0.1.10 returned `[0:0:0:0:0:0:0:1]`; `2001:DB8:0:0:0:0:0:5` in a header is
+  `2001:db8::5`; `::ffff:6.6.6.6` is `6.6.6.6`. Update code or stored data that compares
+  against another spelling.
 - **Repeated `Cookie` lines are joined**, and the first occurrence of a name wins, on HTTP and
   WebSocket alike.
 - **Remove any `::ffff:…/104` entry from `trustedProxies`.** Earlier docs recommended it for

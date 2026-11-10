@@ -80,14 +80,15 @@ class ProxyHeadersReviewFixesTest {
     @Test
     void forwardedAloneWithXffChosenWarnsOnce() {
         var proxies = new TrustedProxies("127.0.0.1");
-        assertEquals("127.0.0.1", trusted(Map.of("Forwarded", "for=203.0.113.9"), proxies).ip());
+        // Final review: "unknown", not the proxy's own address (it is proxying for someone).
+        assertEquals("unknown", trusted(Map.of("Forwarded", "for=203.0.113.9"), proxies).ip());
         assertTrue(Request.warnedForwardingHeader(), "a trusted proxy sending only Forwarded is reported");
     }
 
     @Test
     void xffAloneWithForwardedChosenWarnsOnce() {
         var proxies = new TrustedProxies("127.0.0.1").useForwardedHeader();
-        assertEquals("127.0.0.1", trusted(Map.of("X-Forwarded-For", "203.0.113.9"), proxies).ip());
+        assertEquals("unknown", trusted(Map.of("X-Forwarded-For", "203.0.113.9"), proxies).ip());
         assertTrue(Request.warnedForwardingHeader());
     }
 
@@ -104,10 +105,11 @@ class ProxyHeadersReviewFixesTest {
     // ---- F8: req.ip() is only ever an address literal or "unknown" ----
 
     @Test
-    void nonAddressInXffFallsBackToTheSocketAddress() {
+    void nonAddressInXffIsUnknown() {
+        // Final review: "unknown", where the first fix returned the socket peer (the proxy).
         var proxies = new TrustedProxies("127.0.0.1");
-        assertEquals("127.0.0.1", trusted(Map.of("X-Forwarded-For", "<script>"), proxies).ip());
-        assertEquals("127.0.0.1", trusted(Map.of("X-Forwarded-For", "203.0.113.5, unknown"), proxies).ip());
+        assertEquals("unknown", trusted(Map.of("X-Forwarded-For", "<script>"), proxies).ip());
+        assertEquals("unknown", trusted(Map.of("X-Forwarded-For", "203.0.113.5, unknown"), proxies).ip());
         assertEquals("203.0.113.5", trusted(Map.of("X-Forwarded-For", "203.0.113.5:4711"), proxies).ip());
         assertEquals("2001:db8::1", trusted(Map.of("X-Forwarded-For", "[2001:db8::1]:443"), proxies).ip());
     }
@@ -115,12 +117,12 @@ class ProxyHeadersReviewFixesTest {
     @Test
     void forwardedIsParsedWithQuotedStrings() {
         var proxies = new TrustedProxies("127.0.0.1", "10.0.0.7").useForwardedHeader();
-        assertEquals("127.0.0.1",
+        assertEquals("unknown",
             trusted(Map.of("Forwarded", "for=\"[2001:db8::1]:1234\", for=\"a,b\""), proxies).ip(),
             "a quoted comma is not a separator, and \"a,b\" is not an address");
-        assertEquals("127.0.0.1", trusted(Map.of("Forwarded", "for=_hidden"), proxies).ip());
-        assertEquals("127.0.0.1", trusted(Map.of("Forwarded", "for=unknown"), proxies).ip());
-        assertEquals("127.0.0.1", trusted(Map.of("Forwarded", "for=\"1.2.3.4;x\""), proxies).ip());
+        assertEquals("unknown", trusted(Map.of("Forwarded", "for=_hidden"), proxies).ip());
+        assertEquals("unknown", trusted(Map.of("Forwarded", "for=unknown"), proxies).ip());
+        assertEquals("unknown", trusted(Map.of("Forwarded", "for=\"1.2.3.4;x\""), proxies).ip());
         assertEquals("2001:db8::1", trusted(Map.of("Forwarded", "for=\"[2001:db8::1]:1234\""), proxies).ip());
         assertEquals("203.0.113.7",
             trusted(Map.of("Forwarded", "for=\"203.0.113.7\";proto=\"h,t\\\"tp\", for=10.0.0.7"), proxies).ip());

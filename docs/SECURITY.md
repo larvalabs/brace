@@ -905,18 +905,38 @@ can connect over either, list both:
 app.trustedProxies("127.0.0.1", "::1");
 ```
 
-An IPv6 peer is matched and reported without brackets: Jetty gives the socket address as
-`[0:0:0:0:0:0:0:1]`, and Brace strips the brackets where the address enters the framework, so a
-trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `0:0:0:0:0:0:0:1`.
+An IPv6 peer is matched and reported without brackets and in canonical form: Jetty gives the
+socket address as `[0:0:0:0:0:0:0:1]`, and Brace normalises it where the address enters the
+framework, so a trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `::1`.
+
+**The form of `req.ip()`.** Always canonical, whether it came from the socket or a header, so
+comparing it with a string is reliable:
+
+| Address | `req.ip()` |
+|---|---|
+| IPv4 | dotted decimal: `203.0.113.9` |
+| IPv6 | RFC 5952: lower-case hex, no leading zeros, the longest run of zero groups as `::`, no brackets, no port: `2001:db8::5`, `::1` |
+| IPv4-mapped IPv6 (`::ffff:6.6.6.6`) | the IPv4 address: `6.6.6.6` |
+| With a zone id | the zone kept as written: `fe80::1%eth0` |
+| No usable address | the literal string `unknown` (see below) |
+
+So `2001:DB8:0:0:0:0:0:5`, `[2001:db8::5]:443` and `2001:db8::5` in a header are all
+`2001:db8::5`. Write the addresses you compare against in the same form, or match with
+`new TrustedProxies("2001:db8::/32").isTrusted(req.ip())`, which compares binary values.
 
 ### Supported Headers
 
 - `X-Forwarded-For` (the default client-address header)
 - `Forwarded` (RFC 7239), instead of `X-Forwarded-For`, with `useForwardedHeader()`: elements
-  split on `,`, parameters on `;`, neither inside a quoted-string (`for="[2001:db8::1]:4711"`)
+  split on `,`, parameters on `;`, neither inside a quoted-string (`for="[2001:db8::1]:4711"`).
+  Elements are split from the right, so the element your proxy appended is delimited by its own
+  text: an unbalanced quote in what the client sent (`for="x`) spoils only the client's element
+  and cannot swallow the proxy's
 - `X-Forwarded-Proto` — the original scheme, for the session cookie's `Secure` attribute
 - `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision, the session
-  cookie's `__Host-` name, the cross-site `Origin` checks (CSRF, WebSocket, ops) and analytics
+  cookie's `__Host-` name, the cross-site `Origin` checks (CSRF, WebSocket, ops) and analytics.
+  The entry used must be a `host` or `host:port` (a name, an IPv4 address or a bracketed IPv6
+  address); anything else is ignored and `Host` is used
 
 All of them are ignored unless the immediate peer is a trusted proxy. Each is read from every
 line it arrives on, in order, as one list. For `X-Forwarded-Proto` and `X-Forwarded-Host` Brace
@@ -925,13 +945,33 @@ these headers, or passes a client's copy through, the leftmost entry is whatever
 **Your proxy must set (overwrite) both headers**, as the nginx example below does with
 `proxy_set_header`; a proxy that only passes them through lets a client choose them.
 
-`req.ip()` is always an IP address literal (or `unknown` when there is no socket address). If
-the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
-identifier, or anything a client managed to put there), the socket address is used instead.
+**`unknown`.** `req.ip()` is always a canonical IP address literal or the string `unknown`. It is
+`unknown` when the request came from a trusted proxy and the proxy's header names no usable
+client:
 
-If a trusted proxy sends the forwarding header Brace was not told to read, and not the one it
-was (say only `Forwarded` while the app reads `X-Forwarded-For`), every client would silently get
-the proxy's address; Brace logs one warning naming `TrustedProxies.useForwardedHeader()`.
+- the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
+  identifier, a malformed element, or anything a client managed to put there);
+- the header is present but empty, or (for `Forwarded`) has no `for=`;
+- the proxy sent only the forwarding header Brace was not told to read (say only `Forwarded`
+  while the app reads `X-Forwarded-For`). Brace also logs one warning naming
+  `TrustedProxies.useForwardedHeader()`.
+
+It is never the proxy's own address in those cases. Returning the proxy's address would let a
+client who can malform the header pass for the proxy: an allowlist that admits `127.0.0.1` or
+the proxy's LAN address would admit them, and they would get a second per-IP rate-limit budget.
+What the sentinel means to each consumer:
+
+- **Address allowlists must fail closed on it.** `unknown` is not an address, so
+  `TrustedProxies.isTrusted("unknown")` is false and an `equals` against a real address is
+  false. A denylist (`if (blocked.contains(req.ip()))`) does not catch it: check for it
+  explicitly if you keep one.
+- **`RateLimiter.perIp`** counts every `unknown` request in one shared bucket, so they are
+  limited together, not exempt.
+- **Analytics and logs** record the string as it is.
+
+A trusted peer that sends no forwarding header at all (a health check from the proxy itself, a
+process on the proxy's host) is the client, and `req.ip()` is its address. A request from a peer
+that is not a trusted proxy is always the socket address.
 
 Repeated `Cookie` lines are joined (with `; `) into one list on every request and WebSocket
 upgrade, and a cookie name that appears twice resolves to its first occurrence on both.

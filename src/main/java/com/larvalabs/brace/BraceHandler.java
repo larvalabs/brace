@@ -1823,7 +1823,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * logs, analytics and the ops audit all see the same unbracketed literal. A zone id is kept.
      */
     static String peerAddress(org.eclipse.jetty.server.Request request) {
-        return TrustedProxies.unbracket(org.eclipse.jetty.server.Request.getRemoteAddr(request));
+        String raw = TrustedProxies.unbracket(org.eclipse.jetty.server.Request.getRemoteAddr(request));
+        // L3 final review: and in the canonical form req.ip() returns (::1, not 0:0:0:0:0:0:0:1).
+        String canonical = TrustedProxies.canonical(raw);
+        return canonical != null ? canonical : raw;
     }
 
     /**

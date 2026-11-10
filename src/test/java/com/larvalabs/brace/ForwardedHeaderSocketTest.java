@@ -74,15 +74,16 @@ class ForwardedHeaderSocketTest {
     @Test
     void defaultReadsXForwardedForAndIgnoresForwarded() throws Exception {
         assertEquals("6.6.6.6", ipFrom(xffApp, "X-Forwarded-For: 6.6.6.6", "Forwarded: for=203.0.113.9"));
-        assertEquals("127.0.0.1", ipFrom(xffApp, "Forwarded: for=203.0.113.9"),
-            "Forwarded alone is ignored by default: the socket peer is used");
+        assertEquals("unknown", ipFrom(xffApp, "Forwarded: for=203.0.113.9"),
+            "Forwarded alone is not read by default, and the proxy's own address is not the client's");
+        assertEquals("127.0.0.1", ipFrom(xffApp), "a trusted peer forwarding nothing is itself the client");
     }
 
     @Test
     void forwardedOptionReadsForwardedAndIgnoresXForwardedFor() throws Exception {
         assertEquals("203.0.113.9",
             ipFrom(forwardedApp, "X-Forwarded-For: 6.6.6.6", "Forwarded: for=203.0.113.9"));
-        assertEquals("127.0.0.1", ipFrom(forwardedApp, "X-Forwarded-For: 6.6.6.6"),
+        assertEquals("unknown", ipFrom(forwardedApp, "X-Forwarded-For: 6.6.6.6"),
             "X-Forwarded-For alone is ignored once Forwarded is chosen");
         assertEquals("203.0.113.9", ipFrom(forwardedApp, "Forwarded: for=\"203.0.113.9:4711\";proto=https"));
     }

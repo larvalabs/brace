@@ -514,6 +514,15 @@ judgment; Fable 5.2 where an invariant, a public API or a default changes.
     overwrite them. F10: `Cookie` lines are joined with `"; "` on both paths and the WebSocket
     upgrade parses the session cookie as HTTP does (first occurrence of a name wins). Tests in
     `ProxyHeadersReviewFixesTest`.
+    - **Final review fixes.** M-A (regression from F8): a client's unbalanced quote
+      (`Forwarded: for="x`) swallowed the appending proxy's element, the selected value was not
+      an address, and the fallback returned the socket peer, the trusted proxy. `Forwarded`
+      elements are now split from the right, so a proxy's element is delimited by its own text,
+      and a trusted proxy's header that names no usable client yields `unknown`, never the
+      proxy's address (both header modes; a trusted peer sending no forwarding header at all is
+      still itself). `X-Forwarded-Host` must be a `host[:port]` or it is ignored. `req.ip()` is
+      canonical (RFC 5952, IPv4-mapped as IPv4, zone kept). Tests in
+      `ProxyHeadersFinalReviewTest`.
 
 - [x] **L4: The page cache stores any status and keys on the raw path**, `Cache.java:398-406, 424-433`, `InMemoryBackend.java:53-63`, `PostgresBackend.java`
   - `RenderedResponse.from(result)` is stored regardless of status. The key ignores undeclared

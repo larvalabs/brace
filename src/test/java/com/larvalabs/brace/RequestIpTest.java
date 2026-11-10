@@ -79,12 +79,12 @@ public class RequestIpTest {
         assertEquals("1.2.3.4", req.ip());
         var forwardedOnly = new Request("GET", "/", Map.of(), Map.of(), Map.of("Forwarded", "for=5.6.7.8"),
             null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", forwardedOnly.ip(), "Forwarded is not a fallback");
+        assertEquals("unknown", forwardedOnly.ip(), "Forwarded is not a fallback, and neither is the proxy's address");
         // With useForwardedHeader(), the reverse.
         var rfc = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         assertEquals("5.6.7.8", new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(),
             "10.0.0.1", rfc).ip());
-        assertEquals("10.0.0.1", new Request("GET", "/", Map.of(), Map.of(), Map.of("X-Forwarded-For", "1.2.3.4"),
+        assertEquals("unknown", new Request("GET", "/", Map.of(), Map.of(), Map.of("X-Forwarded-For", "1.2.3.4"),
             null, Map.of(), "10.0.0.1", rfc).ip(), "X-Forwarded-For is ignored once Forwarded is chosen");
     }
 
@@ -108,11 +108,12 @@ public class RequestIpTest {
 
     @Test
     public void testIpEmptyForwardedFor() {
-        // Empty X-Forwarded-For should be ignored
+        // L3 final review: a trusted proxy's forwarding header that names no address is
+        // "unknown", never the proxy's own address.
         var headers = Map.of("X-Forwarded-For", "");
         var trusted = new TrustedProxies("10.0.0.0/8");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
@@ -244,12 +245,12 @@ public class RequestIpTest {
 
     @Test
     public void testIpXffBareComma() {
-        // Header of exactly "," splits to ["", ""] — all blank — must not crash and must fall
-        // back to remoteAddr, not throw ArrayIndexOutOfBoundsException.
+        // Header of exactly "," splits to ["", ""] — all blank — must not crash (no
+        // ArrayIndexOutOfBoundsException) and is "unknown" (L3 final review), not the proxy.
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", ",");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
@@ -272,21 +273,21 @@ public class RequestIpTest {
 
     @Test
     public void testIpXffAllBlankSegments() {
-        // " , , " — all blank — must fall back to remoteAddr, never return "".
+        // " , , " — all blank — is "unknown" (L3 final review), never "".
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", " , , ");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
         assertFalse(req.ip().isEmpty());
     }
 
     @Test
     public void testIpForwardedBareComma() {
-        // Forwarded header of exactly "," — no "for=" values extracted, must fall back to remoteAddr.
+        // Forwarded header of exactly "," — no "for=" values extracted: "unknown" (L3 final review).
         var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var headers = Map.of("Forwarded", ",");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
