@@ -24,6 +24,7 @@ This document describes Brace's security features and best practices for buildin
 - [Installing and Updating Brace](#installing-and-updating-brace)
 - [Ops Endpoints](#ops-endpoints)
 - [Analytics](#analytics)
+- [Outbound Mail](#outbound-mail)
 - [Secrets Management](#secrets-management)
 
 ---
@@ -47,9 +48,26 @@ app.group("/admin", Access.check((req, s) ->
 Requirements are bound to the `Route` object at `start()`, not matched against the request
 path, so a guard and a route can't disagree about a path: `/admin/x/`, `/admin/%78` and
 `HEAD /admin/x` reach the same route and run the same requirements. They run after plain
-`before(...)` middleware (so a rate limiter sheds load first) and before the request body is
-read, so an unauthenticated client can't make the app buffer a body. Rejections go through the
-normal response path, so security headers and session write-back apply.
+`before(...)` middleware (so a rate limiter sheds load first) and before the framework reads
+the request body for the handler and for CSRF. The framework itself never buffers a body for a
+request an access requirement rejects. **The body is read earlier only if a plain `before(...)`
+asks for it**: `req.body()`, `req.formParam(...)`, `req.form(...)` and `req.file(...)` read it
+on first use, and a plain `before` runs ahead of access. The login limiter shown under Rate
+Limiting does exactly that (`req.formParam("username")`), so on that path an unauthenticated
+client's body is read, up to the upload limit, before any access requirement runs; that is the
+limiter's job there, since the login route is public. Keep body-reading `before(...)` middleware
+to the paths that need it. Rejections go through the normal response path, so security headers
+and session write-back apply.
+
+A request whose raw path has a segment that is exactly `.` or `..` (`/items/../y`, `/one/.`)
+is answered 404 without being matched against any route or static mapping, and without any
+`before(...)` middleware, access requirement or handler running: no handler receives `..` as a
+path parameter, and a proxy that resolves dot segments for its own rules can't be made to
+disagree with Brace about which route is being called. After-middleware does run for that 404,
+as for any other, so it carries the app's security headers. When the path, as written or with
+its dot segments resolved, falls under a guarded static mapping (`/docs/./report.txt`,
+`/x/../docs/report.txt`), the 404 is also sent `Cache-Control: no-store`, whatever an
+`after(...)` set.
 
 Plain `before(...)` middleware never counts as access. The previous model —
 `requireSession("/admin/*", …)` path-pattern guards — is removed.
@@ -60,6 +78,97 @@ ops route registered without one fails `start()`. The app's default access never
 `/ops`.
 
 `/ops/routes` and the startup banner list each route's resolved access.
+
+### Static mappings are covered too
+
+A `staticFiles` mapping is not a route, but it is inside the same model. Every mapping says who
+may fetch its files, and `start()` (so also `Brace.test()`) refuses to run while one says
+neither:
+
+```java
+app.staticFiles("/assets", "public").publicFiles();                    // everyone
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));                        // logged-in users
+```
+
+- **`defaultAccess(...)` does not apply to a mapping**, and neither does
+  `defaultAccess(Access.none())`. A mapping's access is exactly what its `.access(...)` lists
+  (all must pass). Inheriting a login default would put the login in front of the login page's
+  own stylesheet; defaulting to public would publish an upload directory by omission. So there
+  is no default, and an undeclared mapping is a startup error.
+- The requirements are bound to the mapping, not to a path pattern. They run when no route
+  matched the request's method and path and the mapping's prefix covers the path, at the same
+  point as a route's: after plain `before(...)`, before session-aware `before(...)`, with the
+  one `Session` the request uses. They run before the path is decoded or the disk is touched,
+  for every method, so every spelling that reaches the mapping's files is guarded, and a
+  rejected request gets the same response whether or not the file exists.
+- **A mapping serves `GET` and `HEAD` only.** Any other method on a path under a mapping
+  (`POST`, `OPTIONS`, an unknown method) gets `405` with `Allow: GET, HEAD`. The 405 comes after
+  the mapping's access has run, so an anonymous request to a guarded mapping still gets the
+  rejection, and after session-aware `before(...)` middleware, which may answer first. The
+  bundled `/__brace/*` assets answer other methods with `405` too.
+- **A route under a mapping's prefix owns its path.** With `staticFiles("/docs", dir)` and
+  `app.get("/docs/payroll.pdf", ...)`, the route answers `GET` (and `HEAD`) with its own access,
+  and the mapping never serves `/docs/payroll.pdf` under any method. (Before this,
+  `POST /docs/payroll.pdf` skipped the route and was served the file by the mapping.) A request
+  for that path under a method the route does not handle is answered in this order: the
+  mapping's access; session-aware `before(...)`; then **the access of every route that owns the
+  path**, so a caller the route would refuse gets that same rejection (a login redirect, a 403)
+  and learns nothing more; and only then `405` with the routes' methods in `Allow`.
+- **A WebSocket route owns its path too.** With `app.ws("/docs/live", ...)` under that mapping,
+  a plain (non-upgrade) request for `/docs/live` is never served a file named `live`: it gets
+  the socket route's access check, then `426 Upgrade Required` for `GET`/`HEAD` or `405` with
+  `Allow: GET` for another method.
+- `start()` logs a warning naming each mapping that has routes (WebSocket routes included)
+  under its prefix, because every other file in that directory is still served under the
+  mapping's access alone; a mapping at `/` is not warned about. Outside a mapping, a path that
+  only matches a route under another method is a `404`, as before.
+- **A mapping's prefix must start with `/`.** `staticFiles("assets", dir)` throws at
+  registration; it used to start and never serve (and `""` behaved as `/`).
+- Nothing under a guarded mapping can be stored by a shared cache. A served file (200, 206, 304)
+  is sent `Cache-Control: private, no-cache`, and a `?v=` fingerprint earns no `immutable`
+  there. Every other response under the mapping (the access rejection, a 404, 405 or 416, an
+  early response from `before(...)`, an error) is sent `Cache-Control: no-store`. This is
+  enforced after after-middleware: `Cache-Control`, `Expires`, `Pragma`, `CDN-Cache-Control`,
+  `Surrogate-Control`, `Cloudflare-CDN-Cache-Control` and `Vercel-CDN-Cache-Control` are removed
+  in any letter case, whatever set them, and the one `Cache-Control` above is set.
+- `start()` refuses two mappings whose directories overlap (the same directory, or one inside
+  the other, compared as written and with symlinks resolved) unless their access is the same:
+  a guarded directory that a public mapping also serves, or one that a less strictly guarded
+  mapping also serves, would be reachable through the weaker prefix. Built-in requirements are
+  compared by value (two `Access.session("userId", "/login")` calls match); a custom
+  `Access.check(...)` or `Access.checkRequest(...)` matches only itself, so pass the same `Access`
+  object to both mappings if they are meant to match.
+- `start()` requires every mapping's directory to exist. A directory created later could be a
+  symlink into another mapping's tree, or a case-variant sibling of one on a case-insensitive
+  volume, which the overlap check would never have seen. As a second line, a mapping answers
+  404 for a file whose real path is inside the directory of a mapping with different access,
+  which covers a directory replaced by a symlink after startup.
+- The same URL prefix cannot be registered twice (`staticFiles` throws; `/files` and `/files/`
+  are the same prefix): only one of the two could ever serve.
+- The bundled `/__brace/*` assets and `/__brace/health` are not mappings and stay public.
+- `/ops/routes` (method `STATIC`) and the startup banner list each mapping with its access.
+
+A path-pattern `before("/uploads/*", ...)` is still not access, for the reasons above. For a
+per-file decision (the owner of this file, not any logged-in user), serve the file from a route
+instead: look the record up with `db.findOwnedOr404(...)` and return
+`Result.fileUnder(dir, name)` or `Result.download(...)`, with `.untrusted()` for uploads. Keep
+those files in a directory no mapping serves. If the route does sit under a mapping's prefix,
+the route wins for its methods and the mapping never serves that path, as described above.
+
+### Access rejections are never cached
+
+When an access requirement rejects a request, on a route or a mapping, the response is sent
+`Cache-Control: no-store` with the same header stripping as above, and
+`Vary: Accept, HX-Request` is added (merged with any existing `Vary`), because
+`Access.session` answers a page request with a 302, a JSON client with a 401 and an htmx
+request with a 401 plus `HX-Redirect`. Without this, an app-wide `after(...)` that marks
+responses `public` let a shared cache store the anonymous login redirect for a guarded URL and
+serve it to logged-in users.
+
+How a *successful* response from a guarded route is cached stays the app's decision. In dev
+mode Brace warns once per route when such a response carries `Cache-Control: public` or
+`s-maxage`.
 
 ### Object-level authorization
 
@@ -123,8 +232,16 @@ What it does **not** catch:
   with `id` as the value is a tautology that returns every row, and isn't flagged, because
   flagging bare words everywhere would trip on ordinary code.
 - A value the handler transformed (trimmed, split into terms, re-cased) before concatenating it.
-- JSON bodies, headers and cookies; queries run outside a request (jobs, `withSession`); and,
-  past the first 1,000 values or 64 KB of a request, the rest.
+- JSON bodies, headers and cookies, and queries run outside a request (jobs, `withSession`).
+  `Sort.of(...)` is checked against the string you passed as well as the normalized order, so
+  `?sort=title%20desc` is caught even though it renders as `title DESC`.
+
+Every path parameter and query value is recorded (the request line is bounded at 8 KB, so there
+are never many). The form body is recorded up to 1,000 values or 1 MB of text; a request past
+that is *over cap* and cannot be fully checked. When such a request reaches a where-fragment, a
+raw query or a `Sort.of(...)`, the call throws in dev mode and `Brace.test()` (so padding a form
+cannot slip a payload past a test), and production runs the query and logs an "over cap" warning
+at most once a minute per call site.
 
 It can also fire on safe code: a hand-written allowlist (`switch (sort) { case "title" ->
 "title"; ... }` concatenated after `ORDER BY`) looks the same as the injection it replaces. Use
@@ -212,6 +329,14 @@ altered without the secret.
   secret is derived from the session secret, so ops clients re-authenticate after a rotation, and
   so is the key for WebSocket broadcasts between instances on Postgres: during a rolling rotation,
   instances on the old and new secret don't receive each other's broadcasts until all match.
+  A secret that is public or compromised (the `brace new` placeholder, or one that leaked) must
+  never be listed as previous: a listed secret still mints cookies. Startup refuses the shipped
+  placeholder as a previous secret, and a cookie opened with a previous secret is honoured only
+  if it carries `_abs` and that deadline is no further out than the configured absolute
+  lifetime. An empty previous-secret cookie opens as a brand-new session, inheriting no
+  deadline. `app.sessions(options)` copies the options, so changing them afterwards has no
+  effect, and `start()` re-runs the secret checks under the mode the app starts in. Drop a
+  retired secret once cookies sealed with it have expired.
 - **Cookie name.** Wherever the browser allows it (`Secure`, `Path=/`, no `Domain` — every
   default production deployment) the cookie is `__Host-brace_session`. Only the exact host can
   set a `__Host-` cookie, over HTTPS, so a compromised or hostile sibling subdomain can't plant
@@ -300,7 +425,7 @@ at startup.
 ### htmx
 
 `${csrfMeta}` renders `<meta name="csrf-token" content="…">` with a masked token, and the bundled
-`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request.
+`/__brace/csrf-htmx.js` copies it into `X-CSRF-Token` on every non-GET htmx request. The token is only attached to same-origin requests, so an `hx-post` to a cross-origin URL (for example, with htmx's `selfRequestsOnly` turned off) does not leak it. The origin is checked when htmx sends the request, so a `htmx:configRequest` listener of the page's own that rewrites the path afterwards is covered too. A cross-origin htmx request never carries `X-CSRF-Token` from this helper, for any verb: a value already in the request's headers when the helper runs (`hx-headers` on the element or inherited from `<body>`, `htmx.ajax(..., {headers})`, an earlier listener), under any letter case, is removed. The helper cannot tell a third party's token from the app's own, and injected markup alone (`<base href>`) can turn a relative `hx-post` into a cross-origin request. A same-origin non-GET request carries the meta tag's token under exactly one header name; a same-origin GET keeps a value the page set itself. To send a chosen `X-CSRF-Token` to another origin, assign it in an `htmx:configRequest` listener added on `document` after the helper script is included.
 
 ### Exemptions
 
@@ -339,25 +464,108 @@ contexts where escaping alone doesn't stop script:
   tabs, newlines and leading control characters before reading the scheme, so
   `java\tscript:` is a script URL too. Also `to`/`from`/`by`/`values` on SVG `<set>` and
   `<animate>`, which can set an `href`. The whole value, template text and every `${...}`, is
-  held until its closing quote and normalized the same way. If the template's own text fixed the
+  held until its closing quote and normalized the same way, with character references decoded
+  (`href="&#32;${url}"` starts with a space, not with a fragment). If the template's own text fixed the
   scheme or made the URL relative (`href="mailto:${email}"`, `href="/users/${id}"`), it's kept;
   if user data decides the scheme (`href="${url}"`, `href="${a}${b}"`, `href="${scheme}://${host}"`)
   only `http`, `https`, `mailto` and `tel` pass, plus raster `data:image/` URLs (png, jpeg, gif,
   webp, avif, bmp; never SVG) on `src` and `poster`. Anything else renders as
-  `about:invalid#blocked`.
+  `about:invalid#blocked`. One scheme the template can't choose for data: a `javascript:` or
+  `vbscript:` URL with any `${...}` in it (`href="javascript:go('${id}')"`) is blocked as well,
+  because the browser undoes both HTML escaping and percent-encoding before it runs the code.
+  Put the value in a `data-*` attribute and read it from a script file.
 - **Script attributes.** `on*`, `hx-on*` (`hx-on:click`, `hx-on-click`, `data-hx-on:*`),
   `hx-vals`, `hx-vars`, `hx-headers`, `hx-request` and `hx-trigger`. User data is escaped with
   `\uXXXX` sequences for every character that can end a string or start markup or a template
   substitution, which is valid in JavaScript strings, template literals and JSON, so JSON
-  `hx-vals`/`hx-headers` keep working with quotes in the data. HTML escaping alone is undone by
+  `hx-vals`/`hx-headers` keep working with quotes in the data. This protects data written
+  **inside a quoted string** in the attribute's code (`onclick="go('${id}')"`,
+  `hx-trigger="click[check('${id}')]"`). It does nothing for data that is the code itself:
+  `onclick="${handler}"`, `onclick="go(${id})"` or `hx-trigger="${trigger}"` run whatever the
+  value says (`click[alert(1)]` is a valid trigger with a filter expression, and has no character
+  that needs escaping). Never put user data there outside a quoted string. HTML escaping alone is undone by
   the browser before the code runs (`&#39;` is a quote again), and JTE's JavaScript escaping for
-  `on*` left `&` alone, so an entity in user data still closed the string.
+  `on*` left `&` alone, so an entity in user data still closed the string. When data is the whole
+  `hx-vals`/`hx-headers`/`hx-request` value (`hx-vals='${json}'`) it is attribute-escaped
+  instead, so JSON the handler built stays intact. htmx evaluates such a value when it starts
+  with `js:` or `javascript:` after trimming (JavaScript's `trim()`, which strips U+00A0, U+FEFF
+  and the other Unicode spaces): if user data supplies any part of that prefix, in one `${...}`
+  or several, the value renders as `{}`. A `js:` the template wrote itself is kept. (`hx-vars`
+  has no such prefix: htmx evaluates all of it, always. It is deprecated in htmx; use `hx-vals`.)
 - **`srcdoc`.** User data is escaped twice, so it is text inside the frame, not markup. Template
   markup inside `srcdoc` isn't URL-checked; an HTML preview should be sanitized HTML written with
   `$unsafe{Html.escape(...)}` in an iframe with `sandbox`.
+- **`<script>` bodies.** In a `<script>` tag written in any letter case, in HTML or inside
+  `<svg>`/`<math>`, every character of user data other than ASCII letters, digits, `_`, `,` and
+  non-ASCII characters is written as a `\uXXXX` escape (`O'Brien` is written `O\u0027Brien`;
+  a backslash is written `\\`). A JavaScript string in either quote style, a template literal
+  and a JSON string read the escapes back as the original text, and a regex literal matches it
+  literally, so the value the script sees is unchanged: only the page source looks different.
+  What is left has nothing in it that is syntax to JavaScript or to an HTML parser (no quote,
+  `<`, `>`, `&`, space, `=`, `/`, `` ` `` or `$`), so data can't end its string, can't spell
+  `</script>`, `<!--` or `${`, and can't read as markup whatever the browser makes of the
+  script. As in a script attribute, that protects data **inside a quoted string**
+  (`var name = "${name}";`, a template literal, a regex literal). Data outside a string is not
+  supported: `var n = ${count};` runs whatever the value says while it is all letters and
+  digits, and is a syntax error as soon as it has anything else in it (`1.5`, `-3`). Pass
+  numbers and objects in a string (`Number("${price}")`, `JSON.parse`) or in a `data-*`
+  attribute. Things to know:
+  - *Data blocks.* `<script type="application/json">{"name": "${name}"}</script>` gets the same
+    escaping, which is valid JSON for any value: `JSON.parse` returns the original text. A
+    block that is neither JavaScript nor JSON (`<script type="text/template">`) gets it too, and
+    there the escapes show as text: put client-side template markup in a `<template>` element,
+    where `${...}` is escaped as HTML.
+  - *Scripts inside `<svg>` or `<math>`.* A browser reads these as markup, not as raw text:
+    `a<b` or `0<i ?` in the code opens a tag, and what follows it is attribute names and values
+    to the HTML parser while it is still JavaScript to the script. The escaping above holds in a
+    string wherever the HTML parser takes it to be. Where Brace sees that a `${...}` lands
+    inside such a tag and outside a quoted value (a string that doesn't follow `=` is in
+    attribute-name position), it writes every character as an escape, letters and digits
+    included (`ok` is written `\u006f\u006b`); the script still reads the text back.
+    A self-closing `<script href="a.js"/>` or `<style/>` is a complete element there. In HTML
+    it is not: `<script src="a.js"/>` opens a script that runs to the next `</script>`, so
+    always write `<script src="a.js"></script>`.
+  - *Scripts wrapped in `<!-- ... -->`.* After `<!--` and a `<script` in the text (as in
+    `document.write("<script src=x></script>")`), a browser does not end the element at the
+    next `</script>`. Brace follows that, so data after it is still escaped as script.
+  - *Comments in a script or style.* JTE removes comments when it compiles a template:
+    `<!-- -->` in markup, `//` to the end of the line and `/* */` in a `<script>`, `/* */` in a
+    `<style>`. So a `// <![CDATA[` line in a script is not in the page. JTE 3.2.1 also has a
+    bug here: when a template's first comment comes before its first `${...}` or `@if`, and the
+    text between that comment and the next `${...}` has a `<` directly followed by a letter
+    with no `>` after it (`for (i = 0; i<n; i++) { f("${x}"); }`), JTE drops all the template
+    text before the comment, the `<script>` tag included. The script's source then shows as
+    page text on every render, and `i<n; ...` is a real tag. Brace can't put the text back; it
+    escapes the data in that tag whole (as above), so the result is a visibly broken page and
+    not an injection. If a page loses its top, write the comparison with spaces (`i < n`), or
+    move or remove the comment.
+- **CSS.** In a `<style>` body and in a `style=""` attribute, every character of user data other
+  than letters, digits, spaces, `# % . _ -` and non-ASCII characters is written as a CSS hex
+  escape (`;` becomes `\3b `). An escaped character is never CSS syntax, so data can't close its
+  declaration or rule and add a selector (the usual way to leak a hidden field's value under a
+  policy that allows inline styles), and can't open `url(...)`. Plain values (`red`, `#ff0000`,
+  `50%`, `12px solid`) are unchanged, and data inside a quoted CSS string
+  (`content: "${label}"`, `url("${image}")`) reads back as written. A value that needs CSS
+  syntax of its own, `rgb(1, 2, 3)` or a whole declaration list in `style="${styles}"`, no longer
+  works as data: build it from plain values in the template. Not covered: user data used as a
+  selector or property *name* can still be any identifier.
 
-Not covered: a `@template` call inside an attribute value renders in body context (JTE's
-behavior), so its output gets neither attribute escaping nor the URL check.
+Brace decides the context from the HTML it has written so far, not only from where the `${...}`
+sits in the template source, so the rules above also apply to data a `@template` call or a
+content block writes inside an attribute value (JTE alone escapes that as body text). It follows
+the HTML parser's rules for tags, comments, `<script>`/`<style>` bodies and SVG/MathML content.
+Where its reading and JTE's differ, the data gets the rules of both: the URL check if either says
+URL attribute, script escaping if either says script. That shows as over-escaped text (`\u0027`
+for a quote), never as unescaped data. Two cases get the strictest treatment. Data that lands
+inside a tag but outside a quoted value, whatever JTE reports, is written with every character
+escaped (JTE refuses `${...}` there at compile time, so a template reaches it only in a script
+or style body that a browser reads as markup). And an `hx-vals`, `hx-headers` or `hx-request`
+value that Brace's reading is not inside of can't be judged whole, so none of its data is
+written: it renders as `{}`. Two things Brace reads differently from a browser, on
+purpose: the text of `<title>` and `<textarea>` is read as markup, and SVG/MathML content that
+isn't well formed (an end tag with no matching start tag inside the `<svg>`) is read as HTML from
+there on. Also read as HTML: `<annotation-xml>` whatever its `encoding`, and a MathML text
+element inside `<svg>` or an SVG one inside `<math>`.
 
 Both the hot-reload and precompiled render paths use this output. `$unsafe{...}` bypasses it, as
 does `Result.html(...)`, which is a raw sink.
@@ -560,6 +768,22 @@ if `Content-Length` says the body is larger, otherwise as soon as the bytes read
 without downloading the rest. Raise or lower it per call with `.maxResponseBytes(n)`. `stream()`
 is not capped, because it hands you the body to read: bound what you read yourself.
 
+The same calls are bounded in **time**. `.timeout(...)` (default 30s) is the deadline for the
+whole exchange, response headers and body together, and `.idleTimeout(...)` (default 30s) bounds
+each wait for more body bytes. Either closes the connection and throws
+`Http.StreamTimeoutException`. Without them, a hostile server behind a user-supplied URL could
+send headers at once and then stall, or drip one byte every 29 seconds under the size cap, and
+hold the request thread (and its pooled database connection, in a `DbHandler`) indefinitely; a
+few dozen such requests would exhaust the pool. That was the case for buffered fetches until the
+2026-11 security review (M8): `timeout` used to cover only the wait for headers. The error body
+`fetchEvents` reads on a non-2xx status gets the same 30s default, though the event stream
+itself has no deadline unless you set one.
+
+A buffered call cannot be configured out of its deadline: `.timeout(null)` removes the deadline
+only for `stream()` and `fetchEvents`, and means the 30s default for every `fetch*` call. Zero
+or a negative duration throws `IllegalArgumentException`, and a duration over 365 days (for
+example `Duration.ofSeconds(Long.MAX_VALUE)`) is clamped to 365 days rather than overflowing.
+
 ### DNS rebinding: what remains
 
 An attacker who controls a domain's DNS can answer with a public address when it's checked and a
@@ -687,13 +911,33 @@ because Cloudflare itself appends the true connecting address to `X-Forwarded-Fo
 ### Behavior
 
 - **Without configuration:** `req.ip()` uses socket remote address only (ignores headers)
-- **With configuration:** `req.ip()` parses `X-Forwarded-For` / `Forwarded` **only if** the immediate peer is trusted
+- **With configuration:** `req.ip()` parses the forwarding header **only if** the immediate peer is trusted
 
-When forwarding headers are consulted, Brace uses **rightmost-untrusted** semantics: it walks
-the `X-Forwarded-For` list from right to left, skips any entry whose address falls inside a
-trusted CIDR, and returns the first untrusted address. This is the correct algorithm because
-real proxies **append** the connecting client's address — the leftmost entries were written by
-the client and can be forged.
+**One forwarding header, chosen explicitly.** Brace reads the client address chain from exactly
+one header: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` (its `for=` parameters) when
+you opt in. The other header is ignored. Reading both was a spoofing hole: a proxy that sets one
+of them usually passes a client-sent copy of the other through untouched, so a client behind a
+`Forwarded`-only proxy could send `X-Forwarded-For: 6.6.6.6` and become `6.6.6.6`.
+
+```java
+app.trustedProxies("10.0.0.5");                                           // X-Forwarded-For
+app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader());  // Forwarded
+```
+
+Choose the header your outermost trusted proxy writes. nginx (`$proxy_add_x_forwarded_for`),
+Caddy, Traefik, Cloudflare and the common cloud load balancers write `X-Forwarded-For`. If
+your proxy writes only `Forwarded`, opt in, and if it might pass a client's `X-Forwarded-For`
+through, that header is now harmless.
+
+If the header arrives on several lines (two proxies that each add a line, or a client line plus
+the proxy's), every line is read, in wire order, as one list.
+
+When the forwarding header is consulted, Brace uses **rightmost-untrusted** semantics: it walks
+the list from right to left, skips any entry whose address falls inside a trusted CIDR, and
+returns the first untrusted address (an empty entry or a `Forwarded` element without `for=`
+reached on the way ends the walk with `unknown`; see below). This is the correct algorithm because real proxies
+**append** the connecting client's address — the leftmost entries were written by the client and
+can be forged.
 
 Examples:
 
@@ -701,29 +945,94 @@ Examples:
 |---|---|---|
 | `1.2.3.4` | `10.0.0.0/8` | `1.2.3.4` |
 | `spoofed, 9.9.9.9` | `10.0.0.0/8` | `9.9.9.9` (rightmost untrusted, not attacker-supplied leftmost) |
-| `client, 10.0.0.2, 10.0.0.1` | `10.0.0.0/8` | `client` (both proxies trusted) |
+| `203.0.113.9, 10.0.0.2, 10.0.0.1` | `10.0.0.0/8` | `203.0.113.9` (both proxies trusted) |
 | `10.0.0.1, 10.0.0.2` | `10.0.0.0/8` | `10.0.0.1` (all trusted → leftmost) |
 
-**Dual-stack / representation mismatch.** `TrustedProxies` matches addresses by binary value
-after resolution, but it **fails closed** when the address family differs — a CIDR expressed as
-an IPv4 address does not match the IPv6-mapped form `::ffff:a.b.c.d`, and `127.0.0.1` does not
-match `::1` on a dual-stack bind. If your proxy can connect over both IPv4 and IPv6, list both
-representations explicitly:
+**Dual-stack.** `TrustedProxies` matches addresses by binary value and never resolves names. An
+IPv4 CIDR also matches the IPv4-mapped IPv6 form of its addresses (`10.0.0.0/8` matches
+`::ffff:10.1.2.3`), so no extra entry is needed for a proxy seen through a dual-stack socket. IPv4
+and IPv6 loopback are different addresses, though: `127.0.0.1` does not match `::1`. If your proxy
+can connect over either, list both:
 
 ```java
 app.trustedProxies("127.0.0.1", "::1");
-app.trustedProxies("10.0.0.0/8", "::ffff:10.0.0.0/104");  // if proxies may use IPv6-mapped addresses
 ```
+
+An IPv6 peer is matched and reported without brackets and in canonical form: Jetty gives the
+socket address as `[0:0:0:0:0:0:0:1]`, and Brace normalises it where the address enters the
+framework, so a trusted IPv6 proxy is recognised and a direct IPv6 client's `req.ip()` is `::1`.
+
+**The form of `req.ip()`.** Always canonical, whether it came from the socket or a header, so
+comparing it with a string is reliable:
+
+| Address | `req.ip()` |
+|---|---|
+| IPv4 | dotted decimal: `203.0.113.9` |
+| IPv6 | RFC 5952: lower-case hex, no leading zeros, the longest run of zero groups as `::`, no brackets, no port: `2001:db8::5`, `::1` |
+| IPv4-mapped IPv6 (`::ffff:6.6.6.6`) | the IPv4 address: `6.6.6.6` |
+| With a zone id | the zone kept as written: `fe80::1%eth0` |
+| No usable address | the literal string `unknown` (see below) |
+
+So `2001:DB8:0:0:0:0:0:5`, `[2001:db8::5]:443` and `2001:db8::5` in a header are all
+`2001:db8::5`. Write the addresses you compare against in the same form, or match with
+`new TrustedProxies("2001:db8::/32").isTrusted(req.ip())`, which compares binary values.
 
 ### Supported Headers
 
-- `X-Forwarded-For` (most common)
-- `Forwarded` (RFC 7239) — elements correctly split on `,`, parameters on `;`
+- `X-Forwarded-For` (the default client-address header)
+- `Forwarded` (RFC 7239), instead of `X-Forwarded-For`, with `useForwardedHeader()`: elements
+  split on `,`, parameters on `;`, neither inside a quoted-string (`for="[2001:db8::1]:4711"`).
+  Elements are split from the right, so the element your proxy appended is delimited by its own
+  text: an unbalanced quote in what the client sent (`for="x`) spoils only the client's element
+  and cannot swallow the proxy's
 - `X-Forwarded-Proto` — the original scheme, for the session cookie's `Secure` attribute
-- `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision and the
-  WebSocket `Origin` check (leftmost entry)
+- `X-Forwarded-Host` — the host the client addressed, for the `Secure` decision, the session
+  cookie's `__Host-` name, the cross-site `Origin` checks (CSRF, WebSocket, ops) and analytics.
+  The entry used must be a `host` or `host:port` (a name, an IPv4 address or a bracketed IPv6
+  address); anything else is ignored and `Host` is used
 
-All of them are ignored unless the immediate peer is a trusted proxy.
+All of them are ignored unless the immediate peer is a trusted proxy. Each is read from every
+line it arrives on, in order, as one list. For `X-Forwarded-Proto` and `X-Forwarded-Host` Brace
+takes the **rightmost** entry, the one the nearest proxy added: behind a proxy that appends to
+these headers, or passes a client's copy through, the leftmost entry is whatever the client sent.
+**Your proxy must set (overwrite) both headers**, as the nginx example below does with
+`proxy_set_header`; a proxy that only passes them through lets a client choose them.
+
+**`unknown`.** `req.ip()` is always a canonical IP address literal or the string `unknown`. It is
+`unknown` when the request came from a trusted proxy and the proxy's header names no usable
+client:
+
+- the entry the walk selects is not an address (`unknown`, `_hidden`, an obfuscated RFC 7239
+  identifier, a malformed element, or anything a client managed to put there);
+- the header is present but empty, or (for `Forwarded`) has no `for=`;
+- the entry the walk reaches first after the trusted proxies is empty, or (for `Forwarded`) an
+  element without `for=`. The walk only steps past entries that are trusted-proxy addresses, so
+  `Forwarded: for=6.6.6.6` followed by the proxy's own `Forwarded: proto=https` line, or
+  `X-Forwarded-For: 6.6.6.6` followed by an empty `X-Forwarded-For:` line, is `unknown`, never
+  the client-written `6.6.6.6`;
+- the proxy sent only the forwarding header Brace was not told to read (say only `Forwarded`
+  while the app reads `X-Forwarded-For`). Brace also logs one warning naming
+  `TrustedProxies.useForwardedHeader()`.
+
+It is never the proxy's own address in those cases. Returning the proxy's address would let a
+client who can malform the header pass for the proxy: an allowlist that admits `127.0.0.1` or
+the proxy's LAN address would admit them, and they would get a second per-IP rate-limit budget.
+What the sentinel means to each consumer:
+
+- **Address allowlists must fail closed on it.** `unknown` is not an address, so
+  `TrustedProxies.isTrusted("unknown")` is false and an `equals` against a real address is
+  false. A denylist (`if (blocked.contains(req.ip()))`) does not catch it: check for it
+  explicitly if you keep one.
+- **`RateLimiter.perIp`** counts every `unknown` request in one shared bucket, so they are
+  limited together, not exempt.
+- **Analytics and logs** record the string as it is.
+
+A trusted peer that sends no forwarding header at all (a health check from the proxy itself, a
+process on the proxy's host) is the client, and `req.ip()` is its address. A request from a peer
+that is not a trusted proxy is always the socket address.
+
+Repeated `Cookie` lines are joined (with `; `) into one list on every request and WebSocket
+upgrade, and a cookie name that appears twice resolves to its first occurrence on both.
 
 ### Pass the real `Host` through
 
@@ -844,11 +1153,30 @@ This sets: `HttpOnly=true`, `Secure=true` (explicitly, regardless of request),
 
 ### Session Cookies and Shared Caches
 
-Any response Brace attaches a session `Set-Cookie` to also gets `Cache-Control: private`
-(unless the handler set an explicit `Cache-Control`, which always wins). A response
-carrying a session cookie is per-user by definition — without this header it is
-*heuristically cacheable*, and a misconfigured shared cache (e.g. an nginx recipe that
+Any response Brace attaches a session `Set-Cookie` to is sent `private`. With no
+`Cache-Control` it gets `Cache-Control: private`. With one set by the handler or an
+after-middleware, `public` is rewritten to `private`, and `private` is added in front when the
+value has neither `private` nor `no-store` (`max-age=600` becomes `private, max-age=600`; so
+does `s-maxage=600`, which a shared cache then ignores); the other directives are kept. The
+value is parsed into directives, so only a bare `private` or `no-store` directive counts: one
+of those words inside a quoted argument (`x="no-store"`, `no-cache="private"`) or the qualified
+form `private="set-cookie"` does not, and `private` is still added. A
+response carrying a session cookie is per-user by definition — without this it is
+*heuristically cacheable*, or explicitly storable, and a shared cache (e.g. an nginx recipe that
 force-caches everything under `/static/`) would replay user A's cookie to every user.
+
+Response header names are case-insensitive in `Result`: `res.header("cache-control", ...)` and
+`res.header("Cache-Control", ...)` are the same header, and the second write replaces the
+first. (Before 0.1.11 they were two entries; Brace checked one spelling and the other reached
+the wire, so a lowercase `cache-control: public` rode out with the session cookie.) Only ASCII
+letter case is folded, and `res.header(name, value)` throws `IllegalArgumentException` for a
+name that is not an HTTP token (empty, or with a space, a colon, a control character or any
+non-ASCII character), so a look-alike name (a Unicode hyphen in `Cache-Control`, the Kelvin
+sign U+212A for `K`) is refused instead of reaching the wire or standing in for the real
+header. Brace does
+not strip `CDN-Cache-Control`, `Surrogate-Control` or `Expires` from a cookie-carrying response
+outside a guarded static mapping or an access rejection, so don't set those app-wide on
+responses that can carry a session.
 
 The riskiest shape is a session-mutating middleware whose path pattern covers static
 prefixes — for example a `lastSeen`-touch guard on `/*`. Every static file response then
@@ -856,6 +1184,82 @@ carries a fresh session cookie. The `private` default makes that safe for spec-c
 caches, but prefer scoping such middleware to application routes (`/app/*`) rather than
 `/*`, and never configure a proxy to ignore response headers for paths a session
 middleware can touch.
+
+A static mapping with access requirements never sends anything a shared cache may store: a
+served file is `private, no-cache` and every other response under it is `no-store`, with or
+without a session cookie (see
+[Static mappings are covered too](#static-mappings-are-covered-too)). Access rejections are
+`no-store` everywhere (see [Access rejections are never cached](#access-rejections-are-never-cached)).
+
+### The page cache (`cache.wrap`)
+
+A page-cached route stores one rendered response per key and serves it to every visitor. The
+key is the route pattern, its decoded path parameters, the method, the `HX-Request` variant, and
+the query params and headers the route declares with `.vary(...)` and `.varyHeader(...)` (a param
+given twice keys on all its values). **A cached handler must depend only on those.** Anything else
+it reads (another query param, `req.url()`, a header such as `Accept-Language`, a cookie,
+`req.ip()`, the body) can differ between visitors, and whatever the first visitor sent is replayed
+to the rest for the TTL: `?msg=<b>PWNED</b>` on an undeclared param becomes everyone's page. In dev
+mode Brace logs such a read once per route, and under `Brace.test()` it throws, so a test of the
+route fails; production does no checking. A read of `req.path()` (the raw, undecoded path, also
+behind `req.url()` and `req.urlWith(...)`) is reported the same way, because one key covers
+several spellings of a path: `/p/!` and `/p/%21` are both in normal form and decode to the same
+parameter. Read path parameters with `req.pathParam(...)` in a cached handler. `req.method()` is
+not recorded, and production checks nothing, so both are also covered structurally: a `HEAD` is
+never stored (it may be served an existing `GET` entry), and a request whose raw path is not in
+RFC 3986 normal form (an escaped unreserved character such as `/p/%62` for `/p/b`, lower-case hex,
+raw non-ASCII) is rendered but never stored, so a crafted spelling cannot choose the page served
+at the normal URL. `Paged` links built in a cached handler are the exception that is safe by
+construction: they link back to the same route, and they copy only the declared `vary` params
+(in every mode), so `?ref=evil.example` on the first request is not in the stored links.
+
+Some inputs are refused outright rather than trusted to the handler: a request with
+`Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or `HX-Prompt` is
+served by the handler without reading or writing the cache, unless the route declares that
+header with `.varyHeader(...)`. `HX-Request` is keyed as absent or exactly `true`; any other value
+(`1`, `True`) bypasses the cache, so a handler testing `req.hasHeader("HX-Request")` cannot store
+its partial under the full-page key. A declared header's value enters the key as its SHA-256
+digest, so `varyHeader("Authorization")` never puts the credential in `brace_cache.cache_key`. A
+response that sets a cookie is never stored (it is returned with its `Set-Cookie` intact). Only 2xx
+responses are stored, and a response carrying the visitor's CSRF token or flash is not.
+
+Page entries are kept apart from the app's own cache entries (keys starting `brace:page:`, which
+`set`, `getOrSet` and `delete` refuse for app keys): on Postgres they have their own row cap
+(10,000 by default), are trimmed least recently used first (written, or hit, recorded at most once
+a minute per row) and are trimmed before app rows when the table is over its overall cap; in
+memory a full cache evicts the page least recently hit (an approximate LRU), and a new page never
+displaces an app entry, including while `clear()`, a tag clear or a prefix delete runs during a
+page flood. A client minting pages (any declared `vary` value or path parameter)
+therefore churns only the page cache, and pages nobody reads again go before the hot ones, so a
+flood cannot lock the real pages out.
+
+### Shared cache values (`CacheBackend.postgres`)
+
+On the shared backend each value is stored as its class name plus Jackson JSON, so whoever can
+write the `brace_cache` table chooses the class name a row carries. Brace never lets that choice
+reach Jackson for an arbitrary class. A row is deserialized only when its class is:
+
+- the exact class the caller asked for (`get(key, Rule.class)` for a `Rule`), always allowed;
+- a class this process has itself stored;
+- a built-in JDK container or value (`ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`,
+  `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `ArrayDeque`, the `List.of`/`Map.of`/
+  `Set.of` and `Collections.unmodifiable*`/`empty*`/`singleton*` classes except the sorted
+  unmodifiable wrappers, boxed primitives, `String`, `BigDecimal`, `BigInteger`, `UUID`, the
+  `java.time` value types, and arrays of these), which Jackson rebuilds without running app code;
+- or a class registered with `cache.allowType(...)`.
+
+A row whose body does not rebuild (Jackson throws, checked or not: a `SingletonList` row holding
+two elements), or rebuilds as something other than the type the caller asked for (an
+`unmodifiableSortedSet` comes back as a plain unmodifiable set), is a miss, never an exception
+from `get`/`getOrSet`.
+
+Anything else (an app class read through `Object`, an interface or a base class, or by
+`getOrSet`, on an instance that has not stored it) is treated as a miss and logged at WARN once
+per stored class and requested type. A miss on security state fails open: after a deploy, or on
+a node that only reads, `cache.get("denylist", Set.class)` for an app-defined set type would see
+nothing. **Read security state with its concrete type**, or register the class at startup on
+every instance with `cache.allowType(MyType.class)`. Register only plain data classes (records,
+POJOs whose constructors and setters only assign): a registered class can be named by any row.
 
 ---
 
@@ -957,9 +1361,17 @@ the object from the key.
 **Static directory.** Register an upload directory as untrusted:
 
 ```java
-app.staticFiles("/assets", "public");                                       // your files
-app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);     // users' files
+app.staticFiles("/assets", "public").publicFiles();                          // your files
+app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)       // users' files
+   .access(Access.session("userId", "/login"));
 ```
+
+`UNTRUSTED` decides how a file is served; the access declaration decides who gets it, and every
+mapping needs one (see [Static mappings are covered too](#static-mappings-are-covered-too)).
+`.publicFiles()` on an upload directory means anyone who can guess or enumerate a name can fetch
+the file: choose it only for uploads that are meant to be public, such as avatars. A static
+mapping can only ask "may this user fetch from this directory"; when the answer depends on the
+file, serve it from a handler (below).
 
 In `UNTRUSTED` mode:
 
@@ -1014,6 +1426,16 @@ than letting CR/LF terminate the part headers and forge extra parts in the reque
 
 ## Static Files
 
+Every mapping declares its access: `app.staticFiles(urlPrefix, directory).publicFiles()` or
+`.access(...)`. `start()` refuses a mapping with neither, and `defaultAccess(...)` does not cover
+mappings; see [Static mappings are covered too](#static-mappings-are-covered-too). Prefer
+`.access(...)` to a path guard for anything private: it is bound to the mapping, so it cannot
+disagree with the path that is served.
+
+A mapping serves `GET` and `HEAD`; every other method gets `405` with `Allow: GET, HEAD`. Its
+directory must exist when the app starts, a URL prefix can be registered once, and two mappings
+may share or nest directories only when their access is the same.
+
 `app.staticFiles(urlPrefix, directory)` confines serving to `directory`. The check resolves
 symlinks (`toRealPath`) before comparing, so a symlink under the served tree cannot serve a
 file outside it — a lexical `normalize()` + `startsWith` check does not catch that, because
@@ -1024,14 +1446,41 @@ served (404), whatever the mapping; the only exception is a leading `.well-known
 challenges and `security.txt` keep working. The check runs on the decoded path, so `%2eenv`
 is refused too.
 
+**A static file is served only at its canonical spelling.** Path guards (`before("/files/private/*", ...)`,
+a path-scoped `after(...)`, a reverse proxy's `location` block) match the raw, still-encoded
+request path, while the file lookup decodes it. Any second spelling of the same file would
+skip a guard written for the first, so these get a 404:
+
+- A percent-escape of an RFC 3986 unreserved character (`A-Z a-z 0-9 - . _ ~`), in either hex
+  case: `/files/%70rivate/secret.txt`, `/files/a%7Eb.txt`. Browsers, `encodeURIComponent` and
+  `Url.to` never encode these.
+- An encoded or literal separator: `%2F`, `%5C`, `\`. Jetty already answers these with a 400;
+  the static handler refuses them as well in case URI compliance is relaxed.
+- A trailing slash or an empty segment: `/files/exact.txt/`, `/files/v2//app.js`. The path that
+  would be opened, written back out, has to equal the requested path character for character.
+  (A trailing slash on a file was served before 0.1.11, past a guard on the exact path.) A
+  directory is a 404 with or without the slash; there are no index files or listings.
+- A name that differs from the name stored on disk: `/files/PRIVATE/secret.txt` on a
+  case-insensitive volume (macOS, Windows), or a decomposed (NFD) spelling of an accented name
+  on APFS. Each requested segment is compared, case-sensitively, with the stored name.
+
+Escapes that a canonical URL needs keep working: `%20`, UTF-8 bytes for non-ASCII names
+(`caf%C3%A9.txt`, either hex case), and reserved characters (`%26`, `%40`, `%3D`, which may also
+be written literally). Two consequences for guards: write the guarded path in unreserved
+characters, because a guard pattern containing `&`, `@`, `=`, a space or non-ASCII can still
+be reached by the other legitimate spelling of that character; and the case check relies on `Path.toRealPath` reporting
+stored names, which it does on macOS and Windows; a Linux directory with the `casefold`
+attribute is untested and may not be covered.
+
 Symlinks that stay inside the served directory keep working. To serve a directory that
 lives elsewhere, register it as its own mapping rather than linking it into the web root. A
 directory users write to is registered `UNTRUSTED` (see
 [Serving uploaded files](#serving-uploaded-files)):
 
 ```java
-app.staticFiles("/assets", "public");
-app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED);
+app.staticFiles("/assets", "public").publicFiles();
+app.staticFiles("/assets/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));
 ```
 
 When prefixes overlap, the longest one serves the request regardless of registration order, so
@@ -1097,6 +1546,13 @@ A WebSocket upgrade runs plain `before(...)` middleware, then the `Origin` check
 the route's access requirements (see [Authorization](#authorization)); a rejection declines the
 handshake. Before 0.1.11 the upgrade ran no guard at all, so a socket under a guarded path
 accepted anonymous clients.
+
+A socket is upgraded only at its registered path, spelled exactly. `app.ws("/ws", ...)` answers
+`/ws` (with any query string); `/x/../ws`, `/%77s` and `/ws;x` get a 404 before any middleware
+or guard runs. Jetty matches upgrades against the decoded path with dot segments resolved, so
+without this check those spellings reached the socket while a reverse proxy matching the raw
+request target saw some other path. The path given to `app.ws(...)` is therefore a literal, not
+a pattern.
 
 WebSocket upgrades are validated against the request's `Origin`. A handshake is **not**
 subject to the same-origin policy, so without this an attacker's page could open a socket
@@ -1183,39 +1639,213 @@ read a room: joining one is still an authorization decision the handler makes be
 Protect endpoints from abuse with rate limiting:
 
 ```java
-// Per-IP rate limiting
-app.before("/api", RateLimiter.perIp(100, "1m"));
+// Per-IP rate limiting (`/api/*`: the bare `/api` pattern matches only the literal path /api)
+app.before("/api/*", RateLimiter.perIp(100, "1m"));
 
-// Per-user rate limiting
-app.before("/api", RateLimiter.perKey(
+// Per-client rate limiting: requests without the header are limited per IP (see below)
+app.before("/api/*", RateLimiter.perKey(
     req -> req.header("Authorization"),
     1000,
     "1h"
 ));
 
-// Custom key function
-app.before("/login", RateLimiter.perKey(
-    req -> req.formParam("username"),
-    5,
-    "15m"
-));
+// Login attempts per account: count submissions only (not views of the login page), and
+// normalize the username so "Alice", "alice" and "alice " are one account
+var loginLimit = RateLimiter.perKey(req -> {
+    var username = req.formParam("username");
+    return username == null ? null : username.strip().toLowerCase(Locale.ROOT);
+}, 5, "15m");
+app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
 ```
+
+**Key the limiter on the value the handler uses.** `req.formParam(...)` reads the request body
+only, and so does `req.form(...)` on `POST`, `PUT`, `PATCH` and `DELETE`: a field in the query
+string never fills a form field on those methods. (Only `GET` and `HEAD` forms bind from the
+query string.) A limiter keyed on `formParam("username")` therefore counts exactly the username
+the login handler checks; `POST /login?username=victim` with no username in the body is counted
+in the client's missing-key bucket and binds no username.
 
 ### Key normalization (DoS protection)
 
 Rate-limit keys extracted from requests (usernames, tokens, IP addresses, custom headers) are
 normalized before use:
 
-- **Null or blank extractor result → `"(none)"`** bucket. Requests with a missing header or null
-  key are counted together rather than silently bypassing the limiter.
+- **Null or blank extractor result → a missing-key bucket per client address** (`(none):` plus
+  the address, an IPv6 client's /64, with the limiter's own limit and window). A request with a
+  missing header or form field is limited exactly as `perIp` would limit it, rather than silently
+  bypassing the limiter, and keyless requests from one address never use up another's budget (an
+  earlier design counted them all in one global bucket, so five visitors viewing a page the
+  limiter covered locked out the sixth). The bucket keys cannot be produced from a request, so a
+  client that sends the literal value `(none):203.0.113.9` gets its own bucket and cannot drain
+  that address's. Where a missing key genuinely means "nothing to limit", opt out explicitly, and
+  bound those requests some other way (here, per IP):
+
+  ```java
+  app.before("/api/*", RateLimiter.perIp(300, "1m"));
+  app.before("/api/*", RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h")
+      .exemptMissingKey());
+  ```
+
+  Don't register a key limiter on a path whose page views carry no key (a `GET /login` with no
+  username) without restricting it to the submissions, as the login example above does:
+  otherwise each view uses up one of that visitor's keyless requests, and a visitor who reloads
+  the page `limit` times is locked out of it. Dev mode logs a warning, once per limiter, the first
+  time a key limiter counts a keyless `GET` or `HEAD`.
+- **Surrounding whitespace is stripped**, so `"victim "` and `"victim"` are one bucket. **Case is
+  not folded**: tokens and API keys are case-sensitive. When the key is an identity that is
+  case-insensitive (a username, an email address), lower-case it in the extractor, as above.
 - **Keys longer than 64 characters → SHA-256 hex digest** (always exactly 64 chars). Long
   user-controlled values (e.g. bearer tokens, forged headers) would otherwise create unbounded
   storage — millions of bytes of map entries locally, or arbitrarily large rows in
   `brace_counters`. Hashing caps the key size while preserving the collision-resistance needed
   for correct bucketing.
+- **Keys containing a control character → SHA-256 hex digest** too. Postgres refuses a NUL in a
+  text parameter, so a raw `username=a%00` key would otherwise fail every shared-counter write.
 
 The cap is applied before any prefix or window-slot decoration, so it holds equally in
 per-process and shared (Postgres) modes.
+
+**`perIp` keys an IPv6 client on its /64.** A site is normally given at least a /64, so one client
+can rotate through billions of source addresses; keying each address separately would give it a
+fresh budget per request. IPv4 clients (and IPv4-mapped IPv6 addresses such as `::ffff:203.0.113.7`)
+are keyed on the full address. Clients that share a /64 share a budget.
+
+#### The key cap, and what a flood can and cannot do
+
+**A limiter's memory is bounded.** Each limiter tracks at most `maxKeys` keys (default 100,000)
+plus at most `maxKeys` per-address overflow buckets and one last-resort bucket: at most
+`2 × maxKeys + 1` tracked entries per instance, however many distinct keys clients send.
+(Concurrent requests can put a table a few entries over for a moment, at most one per request
+in flight.) Change the cap per limiter with `.maxKeys(n)`, e.g.
+`RateLimiter.perIp(100, "1m").maxKeys(500_000)`. Counting all of it, one limiter holds at most:
+
+- the tracked entries above, `2 × maxKeys + 1`;
+- on Postgres, the flush queue of keys counted since the last flush, which can still hold keys
+  evicted from the tables: at most `2 × maxKeys + 10,016` entries (`dirtyBound()`), reached
+  only while flushes are failing;
+- after a shared-counter database error, the per-process fallback tables, which fill like the
+  tracked ones (another `2 × maxKeys + 1` at most) and empty as their windows end;
+- on Postgres, two generations of the evicted-key filter, 4 bytes per `maxKeys` each (at least
+  8 KB, at most 4 MB each).
+
+So in the worst case, a long database outage under a key flood, about `6 × maxKeys + 10,018`
+entries of a few hundred bytes each plus up to `8 × maxKeys` bytes of filter.
+
+Once the key table is full (a warning is logged, at most once a minute), a request for a key the
+limiter is not tracking is handled in this order:
+
+1. **It takes the place of a tracked key that is under its limit**: the least recently used of a
+   small sample, by a per-limiter sequence number, so a key in active use is not the one chosen
+   while an idler one is in the sample.
+2. **A key at or over its limit is never forgotten before its window ends**, so a flood cannot
+   unblock a client that is being limited.
+3. When the sample holds only such blocked keys, the request is counted in an **overflow bucket
+   for its client address** (`ipBucket(req.ip())`, an IPv6 client's /64), with the limiter's limit:
+   that address gets `limit` requests per window across all its untracked keys. Overflow buckets
+   are replaced by the same rule (under its limit: replaceable; at its limit: kept).
+4. When the overflow table too holds only buckets at their limit, the limiter is **saturated**
+   and `onSaturation(...)` decides (below).
+
+**What forgetting a key costs.** It differs by mode:
+
+- *Postgres (shared counters).* Nothing is lost fleet-wide. The key's `brace_counters` row is
+  never deleted by an eviction, and a count the instance had buffered for it is still written at
+  the next flush. When the key comes back, the instance reads its fleet count with one
+  single-row statement before judging the request, provided two things hold: the instance still
+  recognises the key as one it evicted (a pair of rotating Bloom filters remembers at least the
+  last `max(2,048, min(maxKeys, 1,048,576))` keys it evicted, with under 1% false positives
+  however long the window), and the limiter has made fewer than 50 such reads in the current
+  second. Otherwise the key is counted as new and its fleet count arrives with the limiter's next
+  batched flush, the same lag every key has: **a key the fleet has blocked is admitted by that
+  instance at most one flush batch (`limit / 10` requests by default, see
+  `rateLimitBatchDivisor`) before it is refused**, plus any requests that arrive while another
+  thread's flush is still running, and from then on it stays blocked there. The read budget is
+  what keeps a flood of fresh keys from putting a database round trip on every request. One
+  caveat: on an instance whose key table is full of keys at their limit, a key it is not
+  tracking gets no entry of its own (step 3 above), so a key the fleet has blocked is counted
+  there in its client address's overflow bucket: it gets at most `limit` requests per window
+  from that address, shared with that address's other untracked keys, rather than being refused
+  as a key. That is the documented last-resort step, and it takes a flood that pins the whole
+  table. (Counts buffered but unwritten can be lost only while database writes are failing, and
+  during an outage every instance counts on its own.)
+- *Per-process counting (no shared database).* The forgotten key's count so far, fewer than
+  `limit`, is gone: if it returns it starts again from zero. A client that wants extra attempts
+  at one key must therefore fill the table with fresh keys and keep it turning over; with the
+  default cap that is on the order of 6,000 requests for each time the target key is forgotten,
+  buying fewer than `limit` extra attempts. That is the price of bounded memory; a `perIp`
+  limiter in front caps how fast one address can turn the table over.
+
+**Saturation, and what it costs an attacker to get there.** With the documented login limiter,
+`perKey(…, 5, "15m")` and the default cap:
+
+1. Pinning the key table takes 100,000 keys driven to their limit: 600,000 requests in one
+   15-minute window, about 670 requests a second, from any number of addresses. From then on a
+   new key is counted against its client address (step 3), so each address still gets 5 attempts
+   per window, and keys already tracked are unaffected.
+2. Pinning the overflow table as well takes 100,000 distinct client addresses (IPv4 addresses or
+   IPv6 /64s, e.g. two /48 allocations), each driven to its limit: another 600,000 requests per
+   window. Sustained, that is about 1,300 requests a second from 100,000 networks.
+
+A saturated limiter cannot count a request for a key it is not tracking from an address it is
+not tracking. You choose what happens to those requests; each choice hands that attacker
+something:
+
+| `onSaturation(...)` | Such a request is | What the attacker gains while they sustain the flood |
+|---|---|---|
+| `RateLimiter.Saturation.FAIL_CLOSED` (default) | counted in one last-resort bucket with the limiter's limit, shared by all of them, so nearly all are refused with 429 | A lockout: clients the limiter is not already tracking (in practice, anyone who has not just used the endpoint) cannot use it. No request goes uncounted. |
+| `RateLimiter.Saturation.FAIL_OPEN` | let through uncounted | Unlimited attempts at any key the limiter is not tracking, which for a login limiter is unlimited password guessing against accounts of their choice. Nobody is locked out. |
+
+```java
+// The default, spelled out:
+app.before("/login", RateLimiter.perKey(keyFn, 5, "15m").onSaturation(RateLimiter.Saturation.FAIL_CLOSED));
+
+// Availability over the limit, for an endpoint where an uncounted request is cheap:
+app.before("/api/*", RateLimiter.perIp(1000, "1m").onSaturation(RateLimiter.Saturation.FAIL_OPEN));
+```
+
+In both modes a tracked key is still counted and a blocked key stays blocked, and a warning is
+logged at most once a minute while the limiter is saturated. The default is `FAIL_CLOSED`
+because the limiter exists to bound attempts, and an attacker with this much traffic can degrade
+availability in other ways regardless. Either way, raise the cost: a larger `maxKeys` raises both
+figures in proportion (memory grows with it, a few hundred bytes per entry), and a `perIp`
+limiter registered before the key limiter bounds how many of those requests one address can
+contribute. Neither removes the trade-off; a limiter with bounded memory has to do something
+with the request it has no room for.
+
+**`brace_counters` rows are bounded by time, not by the cap.** A row is written for each key
+counted in a window and removed only after the window ends (each instance sweeps expired rows
+once a minute). A flood of fresh keys therefore holds up to one row per distinct key per window:
+600 new keys a second against a 15-minute window is about 540,000 small rows at the peak, gone a
+minute after their windows end. Rows are not deleted earlier, because an instance that has
+forgotten a key cannot know the rest of the fleet has.
+
+Eviction looks at a fixed number of keys under a per-limiter lock taken only on that full-table
+path, so no request scans a table.
+
+**Two limiters with the same type, limit and window share buckets on Postgres.** The counter key
+is built from the limiter's label (`perKey(5/15m)`), the only identity a limiter has across a
+fleet, so on Postgres two such limiters count every key together, their missing-key and overflow
+buckets included. In per-process mode each limiter object counts on its own. Give limiters on
+different paths different limits or windows if they must be independent.
+
+Cache keys get the same treatment in the `Cache` facade, on both backends: a key with a control
+character, or longer than 512 UTF-8 bytes (a page path or `vary` value near the 8 KB URI limit
+exceeds Postgres's index row limit), is stored as its first characters (up to 128, stopping at a
+control character) followed by a SHA-256 digest of the whole key. This is invisible to callers;
+tags still invalidate the entry, and `deletePrefix` still reaches it through the kept prefix.
+
+A key (rate-limit or cache) with an **unpaired surrogate** is hashed too, from an encoding that
+keeps it distinct: pgjdbc sends a lone surrogate as `?`, so `"a\uD800"` and `"a\uD801"` were one
+row on Postgres.
+
+`deletePrefix` with a prefix that reaches past what a hashed key keeps readable (one containing a
+control character, an unpaired surrogate or `#sha256:`, or longer than 128 characters) deletes the
+keys stored as-is that start with the whole prefix, plus the hashed keys whose readable part is
+exactly the prefix's readable part (every hashed key that starts with the prefix has that). So
+`deletePrefix("search:\u0001")` and `deletePrefix("search:#sha256:")` no longer clear
+`search:alpha` (they used to clear all of `search:`), but they do clear other hashed keys that
+share the readable part, such as `search:\u0002`; a 200-character prefix clears hashed keys that
+share its first 128 characters. Over-deletion is a cache miss, never a stale entry.
 
 ### Trusted proxies and IP spoofing
 
@@ -1242,6 +1872,20 @@ without any check. During an outage the effective limit across a fleet of N inst
 approximately `limit × N`, so brief over-admission is possible — this is intentional: the
 alternative (turning every rate-limited endpoint into a 500) is worse. A warning is logged at
 `WARN` level for each request that falls back.
+
+Buffered counts are written in statements of at most 5,000 keys (Postgres refuses a statement
+with more than 65,535 parameters). A statement the database refuses with a data error (SQLState
+class 22 or 54: a key it cannot store) is split in half, and the halves again, until the refused
+key is isolated; that key's buffered count is dropped with a warning instead of failing every
+later flush, at a cost of a few dozen statements rather than one per key. Any other failure
+(the database unreachable, SQLState class 08, 53 or 57, or an error that is not about the data)
+restores every count not yet written and retries after a one-second back-off. A flush runs on the
+request that filled the buffer, so it has a 2-second budget: it stops between statements once
+the budget is spent, and each statement carries a JDBC query timeout for what is left of it, so
+a statement stuck behind a lock or a slow database is cancelled rather than holding the request.
+JDBC timeouts are whole seconds, rounded up, so the hold is bounded at about the budget plus one
+second; what was not written is kept for the next flush. (Waiting for a free pooled connection
+is bounded by the pool's own connection timeout, not by this budget.)
 
 ### Best Practices
 
@@ -1307,7 +1951,7 @@ Ops endpoints (`/ops/*`) provide powerful observability and control. **Secure th
 Ops endpoints use public key authentication:
 
 ```java
-app.ops("authorized-keys");
+app.ops("authorized-keys").opsOrigins("https://app.example.com");   // origins: required outside dev
 ```
 
 The `authorized-keys` file contains public keys of clients allowed to access ops endpoints.
@@ -1320,6 +1964,12 @@ attempt. Binding the public key means a captured signature is only valid for the
 produced it; the nonce makes each signed request single-use; the origin makes it valid only at
 the server it names. The exact wire format is in `docs/agent-ops-guide.md`.
 
+Each key has its own quota of remembered nonces: 5,000 per two minutes, or less when there are
+more than 20 authorized keys, so that every key's share fits inside the overall 100,000. One
+key, even a read-scoped one, cannot fill the memory and block other operators' logins, and no
+group of keys can either. A key over its quota gets a 401 saying so. What "single-use" covers,
+across instances and restarts, is set out under "Replay suppression" below.
+
 **The signature is bound to a server.** The CLI reads the server's URL from the committed
 `.brace` file, so a pull request that points `ops.prod.url` somewhere else could collect a fresh
 signature and relay it to the real server within the time window. The server accepts a v3
@@ -1327,8 +1977,9 @@ signature only for an origin listed with `app.opsOrigins("https://app.example.co
 `BRACE_OPS_ORIGINS` environment variable, comma-separated), compared exactly: scheme, host and
 port. The request's `Host` and `X-Forwarded-Host` play no part, because the client relaying a
 signature chooses those: an app reachable directly, or a proxy that passes a client's
-`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Prod
-mode refuses to start with ops on and no origin configured. In dev and tests, with none set, the
+`X-Forwarded-Host` through to an app that trusts the proxy, would let it claim any host. Every
+mode except `dev` (including an unset `brace.mode`, as in older scaffold Dockerfiles) refuses to
+start with ops on and no origin configured. In dev mode and the test harness, with none set, the
 origin's host must match the request's host instead, which is no defense against a client that
 can reach the app directly.
 
@@ -1381,14 +2032,48 @@ hits a different instance than the one that issued the token (B5). Within the 60
 login token can be exchanged more than once; single-use would require fleet-wide shared state
 that ops can't assume. The TTL is kept very short to limit the replay window.
 
-**Replay suppression (auth, per-instance, best-effort).** Used nonces are tracked in memory on
-each server instance, never fleet-wide — ops deliberately works without shared state (no
-database required), so behind a load balancer a captured auth request remains replayable against
-a *different* instance until the ±30s timestamp window closes. This residual window is accepted;
-the mitigations are HTTPS (an attacker should never observe the request body) plus the
-recommendations below. The deprecated v1 protocol (signature over the timestamp alone, no
-nonce — replayable as-is within the window) is accepted for one release with a logged
-deprecation warning and will then be rejected; see the 0.1.6 → 0.1.7 migration guide.
+**Replay suppression (auth).** A sign-in request that a server has accepted must not be accepted
+again. Two layers do that, and which guarantee you get depends on whether the app has a database:
+
+- *With a database* (`app.database(...)`): each accepted nonce is also recorded in the framework's
+  `brace_counters` table (a 64-character digest and an expiry two minutes on; no migration, no
+  configuration). The record is shared by every instance and outlives the process, so **an
+  accepted request is refused by every instance and after any restart or deploy**. Nothing is
+  refused after a start. If the write fails (database down), sign-in still works and the rules
+  of the next bullet apply until it succeeds again. A sign-in never waits on the database: the
+  write, waiting for a pooled connection included, is given 2 seconds and then counts as failed
+  (its statement carries a query timeout so it does not linger), and after a failure the
+  database is not tried again for 10 seconds, so every sign-in during an outage is answered at
+  once. A write that completes after its 2 seconds records only that request's nonce, which the
+  instance already remembers and the CLI never reuses, so it cannot refuse a later sign-in. Two
+  instances recording the same nonce at once is a replay on every database: the one that loses
+  the race (a unique-key violation) refuses it.
+- *Without a database, or while it is unreachable:* accepted nonces are remembered in each
+  instance's memory only. A replay to the same instance is refused. A restart empties that
+  memory, so for the first minute after a start the server **refuses any sign-in whose timestamp
+  is earlier than 30 seconds after it started**: the previous process accepted only timestamps
+  within 30 seconds of its clock and had stopped before this one started, so everything it
+  accepted falls in that range. The cost: a sign-in during the first 30 seconds after a start
+  (up to 60 for a client whose clock runs behind) gets a 401 that names the restart and says to
+  retry. Dev mode and the test harness skip this window. **Residual in this mode:** behind a
+  load balancer a request accepted by one live instance can be replayed against a *different*
+  instance until its ±30 s timestamp window closes; that includes the old instance of a
+  rolling deploy while both run.
+
+In both modes the checks run only after the signature and the origin have been verified, so a
+caller without an authorized key learns nothing from them, and a request no server ever accepted
+(the client's connection failed before delivery) is, like any bearer of a valid signature, good
+once within its 30 seconds. HTTPS is what keeps an attacker from observing a request in the first
+place; see the recommendations below. The old v1 and v2 protocols are removed (see above).
+
+**Residual: a future-dated request no server has accepted.** The timestamp may be up to 30 s
+ahead of the server's clock, and a request is good until its timestamp is 30 s old, so a request
+signed by a client whose clock runs fast stays presentable for up to a minute after it was made.
+One dated further ahead is refused as stale without its nonce being recorded, so it becomes
+acceptable once the server's clock catches up to within 30 s of it. Either can be presented once,
+by whoever holds it, when it is within the window; the replay guarantee above covers only requests
+a server has accepted. It requires capturing a request that was never delivered, or one refused
+for its timestamp, which HTTPS prevents.
 
 **Key revocation.** Tokens are bound to the key that minted them. At startup the server takes
 the fingerprints of the keys in `ops-authorized-keys` and rejects any bearer token, ops session
@@ -1397,6 +2082,58 @@ token's scope at its key's current ceiling. Removing a key, or lowering it to `s
 restarting or redeploying takes effect on its outstanding tokens immediately, although the token secret is derived from
 the session secret and unexpired tokens (up to 24 h bearer, 8 h cookie) would otherwise survive
 the restart.
+
+**The `ops-authorized-keys` format: every key line states its scope.** The file is UTF-8 (a
+byte-order mark at the very start is ignored), one key per line, in one of two forms:
+
+```
+KEY scope:read    [label words ...] [# comment]
+KEY scope:control [label words ...] [# comment]
+```
+
+`scope:read` allows status, logs, errors and the other read endpoints; `scope:control` allows
+everything. Nothing is inferred: **a key line with no scope token fails startup.** (Until
+0.1.11 such a line meant control, so `KEY read ci-agent`, `KEY ci-agent read-only` and
+`KEY (read)` all quietly loaded as full-control keys.) The rules:
+
+- `#` at the start of a line, or after whitespace, starts a comment that runs to the end of the
+  line. Blank and comment-only lines are ignored. (`ci#1` is label text: no whitespace before
+  the `#`.)
+- The first token is the public key: the base64 Ed25519 key that `brace ops keypair` prints.
+  Anything that could never match a client's key fails startup with its own message: truncated
+  or padded base64, a key of another type, an OpenSSH `ssh-ed25519 AAAA…` line.
+- Exactly one of the remaining tokens is `scope:read` or `scope:control` (`scope:` in lowercase,
+  the value case-insensitive); the tokens may come in any order.
+- Any other token containing `:` or `=` fails startup: `scope: read`, `Scope:read`,
+  `scope=read`, `--scope=read`, `role:read`, `scpoe:read`, `scope:read-only`, or a second scope
+  token.
+- Every other token is label text, including `control`, `ro`, `read` and `scope-ci`: with the
+  scope stated, a label is only a label.
+- A comment on a key line may not contain `scope:` or `scope=` (`KEY label #1 scope:read` has
+  its scope inside the comment, where it would be ignored). Comment-only lines may say anything.
+- A key line may not contain whitespace other than space and tab (a no-break space joins two
+  tokens invisibly), a byte-order mark, an invisible control or format character, or a
+  look-alike of `:` or `=` such as the fullwidth colon (`scope：read`). The error names the
+  column and the code point.
+
+Failures name the file and line number, never the key. The message for a missing scope reads:
+
+```
+Invalid ops authorized keys file ops-authorized-keys, line 3: the line has no scope. Every key
+line must say scope:read (status, logs and errors only) or scope:control (everything). A line
+without one used to mean control: add scope:control to keep that, or scope:read if the key was
+meant to be read-only. Format, one of:  KEY scope:read [label words...] [# comment]  or
+KEY scope:control [label words...] [# comment]. ...
+```
+
+`brace ops keypair` always writes the token (`scope:control`, or `scope:read` with
+`--read-only`), as does the file `brace new` generates. A key listed twice keeps the lower
+scope. A key must be written in its one canonical base64 spelling, as `brace ops keypair` prints
+it: a spelling the decoder also accepts (missing `=` padding, or a last character that differs
+only in bits the decoding ignores) fails startup, because keys are matched as text and a second
+spelling would be a second entry with its own scope. Each key's fingerprint and scope is logged
+at boot (`ops.key`). A token whose payload has no scope claim, or one the server does not
+recognise, is treated as `read`, as is an unrecognised `scope` requested at `/ops/auth`.
 
 ### Ops pages in the browser
 
@@ -1522,8 +2259,22 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
   the parameter.
 - **Bounded growth.** Only matched routes returning HTML are counted, so a scanner requesting
   random URLs produces 404s, not rows. The in-memory buffer is capped at 20,000 views; beyond that
-  views are dropped and tallied. Every stored string is length-capped, and every value the page
-  renders is HTML-escaped.
+  views are dropped and tallied. More caps bound table growth against a client that sends
+  browser-looking requests in a loop: one visitor (host, IP, user agent) adds at most 30 rows per
+  10-second flush window (`maxViewsPerVisitorPerFlush`); one client address (an IPv6 address by
+  its /64), whatever user agents it rotates through, at most 300 (`maxViewsPerIpPerFlush`); and an
+  instance inserts at most 500,000 rows a day (`dailyRowBudget`). Views over a cap are not stored
+  but are tallied as `dropped`, which the dashboard and `notCounted` show, so a capped day reads
+  as capped rather than silently low. Every stored string is length-capped, and every value the
+  page renders is HTML-escaped.
+- **The daily budget is not a blinding switch for one client.** Once the budget is spent nothing
+  more is stored until midnight, so a single client that could spend it (500,000 requests, about
+  four minutes at 2,000 req/s) could hide everyone else's traffic for the rest of the day. One
+  client address may use at most 2% of the budget a day (`maxDailyRowsPerIp`, tallied for up to
+  50,000 addresses), so after one source hits its share, other visitors' views are still stored.
+  Many sources together can still spend it; when that happens, `/ops/analytics` shows "Row budget
+  reached at HH:MM, N views not stored", the JSON report carries `rowBudget`, and a warning is
+  logged once that day.
 - **The "don't count" cookie.** `POST /ops/analytics/ignore` sets `__brace_analytics_ignore=1`
   (HttpOnly, `SameSite=Lax`, `Path=/`, `Secure` except on localhost). It carries no credential;
   it only marks the browser's visits as excluded. The endpoint is CSRF-exempt like the other ops
@@ -1534,61 +2285,488 @@ when you turn it on (full guide: [analytics.md](analytics.md)):
 
 ## Error Store Redaction
 
-Brace scrubs error records at capture time (before they reach the database or
-`/ops/errors`). Two redaction passes run inside `BraceHandler` at the point the
-exception is caught.
+Brace scrubs error records at capture time, before they reach the database or
+`/ops/errors`: `BraceHandler` redacts the request path, query string, headers,
+exception message and stack trace at the point the exception is caught, and
+`ErrorStore.record` redacts the stack trace again. Everything here is in
+`Redactor`.
 
-The same value-shaped pass also runs **in the log and stats sinks themselves**:
-`Log.request`/`Log.error` redact the request path (and the exception message)
-before the entry reaches stdout or the `/ops/logs` ring buffer, and `Stats`
-redacts route keys and error messages before they are served on `/ops/status`.
-A reset token in a URL path is therefore scrubbed on every request — including
-successful ones — not only when an exception is thrown.
+The same passes also run **in the log and stats sinks themselves**:
+`Log.request`/`Log.error` redact the request path and the exception message
+before the entry reaches stdout or the `/ops/logs` ring buffer, every `Log`
+entry's fields are redacted by name, `Stats` redacts route keys, error messages
+and stack traces before they are served on `/ops/status`, and analytics stores
+redacted paths. A reset token in a URL path is therefore scrubbed on every
+request, including successful ones, not only when an exception is thrown.
 
-### Name-based redaction (query params and request headers)
+Two placeholders tell the passes apart: `[REDACTED]` means the value was
+replaced because of its **name** (or it was URL user info), `[redacted]`
+because of its **shape**.
 
-Query-string parameters and request headers whose names look sensitive
-(`token`, `password`, `authorization`, `cookie`, `secret`, `api-key`, and
-several others — see `Redactor.SENSITIVE`) have their values replaced with
-`[REDACTED]`. Matching is on the normalized name (lowercased, hyphens and
-underscores stripped), so it deliberately over-redacts: a field named
-`token_count` is also redacted.
+**Redaction fails closed.** No public `Redactor` method throws. If one hits an
+internal error it returns the marker `[redaction failed]` in place of the text
+it was given, never the text itself: `redactMessage`, `redactQuery`,
+`redactUrl` and `redactPath` return the marker alone, `redactStackTrace` puts
+it in place of the line concerned (frames are kept), `redactHeaders` in place
+of the header value concerned, `redact(Map)` in place of every value, and
+`isSensitive`/`isSensitiveField` answer true. The redactor runs inside the 500
+handler, so a throw there used to lose the error being recorded. If you see
+`[redaction failed]` in an error record or a log line, that is a bug in the
+redactor worth reporting; nothing leaked. The 500 handler itself also keeps
+going when recording fails: each of the stats, the `http.error` log line and
+the error store is written on its own, and the client always gets the
+framework's 500.
 
-### Value-shaped redaction (path segments and exception message tokens)
+### Name-based redaction
 
-High-entropy tokens are detected by shape and replaced with `[redacted]`,
-regardless of field name. The heuristic (applied in `Redactor.redactPath` and
-`Redactor.redactMessage`) treats a segment or whitespace/punctuation-delimited
-token as a secret when **all** of these hold:
+There are two name rules, because a short word such as `code` is a credential
+in a query string but ordinary data in a log field.
 
-1. Length ≥ 16 characters.
-2. Every character is in the base64url-or-hex alphabet (`[A-Za-z0-9_\-+/=]`).
-3. Contains at least one ASCII digit **and** at least one ASCII letter (rules
-   out purely numeric IDs and purely alphabetic slugs).
+| Rule | Applies to |
+|---|---|
+| **In transit** (`Redactor.isSensitive`) | query parameter names (percent-decoded first: `%74oken=` is `token=`), request header names, and `name=value` pairs found inside header values, URLs and path segments (`;jsessionid=`) |
+| **Fields** (`Redactor.isSensitiveField`) | structured log fields (every `Log` entry, through `Redactor.redact`, nested maps and lists included), analytics route parameter names (`/reset/{token}` is stored as `/reset/{token}`), and `name=value` pairs inside exception messages |
 
-JWTs (two dots dividing three base64url parts) are also caught as a special
-case.
+Both rules match:
+
+- **A substring** of the normalized name (lowercased, `-` and `_` removed):
+  `authorization`, `cookie`, `password`, `passwd`, `pwd`, `secret`, `token`,
+  `apikey`, `bearer`, `credential`, `privatekey`, `accesskey`, `sessionid`,
+  `csrf`, `jwt`, `assertion`, `signature`, `authkey`, `nonce`
+  (`Redactor.SENSITIVE`). This deliberately over-redacts: `token_count` is
+  redacted too.
+- **An auth-paired `code`.** The name is split into segments on `_ - . [ ]`
+  and other punctuation and at camelCase boundaries, ignoring a leading `X-`.
+  A `code` (or plural `codes`) segment is sensitive next to one of `auth`, `authorization`,
+  `authentication`, `oauth`, `verification`, `verify`, `verifier`, `reset`,
+  `otp`, `totp`, `hotp`, `sms`, `mfa`, `2fa`, `tfa`, `pin`, `pass`,
+  `password`, `invite`, `invitation`, `access`, `login`, `signin`, `confirm`,
+  `confirmation`, `activation`, `activate`, `recovery`, `backup`, `security`,
+  `magic`, `device`, `unlock`, `onetime`, `twofactor`
+  (`Redactor.CODE_QUALIFIERS`), and so is one of those words fused with `code`
+  or `codes` (`passcode`, `authcode`, `otpcode`, `onetimecode`, `passcodes`);
+  `backup_codes` and `recovery_codes` are sensitive like `backup_code`. Two
+  pairs of segments qualify a `code` as well: `one` + `time` (`one_time_code`)
+  and `two`, `2`, `multi` or `second` + `factor` (`twoFactorCode`).
+
+The in-transit rule also matches a name that is exactly `code` (an OAuth
+authorization code; `X-Code` too), a segment `sig`, `otp`, `totp`, `pin`,
+`sid`, `ticket` or `session` (`Redactor.TRANSIT_WORDS`), and a name whose last
+segment is `auth`, `mfa`, `2fa`, `tfa`, `verification` or a second factor
+(`X-Auth`, `X-Upstream-Auth`, `X-MFA`, `email_verification`, `two_factor`;
+`Redactor.TRANSIT_LAST_WORDS`). Those last words name the value only when they
+end the name: `mfa_enabled`, `two_factor_enabled` and `verification_status`
+are kept. The field rule instead matches only a field named exactly `otp` or
+`totp`.
+
+| Name | In transit | Field |
+|---|---|---|
+| `token`, `api_key`, `X-Auth-Token`, `password`, `session_id`, `client_assertion` | redacted | redacted |
+| `auth_code`, `verificationCode`, `reset_code`, `otp_code`, `pin_code`, `device_code`, `code_verifier`, `passcode`, `backup_codes`, `recovery_codes`, `onetimecode`, `one_time_code`, `twoFactorCode`, `mfa_code` | redacted | redacted |
+| `code`, `X-Code` | redacted | kept (`code:"card_declined"`, `/countries/{code}`) |
+| `sig`, `pin`, `sid`, `ticket`, `session`, `user_session`, `account_sid`, `sms_otp`, `X-Auth`, `X-Upstream-Auth` | redacted | kept |
+| `mfa`, `2fa`, `two_factor`, `verification`, `email_verification` | redacted | kept (`mfa:true`, `verification:"pending"`) |
+| `otp`, `totp` | redacted | redacted |
+| `zip_code`, `status_code`, `error_code`, `country_code`, `currency_code`, `postal_code`, `promo_code`, `code_challenge`, `user_code`, `zip_codes`, `status_codes` | kept | kept |
+| `postcode`, `barcode`, `encode`, `codec`, `signal`, `design`, `sigma`, `pinned`, `sessions`, `sidebar`, `tickets`, `author`, `authority`, `auth_method`, `X-Auth-Request-User`, `state`, `mfa_enabled`, `two_factor_enabled`, `verification_status` | kept | kept |
+
+`state` (the OAuth CSRF value) and `promo_code` are deliberately not
+sensitive. A malformed percent-escape in a name is kept literally, never an
+error.
+
+### Value-shaped redaction
+
+Free text (an exception message, a header value, a path segment, a query
+value) is scanned left to right by `Redactor.redactText`, in three passes at
+once:
+
+1. **Embedded URLs.** Every `scheme://…` (any scheme: `https`, `postgres`,
+   `jdbc:postgresql`, `redis`, `amqp`, `smtp`, `s3`…), every `</path?query>`
+   (a `Link` header), and a `/path` value after `name=` (`Refresh: 0;
+   url=/reset?token=…`, `Forwarded: uri="/reset?token=…"`) goes through
+   `redactUrl`: any `user:password@` becomes `[REDACTED]` whatever its shape,
+   the path through `redactPath`, the query and fragment through
+   `redactQuery`; scheme, host and port are kept. A URL ends at whitespace, a
+   quote, `< > \ ^ { } |`, and loses trailing `. , ; : ! ? ) ]`. A scheme is
+   found inside a run too, whatever it is: at `://` the scan backs up over
+   letters, digits and `+ - .` (`GET /proxy/https://user:pw@host`,
+   `1https://`, `backup_ldap://cn:pw@host` is `ldap://`,
+   `jdbc:my_driver://` is `driver://`). A "scheme" that is itself
+   secret-shaped (a token glued to `://`) is replaced.
+
+   **User info.** An `@` before the first `/ ? #` ends the user info, as in
+   any URL parser. A password can also hold a character that would end the
+   URL or the authority, so two more cases are masked:
+   - A password with an unencoded `/`, `?`, `#` or `;`
+     (`postgres://user:pa/ss@host`, `redis://:pa?ss@host`): masked up to the
+     last `@` of the URL, when the text before the first `/ ? #` holds a `:`
+     and is not evidently a host. A list of two or more `host[:port]`
+     (`mongodb://h1:27017,h2:27017/db?authSource=a@b`) is evidently hosts
+     and keeps its path and query. So does one host with a dot, `localhost`
+     or an IPv6 literal when the scheme is `http`, `https`, `ws` or `wss`
+     (`https://example.com:8443/users/@bob`,
+     `http://localhost:3000/assets/logo@2x.png`) or when the `@` is in the
+     query (`postgres://db.internal:5432/app?email=a@b.c`); in any other
+     scheme an `@` inside a path segment still ends the user info, because
+     `postgres://first.last:12345/678@db` (a dotted user name, a numeric
+     password with a `/`) looks exactly like a host, a port and a path. One
+     dotless `name:digits` can be a host and port (`db:5432`) or a user and
+     a numeric password cut at its `/` (`user:12345/678@host`): redaction
+     wins the tie in every scheme, so `redis://cache:6379/0?client=a@b` is
+     stored as `redis://[REDACTED]@b`.
+   - A password with `^ { } | \` a backtick, `'`, `<` or `>`
+     (`jdbc:postgresql://app:p^ssw0rd@db/x`): the URL does not end there when
+     the authority so far holds `:`, no `@` and no `/ ? #`, is not evidently
+     a host, and an `@` follows within 256 characters before any whitespace.
+     One space is passed the same way when what follows the `:` cannot be a
+     port and the next word holds the `@` (`postgres://app:my pass@db`). A
+     double quote always ends the URL.
+
+   **Parameters after the host** (`jdbc:sqlserver://db:1433;user=sa;password=…`,
+   a `;name=value` before any `/ ? #`): the whole rest of the URL gets the
+   `name=value` pass, so a password there may hold `/`, `?`, `#` or `@`.
+2. **`name=value` pairs.** When the name before `=` is sensitive (the
+   in-transit rule, or the field rule inside exception messages), the value
+   becomes `[REDACTED]`: up to whitespace or one of
+   `& ; , " ' < > ( ) [ ] { } | \`, so the next parameter is never swallowed;
+   or, when the value opens with `"`, `'`, `(`, `[`, `{` or `<`, up to the
+   matching closer (`password={a;b}` is `password={[REDACTED]}`,
+   `backupCodes=[a1b2c-d3e4f, g5h6i-j7k8l]` is `backupCodes=[[REDACTED]]`).
+   Brackets of one kind nest, a doubled `}` or `'` inside is an escaped one
+   (SQL Server's `{a}}b}`, SQL's `'it''s'`), and with no closer the value
+   runs to the end of the line.
+3. **The run rule.** Every other maximal run of `[A-Za-z0-9_\-+/.~$%]` is
+   tested wherever it sits (next to a quote, a `<`, a full stop):
+   - A run holding `%` is percent-decoded up to 3 rounds (`%252F` is `/`); if
+     any decoded round has something to redact by these same rules, the whole
+     run becomes `[redacted]`.
+   - A JWT (two dots, three base64url parts, the outer two at least 10
+     characters) or a two-part `payload.signature` token (one dot, at least 20
+     base64url characters each side, a digit and a letter: the ops bearer
+     token's own shape) becomes `[redacted]` whole.
+   - A Java qualified name (three or more identifier labels starting with a
+     common root such as `java`, `com`, `org`, `io`:
+     `com.amazonaws.services.s3.model.AmazonS3Exception`) and a hostname (three
+     or more DNS labels ending in a common TLD such as `com`, `net`, `io`,
+     `internal`, `local`, or two labels ending in `internal`, `local`,
+     `localhost`, `lan` or `corp`: `db-primary-7f8c9d.internal`) are kept whole.
+   - A label with `/` is a **file path** when every `/`-piece looks like part
+     of one: no `+` anywhere; no piece under 16 characters mixes upper case,
+     lower case and digits; and a piece of 16 or more characters without a
+     digit is cased like words (lower case, upper case, Capitalized, or a
+     camelCase name such as `AdminDashboardController`). Standard base64 uses
+     `/` too, and this is what tells the two apart: the tail of AWS's example
+     key, `bPxRfiCYEXAMPLEKEY`, is not cased like words, so
+     `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` is judged whole and redacted.
+     A path whose pieces are all plain is kept
+     (`/var/lib/app/uploads/2024/11/05/invoice-48213-final-v2.pdf`,
+     `db/migration/V3__create_users_table`). A path with a secret-shaped piece
+     loses that piece alone when the run starts like a path (`/`, `./`, `../`,
+     `~/`; a drive letter's `C:` is outside the run) or ends in a file
+     extension, and its short pieces are words or simple camelCase:
+     `/tmp/brace-uploads/upload-8a7b6c5d4e3f2a1b.tmp` is
+     `/tmp/brace-uploads/[redacted].tmp`, `Failed to load
+     /assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is `Failed to load
+     /assets/[redacted].css`. Without that evidence the whole label is
+     replaced (`exports/<token>/data` is `[redacted]`).
+   - Otherwise each **label** between `. ~ $ %` is redacted when **all** of
+     these hold: it is at least **16** characters of `[A-Za-z0-9_\-+/]`; it
+     contains an ASCII digit **and** an ASCII letter; it is not a UUID
+     (`8-4-4-4-12` hex); and it is not a **name made of words** (below). The
+     separators are kept: `T.` is `[redacted].`, `/dl/T.pdf` is
+     `/dl/[redacted].pdf`, `SG.x.y` is `SG.[redacted].[redacted]`, `T~x` is
+     `[redacted]~x`.
+
+   **Names versus secrets.** A label is a name, and kept, when it is made of
+   words: it holds only `[A-Za-z0-9_-]`, it is split into parts on `_` and
+   `-` and each part into words (a leading digit group, or letters cut at
+   camelCase boundaries with an optional trailing digit group), and:
+   - it has two or more words, at least one of three or more letters;
+   - every word of five or more letters reads like a word: each pair of
+     adjacent letters is scored by how usual it is (a 26 by 26 table ranked
+     over English and identifier text), and the score may not pass two thirds
+     of a point per pair, so one unusual pair is forgiven and a run of them is
+     not (`create`, `users`, `Handler`; not `ZAXVVMA`, `htvmuprj`);
+   - a digit group has at most 6 digits on its own (`48213`, `000482`), or 8
+     that read as a date (`20241105`), and at most 3 after letters (`v2`,
+     `V19`), and at most one word has both letters and digits;
+   - letters and digits are not interleaved: a digit followed directly by a
+     letter, other than at a camelCase boundary (`Http2Connection`), is
+     allowed once and only in a part shaped like `2024q4`;
+   - at most one word is a one- or two-letter fragment inside a longer part;
+   - in a camelCase part every word has four or more letters (`Http`,
+     `Line`), except a first lower-case word (`get`, `shipping`) and one
+     acronym of two to four capitals that starts the part or carries the
+     digits (`UTF8`, `XML`); no word has five consonants in a row;
+   - it is not three or more parts of (nearly) one length (the shape of a
+     grouped code, `abcd5-efgh6-ijkl7`); and two parts of (nearly) one length,
+     seven or more characters each, are a name only under a stricter word
+     score, half a point per pair (`shipping_address2` is kept,
+     `PZEEBRLL_HGZUZTU3` is not).
+
+   Also names: a JVM address, `0x` and 16 hex digits of which the first four
+   are zero (a lambda's `$$Lambda/0x000001f0a1047000`), and a `git describe`
+   suffix after a tag part, with a count of at most 5 digits
+   (`2024.11.05-1423-g3f9a1c2`, `v1-1423-g3f9a1c2`). So
+   `V3__create_users_table`, `invoice-48213-final-v2`,
+   `user_sessions_archive_2024q4`, `CONSTRAINT_INDEX_4`,
+   `audit_log_entries_2024`, `PARTIALLY_REFUNDED_V2`, `ORD-2024-11-000482`,
+   `shippingAddressLine2`, `Http2ConnectionHandlerImpl` and
+   `UTF8StreamJsonParser` are kept, while a hex hash (`8a7b6c5d4e3f2a1b`, a
+   40-hex commit SHA), a random token, a two-group code
+   (`ZAXVVMA5-LAHQRWYU`), a Stripe id (`pi_3OaBcD2eFgHiJkLm`), a word joined
+   to a secret or to a long number (`reset-8a7b6c5d4e3f2a1b9c0d`,
+   `token_Ab3dE9fGh1JkLmN0pQrS`, `reset-code-48213977`) and any other `0x`
+   literal of 16 or more characters are redacted.
+
+   **Measured.** A seeded test
+   (`RedactorTest.randomTokensOfEveryShapeAreRedacted`) draws 100,000 random
+   tokens of each of 41 shapes and fails when more than 1 in 10,000 of a shape
+   the name rule judges keeps half or more of itself. On 300,000 tokens per
+   shape: hex, base32, base36, Crockford and base64url tokens of 16 to 43
+   characters, ungrouped or in groups of 4 to 6, none kept; base62 of 16
+   characters 1 in 40,000, of 20 or more none; two groups of 8 or 9 (the
+   worst shape) 1 in 20,000 for base32, 1 in 50,000 for base62, 1 in 100,000
+   for base36, none for hex. Standard base64 can also read as a path of
+   short pieces (`YGw/A0C3B/hJOQFgnBClnm`): 22 characters 1 in 1,250, 27
+   characters 1 in 5,500, 40 characters 1 in 150,000, 43 or more none in
+   300,000. These base64 figures are the same as before paths and names were
+   told apart.
+
+`=` is not part of a run (it separates a name from its value, and base64
+padding is not secret). Recursion through URL-inside-URL values stops at 4
+levels; deeper content becomes `[redacted]`. All of it is linear in the input:
+the review's worst cases (64 KB and 1 MB of `%`, `&`, dots, `%25`, `=`, nested
+URLs) are a test.
+
+Where it runs:
+
+| Where | How |
+|---|---|
+| Request path (error record, logs, stats, analytics) | `redactPath`: each `/`-segment gets the free-form pass with the in-transit rule. A segment is also tested percent-decoded (up to 3 rounds), and a `;name=value` matrix parameter is redacted by name (`;jsessionid=`, `;token=` become `[REDACTED]`) or by shape. A path whose segments are all under 16 characters and that has no `=` is returned at once |
+| Exception message and stack trace | `redactMessage` / `redactStackTrace`: the free-form pass with the field rule for pairs. In a stack trace every message line (`Caused by:`, `Suppressed:`, at any indent, and multi-line messages) is redacted; frame lines are kept: `... N more`, `... N common frames omitted`, and `at` followed by a frame as the JVM prints it, `[loader/][module[@version]/]pkg.Class.method(File.java:12)` with `(Native Method)` or `(Unknown Source)` and an optional Logback `~[jar:version]`, after one or more tabs or spaces (so the frames of a `Suppressed:` exception and of the causes under it too). A line that merely starts with `at ` is message text and is redacted: Jackson's ` at [Source: (String)"{…}"; line: 1, column: 3]` quotes the document it failed on |
+| Query string (error record `requestDetail`, stats) | `redactQuery`: a part whose percent-decoded name is sensitive (in-transit rule), or whose value, as sent or after up to 3 rounds of decoding, has anything the free-form pass would redact (a secret-shaped run, a URL with something to redact such as `?next=https%3A…%3Ftoken%3D…`, a sensitive pair), becomes `name=[REDACTED]`; a bare `?<token>` part becomes `[REDACTED]` |
+| URL-valued request headers (`Referer`, `Origin`, `Location`, `Content-Location`, `X-Original-URL`, `X-Forwarded-Uri`, `X-Rewrite-URL`, `HX-Current-URL`) | `redactUrl`, as in pass 1. A value that is not a URL gets the free-form pass |
+| Other request headers, `Forwarded` and `Via` included | `redactValue`: a value that is one URL or path with no whitespace goes through `redactUrl` (or becomes `[redacted]` whole if it is secret-shaped as a whole, since a standard-base64 secret can start with `/`); anything else gets the free-form pass with the in-transit rule. `Forwarded: for=…;by=…;proto=…;host=…` stays readable while its `uri="…"` is redacted; a JWT in `X-Amzn-Oidc-Data` or `Sec-WebSocket-Protocol` (`base64url.bearer.authorization.k8s.io.<token>`) is caught |
+| Protocol-metadata headers | **kept verbatim**: `Accept`, `Accept-Charset`, `Accept-Encoding`, `Accept-Language`, `Cache-Control`, `Connection`, `Content-Encoding`, `Content-Language`, `Content-Length`, `Content-Type`, `DNT`, `Expect`, `Host`, `HTTP2-Settings`, the conditional headers (`If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `If-Range`), `Keep-Alive`, `Pragma`, `Priority`, `Range`, `TE`, `Upgrade`, `Upgrade-Insecure-Requests`, `User-Agent`, `X-Requested-With`; exactly four of the `X-Forwarded-*` family (`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Port`, `X-Forwarded-Proto`) plus `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP`, `CF-IPCountry`, `CF-Visitor`; request ids and trace context (`X-Request-Id`, `X-Correlation-Id`, `Request-Id`, `traceparent`, `tracestate`, `Cf-Ray`, `X-Amzn-Trace-Id`, `X-Cloud-Trace-Context`, B3); `Sec-Fetch-*`, `Sec-Ch-*`; the WebSocket key, version and extensions; htmx's request headers (`Redactor.VERBATIM_HEADERS`). Their values are never a user's credential, and the shape rule would misfire on an ETag, a multipart boundary or a request id. Any other `X-Forwarded-*` header gets the free-form pass |
+| Log fields | by name only (field rule), recursing into nested maps and lists. Nesting deeper than 64 levels, or past 100,000 copied values (a map that contains itself, a shared child under many keys), becomes `[nested too deep]` |
+
+The request headers are redacted by `Redactor.redactHeaders`, in that order:
+a sensitive name (in-transit rule) first, then the URL, verbatim or free-form
+rule.
 
 **What is intentionally kept visible:**
 
 | What | Why |
 |---|---|
-| UUIDs (`8-4-4-4-12` hex) | Usually record identifiers, not bearer secrets; needed for debugging |
-| Purely numeric segments | Page IDs, order numbers, user IDs |
-| Short slugs (< 16 chars) | Route labels, action names |
+| UUIDs (`8-4-4-4-12` hex), anywhere | Usually record identifiers, not bearer secrets; needed for debugging. A request id that is not a UUID is kept only in the request-id headers above |
+| Purely numeric values and runs | Page IDs, order numbers, user IDs |
+| Short labels (< 16 chars) | Route labels, action names, dotted versions (`4.12.0-beta.3+build.20241105`), file names whose labels are short (`app.3f9a1c2b.js`, Brace's own `?v=a1b2c3d4` fingerprint) |
+| Java qualified names, hostnames ending in a common TLD | `com.amazonaws.services.s3.model.AmazonS3Exception`, `my-loadbalancer-1234567890.us-west-2.elb.amazonaws.com`, `db-primary-7f8c9d.internal`, a CloudFront `Via` |
+| Names made of words | `V3__create_users_table.sql` (any Flyway file name, Brace's own included), `invoice-48213-final-v2`, `CONSTRAINT_INDEX_4`, `shippingAddressLine2`, `Http2ConnectionHandlerImpl`, `2024-black-friday-sale` |
+| File paths | `/srv/app/uploads/2024/11/report-final.pdf`, `/var/app/releases/20241105`, `exports/2024/11/05/customer-orders-2024-11-05.csv`; in a path that starts with `/`, `./`, `../` or `~/` or ends in a file extension only a secret-shaped piece is replaced (`/tmp/brace-uploads/[redacted].tmp`) |
+| Stack frame lines | `at pkg.Class.method(File.java:12)` and `... N more` at any indent, the frames of `Suppressed:` exceptions included |
+| Host lists and hosts with a dot | `mongodb://h1:27017,h2:27017/db?authSource=a@b`, `postgres://db.internal:5432/app?email=a@b.c`, `https://example.com:8443/users/@bob`: an `@` beyond them is not user info (outside the web schemes, one inside a path segment still is) |
+| Email addresses | PII, not a credential; `@` is outside the run alphabet and each label is short |
+| Comma- or `#`-separated lists (`#ff0000,#00ff00`) | Each item is short |
 | Exception message text without high-entropy tokens | Needed to diagnose the error |
 
-The same pass runs over stored **stack traces** (`Redactor.redactStackTrace`, at
-`Stats.recordError` and `ErrorStore.record`): every message line, including `Caused by:` and
-`Suppressed:` lines and multi-line messages, is redacted, and frame (`at …`) lines are kept
-as is. A message redacted on its own used to reappear verbatim in the trace.
+**Known over-redaction.** What the rules cannot tell from a secret, and so
+redact:
 
-The heuristic is conservative by design. An over-eager redactor makes error
-records useless. If your application routes embed raw bearer tokens or reset
-secrets in path positions, consider moving them to opaque database-lookup keys
-so the route retains meaning even after redaction.
+- A 16+ character label of letters, digits, `-`, `_`, `+` or `/` with both a
+  digit and a letter that is not a name made of words: a dash-joined hex list
+  `ff0000-00ff00-0000ff`, a 16+ character hex hash (a commit SHA in a
+  message), a pod name `web-7d9f8b6c5-x2k4q`, `db-primary-7f8c9d` outside a
+  hostname, a name with a one-letter camelCase word or two words holding digits
+  (`AmazonS3Exception`, `OAuth2AuthorizationCodeGrantFilter`,
+  `utf8mb4_0900_ai_ci`), three parts of one length (`test-case-data-2024`), a
+  name with a 7 or 8 digit group that is not a date (`test-user-12345678`), and
+  a name holding a word the letter-pair table scores as unusual (`proxy`,
+  `nginx`, `jsonb`; about 1 use in 200 of the five-letter-or-longer words in
+  Brace's own sources). These look exactly like a grouped recovery code or a
+  token.
+- A dotless host with a port, in any scheme, when an `@` follows in the path
+  or query: `http://api:8080/users/@bob` and
+  `redis://cache:6379/0?client=a@b` are stored as `http://[REDACTED]@bob` and
+  `redis://[REDACTED]@b`, because `user:12345/678@host` has the same shape.
+  Outside the web schemes the same holds for a host with a dot and a port
+  when the `@` is inside a path segment:
+  `s3://bucket.example.com:443/exports/a@b.csv` is stored as
+  `s3://[REDACTED]@b.csv`.
+- A relative path with no file extension and a secret-shaped piece
+  (`exports/<token>/data`) is replaced whole, and so is a path where a secret
+  piece sits next to a directory that is not cased like words (`/opt/iOS/…`).
+- A sensitive value that opens with a bracket or a quote and never closes it
+  takes the rest of its line.
+- **A content hash of 16 or more characters in a file name**:
+  `/assets/main-3f9a1c2b4d5e6f7a8b9c0d1e.css` is stored as
+  `/assets/[redacted].css`, and so is a bundler chunk such as
+  `ProductDetail-a1B2c3D4.js` (the label is 22 characters). Chosen
+  deliberately: such a name cannot be told from a download token in
+  `/dl/<token>.pdf`. The cost is cosmetic, in error records and logs only.
+- A two-label host whose last label is a public TLD
+  (`abcdef1234567890xyz.com`).
+- A `/`-joined value with a long or mixed-case-and-digit piece
+  (`/files/Ab3dE9fG/raw` as a whole header value), since a standard-base64
+  secret can contain `/`.
+- In transit, names that only look sensitive: `ticket_id`, `session_count`,
+  `pin=1`, `otp_enabled`, `sig_alg`, `account_sid` (an identifier), and any
+  name ending in `auth`, `mfa`, `2fa` or `verification`
+  (`?verification=pending`). In exception messages, `token=…` or `password=…`
+  text that is not a credential.
+
+**Known limits.** What the rules do not redact. Treat the error store and the
+logs as holding secrets of these kinds, and keep them out of exception
+messages and URLs where you can:
+
+- **A secret under a sensitive name that is not written `name=value`.** The
+  name pass reads `=` only. JSON (`{"password":"hunter2"}`), a colon
+  (`password: hunter2`), spaces around the sign (`password = hunter2`) and
+  prose (`the password hunter2 was rejected`) are not matched by name. A
+  value there is still caught when its shape is secret-like (16 or more
+  characters with a digit and a letter, a JWT), so a long API key in a JSON
+  excerpt goes and a short password stays.
+- **A short secret under a name the rules do not know.** Under 16 characters
+  nothing is redacted by shape: a 6-digit code in `?c=123456`, a short
+  password in a message.
+- **A secret made of words.** `CorrectHorseBattery1`,
+  `monkey_dragon_letmein_2024` and any passphrase of dictionary words with a
+  short number read as names, by design of the name rule above, and are kept
+  unless a sensitive name stands before them.
+- **A secret of letters only or digits only**, of any length: the shape rule
+  needs both a digit and a letter.
+- **A space inside an unquoted value.** `password=abc def123` loses `abc`
+  only. The one exception is the single space inside URL user info described
+  above.
+- **Standard base64 that reads as a path of short pieces.** A base64 value
+  whose `/`-pieces are all under 16 characters and none of which mixes upper
+  case, lower case and digits is kept
+  (`abcdefghijklm/NOPQRSTUVWXYZ/0123456789012`): the measured rates are
+  above. Likewise a value cut by `/` or `.` into pieces that are each under
+  16 characters is never redacted by shape (`a69a83f4/07210da8/180c9c1b`,
+  `wmb5q8pnsd23k9i.ok5g34xcrge1ztx`), whatever it is.
+- **A request path is judged segment by segment** (`redactPath`), so a base64
+  value with `/` inside a URL path is several short segments.
+- **User info that looks like a host.** A dot in the user name and a numeric
+  password cut by an unencoded `/`, `?` or `#` read as a host, a port and a
+  path or query. `https://first.last:12345/x@host` is kept (in a web scheme
+  the path wins, for `logo@2x.png`), and so is
+  `postgres://first.last:12345?x@host` in any scheme (the query wins).
+  Percent-encode such a password, as the URL syntax requires, and it is
+  masked.
+- **A line shaped exactly like a stack frame** inside a multi-line exception
+  message is taken for one and kept.
+
+If your application routes embed raw bearer tokens or reset secrets in path
+positions, consider moving them to opaque database-lookup keys so the route
+keeps its meaning after redaction. Exclude such routes from analytics with
+`.analytics(false)` when the parameter name does not say it is secret
+(`/invite/{code}`).
+
+### One bad record cannot stall the store
+
+Error records carry client-controlled text, so `ErrorStore` makes sure no single record can
+block the others:
+
+- `ErrorStore.record` replaces NUL characters with U+FFFD. A request such as `?page=1%00` puts a
+  NUL in a `NumberFormatException` message, and Postgres text cannot hold one. Replacing it
+  instead of deleting it keeps already-redacted tokens from being joined into one secret-shaped
+  token. The error type and route are clipped to their 255-character columns; the route starts
+  with the client-chosen HTTP method.
+- Each upsert in a flush runs under its own savepoint. A row the database rejects is rolled
+  back alone, and the rest of the batch commits.
+- A row rejected for its **data** (SQLState class `22` data exception, `23` integrity
+  constraint, `54` program limit) is retried once, in the same flush, with its payload
+  stripped: a new error kind is inserted with a fixed placeholder message (`[details not
+  stored: the database rejected this error record]`, no request-derived text) and an empty
+  stack trace, request detail, queries and headers; an error kind that already has a row only
+  gets its count and last-seen time updated, so its stored details are never replaced by the
+  placeholder. The count and the regression notification survive. Any other row rejection (a
+  lock timeout `55P03`, a statement timeout, an error without a SQLState) is not retried
+  stripped: the full record is retried on the next flush.
+- A rejected entry is retried on later flushes, and dropped after 5 rejected flushes.
+- Not blamed on any entry, so the whole batch is kept, uncounted, and retried, bounded by the
+  1,000-kind pending buffer:
+  - a connection-level failure (database down, pool exhausted, failure to open the session or
+    begin the transaction);
+  - a server-wide SQLState when no row of that flush could be written, whether or not the
+    connection still passes `isValid`: `25006` (read-only transaction, as during a failover),
+    class `53` (disk full, out of memory, too many connections), `57P01` to `57P05` (shutdown),
+    class `58` (system error), class `08` (connection). When another row of the same flush was
+    written, the server is taking writes, so the state counts against that row alone (dropped
+    after 5 such flushes) and the other rows commit;
+  - another connection-classed SQLState (`40`, other `57`, other `25`) when the connection also
+    fails `isValid`.
+
+  That retention is capped at 60 consecutive flushes per entry (about two minutes). After that
+  each further failed flush counts like a row rejection, so an outage longer than about two
+  minutes drops the entries it holds after 5 more flushes, reported by the rate-limited warning,
+  instead of keeping the pending buffer full for good. Every other row error is a row rejection
+  like any other, even when every row of the batch gets the same one (a lock timeout on every
+  row), and so is a connection-classed error on a live connection (for example `57014`, a
+  statement timeout on one huge row): a single poisoned row is still isolated and dropped after
+  5, and kinds that always fail that way cannot fill the buffer and lock out a new kind.
+- The 1,000-kind cap covers everything the store holds: pending kinds plus the batch a flush is
+  writing. While a flush waits on an unreachable database, new kinds past the cap are dropped
+  (and counted in the "error storm" warning); the kinds buffered first, with their counts, are
+  kept.
+- In error kinds and in the `/ops/status` route stats, a request method outside GET, HEAD, POST,
+  PUT, PATCH, DELETE, OPTIONS, TRACE and CONNECT appears as `OTHER`, so a client cannot create
+  kinds or stats keys with made-up methods. The request log line and an error's request detail
+  keep the method as sent.
+- Failures are logged at most once a minute, naming the exception class, SQLState and the error
+  type of any dropped entry. Request-derived content (messages, paths, headers) is never logged.
+  The warning distinguishes kinds dropped "after 5 rejected flushes" from kinds "the database
+  could not take through 65 failed flushes". A `RegressionListener` that throws loses only its
+  own notification, and an `Error` during a flush keeps the batch and the flusher thread.
+
+Before the 2026-11 security review (M5), one such request failed every later flush on
+Postgres, so nothing reached `ops_errors` and regression alerts stopped until restart.
+
+### Regression notifications carry request-derived text
+
+A new error kind's message can contain text a web user chose. `WebhookNotifier` (Slack and
+Mattermost incoming webhooks) therefore puts the type, route and message each in an inline code
+span, which both render literally: Mattermost markdown links, images (a tracking pixel) and
+emphasis are inert. Inside the span, a backtick (which would close it) becomes `ˋ`, `<` `>` `&`
+(Slack control sequences such as `<!channel>`) become `‹` `›` `＆`, `@` becomes the full-width
+`＠` so no `@channel` mention fires, and line breaks and control characters become spaces. The
+message is cut to 500 characters first. Backslash escaping was not used because Slack does not
+honour it. `MailerNotifier` sends plain text.
 
 ---
+
+## Outbound Mail
+
+`Mailer` over `smtp://user:pass@host:587` **requires STARTTLS**
+(`mail.smtp.starttls.required=true`). If the relay's EHLO does not offer it, the send fails
+instead of continuing in cleartext, so a network attacker cannot strip the offer and read the
+SMTP password and mail bodies (password-reset links). `smtps://` is implicit TLS. A trusted
+local relay that cannot do TLS (a sidecar on localhost) opts out explicitly with
+`smtp+plain://localhost:25`, which uses STARTTLS when offered but never requires it. Credentials
+on an `smtp+plain://` URL are allowed but logged as a warning once, when the `Mailer` is
+constructed (the host is named; the user and password never are), because without TLS the AUTH
+exchange is cleartext. The scheme is compared case-insensitively (`SMTPS://` is implicit TLS).
+Dev mode (no SMTP URL) only captures mail and is unaffected.
+
+The SMTP URL is parsed once, when the `Mailer` is constructed. A malformed one (a password with
+an unencoded `^`, space, `|` or `#`) throws `IllegalArgumentException` there, naming the
+`smtp.url` setting and asking for percent-encoding, but never including the URL or chaining the
+parser's exception: its message is the whole URL, password included, and used to reach the
+error store's stack trace as the cause of every failed send.
+
+`Mailer.to(...)` takes exactly one address and parses it strictly, so a recipient taken from a form
+cannot add recipients (`"a@b.c, victim@x.y"` throws). The same holds for `cc(...)`, the
+per-message `from(...)`, and `Mailer.from(...)`/`Mailer.replyTo(...)` (checked when configured).
+Strict parsing yields exactly one address or throws; on top of that, group syntax
+(`g: a@b.c, victim@x.y;`, several mailboxes as one address), route addresses
+(`<@relay:a@b.c>`) and control characters are refused. A comma inside a quoted display name
+(`"Doe, J" <a@b.c>`) is one mailbox and is accepted. `@Email` likewise rejects `,` `;` `<` `>`,
+`(` `)` `"`, whitespace and control characters, and accepts only a value that parses as one bare
+address equal to itself: an RFC 822 comment (`evil@attacker.tld(ceo@corp.example)`) would
+otherwise be sent as the display name. `MailerNotifier` accepts several recipients, validates each at
+construction and sends each its own message.
 
 ## Secrets Management
 

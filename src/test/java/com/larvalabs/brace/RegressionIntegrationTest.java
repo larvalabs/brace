@@ -32,14 +32,14 @@ class RegressionIntegrationTest {
         readKey = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
         Files.writeString(keysFile,
-            controlKey.publicKey() + "  ops-laptop\n" +
+            controlKey.publicKey() + "  scope:control  ops-laptop\n" +
             readKey.publicKey() + "  scope:read  oncall-agent\n");
 
         var db = new DatabaseFactory(
             "jdbc:h2:mem:regrdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null, List.of());
 
         // warmup 0 so an error triggered right after startup is flagged immediately.
-        app = Brace.app().port(0).ops(keysFile.toString()).database(db).regressionsWarmup(0);
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString()).database(db).regressionsWarmup(0);
         app.get("/boom", req -> { throw new RuntimeException("kaboom"); });
         app.start();
         port = app.actualPort();

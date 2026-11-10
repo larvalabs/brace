@@ -113,11 +113,11 @@ class CliInitTest {
     void remoteCheckSucceedsAgainstAuthorizedServer() throws Exception {
         var keypair = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
-        var app = Brace.app().port(0).ops(keysFile.toString());
+        var app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         app.start();
         try {
             Files.writeString(tmp.resolve(".brace"),
@@ -139,11 +139,11 @@ class CliInitTest {
         // structural, not a key problem.
         var keypair = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
-        var app = Brace.app().port(0)
+        var app = Brace.app().opsUnpinnedForTests().port(0)
             .sessions("init-csrf-test-secret-at-least-32-characters")
             .ops(keysFile.toString());
         app.start();
@@ -186,16 +186,16 @@ class CliInitTest {
         // distribution is wrong — the local/server files have probably drifted.
         var keypair = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
         // Server with a DIFFERENT authorized-keys file → 401 against this client.
         var serverKey = OpsKeys.generateKeypair();
         Path serverKeysFile = tmp.resolve("server-keys");
-        Files.writeString(serverKeysFile, serverKey.publicKey() + " server-only\n");
+        Files.writeString(serverKeysFile, serverKey.publicKey() + " scope:control server-only\n");
 
-        var app = Brace.app().port(0).ops(serverKeysFile.toString());
+        var app = Brace.app().opsUnpinnedForTests().port(0).ops(serverKeysFile.toString());
         app.start();
         try {
             Files.writeString(tmp.resolve(".brace"),
@@ -224,11 +224,11 @@ class CliInitTest {
         var serverKey = OpsKeys.generateKeypair();
         var clientKey = OpsKeys.generateKeypair();
         Path keysFile = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, serverKey.publicKey() + " server-only\n");
+        Files.writeString(keysFile, serverKey.publicKey() + " scope:control server-only\n");
         Files.writeString(tmp.resolve("ops-private.key"),
             clientKey.privateKey() + "\n" + clientKey.publicKey() + "\n");
 
-        var app = Brace.app().port(0).ops(keysFile.toString());
+        var app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         app.start();
         try {
             Files.writeString(tmp.resolve(".brace"),

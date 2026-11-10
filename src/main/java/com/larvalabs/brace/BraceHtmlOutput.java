@@ -6,9 +6,10 @@ import gg.jte.html.OwaspHtmlTemplateOutput;
 import gg.jte.html.escape.Escape;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -38,9 +39,31 @@ import java.util.regex.Pattern;
  *       JTE's JavaScript escaping for {@code on*} left {@code &} alone, so {@code &#39;} in user
  *       data closed the string.</li>
  *   <li>{@code srcdoc}: user data is escaped twice, so it is text in the frame, not markup.</li>
+ *   <li><strong>CSS</strong> ({@code <style>} bodies and {@code style=""}): user data is written
+ *       with CSS hex escapes for everything but plain value characters, so it can't end its
+ *       declaration or rule. See {@link #escapeCss}.</li>
+ *   <li><strong>Script bodies</strong>: everything in user data but letters, digits, {@code _},
+ *       {@code ,} and non-ASCII characters is written as {@code \}{@code uXXXX}, which a
+ *       JavaScript string, a template literal, a regex literal and a JSON string all read back
+ *       as the data, and which has nothing in it that is syntax to an HTML tokenizer, whether the
+ *       browser reads the script as raw text or (inside {@code <svg>} or {@code <math>}) as
+ *       markup. See {@link #escapeScriptData}.</li>
+ *   <li><strong>Inside a tag, outside a quoted value</strong> (reached only through such a script
+ *       or style body, where {@code a<b} opens a tag): every character is written as an escape.
+ *       See {@link #escapeAll}.</li>
  * </ul>
  *
- * JTE uses an output it's given as is when it is already an HTML output, so dev (hot-reload) and
+ * Where each {@code ${...}} lands is read from the output itself, by a small HTML tokenizer over
+ * the template's text (H1 and L7, 2026-11 review): a value is held only while the output is
+ * inside a quoted URL or {@code hx-vals}/{@code hx-headers}/{@code hx-request} value of a start
+ * tag, never in a {@code <script>} or {@code <style>} body or in body text, and data a
+ * {@code @template} call writes inside an attribute value is escaped for that attribute. The
+ * tokenizer follows the script-data escaped states ({@code <!--} in a script) and foreign content
+ * ({@code <svg>}, {@code <math>}), where {@code <script/>} is a complete element. JTE's own
+ * context is the second opinion, and disagreement between the two always resolves to the stricter:
+ * data gets the rules of both readings (see "user data" below).
+ *
+ * <p>JTE uses an output it's given as is when it is already an HTML output, so dev (hot-reload) and
  * precompiled templates both go through this class. {@link TemplateEngine} calls {@link #finish}
  * after each render.
  */
@@ -56,26 +79,28 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     private static final Set<String> ANIMATION_VALUES = Set.of("to", "from", "by", "values");
     private static final Set<String> SAFE_SCHEMES = Set.of("http", "https", "mailto", "tel");
 
-    // The end of a static chunk that opens a quoted attribute value: the attribute name, then
-    // whatever of the value the template wrote before the first ${...}.
-    private static final Pattern OPENS_VALUE = Pattern.compile(
-        "\\s([A-Za-z_:][-A-Za-z0-9_:.]*)\\s*=\\s*(?:\"([^\"]*)|'([^']*))$");
-
     private final TemplateOutput target;
+    // Where JTE says the template source is: the enclosing tag and, inside a value, its attribute.
     private String tagName;
     private String attributeName;
 
-    // An attribute value that's open: held back, not yet written, because if user data in a URL
-    // value turns out to make it unsafe the whole value is replaced.
-    private String valueAttribute;      // lower-cased attribute name; null when no value is held
+    // A URL or hx-vals/hx-headers/hx-request value that's open: held back, not yet written, because if user
+    // data turns out to make it unsafe the whole value is replaced. Which value is open, and on
+    // which attribute of which tag, comes from the tokenizer below, so a value is held exactly
+    // while the output is inside it (L7: a pattern match on the text before a ${...} could pick
+    // an earlier attribute, and the real one was then judged one piece at a time).
+    private StringBuilder valueOut;     // the value as HTML to emit: template text, escaped user data; null when none is held
+    private String valueAttribute;      // its attribute, lower-cased
     private char valueQuote;
-    private StringBuilder valueOut;     // the value as HTML to emit: template text, escaped user data
-    private StringBuilder valueRaw;     // the value as the browser reads it, for the URL check
-    private int firstUserIndex;         // where in valueRaw user data first appears; -1 if none
-    private boolean urlValue;           // JTE's context confirmed this is a URL attribute
-    private boolean jsonValue;          // hx-vals or hx-headers: may be one piece of JSON data
+    private boolean urlValue;           // a URL attribute; otherwise hx-vals, hx-headers or hx-request
+    private boolean templateText;       // the template wrote some of the value itself
+    private int firstUser;              // where in valueOut user data first appears; -1 if none
     private int userWrites;             // pieces of user data in the held value
     private String soleUser;            // the last of them (the only one, if userWrites == 1)
+    private boolean scriptEscaped;      // some of them were script-escaped on top (JTE reads a script there)
+    // An hx-vals/hx-headers/hx-request value JTE reports that is NOT held (the tokenizer isn't in
+    // it): "{}" has been written for it, and no template text with a quote in it since.
+    private boolean unheldJsonWritten;
 
     public BraceHtmlOutput(TemplateOutput target) {
         super(target);
@@ -84,17 +109,11 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
     @Override
     public void setContext(String tagName, String attributeName) {
+        // L7: lower-cased, because JTE compares the tag to "script" exactly and <Script> is one.
+        if (tagName != null) tagName = tagName.toLowerCase(Locale.ROOT);
         super.setContext(tagName, attributeName);
         this.tagName = tagName;
         this.attributeName = attributeName == null ? null : attributeName.toLowerCase(Locale.ROOT);
-        if (valueAttribute == null || this.attributeName == null || urlValue || jsonValue) return;
-        if (valueAttribute.equals(this.attributeName) && isUrlAttribute(tagName, this.attributeName)) {
-            urlValue = true;
-        } else if (valueAttribute.equals(this.attributeName) && isJsonAttribute(this.attributeName)) {
-            jsonValue = true;
-        } else {
-            emitHeldValue(); // not a URL: nothing to decide, so the held start goes out now
-        }
     }
 
     // --- template text ---
@@ -111,180 +130,792 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
     @Override
     public void writeBinaryContent(byte[] value) {
-        // Template text pre-encoded as UTF-8: passed through untouched unless it's inside, or
-        // opens, an attribute value, which needs it as text.
-        if (valueAttribute == null && !mayOpenValue(value)) {
+        // Template text pre-encoded as UTF-8: read as bytes and passed through untouched unless
+        // it's inside, or opens, a held value, which needs it as text.
+        if (unheldJsonWritten) {
+            for (byte b : value) {
+                if (b == '"' || b == '\'') {
+                    unheldJsonWritten = false;
+                    break;
+                }
+            }
+        }
+        if (valueOut != null) {
+            String text = new String(value, StandardCharsets.UTF_8);
+            writeStatic(text, 0, text.length());
+            return;
+        }
+        scan(value);
+        if (!opensHeldValue()) {
             super.writeBinaryContent(value);
             return;
         }
-        String text = new String(value, StandardCharsets.UTF_8);
-        writeStatic(text, 0, text.length());
+        // valueStart follows an ASCII quote, so it is a character boundary.
+        if (valueStart > 0) super.writeBinaryContent(Arrays.copyOfRange(value, 0, valueStart));
+        String rest = new String(value, valueStart, value.length - valueStart, StandardCharsets.UTF_8);
+        hold(rest, 0, rest.length());
     }
 
     private void writeStatic(String s, int begin, int end) {
-        if (valueAttribute != null) {
+        if (unheldJsonWritten) {
+            for (int i = begin; i < end && unheldJsonWritten; i++) {
+                char c = s.charAt(i);
+                unheldJsonWritten = c != '"' && c != '\'';
+            }
+        }
+        scan(s, begin, end);
+        if (valueOut != null) {
+            // The tokenizer was in this value, so the first quote of its kind is where it left.
             int close = s.indexOf(valueQuote, begin);
             if (close < 0 || close >= end) {
                 valueOut.append(s, begin, end);
-                valueRaw.append(s, begin, end);
+                templateText |= end > begin;
                 return;
             }
             valueOut.append(s, begin, close);
-            valueRaw.append(s, begin, close);
+            templateText |= close > begin;
             emitHeldValue();
             begin = close;
         }
-        Matcher m = mayOpenValue(s, begin, end) ? OPENS_VALUE.matcher(s).region(begin, end) : null;
-        if (m == null || !m.find()) {
+        if (!opensHeldValue()) {
             super.writeContent(s, begin, end);
             return;
         }
-        int valueStart = m.start(2) >= 0 ? m.start(2) : m.start(3);
         super.writeContent(s, begin, valueStart);
-        valueAttribute = m.group(1).toLowerCase(Locale.ROOT);
-        valueQuote = m.start(2) >= 0 ? '"' : '\'';
-        valueOut = new StringBuilder(end - valueStart + 32).append(s, valueStart, end);
-        valueRaw = new StringBuilder(end - valueStart + 32).append(s, valueStart, end);
-        firstUserIndex = -1;
-        urlValue = false;
-        jsonValue = false;
+        hold(s, valueStart, end);
+    }
+
+    /**
+     * Whether the text just scanned ends inside a quoted value it opened, on a start tag, of an
+     * attribute whose value is judged whole. H1: so never in a script or style body or in body
+     * text, whatever the text there looks like ({@code var a = "}).
+     */
+    private boolean opensHeldValue() {
+        if (valueStart < 0 || endTag) return false;
+        String attribute = currentAttribute();
+        return isUrlAttribute(currentTag(), attribute) || isJsonAttribute(attribute);
+    }
+
+    private void hold(String s, int begin, int end) {
+        valueAttribute = currentAttribute();
+        valueQuote = quote;
+        urlValue = isUrlAttribute(currentTag(), valueAttribute);
+        valueOut = new StringBuilder(end - begin + 64).append(s, begin, end);
+        templateText = end > begin;
+        firstUser = -1;
         userWrites = 0;
+        soleUser = null;
+        scriptEscaped = false;
+    }
+
+    // --- where the output is ---
+    //
+    // A tokenizer over the template's own text (and anything else written as trusted markup:
+    // $unsafe{...}, content blocks), following the HTML parsing rules closely enough to know
+    // whether the next ${...} lands in body text, inside a tag, inside a quoted attribute value,
+    // or in the body of a <script> or <style> element, where markup isn't parsed and nothing is
+    // an attribute.
+    //
+    // H1 (2026-11 security review). A held attribute value NEVER opens inside a raw-text element
+    // or in body text: it opens only when template text ends in the state VALUE_QUOTED of a start
+    // tag. Before this, the end of each text chunk was matched against a pattern on its own, so
+    // `<script>var a = "${x}"` held a "value" named `a` and gave x attribute escaping in the
+    // middle of a script. The decision rests on this class's own reading of the output, not on
+    // the tag JTE reports with setContext: JTE's context says where the *template source* is,
+    // which isn't where the output is when a @template call renders inside an attribute value.
+    //
+    // User data isn't read: it is escaped so that it can't close a tag, a quoted value or a
+    // raw-text element. It does end a match the template text was in the middle of (dataWritten).
+    //
+    // <textarea> and <title> bodies are text to a browser as well, but are read as markup here:
+    // the worst that does is attribute-escape data in text that looks like a tag, whereas reading
+    // them as text would be wrong for <title> inside <svg>, whose body is markup.
+    //
+    // Foreign content (H1 review, F1). Inside <svg> and <math> the browser parses differently:
+    // `<script href="a.js"/>` and `<style/>` are complete elements (in HTML content the "/" is
+    // ignored and a script body follows), a <script> or <style> with a body is ordinary markup,
+    // tags in it included, and <![CDATA[ ... ]]> is text. So the elements open inside the
+    // outermost <svg>/<math> are kept in `open`, and the output is in foreign content while the
+    // innermost of them isn't an integration point (<foreignObject>, <desc>, <title>,
+    // <annotation-xml>, MathML's <mi> <mo> <mn> <ms> <mtext>), whose content is HTML again. What
+    // isn't modelled errs towards HTML: a tag that takes a browser out of foreign content (<p>,
+    // <div>, ... or an end tag that matches nothing open in it) empties the list down to the
+    // nearest integration point, every integration-point name counts under either root, and
+    // <annotation-xml> counts whatever its encoding. Believing HTML where the browser is in
+    // foreign content means a self-closing <script/> is read as the start of a script body, and
+    // data after it is then escaped for a script and for what JTE reports as well (see "user
+    // data" below): garbled, never unescaped. The reverse (believing foreign content where the
+    // browser reads HTML) needs markup this doesn't follow, such as an <svg> tag in the text of a
+    // <textarea> or an element left open across an integration point; the only thing it changes
+    // is that a <script/> or <style/> written self-closing is taken as complete.
+
+    private static final int DATA = 0, LT = 1, END_TAG_OPEN = 2, TAG_NAME = 3, BEFORE_ATTR = 4,
+        ATTR_NAME = 5, AFTER_ATTR_NAME = 6, BEFORE_VALUE = 7, VALUE_QUOTED = 8, VALUE_UNQUOTED = 9,
+        RAW = 10, RAW_LT = 11, RAW_END = 12, MARKUP = 13, MARKUP_DASH = 14, COMMENT = 15,
+        COMMENT_DASH = 16, COMMENT_DASH_DASH = 17, COMMENT_BANG = 18, BOGUS = 19,
+        CDATA_OPEN = 20, CDATA = 21, CDATA_BRACKET = 22, CDATA_BRACKETS = 23,
+        RAW_BANG = 24, RAW_BANG_DASH = 25, RAW_OPEN = 26;
+    private static final int MAX_NAME = 64;
+    private static final int MAX_OPEN = 256;
+
+    // Elements whose body is text up to their own end tag (in HTML content).
+    private static final String[] RAW_TEXT = {"script", "style"};
+
+    private static final Set<String> FOREIGN_ROOTS = Set.of("svg", "math");
+    private static final Set<String> INTEGRATION_POINTS = Set.of(
+        "foreignobject", "desc", "title", "annotation-xml", "mi", "mo", "mn", "ms", "mtext");
+    // Start tags that end foreign content: the HTML parser's list. <font> is on it only with a
+    // color, face or size attribute (see fontBreakout): an SVG font definition (<font id="f"
+    // horiz-adv-x="10">) stays in the SVG.
+    private static final Set<String> BREAKOUT_TAGS = Set.of(
+        "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed",
+        "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr",
+        "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt", "u",
+        "ul", "var");
+    private static final String CDATA_START = "CDATA[";
+
+    private int state = DATA;
+    private boolean endTag;                                // the tag being read is </name ...>
+    private boolean slash;                                 // inside a tag: the character just read was a '/' outside a value
+    private boolean fontBreakout;                          // the tag being read has an attribute named color, face or size
+    private final StringBuilder tag = new StringBuilder(); // its name, lower-cased
+    private final StringBuilder attr = new StringBuilder(); // the attribute being read, lower-cased
+    private String tagString, attrString;                  // those as Strings, made when asked for
+    private char quote;                                    // in VALUE_QUOTED: the quote that closes it
+    private String rawElement;                             // in RAW*: the element whose body this is
+    private int rawMatched;                                // in RAW_END, RAW_OPEN: characters of its name matched; in CDATA_OPEN: of "CDATA["
+    private int scriptEscape;                              // in a script body: 0 script data, 1 escaped, 2 double-escaped (see raw)
+    private int dashes;                                    // in RAW with scriptEscape > 0: the '-' just read, up to 2
+    private int valueStart;                                // see scan
+    // Elements open inside the outermost <svg>/<math>, lower-cased, outermost first; empty in
+    // plain HTML content. Inside an integration point only what matters is added: a nested
+    // <svg>/<math>, and an element named like the integration point (so its end tag is counted).
+    private final java.util.ArrayList<String> open = new java.util.ArrayList<>();
+
+    /**
+     * Advances the tokenizer over template text. Afterwards {@code valueStart} is the index in
+     * this text where the quoted value still open at its end began, or -1 if the text doesn't end
+     * in a value it opened.
+     */
+    private void scan(String s, int begin, int end) {
+        valueStart = -1;
+        int i = begin;
+        while (i < end) {
+            if (state == DATA || (state == RAW && scriptEscape == 0)) { // most of a page: nothing happens before a '<'
+                i = s.indexOf('<', i);
+                if (i < 0 || i >= end) return;
+            }
+            step(s.charAt(i), i);
+            i++;
+        }
+    }
+
+    /** The same over UTF-8 bytes: every character that matters is ASCII, so no decoding. */
+    private void scan(byte[] b) {
+        valueStart = -1;
+        int i = 0, end = b.length;
+        while (i < end) {
+            if (state == DATA || (state == RAW && scriptEscape == 0)) {
+                while (i < end && b[i] != '<') i++;
+                if (i == end) return;
+            }
+            step((char) (b[i] & 0xff), i);
+            i++;
+        }
+    }
+
+    /** Whether the output is in the body of a {@code <script>} element, in any letter case. */
+    private boolean inScriptBody() {
+        return inBody("script");
+    }
+
+    /** Whether the output is in the body of a {@code <style>} element, in any letter case. */
+    private boolean inStyleBody() {
+        return inBody("style");
+    }
+
+    /** In HTML content, the raw text of that element; in foreign content, directly inside one. */
+    private boolean inBody(String element) {
+        if (inRawText()) return element.equals(rawElement);
+        return !open.isEmpty() && element.equals(open.get(open.size() - 1));
+    }
+
+    private boolean inRawText() {
+        return state == RAW || state == RAW_LT || state == RAW_END || state == RAW_BANG || state == RAW_BANG_DASH
+            || state == RAW_OPEN;
+    }
+
+    /** Whether the output is inside {@code <svg>} or {@code <math>} and not in an integration point. */
+    private boolean inForeignContent() {
+        return !open.isEmpty() && !INTEGRATION_POINTS.contains(open.get(open.size() - 1));
+    }
+
+    /** Whether the output is inside a quoted attribute value of a start tag. */
+    private boolean inQuotedValue() {
+        return state == VALUE_QUOTED && !endTag;
+    }
+
+    /**
+     * Whether what is written next lands inside a tag (start or end) and outside a quoted value,
+     * or straight after the {@code <} or {@code </} that would open one.
+     */
+    private boolean inTagOutsideValue() {
+        return state == TAG_NAME || state == BEFORE_ATTR || state == ATTR_NAME || state == AFTER_ATTR_NAME
+            || state == BEFORE_VALUE || state == VALUE_UNQUOTED || state == LT || state == END_TAG_OPEN;
+    }
+
+    /** The tag being read, or the last one read. */
+    private String currentTag() {
+        if (tagString == null) tagString = tag.toString();
+        return tagString;
+    }
+
+    /** The attribute being read: in VALUE_QUOTED, the one whose value this is. */
+    private String currentAttribute() {
+        if (attrString == null) attrString = attr.toString();
+        return attrString;
+    }
+
+    private void step(char c, int index) {
+        // "/>" ends a tag as self-closing only when the '/' is outside a value and nothing
+        // follows it: not in <a href=/x/> or <br / >.
+        boolean selfClosing = slash;
+        slash = false;
+        switch (state) {
+            case DATA -> { if (c == '<') state = LT; }
+            case LT -> {
+                if (isAsciiLetter(c)) startTagName(c, false);
+                else if (c == '/') state = END_TAG_OPEN;
+                else if (c == '!') state = MARKUP;
+                else if (c == '?') state = BOGUS;
+                else if (c != '<') state = DATA;
+            }
+            case END_TAG_OPEN -> {
+                if (isAsciiLetter(c)) startTagName(c, true);
+                else state = c == '>' ? DATA : BOGUS;
+            }
+            case TAG_NAME -> {
+                if (isSpace(c)) state = BEFORE_ATTR;
+                else if (c == '/') tagSlash();
+                else if (c == '>') closeTag(false);
+                else appendName(tag, c);
+                tagString = null;
+            }
+            case BEFORE_ATTR -> {
+                if (c == '>') closeTag(selfClosing);
+                else if (c == '/') tagSlash();
+                else if (!isSpace(c)) startAttribute(c);
+            }
+            case ATTR_NAME -> {
+                boolean named = isSpace(c) || c == '/' || c == '=' || c == '>';
+                if (named && !fontBreakout) {
+                    fontBreakout = "color".contentEquals(attr) || "face".contentEquals(attr) || "size".contentEquals(attr);
+                }
+                if (isSpace(c)) state = AFTER_ATTR_NAME;
+                else if (c == '/') tagSlash();
+                else if (c == '=') state = BEFORE_VALUE;
+                else if (c == '>') closeTag(false);
+                else appendName(attr, c);
+                attrString = null;
+            }
+            case AFTER_ATTR_NAME -> {
+                if (c == '=') state = BEFORE_VALUE;
+                else if (c == '/') tagSlash();
+                else if (c == '>') closeTag(false);
+                else if (!isSpace(c)) startAttribute(c);
+            }
+            case BEFORE_VALUE -> {
+                if (c == '"' || c == '\'') {
+                    state = VALUE_QUOTED;
+                    quote = c;
+                    valueStart = index + 1;
+                } else if (c == '>') {
+                    closeTag(false);
+                } else if (!isSpace(c)) {
+                    state = VALUE_UNQUOTED;
+                }
+            }
+            case VALUE_QUOTED -> {
+                if (c == quote) {
+                    state = BEFORE_ATTR;
+                    valueStart = -1;
+                }
+            }
+            case VALUE_UNQUOTED -> {
+                if (isSpace(c)) state = BEFORE_ATTR;
+                else if (c == '>') closeTag(false);
+            }
+            case RAW -> raw(c);
+            case RAW_LT -> {
+                if (c == '/') {
+                    state = RAW_END;
+                    rawMatched = 0;
+                } else if (c == '!' && scriptEscape == 0 && "script".equals(rawElement)) {
+                    state = RAW_BANG;
+                } else if (scriptEscape == 1 && lower(c) == 's') {
+                    state = RAW_OPEN;
+                    rawMatched = 1;
+                } else {
+                    rawAgain(c);
+                }
+            }
+            case RAW_BANG -> { if (c == '-') state = RAW_BANG_DASH; else rawAgain(c); }
+            case RAW_BANG_DASH -> {
+                if (c == '-') {
+                    state = RAW;
+                    scriptEscape = 1;
+                    dashes = 2; // "<!-->" is over already
+                } else {
+                    rawAgain(c);
+                }
+            }
+            case RAW_OPEN -> { // "<script" in the escaped state
+                if (rawMatched < rawElement.length()) {
+                    if (lower(c) == rawElement.charAt(rawMatched)) rawMatched++;
+                    else rawAgain(c);
+                } else if (isSpace(c) || c == '/' || c == '>') {
+                    state = RAW;
+                    scriptEscape = 2;
+                } else {
+                    rawAgain(c); // <scripty
+                }
+            }
+            case RAW_END -> {
+                if (rawMatched < rawElement.length()) {
+                    if (lower(c) == rawElement.charAt(rawMatched)) rawMatched++;
+                    else rawAgain(c);
+                } else if (!isSpace(c) && c != '/' && c != '>') {
+                    rawAgain(c); // </scripty: still the body
+                } else if (scriptEscape == 2) {
+                    state = RAW; // the </script> of the inner "<script": not the end of the element
+                    scriptEscape = 1;
+                } else {
+                    scriptEscape = 0;
+                    if (c == '>') {
+                        state = DATA;
+                    } else {
+                        endTag = true; // </script ...>: read to its '>' like any other tag
+                        state = BEFORE_ATTR;
+                    }
+                }
+            }
+            case MARKUP -> {
+                if (c == '[' && inForeignContent()) {
+                    state = CDATA_OPEN; // in HTML content "<![CDATA[" is a bogus comment, up to the first '>'
+                    rawMatched = 0;
+                } else {
+                    state = c == '-' ? MARKUP_DASH : c == '>' ? DATA : BOGUS;
+                }
+            }
+            case CDATA_OPEN -> {
+                if (c != CDATA_START.charAt(rawMatched)) state = c == '>' ? DATA : BOGUS;
+                else if (++rawMatched == CDATA_START.length()) state = CDATA;
+            }
+            case CDATA -> { if (c == ']') state = CDATA_BRACKET; }
+            case CDATA_BRACKET -> state = c == ']' ? CDATA_BRACKETS : CDATA;
+            case CDATA_BRACKETS -> { if (c != ']') state = c == '>' ? DATA : CDATA; }
+            // "<!--" goes straight to COMMENT_DASH_DASH: "<!-->" and "<!--->" are whole comments.
+            case MARKUP_DASH -> state = c == '-' ? COMMENT_DASH_DASH : c == '>' ? DATA : BOGUS;
+            case COMMENT -> { if (c == '-') state = COMMENT_DASH; }
+            case COMMENT_DASH -> state = c == '-' ? COMMENT_DASH_DASH : COMMENT;
+            case COMMENT_DASH_DASH -> {
+                if (c == '>') state = DATA;
+                else if (c == '!') state = COMMENT_BANG;
+                else if (c != '-') state = COMMENT;
+            }
+            case COMMENT_BANG -> state = c == '>' ? DATA : c == '-' ? COMMENT_DASH : COMMENT; // "--!>"
+            case BOGUS -> { if (c == '>') state = DATA; }
+            default -> throw new IllegalStateException("tokenizer state " + state);
+        }
+    }
+
+    private void startTagName(char c, boolean end) {
+        state = TAG_NAME;
+        endTag = end;
+        fontBreakout = false;
+        tag.setLength(0);
+        tag.append(lower(c));
+        tagString = null;
+    }
+
+    private void startAttribute(char c) {
+        state = ATTR_NAME;
+        attr.setLength(0);
+        attr.append(lower(c));
+        attrString = null;
+    }
+
+    // The body of a <script> or <style> in HTML content. A <style> ends at its end tag and that is
+    // all. A <script> has the HTML tokenizer's "escaped" states as well (H1 review, F2), kept in
+    // scriptEscape: "<!--" enters the escaped state (1), "<script" followed by a space, '/' or
+    // '>' in it enters the double-escaped state (2), where "</script" followed by one of those
+    // returns to the escaped state and does NOT end the element, and "-->" in either returns to
+    // plain script data (0). "</script" then ends the element from 0 or 1. So in
+    //   <script><!-- document.write("<script src=x></script>"); var a = "${a}"; //--></script>
+    // ${a} is still in the script, though JTE, which ends a script at the first </script>, says
+    // it isn't; the two disagree and the data is escaped for a script.
+
+    private void raw(char c) {
+        if (c == '<') {
+            state = RAW_LT;
+            dashes = 0;
+        } else if (scriptEscape > 0) {
+            if (c == '-') {
+                if (dashes < 2) dashes++;
+            } else {
+                if (c == '>' && dashes == 2) scriptEscape = 0; // "-->"
+                dashes = 0;
+            }
+        }
+    }
+
+    /** A character that didn't continue what the body was in the middle of matching. */
+    private void rawAgain(char c) {
+        state = RAW;
+        raw(c);
+    }
+
+    private void tagSlash() {
+        state = BEFORE_ATTR;
+        slash = true;
+    }
+
+    /** The '>' of a tag. {@code selfClosing}: it was written {@code />}. */
+    private void closeTag(boolean selfClosing) {
+        state = DATA;
+        if (endTag) {
+            if (!open.isEmpty()) closeElement(currentTag());
+            return;
+        }
+        if (inForeignContent()) {
+            if (!BREAKOUT_TAGS.contains(currentTag()) && !(fontBreakout && "font".contentEquals(tag))) {
+                // Every element here is markup, <script> and <style> too: no raw text, and
+                // a self-closing one is complete.
+                if (!selfClosing) openElement(currentTag());
+                return;
+            }
+            leaveForeignContent(); // the browser closes the foreign elements and reads the tag as HTML
+        }
+        for (String name : RAW_TEXT) {
+            if (name.contentEquals(tag)) {
+                state = RAW; // "/>" or not: HTML has no self-closing <script/>
+                rawElement = name;
+                scriptEscape = 0;
+                dashes = 0;
+                return;
+            }
+        }
+        if (selfClosing) return;
+        if (open.isEmpty() ? "svg".contentEquals(tag) || "math".contentEquals(tag)
+                : FOREIGN_ROOTS.contains(currentTag()) || open.get(open.size() - 1).equals(currentTag())) {
+            openElement(currentTag());
+        }
+    }
+
+    private void openElement(String name) {
+        // Deeper than any real SVG: stop following it, which reads everything after as HTML.
+        if (open.size() >= MAX_OPEN) open.clear();
+        else open.add(name);
+    }
+
+    /** An end tag while something is open inside {@code <svg>} or {@code <math>}. */
+    private void closeElement(String name) {
+        int top = open.size() - 1;
+        if (INTEGRATION_POINTS.contains(open.get(top))) {
+            // HTML content: only the integration point's own end tag is of interest.
+            if (open.get(top).equals(name)) open.remove(top);
+            return;
+        }
+        int match = name.equals("p") || name.equals("br") ? -1 : open.lastIndexOf(name);
+        if (match < 0) leaveForeignContent(); // </p>, </br>, or nothing here by that name: HTML's rules, which may close it all
+        else open.subList(match, open.size()).clear();
+    }
+
+    /** Closes the foreign elements down to the nearest integration point, or all of them. */
+    private void leaveForeignContent() {
+        int keep = open.size();
+        while (keep > 0 && !INTEGRATION_POINTS.contains(open.get(keep - 1))) keep--;
+        open.subList(keep, open.size()).clear();
+    }
+
+    private static void appendName(StringBuilder name, char c) {
+        if (name.length() < MAX_NAME) name.append(lower(c));
+    }
+
+    private static char lower(char c) {
+        return c >= 'A' && c <= 'Z' ? (char) (c + 32) : c;
+    }
+
+    private static boolean isSpace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    }
+
+    /**
+     * Write the held value: replaced first if it's a URL that user data made unsafe, or an
+     * {@code hx-vals}/{@code hx-headers} value that user data made an expression.
+     */
+    private void emitHeldValue() {
+        if (firstUser < 0) {
+            target.writeContent(valueOut.toString()); // all template text
+        } else {
+            // The value as the browser reads it. Decoded from what will be written, not put
+            // together from the pieces, so that a reference the template wrote (href="&#32;${x}",
+            // L7) or one split between template and data ("&#" + "32;") reads as it will there.
+            String raw = decodeReferences(valueOut);
+            int userAt = templatePrefixLength();
+            if (urlValue) {
+                boolean safe = isSafeValue(raw, userAt);
+                if (safe && scriptEscaped) {
+                    // Data in it was script-escaped as well (JTE reads a script here), and that
+                    // takes the ':' out of "javascript:". Judged again with those escapes undone:
+                    // the URL rule isn't switched off by the other reading's escaping.
+                    safe = isSafeValue(unescapeScript(raw), unescapeScript(raw.substring(0, userAt)).length());
+                }
+                if (safe) target.writeContent(valueOut.toString());
+                else Escape.htmlAttribute(BLOCKED_URL, target);
+            } else if (userWrites == 1 && !templateText) {
+                // The whole value is one piece of data: JSON the app built (hx-vals='${json}').
+                // escaping its quotes as JavaScript would break the JSON, so it's attribute-escaped instead (the
+                // browser decodes that back), unless it's a js: expression htmx would evaluate.
+                if (evaluatedBecauseOfUserData(soleUser, 0)) target.writeContent("{}");
+                else Escape.htmlAttribute(soleUser, target);
+            } else if (evaluatedBecauseOfUserData(unescapeScript(raw), unescapeScript(raw.substring(0, userAt)).length())) {
+                // Data made it a js: expression. Read with the \\uXXXX escapes of the data undone:
+                // a tab written as \\u0009 isn't whitespace to htmx, but this doesn't lean on that.
+                target.writeContent("{}");
+            } else {
+                target.writeContent(valueOut.toString());
+            }
+        }
+        valueOut = null;
+        valueAttribute = null;
         soleUser = null;
     }
 
     /**
-     * A cheap test that template text might end inside an attribute value: a quote after '=',
-     * back to the tag's start. Other quotes are passed over, since a value can hold the other
-     * kind ({@code onclick="go('}); {@link #OPENS_VALUE} makes the real decision.
+     * How much of the decoded value is the template's own text before the first user data. A
+     * reference left unfinished where the data starts ({@code &#} then {@code ${n};}) doesn't
+     * count: the data completes it.
      */
-    private static boolean mayOpenValue(byte[] b) {
-        for (int i = b.length - 1; i > 0; i--) {
-            byte c = b[i];
-            if (c == '"' || c == '\'') {
-                int j = i - 1;
-                while (j >= 0 && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r')) j--;
-                if (j >= 0 && b[j] == '=') return true;
-            }
-            if (c == '>' || c == '<') return false;
+    private int templatePrefixLength() {
+        int end = firstUser;
+        int amp = valueOut.lastIndexOf("&", end - 1);
+        if (end > 0 && amp >= 0) {
+            int semicolon = valueOut.indexOf(";", amp);
+            if (semicolon < 0 || semicolon >= end) end = amp;
         }
-        return false;
-    }
-
-    private static boolean mayOpenValue(String s, int begin, int end) {
-        for (int i = end - 1; i > begin; i--) {
-            char c = s.charAt(i);
-            if (c == '"' || c == '\'') {
-                int j = i - 1;
-                while (j >= begin && Character.isWhitespace(s.charAt(j))) j--;
-                if (j >= begin && s.charAt(j) == '=') return true;
-            }
-            if (c == '>' || c == '<') return false;
-        }
-        return false;
-    }
-
-    /** Write the held value, replaced first if it's a URL that user data made unsafe. */
-    private void emitHeldValue() {
-        if (urlValue && !isSafeValue()) {
-            Escape.htmlAttribute(BLOCKED_URL, target);
-        } else if (jsonValue && userWrites == 1 && valueRaw.length() == soleUser.length()) {
-            // The whole value is one piece of data: JSON the app built (hx-vals='${json}').
-            // escaping its quotes as JavaScript would break the JSON, so it's attribute-escaped instead (the
-            // browser decodes that back), unless it's a js: expression htmx would evaluate.
-            Escape.htmlAttribute(evaluated(soleUser) ? "{}" : soleUser, target);
-        } else {
-            target.writeContent(valueOut.toString());
-        }
-        valueAttribute = null;
-        valueOut = null;
-        valueRaw = null;
-        urlValue = false;
-        jsonValue = false;
-        userWrites = 0;
-        soleUser = null;
+        return decodeReferences(valueOut.subSequence(0, end)).length();
     }
 
     /** Flushes a value still held at the end of a render. Called by {@link TemplateEngine}. */
     void finish() {
-        if (valueAttribute != null) emitHeldValue();
+        if (valueOut != null) emitHeldValue();
     }
 
     // --- user data ---
+    //
+    // Two readings of where it lands: this class's tokenizer (where the output is) and JTE's
+    // context (where the template source is). They differ when a @template call or content block
+    // renders inside an attribute value, where JTE reports body text, and inside <Script>, which
+    // JTE doesn't know is a script. They also differ whenever the tokenizer has lost its place,
+    // which no template should be able to make it do, but has (H1 review, F1: a self-closing
+    // <script/> in SVG was read as the start of a script body that ran on down the page).
+    //
+    // INVARIANT: disagreement between JTE's context and the tokenizer always resolves to the
+    // stricter of the two. Each reading names the rules for the place it believes the data
+    // lands in, and where the two name different places the data gets the rules of both: the
+    // URL scheme check if either says URL attribute, script escaping if either says script
+    // attribute or script body, CSS escaping if either says style, attribute escaping if either
+    // says attribute. Neither reading can switch off a rule the other calls for, so a tokenizer
+    // that has lost its place garbles data (script escapes in body text) and never unescapes it.
+    //
+    // The strictest reading of all (final review, M1): the tokenizer is INSIDE A TAG AND NOT IN A
+    // QUOTED VALUE: in the tag name, before, in or after an attribute name, before a value or in
+    // an unquoted one, or straight after "<" or "</". Nothing escapes for that position: in
+    // attribute-name position a space ends a name, "=" starts a value and letters alone spell
+    // `hidden` or `autofocus`; after "<" a letter starts a tag. So there every character of the
+    // data is written as an escape (escapeAll, or CSS hex escapes in a style), whatever JTE
+    // reports and on top of whatever rule JTE's attribute calls for. JTE refuses ${...} as a tag
+    // name, as an attribute name and in an unquoted value at compile time, so a template reaches
+    // this only in a script or style body that a browser reads as markup:
+    //   <svg><script>var n = 0<i ? "${x}" : "";</script></svg>
+    // where "<i" opens a tag and the string is in attribute-name position (a JavaScript string
+    // reads the escapes back as the text, so the script still gets its value), or through text
+    // JTE dropped (in 3.2.1 a first comment in a script can take the <script> tag before it with
+    // it, leaving the script's source as body text; see SECURITY.md), or after a desync.
 
     @Override
     public void writeUserContent(String value) {
         if (value == null) return;
-        if (valueAttribute != null && (attributeName == null || urlValue || jsonValue)) {
-            appendToHeldValue(value);
-            return;
+        boolean jteAttribute = tagName != null && attributeName != null;
+        boolean jteScript = attributeName == null && "script".equals(tagName);
+        boolean jteStyle = attributeName == null && "style".equals(tagName);
+        boolean insideTag = valueOut == null && inTagOutsideValue();
+        boolean scriptBody = inScriptBody() || jteScript;
+        if (!value.isEmpty()) {
+            // The data's first character as it will be written: inside a tag, and for a character
+            // that script escaping doesn't leave alone, the backslash of an escape.
+            char first = value.charAt(0);
+            dataWritten(insideTag || (scriptBody && !jteAttribute && !isScriptDataPlain(first)) ? '\\' : first);
         }
-        if (tagName == null || attributeName == null) {
-            super.writeUserContent(value);
-            return;
-        }
-        if (valueAttribute != null) emitHeldValue();
-        if (isUrlAttribute(tagName, attributeName)) {
-            // A URL value whose opening this class didn't see: judge the value on its own.
-            boolean safe = isSafeUrl(value) || mediaDataUrl(attributeName, value);
-            Escape.htmlAttribute(safe ? value : BLOCKED_URL, target);
-        } else if (isScriptAttribute(attributeName)) {
-            Escape.htmlAttribute(escapeScript(value), target);
-        } else if ("srcdoc".equals(attributeName)) {
-            var once = new StringBuilder(value.length() + 16);
-            Escape.htmlAttribute(value, new Appender(once));
-            Escape.htmlAttribute(once.toString(), target);
+        if (valueOut != null) {
+            appendToHeldValue(value, jteScript, jteStyle);
+        } else if (insideTag) {
+            writeAttributeData(null, null, jteAttribute ? tagName : null, jteAttribute ? attributeName : null, value,
+                scriptBody, inStyleBody() || jteStyle, true);
+        } else if (inQuotedValue()) {
+            // In an attribute value that isn't held. Also reached with no attribute context from
+            // JTE (a @template call inside the value): JTE would escape that as body text, which
+            // leaves quotes alone.
+            writeAttributeData(currentTag(), currentAttribute(), jteAttribute ? tagName : null,
+                jteAttribute ? attributeName : null, value, jteScript, jteStyle, false);
+        } else if (jteAttribute) {
+            // JTE reports an attribute and the output isn't in a quoted value of a start tag
+            // (JTE refuses unquoted ones, so the two disagree): JTE's attribute, and whatever
+            // body the output is in.
+            writeAttributeData(null, null, tagName, attributeName, value, inScriptBody(), inStyleBody(), false);
         } else {
-            super.writeUserContent(value);
+            boolean style = inStyleBody() || jteStyle;
+            if (scriptBody) {
+                // A script body by either reading: the same escaping whether the two agree or
+                // not, and whether the script is HTML's raw text or markup inside <svg>. What it
+                // writes is inert as body text too, if only one of them says script.
+                String escaped = escapeScriptData(value);
+                target.writeContent(style ? escapeCss(escaped) : escaped);
+            } else if (style) {
+                // L7: JTE HTML-escapes data in a <style> body, which keeps it in the element but not
+                // in its declaration. (The result is inert as body text too, if JTE alone says style.)
+                target.writeContent(escapeCss(value));
+            } else {
+                super.writeUserContent(value); // JTE's escaping for body text
+            }
         }
     }
 
     /**
-     * User data inside the held value. With no attribute context from JTE, it was written by a
-     * {@code @template} call (or a content block) inside the value: JTE escapes that as body text,
-     * which leaves quotes alone, so it's classified here by the held attribute's name instead,
-     * failing safe for names that are URLs only on some tags.
+     * Data is about to be written (not empty; {@code first} is its first character). The
+     * tokenizer doesn't read data, which is escaped so that it can't open or close anything, but
+     * data does separate the template text before it from the text after it (H1 review, F5):
+     * {@code </scr${x}ipt>} is not an end tag, {@code -${x}->} doesn't end a comment. So a match
+     * in progress is dropped. The one place where what the data is matters is straight after a
+     * {@code <} in markup, where a browser takes a letter for the start of a tag; reading that as
+     * a tag too keeps a quoted value written after it an attribute value. (Its name starts with
+     * data, so it is never taken for a script, style or svg tag: '?' stands in for the data.)
      */
-    private void appendToHeldValue(String value) {
-        String attribute = valueAttribute;
-        if (!urlValue && !jsonValue) {
-            if (isUrlAttribute(tagName, attribute) || ANIMATION_VALUES.contains(attribute)) urlValue = true;
-            else if (isJsonAttribute(attribute)) jsonValue = true;
+    private void dataWritten(char first) {
+        slash = false;
+        dashes = 0;
+        switch (state) {
+            case LT -> {
+                if (isAsciiLetter(first)) startTagName('?', false);
+                else state = first == '/' ? END_TAG_OPEN : first == '!' ? MARKUP : first == '?' ? BOGUS : DATA;
+            }
+            case END_TAG_OPEN -> {
+                if (isAsciiLetter(first)) startTagName('?', true);
+                else state = BOGUS;
+            }
+            case MARKUP, CDATA_OPEN -> state = BOGUS;
+            case MARKUP_DASH -> state = first == '-' ? COMMENT : BOGUS;
+            case COMMENT_DASH, COMMENT_DASH_DASH, COMMENT_BANG -> state = COMMENT;
+            case CDATA_BRACKET, CDATA_BRACKETS -> state = CDATA;
+            case RAW_LT, RAW_END, RAW_BANG, RAW_BANG_DASH, RAW_OPEN -> state = RAW;
+            default -> { }
         }
-        if (firstUserIndex < 0) firstUserIndex = valueRaw.length();
-        userWrites++;
-        soleUser = value;
-        valueRaw.append(value);
-        var out = new Appender(valueOut);
-        if (urlValue) {
-            Escape.htmlAttribute(value, out);
-        } else if (jsonValue || isScriptAttribute(attribute)) {
-            Escape.htmlAttribute(escapeScript(value), out);
-        } else if ("srcdoc".equals(attribute)) {
+    }
+
+    /**
+     * Data in an attribute value that isn't held, under the rules of the attribute the output is
+     * in ({@code tag}, {@code attribute}; null if it isn't in one) and of the one JTE reports
+     * ({@code jteTag}, {@code jteAttribute}; null if none), which are normally the same, plus
+     * script or CSS escaping when one of the two readings is a script or style body.
+     * {@code insideTag}: the output is inside a tag and not in a quoted value at all (see "user
+     * data" above); JTE's attribute, if it reports one, still gets its rule first.
+     */
+    private void writeAttributeData(String tag, String attribute, String jteTag, String jteAttribute,
+                                    String value, boolean script, boolean css, boolean insideTag) {
+        boolean url = attribute != null && isUrlAttribute(tag, attribute);
+        boolean jteUrl = jteAttribute != null && isUrlAttribute(jteTag, jteAttribute);
+        if (url || jteUrl) {
+            // No whole value to judge here, only this piece, and the next piece could finish a
+            // scheme this one starts ("javascript" then ":..."): it has to settle its own.
+            boolean media = (!url || mediaDataUrl(attribute, value)) && (!jteUrl || mediaDataUrl(jteAttribute, value));
+            if (!settlesItsScheme(value) || !(isSafeUrl(value) || media)) value = BLOCKED_URL;
+        }
+        if ((isJsonAttribute(attribute) || isJsonAttribute(jteAttribute)) && !value.isEmpty()) {
+            // L7 final review. An hx-vals, hx-headers or hx-request value that isn't held can't
+            // be judged whole, and judged a piece at a time "j" then "s:alert(1)" both pass. So
+            // none of the data is written: "{}" for the first piece, nothing for the rest, until
+            // template text with a quote in it shows the value is over (or, for the other kind
+            // of quote, isn't: then the next piece is "{}" again, and still none of it is data).
+            value = unheldJsonWritten ? "" : "{}";
+            unheldJsonWritten = true;
+        }
+        css |= "style".equals(attribute) || "style".equals(jteAttribute);
+        boolean scriptAttribute = isScriptAttribute(attribute) || isScriptAttribute(jteAttribute);
+        if (insideTag) {
+            // CSS alone: hex escapes, which a CSS parser reads back. Otherwise \\uXXXX, which a
+            // script reads back, CSS-escaped as well if a style is one of the readings.
+            boolean anyScript = script || scriptAttribute;
+            target.writeContent(css && !anyScript ? escapeCss(value, true) : css ? escapeCss(escapeAll(value)) : escapeAll(value));
+            return;
+        }
+        // A script body by one of the readings. JTE says script (and so no attribute): the data
+        // is in a string of that script, and gets a script body's escaping. JTE says attribute
+        // and the tokenizer says script body: JTE saw a quoted attribute value in the template's
+        // source, so either the browser is in that value (and the tokenizer has lost its place)
+        // or in a script string with a quote before the data; a script attribute's escaping
+        // covers both, and leaves a URL readable if the tokenizer is the one that is wrong.
+        if (script && jteAttribute == null) value = escapeScriptData(value);
+        else if (script || scriptAttribute) value = escapeScript(value);
+        if (css) {
+            target.writeContent(escapeCss(value)); // nothing left in it for HTML escaping to do
+        } else if ("srcdoc".equals(attribute) || "srcdoc".equals(jteAttribute)) {
             var once = new StringBuilder(value.length() + 16);
             Escape.htmlAttribute(value, new Appender(once));
-            Escape.htmlAttribute(once.toString(), out);
+            Escape.htmlAttribute(once.toString(), target);
         } else {
-            Escape.htmlAttribute(value, out);
+            Escape.htmlAttribute(value, target);
         }
+    }
+
+    /**
+     * Whether a piece of a URL written outside a held value decides, by itself, what scheme the
+     * URL has or that it has none: it is empty, or has a {@code : / ? #} in it.
+     */
+    private static boolean settlesItsScheme(String piece) {
+        String url = normalize(piece);
+        if (url.isEmpty()) return true;
+        for (int i = 0; i < url.length(); i++) {
+            char c = url.charAt(i);
+            if (c == ':' || c == '/' || c == '?' || c == '#') return true;
+        }
+        return false;
+    }
+
+    /** User data inside the held value: a URL, or hx-vals/hx-headers. */
+    private void appendToHeldValue(String value, boolean jteScript, boolean jteStyle) {
+        if (firstUser < 0) firstUser = valueOut.length();
+        // JTE reads a script, a style or a script attribute here: its escaping as well.
+        boolean jteDiffers = jteScript || jteStyle || (urlValue && isScriptAttribute(attributeName));
+        userWrites += jteDiffers ? 2 : 1; // never "the whole value is one piece of JSON" then
+        soleUser = value;
+        if (jteScript) value = escapeScriptData(value);
+        else if (jteDiffers || !urlValue) value = escapeScript(value);
+        scriptEscaped |= jteDiffers;
+        if (jteStyle) value = escapeCss(value);
+        Escape.htmlAttribute(value, new Appender(valueOut));
     }
 
     @Override
     public void writeUserContent(Content content) {
         if (content == null) return;
-        if (valueAttribute != null && (attributeName == null || urlValue || jsonValue)) {
-            var text = createOutputForAttributeContent();
-            content.writeTo(text);
-            appendToHeldValue(text.toString());
-            return;
-        }
-        if (tagName != null && attributeName != null) {
+        if (valueOut != null || inQuotedValue() || (tagName != null && attributeName != null)) {
             // Rendered to text first, into the HTML-aware output JTE itself uses for this (a
             // content block casts its output to one), then treated like any other value here.
             var text = createOutputForAttributeContent();
             content.writeTo(text);
             writeUserContent(text.toString());
         } else {
-            if (valueAttribute != null) emitHeldValue();
             super.writeUserContent(content);
         }
     }
@@ -306,17 +937,37 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
 
     // --- rules ---
 
-    private boolean isSafeValue() {
-        if (firstUserIndex < 0) return true; // all template text
-        String raw = valueRaw.toString();
+    /** {@code raw}: the held URL value as the browser reads it; {@code userAt}: where user data starts in it. */
+    private boolean isSafeValue(String raw, int userAt) {
         if ("values".equals(valueAttribute)) {
             for (String item : raw.split(";")) {
                 if (!isSafeUrl(item)) return false;
             }
             return true;
         }
-        if (schemeWrittenByTemplate(raw, firstUserIndex)) return true;
+        // L7: a script URL the template wrote, with data in it (href="javascript:go('${x}')"), is
+        // code with data spliced in. Attribute escaping is undone by the browser before it runs,
+        // and so is percent-encoding, so there is no escaping to apply: it's blocked.
+        if (schemeWrittenByTemplate(raw, userAt)) return !isScriptUrl(raw);
         return isSafeUrl(raw) || mediaDataUrl(valueAttribute, raw);
+    }
+
+    private static boolean isScriptUrl(String url) {
+        String scheme = scheme(normalize(url));
+        return scheme != null && (scheme.equalsIgnoreCase("javascript") || scheme.equalsIgnoreCase("vbscript"));
+    }
+
+    /** The scheme of a normalized URL, or null if it is relative. */
+    private static String scheme(String normalized) {
+        int colon = normalized.indexOf(':');
+        if (colon < 0) return null;
+        // A scheme only if the ':' comes before any path, query or fragment delimiter.
+        for (int i = 0; i < colon; i++) {
+            char c = normalized.charAt(i);
+            if (c == '/' || c == '?' || c == '#') return null;
+        }
+        String scheme = normalized.substring(0, colon);
+        return isScheme(scheme) ? scheme : null; // not parseable as a scheme: a relative path
     }
 
     /**
@@ -357,19 +1008,48 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
         return attribute.startsWith("data-hx-") ? attribute.substring(5) : attribute;
     }
 
-    /** htmx attributes that take JSON (or, with a {@code js:} prefix, an expression). */
+    /**
+     * htmx attributes that take JSON (or, with a {@code js:} prefix, an expression): the three
+     * that htmx 2.0.10 reads through its one evaluating function with "evaluate only on the
+     * prefix". {@code hx-request} was missing (L7 review, F4). The fourth caller of that
+     * function, {@code hx-vars}, is evaluated whatever it starts with, so it has no prefix to
+     * guard and is a script attribute only.
+     */
     private static boolean isJsonAttribute(String attribute) {
+        if (attribute == null) return false;
         String name = unprefixed(attribute);
-        return name.equals("hx-vals") || name.equals("hx-headers");
+        return name.equals("hx-vals") || name.equals("hx-headers") || name.equals("hx-request");
     }
 
-    /** A {@code js:}/{@code javascript:} value, which htmx evaluates as code. */
-    private static boolean evaluated(String value) {
-        String v = normalize(value).toLowerCase(Locale.ROOT);
-        return v.startsWith("js:") || v.startsWith("javascript:");
+    /**
+     * Whether a held {@code hx-vals}/{@code hx-headers}/{@code hx-request} value starts with {@code js:} or
+     * {@code javascript:}, which htmx evaluates as code, and user data supplied any of that
+     * prefix. Judged on the whole value as the browser reads it ({@code raw}), however many
+     * pieces it was written in, after the trimming htmx does: JavaScript's {@code trim()}, which
+     * strips Unicode spaces too (L7). U+FFFD stands for a named reference this class doesn't
+     * decode, which may be one of those spaces. A prefix that is all template text
+     * ({@code hx-vals='js:{v: "${x}"}'}) is the template's choice.
+     */
+    private static boolean evaluatedBecauseOfUserData(String raw, int userAt) {
+        int i = 0, length = raw.length();
+        while (i < length && (isJsSpace(raw.charAt(i)) || raw.charAt(i) == '�')) i++;
+        for (String prefix : EVALUATED_PREFIXES) {
+            if (raw.regionMatches(true, i, prefix, 0, prefix.length())) return userAt < i + prefix.length();
+        }
+        return false;
+    }
+
+    private static final String[] EVALUATED_PREFIXES = {"js:", "javascript:"};
+
+    /** What JavaScript's {@code String.prototype.trim} strips: WhiteSpace and LineTerminator. */
+    private static boolean isJsSpace(char c) {
+        return (c >= '\t' && c <= '\r') || c == ' ' || c == ' ' || c == ' '
+            || (c >= ' ' && c <= ' ') || c == ' ' || c == ' ' || c == ' '
+            || c == ' ' || c == '　' || c == '﻿';
     }
 
     private static boolean isScriptAttribute(String attribute) {
+        if (attribute == null) return false;
         String name = unprefixed(attribute);
         return name.startsWith("on") || name.startsWith("hx-on")
             || name.equals("hx-vals") || name.equals("hx-vars") || name.equals("hx-headers")
@@ -399,21 +1079,139 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
     }
 
     /**
+     * Escape for data in a script body (final review): everything but ASCII letters and digits,
+     * {@code _}, {@code ,} and non-ASCII characters is written as {@code \}{@code uXXXX}
+     * ({@code \} itself as {@code \\}). U+2028, U+2029, the C1 controls and unpaired surrogates
+     * are escaped too.
+     *
+     * <p>What is left is the same text to everything that might read it. A JavaScript string in
+     * either quote style, a template literal (no {@code `} or <code>${</code>) and a JSON string
+     * read the escapes back as the original characters, and a regex literal matches them
+     * literally. To an HTML tokenizer there is no {@code < > & " '}, no space, {@code =} or
+     * {@code /}: in raw text it can't spell {@code </script} or {@code <!--}, and if the browser
+     * is reading the script as markup (in {@code <svg>}) it can't end an attribute value in
+     * either quote style, an unquoted one or an attribute name, so it doesn't matter whether the
+     * tokenizer here knows which of those it is. JTE's own script escaping wrote {@code \'},
+     * {@code \-}, {@code \`} and {@code \$}, which are not JSON, and {@code \"}, whose quote is
+     * still a quote to HTML.
+     *
+     * <p>It protects data inside a string or regex literal. Outside one, anything escaped is a
+     * syntax error ({@code var n = ${count}} works for letters and digits only, so not for
+     * {@code 1.5} or {@code -3}). Nor does it suit a script block that is neither JavaScript nor
+     * JSON ({@code type="text/template"}): the escapes show up in it as text.
+     */
+    static String escapeScriptData(String value) {
+        StringBuilder out = null;
+        for (int i = 0, n = value.length(); i < n; i++) {
+            char c = value.charAt(i);
+            boolean pair = Character.isHighSurrogate(c) && i + 1 < n && Character.isLowSurrogate(value.charAt(i + 1));
+            if (pair || isScriptDataPlain(c)) {
+                if (out != null) out.append(c);
+                if (pair) {
+                    i++;
+                    if (out != null) out.append(value.charAt(i));
+                }
+                continue;
+            }
+            if (out == null) out = new StringBuilder(n + 32).append(value, 0, i);
+            if (c == '\\') out.append("\\\\");
+            else appendUnicodeEscape(out, c);
+        }
+        return out == null ? value : out.toString();
+    }
+
+    private static boolean isScriptDataPlain(char c) {
+        return isAsciiAlphanumeric(c) || c == '_' || c == ','
+            || (c >= 0xa0 && c != 0x2028 && c != 0x2029 && !Character.isSurrogate(c));
+    }
+
+    /**
+     * Every character as {@code \}{@code uXXXX}, letters and digits too (final review, M1): for
+     * data that lands inside a tag but outside a quoted value. Nothing in the result is syntax to
+     * an HTML tokenizer in any state, it can't start or name a tag (after {@code <} a browser
+     * needs a letter) or spell an attribute name ({@code hidden}, {@code autofocus}), and a
+     * JavaScript string or template literal still reads the original text back.
+     */
+    static String escapeAll(String value) {
+        var out = new StringBuilder(value.length() * 6);
+        for (int i = 0; i < value.length(); i++) appendUnicodeEscape(out, value.charAt(i));
+        return out.toString();
+    }
+
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+    private static void appendUnicodeEscape(StringBuilder out, char c) {
+        out.append('\\').append('u').append(HEX[c >> 12]).append(HEX[(c >> 8) & 15]).append(HEX[(c >> 4) & 15]).append(HEX[c & 15]);
+    }
+
+    /**
+     * Escape for CSS, in a {@code <style>} body or a {@code style=""} attribute (L7): everything
+     * but letters, digits, spaces, {@code # % . _ -} and non-ASCII characters becomes a hex
+     * escape ({@code ;} is {@code \3b }). An escaped character is never syntax to a CSS parser,
+     * so data can't end its declaration or rule, open a function or a comment, or (having no
+     * {@code < > & " '} left) leave the style element or attribute. Inside a quoted CSS string
+     * the parser reads the original text back; outside one, a value with escaped characters is
+     * an odd identifier, and its declaration is dropped.
+     */
+    static String escapeCss(String value) {
+        return escapeCss(value, false);
+    }
+
+    /** {@code all}: every character as a hex escape, for data inside a tag (see {@link #escapeAll}). */
+    private static String escapeCss(String value, boolean all) {
+        StringBuilder out = null;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean plain = !all && (isAsciiAlphanumeric(c) || c == ' ' || c == '#' || c == '%' || c == '.'
+                || c == '_' || c == '-' || c >= 0xa0);
+            if (plain) {
+                if (out != null) out.append(c);
+                continue;
+            }
+            if (out == null) out = new StringBuilder(value.length() + 16).append(value, 0, i);
+            int code = c == 0 ? 0xfffd : c;
+            if (Character.isHighSurrogate(c) && i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1))) {
+                code = Character.toCodePoint(c, value.charAt(++i)); // only with `all`: a hex escape names a code point
+            }
+            out.append('\\').append(Integer.toHexString(code)).append(' ');
+        }
+        return out == null ? value : out.toString();
+    }
+
+    /** Undoes {@link #escapeScript}: {@code \}{@code uXXXX} and {@code \\} back to the characters. */
+    static String unescapeScript(String value) {
+        int i = value.indexOf('\\');
+        if (i < 0) return value;
+        var out = new StringBuilder(value.length()).append(value, 0, i);
+        for (int n = value.length(); i < n; i++) {
+            char c = value.charAt(i);
+            if (c == '\\' && i + 1 < n && value.charAt(i + 1) == '\\') {
+                out.append('\\');
+                i++;
+            } else if (c == '\\' && i + 5 < n && value.charAt(i + 1) == 'u' && isHex4(value, i + 2)) {
+                out.append((char) Integer.parseInt(value, i + 2, i + 6, 16));
+                i += 5;
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    private static boolean isHex4(String s, int from) {
+        for (int i = from; i < from + 4; i++) {
+            if (asciiDigit(s.charAt(i), 16) < 0) return false;
+        }
+        return true;
+    }
+
+    /**
      * Whether {@code url} is relative or uses an allowed scheme, judged the way a browser parses
      * it: leading and trailing C0 controls and spaces dropped, tabs and newlines removed anywhere.
      */
     static boolean isSafeUrl(String url) {
-        String normalized = normalize(url);
-        int colon = normalized.indexOf(':');
-        if (colon < 0) return true;
-        // A scheme only if the ':' comes before any path, query or fragment delimiter.
-        for (int i = 0; i < colon; i++) {
-            char c = normalized.charAt(i);
-            if (c == '/' || c == '?' || c == '#') return true;
-        }
-        String scheme = normalized.substring(0, colon);
-        if (!isScheme(scheme)) return true; // not parseable as a scheme: a relative path
-        return SAFE_SCHEMES.contains(scheme.toLowerCase(Locale.ROOT));
+        String scheme = scheme(normalize(url));
+        return scheme == null || SAFE_SCHEMES.contains(scheme.toLowerCase(Locale.ROOT));
     }
 
     private static boolean isScheme(String s) {
@@ -439,6 +1237,91 @@ public class BraceHtmlOutput extends OwaspHtmlTemplateOutput {
             if (c != '\t' && c != '\n' && c != '\r') out.append(c);
         }
         return out.toString();
+    }
+
+    // Named character references that decode to ASCII (every one that does, bar the ligature-free
+    // rest of the table, which is all non-ASCII), plus the no-break space.
+    private static final Map<String, String> NAMED_REFERENCES = Map.ofEntries(
+        Map.entry("Tab", "\t"), Map.entry("NewLine", "\n"), Map.entry("excl", "!"), Map.entry("quot", "\""),
+        Map.entry("QUOT", "\""), Map.entry("num", "#"), Map.entry("dollar", "$"), Map.entry("percnt", "%"),
+        Map.entry("amp", "&"), Map.entry("AMP", "&"), Map.entry("apos", "'"), Map.entry("lpar", "("),
+        Map.entry("rpar", ")"), Map.entry("ast", "*"), Map.entry("midast", "*"), Map.entry("plus", "+"),
+        Map.entry("comma", ","), Map.entry("period", "."), Map.entry("sol", "/"), Map.entry("colon", ":"),
+        Map.entry("semi", ";"), Map.entry("lt", "<"), Map.entry("LT", "<"), Map.entry("equals", "="),
+        Map.entry("gt", ">"), Map.entry("GT", ">"), Map.entry("quest", "?"), Map.entry("commat", "@"),
+        Map.entry("lsqb", "["), Map.entry("lbrack", "["), Map.entry("bsol", "\\"), Map.entry("rsqb", "]"),
+        Map.entry("rbrack", "]"), Map.entry("Hat", "^"), Map.entry("lowbar", "_"), Map.entry("UnderBar", "_"),
+        Map.entry("grave", "`"), Map.entry("DiacriticalGrave", "`"), Map.entry("fjlig", "fj"),
+        Map.entry("lcub", "{"), Map.entry("lbrace", "{"), Map.entry("verbar", "|"), Map.entry("vert", "|"),
+        Map.entry("VerticalLine", "|"), Map.entry("rcub", "}"), Map.entry("rbrace", "}"),
+        Map.entry("nbsp", " "), Map.entry("NonBreakingSpace", " "));
+    // Of those, the ones HTML also accepts without the semicolon.
+    private static final Set<String> NO_SEMICOLON = Set.of("amp", "AMP", "lt", "LT", "gt", "GT", "quot", "QUOT", "nbsp");
+    private static final int MAX_REFERENCE_NAME = 32;
+
+    /**
+     * An attribute value as the browser reads it, with character references decoded: numeric
+     * ones ({@code &#32;}, {@code &#x3a}, the semicolon optional) and the named ones that produce
+     * ASCII ({@code &colon;}, {@code &Tab;}, {@code &amp;}...). Any other {@code &name;} becomes
+     * U+FFFD: whatever it names is not ASCII, so it can't be part of a scheme or a delimiter.
+     */
+    static String decodeReferences(CharSequence s) {
+        int n = s.length(), i = 0;
+        while (i < n && s.charAt(i) != '&') i++;
+        if (i == n) return s.toString();
+        var out = new StringBuilder(n).append(s, 0, i);
+        while (i < n) {
+            char c = s.charAt(i);
+            int next = c == '&' && i + 1 < n ? s.charAt(i + 1) : -1;
+            if (next == '#') {
+                int j = i + 2;
+                int radix = j < n && (s.charAt(j) == 'x' || s.charAt(j) == 'X') ? 16 : 10;
+                if (radix == 16) j++;
+                int digits = j, code = 0;
+                for (; j < n; j++) {
+                    int d = asciiDigit(s.charAt(j), radix);
+                    if (d < 0) break;
+                    if (code <= 0x10FFFF) code = code * radix + d;
+                }
+                if (j > digits) {
+                    if (j < n && s.charAt(j) == ';') j++;
+                    boolean valid = code != 0 && code <= 0x10FFFF && !(code >= 0xD800 && code <= 0xDFFF);
+                    out.appendCodePoint(valid ? code : 0xFFFD);
+                    i = j;
+                    continue;
+                }
+            } else if (next >= 0 && isAsciiAlphanumeric((char) next)) {
+                int j = i + 1;
+                while (j < n && j - i <= MAX_REFERENCE_NAME && isAsciiAlphanumeric(s.charAt(j))) j++;
+                String name = s.subSequence(i + 1, j).toString();
+                if (j < n && s.charAt(j) == ';') {
+                    out.append(NAMED_REFERENCES.getOrDefault(name, "�"));
+                    i = j + 1;
+                    continue;
+                }
+                // No semicolon: in an attribute, a reference only if '=' or a letter or digit
+                // doesn't follow (so ?a=1&lt=2 keeps its "&lt").
+                if (NO_SEMICOLON.contains(name) && (j == n || s.charAt(j) != '=')) {
+                    out.append(NAMED_REFERENCES.get(name));
+                    i = j;
+                    continue;
+                }
+            }
+            out.append(c);
+            i++;
+        }
+        return out.toString();
+    }
+
+    private static int asciiDigit(char c, int radix) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (radix == 16 && c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (radix == 16 && c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    }
+
+    private static boolean isAsciiAlphanumeric(char c) {
+        return isAsciiLetter(c) || (c >= '0' && c <= '9');
     }
 
     /** A TemplateOutput appending to a StringBuilder sized for its content. */

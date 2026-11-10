@@ -28,9 +28,9 @@ class OpsOriginPinTest {
     static void start() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keys = tmp.resolve("authorized-keys");
-        Files.writeString(keys, keypair.publicKey() + " test\n");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
         app = Brace.app().port(0).ops(keys.toString()).trustedProxies("127.0.0.1", "::1")
-            .opsOrigins("https://app.example.com");
+            .opsOrigins("https://app.example.com").opsNoRestartWindowForTests();
         app.start();
         port = app.actualPort();
     }
@@ -101,7 +101,7 @@ class OpsOriginPinTest {
     @Test
     void prodModeRequiresOpsOrigins() throws Exception {
         Path keys = tmp.resolve("prod-keys");
-        Files.writeString(keys, keypair.publicKey() + " test\n");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
         System.setProperty("brace.mode", "prod");
         try {
             var unpinned = Brace.app().port(0).opsSecret("ops-origin-pin-test-secret-at-least-32-chars").ops(keys.toString());
@@ -111,6 +111,45 @@ class OpsOriginPinTest {
         } finally {
             System.clearProperty("brace.mode");
         }
+    }
+
+    @Test
+    void unsetModeRequiresOpsOrigins() throws Exception {
+        Path keys = tmp.resolve("unset-keys");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
+        String previous = System.getProperty("brace.mode");
+        System.clearProperty("brace.mode");
+        try {
+            var unpinned = Brace.app().port(0).opsSecret("ops-origin-pin-test-secret-at-least-32-chars").ops(keys.toString());
+            var e = assertThrows(IllegalStateException.class, unpinned::start);
+            assertTrue(e.getMessage().contains("opsOrigins"), e.getMessage());
+            unpinned.stop();
+        } finally {
+            if (previous != null) System.setProperty("brace.mode", previous);
+        }
+    }
+
+    @Test
+    void devModeStartsWithoutOpsOrigins() throws Exception {
+        Path keys = tmp.resolve("dev-keys");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
+        String previous = System.getProperty("brace.mode");
+        System.setProperty("brace.mode", "dev");
+        try {
+            var dev = Brace.app().port(0).opsSecret("ops-origin-pin-test-secret-at-least-32-chars").ops(keys.toString());
+            dev.start();
+            dev.stop();
+        } finally {
+            if (previous != null) System.setProperty("brace.mode", previous); else System.clearProperty("brace.mode");
+        }
+    }
+
+    @Test
+    void testHarnessStartsWithoutOpsOrigins() throws Exception {
+        Path keys = tmp.resolve("harness-keys");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
+        var testApp = Brace.test().start(a -> a.ops(keys.toString()));
+        testApp.stop();
     }
 
     @Test

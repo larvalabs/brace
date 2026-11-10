@@ -35,7 +35,9 @@ public class JobScheduler {
 
     private final CopyOnWriteArrayList<RegisteredJob> registeredJobs = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<JobStatus> statuses = new CopyOnWriteArrayList<>();
-    private ScheduledExecutorService scheduler;
+    // Null before start() and after stop(): a job registered while stopped is only recorded, and
+    // the next start() schedules it on a fresh executor (a terminated one rejects every task).
+    private volatile ScheduledExecutorService scheduler;
     private DatabaseFactory dbFactory;
 
     public void every(String interval, String name, Job job) {
@@ -59,10 +61,11 @@ public class JobScheduler {
         statuses.add(new JobStatus(name, "every " + interval, null, 0, "pending", null, 0, null, null));
 
         // If scheduler is already running, schedule immediately
-        if (scheduler != null) {
+        var executor = scheduler;
+        if (executor != null) {
             final int index = registeredJobs.size() - 1;
             if (!local) seedRunRow(name);
-            scheduler.scheduleAtFixedRate(() -> {
+            executor.scheduleAtFixedRate(() -> {
                 Thread.startVirtualThread(() -> executeJob(index, rj));
             }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
         }
@@ -81,10 +84,11 @@ public class JobScheduler {
         // If the scheduler is already running, schedule immediately — same late-registration branch
         // register() has. Without this a daily job added after start() was tracked in statuses but
         // never handed to the executor, so it silently never ran. daily is always cluster-deduped.
-        if (scheduler != null) {
+        var executor = scheduler;
+        if (executor != null) {
             final int index = registeredJobs.size() - 1;
             seedRunRow(name);
-            scheduleDaily(index, rj, rj.initialDelayMs());
+            scheduleDaily(executor, index, rj, rj.initialDelayMs());
         }
     }
 
@@ -101,13 +105,14 @@ public class JobScheduler {
      * <p>Recomputing the delay after each firing costs one {@code ZonedDateTime} per day and makes
      * the schedule mean what it says in local time, across DST and across a zone change.
      */
-    private void scheduleDaily(int index, RegisteredJob rj, long delayMs) {
-        scheduler.schedule(() -> {
+    private void scheduleDaily(ScheduledExecutorService executor, int index, RegisteredJob rj, long delayMs) {
+        executor.schedule(() -> {
             Thread.startVirtualThread(() -> executeJob(index, rj));
             // Re-arm before the body runs to completion — the next run is a function of the clock,
-            // not of how long this one takes.
-            if (scheduler != null && !scheduler.isShutdown()) {
-                scheduleDaily(index, rj, computeDelayUntil(rj.dailyAt()));
+            // not of how long this one takes. On the same executor only: after a stop() and
+            // start() the new executor already has its own copy of this job.
+            if (!executor.isShutdown()) {
+                scheduleDaily(executor, index, rj, computeDelayUntil(rj.dailyAt()));
             }
         }, delayMs, TimeUnit.MILLISECONDS);
     }
@@ -126,9 +131,10 @@ public class JobScheduler {
             final int index = i;
             if (!rj.local()) seedRunRow(rj.name());
             if (rj.dailyAt() != null) {
-                scheduleDaily(index, rj, rj.initialDelayMs());
+                // From now, not the delay computed at registration (which may be a restart ago).
+                scheduleDaily(executor, index, rj, computeDelayUntil(rj.dailyAt()));
             } else {
-                scheduler.scheduleAtFixedRate(() -> {
+                executor.scheduleAtFixedRate(() -> {
                     Thread.startVirtualThread(() -> executeJob(index, rj));
                 }, rj.initialDelayMs(), rj.periodMs(), TimeUnit.MILLISECONDS);
             }
@@ -136,15 +142,17 @@ public class JobScheduler {
     }
 
     public void stop() {
-        if (scheduler != null) {
-            scheduler.shutdown();
+        var executor = scheduler;
+        scheduler = null; // a restart gets a new executor; registrations in between are kept
+        if (executor != null) {
+            executor.shutdown();
             try {
-                if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                    scheduler.shutdownNow();
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                scheduler.shutdownNow();
+                executor.shutdownNow();
             }
         }
     }
@@ -196,7 +204,7 @@ public class JobScheduler {
             var prev = statuses.get(index);
             var msg = ctx.consumeMessage();
             statuses.set(index, new JobStatus(
-                rj.name(), rj.schedule(), start, durationMs, "error", e.getMessage(),
+                rj.name(), rj.schedule(), start, durationMs, "error", Redactor.redactMessage(e.getMessage()),
                 prev.failCount() + 1, nextRun,
                 msg != null ? msg : prev.lastMessage()
             ));
@@ -276,7 +284,7 @@ public class JobScheduler {
             }
         } catch (Exception e) {
             // A transient read error shouldn't drop a run — fall through and decide under the lock.
-            Log.warn("scheduler-claim-read-failed job=" + rj.name() + " error=" + e.getMessage());
+            Log.warn("scheduler-claim-read-failed job=" + rj.name() + " error=" + Redactor.redactMessage(e.getMessage()));
         }
 
         // Slow path: the slot looks unclaimed (or the row is missing). Take the row lock and re-check
@@ -327,7 +335,7 @@ public class JobScheduler {
             // Coordination failed (e.g. transient DB error). Skip this tick rather than
             // risk a duplicate side effect — the job runs again next interval. Preventing
             // N-fold duplicate runs is the whole point, so favor skip over duplicate.
-            Log.warn("scheduler-claim-failed job=" + rj.name() + " error=" + e.getMessage());
+            Log.warn("scheduler-claim-failed job=" + rj.name() + " error=" + Redactor.redactMessage(e.getMessage()));
             return false;
         } finally {
             db.close();

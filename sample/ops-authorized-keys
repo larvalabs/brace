@@ -1,3 +1,4 @@
-# Authorized public keys for ops dashboard access
-# Generate a keypair with: brace ops keypair
-# Then paste the public key line here
+# Authorized public keys for ops dashboard access, one per line:
+#   KEY scope:read|scope:control label
+# Every key line must state its scope, or the server refuses to start.
+# `brace ops keypair` generates a keypair and writes its line here.

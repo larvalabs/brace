@@ -56,13 +56,49 @@ class OpsTokenTest {
     }
 
     @Test
-    void absentScopeDefaultsToControl() {
-        // Legacy two-arg create (and tokens minted before scoping existed) verify as CONTROL.
+    void legacyTwoArgCreateMintsAnExplicitControlToken() {
+        // The deprecated two-arg create writes scope:control into the payload explicitly.
         var secret = OpsToken.generateSecret();
         var claims = OpsToken.verify(OpsToken.create(secret, 3600), secret);
         assertNotNull(claims);
         assertEquals(OpsScope.CONTROL, claims.scope());
         assertNull(claims.kid());
+    }
+
+    // --- L1 review fixes: a scope claim that is missing or unknown fails closed to READ ---
+
+    @Test
+    void missingScopeClaimIsRead() {
+        var secret = OpsToken.generateSecret();
+        long exp = System.currentTimeMillis() / 1000 + 3600;
+        var claims = OpsToken.verify(OpsToken.create(secret, exp, null, "kid", OpsToken.Type.BEARER), secret);
+        assertNotNull(claims);
+        assertEquals(OpsScope.READ, claims.scope(), "no scope claim must never mean CONTROL");
+        assertEquals(OpsScope.READ, OpsToken.verify(signed(secret, "{\"exp\":" + exp + "}"), secret).scope());
+    }
+
+    @Test
+    void unknownScopeClaimIsRead() {
+        var secret = OpsToken.generateSecret();
+        long exp = System.currentTimeMillis() / 1000 + 3600;
+        for (String scope : new String[] {"admin", "CONTROL!", "", "control,read"}) {
+            var claims = OpsToken.verify(signed(secret, "{\"exp\":" + exp + ",\"scope\":\"" + scope + "\"}"), secret);
+            assertNotNull(claims, scope);
+            assertEquals(OpsScope.READ, claims.scope(), scope);
+        }
+    }
+
+    /** A token over an arbitrary payload, signed as OpsToken signs. */
+    private static String signed(String secret, String json) {
+        try {
+            var enc = java.util.Base64.getUrlEncoder().withoutPadding();
+            String payload = enc.encodeToString(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+            return payload + "." + enc.encodeToString(mac.doFinal(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test

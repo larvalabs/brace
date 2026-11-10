@@ -28,7 +28,7 @@ class ShortCircuitStatsTest {
         assetDir = Files.createTempDirectory("brace-h2-assets");
         Files.writeString(assetDir.resolve("app.css"), "body{}");
         app = Brace.test().sessions("h2-short-circuit-secret-at-least-32-chars").start(a -> {
-            a.staticFiles("/assets", assetDir.toString());
+            a.staticFiles("/assets", assetDir.toString()).publicFiles();
             a.get("/ok", req -> Result.text("ok"));
             a.before("/blocked", req -> Result.error(429, "Too Many Requests"));
             a.get("/blocked", req -> Result.text("never reached"));

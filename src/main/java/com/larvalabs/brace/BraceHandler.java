@@ -97,14 +97,109 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         prepareUploadTempDir(tempDir);
     }
 
-    record StaticFileMapping(String urlPrefix, String directory, StaticFiles mode) {
+    /**
+     * A static mapping as the handler serves it. {@code access} is the mapping's resolved
+     * requirements (M3): empty for a mapping declared {@code .publicFiles()}, otherwise every
+     * entry must pass before a file is looked up. {@link Brace#start()} builds these only from
+     * mappings that declared one or the other.
+     */
+    record StaticFileMapping(String urlPrefix, String directory, StaticFiles mode, List<Access> access) {
+        StaticFileMapping {
+            access = List.copyOf(access);
+        }
+
+        /** A public mapping; for tests that build a handler directly. */
+        StaticFileMapping(String urlPrefix, String directory, StaticFiles mode) {
+            this(urlPrefix, directory, mode, List.of());
+        }
+
+        /** A public, trusted mapping; for tests that build a handler directly. */
         StaticFileMapping(String urlPrefix, String directory) {
-            this(urlPrefix, directory, StaticFiles.TRUSTED);
+            this(urlPrefix, directory, StaticFiles.TRUSTED, List.of());
+        }
+
+        boolean guarded() {
+            return !access.isEmpty();
+        }
+
+        /**
+         * Both public, or the same requirements in any order. Requirements are compared with
+         * {@link Access#equals}: two {@code Access.session("userId", "/login")} calls are equal,
+         * while a custom {@code Access.check(...)} or {@code Access.checkRequest(...)} is only
+         * equal to itself (the fail-closed reading for a lambda).
+         */
+        boolean sameAccessAs(StaticFileMapping other) {
+            return access.containsAll(other.access) && other.access.containsAll(access);
+        }
+
+        /** {@code public}, or the requirement labels joined with {@code +}; as {@link Route#accessLabel}. */
+        String accessLabel() {
+            if (access.isEmpty()) return "public";
+            var labels = new ArrayList<String>();
+            for (Access a : access) labels.add(a.label());
+            return String.join(" + ", labels);
+        }
+
+        /** The mapping as a path pattern, for the banner and {@code /ops/routes}: {@code /assets/*}. */
+        String pattern() {
+            return urlPrefix.endsWith("/") ? urlPrefix + "*" : urlPrefix + "/*";
+        }
+
+        /** Whether {@code requestPath} is under this mapping's prefix, at a segment boundary (M1). */
+        boolean covers(String requestPath) {
+            if (!requestPath.startsWith(urlPrefix)) return false;
+            // "/filesX" is not under "/files". Matches Middleware's path patterns, so a guard on
+            // "/files/*" covers exactly what this serves.
+            return requestPath.length() == urlPrefix.length() || urlPrefix.endsWith("/")
+                || requestPath.charAt(urlPrefix.length()) == '/';
         }
     }
 
     void setBeforeSessionMiddleware(List<Middleware.BoundBeforeSession> middleware) {
         this.beforeSessionMiddleware = middleware;
+    }
+
+    /**
+     * The app's WebSocket routes (method {@code WS}, a literal path, access resolved). They live
+     * outside the {@link Router}, and an upgrade never reaches this handler, but a plain request
+     * for a socket's path does: under a static mapping that path belongs to the socket route,
+     * not to a file of the same name (M3 final review). Set by {@link Brace} before start.
+     */
+    private List<Route> webSocketRoutes = List.of();
+
+    void setWebSocketRoutes(List<Route> routes) {
+        this.webSocketRoutes = List.copyOf(routes);
+    }
+
+    /**
+     * Every route that owns {@code path} whatever the request's method: the {@link Router}'s
+     * routes whose pattern matches it, and a WebSocket route registered at it. Asked only after
+     * no route matched the request's own method.
+     */
+    private List<Route> routesOwning(String path) {
+        List<Route> owners = router.routesMatching(path);
+        if (webSocketRoutes.isEmpty()) return owners;
+        String canonical = path.length() > 1 && path.endsWith("/") ? Router.stripTrailingSlashes(path) : path;
+        List<Route> all = null;
+        for (Route ws : webSocketRoutes) {
+            if (ws.pattern().equals(path) || ws.pattern().equals(canonical)) {
+                if (all == null) all = new ArrayList<>(owners);
+                all.add(ws);
+            }
+        }
+        return all == null ? owners : all;
+    }
+
+    /**
+     * True when a guarded mapping's prefix covers {@code rawPath} as written or with its dot
+     * segments resolved; see where {@code guardedStatic} is set.
+     */
+    private boolean underGuardedMapping(String rawPath) {
+        String resolved = Router.resolveDotSegments(rawPath);
+        for (var mapping : staticFileMappings) {
+            if (mapping.guarded() && (mapping.covers(rawPath) || mapping.covers(resolved))) return true;
+        }
+        return false;
     }
 
     /** Page-view analytics, or null when the app didn't enable it. Set by {@link Brace} before start. */
@@ -273,6 +368,31 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             String method = exchange.method;
             String path = exchange.path;
 
+            // L9: a raw "." or ".." segment is never a route, a path-parameter value or a static
+            // path. Answered before the router so no spelling of it reaches a handler (a
+            // handler building a file path from a parameter would walk out of its directory, and
+            // a proxy that normalizes dot segments for its own rules sees a different path than
+            // Brace does). Only an exact "." / ".." segment: "..foo" and ".well-known" are fine.
+            // Percent-encoded forms (%2e%2e) are not segments here and Jetty refuses them itself.
+            // Decided here, so nothing below matches the path against a route or a mapping, and
+            // answered once the Request exists (L9 review): thrown from here, the 404 skipped
+            // after-middleware, so it alone went out without the app's security headers.
+            boolean dotSegment = Router.hasDotSegment(path);
+
+            // M3: the static mapping whose prefix covers the path, chosen once. A guarded one is
+            // flagged here, before anything below can answer (a malformed query's 400, a
+            // before() short-circuit, the rejection itself), so every response under it gets the
+            // no-shared-cache headers in send(). Un-flagged below if a route matches instead.
+            //
+            // M3 final review: a dot-segment path is matched against no mapping and serves
+            // nothing, but its 404 is still a response under a guarded prefix when the path, as
+            // written or with its dot segments resolved, falls under one ("/docs/./report.txt",
+            // "/x/../docs/report.txt"). An app-wide after(...) setting "public" made that 404
+            // shared-cacheable at the guarded file's URL as a normalizing cache keys it.
+            StaticFileMapping coveringMapping = dotSegment ? null : staticMappingFor(path);
+            exchange.guardedStatic = dotSegment ? underGuardedMapping(path)
+                : coveringMapping != null && coveringMapping.guarded();
+
             // Parse query parameters (raw string kept for Request.queryParams(name) multi-value access)
             String rawQuery = jettyRequest.getHttpURI().getQuery();
             Map<String, String> queryParams = parseQuery(rawQuery);
@@ -280,24 +400,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Extract headers into a case-insensitive map. HTTP header names are
             // case-insensitive (and arrive lowercased over HTTP/2), so lookups like
             // headers.get("Cookie") / "Content-Type" must not depend on the wire casing.
-            Map<String, String> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            for (var field : jettyRequest.getHeaders()) {
-                headers.put(field.getName(), field.getValue());
-            }
+            Map<String, String> headers = headerMap(jettyRequest.getHeaders());
 
             // Resolve the session cookie's Secure attribute from this request (H2). Computed here,
             // before the first response can be sent, and threaded through the choke point so every
             // exit path agrees. See SessionOptions.resolveSecure for the rule.
-            cookieSpec = cookieSpec(headers, org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest));
+            cookieSpec = cookieSpec(headers, peerAddress(jettyRequest));
             // M10: the name this request reads its session from, the same one it writes.
             final String sessionCookieName = cookieSpec.name();
 
             // Match route first. Static files and 404s must not pay request-body or
             // multipart-parsing cost. (This also keeps an unmatched POST with a large multipart
             // body from being fully parsed into memory before the 404.)
-            RouteMatch match = router.match(method, path);
+            RouteMatch match = dotSegment ? null : router.match(method, path);
             // The choke point keys stats on the matched ROUTE PATTERN, not the concrete URL (H1).
             exchange.match = match;
+            // A route wins over a mapping for the same path, and carries its own access; how its
+            // responses are cached is the app's choice.
+            StaticFileMapping staticMapping = match == null ? coveringMapping : null;
+            if (match != null) {
+                exchange.guardedStatic = false;
+            } else if (exchange.guardedStatic) {
+                exchange.noMatchKey = STATIC_ROUTE_KEY;
+            }
 
             // L1: the router serves "/users/" from the "/users" route (no compiled pattern ends in
             // a slash, so a match on such a path is always that fallback). From here on the request
@@ -320,16 +445,31 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                               : () -> readRequestBody(jettyRequest, headers);
 
             // Extract remote address from socket
-            String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(jettyRequest);
+            String remoteAddr = peerAddress(jettyRequest);
             warnIfProxyNotTrusted(headers, remoteAddr);
 
             // Build Brace Request (path params come from match, or empty if no match)
             Map<String, String> pathParams = match != null ? match.pathParams() : Map.of();
             braceRequest = new Request(method, path, pathParams, queryParams, headers, bodySource, remoteAddr, trustedProxies);
             braceRequest.setRawQuery(rawQuery);
+            // L4 review F6: a page-cached handler's undeclared reads are reported in dev mode and
+            // tests, the same switch as the query-taint check.
+            braceRequest.setStrictInputChecks(strictQueryChecks);
+            if (match != null) {
+                braceRequest.setRoute(match.route()); // the page cache keys on it (L4)
+            }
+            if (trustedProxies != null) {
+                // L3: req.ip() needs every line of the forwarding header, not the last one.
+                braceRequest.setForwardingChain(
+                    joinedFieldValues(jettyRequest.getHeaders(), trustedProxies.clientIpHeader()));
+            }
             if (storage != null) {
                 braceRequest.setStorage(storage);
             }
+
+            // L9: the dot-segment 404. No middleware, guard or handler runs for the request;
+            // the catch below sends it through after-middleware like any thrown 404.
+            if (dotSegment) throw new NotFoundException();
 
             // Run before middleware
             for (var before : beforeMiddleware) {
@@ -348,16 +488,26 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // guarded route are guarded the same way. A session-reading requirement builds the
             // session here, and it is the same instance session-aware middleware and the handler
             // get (the identity invariant below).
-            if (match != null) {
-                for (var access : match.route().access()) {
-                    if (access.usesSession() && session == null) {
-                        session = buildSession(headers, sessionCookieName);
-                    }
-                    Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
-                    if (rejected != null) {
-                        respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSpec, exchange);
-                        return true;
-                    }
+            //
+            // M3 (2026-11): with no route matched, the static mapping whose prefix covers the path
+            // is inside the same model. Its requirements are bound to the mapping object and run
+            // here, at the route position, before the path is decoded or the filesystem touched:
+            // every spelling that can reach the mapping's files goes through them, and a rejection
+            // is the same response whether or not the file exists and whatever the method (the
+            // 405 for a method a mapping doesn't serve comes after, below). The bundled /__brace
+            // assets are not mappings and stay public.
+            List<Access> requirements = match != null ? match.route().access()
+                : staticMapping != null ? staticMapping.access() : List.of();
+            for (var access : requirements) {
+                if (access.usesSession() && session == null) {
+                    session = buildSession(headers, sessionCookieName);
+                }
+                Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
+                if (rejected != null) {
+                    // A rejection (route or mapping) is per-caller: send() makes it no-store.
+                    exchange.accessRejected = true;
+                    respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSpec, exchange);
+                    return true;
                 }
             }
 
@@ -388,8 +538,71 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // counters) — the write-back contract holds on these paths too via the
             // choke point, instead of silently dropping the mutation.
             if (match == null) {
-                Result staticResult = serveStaticFile(braceRequest);
+                if (staticMapping != null || isBundledAsset(path)) {
+                    // M3 review: no route matched this METHOD, but the path may still be a
+                    // route's (GET /docs/payroll.pdf with its own access, requested as POST). A
+                    // mapping never serves a path some route pattern matches: the route decides
+                    // who gets that file, and falling through here served it to anyone who
+                    // passed the mapping's weaker access by changing the method. The mapping's
+                    // access has already run, so an anonymous caller got its uniform rejection
+                    // and learns nothing from the 405.
+                    //
+                    // M3 final review: a WebSocket route owns its path the same way (a plain,
+                    // non-upgrade GET of it used to be served the mapping's file), and the 405's
+                    // Allow header names the owning routes' methods, which is information about
+                    // routes the caller may not be allowed to see. So each route that owns the
+                    // path runs its own access first: a caller it refuses gets that rejection,
+                    // exactly as if the route had matched, and only a caller every owner admits
+                    // is told which methods exist.
+                    List<Route> owners = staticMapping != null ? routesOwning(path) : List.of();
+                    for (Route owner : owners) {
+                        for (var access : owner.access()) {
+                            if (access.usesSession() && session == null) {
+                                session = buildSession(headers, sessionCookieName);
+                            }
+                            Result rejected = access.check(braceRequest, access.usesSession() ? session : null);
+                            if (rejected != null) {
+                                exchange.accessRejected = true;
+                                exchange.noMatchKey = STATIC_ROUTE_KEY;
+                                respond(braceRequest, rejected, response, callback, session, csrfOnlySession, cookieSpec, exchange);
+                                return true;
+                            }
+                        }
+                    }
+                    // And a mapping (or a bundled asset) serves GET and HEAD, nothing else.
+                    boolean readMethod = "GET".equals(method) || "HEAD".equals(method);
+                    if (!owners.isEmpty() || !readMethod) {
+                        exchange.noMatchKey = STATIC_ROUTE_KEY;
+                        var routeMethods = new java.util.LinkedHashSet<String>();
+                        boolean socketOwned = false;
+                        for (Route owner : owners) {
+                            if (owner.method().equals("WS")) {
+                                socketOwned = true;
+                                routeMethods.add("GET");
+                            } else {
+                                routeMethods.add(owner.method());
+                                if (owner.method().equals("GET")) routeMethods.add("HEAD");
+                            }
+                        }
+                        Result refused;
+                        if (socketOwned && readMethod) {
+                            // The path is a socket: a plain request for it is asked to upgrade,
+                            // whatever other methods' routes share the path (verification fix:
+                            // a POST route there made this a 405 naming GET in Allow).
+                            refused = Result.error(426, "Upgrade Required").header("Upgrade", "websocket");
+                        } else {
+                            refused = Result.error(405, "Method Not Allowed")
+                                .header("Allow", routeMethods.isEmpty() ? "GET, HEAD" : String.join(", ", routeMethods));
+                        }
+                        respond(braceRequest, refused, response, callback, session, csrfOnlySession, cookieSpec, exchange);
+                        return true;
+                    }
+                }
+                Result staticResult = serveStaticFile(braceRequest, staticMapping);
                 if (staticResult != null) {
+                    // The file itself (or its 304): send() marks it "private, no-cache" under a
+                    // guarded mapping; every other response there is "no-store".
+                    exchange.staticServed = staticResult.status() == 200 || staticResult.status() == 304;
                     exchange.noMatchKey = STATIC_ROUTE_KEY;
                     respond(braceRequest, staticResult, response, callback, session, csrfOnlySession, cookieSpec, exchange);
                     return true;
@@ -584,46 +797,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 response, callback, session, csrfOnlySession, cookieSpec, exchange);
             return true;
         } catch (Exception e) {
-            String errorMethod = jettyRequest.getMethod();
-            String errorPath = jettyRequest.getHttpURI().getPath();
-            String errorQuery = jettyRequest.getHttpURI().getQuery();
-            // Redact high-entropy path segments (reset tokens, invite tokens, etc.) so they
-            // are not persisted in the error store or surfaced on /ops/errors.
-            String redactedPath = Redactor.redactPath(errorPath);
-            // An error kind is (type, route PATTERN), like the stats keys (H1): keyed by the
-            // concrete path, every /users/{id} a client tried was a new kind and a new regression
-            // notification. The concrete (redacted) path is still in requestInfo below.
-            String routeInfo = errorMethod + " " + routeKey(exchange.match);
-            // Redact sensitive query params (?token=…, ?password=…) before the request detail
-            // is stored in the error record and served over /ops/errors.
-            String requestInfo = errorMethod + " " + redactedPath
-                + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
-            int qc = exchange.db != null ? exchange.db.queryCount() : 0;
-            long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
-            if (stats != null) {
-                stats.recordError(e.getClass().getSimpleName(), e.getMessage(),
-                    routeInfo, stackTraceToString(e), requestInfo, "");
-                Log.error(errorMethod, errorPath, e);
-                // http.error already carries this request, with the exception and app frame.
-                // Suppress the choke point's http.request line so a 500 stays one log entry;
-                // the stats side still records (that is the whole point of H2).
-                exchange.logged = true;
-            }
-            if (errorStore != null) {
-                String errorType = e.getClass().getSimpleName();
-                // Redact the exception message: name-based pass (via Redactor.isSensitive on
-                // tokens that look like key=value) is not applicable here, so we run the
-                // value-shaped pass to strip embedded bearer tokens, SQL literals, etc.
-                String errorMessage = Redactor.redactMessage(e.getMessage());
-                String stackTrace = stackTraceToString(e);
-                // Instant-of-failure context: how much DB work ran before the throw, and the
-                // redacted request headers. record() only merges into the in-memory buffer (the
-                // flusher persists it), so it runs here, before the 500 is sent: once a client sees
-                // the response, the error is buffered and a flush() will persist it.
-                String queriesBefore = "{\"count\":" + qc + ",\"durationMs\":" + (Math.round(qu / 100.0) / 10.0) + "}";
-                String requestHeaders = captureRedactedHeaders(jettyRequest);
-                errorStore.record(
-                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders);
+            // Recording the failure must never cost the response. A throw in here used to skip
+            // everything after it, respondToError included (the redactor's, on ?x=jdbc:_x://h:
+            // no http.error line, nothing in the stats or the error store, a bare Jetty 500), so
+            // a client that could cause a 500 could also hide it. Now the exception's message and
+            // trace are read once, guarded (a getMessage() that throws takes printStackTrace and
+            // the logger with it), each sink runs in its own try, and whatever still escapes is
+            // caught around the lot.
+            try {
+                recordFailure(jettyRequest, exchange, e);
+            } catch (RuntimeException recording) {
+                recordingFailed("request", recording);
             }
             // Guard/middleware session mutations persist on the 500 too — the DB rollback
             // is orthogonal to middleware session touches.
@@ -644,6 +828,100 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /**
+     * Record an exception that escaped a handler in the in-memory stats (served on
+     * {@code /ops/status}), the {@code http.error} log line and the error store. A failure in one
+     * sink costs that record only, not the others.
+     */
+    private void recordFailure(org.eclipse.jetty.server.Request jettyRequest, Exchange exchange, Exception e) {
+        String errorType = e.getClass().getSimpleName();
+        String errorMethod = jettyRequest.getMethod();
+        String errorPath = jettyRequest.getHttpURI().getPath();
+        String errorQuery = jettyRequest.getHttpURI().getQuery();
+        // Redact high-entropy path segments (reset tokens, invite tokens, etc.) so they
+        // are not persisted in the error store or surfaced on /ops/errors.
+        String redactedPath = Redactor.redactPath(errorPath);
+        // An error kind is (type, route PATTERN), like the stats keys (H1): keyed by the
+        // concrete path, every /users/{id} a client tried was a new kind and a new regression
+        // notification. The concrete (redacted) path is still in requestInfo below.
+        // The method is folded to a fixed list (methodKey): it is the client's to choose, and an
+        // unmatched request can reach here through a throwing global before-middleware.
+        // requestInfo keeps the method as sent.
+        String routeInfo = methodKey(errorMethod) + " " + routeKey(exchange.match);
+        // Redact query params before the request detail is stored in the error record and
+        // served over /ops/errors: by decoded name (?token=…, ?%74oken=…, ?code=…) and by
+        // value shape (a JWT or 32-char token under any name; M6).
+        String requestInfo = errorMethod + " " + redactedPath
+            + (errorQuery != null ? "?" + Redactor.redactQuery(errorQuery) : "");
+        String rawMessage;
+        try {
+            rawMessage = e.getMessage();
+        } catch (RuntimeException ex) {
+            rawMessage = "[exception message unavailable]";
+        }
+        String stackTrace;
+        try {
+            stackTrace = stackTraceToString(e);
+        } catch (RuntimeException ex) {
+            stackTrace = framesOnly(e, rawMessage);
+        }
+        int qc = exchange.db != null ? exchange.db.queryCount() : 0;
+        long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
+        if (stats != null) {
+            try {
+                stats.recordError(errorType, rawMessage, routeInfo, stackTrace, requestInfo, "");
+            } catch (RuntimeException ex) {
+                recordingFailed("stats", ex);
+            }
+            try {
+                Log.error(errorMethod, errorPath, e, rawMessage);
+                // http.error already carries this request, with the exception and app frame.
+                // Suppress the choke point's http.request line so a 500 stays one log entry;
+                // the stats side still records (that is the whole point of H2).
+                exchange.logged = true;
+            } catch (RuntimeException ex) {
+                recordingFailed("log", ex);
+            }
+        }
+        if (errorStore != null) {
+            try {
+                // Redact the exception message: name-based pass (via Redactor.isSensitive on
+                // tokens that look like key=value) is not applicable here, so we run the
+                // value-shaped pass to strip embedded bearer tokens, SQL literals, etc.
+                String errorMessage = Redactor.redactMessage(rawMessage);
+                // Instant-of-failure context: how much DB work ran before the throw, and the
+                // redacted request headers. record() only merges into the in-memory buffer (the
+                // flusher persists it), so it runs here, before the 500 is sent: once a client sees
+                // the response, the error is buffered and a flush() will persist it.
+                String queriesBefore = "{\"count\":" + qc + ",\"durationMs\":" + (Math.round(qu / 100.0) / 10.0) + "}";
+                String requestHeaders = captureRedactedHeaders(jettyRequest);
+                errorStore.record(
+                    errorType, errorMessage, routeInfo, stackTrace, requestInfo, queriesBefore, requestHeaders);
+            } catch (RuntimeException ex) {
+                recordingFailed("error store", ex);
+            }
+        }
+    }
+
+    /** A trace built from the frames alone, for an exception whose {@code printStackTrace} throws. */
+    private static String framesOnly(Throwable t, String message) {
+        var sb = new StringBuilder(t.getClass().getName()).append(": ").append(message).append('\n');
+        try {
+            for (StackTraceElement frame : t.getStackTrace()) sb.append("\tat ").append(frame).append('\n');
+        } catch (RuntimeException ex) {
+            // the header line alone
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Last resort when recording a request error itself throws. Straight to stderr (the logger may
+     * be what failed) and by class name only: the message would be unredacted text.
+     */
+    private static void recordingFailed(String sink, RuntimeException ex) {
+        System.err.println("Brace: could not record a request error (" + sink + "): " + ex.getClass().getName());
+    }
+
+    /**
      * Stats key for a request: the matched route's PATTERN, or {@link #UNMATCHED_ROUTE_KEY} when
      * nothing matched (H1).
      *
@@ -661,6 +939,29 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      */
     private static String routeKey(RouteMatch match) {
         return match != null ? match.route().pattern() : UNMATCHED_ROUTE_KEY;
+    }
+
+    /** Key for any request method outside {@link #methodKey}'s fixed list. */
+    static final String OTHER_METHOD = "OTHER";
+
+    /**
+     * The request method as it may appear in a stats key or an error kind: one of the nine
+     * standard methods, or {@link #OTHER_METHOD} (security review 2026-11, second review of M5).
+     *
+     * <p>The method is the client's to choose and Jetty passes any token through, so it is as
+     * unbounded as the path is. Keyed raw, {@code ZZ0 /x}, {@code ZZ1 /x}, ... each minted a
+     * permanent entry in the never-reset stats map, and, where a 500 can be had without matching
+     * a route (a throwing global before-middleware), a new error kind and a new regression
+     * notification per request. Routes are only ever registered under GET, POST, PUT and DELETE
+     * (HEAD is answered by the GET route), so nothing a route can match is folded. The request
+     * log and an error record's request detail keep the method as it was sent.
+     */
+    static String methodKey(String method) {
+        if (method == null) return OTHER_METHOD;
+        return switch (method) {
+            case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT" -> method;
+            default -> OTHER_METHOD;
+        };
     }
 
     /** Stats bucket for requests that matched no route — see {@link #routeKey}. */
@@ -702,6 +1003,12 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         Database db;
         /** Stats bucket when no route matched — {@link #STATIC_ROUTE_KEY} for a served file. */
         String noMatchKey = UNMATCHED_ROUTE_KEY;
+        /** M3: the request is under a static mapping with access requirements; see {@link #send}. */
+        boolean guardedStatic;
+        /** A mapping's file (200, or its 304) is the response; with {@link #guardedStatic}, see {@link #send}. */
+        boolean staticServed;
+        /** An access requirement, a route's or a mapping's, rejected the request; see {@link #send}. */
+        boolean accessRejected;
         /** Set once the response is recorded, so a second choke-point pass cannot double-count. */
         boolean recorded;
         /** Set when this request was already logged another way (the 500 path's http.error). */
@@ -758,7 +1065,8 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         int qc = exchange.db != null ? exchange.db.queryCount() : 0;
         long qu = exchange.db != null ? exchange.db.queryDurationUs() : 0;
         String key = exchange.match != null ? routeKey(exchange.match) : exchange.noMatchKey;
-        stats.recordRequestPattern(exchange.method, key, status, durationUs, qc, qu);
+        // methodKey: a made-up method must not mint a permanent stats key. The log keeps it as sent.
+        stats.recordRequestPattern(methodKey(exchange.method), key, status, durationUs, qc, qu);
         if (!exchange.logged) {
             Log.request(exchange.method, exchange.path, status, durationUs, qc, qu);
         }
@@ -871,7 +1179,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 try {
                     result = after.apply(req, result);
                 } catch (Exception e) {
-                    Log.warn("after-middleware threw while decorating an error response: " + e);
+                    Log.warn("after-middleware threw while decorating an error response: " + Redactor.redactMessage(e.toString()));
                 }
             }
         }
@@ -896,8 +1204,30 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         if (exchange.match != null && exchange.match.route().isFramework()) {
             OpsHandler.applySecurityHeaders(result);
         }
+        // M3: nothing under an access-guarded static mapping may be stored by a shared cache, and
+        // neither may an access rejection anywhere (a cached login redirect is served to
+        // logged-in users). Here, after after-middleware, so an app-wide after(...) can't undo
+        // it. Rewriting "public" to "private" was not enough: "s-maxage", a bare "max-age" on a
+        // cookie-authenticated response, Expires and the CDN-specific headers all make a
+        // response storable without that word. So every caching header is dropped, in any
+        // letter case, and one Cache-Control is set: the file (200, 206, 304) may be kept by the
+        // browser and revalidated through the guard; anything else is not stored at all.
+        if (exchange.guardedStatic || exchange.accessRejected) {
+            int status = result.status();
+            boolean file = exchange.staticServed && !exchange.accessRejected
+                && (status == 200 || status == 206 || status == 304);
+            result.headers().keySet().removeIf(SHARED_CACHE_HEADERS::contains);
+            result.header("Cache-Control", file ? "private, no-cache" : "no-store");
+        }
+        if (exchange.accessRejected) {
+            // Access.session answers a page, a JSON client and htmx differently. no-store already
+            // keeps the rejection out of caches; Vary covers one that stores it regardless.
+            result.header("Vary", mergeVary(result.header("Vary"), "Accept, HX-Request"));
+        }
         attachSessionCookie(result, session, cookieSpec);
         attachSessionCookie(result, csrfOnlySession != null ? csrfOnlySession.peek() : null, cookieSpec);
+        // After the cookie: a response that carries one has had "public" rewritten already.
+        if (!exchange.accessRejected) warnIfGuardedRouteSentPublic(exchange, result);
         // H2: recording lives here, not at the call sites, because this is the ONE place every
         // response passes through. Recording per-site meant only three of the exits were
         // covered, so rate-limiter 429s, CSRF 403s, 413s, static files and unmatched 404s never
@@ -951,13 +1281,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         if (sessionOptions == null) return false; // legacy fallback cookie: unchanged behavior
         boolean forwardedHttps = false;
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            String proto = headers.get("X-Forwarded-Proto");
-            if (proto != null) {
-                // A multi-hop chain appends, so the original client's scheme is the leftmost entry.
-                int comma = proto.indexOf(',');
-                if (comma >= 0) proto = proto.substring(0, comma);
-                forwardedHttps = "https".equalsIgnoreCase(proto.strip());
-            }
+            // L3 review F9: the rightmost entry, from every line. The leftmost was taken before, but
+            // behind a proxy that appends (or passes a client's header through) the leftmost entry
+            // is the client's own claim. The proxy should set (overwrite) the header.
+            String proto = rightmostEntry(headers.get("X-Forwarded-Proto"));
+            forwardedHttps = "https".equalsIgnoreCase(proto);
         }
         boolean loopback = isLoopbackHost(ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies));
         if (loopback) {
@@ -1073,7 +1401,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 closeQuietly(onWritten);
                 Log.event("response.stream.failed", Map.of(
                     "status", result.status(),
-                    "error", String.valueOf(t)));
+                    "error", Redactor.redactMessage(String.valueOf(t))));
             });
         // Callback.from(Runnable, Consumer) builds a callback whose completion does NOT propagate,
         // so chain the real one explicitly: release our resources first, then complete the request.
@@ -1145,7 +1473,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         try {
             closeable.close();
         } catch (Throwable t) {
-            Log.warn("failed to release request resources after response: " + t);
+            Log.warn("failed to release request resources after response: " + Redactor.redactMessage(t.toString()));
         }
     }
 
@@ -1242,6 +1570,66 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return false;
     }
 
+    /**
+     * M2: true if a raw (still encoded) static path spells something non-canonically: a
+     * percent-escape of an RFC 3986 unreserved character ({@code ALPHA DIGIT - . _ ~}, either hex
+     * case), an escape written with non-ASCII "hex digits" (which {@link Route#decodeSegment}
+     * would otherwise decode), or a separator smuggled in as {@code %2F}, {@code %5C} or a bare
+     * {@code \}. Escapes of everything else ({@code %20}, UTF-8 bytes, reserved characters such as
+     * {@code %26} or {@code %40}) stay legitimate.
+     *
+     * <p>Jetty's default URI compliance already answers the separator forms, {@code //} and
+     * encoded dot segments with a 400, but the static lookup does not rely on that: an encoded
+     * separator or dot ({@code %2F}, {@code %5C}, {@code %2E}) is refused here, a raw {@code .}
+     * or {@code ..} segment is refused for every request ({@link Router#hasDotSegment}), and an
+     * empty segment or a trailing slash fails the exact-spelling comparison in
+     * {@code serveStaticFile}. This method covers only what it lists; path parameters
+     * ({@code ;x=1}) are not interpreted and are looked up as part of the literal name.
+     */
+    static boolean hasNonCanonicalEscape(String rawPath) {
+        for (int i = 0; i < rawPath.length(); i++) {
+            char c = rawPath.charAt(i);
+            if (c == '\\') return true;
+            if (c != '%' || i + 2 >= rawPath.length()) continue;
+            char h = rawPath.charAt(i + 1), l = rawPath.charAt(i + 2);
+            int hi = Character.digit(h, 16), lo = Character.digit(l, 16);
+            if (hi < 0 || lo < 0) continue; // malformed: decodeSegment leaves the segment literal
+            if (h > 0x7F || l > 0x7F) return true;
+            char decoded = (char) ((hi << 4) | lo);
+            if ((decoded >= 'a' && decoded <= 'z') || (decoded >= 'A' && decoded <= 'Z')
+                    || (decoded >= '0' && decoded <= '9') || "-._~/\\".indexOf(decoded) >= 0) {
+                return true;
+            }
+            i += 2;
+        }
+        return false;
+    }
+
+    /**
+     * M2: true if every name in {@code requested} (relative to the served directory) is the name
+     * stored on disk, byte for byte. A case-insensitive volume opens {@code PRIVATE/x} as
+     * {@code private/x}, and a normalization-insensitive one opens an NFD name as its NFC twin;
+     * both are spellings a raw-path guard never saw. {@code toRealPath} reports stored names.
+     *
+     * <p>The common case costs a string compare: no link inside the tree, so the real path's tail
+     * is the request itself. Otherwise (a link, or a folded spelling) walk the names: each must be
+     * the stored name of its own entry ({@code NOFOLLOW_LINKS}, so a link is judged by its own
+     * name, not its target's), and the walk continues from the link-resolved directory. Links
+     * that stay inside the tree keep working; the caller has already checked containment.
+     */
+    private static boolean requestedNamesAreStored(Path baseReal, Path requested, Path realFile)
+            throws java.io.IOException {
+        if (baseReal.relativize(realFile).toString().equals(requested.toString())) return true;
+        Path dir = baseReal;
+        for (Path name : requested) {
+            Path entry = dir.resolve(name.toString());
+            Path stored = entry.toRealPath(java.nio.file.LinkOption.NOFOLLOW_LINKS).getFileName();
+            if (stored == null || !stored.toString().equals(name.toString())) return false;
+            dir = entry.toRealPath();
+        }
+        return true;
+    }
+
     /** Set once {@link #warnIfProxyNotTrusted} has warned; it warns once per process. */
     private final java.util.concurrent.atomic.AtomicBoolean warnedProxyNotTrusted =
         new java.util.concurrent.atomic.AtomicBoolean();
@@ -1295,7 +1683,33 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             + "Make this a POST (or PUT/DELETE) route.");
     }
 
-    private Result serveStaticFile(Request request) {
+    /** True for the assets bundled in the jar and served at fixed {@code /__brace/} paths. */
+    private boolean isBundledAsset(String requestPath) {
+        return ("/__brace/csrf-htmx.js".equals(requestPath) && csrfHtmxJs != null)
+            || ("/__brace/htmx.min.js".equals(requestPath) && htmxJs != null)
+            || OPS_ASSETS.containsKey(requestPath);
+    }
+
+    /**
+     * The static mapping that serves {@code requestPath}, or null: the first (longest-prefix)
+     * mapping covering it. Null for a bundled asset, which is served ahead of any mapping and
+     * is always public. Chosen once per request, so the mapping whose access requirements ran
+     * is the mapping that serves (M3).
+     */
+    private StaticFileMapping staticMappingFor(String requestPath) {
+        if (staticFileMappings.isEmpty() || isBundledAsset(requestPath)) return null;
+        for (var mapping : staticFileMappings) {
+            if (mapping.covers(requestPath)) return mapping;
+        }
+        return null;
+    }
+
+    /**
+     * Serves a bundled asset, or a file from {@code mapping} (the result of
+     * {@link #staticMappingFor}, whose access requirements the caller has already run). Null
+     * when the path is neither.
+     */
+    private Result serveStaticFile(Request request, StaticFileMapping mapping) {
         String requestPath = request.path();
         if ("/__brace/csrf-htmx.js".equals(requestPath) && csrfHtmxJs != null) {
             String cacheControl = "public, max-age=0, must-revalidate";
@@ -1334,20 +1748,28 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 .header("ETag", opsAsset.etag())
                 .header("Cache-Control", cacheControl);
         }
-        for (var mapping : staticFileMappings) {
+        if (mapping != null) {
             String prefix = mapping.urlPrefix();
-            if (!requestPath.startsWith(prefix)) continue;
 
             String relativePath = requestPath.substring(prefix.length());
             if (relativePath.startsWith("/")) {
                 relativePath = relativePath.substring(1);
             }
 
+            // M2: path guards (before/after middleware, a reverse proxy's location block) match
+            // the RAW path, and the lookup below decodes it. So the file must be reachable only
+            // at its canonical spelling, or "/files/%70rivate/x" reaches what a guard on
+            // "/files/private/*" protects. A canonical URL never percent-encodes an unreserved
+            // character; anything that does is another spelling of a plainer path, so it's a 404.
+            if (hasNonCanonicalEscape(relativePath)) {
+                return Result.notFound();
+            }
+
             // Decode BEFORE the traversal checks (H3). Serving from the raw path meant
             // /assets/my%20file.css looked for a literal "my%20file.css" and 404'd; decoding
             // after the ".." check would have been worse, letting %2e%2e slip past it.
-            // decodePath decodes per segment, so a %2F cannot invent a separator that wasn't
-            // in the request — and the checks below run on what actually reaches the disk.
+            // A %2F or %5C would decode to a separator the guards never saw; Jetty 400s those and
+            // hasNonCanonicalEscape refused them above. The checks below run on what reaches disk.
             relativePath = Route.decodePath(relativePath);
 
             if (relativePath.isEmpty() || relativePath.contains("..")) {
@@ -1368,6 +1790,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 return Result.notFound();
             }
 
+            // M2 review: resolve() and normalize() are forgiving. They drop a trailing
+            // separator and collapse an empty or "." segment, so "exact.txt/" and "v2//app.js"
+            // open the same file as the plain spelling while skipping a guard written for it.
+            // The path that will be opened, written back out, must be the requested path
+            // character for character. (Jetty's default URI compliance already answers "//"
+            // with a 400; this does not depend on it.)
+            String opened = baseDir.relativize(filePath).toString().replace(java.io.File.separatorChar, '/');
+            if (relativePath.endsWith("/") || relativePath.contains("//") || !opened.equals(relativePath)) {
+                return Result.notFound();
+            }
+
             // H1: the check above is lexical — Path.normalize() collapses ".." in the *string*
             // and does not resolve symlinks, while the reads below follow them. A symlink under
             // the served directory pointing outside it therefore passed containment and served
@@ -1377,7 +1810,21 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             Path realFile;
             try {
                 realFile = filePath.toRealPath();
-                if (!realFile.startsWith(baseDir.toRealPath())) {
+                Path baseReal = baseDir.toRealPath();
+                if (!realFile.startsWith(baseReal)) {
+                    return Result.notFound();
+                }
+                // M3 review: start() refuses mappings with different access on overlapping
+                // directories, but it sees the filesystem as it was then. If this mapping's
+                // directory has since become a link into another mapping's tree (or the reverse),
+                // the file is that mapping's to guard, so it isn't served from here.
+                if (insideMappingWithOtherAccess(mapping, realFile)) {
+                    return Result.notFound();
+                }
+                // M2: the second spelling a case-insensitive volume (macOS, Windows) accepts.
+                // "/files/PRIVATE/x" opens private/x there while skipping a guard on
+                // "/files/private/*", so every requested name must be the name stored on disk.
+                if (!requestedNamesAreStored(baseReal, baseDir.relativize(filePath), realFile)) {
                     return Result.notFound();
                 }
             } catch (java.io.IOException e) {
@@ -1408,9 +1855,14 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             // Decoded URL path: Assets resolves it back to a file, so it has to see the same
             // name the lookup above did, or an encoded filename never matches its fingerprint.
             String decodedUrlPath = prefix + (prefix.endsWith("/") ? "" : "/") + relativePath;
-            boolean immutable = version != null && version.equals(Assets.currentVersion(decodedUrlPath));
-            String cacheControl = immutable
-                ? "public, max-age=31536000, immutable"
+            boolean immutable = !mapping.guarded() && version != null
+                && version.equals(Assets.currentVersion(decodedUrlPath));
+            // M3: a file behind access requirements is per-user. "private" keeps it out of shared
+            // caches; "no-cache" makes the browser revalidate each use, and the revalidation runs
+            // the guard again, so a copy isn't shown from cache after logout. That also rules out
+            // the immutable year, fingerprint or not.
+            String cacheControl = mapping.guarded() ? "private, no-cache"
+                : immutable ? "public, max-age=31536000, immutable"
                 : "public, max-age=0, must-revalidate";
 
             if (isNotModified(request, etag, mtime)) {
@@ -1446,6 +1898,16 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
             }
         }
         return null;
+    }
+
+    /** True if {@code realFile} is inside the (link-resolved) directory of a mapping whose access differs. */
+    private boolean insideMappingWithOtherAccess(StaticFileMapping serving, Path realFile) {
+        for (var other : staticFileMappings) {
+            if (other == serving || serving.sameAccessAs(other)) continue;
+            Path dir = realPathOrNearest(Path.of(other.directory()).toAbsolutePath().normalize());
+            if (realFile.startsWith(dir)) return true;
+        }
+        return false;
     }
 
     private boolean insideUntrustedDirectory(Path realFile) {
@@ -1535,6 +1997,89 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
     }
 
     /**
+     * The socket peer's address as every part of Brace sees it (L6 review): Jetty reports an IPv6
+     * peer in brackets ({@code [0:0:0:0:0:0:0:1]}), which is stripped here, once, where the
+     * address enters the framework, so trust checks, {@code perIp} buckets, {@code req.ip()},
+     * logs, analytics and the ops audit all see the same unbracketed literal. A zone id is kept.
+     */
+    static String peerAddress(org.eclipse.jetty.server.Request request) {
+        String raw = TrustedProxies.unbracket(org.eclipse.jetty.server.Request.getRemoteAddr(request));
+        // L3 final review: and in the canonical form req.ip() returns (::1, not 0:0:0:0:0:0:0:1).
+        String canonical = TrustedProxies.canonical(raw);
+        return canonical != null ? canonical : raw;
+    }
+
+    /**
+     * The request's headers as the single-value, case-insensitive map {@link Request} reads, built
+     * the same way for HTTP requests and WebSocket upgrades (L3 review). A header sent on several
+     * lines keeps its last line, except those whose lines the framework reads as one list, which
+     * are joined in wire order: {@code Cookie} with {@code "; "} (RFC 9113 8.2.3), so both paths
+     * see every cookie and a repeated name resolves to its first occurrence, and the forwarding
+     * headers ({@code X-Forwarded-For}, {@code Forwarded}, {@code X-Forwarded-Proto},
+     * {@code X-Forwarded-Host}) with {@code ","} (RFC 9110 5.3), so the rightmost entry is the
+     * last proxy's however a client split its own lines.
+     */
+    static Map<String, String> headerMap(org.eclipse.jetty.http.HttpFields fields) {
+        Map<String, String> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (var field : fields) {
+            String name = field.getName();
+            String value = field.getValue() == null ? "" : field.getValue();
+            String separator = listSeparator(name);
+            if (separator == null) {
+                headers.put(name, value);
+            } else {
+                headers.merge(name, value, (earlier, later) -> earlier + separator + later);
+            }
+        }
+        return headers;
+    }
+
+    private static String listSeparator(String name) {
+        if (name.equalsIgnoreCase("Cookie")) return "; ";
+        if (name.equalsIgnoreCase("X-Forwarded-For") || name.equalsIgnoreCase("Forwarded")
+                || name.equalsIgnoreCase("X-Forwarded-Proto") || name.equalsIgnoreCase("X-Forwarded-Host")) {
+            return ",";
+        }
+        return null;
+    }
+
+    /**
+     * The rightmost entry of a comma-separated forwarding header value (L3 review F9), stripped;
+     * null if there is none. A proxy that appends puts its own entry last, so this is the value the
+     * nearest trusted proxy vouched for; anything to its left came from further away, ultimately
+     * the client.
+     */
+    static String rightmostEntry(String list) {
+        if (list == null) return null;
+        String[] entries = list.split(",");
+        for (int i = entries.length - 1; i >= 0; i--) {
+            String entry = entries[i].strip();
+            if (!entry.isEmpty()) return entry;
+        }
+        return null;
+    }
+
+    /**
+     * Every instance of header {@code name}, in wire order, joined with {@code ","} (a list
+     * header's lines are one comma-separated list, RFC 9110 5.3), or null if there is none (L3).
+     * Used for the forwarding header, where the single-value request header map would keep only
+     * the last line.
+     */
+    static String joinedFieldValues(org.eclipse.jetty.http.HttpFields fields, String name) {
+        StringBuilder joined = null;
+        for (var field : fields) {
+            if (field.is(name)) {
+                if (joined == null) {
+                    joined = new StringBuilder(field.getValue() == null ? "" : field.getValue());
+                } else {
+                    joined.append(',').append(field.getValue() == null ? "" : field.getValue());
+                }
+            }
+        }
+        return joined == null ? null : joined.toString();
+    }
+
+    /**
      * Build the request's Session from the cookie (or a fresh one when sessions are off).
      * Deliberately does NOT consume flash: a session built for a before-middleware guard
      * may belong to a request whose handler can never render flash (a plain-Handler JSON
@@ -1598,8 +2143,11 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
      * socket can't carry a session a request couldn't.
      */
     Session decodeSession(String cookieValue) {
-        List<String> previous = sessionOptions != null ? sessionOptions.previousSecrets() : List.of();
-        Session session = Session.fromCookie(cookieValue, sessionSecret, previous);
+        // M7: the previous secrets always travel with their lifetime bound.
+        Session session = sessionOptions != null
+            ? Session.fromCookie(cookieValue, sessionSecret,
+                sessionOptions.previousSecrets(), sessionOptions.maxPreviousAbsoluteSeconds())
+            : Session.fromCookie(cookieValue, sessionSecret);
         if (sessionValidator != null && !session.isEmpty() && !sessionValidator.isValid(session)) {
             return Session.invalidated();
         }
@@ -1636,10 +2184,124 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         return true;
     }
 
-    /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
-    private static final java.util.regex.Pattern PUBLIC_DIRECTIVE =
-        java.util.regex.Pattern.compile("(?i)(?<![-\\w])public(?![-\\w])");
+    /**
+     * One directive of a {@code Cache-Control} value: its name in lower case, whether it has an
+     * argument ({@code max-age=60}, {@code private="set-cookie"}), and its text as written.
+     */
+    record CacheDirective(String name, boolean hasArgument, String text) {}
 
+    /**
+     * The directives of a {@code Cache-Control} value (RFC 9111 5.2), split on commas that are not
+     * inside a quoted-string (a backslash escapes the next character in one). This is the one
+     * reader of {@code Cache-Control} in the framework (M3 final review): word-matching the
+     * header's text took {@code x="no-store"} for {@code no-store} and {@code no-cache="private"}
+     * for {@code private}, so such a response went out with a session cookie and nothing keeping
+     * it from a shared cache. An unterminated quoted-string runs to the end of the value: nothing
+     * inside it is a directive. Empty list elements are skipped.
+     */
+    static List<CacheDirective> cacheDirectives(String cacheControl) {
+        var directives = new ArrayList<CacheDirective>();
+        if (cacheControl == null) return directives;
+        int start = 0;
+        boolean quoted = false;
+        for (int i = 0; i <= cacheControl.length(); i++) {
+            char c = i < cacheControl.length() ? cacheControl.charAt(i) : ',';
+            if (i < cacheControl.length()) {
+                if (quoted && c == '\\') {
+                    i++;
+                    continue;
+                }
+                if (c == '"') {
+                    quoted = !quoted;
+                    continue;
+                }
+                if (c != ',' || quoted) continue;
+            }
+            String text = cacheControl.substring(start, Math.min(i, cacheControl.length())).strip();
+            start = i + 1;
+            if (text.isEmpty()) continue;
+            int eq = text.indexOf('=');
+            int quote = text.indexOf('"');
+            boolean hasArgument = eq >= 0 && (quote < 0 || eq < quote);
+            String name = (hasArgument ? text.substring(0, eq) : text).strip().toLowerCase(java.util.Locale.ROOT);
+            directives.add(new CacheDirective(name, hasArgument, text));
+        }
+        return directives;
+    }
+
+    /** The directive names of a {@code Cache-Control} value, lower-cased, in order. */
+    static List<String> cacheDirectiveNames(String cacheControl) {
+        return cacheDirectives(cacheControl).stream().map(CacheDirective::name).toList();
+    }
+
+    /** True if {@code directives} has the bare directive {@code name} (no argument). */
+    private static boolean hasBareDirective(List<CacheDirective> directives, String name) {
+        for (var d : directives) {
+            if (!d.hasArgument() && d.name().equals(name)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * {@code cacheControl} made safe for a response that carries a session cookie: {@code public}
+     * is dropped, and {@code private} is put first unless the value already has a bare
+     * {@code private} or {@code no-store}. Every other directive is kept as written.
+     * {@code private="field"} does not count: it withholds only the named field from a shared
+     * cache, and not every cache honors it.
+     */
+    static String privateCacheControl(String cacheControl) {
+        var directives = cacheDirectives(cacheControl);
+        boolean hadPublic = directives.removeIf(d -> !d.hasArgument() && d.name().equals("public"));
+        boolean alreadyPrivate = hasBareDirective(directives, "private") || hasBareDirective(directives, "no-store");
+        if (!hadPublic && alreadyPrivate) return cacheControl;
+        var out = new StringBuilder(alreadyPrivate ? "" : "private");
+        for (var d : directives) {
+            if (out.length() > 0) out.append(", ");
+            out.append(d.text());
+        }
+        return out.toString();
+    }
+
+    /**
+     * Every response header that tells a browser, a proxy or a CDN it may store a response.
+     * {@link #send} removes them all (names match in any letter case) from responses that must
+     * not be shared, then sets the one {@code Cache-Control} it wants.
+     */
+    private static final Set<String> SHARED_CACHE_HEADERS = sharedCacheHeaders();
+
+    private static Set<String> sharedCacheHeaders() {
+        var names = new java.util.TreeSet<String>(Result.ASCII_CASE_INSENSITIVE);
+        names.addAll(List.of("Cache-Control", "Expires", "Pragma", "CDN-Cache-Control",
+            "Surrogate-Control", "Cloudflare-CDN-Cache-Control", "Vercel-CDN-Cache-Control"));
+        return java.util.Collections.unmodifiableSet(names);
+    }
+
+    /** Route patterns already warned about by {@link #warnIfGuardedRouteSentPublic}. */
+    private final Set<String> warnedPublicGuarded = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Dev-mode nudge: a route with access requirements answered with {@code Cache-Control: public}
+     * or {@code s-maxage}, so a shared cache may hand one user's response to the next without
+     * the requirement running. Caching a successful response is the app's choice (some guarded
+     * pages are the same for everyone), so this only warns, once per route.
+     */
+    private void warnIfGuardedRouteSentPublic(Exchange exchange, Result result) {
+        if (!devMode || exchange.match == null) return;
+        Route route = exchange.match.route();
+        if (route.isFramework() || !route.isGuarded()) return;
+        String cacheControl = result.header("Cache-Control");
+        if (cacheControl == null) return;
+        var names = cacheDirectiveNames(cacheControl);
+        if (!names.contains("public") && !names.contains("s-maxage")) return;
+        String key = route.method() + " " + route.pattern();
+        if (!warnedPublicGuarded.add(key)) return;
+        Log.warn(key + " has access requirements (" + route.accessLabel() + ") but its response was sent "
+            + "Cache-Control: " + cacheControl + ". A shared cache (CDN, reverse proxy) may store it and "
+            + "serve it to other users without the requirement running. Use \"private\" or \"no-store\" "
+            + "unless the response is the same for everyone who may see it. Logged once per route.");
+    }
+
+    /** Attach the Set-Cookie for a modified session to a Result; no-op otherwise. */
     private void attachSessionCookie(Result result, Session session, CookieSpec cookieSpec) {
         if (session == null || !session.isModified() || sessionSecret == null) return;
         session.maxAgeSeconds(sessionMaxAgeSeconds());
@@ -1659,13 +2321,17 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
         // middleware) is heuristically cacheable, and a force-cache proxy would replay
         // user A's Set-Cookie to everyone. An explicit Cache-Control wins, except "public": a
         // shared cache may store that (a fingerprinted static file is public, immutable), and
-        // with it this user's session cookie, so it becomes "private".
+        // with it this user's session cookie, so it becomes "private". Result matches header
+        // names case-insensitively, so a middleware's "cache-control" is this same header (it
+        // used to be a second map entry that this lookup missed and the wire sent).
+        // "public" is not the only way in: "s-maxage=600", or a bare "max-age=600", also lets a
+        // shared cache store the response, so "private" is added whenever the value has neither
+        // "private" nor "no-store". The handler's other directives are kept. The value is parsed
+        // into directives (M3 final review), so a quoted argument that contains one of those
+        // words is not taken for the directive.
         String cacheControl = result.header("Cache-Control");
-        if (cacheControl == null) {
-            result.header("Cache-Control", "private");
-        } else if (PUBLIC_DIRECTIVE.matcher(cacheControl).find()) {
-            result.header("Cache-Control", PUBLIC_DIRECTIVE.matcher(cacheControl).replaceAll("private"));
-        }
+        String rewritten = privateCacheControl(cacheControl);
+        if (!rewritten.equals(cacheControl)) result.header("Cache-Control", rewritten);
     }
 
     private String parseCookieValue(String cookieHeader, String name) {
@@ -1687,8 +2353,10 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
 
     /**
      * Snapshot the request headers as a redacted JSON object for the error record.
-     * Sensitive headers (authorization, cookie, …) are replaced with [REDACTED] by the
-     * Redactor. Returns null if there are no headers or serialization fails.
+     * {@link Redactor#redactHeaders}: sensitive names (authorization, cookie, …) become
+     * [REDACTED]; URL-valued headers (Referer, Origin, X-Original-URL, …) have their path and
+     * query redacted; other free-form values get the value-shaped pass (JWTs, high-entropy
+     * tokens, M6). Returns null if there are no headers or serialization fails.
      */
     private static String captureRedactedHeaders(org.eclipse.jetty.server.Request request) {
         try {
@@ -1697,7 +2365,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 headers.put(field.getName(), field.getValue());
             }
             if (headers.isEmpty()) return null;
-            return Json.mapper().writeValueAsString(Redactor.redact(headers));
+            return Json.mapper().writeValueAsString(Redactor.redactHeaders(headers));
         } catch (Exception e) {
             return null;
         }
@@ -1973,7 +2641,7 @@ public class BraceHandler extends org.eclipse.jetty.server.Handler.Abstract {
                 }
             }
         } catch (Exception e) {
-            Log.warn("upload temp sweep failed for " + dir + ": " + e);
+            Log.warn("upload temp sweep failed for " + dir + ": " + Redactor.redactMessage(e.toString()));
             return;
         }
         if (swept > 0) {

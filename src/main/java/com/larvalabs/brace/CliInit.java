@@ -18,7 +18,7 @@ public class CliInit {
         // .brace
         Path brace = projectDir.resolve(".brace");
         if (!Files.exists(brace)) {
-            Files.writeString(brace,
+            SecretFiles.writeProjectFile(brace,
                 "# Brace CLI project config — committed to git\n" +
                 "ops.local.url=http://localhost:8080\n" +
                 "# ops.prod.url=https://your-app.example.com\n" +
@@ -32,7 +32,7 @@ public class CliInit {
         // .brace.local
         Path local1 = projectDir.resolve(".brace.local");
         if (!Files.exists(local1)) {
-            Files.writeString(local1,
+            SecretFiles.writeProjectFile(local1,
                 "# Brace CLI per-developer overrides — gitignored\n" +
                 "ops.key=ops-private.key\n" +
                 "\n" +
@@ -59,7 +59,7 @@ public class CliInit {
         if (!needs.isEmpty()) {
             String addition = (existing.isEmpty() || existing.endsWith("\n") ? "" : "\n")
                 + "\n# brace CLI\n" + String.join("\n", needs) + "\n";
-            Files.writeString(gitignore, existing + addition);
+            SecretFiles.writeProjectFile(gitignore, existing + addition);
             local.add(new Check(".gitignore", true, "added " + String.join(", ", needs)));
             actions.add("Updated .gitignore");
         } else {
@@ -138,11 +138,11 @@ public class CliInit {
                 remote.add(new Check("reachable", true, prodUrl));
                 String detail = "HTTP " + e.status
                     + (e.code != null ? " (" + e.code + ")" : "")
-                    + ": " + (e.body == null || e.body.isBlank() ? "(empty body)" : e.body);
+                    + ": " + (e.body == null || e.body.isBlank() ? "(empty body)" : CliOutput.excerpt(e.body));
                 remote.add(new Check("authorized", false, detail));
                 addAuthFailureActions(projectDir, privKey, e, actions);
             } catch (Exception e) {
-                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+                String msg = CliOutput.excerpt(e.getMessage() != null ? e.getMessage() : e.toString());
                 if (msg.contains("Connection") || msg.contains("refused") || msg.contains("HostNotFound")) {
                     remote.add(new Check("reachable", false, "not reachable: " + msg));
                     actions.add("Verify " + prodUrl + " is reachable");
@@ -169,26 +169,26 @@ public class CliInit {
                 "actions", r.actions())));
             return;
         }
-        System.out.println();
-        System.out.println("Local setup");
+        CliOutput.println();
+        CliOutput.println("Local setup");
         for (var c : r.local()) {
-            System.out.println("  " + (c.ok() ? "✓" : "✗") + " "
+            CliOutput.println("  " + (c.ok() ? "✓" : "✗") + " "
                 + pad(c.name(), 24) + " " + c.detail());
         }
         if (!r.remote().isEmpty()) {
-            System.out.println();
-            System.out.println("Remote (prod)");
+            CliOutput.println();
+            CliOutput.println("Remote (prod)");
             for (var c : r.remote()) {
-                System.out.println("  " + (c.ok() ? "✓" : "✗") + " "
+                CliOutput.println("  " + (c.ok() ? "✓" : "✗") + " "
                     + pad(c.name(), 24) + " " + c.detail());
             }
         }
         if (!r.actions().isEmpty()) {
-            System.out.println();
-            System.out.println("Actions:");
-            for (var a : r.actions()) System.out.println("  - " + a);
+            CliOutput.println();
+            CliOutput.println("Actions:");
+            for (var a : r.actions()) CliOutput.println("  - " + a);
         }
-        System.out.println();
+        CliOutput.println();
     }
 
     private static void addAuthFailureActions(Path projectDir, Path privKey,
@@ -224,7 +224,11 @@ public class CliInit {
                 + "(3) server returned a framework-level error before the auth handler ran "
                 + "(check the response body shown above).");
         } else if (myPub != null) {
-            actions.add("Add to server's ops-authorized-keys: " + myPub + "  <label>");
+            // The exact line the server accepts: it refuses to start on a key line with no scope
+            // token (L1 final review), so a bare `KEY <label>` would break the next deploy.
+            actions.add("Add this line to the server's ops-authorized-keys (write scope:read instead of"
+                + " scope:control for a key that should only read status, logs and errors): "
+                + CliOps.keysFileLine(myPub, CliOps.defaultLabel(projectDir), false));
         } else {
             actions.add("Add your public key to server's ops-authorized-keys");
         }

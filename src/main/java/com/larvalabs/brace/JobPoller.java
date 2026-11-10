@@ -367,7 +367,7 @@ public class JobPoller {
                 break;
             } catch (Exception e) {
                 // Log and continue
-                System.err.println("JobPoller error: " + e.getMessage());
+                System.err.println("JobPoller error: " + Redactor.redactMessage(e.getMessage()));
                 try {
                     Thread.sleep(5_000);
                 } catch (InterruptedException ie) {
@@ -407,7 +407,7 @@ public class JobPoller {
                 break;
             } catch (Exception e) {
                 // Never let a transient error kill the thread — a dead heartbeat looks like a dead instance.
-                System.err.println("JobPoller heartbeat error: " + e.getMessage());
+                System.err.println("JobPoller heartbeat error: " + Redactor.redactMessage(e.getMessage()));
             }
         }
     }
@@ -441,7 +441,7 @@ public class JobPoller {
         } catch (Exception e) {
             rollbackQuietly(db);
             healthySinceNanos = 0;
-            System.err.println("JobPoller heartbeat failed: " + e.getMessage());
+            System.err.println("JobPoller heartbeat failed: " + Redactor.redactMessage(e.getMessage()));
         } finally {
             db.close();
         }
@@ -472,7 +472,7 @@ public class JobPoller {
             }
         } catch (Exception e) {
             rollbackQuietly(db);
-            System.err.println("JobPoller sweep error: " + e.getMessage());
+            System.err.println("JobPoller sweep error: " + Redactor.redactMessage(e.getMessage()));
         } finally {
             db.close();
         }
@@ -521,7 +521,7 @@ public class JobPoller {
             }
         } catch (Exception e) {
             rollbackQuietly(db);
-            System.err.println("JobPoller own-orphan check error: " + e.getMessage());
+            System.err.println("JobPoller own-orphan check error: " + Redactor.redactMessage(e.getMessage()));
         } finally {
             db.close();
         }
@@ -567,7 +567,7 @@ public class JobPoller {
         } catch (Exception e) {
             rollbackQuietly(db);
             System.err.println("JobPoller could not release claims on shutdown (the heartbeat sweep "
-                + "will recover them): " + e.getMessage());
+                + "will recover them): " + Redactor.redactMessage(e.getMessage()));
         } finally {
             db.close();
         }
@@ -732,7 +732,7 @@ public class JobPoller {
             return rows;
         } catch (Exception e) {
             db.rollbackTransaction();
-            System.err.println("JobPoller batch claim error: " + e.getMessage());
+            System.err.println("JobPoller batch claim error: " + Redactor.redactMessage(e.getMessage()));
             return List.of();
         } finally {
             db.close();
@@ -843,9 +843,11 @@ public class JobPoller {
                 return; // Interrupted by shutdown: releaseOwnClaims returns the row, attempt refunded.
             }
 
-            String error = flight.timedOut
+            // L13 review: stored in scheduled_jobs.error and shown to operators; redacted like
+            // every other exception message that leaves the process.
+            String error = Redactor.redactMessage(flight.timedOut
                 ? "Timed out after " + describe(timeout) + " (" + failure + ")"
-                : failure.getMessage();
+                : failure.getMessage());
             int newAttempts = attempts + 1;
             if (newAttempts >= maxAttempts) {
                 markTerminal(factory, db, id,
@@ -887,7 +889,7 @@ public class JobPoller {
                 Thread.interrupted();
                 if (attempt == 1) {
                     System.err.println("JobPoller could not record the outcome of job " + id
-                        + " (it will be released for retry): " + e.getMessage());
+                        + " (it will be released for retry): " + Redactor.redactMessage(e.getMessage()));
                 }
             } finally {
                 if (db != jobDb) db.close();

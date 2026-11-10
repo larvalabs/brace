@@ -26,10 +26,10 @@ class OpsIntegrationTest {
     static void startApp() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test-key\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test-key\n");
         keysFilePath = keysFile.toString();
 
-        app = Brace.app().port(0).ops(keysFilePath);
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFilePath);
 
         app.get("/hello", req -> Result.text("Hello!")).name("hello");
         app.get("/error", req -> { throw new RuntimeException("test error"); });
@@ -433,7 +433,7 @@ class OpsIntegrationTest {
     static void startCacheApp() throws Exception {
         cacheKeypair = OpsKeys.generateKeypair();
         Path cacheKeysFile = tmpDir.resolve("cache-authorized-keys");
-        Files.writeString(cacheKeysFile, cacheKeypair.publicKey() + "\n");
+        Files.writeString(cacheKeysFile, cacheKeypair.publicKey() + " scope:control\n");
 
         var cache = Brace.cache();
         cache.set("key1", "value1");
@@ -442,7 +442,7 @@ class OpsIntegrationTest {
         var db = new DatabaseFactory(
             "jdbc:h2:mem:cacheopsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
             List.of());
-        cacheApp = Brace.app().port(0).ops(cacheKeysFile.toString()).cache(cache).database(db);
+        cacheApp = Brace.app().opsUnpinnedForTests().port(0).ops(cacheKeysFile.toString()).cache(cache).database(db);
         cacheApp.get("/cacheboom", req -> { throw new RuntimeException("cache test error"); });
         cacheApp.start();
         cachePort = cacheApp.actualPort();
@@ -591,9 +591,9 @@ class OpsIntegrationTest {
     static void startMetricsApp() throws Exception {
         metricsKeypair = OpsKeys.generateKeypair();
         Path metricsKeysFile = tmpDir.resolve("metrics-authorized-keys");
-        Files.writeString(metricsKeysFile, metricsKeypair.publicKey() + "\n");
+        Files.writeString(metricsKeysFile, metricsKeypair.publicKey() + " scope:control\n");
 
-        metricsApp = Brace.app().port(0).ops(metricsKeysFile.toString());
+        metricsApp = Brace.app().opsUnpinnedForTests().port(0).ops(metricsKeysFile.toString());
         metricsApp.get("/ping", req -> Result.text("pong"));
         metricsApp.start();
         metricsPort = metricsApp.actualPort();
@@ -668,9 +668,9 @@ class OpsIntegrationTest {
     static void startJfrApp() throws Exception {
         jfrKeypair = OpsKeys.generateKeypair();
         Path jfrKeysFile = tmpDir.resolve("jfr-authorized-keys");
-        Files.writeString(jfrKeysFile, jfrKeypair.publicKey() + "\n");
+        Files.writeString(jfrKeysFile, jfrKeypair.publicKey() + " scope:control\n");
 
-        jfrApp = Brace.app().port(0).ops(jfrKeysFile.toString());
+        jfrApp = Brace.app().opsUnpinnedForTests().port(0).ops(jfrKeysFile.toString());
         jfrApp.get("/work", req -> {
             long sum = 0;
             for (int i = 0; i < 10000; i++) sum += i;

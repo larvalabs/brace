@@ -31,33 +31,33 @@ public class CliCheck {
         // Fetch all three endpoints
         JsonNode status, errors, logs;
         try {
-            status = fetchJson(cfg, projectDir, cfg.url() + "/ops/status");
+            status = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/status");
         } catch (Exception e) {
             if (mode == CliOutput.Mode.JSON) {
-                var result = new CheckResult(false, "App unreachable: " + e.getMessage(), List.of(
-                    new Check("reachability", "fail", "Cannot connect: " + e.getMessage())
+                var result = new CheckResult(false, "App unreachable: " + CliOutput.excerpt(e.getMessage()), List.of(
+                    new Check("reachability", "fail", "Cannot connect: " + CliOutput.excerpt(e.getMessage()))
                 ));
                 System.out.println(CliOutput.json(result));
             } else {
-                CliOutput.printError("Cannot reach " + cfg.url() + ": " + e.getMessage());
+                CliOutput.printError("Cannot reach " + CliOutput.excerpt(cfg.url()) + ": " + CliOutput.excerpt(e.getMessage()));
             }
             return 2;
         }
 
         try {
-            errors = fetchJson(cfg, projectDir, cfg.url() + "/ops/errors");
+            errors = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/errors");
         } catch (Exception e) {
             errors = Json.mapper().valueToTree(List.of());
         }
 
         try {
             Instant since = Instant.now().minusSeconds(thresholds.logWindowMinutes() * 60L);
-            logs = fetchJson(cfg, projectDir, cfg.url() + "/ops/logs?level=warn&since_ts=" + since.toString());
+            logs = fetchJson(cfg, projectDir, CliAuth.baseUrl(cfg) + "/ops/logs?level=warn&since_ts=" + since.toString());
         } catch (Exception e) {
             logs = Json.mapper().valueToTree(List.of());
         }
 
-        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(cfg.url())));
+        var result = evaluate(status, errors, logs, thresholds, cfg.env(), checkContentSecurityPolicy(probeRoot(CliAuth.baseUrl(cfg))));
 
         if (mode == CliOutput.Mode.JSON) {
             System.out.println(CliOutput.json(result));
@@ -81,7 +81,7 @@ public class CliCheck {
     }
 
     private static void renderHuman(CheckResult result) {
-        System.out.println();
+        CliOutput.println();
         for (var check : result.checks()) {
             String icon = switch (check.status()) {
                 case "pass" -> "\u2713";
@@ -89,18 +89,18 @@ public class CliCheck {
                 case "fail" -> "\u2717";
                 default -> "?";
             };
-            System.out.printf("%s %-15s %s%n", icon, check.name(), check.message());
+            CliOutput.printf("%s %-15s %s%n", icon, check.name(), check.message());
             if (check.followUp() != null && !"pass".equals(check.status())) {
-                System.out.printf("  %-15s \u2192 %s%n", "", check.followUp());
+                CliOutput.printf("  %-15s \u2192 %s%n", "", check.followUp());
             }
         }
-        System.out.println();
+        CliOutput.println();
         long issues = result.checks().stream()
             .filter(c -> !"pass".equals(c.status())).count();
         if (issues == 0) {
-            System.out.println("All checks passed");
+            CliOutput.println("All checks passed");
         } else {
-            System.out.println(issues + " issue" + (issues == 1 ? "" : "s") + " found");
+            CliOutput.println(issues + " issue" + (issues == 1 ? "" : "s") + " found");
         }
     }
 
@@ -145,21 +145,17 @@ public class CliCheck {
         }
     }
 
-    private static final HttpClient probeClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(5))
-        .followRedirects(HttpClient.Redirect.NEVER)
-        .build();
-
     /**
      * Fetch {@code GET /} without credentials, or null if that fails. The app's after-middleware
      * runs on every response, redirects and 404s included, so a login redirect still shows the
-     * headers the app sets.
+     * headers the app sets. Sent through {@link CliHttp} (verification pass): its client never
+     * follows a redirect and adds no credentials, and the body is read within its request
+     * timeout, total deadline and size cap, so a root that drips or never ends cannot hold
+     * {@code brace check}.
      */
     static RootProbe probeRoot(String baseUrl) {
         try {
-            var response = probeClient.send(
-                HttpRequest.newBuilder().uri(URI.create(baseUrl + "/")).timeout(Duration.ofSeconds(10)).GET().build(),
-                HttpResponse.BodyHandlers.discarding());
+            var response = CliHttp.send(HttpRequest.newBuilder().uri(URI.create(baseUrl + "/")).GET());
             return new RootProbe(response.statusCode(),
                 response.headers().firstValue("Content-Type").orElse(null),
                 response.headers().allValues("Content-Security-Policy"));
@@ -263,13 +259,18 @@ public class CliCheck {
 
     static Check checkHttp5xx(JsonNode status) {
         var codes = status.path("http").path("statusCodes");
-        int total5xx = 0;
-        int totalRequests = 0;
+        long total5xx = 0;
+        long totalRequests = 0;
         var it = codes.fields();
         while (it.hasNext()) {
             var entry = it.next();
-            int code = Integer.parseInt(entry.getKey());
-            int count = entry.getValue().asInt(0);
+            int code;
+            try {
+                code = Integer.parseInt(entry.getKey());
+            } catch (NumberFormatException notAStatusCode) {
+                continue;   // a key the server made up: not a status code, so not counted
+            }
+            long count = entry.getValue().asLong(0);
             totalRequests += count;
             if (code >= 500) total5xx += count;
         }

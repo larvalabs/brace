@@ -29,19 +29,19 @@ class StrictSecurityHeadersTest {
     static void startApp() throws Exception {
         key = OpsKeys.generateKeypair();
         Path keys = tmp.resolve("ops-authorized-keys");
-        Files.writeString(keys, key.publicKey() + " test\n");
+        Files.writeString(keys, key.publicKey() + " scope:control test\n");
         Path assets = Files.createDirectories(tmp.resolve("public"));
         Files.writeString(assets.resolve("app.css"), "body{}");
 
         var db = new DatabaseFactory("jdbc:h2:mem:stricthdr" + System.nanoTime() + ";DB_CLOSE_DELAY=-1",
             null, null, List.of());
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .sessions("strict-headers-session-secret-at-least-32")
             .opsSecret(OPS_SECRET)
             .ops(keys.toString())
             .database(db)
             .cache(Brace.cache())
-            .staticFiles("/assets", assets.toString());
+            .staticFiles("/assets", assets.toString()).publicFiles();
         app.after(SecurityHeaders.strict());
         // A lax app policy in another case, aimed at /ops: it must not reach the ops pages.
         app.after("/ops/*", (req, result) -> result.header("content-security-policy", "script-src * 'unsafe-inline'"));

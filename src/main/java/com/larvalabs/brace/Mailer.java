@@ -31,12 +31,78 @@ public class Mailer {
     private final LongAdder sentCount = new LongAdder();
     private final LongAdder failCount = new LongAdder();
 
+    /** {@link #smtpUrl} parsed once at construction; null in dev capture mode. */
+    private final java.net.URI smtpUri;
+
+    /**
+     * @throws IllegalArgumentException if {@code smtpUrl} is not a parseable URL with a host. The
+     *     message names the setting, never the URL (it carries the SMTP password).
+     */
     public Mailer(String smtpUrl) {
         this.smtpUrl = smtpUrl;
+        this.smtpUri = smtpUrl == null ? null : parseSmtpUrl(smtpUrl);
+        warnIfCleartextCredentials(smtpUri);
     }
 
-    public Mailer from(String from) { this.defaultFrom = from; return this; }
-    public Mailer replyTo(String replyTo) { this.defaultReplyTo = replyTo; return this; }
+    /**
+     * Parses the SMTP URL once (M9 final review). A password containing {@code ^}, a space or
+     * {@code |} made {@code new URI(...)} throw a {@code URISyntaxException} whose message is the
+     * whole URL, and it was chained as the cause of every send failure, so the password reached the
+     * stored stack trace. The exception thrown here neither includes the input nor chains the
+     * original.
+     */
+    static java.net.URI parseSmtpUrl(String smtpUrl) {
+        java.net.URI url;
+        try {
+            url = new java.net.URI(smtpUrl);
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalArgumentException("Mailer: the SMTP URL (the smtp.url setting passed to "
+                + "new Mailer(...)) is malformed. If the user name or password contains reserved "
+                + "characters, percent-encode them (^ as %5E, a space as %20, | as %7C, # as %23, "
+                + "@ as %40, / as %2F, : as %3A).");
+        }
+        if (url.getHost() == null) {
+            throw new IllegalArgumentException("Mailer: the SMTP URL (the smtp.url setting passed to "
+                + "new Mailer(...)) has no valid host. A # / ? or @ in the password must be "
+                + "percent-encoded (# as %23, / as %2F, ? as %3F, @ as %40), and a host name cannot "
+                + "contain _.");
+        }
+        return url;
+    }
+
+    /**
+     * M9 review: {@code smtp+plain://user:pass@host} never requires TLS, so if the relay does not
+     * offer STARTTLS the AUTH exchange (the password) goes in cleartext. Allowed, for a trusted
+     * local relay, but said out loud once at construction. Never logs the user info.
+     */
+    private static void warnIfCleartextCredentials(java.net.URI url) {
+        if (url == null) return;
+        if ("smtp+plain".equals(lowerScheme(url)) && url.getRawUserInfo() != null) {
+            Log.warn("Mailer: credentials are configured on an smtp+plain:// URL (host "
+                + url.getHost() + "), which does not require TLS: if the relay does not offer "
+                + "STARTTLS, the SMTP password is sent in cleartext. Use smtp:// (STARTTLS "
+                + "required) or smtps:// unless the relay is local and trusted.");
+        }
+    }
+
+    /** The URL scheme, lowercased: URI schemes are case-insensitive ({@code SMTPS://} is smtps). */
+    private static String lowerScheme(java.net.URI url) {
+        return url.getScheme() == null ? null : url.getScheme().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** The default sender: exactly one address, checked here so a bad one fails at startup (L14). */
+    public Mailer from(String from) {
+        if (from != null) singleAddress(from, "from");
+        this.defaultFrom = from;
+        return this;
+    }
+
+    /** The {@code Reply-To} address for every message: exactly one, checked here (L14). */
+    public Mailer replyTo(String replyTo) {
+        if (replyTo != null) singleAddress(replyTo, "replyTo");
+        this.defaultReplyTo = replyTo;
+        return this;
+    }
 
     /** How long to wait for the SMTP TCP connect. Default 10s. */
     public Mailer connectTimeout(java.time.Duration connectTimeout) {
@@ -78,13 +144,50 @@ public class Mailer {
                 send(email);
             } catch (Exception e) {
                 // send() already counted the failure in failCount
-                Log.warn("async email to " + email.to + " failed: " + e.getMessage());
+                Log.warn("async email to " + email.to + " failed: " + Redactor.redactMessage(e.getMessage()));
             }
         });
     }
 
+    /**
+     * {@code to(...)} takes exactly one address (L14). {@code InternetAddress.parse} expands a
+     * comma-separated list, so an address taken from a form field could add recipients. Strict
+     * parsing with {@code new InternetAddress(s, true)} already yields exactly one address or
+     * throws; on top of that this refuses group syntax ({@code g: a@b.c;}, which names several
+     * mailboxes as one address), route addresses ({@code <@relay:a@b.c>}) and any control
+     * character. A comma or semicolon inside a quoted display name ({@code "Doe, J" <a@b.c>})
+     * is one mailbox and is accepted.
+     */
+    static jakarta.mail.internet.InternetAddress singleAddress(String to) {
+        return singleAddress(to, "to");
+    }
+
+    /** {@link #singleAddress(String)}, naming {@code field} ({@code to}, {@code cc}, {@code from}, {@code replyTo}) in the error. */
+    static jakarta.mail.internet.InternetAddress singleAddress(String value, String field) {
+        if (value == null) throw new IllegalArgumentException(field + " address is required");
+        for (int i = 0; i < value.length(); i++) {
+            if (Character.isISOControl(value.charAt(i))) {
+                throw new IllegalArgumentException(field + "(...) takes a single address without control characters");
+            }
+        }
+        try {
+            var address = new jakarta.mail.internet.InternetAddress(value, true);
+            String mailbox = address.getAddress();
+            if (address.isGroup() || mailbox == null || mailbox.startsWith("@") || mailbox.indexOf(':') >= 0) {
+                throw new IllegalArgumentException(field + "(...) takes a single mailbox, not a group or route address");
+            }
+            return address;
+        } catch (jakarta.mail.internet.AddressException e) {
+            throw new IllegalArgumentException(field + "(...) takes a single valid address", e);
+        }
+    }
+
     void send(EmailBuilder email) {
         var from = email.from != null ? email.from : defaultFrom;
+        // Every address field is exactly one mailbox (L14), checked in dev capture mode too.
+        singleAddress(email.to, "to");
+        if (email.cc != null) singleAddress(email.cc, "cc");
+        if (from != null) singleAddress(from, "from");
 
         if (smtpUrl == null) {
             // Dev mode: capture instead of sending, bounded drop-oldest. Capture is dev-only —
@@ -110,11 +213,11 @@ public class Mailer {
 
     private void sendSmtp(EmailBuilder email, String from) {
         try {
-            // Parse smtpUrl: smtp://user:pass@host:port or smtps://user:pass@host:port
-            var url = new java.net.URI(smtpUrl);
+            // smtp://, smtps:// or smtp+plain:// (user:pass@host:port), parsed at construction
+            var url = smtpUri;
             var host = url.getHost();
             var port = url.getPort() > 0 ? url.getPort() : 587;
-            var scheme = url.getScheme(); // "smtp" or "smtps"
+            var scheme = lowerScheme(url); // "smtp", "smtps" or "smtp+plain"
             String user = null;
             String pass = null;
             if (url.getUserInfo() != null) {
@@ -144,12 +247,15 @@ public class Mailer {
             }
 
             var message = new jakarta.mail.internet.MimeMessage(session);
-            if (from != null) message.setFrom(new jakarta.mail.internet.InternetAddress(from));
+            if (from != null) message.setFrom(singleAddress(from, "from"));
+            if (defaultReplyTo != null) {
+                message.setReplyTo(new jakarta.mail.Address[] {singleAddress(defaultReplyTo, "replyTo")});
+            }
             message.setRecipients(jakarta.mail.Message.RecipientType.TO,
-                jakarta.mail.internet.InternetAddress.parse(email.to));
+                new jakarta.mail.Address[] {singleAddress(email.to, "to")});
             if (email.cc != null) {
                 message.setRecipients(jakarta.mail.Message.RecipientType.CC,
-                    jakarta.mail.internet.InternetAddress.parse(email.cc));
+                    new jakarta.mail.Address[] {singleAddress(email.cc, "cc")});
             }
             message.setSubject(email.subject);
 
@@ -178,11 +284,20 @@ public class Mailer {
         var props = new Properties();
         props.put("mail.smtp.host", host);
         props.put("mail.smtp.port", String.valueOf(port));
+        // Case-insensitive (M9 review): `SMTPS://` used to land on the STARTTLS-required path.
+        scheme = scheme == null ? null : scheme.toLowerCase(java.util.Locale.ROOT);
 
         if ("smtps".equals(scheme)) {
             props.put("mail.smtp.ssl.enable", "true");
         } else {
             props.put("mail.smtp.starttls.enable", "true");
+            // M9: without "required" the library silently continues in cleartext when the server's
+            // EHLO does not advertise STARTTLS (a network attacker strips it), then sends AUTH and
+            // the message. Plain `smtp://` therefore refuses to talk without TLS; a local relay
+            // that cannot offer it opts out with the `smtp+plain://` scheme.
+            if (!"smtp+plain".equals(scheme)) {
+                props.put("mail.smtp.starttls.required", "true");
+            }
         }
 
         props.put("mail.smtp.connectiontimeout", String.valueOf(connectTimeout.toMillis()));

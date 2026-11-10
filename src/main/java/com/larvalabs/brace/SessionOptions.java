@@ -164,8 +164,39 @@ public class SessionOptions {
         return this;
     }
 
+    /** The previous secrets (immutable). */
     public java.util.List<String> previousSecrets() {
         return previousSecrets;
+    }
+
+    /**
+     * Longest absolute lifetime, in seconds, a cookie opened with a previous secret may carry: the
+     * M7 bound that {@link Session#fromCookie(String, String, java.util.List, long)} requires
+     * alongside the previous secrets.
+     */
+    long maxPreviousAbsoluteSeconds() {
+        if (absoluteMaxAge != null && absoluteMaxAge.getSeconds() > 0) return absoluteMaxAge.getSeconds();
+        long horizon = maxAge != null && maxAge.getSeconds() > 0
+            ? maxAge.getSeconds() : Session.DEFAULT_MAX_AGE_SECONDS;
+        return Math.max(Session.DEFAULT_ABSOLUTE_MAX_AGE_SECONDS, horizon);
+    }
+
+    /**
+     * An independent copy, taken by {@link Brace#sessions(SessionOptions)} so that changing these
+     * options afterwards (a placeholder previous secret, say) cannot bypass the validation it ran
+     * (M7 review). Every field is immutable or copied.
+     */
+    SessionOptions copy() {
+        var c = new SessionOptions(secret);
+        c.httpOnly = httpOnly;
+        c.secure = secure;
+        c.sameSite = sameSite;
+        c.maxAge = maxAge;
+        c.absoluteMaxAge = absoluteMaxAge;
+        c.previousSecrets = java.util.List.copyOf(previousSecrets);
+        c.path = path;
+        c.domain = domain;
+        return c;
     }
 
     /** Cookie Path; must start with {@code /} and contain no {@code ;} or control characters. */

@@ -313,14 +313,34 @@ public class Session {
      * (M10's {@link SessionOptions#previousSecrets}), so the secret can be rotated without logging
      * everyone out. A session opened with an old secret is marked modified, so this response
      * re-seals it with the current one.
+     *
+     * <p>{@code maxPreviousAbsoluteSeconds} is the longest absolute lifetime a cookie opened with a
+     * previous secret may still claim ({@link SessionOptions#maxPreviousAbsoluteSeconds}, M7). It
+     * is a required argument on purpose: there is no overload that takes previous secrets without
+     * it, and a bound that is not positive honours no previous-secret cookie (fail closed).
      */
-    static Session fromCookie(String cookie, String secret, java.util.List<String> previousSecrets) {
+    static Session fromCookie(String cookie, String secret, java.util.List<String> previousSecrets,
+                              long maxPreviousAbsoluteSeconds) {
         Session session = decrypt(cookie, secret);
         if (session != null) return session;
+        // M7: without a bound there is no way to limit _abs, so no cookie sealed with a previous
+        // secret is honoured: fail closed rather than guess a default lifetime.
+        if (maxPreviousAbsoluteSeconds <= 0) return new Session();
+        long maxAbsolute = maxPreviousAbsoluteSeconds;
         for (String previous : previousSecrets) {
             session = decrypt(cookie, previous);
             if (session != null) {
-                if (!session.data.isEmpty()) session.modified = true;
+                // M7: a cookie sealed with a retired secret is only honoured while it carries a
+                // bounded _abs. One forged with a leaked or public secret (no _abs, or one pushed
+                // far out) would otherwise be re-sealed under the current secret indefinitely.
+                long now = System.currentTimeMillis() / 1000;
+                if (session.absoluteDeadline <= 0 || session.absoluteDeadline > now + maxAbsolute) {
+                    return new Session();
+                }
+                // An empty one is a brand-new session: it inherits no deadline (M7 review), so a
+                // forged empty cookie can't hand its _abs to the session written into it.
+                if (session.data.isEmpty()) return new Session();
+                session.modified = true;
                 return session;
             }
         }
@@ -379,10 +399,9 @@ public class Session {
             //   regardless of the client-side Max-Age hint).
             // - Present and in the future → strip _exp so it is never visible via get/has/keys, then
             //   keep the data.
-            // - Absent (legacy ≤0.1.6 cookie) → accepted for this release; re-minted with _exp on the
-            //   next write. A future release will reject expiry-less cookies (see migration guide).
-            // M10: a cookie without _exp (minted by 0.1.6 or earlier) is no longer accepted; every
-            // cookie since 0.1.7 carries one. A missing, malformed or past _exp is an empty session.
+            // - Absent → reject (M10): a cookie without _exp (minted by 0.1.6 or earlier) is no longer
+            //   accepted; every cookie since 0.1.7 carries one. A missing, malformed or past _exp is
+            //   an empty session.
             long now = System.currentTimeMillis() / 1000;
             String exp = session.data.remove(EXPIRY_KEY);
             try {

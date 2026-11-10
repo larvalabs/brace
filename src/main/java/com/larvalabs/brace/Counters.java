@@ -44,6 +44,15 @@ class Counters {
      * @return the counter value after applying {@code delta}
      */
     long incrementAndGet(String key, long delta, Instant expiresAt) {
+        return incrementAndGet(key, delta, expiresAt, NO_DEADLINE);
+    }
+
+    /**
+     * As {@link #incrementAndGet(String, long, Instant)}, with every statement given a JDBC query
+     * timeout for what is left before {@code deadlineNanos} (see {@link #applyDeadline}), so an
+     * abandoned call does not leave a statement waiting on a lock (L16 verification).
+     */
+    long incrementAndGet(String key, long delta, Instant expiresAt, long deadlineNanos) {
         var db = new Database(dbFactory.openSession());
         try {
             db.beginTransaction();
@@ -52,8 +61,8 @@ class Counters {
             Timestamp nowTs = Timestamp.from(now);
             long result = db.jdbc(conn ->
                 dbFactory.isPostgres()
-                    ? incrementPostgres(conn, key, delta, exp, nowTs)
-                    : incrementPortable(conn, key, delta, exp, now));
+                    ? incrementPostgres(conn, key, delta, exp, nowTs, deadlineNanos)
+                    : incrementPortable(conn, key, delta, exp, now, deadlineNanos));
             db.commitTransaction();
             return result;
         } catch (RuntimeException e) {
@@ -90,6 +99,23 @@ class Counters {
      * @return new value per key after applying its delta; empty if {@code updates} is empty
      */
     Map<String, Long> incrementBatch(List<CounterUpdate> updates) {
+        return incrementBatch(updates, NO_DEADLINE);
+    }
+
+    /** {@link #incrementBatch(List, long)} without a deadline. */
+    static final long NO_DEADLINE = Long.MIN_VALUE;
+
+    /**
+     * As {@link #incrementBatch(List)}, giving up at {@code deadlineNanos} (a
+     * {@link System#nanoTime()} value; L6 final review). Every statement carries a JDBC query
+     * timeout for the time that is left, so a statement stuck behind a lock or a slow database
+     * is cancelled by the driver instead of holding the calling request. JDBC timeouts are whole
+     * seconds, so the remainder is rounded up: a statement can outlive the deadline by up to a
+     * second. A cancelled statement surfaces as an exception (SQLState 57014 on Postgres), which
+     * {@link #isOutage} classes with outages, and the transaction is rolled back. Waiting for a
+     * pooled connection is bounded by the pool's own timeout, not by this deadline.
+     */
+    Map<String, Long> incrementBatch(List<CounterUpdate> updates, long deadlineNanos) {
         if (updates.isEmpty()) {
             return Map.of();
         }
@@ -99,8 +125,8 @@ class Counters {
             Instant now = Instant.now();
             Map<String, Long> result = db.jdbc(conn ->
                 dbFactory.isPostgres()
-                    ? incrementBatchPostgres(conn, updates, Timestamp.from(now))
-                    : incrementBatchPortable(conn, updates, now));
+                    ? incrementBatchPostgres(conn, updates, Timestamp.from(now), deadlineNanos)
+                    : incrementBatchPortable(conn, updates, now, deadlineNanos));
             db.commitTransaction();
             return result;
         } catch (RuntimeException e) {
@@ -114,9 +140,49 @@ class Counters {
         }
     }
 
-    /** Postgres batch upsert: one multi-row statement, one round trip, RETURNING every new count. */
+    /**
+     * Most rows in one Postgres counter statement (L6 review F4). Each row binds three parameters
+     * and Postgres refuses a statement with more than 65,535, so a single statement for a buffer
+     * of over 21,845 keys failed outright; larger batches are split into statements of this size,
+     * still inside one transaction.
+     */
+    static final int MAX_BATCH_ROWS = 5_000;
+
+    /** Postgres batch upsert: multi-row statements of at most {@link #MAX_BATCH_ROWS}, RETURNING every new count. */
     private static Map<String, Long> incrementBatchPostgres(java.sql.Connection conn,
-                                                            List<CounterUpdate> updates, Timestamp now)
+                                                            List<CounterUpdate> updates, Timestamp now,
+                                                            long deadlineNanos)
+            throws java.sql.SQLException {
+        if (updates.size() <= MAX_BATCH_ROWS) {
+            return incrementChunkPostgres(conn, updates, now, deadlineNanos);
+        }
+        var result = new HashMap<String, Long>();
+        for (int from = 0; from < updates.size(); from += MAX_BATCH_ROWS) {
+            result.putAll(incrementChunkPostgres(conn,
+                updates.subList(from, Math.min(updates.size(), from + MAX_BATCH_ROWS)), now, deadlineNanos));
+        }
+        return result;
+    }
+
+    /**
+     * Give {@code statement} a query timeout for what is left before {@code deadlineNanos}, in
+     * whole seconds rounded up (JDBC's unit); throws if the deadline has already passed.
+     */
+    private static void applyDeadline(java.sql.Statement statement, long deadlineNanos)
+            throws java.sql.SQLException {
+        if (deadlineNanos == NO_DEADLINE) {
+            return;
+        }
+        long leftNanos = deadlineNanos - System.nanoTime();
+        if (leftNanos <= 0) {
+            throw new java.sql.SQLTimeoutException("shared-counter write passed its deadline", "57014");
+        }
+        statement.setQueryTimeout((int) Math.min(Integer.MAX_VALUE, (leftNanos + 999_999_999L) / 1_000_000_000L));
+    }
+
+    private static Map<String, Long> incrementChunkPostgres(java.sql.Connection conn,
+                                                            List<CounterUpdate> updates, Timestamp now,
+                                                            long deadlineNanos)
             throws java.sql.SQLException {
         var sql = new StringBuilder(
             "INSERT INTO brace_counters AS c (counter_key, n, expires_at) VALUES ");
@@ -137,6 +203,7 @@ class Counters {
                 setNullableTimestamp(ps, p++, u.expiresAt() == null ? null : Timestamp.from(u.expiresAt()));
             }
             ps.setTimestamp(p, now); // expiry comparison basis, shared by every row's CASE
+            applyDeadline(ps, deadlineNanos);
             try (var rs = ps.executeQuery()) {
                 while (rs.next()) {
                     result.put(rs.getString(1), rs.getLong(2));
@@ -148,12 +215,13 @@ class Counters {
 
     /** Portable batch (H2 and any non-Postgres): the single-key upsert run per key in one tx. */
     private static Map<String, Long> incrementBatchPortable(java.sql.Connection conn,
-                                                            List<CounterUpdate> updates, Instant now)
+                                                            List<CounterUpdate> updates, Instant now,
+                                                            long deadlineNanos)
             throws java.sql.SQLException {
         var result = new HashMap<String, Long>();
         for (var u : updates) {
             Timestamp exp = u.expiresAt() == null ? null : Timestamp.from(u.expiresAt());
-            result.put(u.key(), incrementPortable(conn, u.key(), u.delta(), exp, now));
+            result.put(u.key(), incrementPortable(conn, u.key(), u.delta(), exp, now, deadlineNanos));
         }
         return result;
     }
@@ -165,7 +233,8 @@ class Counters {
      * for the rate limiter on a busy server; see {@code docs/2026-06-07-rate-limiter-load.md}.
      */
     private static long incrementPostgres(java.sql.Connection conn, String key, long delta,
-                                          Timestamp exp, Timestamp now) throws java.sql.SQLException {
+                                          Timestamp exp, Timestamp now, long deadlineNanos)
+            throws java.sql.SQLException {
         try (var ps = conn.prepareStatement(
                 "INSERT INTO brace_counters AS c (counter_key, n, expires_at) VALUES (?, ?, ?) " +
                 "ON CONFLICT (counter_key) DO UPDATE SET " +
@@ -178,6 +247,7 @@ class Counters {
             ps.setTimestamp(4, now);   // expiry comparison uses the same Timestamp basis as storage
             ps.setLong(5, delta);      // reset value when the prior window had expired
             ps.setLong(6, delta);      // otherwise increment the live count
+            applyDeadline(ps, deadlineNanos);
             try (var rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getLong(1);
@@ -187,12 +257,14 @@ class Counters {
 
     /** Portable path (H2 and any non-Postgres): SELECT ... FOR UPDATE then UPDATE/INSERT. */
     private static long incrementPortable(java.sql.Connection conn, String key, long delta,
-                                          Timestamp exp, Instant now) throws java.sql.SQLException {
+                                          Timestamp exp, Instant now, long deadlineNanos)
+            throws java.sql.SQLException {
         long current = 0;
         boolean exists = false;
         try (var ps = conn.prepareStatement(
                 "SELECT n, expires_at FROM brace_counters WHERE counter_key = ? FOR UPDATE")) {
             ps.setString(1, key);
+            applyDeadline(ps, deadlineNanos);
             try (var rs = ps.executeQuery()) {
                 if (rs.next()) {
                     exists = true;
@@ -210,6 +282,7 @@ class Counters {
                 ps.setLong(1, next);
                 setNullableTimestamp(ps, 2, exp);
                 ps.setString(3, key);
+                applyDeadline(ps, deadlineNanos);
                 ps.executeUpdate();
             }
         } else {
@@ -218,6 +291,7 @@ class Counters {
                 ps.setString(1, key);
                 ps.setLong(2, next);
                 setNullableTimestamp(ps, 3, exp);
+                applyDeadline(ps, deadlineNanos);
                 ps.executeUpdate();
             }
         }
@@ -259,6 +333,9 @@ class Counters {
 
     /**
      * Delete expired counter rows (space reclamation; expiry is already enforced on read/increment).
+     * This is the only way a counter row is ever removed (L6 final review): a row lives until its
+     * window ends, and nothing deletes it early, because an instance that no longer tracks a key
+     * cannot know that the rest of the fleet has stopped counting it.
      * @return number of rows removed
      */
     long sweepExpired() {
@@ -284,6 +361,55 @@ class Counters {
         } finally {
             db.close();
         }
+    }
+
+    /**
+     * True when {@code e} means the database could not be reached or used at all (L5): a
+     * connection exception, or an SQLState in class 08 (connection exception), 53 (insufficient
+     * resources) or 57 (operator intervention, e.g. shutdown). Every key in a batch would fail the
+     * same way, so its counts are kept and retried rather than blamed on a key.
+     */
+    static boolean isOutage(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLTransientConnectionException
+                    || t instanceof java.sql.SQLNonTransientConnectionException
+                    || t instanceof java.net.SocketException
+                    || t instanceof java.net.SocketTimeoutException) {
+                return true;
+            }
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                String state = sql.getSQLState();
+                if (state.startsWith("08") || state.startsWith("53") || state.startsWith("57")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when {@code e} is the database refusing this statement's data (L5): an SQLState in
+     * class 22 (data exception: a NUL, an invalid byte sequence, a bad parameter) or 54 (program
+     * limit exceeded: an index row too large). Such an error follows the key, not the database.
+     * Not pgjdbc's "at most 65,535 parameters" refusal, which reuses SQLState 22023 but is about
+     * the statement's size (L6 review F4).
+     */
+    static boolean isDataError(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                String message = sql.getMessage();
+                if (message != null && message.contains("at most") && message.contains("parameters")) {
+                    return false;
+                }
+                String state = sql.getSQLState();
+                if (state.startsWith("22") || state.startsWith("54")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static void setNullableTimestamp(java.sql.PreparedStatement ps, int idx, Timestamp ts)

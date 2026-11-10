@@ -14,6 +14,30 @@ public class SecretFiles {
     private SecretFiles() {}
 
     /**
+     * Throw if {@code path} is a symbolic link, including a dangling one ({@code Files.exists}
+     * follows links and reports false for those). A repo can commit {@code BRACE-AGENTS.md ->
+     * ~/.ssh/authorized_keys}; writing through it would overwrite a file the repo has no business
+     * touching.
+     */
+    public static void refuseSymlink(Path path) throws IOException {
+        if (Files.isSymbolicLink(path)) {
+            throw new IOException(path.getFileName() + " is a symbolic link; refusing to write through it. "
+                + "Remove the link and run the command again.");
+        }
+    }
+
+    /**
+     * Write a project file (config, docs, keys list) without following a symlink at {@code path}.
+     * Refuses a symlink target, and also opens with NOFOLLOW so a link swapped in between the
+     * check and the write still fails.
+     */
+    public static void writeProjectFile(Path path, String content) throws IOException {
+        refuseSymlink(path);
+        Files.writeString(path, content, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+    }
+
+    /**
      * Write a string to a file with owner-only permissions (rw-------).
      * Uses PosixFilePermissions on POSIX filesystems; falls back to setReadable/setWritable
      * on Windows and other non-POSIX systems.

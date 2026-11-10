@@ -23,20 +23,71 @@ final class ProxyHeaders {
     private ProxyHeaders() {}
 
     /**
-     * The host the client addressed: the leftmost {@code X-Forwarded-Host} when the immediate peer
-     * is a configured trusted proxy and sent one, otherwise {@code Host}. The same trust gate as
-     * {@code X-Forwarded-Proto} and {@link Request#ip()} — a client that connects directly cannot
-     * claim a host by sending the header itself.
+     * The host the client addressed: the rightmost {@code X-Forwarded-Host} entry, across all its
+     * lines, when the immediate peer is a configured trusted proxy and sent one, otherwise
+     * {@code Host}. The same trust gate as {@code X-Forwarded-Proto} and {@link Request#ip()}: a
+     * client that connects directly cannot claim a host by sending the header itself. Rightmost
+     * (L3 review F9): behind a proxy that appends to the header, or passes a client's copy
+     * through, the leftmost entry is the client's choice. The proxy should set (overwrite) it.
+     * {@code header} must read the request's header map, where the lines are joined.
      */
     static String effectiveHost(UnaryOperator<String> header, String remoteAddr, TrustedProxies trustedProxies) {
         if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            String forwarded = header.apply("X-Forwarded-Host");
-            if (forwarded != null && !forwarded.isBlank()) {
-                int comma = forwarded.indexOf(',');
-                return (comma >= 0 ? forwarded.substring(0, comma) : forwarded).strip();
+            String forwarded = BraceHandler.rightmostEntry(header.apply("X-Forwarded-Host"));
+            // L3 final review: the entries are split on bare commas, so a quoted comma
+            // (`app.example, "evil,x"`) leaves a fragment (`x"`) as the rightmost entry. Anything
+            // that is not a host[:port] is ignored and Host is used.
+            if (forwarded != null && isHostPort(forwarded)) {
+                return forwarded;
             }
         }
         return header.apply("Host");
+    }
+
+    /**
+     * True for a syntactically valid {@code host[:port]}: a name of dot-separated labels (ASCII
+     * letters, digits, {@code -}, {@code _}; one trailing dot allowed), an IPv4 literal, or a
+     * bracketed IPv6 literal, then an optional decimal port up to 65535. No resolution.
+     */
+    static boolean isHostPort(String value) {
+        if (value == null || value.isEmpty()) return false;
+        String host = value;
+        if (value.charAt(0) == '[') {
+            int close = value.indexOf(']');
+            if (close < 0) return false;
+            String inner = value.substring(1, close);
+            if (inner.indexOf(':') < 0 || TrustedProxies.parseLiteral(inner) == null) return false;
+            String rest = value.substring(close + 1);
+            return rest.isEmpty() || rest.charAt(0) == ':' && isPort(rest.substring(1));
+        }
+        int colon = value.indexOf(':');
+        if (colon >= 0) {
+            if (!isPort(value.substring(colon + 1))) return false;
+            host = value.substring(0, colon);
+        }
+        if (host.length() > 1 && host.endsWith(".")) host = host.substring(0, host.length() - 1);
+        if (host.isEmpty() || host.length() > 253) return false;
+        int labelLength = 0;
+        for (int i = 0; i < host.length(); i++) {
+            char c = host.charAt(i);
+            if (c == '.') {
+                if (labelLength == 0) return false;
+                labelLength = 0;
+            } else if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+                labelLength++;
+            } else {
+                return false;
+            }
+        }
+        return labelLength > 0;
+    }
+
+    private static boolean isPort(String s) {
+        if (s.isEmpty() || s.length() > 5) return false;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) < '0' || s.charAt(i) > '9') return false;
+        }
+        return Integer.parseInt(s) <= 65535;
     }
 
     /**

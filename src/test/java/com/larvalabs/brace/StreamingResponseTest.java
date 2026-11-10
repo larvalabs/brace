@@ -34,7 +34,7 @@ class StreamingResponseTest {
         Files.write(bigFile, bigContent);
         Files.writeString(staticDir.resolve("hello.txt"), "hello static");
 
-        app = Brace.app().port(0).staticFiles("/assets", staticDir.toString());
+        app = Brace.app().port(0).staticFiles("/assets", staticDir.toString()).publicFiles();
 
         app.get("/file", req -> Result.file(bigFile));
         app.get("/file-typed", req -> Result.file(bigFile, "video/mp4"));

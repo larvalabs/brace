@@ -28,6 +28,8 @@ public class Brace {
     private final List<Middleware.BoundBefore> beforeMiddleware = new ArrayList<>();
     // Started by Brace.test(): request data in a query string throws instead of logging (H3).
     private boolean testHarness;
+    /** Test-only: skip the L2 "ops needs opsOrigins" startup check for apps built outside {@code Brace.test()}. */
+    private boolean opsOriginsOptional;
     private final List<Middleware.BoundBeforeSession> beforeSessionMiddleware = new ArrayList<>();
     private SessionValidator sessionValidator;
     // H1 access model: the requirement every route gets unless it is marked .publicRoute().
@@ -40,7 +42,9 @@ public class Brace {
     private Access fallbackDefaultAccess = frameworkTestDefaultAccess;
     static volatile Access frameworkTestDefaultAccess;
     private final List<Middleware.BoundAfter> afterMiddleware = new ArrayList<>();
-    private final List<BraceHandler.StaticFileMapping> staticFileMappings = new ArrayList<>();
+    // M3: each mapping with its access declaration; resolved and checked by start().
+    private final List<StaticFilesConfig> staticFileMappings = new ArrayList<>();
+    private List<BraceHandler.StaticFileMapping> resolvedStaticMappings = List.of();
     private DatabaseFactory databaseFactory;
     private boolean ownsDatabaseFactory = true; // M4: stop() closes the pool unless told otherwise
     private String sessionSecret;
@@ -89,13 +93,31 @@ public class Brace {
     private java.time.Duration jobPollInterval = JobPoller.DEFAULT_POLL_INTERVAL;
     private Runnable enqueueHook;
     private volatile Thread shutdownHook;
-    private final java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean();
+    /** The no-database stats snapshot timer of the current start, or null. */
+    private java.util.Timer statsSnapshotTimer;
     private String httpStatsInterval = "60s";
     private String cacheStatsInterval = "60s";
     private String mailerStatsInterval = "60s";
     private TrustedProxies trustedProxies;
     private int regressionsWarmupSeconds = 30;
     private final List<Notifier> regressionNotifiers = new ArrayList<>();
+
+    /**
+     * Package-private for tests that start a real server with ops on: no pinned origin is
+     * required, and the post-start sign-in window (L16) is off, as in dev mode.
+     */
+    Brace opsUnpinnedForTests() {
+        this.opsOriginsOptional = true;
+        return opsNoRestartWindowForTests();
+    }
+
+    /** Package-private for tests that sign in to a real ops server the moment it starts (L16). */
+    Brace opsNoRestartWindowForTests() {
+        this.opsRestartWindowOff = true;
+        return this;
+    }
+
+    private boolean opsRestartWindowOff;
 
     public static Brace app() {
         JulLogging.init();
@@ -265,11 +287,29 @@ public class Brace {
         return this;
     }
 
+    /**
+     * Enable sessions with these options. The options are copied here: changing them after this
+     * call has no effect (M7 review: a placeholder previous secret added afterwards would
+     * otherwise skip the validation below). Configure them fully first.
+     */
     public Brace sessions(SessionOptions options) {
-        validateSecret(options.secret(), "session");
-        this.sessionSecret = options.secret();
-        this.sessionOptions = options;
+        var snapshot = options.copy();
+        validateSessionSecrets(snapshot, true);
+        this.sessionSecret = snapshot.secret();
+        this.sessionOptions = snapshot;
         return this;
+    }
+
+    /**
+     * The current secret and every previous one through {@link #validateSecret}. M7: a previous
+     * secret that is the public scaffold placeholder (or leaked) forges cookies. {@code warn} is
+     * false for the start() backstop, so weak-secret warnings aren't logged twice.
+     */
+    private void validateSessionSecrets(SessionOptions options, boolean warn) {
+        validateSecret(options.secret(), "session", warn);
+        for (String previous : options.previousSecrets()) {
+            validateSecret(previous, "previous session", warn);
+        }
     }
 
     /**
@@ -357,6 +397,10 @@ public class Brace {
         java.util.Set.of("CHANGE-ME-to-a-random-string-at-least-32-chars");
 
     private void validateSecret(String secret, String type) {
+        validateSecret(secret, type, true);
+    }
+
+    private void validateSecret(String secret, String type, boolean warn) {
         if (secret == null || secret.isEmpty()) {
             throw new IllegalArgumentException(type + " secret cannot be null or empty");
         }
@@ -378,6 +422,7 @@ public class Brace {
                 + "is only a warning.");
         }
         // Warn about obvious placeholder values (including old scaffolds)
+        if (!warn) return;
         String lower = secret.toLowerCase();
         // The old scaffold placeholder ("CHANGE-ME-to-a-random-string-at-least-32-chars") had its
         // own clause here, comparing a mixed-case literal against a string that was just
@@ -526,8 +571,12 @@ public class Brace {
         return this;
     }
 
-    /** Serves {@code directory} at {@code urlPrefix} as {@link StaticFiles#TRUSTED} files you shipped. */
-    public Brace staticFiles(String urlPrefix, String directory) {
+    /**
+     * Serves {@code directory} at {@code urlPrefix} as {@link StaticFiles#TRUSTED} files you
+     * shipped. Say who may fetch them on the returned config: {@code .publicFiles()} or
+     * {@code .access(...)}. {@link #start()} refuses a mapping that says neither.
+     */
+    public StaticFilesConfig staticFiles(String urlPrefix, String directory) {
         return staticFiles(urlPrefix, directory, StaticFiles.TRUSTED);
     }
 
@@ -535,23 +584,46 @@ public class Brace {
      * Serves {@code directory} at {@code urlPrefix}. Use {@link StaticFiles#UNTRUSTED} for any
      * directory users can write to (uploads), so nothing in it runs on the app's origin.
      *
+     * <p>A mapping is inside the access model, like a route: finish the call with
+     * {@code .publicFiles()} (served to everyone) or {@code .access(...)} (see
+     * {@link StaticFilesConfig}). {@link #start()} refuses to start while a mapping has neither,
+     * and {@link #defaultAccess(Access)} does not apply to mappings.
+     *
      * <p>When prefixes overlap, the longest one serves the request, whatever the registration
      * order. Throws {@link IllegalArgumentException} when an untrusted directory sits inside a
      * trusted one (or the reverse): its files would be reachable through the trusted mapping too.
+     * Throws {@link IllegalStateException} when the prefix is already registered.
+     *
+     * <p>A mapping serves {@code GET} and {@code HEAD}; any other method gets 405. A route
+     * registered at a path under the prefix answers that path for its own methods, and the
+     * mapping never serves a path a route pattern matches. {@link #start()} requires the
+     * directory to exist, and refuses two mappings whose directories overlap unless their access
+     * is the same.
      */
-    public Brace staticFiles(String urlPrefix, String directory, StaticFiles mode) {
+    public StaticFilesConfig staticFiles(String urlPrefix, String directory, StaticFiles mode) {
         java.util.Objects.requireNonNull(mode, "mode");
-        var added = new BraceHandler.StaticFileMapping(urlPrefix, directory, mode);
-        // Compared both as written and with symlinks resolved: a link (uploads -> public/uploads,
-        // current -> releases/42) puts the same directory under two paths.
-        var dir = java.nio.file.Path.of(directory).toAbsolutePath().normalize();
-        var realDir = BraceHandler.realPathOrNearest(dir);
+        // M3 final review: a prefix with no leading slash never matched a request path, so the
+        // mapping started and silently served nothing ("" behaved as "/").
+        if (urlPrefix == null || !urlPrefix.startsWith("/")) {
+            throw new IllegalArgumentException("Static mapping prefix " + (urlPrefix == null ? "null" : "\"" + urlPrefix + "\"")
+                + " must start with \"/\": it is matched against the request path, e.g. "
+                + "staticFiles(\"/assets\", \"public\"). Use \"/\" to serve a directory at the root.");
+        }
+        router.requireNotStarted("Registering static mapping " + urlPrefix);
+        var added = new StaticFilesConfig(this, urlPrefix, directory, mode);
+        for (var existing : staticFileMappings) {
+            // Only one of two mappings at the same prefix ever serves; the other, with its
+            // directory and its access declaration, is silently dead. Refused, like a route
+            // registered twice. "/files" and "/files/" cover the same paths.
+            if (Router.stripTrailingSlashes(existing.urlPrefix()).equals(Router.stripTrailingSlashes(urlPrefix))) {
+                throw new IllegalStateException("Static mapping " + urlPrefix + " is registered twice ("
+                    + existing.directory() + " and " + directory + "): only one could ever serve, "
+                    + "with its access declaration. Give each directory its own prefix.");
+            }
+        }
         for (var existing : staticFileMappings) {
             if (existing.mode() == mode) continue;
-            var other = java.nio.file.Path.of(existing.directory()).toAbsolutePath().normalize();
-            var realOther = BraceHandler.realPathOrNearest(other);
-            if (other.startsWith(dir) || dir.startsWith(other)
-                    || realOther.startsWith(realDir) || realDir.startsWith(realOther)) {
+            if (directoriesOverlap(directory, existing.directory())) {
                 var trusted = mode == StaticFiles.TRUSTED ? added : existing;
                 var untrusted = mode == StaticFiles.TRUSTED ? existing : added;
                 throw new IllegalArgumentException("Untrusted static directory " + untrusted.directory()
@@ -561,7 +633,21 @@ public class Brace {
             }
         }
         staticFileMappings.add(added);
-        return this;
+        return added;
+    }
+
+    /**
+     * Whether one directory is, or is inside, the other. Compared both as written and with
+     * symlinks resolved: a link (uploads -> public/uploads, current -> releases/42) puts the same
+     * directory under two paths.
+     */
+    private static boolean directoriesOverlap(String a, String b) {
+        var dir = java.nio.file.Path.of(a).toAbsolutePath().normalize();
+        var other = java.nio.file.Path.of(b).toAbsolutePath().normalize();
+        var realDir = BraceHandler.realPathOrNearest(dir);
+        var realOther = BraceHandler.realPathOrNearest(other);
+        return other.startsWith(dir) || dir.startsWith(other)
+            || realOther.startsWith(realDir) || realDir.startsWith(realOther);
     }
 
     public Brace maxUploadSize(String size) {
@@ -621,6 +707,9 @@ public class Brace {
      * the upgrade request runs plain {@code before()} middleware, the Origin check, then the
      * route's access requirements; any rejection declines the handshake. Inside the socket,
      * joining a room is still an authorization decision for the handler.
+     *
+     * <p>{@code path} is a literal path. The upgrade is accepted only when the request's raw
+     * path equals it exactly: an encoded, dot-segment or {@code ;parameter} spelling is a 404.
      */
     public RouteConfig ws(String path, Function<WsContext, Object> handlerFactory) {
         router.requireNotStarted("Registering WS " + path);
@@ -674,10 +763,10 @@ public class Brace {
      * The public origin(s) of this app ({@code "https://app.example.com"}), the only ones an ops
      * CLI login may be signed for (M14). The {@code brace} CLI signs the server's origin into its
      * login, so a signature collected by another server (a {@code .brace} pointing elsewhere) is
-     * refused here. Required in prod mode when ops is on; also read from the
+     * refused here. Required whenever ops is on, except in dev mode and the test harness; also read from the
      * {@code BRACE_OPS_ORIGINS} environment variable when not set in code. Each argument may be a
      * comma-separated list; null and blank entries are skipped (an unset config key).
-     * Without it (dev, tests) the origin's host must match the request's {@code Host}, which a
+     * Without it (dev mode, tests) the origin's host must match the request's {@code Host}, which a
      * client can choose on a directly exposed app, so it's no defense there.
      */
     public Brace opsOrigins(String... origins) {
@@ -1150,20 +1239,72 @@ public class Brace {
         return false;
     }
 
+    /**
+     * Where the app is in its life. Every transition happens under {@link #lifecycleLock}, so
+     * {@code start()} and {@code stop()} never interleave (final review: a {@code stop()} that
+     * raced a {@code start()} saw "nothing to stop", and the server that start() then brought up
+     * was one no later stop() would stop).
+     */
+    private enum Lifecycle { NEW, STARTING, RUNNING, STOPPING, STOPPED }
+
+    private final java.util.concurrent.locks.ReentrantLock lifecycleLock = new java.util.concurrent.locks.ReentrantLock();
+    /** Guarded by {@link #lifecycleLock}. */
+    private Lifecycle lifecycle = Lifecycle.NEW;
+
+    /**
+     * True once a start() began with a database (verification fix). Guarded by
+     * {@link #lifecycleLock}. Such an app is not restartable: stop() closes the pool it owns,
+     * framework jobs (job pruning, ops metrics, analytics rollup) are registered per start, and a
+     * shared cache backend holds that start's factory. Rebinding all of it is a larger change, so
+     * a second start() refuses up front instead of failing somewhere inside.
+     */
+    private boolean startedWithDatabase;
+
+    /**
+     * Start the app. A new app can be started; {@code start()} on an app that is starting or
+     * running throws {@link IllegalStateException} and leaves it as it is. If the start fails,
+     * everything it had brought up is stopped again before the exception propagates. An app
+     * without a database that has been stopped (or whose start failed) can be reconfigured and
+     * started again. An app that was started with a {@link #database database} cannot: its second
+     * {@code start()} throws {@link IllegalStateException}; build a new {@code Brace} instead.
+     */
     public void start() throws Exception {
+        lifecycleLock.lock();
         try {
-            startOrThrow();
-        } catch (Throwable t) {
-            // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
-            // failed start can't leave threads that keep the JVM alive with no server: main()
-            // would exit with a stack trace while the process stays up. stop() is idempotent
-            // and copes with components that never started.
-            try {
-                stop();
-            } catch (Throwable cleanup) {
-                t.addSuppressed(cleanup);
+            if (lifecycle != Lifecycle.NEW && lifecycle != Lifecycle.STOPPED) {
+                throw new IllegalStateException("start() was called on an app that is already "
+                    + lifecycle.name().toLowerCase(java.util.Locale.ROOT) + ". Call stop() first to restart it; "
+                    + "starting it again would leave the first server running with nothing to stop it.");
             }
-            throw t;
+            if (startedWithDatabase) {
+                throw new IllegalStateException("start() was called again on an app that was started with a "
+                    + "database, and an app with a database cannot be restarted: stop() released its job "
+                    + "scheduler, job poller and (unless ownsDatabase(false)) its connection pool, and its "
+                    + "framework jobs and cache are bound to that start. Build a new Brace with Brace.app() "
+                    + "and a DatabaseFactory to start again.");
+            }
+            if (databaseFactory != null) startedWithDatabase = true;
+            lifecycle = Lifecycle.STARTING;
+            try {
+                startOrThrow();
+                lifecycle = Lifecycle.RUNNING;
+            } catch (Throwable t) {
+                // Undo whatever already started (profiler, scheduler, poller, server, ...) so a
+                // failed start can't leave threads that keep the JVM alive with no server: main()
+                // would exit with a stack trace while the process stays up. The teardown copes
+                // with components that never started, and leaves the app startable again.
+                lifecycle = Lifecycle.STOPPING;
+                try {
+                    stopOrThrow();
+                } catch (Throwable cleanup) {
+                    t.addSuppressed(cleanup);
+                } finally {
+                    lifecycle = Lifecycle.STOPPED;
+                }
+                throw t;
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
     }
 
@@ -1171,6 +1312,11 @@ public class Brace {
         // A previous stop() ended autoRefresh()'s fetcher; a restart picks it back up.
         if (trustedProxies != null) {
             trustedProxies.resumeRefresh();
+        }
+        // M7 review backstop: sessions() validated a snapshot, but check again here, under the
+        // mode the app actually starts in.
+        if (sessionOptions != null) {
+            validateSessionSecrets(sessionOptions, false);
         }
         // Session-aware middleware without .sessions(secret) is a silent trap: every request
         // gets a fresh empty Session. A session-reading access requirement fails start() for
@@ -1236,21 +1382,36 @@ public class Brace {
         // Register ops endpoints if authorized keys are configured
         String tokenSecret = null;
         if (opsKeysPath != null) {
-            var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath);
+            var authorizedKeys = OpsKeys.loadAuthorizedKeys(opsKeysPath, true);
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             opsHandler.setAnalytics(analytics);
             if (opsOrigins.isEmpty() && System.getenv("BRACE_OPS_ORIGINS") != null) {
                 opsOrigins(System.getenv("BRACE_OPS_ORIGINS"));
             }
-            if (opsOrigins.isEmpty() && "prod".equals(System.getProperty("brace.mode"))) {
-                throw new IllegalStateException("Ops is on in prod mode without app.opsOrigins(\"https://your-app\") "
+            // L2: required everywhere except dev and the test harness, matching validateSecret:
+            // deployments launched with no brace.mode at all (old scaffold Dockerfiles) are real
+            // deployments, and an unpinned origin falls back to the Host header a client can choose.
+            if (opsOrigins.isEmpty() && !testHarness && !opsOriginsOptional
+                    && !"dev".equals(System.getProperty("brace.mode"))) {
+                throw new IllegalStateException("Ops is on outside dev mode without app.opsOrigins(\"https://your-app\") "
                     + "(or BRACE_OPS_ORIGINS): the ops CLI login is bound to the server's origin, and without "
                     + "it configured the server can only compare against the Host header, which a client "
                     + "talking to the app directly can choose.");
             }
             opsHandler.setPinnedOrigins(opsOrigins);
+            // L16 final review: with a database, accepted sign-in nonces are recorded there, so a
+            // replay is refused fleet-wide and across restarts. Without one (or while it is down)
+            // the handler refuses sign-ins for a short window after each start instead; not in dev
+            // mode or the test harness, where servers restart constantly.
+            if (databaseFactory != null) {
+                opsHandler.setDurableNonces(new Counters(databaseFactory));
+            }
+            if (testHarness || opsRestartWindowOff || "dev".equals(System.getProperty("brace.mode"))) {
+                opsHandler.disableRestartWindow();
+            }
             opsHandler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
+            opsHandler.setStaticMappings(() -> resolvedStaticMappings);
 
             // Server-side regression detection: track new error kinds since startup and notify on
             // first appearance. Requires the error store (a database); the LogNotifier is always on
@@ -1319,10 +1480,11 @@ public class Brace {
         // Longest prefix first, so "/assets/uploads" is reached even when "/assets" was registered
         // before it. Matching in registration order let the shorter prefix claim the request and
         // answer 404, leaving the more specific (typically untrusted) mapping unreachable.
-        var staticMappingsCopy = staticFileMappings.stream()
+        var staticMappingsCopy = resolveStaticAccess().stream()
             .sorted(java.util.Comparator.comparingInt(
                 (BraceHandler.StaticFileMapping m) -> m.urlPrefix().length()).reversed())
             .toList();
+        resolvedStaticMappings = staticMappingsCopy;
         Assets.init(staticMappingsCopy);
         // Adoption aid for named routes: once any route is named, report how many app
         // routes still aren't (framework /ops/* routes are excluded — apps can't name them).
@@ -1334,10 +1496,12 @@ public class Brace {
             }
         }
         resolveAccess();
+        warnRoutesUnderStaticMappings(staticMappingsCopy);
         router.freeze();
         handler = new BraceHandler(router, beforeMiddleware, afterMiddleware, databaseFactory, sessionSecret, sessionOptions, stats, errorStore, staticMappingsCopy, maxUploadSize, storage, trustedProxies);
         handler.setUploadSpill(uploadTempDir, uploadMemoryThreshold);
         handler.setBeforeSessionMiddleware(List.copyOf(beforeSessionMiddleware));
+        handler.setWebSocketRoutes(wsRoutes.values().stream().map(WsRoute::route).toList());
         handler.setAnalytics(analytics);
         handler.setSessionValidator(sessionValidator);
         handler.setStrictQueryChecks(testHarness || "dev".equals(System.getProperty("brace.mode")));
@@ -1360,16 +1524,30 @@ public class Brace {
                     Route wsRoute = entry.getValue().route();
                     Function<WsContext, Object> factory = entry.getValue().factory();
                     container.addMapping(wsPath, (upgradeRequest, upgradeResponse, callback) -> {
-                        String remoteAddr = org.eclipse.jetty.server.Request.getRemoteAddr(upgradeRequest);
+                        // L9 review: Jetty matches the mapping against the canonical path
+                        // (percent-decoded, dot segments resolved, path parameters dropped), so
+                        // "/x/../ws", "/%77s" and "/ws;x" all arrive here. A proxy that forwards
+                        // the raw target applied its rules to a different path than the one
+                        // being upgraded. The socket answers only at its registered path,
+                        // spelled exactly; anything else is a 404, like an unmatched path.
+                        if (!wsPath.equals(upgradeRequest.getHttpURI().getPath())) {
+                            return declineUpgrade(upgradeRequest, upgradeResponse, callback, 404);
+                        }
+                        String remoteAddr = BraceHandler.peerAddress(upgradeRequest); // L6 review: unbracketed
                         // H2: the upgrade is a request like any other, so it runs plain before()
                         // middleware (a rate limiter sheds load first) and, below, the route's access
                         // requirements. Before this, every guard was skipped and a socket under a
                         // guarded prefix accepted anonymous clients.
-                        Map<String, String> headers = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-                        for (var field : upgradeRequest.getHeaders()) headers.put(field.getName(), field.getValue());
+                        // L3 review: the same header map as an HTTP request (Cookie and forwarding
+                        // lines joined), so both paths read the same cookies and forwarding values.
+                        Map<String, String> headers = BraceHandler.headerMap(upgradeRequest.getHeaders());
                         var request = new Request("GET", wsPath, Map.of(),
                             Request.parseSingleValues(upgradeRequest.getHttpURI().getQuery(), true),
                             headers, "", Map.of(), remoteAddr, wsTrustedProxies);
+                        if (wsTrustedProxies != null) {
+                            request.setForwardingChain(BraceHandler.joinedFieldValues(
+                                upgradeRequest.getHeaders(), wsTrustedProxies.clientIpHeader())); // L3
+                        }
                         for (var before : wsBefore) {
                             Result early = before.apply(request);
                             if (early != null) return declineUpgrade(upgradeRequest, upgradeResponse, callback, early.status());
@@ -1380,8 +1558,7 @@ public class Brace {
                         // proxy sent it, else Host. Cheap and decrypts nothing, so it runs before
                         // the access requirements.
                         String origin = upgradeRequest.getHeaders().get("Origin");
-                        String host = ProxyHeaders.effectiveHost(upgradeRequest.getHeaders()::get,
-                            remoteAddr, wsTrustedProxies);
+                        String host = ProxyHeaders.effectiveHost(headers::get, remoteAddr, wsTrustedProxies);
                         if (!originAllowed(origin, host, allowedOrigins)) {
                             if (host != null && BraceHandler.isLoopbackHost(host)) {
                                 ProxyHeaders.warnWebSocketHostRewrite(origin, host);
@@ -1393,13 +1570,10 @@ public class Brace {
                         if (sessionSecret != null) {
                             // M10: the name this request would be given (__Host- when Secure).
                             String cookieName = handler.cookieSpec(headers, remoteAddr).name();
-                            var cookies = org.eclipse.jetty.server.Request.getCookies(upgradeRequest);
-                            for (var cookie : cookies) {
-                                if (cookieName.equals(cookie.getName())) {
-                                    braceSession = handler.decodeSession(cookie.getValue());
-                                    break;
-                                }
-                            }
+                            // L3 review F10: parsed as the HTTP path parses it (all Cookie lines,
+                            // first occurrence of the name), not by Jetty's parser.
+                            String cookieValue = request.cookie(cookieName);
+                            if (cookieValue != null) braceSession = handler.decodeSession(cookieValue);
                             if (braceSession == null) braceSession = new Session();
                         }
                         // H2: the route's resolved access requirements. The session they read is the
@@ -1441,7 +1615,7 @@ public class Brace {
             String threadName = thread.getName();
             stats.recordError(
                 throwable.getClass().getName(),
-                throwable.getMessage(),
+                Redactor.redactMessage(throwable.getMessage()),
                 "thread:" + threadName,
                 sw.toString(),
                 null,
@@ -1449,7 +1623,7 @@ public class Brace {
             Log.event("uncaught_exception", java.util.Map.of(
                 "thread", threadName,
                 "type", throwable.getClass().getName(),
-                "message", String.valueOf(throwable.getMessage())));
+                "message", String.valueOf(Redactor.redactMessage(throwable.getMessage()))));
         });
 
         // Durable-job retention (perf review H3): finished rows otherwise accumulate forever and
@@ -1508,6 +1682,7 @@ public class Brace {
         // Snapshot stats for dashboard sparklines (even without a database)
         if (opsKeysPath != null && databaseFactory == null) {
             var snapshotTimer = new java.util.Timer("brace-stats-snapshot", true);
+            statsSnapshotTimer = snapshotTimer; // cancelled by stop(), so a restart doesn't stack timers
             snapshotTimer.scheduleAtFixedRate(new java.util.TimerTask() {
                 @Override public void run() { stats.snapshot(); }
             }, 60_000, 60_000);
@@ -1668,6 +1843,15 @@ public class Brace {
             System.out.printf("        %-6s %-32s %s%n", "WS", ws.route().pattern(), ws.route().accessLabel());
         }
         System.out.println("     }");
+        if (!resolvedStaticMappings.isEmpty()) {
+            // M3: each static mapping and who may fetch its files, like the routes above.
+            System.out.printf("     static (%d) {%n", resolvedStaticMappings.size());
+            for (var mapping : resolvedStaticMappings) {
+                System.out.printf("        %-6s %-32s %s%s%n", "STATIC", mapping.pattern(), mapping.accessLabel(),
+                    mapping.mode() == StaticFiles.UNTRUSTED ? "  untrusted" : "");
+            }
+            System.out.println("     }");
+        }
         System.out.println("  }");
     }
 
@@ -1683,19 +1867,40 @@ public class Brace {
         ClaudeMdGenerator.write(projectName, path);
     }
 
+    /**
+     * Stop the app and release what it holds. Idempotent, and safe to call from any thread at any
+     * time: the shutdown hook and an explicit {@code stop()} may both call it, and a
+     * {@code stop()} that arrives while {@code start()} is still running waits for it and then
+     * stops what it started. A stopped app without a database can be reconfigured and started
+     * again; one that was started with a database cannot (see {@link #start()}).
+     */
     public void stop() throws Exception {
-        // Idempotent: the shutdown hook and an explicit stop() (or an app's own hook) may both call it.
-        if (!stopped.compareAndSet(false, true)) {
-            return;
+        lifecycleLock.lock();
+        try {
+            // STOPPED: already done. STARTING or STOPPING here means this thread is inside
+            // start() or stop() already (the lock is reentrant): that call does the teardown.
+            if (lifecycle != Lifecycle.NEW && lifecycle != Lifecycle.RUNNING) {
+                return;
+            }
+            lifecycle = Lifecycle.STOPPING;
+            try {
+                stopOrThrow();
+            } finally {
+                lifecycle = Lifecycle.STOPPED;
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
-        router.unfreeze(); // a stopped app may be reconfigured before the next start()
+    }
+
+    private void stopOrThrow() throws Exception {
         var hook = shutdownHook;
         shutdownHook = null;
         if (hook != null && Thread.currentThread() != hook) {
             try {
                 Runtime.getRuntime().removeShutdownHook(hook);
             } catch (IllegalStateException alreadyShuttingDown) {
-                // The JVM is exiting and our hook is queued to run; it will find stopped == true.
+                // The JVM is exiting and our hook is queued to run; it will find the app stopped.
             }
         }
         if (enqueueHook != null) {
@@ -1728,6 +1933,20 @@ public class Brace {
         if (server != null) {
             server.stop();
         }
+        // A stopped app may be reconfigured before the next start(). Only now, with Jetty
+        // stopped (L10 review): unfrozen at the top of stop(), a route registered while requests
+        // were still draining was matched with its access unresolved (a 500, so closed), and
+        // mutated the Router's plain collections under the request threads reading them. If
+        // server.stop() throws, the router stays frozen.
+        router.unfreeze();
+        // The framework's own routes (/ops/*) are registered by start(), bound to that start's
+        // OpsHandler. Take them out again, or the next start() (a restart, or a retry after a
+        // failed bind) fails with "POST /ops/auth is registered twice" (final review).
+        router.removeFrameworkRoutes();
+        if (statsSnapshotTimer != null) {
+            statsSnapshotTimer.cancel();
+            statsSnapshotTimer = null;
+        }
         if (wsRegistry != null) {
             wsRegistry.close();
         }
@@ -1759,7 +1978,7 @@ public class Brace {
         try {
             stop();
         } catch (Exception e) {
-            System.err.println("Brace shutdown error: " + e);
+            System.err.println("Brace shutdown error: " + Redactor.redactMessage(e.toString()));
         }
     }
 
@@ -1790,8 +2009,12 @@ public class Brace {
         return instanceId;
     }
 
-    private static long parseSize(String size) {
-        var s = size.strip().toLowerCase();
+    static long parseSize(String size) {
+        var s = size.strip().toLowerCase(java.util.Locale.ROOT);
+        // KB, MB and GB mean the same as K, M and G (binary units, as always).
+        if (s.length() > 2 && s.endsWith("b") && "kmg".indexOf(s.charAt(s.length() - 2)) >= 0) {
+            s = s.substring(0, s.length() - 1);
+        }
         if (s.endsWith("k")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024;
         if (s.endsWith("m")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024;
         if (s.endsWith("g")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1024 * 1024 * 1024;
@@ -1801,9 +2024,9 @@ public class Brace {
     /**
      * Wrap an ops handler so its response is never stored by a cache (M4).
      *
-     * <p>Ops responses carry credentials and operational detail: {@code /ops/dashboard} embeds a
-     * live bearer token in the page HTML (on the polling div and each action button), and the
-     * others expose error messages, stack traces, and log lines. Only {@code /ops/auth/exchange}
+     * <p>Ops responses carry operational detail: error messages, stack traces and log lines, and
+     * the auth endpoints return tokens. (The dashboard page itself no longer embeds a bearer
+     * token; it is cookie-only since 0.1.11.) Only {@code /ops/auth/exchange}
      * used to say {@code no-store} — because its token is in the URL — which left every other
      * endpoint relying on the caller's credential channel to suppress caching.
      *
@@ -1904,6 +2127,120 @@ public class Brace {
         }
         if (defaultAccess != null && defaultAccess.isNone()) {
             Log.info("defaultAccess(Access.none()): routes without their own requirement are public");
+        }
+    }
+
+    /**
+     * M3 (2026-11): static mappings are inside deny-by-default. Each mapping's access is exactly
+     * what it declared: {@code .publicFiles()} or its {@code .access(...)} list. The app's
+     * default access is deliberately not applied (an inherited login would break the login
+     * page's own stylesheet), so a mapping that declared nothing is refused here, whatever the
+     * default is. Also refused: a mapping whose directory doesn't exist, and two mappings on
+     * overlapping directories whose access differs (a guarded directory that a public mapping
+     * serves too, or one a less strictly guarded mapping serves too).
+     */
+    private List<BraceHandler.StaticFileMapping> resolveStaticAccess() {
+        var undeclared = new ArrayList<StaticFilesConfig>();
+        for (var m : staticFileMappings) {
+            if (!m.isDeclared()) undeclared.add(m);
+        }
+        if (!undeclared.isEmpty()) {
+            var msg = new StringBuilder().append(undeclared.size())
+                .append(undeclared.size() == 1 ? " static mapping has" : " static mappings have")
+                .append(" no access declaration:");
+            for (var m : undeclared) {
+                msg.append("\n  ").append(m.urlPrefix()).append("  ->  ").append(m.directory());
+            }
+            msg.append("\nSay who may fetch each one: app.staticFiles(...).publicFiles() serves it to everyone, "
+                + "app.staticFiles(...).access(Access.session(\"userId\", \"/login\")) guards it. "
+                + "defaultAccess(...) does not apply to static mappings.");
+            throw new IllegalStateException(msg.toString());
+        }
+        var resolved = new ArrayList<BraceHandler.StaticFileMapping>();
+        for (var m : staticFileMappings) {
+            for (Access a : m.declaredAccess()) {
+                if (a.usesSession() && sessionSecret == null) {
+                    throw new IllegalStateException("Static mapping " + m.urlPrefix() + " has a session-reading "
+                        + "access requirement (Access.session or Access.check) but sessions are not enabled: "
+                        + "call .sessions(secret) before start(). Without it every request sees an empty "
+                        + "session, so the requirement rejects every request.");
+                }
+            }
+            // The directory checks below read the filesystem as it is now. A directory that
+            // doesn't exist yet can't be checked: created later as a link into another mapping's
+            // tree, or as a case-variant sibling of one on a case-insensitive volume, it would
+            // serve that mapping's files under this one's access.
+            var dir = java.nio.file.Path.of(m.directory()).toAbsolutePath().normalize();
+            if (!java.nio.file.Files.isDirectory(dir)) {
+                throw new IllegalStateException("Static mapping " + m.urlPrefix() + " serves " + m.directory()
+                    + (dir.toString().equals(m.directory()) ? "" : " (" + dir + ")")
+                    + ", which is not an existing directory. Create it before start(): the checks that "
+                    + "keep one mapping's files from being served through another need to see it.");
+            }
+            resolved.add(new BraceHandler.StaticFileMapping(m.urlPrefix(), m.directory(), m.mode(),
+                List.copyOf(m.declaredAccess())));
+        }
+        // A file under two mappings is reachable through whichever asks for less, so two mappings
+        // may share or nest directories only when their access is the same: both public, or the
+        // same requirements.
+        for (int i = 0; i < resolved.size(); i++) {
+            for (int j = i + 1; j < resolved.size(); j++) {
+                var a = resolved.get(i);
+                var b = resolved.get(j);
+                if (a.sameAccessAs(b) || !directoriesOverlap(a.directory(), b.directory())) continue;
+                if (!a.guarded() || !b.guarded()) {
+                    var guarded = a.guarded() ? a : b;
+                    var open = a.guarded() ? b : a;
+                    throw new IllegalStateException("Static mapping " + guarded.urlPrefix() + " (" + guarded.directory()
+                        + ") has access requirements, but its directory overlaps the public mapping "
+                        + open.urlPrefix() + " (" + open.directory() + "): the same files would be served "
+                        + "to everyone there. Keep guarded files in a directory no public mapping covers.");
+                }
+                throw new IllegalStateException("Static mappings " + a.urlPrefix() + " (" + a.directory() + ", "
+                    + a.accessLabel() + ") and " + b.urlPrefix() + " (" + b.directory() + ", " + b.accessLabel()
+                    + ") serve overlapping directories with different access requirements: a file under both "
+                    + "is reachable through whichever asks for less. Give each its own directory, or give both "
+                    + "the same requirements (built-in ones such as Access.session(key, loginUrl) compare by "
+                    + "value; a custom Access.check/checkRequest compares by identity, so pass the same "
+                    + "Access object to both).");
+            }
+        }
+        return resolved;
+    }
+
+    /**
+     * M3 review: a route registered under a mapping's prefix is the documented way to decide
+     * per file (the route wins for its methods, and the mapping never serves a path a route
+     * pattern matches), but it is also an easy accident: the file stays in the mapping's
+     * directory, and the route is the only thing between it and everyone who passes the
+     * mapping's access. Say so once at startup, per mapping. A mapping at {@code /} is skipped:
+     * every route is under it.
+     */
+    private void warnRoutesUnderStaticMappings(List<BraceHandler.StaticFileMapping> mappings) {
+        for (var mapping : mappings) {
+            if (mapping.urlPrefix().equals("/")) continue;
+            var under = new ArrayList<String>();
+            for (Route route : router.routes()) {
+                if (!route.isFramework() && mapping.covers(route.pattern())) {
+                    under.add(route.method() + " " + route.pattern());
+                }
+            }
+            // A WebSocket route owns its path under a mapping too (M3 final review).
+            for (var ws : wsRoutes.values()) {
+                if (mapping.covers(ws.route().pattern())) {
+                    under.add("WS " + ws.route().pattern());
+                }
+            }
+            if (under.isEmpty()) continue;
+            int shown = Math.min(5, under.size());
+            Log.warn("Static mapping " + mapping.pattern() + " (" + mapping.directory() + ", "
+                + mapping.accessLabel() + ") has " + (under.size() == 1 ? "a route" : under.size() + " routes")
+                + " under its prefix: " + String.join(", ", under.subList(0, shown))
+                + (under.size() > shown ? " and " + (under.size() - shown) + " more" : "")
+                + ". A route answers its path for its own methods, with its own access, and the mapping "
+                + "never serves a path a route pattern matches (another method gets the route's access "
+                + "check, then 405; a plain request for a WebSocket path gets 426). Every other file in "
+                + "the directory is served under the mapping's access alone.");
         }
     }
 
@@ -2075,8 +2412,13 @@ public class Brace {
             }
 
             var mailer = new Mailer(null);
+            // Loopback only: TestApp connects to localhost. On the wildcard address the OS can hand
+            // port(0) a port another local process already holds on 127.0.0.1 (macOS allows a
+            // wildcard bind beside a specific one), start() succeeds, and the test's requests reach
+            // that process instead. Bound to 127.0.0.1, the OS never hands out a port held there.
             var app = Brace.app()
                 .port(0)
+                .host("127.0.0.1")
                 .banner(false)
                 .mailer(mailer);
             app.testHarness = true;

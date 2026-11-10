@@ -38,11 +38,126 @@ public class CliOutput {
         }
     }
 
+    /**
+     * Make one value safe to print on a single line of a human's terminal. The value came from a
+     * server or a config file (the URL is in a committed {@code .brace}, so a pull request picks
+     * the server), and without this it could:
+     * <ul>
+     *   <li>emit ESC/CSI/OSC sequences that rewrite earlier output or set the window title
+     *       (C0 controls, DEL, the C1 range U+0080 to U+009F);</li>
+     *   <li>forge whole lines, e.g. a passing check and a {@code →} follow-up command, or scroll
+     *       a warning away ({@code \n}, {@code \r}, U+2028, U+2029; {@code \t} too);</li>
+     *   <li>make the line read differently from what it says (Unicode FORMAT characters: bidi
+     *       embeddings, overrides and isolates, zero-width characters, the BOM, the soft
+     *       hyphen).</li>
+     * </ul>
+     * Each such character is shown as a visible escape, as text: {@code \n}, {@code \x1b}, or a
+     * backslash, {@code u} and the hex code point (four digits, or in braces above U+FFFF), so
+     * the operator can see what was there. Other text,
+     * accents, CJK, emoji and NBSP included, is unchanged; a zero width joiner is a FORMAT
+     * character, so a joined emoji sequence shows its parts with the joiner escaped. JSON mode
+     * does not use this: Jackson escapes only U+0000 to U+001F, so {@link #json} escapes the rest
+     * of these characters itself.
+     */
+    public static String sanitizeLine(String s) {
+        return escape(s, false);
+    }
+
+    /**
+     * {@link #sanitizeLine} for multi-line text whose line breaks this CLI laid out itself, a
+     * rendered table or report: {@code \n}, CRLF and {@code \t} are kept, everything else
+     * {@code sanitizeLine} escapes is escaped (a lone {@code \r} too: it returns to the start of
+     * the line and overwrites it). A server value going into such text must still be passed
+     * through {@code sanitizeLine} first, or its own newlines would forge lines.
+     */
+    public static String sanitize(String s) {
+        return escape(s, true);
+    }
+
+    private static String escape(String s, boolean keepLineBreaks) {
+        if (s == null) return null;
+        StringBuilder sb = null;
+        for (int i = 0; i < s.length(); ) {
+            int cp = s.codePointAt(i);
+            int n = Character.charCount(cp);
+            boolean keep = keepLineBreaks
+                && (cp == '\n' || cp == '\t' || (cp == '\r' && i + 1 < s.length() && s.charAt(i + 1) == '\n'));
+            boolean bad = !keep && unsafe(cp);
+            if (bad && sb == null) sb = new StringBuilder(s.length() + 16).append(s, 0, i);
+            if (sb != null) {
+                if (bad) appendEscape(sb, cp);
+                else sb.appendCodePoint(cp);
+            }
+            i += n;
+        }
+        return sb == null ? s : sb.toString();
+    }
+
+    private static boolean unsafe(int cp) {
+        if (cp < 0x20 || cp == 0x7f || (cp >= 0x80 && cp <= 0x9f)) return true;
+        int type = Character.getType(cp);
+        return type == Character.FORMAT
+            || type == Character.LINE_SEPARATOR        // U+2028
+            || type == Character.PARAGRAPH_SEPARATOR   // U+2029
+            || type == Character.SURROGATE;            // an unpaired half: not text, prints as '?'
+    }
+
+    private static void appendEscape(StringBuilder sb, int cp) {
+        switch (cp) {
+            case '\n' -> sb.append("\\n");
+            case '\r' -> sb.append("\\r");
+            case '\t' -> sb.append("\\t");
+            default -> {
+                if (cp < 0x100) sb.append(String.format("\\x%02x", cp));
+                else if (cp <= 0xFFFF) sb.append(String.format("\\u%04x", cp));
+                else sb.append(String.format("\\u{%x}", cp));
+            }
+        }
+    }
+
+    /**
+     * Human-mode {@code println} of ONE line: the whole string goes through
+     * {@link #sanitizeLine}, so a value's newline can't start a line of its own. For text with
+     * line breaks of this CLI's own (a table), use {@link #print}.
+     */
+    public static void println(String s) {
+        System.out.println(sanitizeLine(s));
+    }
+
+    public static void println() {
+        System.out.println();
+    }
+
+    /**
+     * Human-mode {@code print} of multi-line text this CLI laid out (see {@link #sanitize}):
+     * server values in it must already have gone through {@link #sanitizeLine} or
+     * {@link #table}.
+     */
+    public static void print(String s) {
+        System.out.print(sanitize(s));
+    }
+
+    /**
+     * Human-mode {@code printf}: every argument that isn't a number or a boolean is printed
+     * through {@link #sanitizeLine}, so line breaks come only from the format string.
+     */
+    public static void printf(String format, Object... args) {
+        Object[] clean = new Object[args.length];
+        for (int i = 0; i < args.length; i++) {
+            Object a = args[i];
+            clean[i] = a == null || a instanceof Number || a instanceof Boolean ? a : sanitizeLine(String.valueOf(a));
+        }
+        System.out.print(sanitize(String.format(format, clean)));
+    }
+
     public static String table(List<String> headers, List<List<String>> rows) {
         return table(headers, rows, 200);
     }
 
     public static String table(List<String> headers, List<List<String>> rows, int maxWidth) {
+        // Each cell on one line: a newline in a value must not start a row of its own.
+        headers = headers.stream().map(CliOutput::sanitizeLine).toList();
+        rows = rows.stream().map(r -> r.stream().map(CliOutput::sanitizeLine).toList()).toList();
         int cols = headers.size();
         int[] widths = new int[cols];
         for (int i = 0; i < cols; i++) widths[i] = headers.get(i).length();
@@ -72,7 +187,11 @@ public class CliOutput {
     private static void appendRow(StringBuilder sb, List<String> row, int[] widths) {
         for (int i = 0; i < widths.length; i++) {
             String cell = i < row.size() && row.get(i) != null ? row.get(i) : "";
-            if (cell.length() > widths[i]) cell = cell.substring(0, widths[i] - 1) + "…";
+            if (cell.length() > widths[i]) {
+                int cut = widths[i] - 1;
+                if (cut > 0 && Character.isHighSurrogate(cell.charAt(cut - 1))) cut--;   // keep pairs whole
+                cell = cell.substring(0, cut) + "…";
+            }
             sb.append(pad(cell, widths[i]));
             if (i < widths.length - 1) sb.append("  ");
         }
@@ -86,26 +205,76 @@ public class CliOutput {
 
     /**
      * Serialize a value for JSON (agent) mode: compact, one line. JSON mode exists for
-     * programs — agents, `jq`, scripts — where pretty-printing only costs tokens. The
+     * programs (agents, `jq`, scripts) where pretty-printing only costs tokens. The
      * human/`--pretty` mode renders tables and summaries, not pretty-printed JSON.
+     *
+     * <p>Jackson escapes only U+0000 to U+001F, but the output also reaches terminals and logs,
+     * and the values and key names may come from a hostile server. So after serializing, every
+     * code point {@link #sanitizeLine} treats as unsafe and that is still raw (DEL and the C1
+     * range, including U+009B, an 8-bit CSI; FORMAT characters such as bidi overrides, zero-width
+     * characters and the BOM, in any plane; U+2028 and U+2029; an unpaired surrogate) is written
+     * as a backslash-u-hex escape (four digits), a supplementary one as a surrogate pair. This is valid JSON
+     * that parses back to the same strings, and it applies to key names as well as values. A
+     * structural character is never one of these, so a text replacement over the whole output
+     * is safe. Ordinary non-ASCII text stays readable.
      */
     public static String json(Object value) {
         try {
-            return Json.mapper().writeValueAsString(value);
+            return escapeJsonUnsafe(Json.mapper().writeValueAsString(value));
         } catch (Exception e) {
-            return String.valueOf(value);
+            return sanitizeLine(String.valueOf(value));
         }
     }
 
+    /** Escapes the unsafe code points of already-serialized JSON text as backslash-u-hex escapes. */
+    static String escapeJsonUnsafe(String json) {
+        StringBuilder sb = null;
+        for (int i = 0; i < json.length(); ) {
+            int cp = json.codePointAt(i);
+            int n = Character.charCount(cp);
+            boolean bad = unsafe(cp);
+            if (bad && sb == null) sb = new StringBuilder(json.length() + 16).append(json, 0, i);
+            if (sb != null) {
+                if (bad) {
+                    for (int k = i; k < i + n; k++) sb.append(String.format("\\u%04x", (int) json.charAt(k)));
+                } else {
+                    sb.appendCodePoint(cp);
+                }
+            }
+            i += n;
+        }
+        return sb == null ? json : sb.toString();
+    }
+
+    /** The most server-derived text an error message carries. */
+    static final int EXCERPT_LIMIT = 300;
+
+    /**
+     * Server-derived text for an error message, cut to {@value #EXCERPT_LIMIT} code points (never
+     * through a surrogate pair) with a visible marker, so a hostile server cannot make the CLI
+     * print megabytes on one line. Null is the empty string. Not sanitized: {@link #printError}
+     * and the other one-line printers do that.
+     */
+    public static String excerpt(String s) {
+        if (s == null) return "";
+        int points = s.codePointCount(0, s.length());
+        if (points <= EXCERPT_LIMIT) return s;
+        int end = s.offsetByCodePoints(0, EXCERPT_LIMIT);
+        return s.substring(0, end) + "… (" + (points - EXCERPT_LIMIT) + " more characters)";
+    }
+
+    /** One line on stderr; the message goes through {@link #sanitizeLine}. */
     public static void printError(String message) {
-        System.err.println("✗ " + message);
+        System.err.println("✗ " + sanitizeLine(message));
     }
 
+    /** One line; the message goes through {@link #sanitizeLine}. */
     public static void printSuccess(String message) {
-        System.out.println("✓ " + message);
+        System.out.println("✓ " + sanitizeLine(message));
     }
 
+    /** One line; the message goes through {@link #sanitizeLine}. */
     public static void printInfo(String message) {
-        System.out.println("▸ " + message);
+        System.out.println("▸ " + sanitizeLine(message));
     }
 }

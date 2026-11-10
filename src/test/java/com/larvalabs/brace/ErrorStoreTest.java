@@ -99,6 +99,709 @@ class ErrorStoreTest {
         assertEquals(trace.replace(secret, "[redacted]"), stored, "frame lines are unchanged");
     }
 
+    // --- M5 (2026-11 review): one bad entry must not stall the store ---
+
+    @Test
+    void nulIsReplacedSoAlreadyRedactedTokensAreNotJoined() {
+        // H2 stores a NUL happily; Postgres can't (see ErrorStorePostgresIT). Replacing it with
+        // U+FFFD rather than deleting keeps `abc\0def` (two short tokens to the redactor that ran
+        // upstream) from becoming one long secret-shaped token in the stored row.
+        errorStore.record("NumberFormatException", "For input string: \"abc\u0000def\"", "GET /x",
+            "java.lang.NumberFormatException: abc\u0000def\n", "GET /x?page=abc\u0000def",
+            "{\"count\":0}", "{\"x-h\":\"a\u0000b\"}");
+        errorStore.flush();
+
+        var err = errorStore.list(null).get(0);
+        assertEquals("For input string: \"abc�def\"", err.get("message"));
+        assertEquals("GET /x?page=abc�def", err.get("requestDetail"));
+        assertEquals("{\"x-h\":\"a�b\"}", err.get("requestHeaders"));
+        assertFalse(((String) err.get("stackTrace")).contains("\u0000"));
+    }
+
+    @Test
+    void overlongTypeAndRouteAreClippedNotRejected() {
+        errorStore.record("E".repeat(300), "m", "X".repeat(400) + " /r", "s", "req");
+        errorStore.record("Healthy", "m", "GET /ok", "s", "req");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(2, errors.size());
+        for (var e : errors) {
+            assertTrue(((String) e.get("errorType")).length() <= ErrorStore.MAX_KEY_LENGTH);
+            assertTrue(((String) e.get("route")).length() <= ErrorStore.MAX_KEY_LENGTH);
+        }
+        // A surrogate pair straddling the limit is dropped whole, not split.
+        String clipped = ErrorStore.clip("a".repeat(254) + "😀");
+        assertEquals(254, clipped.length());
+    }
+
+    @Test
+    void anEntryTheDatabaseKeepsRejectingIsDroppedAndLoggedOthersCommit() {
+        // A CHECK constraint stands in for any row-level rejection that sanitizing doesn't foresee.
+        // It is on error_type, which the payload-stripped retry keeps, so the retry fails too.
+        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check CHECK (error_type NOT LIKE '%Poison%')");
+        LogTap.clear();
+        try {
+            errorStore.record("PoisonException", "POISON secret-payload", "GET /p", "s", "req");
+            errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "the healthy kind commits despite its neighbour");
+
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            sql("ALTER TABLE ops_errors DROP CONSTRAINT poison_check");
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "dropped after MAX_FLUSH_FAILURES, not retried forever");
+        } finally {
+            sql("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS poison_check");
+        }
+
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), "rate-limited to one line per interval: " + warnings);
+        assertTrue(warnings.get(0).contains("database rejected"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("secret-payload"), "request-derived content is never logged");
+        // The drop happened after the first (immediate) warning, inside the rate-limit window, so
+        // it is reported by the next line once the window passes.
+        assertFalse(warnings.get(0).contains("dropped"));
+    }
+
+    @Test
+    void dropIsLoggedWhenTheWindowAllows() {
+        sql("ALTER TABLE ops_errors ADD CONSTRAINT poison_check2 CHECK (error_type NOT LIKE '%Poison%')");
+        LogTap.clear();
+        try {
+            errorStore.record("PoisonException", "POISON", "GET /p", "s", "req");
+            for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            LogTap.clear();
+            // Next flush is past the window (simulated): the summary names the dropped kind.
+            errorStore.expireFailureLogWindow();
+            errorStore.flush();
+        } finally {
+            sql("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS poison_check2");
+        }
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertTrue(warnings.get(0).contains("dropped 1 error kind(s)"), warnings.get(0));
+        assertTrue(warnings.get(0).contains("PoisonException"), warnings.get(0));
+    }
+
+    @Test
+    void anUnreachableDatabaseKeepsEntriesAndRetries() {
+        // DB down / pool exhausted: not any entry's fault. Entries must survive any number of
+        // failed flushes (bounded by kind cardinality, as before) and land once it's back.
+        var real = errorStore.flushSession;
+        LogTap.clear();
+        errorStore.flushSession = () -> {
+            throw new org.hibernate.exception.JDBCConnectionException("Unable to acquire JDBC Connection",
+                new java.sql.SQLTransientConnectionException("Connection is not available", "08001"));
+        };
+        errorStore.record("RuntimeException", "first", "GET /down", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("RuntimeException", "second", "GET /down", "s", "req");
+        errorStore.flush();
+
+        errorStore.flushSession = real;
+        errorStore.flush();
+        var errors = errorStore.list(null);
+        assertEquals(1, errors.size());
+        assertEquals(2, errors.get(0).get("occurrenceCount"), "both occurrences survived the outage");
+        assertEquals("second", errors.get(0).get("message"));
+
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), "rate-limited: " + warnings);
+        assertTrue(warnings.get(0).contains("kept for retry"), warnings.get(0));
+        assertTrue(warnings.get(0).contains("SQLState 08001"), warnings.get(0));
+    }
+
+    @Test
+    void connectionFailureClassification() {
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "08006")));
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "57P01")));
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "40P01")));
+        assertTrue(ErrorStore.isConnectionFailure(new java.sql.SQLTransientConnectionException("x")));
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "22023")), "pgjdbc's NUL rejection");
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "22001")), "value too long");
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x", "23514")), "check violation");
+        assertFalse(ErrorStore.isConnectionFailure(new java.sql.SQLException("x")));
+    }
+
+    // --- M5 review fixes ---
+
+    @Test
+    void aRetainedClassRowErrorOnALiveConnectionIsARowRejection() {
+        // 57014 (statement_timeout on a huge row) is in a "connection-level" SQLState class, but
+        // the connection is fine: it must count against the entry, not abort and retain the batch
+        // forever (the original stall). The fault fires on the stripped retry too.
+        errorStore.rowFault = (type, message) -> {
+            if ("HugeRowException".equals(type)) {
+                throw new java.sql.SQLException("canceling statement due to statement timeout", "57014");
+            }
+        };
+        errorStore.record("HugeRowException", "x".repeat(1000), "GET /huge", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types(), "the healthy kind commits despite its neighbour");
+
+        for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types(), "dropped after MAX_FLUSH_FAILURES, not retained forever");
+    }
+
+    @Test
+    void aConnectionClassedErrorOnADeadConnectionRetainsTheBatchUncounted() {
+        errorStore.rowFault = (type, message) -> {
+            throw new java.sql.SQLException("An I/O error occurred while sending to the backend", "08006");
+        };
+        errorStore.connectionCheck = connection -> false;
+        errorStore.record("RuntimeException", "first", "GET /down", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        assertEquals(List.of(), types(), "nothing commits while the connection is dead");
+
+        errorStore.rowFault = null;
+        errorStore.connectionCheck = connection -> connection.isValid(1);
+        errorStore.flush();
+        assertEquals(List.of("Healthy", "RuntimeException"), types(), "kept, not counted or dropped");
+    }
+
+    @Test
+    void aRejectedRowIsRetriedOnceWithoutItsPayload() {
+        // e.g. a value the database refuses in the message, trace or request detail. The kind's
+        // count and the regression signal must survive; the payload is replaced by fixed text.
+        var seen = new java.util.ArrayList<String>();
+        errorStore.setRegressionListener(new ErrorStore.RegressionListener() {
+            public void onNew(String type, String route, String message, java.time.Instant firstSeen) {
+                seen.add(type + ": " + message);
+            }
+            public void onRepeat(String type, String route, long count) { }
+        });
+        errorStore.rowFault = (type, message) -> {
+            if ("BigPayloadException".equals(type) && !ErrorStore.STRIPPED_MESSAGE.equals(message)) {
+                throw new java.sql.SQLException("value too long", "22001");
+            }
+        };
+        errorStore.record("BigPayloadException", "request text token=abc", "GET /big",
+            "trace with request text", "GET /big?q=request-text", "{\"count\":1}", "{\"x-h\":\"request-text\"}");
+        errorStore.record("BigPayloadException", "request text again", "GET /big", "trace", "detail");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(1, errors.size(), errors.toString());
+        var err = errors.get(0);
+        assertEquals("BigPayloadException", err.get("errorType"));
+        assertEquals("GET /big", err.get("route"));
+        assertEquals(2, err.get("occurrenceCount"), "the count survives");
+        assertEquals(ErrorStore.STRIPPED_MESSAGE, err.get("message"));
+        assertNull(err.get("stackTrace"));
+        assertNull(err.get("requestDetail"));
+        assertNull(err.get("queriesBefore"));
+        assertNull(err.get("requestHeaders"));
+        assertEquals(List.of("BigPayloadException: " + ErrorStore.STRIPPED_MESSAGE), seen,
+            "the regression signal fires, with the placeholder rather than the rejected payload");
+        assertFalse(ErrorStore.STRIPPED_MESSAGE.contains("request"), "fixed text only");
+
+        // Nothing left pending: a later flush with the fault gone adds nothing.
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(2, errorStore.list(null).get(0).get("occurrenceCount"));
+    }
+
+    // --- Final review fixes (docs/2026-11-09-security-review-todos.md, M5) ---
+
+    @Test
+    void aTransientRowErrorIsNotRetriedStrippedAndNeverOverwritesStoredDetails() {
+        // L9: a 55P03 lock timeout on the first attempt, then the payload-stripped retry succeeded
+        // and overwrote the existing row's message, trace, detail and headers with the placeholder.
+        errorStore.record("LockedException", "first details", "GET /l", "first trace", "GET /l?a=1",
+            "{\"count\":1}", "{\"x-h\":\"first\"}");
+        errorStore.flush();
+        var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        errorStore.rowFault = (type, message) -> {
+            if ("LockedException".equals(type) && attempts.getAndIncrement() == 0) {
+                throw new java.sql.SQLException("canceling statement due to lock timeout", "55P03");
+            }
+        };
+        errorStore.record("LockedException", "second details", "GET /l", "second trace", "GET /l?a=2",
+            "{\"count\":2}", "{\"x-h\":\"second\"}");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        var locked = find("LockedException");
+        assertEquals("first details", locked.get("message"), "never overwritten with the placeholder");
+        assertEquals("first trace", locked.get("stackTrace"));
+        assertEquals("{\"x-h\":\"first\"}", locked.get("requestHeaders"));
+        assertEquals(1, locked.get("occurrenceCount"));
+
+        errorStore.flush(); // the lock is gone: the full payload lands
+        locked = find("LockedException");
+        assertEquals("second details", locked.get("message"));
+        assertEquals("second trace", locked.get("stackTrace"));
+        assertEquals(2, locked.get("occurrenceCount"));
+        errorStore.rowFault = null;
+    }
+
+    @Test
+    void aStrippedWriteOnlyCountsWhenTheRowExists() {
+        // L9: a data-class rejection (22001 value too long) is retried without its payload; when
+        // the kind already has a row, the retry adds the count and keeps the stored details.
+        errorStore.record("BigPayloadException", "stored details", "GET /big", "stored trace", "GET /big",
+            "{\"count\":1}", "{\"x-h\":\"stored\"}");
+        errorStore.flush();
+        errorStore.rowFault = (type, message) -> {
+            if ("BigPayloadException".equals(type) && !ErrorStore.STRIPPED_MESSAGE.equals(message)) {
+                throw new java.sql.SQLException("value too long", "22001");
+            }
+        };
+        errorStore.record("BigPayloadException", "x".repeat(100), "GET /big", "huge trace", "detail");
+        errorStore.flush();
+        var big = find("BigPayloadException");
+        assertEquals(2, big.get("occurrenceCount"), "the count survives");
+        assertEquals("stored details", big.get("message"), "existing details are kept, not replaced");
+        assertEquals("stored trace", big.get("stackTrace"));
+        assertEquals("{\"x-h\":\"stored\"}", big.get("requestHeaders"));
+        errorStore.rowFault = null;
+    }
+
+    @Test
+    void onlyDataClassRejectionsAreRetriedStripped() {
+        // A rejection with no SQLState, or a non-data one, is not retried without its payload:
+        // it is counted like any rejection and retried in full on the next flush.
+        var seenMessages = new java.util.ArrayList<String>();
+        errorStore.rowFault = (type, message) -> {
+            if ("Odd".equals(type)) {
+                seenMessages.add(message);
+                throw new java.sql.SQLException("driver said no");
+            }
+        };
+        errorStore.record("Odd", "payload", "GET /odd", "s", "req");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of("payload"), seenMessages, "no stripped retry");
+        assertEquals(List.of("Healthy"), types());
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals("payload", find("Odd").get("message"));
+    }
+
+    @Test
+    void aReadOnlyWindowKeepsEveryKindUncounted() {
+        // L10: SQLState 25006 (read-only transaction, e.g. during a failover) on a connection that
+        // still passes isValid counted against every row, so five flushes dropped every kind.
+        for (String state : List.of("25006", "53100", "53300", "57P01", "57P03", "58030")) {
+            errorStore.close();
+            cleanTable();
+            errorStore.rowFault = (type, message) -> {
+                throw new java.sql.SQLException("server-wide failure " + state, state);
+            };
+            errorStore.record("A", "a", "GET /a", "s", "req");
+            errorStore.record("B", "b", "GET /b", "s", "req");
+            for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+                errorStore.flush();
+            }
+            errorStore.record("Lone", "lone", "GET /lone", "s", "req");
+            errorStore.rowFault = null;
+            errorStore.flush();
+            assertEquals(List.of("A", "B", "Lone"), types(), "kept uncounted through the window: " + state);
+        }
+    }
+
+    @Test
+    void aSingleServerWideFailureIsNotBlamedOnALoneRow() {
+        // A one-kind batch in a read-only window is still not the row's fault.
+        errorStore.rowFault = (type, message) -> {
+            throw new java.sql.SQLException("cannot execute INSERT in a read-only transaction", "25006");
+        };
+        errorStore.record("Lone", "lone", "GET /lone", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(List.of("Lone"), types());
+    }
+
+    @Test
+    void rowsAlwaysFailingWithOneStateThatIsNotServerWideAreCountedAndDropped() {
+        // Verification pass: L10 kept a batch whose rows all failed with one non-data SQLState
+        // uncounted, with no bound, so two rows that always fail that way were retried forever.
+        // Only a server-wide state (read-only, out of resources, shutdown, connection) is the
+        // database's; a lock timeout on every row is counted like any row rejection.
+        errorStore.rowFault = (type, message) -> {
+            throw new java.sql.SQLException("canceling statement due to lock timeout", "55P03");
+        };
+        errorStore.record("A", "a", "GET /a", "s", "req");
+        errorStore.record("B", "b", "GET /b", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(List.of(), types(), "dropped after MAX_FLUSH_FAILURES, not retried forever");
+    }
+
+    @Test
+    void aFullBufferOfAlwaysFailingKindsDoesNotLockOutANewKind() {
+        // 1,000 such kinds filled the pending buffer for good, so a healthy new kind was dropped
+        // at record().
+        errorStore.rowFault = (type, message) -> {
+            if (type.startsWith("Stuck")) {
+                throw new java.sql.SQLException("canceling statement due to lock timeout", "55P03");
+            }
+        };
+        for (int i = 0; i < ErrorStore.MAX_PENDING_KINDS; i++) {
+            errorStore.record("Stuck" + i, "m", "GET /s" + i, "s", "req");
+        }
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of("Healthy"), types());
+    }
+
+    @Test
+    void anOutageRetainsEntriesUpToTheCapThenDropsThemWithOneWarning() {
+        var real = errorStore.flushSession;
+        java.util.function.Supplier<Database> down = () -> {
+            throw new org.hibernate.exception.JDBCConnectionException("Unable to acquire JDBC Connection",
+                new java.sql.SQLTransientConnectionException("Connection is not available", "08001"));
+        };
+        // While the outage lasts up to the cap, everything is kept.
+        errorStore.flushSession = down;
+        errorStore.record("Kept", "k", "GET /k", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_UNCOUNTED_RETENTIONS; i++) {
+            errorStore.flush();
+        }
+        errorStore.flushSession = real;
+        errorStore.flush();
+        assertEquals(List.of("Kept"), types(), "kept through an outage as long as the cap");
+
+        // Past the cap, an entry is counted like a row rejection and dropped; a kind that arrived
+        // later is still kept.
+        errorStore.close();
+        cleanTable();
+        LogTap.clear();
+        errorStore.flushSession = down;
+        errorStore.record("Old", "secret-payload", "GET /old", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_UNCOUNTED_RETENTIONS + ErrorStore.MAX_FLUSH_FAILURES - 1; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("New", "n", "GET /new", "s", "req");
+        errorStore.expireFailureLogWindow();
+        errorStore.flush();
+        errorStore.flushSession = real;
+        errorStore.flush();
+        assertEquals(List.of("New"), types());
+        var dropWarnings = errorStoreWarnings().stream().filter(w -> w.contains("dropped")).toList();
+        assertEquals(1, dropWarnings.size(), errorStoreWarnings().toString());
+        assertTrue(dropWarnings.get(0).contains("dropped 1 error kind(s)") && dropWarnings.get(0).contains("Old"),
+            dropWarnings.get(0));
+        assertFalse(dropWarnings.get(0).contains("secret-payload"));
+        // Second review: this said "after 5 rejected flushes", though the database rejected nothing.
+        assertFalse(dropWarnings.get(0).contains("rejected flushes"), dropWarnings.get(0));
+        assertTrue(dropWarnings.get(0).contains("the database could not take through "
+            + (ErrorStore.MAX_UNCOUNTED_RETENTIONS + ErrorStore.MAX_FLUSH_FAILURES) + " failed flushes"),
+            dropWarnings.get(0));
+    }
+
+    @Test
+    void newKindsArrivingWhileAFlushWaitsOnADeadDatabaseDoNotGrowTheBufferPastTheCap() {
+        // Second review: flushBatch drained `pending`, then blocked opening a session. Meanwhile
+        // record() saw an empty map and admitted another MAX_PENDING_KINDS kinds, and the failed
+        // batch was merged back on top with no cap check: 1,000 more per flush, 65,000 held by
+        // the time the outage cap dropped the first ones.
+        var real = errorStore.flushSession;
+        int[] minted = {0};
+        int[] worst = {0};
+        errorStore.flushSession = () -> {
+            // What the request threads do while the flusher waits for a connection.
+            for (int i = 0; i < ErrorStore.MAX_PENDING_KINDS; i++) {
+                int n = minted[0]++;
+                errorStore.record("Storm" + n, "m", "GET /storm" + n, "s", "req");
+            }
+            // A kind that is in the batch being flushed recurs: a counter bump, never dropped.
+            errorStore.record("First", "again", "GET /first", "s", "req");
+            worst[0] = Math.max(worst[0], errorStore.bufferedKinds());
+            throw new org.hibernate.exception.JDBCConnectionException("Unable to acquire JDBC Connection",
+                new java.sql.SQLTransientConnectionException("Connection is not available", "08001"));
+        };
+        errorStore.record("First", "first", "GET /first", "s", "req");
+        int flushes = 8;
+        for (int i = 0; i < flushes; i++) {
+            errorStore.flush();
+            assertTrue(errorStore.pendingKinds() <= ErrorStore.MAX_PENDING_KINDS,
+                "after failed flush " + (i + 1) + ": " + errorStore.pendingKinds() + " kinds pending");
+        }
+        assertTrue(worst[0] <= ErrorStore.MAX_PENDING_KINDS,
+            "during a flush, pending plus in flight: " + worst[0] + " kinds");
+
+        errorStore.flushSession = real;
+        errorStore.flush();
+        var stored = errorStore.list(null, java.time.Instant.EPOCH);
+        assertEquals(ErrorStore.MAX_PENDING_KINDS, stored.size());
+        // The kinds buffered first are the ones kept: the oldest entry and its whole count survive.
+        var first = stored.stream().filter(e -> "First".equals(e.get("errorType"))).findFirst().orElseThrow();
+        assertEquals(1 + flushes, first.get("occurrenceCount"));
+        assertTrue(stored.stream().anyMatch(e -> "Storm0".equals(e.get("errorType"))));
+        assertFalse(stored.stream().anyMatch(e -> ("Storm" + ErrorStore.MAX_PENDING_KINDS).equals(e.get("errorType"))));
+        // Nothing is left in flight, so a new kind is admitted again.
+        assertEquals(0, errorStore.bufferedKinds());
+        errorStore.record("After", "a", "GET /after", "s", "req");
+        errorStore.flush();
+        assertTrue(errorStore.list(null, java.time.Instant.EPOCH).stream()
+            .anyMatch(e -> "After".equals(e.get("errorType"))));
+        assertEquals(0, errorStore.bufferedKinds());
+    }
+
+    @Test
+    void oneRowDrawingAServerWideStateDoesNotStarveTheHealthyRowsBesideIt() {
+        // Second review: a server-wide SQLState on any row aborted the flush, so one row that
+        // always draws one (an oversized row and 53100 disk full, 53200 out of memory) kept every
+        // healthy row beside it out of the table for as long as it stayed buffered (0 of 400).
+        for (String state : List.of("53100", "53200", "58030", "08P01")) {
+            errorStore.close();
+            cleanTable();
+            errorStore.rowFault = (type, message) -> {
+                if (type.startsWith("Poison")) throw new java.sql.SQLException("server-wide failure " + state, state);
+            };
+            // Several poisoned rows, so some come before and some after a healthy row in the batch.
+            for (int i = 0; i < 400; i++) {
+                errorStore.record("Healthy" + i, "m", "GET /h" + i, "s", "req");
+                if (i % 50 == 0) errorStore.record("Poison" + i, "m", "GET /p" + i, "s", "req");
+            }
+            errorStore.flush();
+            var stored = errorStore.list(null, java.time.Instant.EPOCH);
+            assertEquals(400, stored.size(), "healthy rows stored on the first flush: " + state);
+            assertEquals(8, errorStore.bufferedKinds(), "the poisoned rows are kept for retry: " + state);
+
+            // The poisoned rows are counted, like any row rejection, while a healthy row is written
+            // beside them, and dropped after MAX_FLUSH_FAILURES such flushes.
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.record("Healthy0", "m", "GET /h0", "s", "req");
+                errorStore.flush();
+            }
+            assertEquals(0, errorStore.bufferedKinds(), "poisoned rows dropped: " + state);
+            errorStore.rowFault = null;
+            errorStore.flush();
+            assertEquals(400, errorStore.list(null, java.time.Instant.EPOCH).size());
+        }
+    }
+
+    @Test
+    void anOutageThatStartsMidBatchKeepsTheWholeBatchUncounted() {
+        // The other side of the rule above: rows written, then the server goes away. The next
+        // statement on the dead connection fails the flush, nothing commits, and no row is
+        // counted, however many flushes the outage lasts (up to the uncounted cap).
+        int[] calls = {0};
+        errorStore.rowFault = (type, message) -> {
+            if (++calls[0] > 3) throw new java.sql.SQLException("terminating connection", "57P01");
+        };
+        errorStore.connectionCheck = connection -> false;
+        for (int i = 0; i < 10; i++) {
+            errorStore.record("E" + i, "m", "GET /e" + i, "s", "req");
+        }
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            calls[0] = 0;
+            errorStore.flush();
+            assertEquals(List.of(), types(), "nothing commits from an aborted flush");
+        }
+        errorStore.rowFault = null;
+        errorStore.connectionCheck = connection -> connection.isValid(1);
+        errorStore.flush();
+        assertEquals(10, types().size());
+    }
+
+    @Test
+    void aServerThatStopsTakingWritesMidBatchOnALiveConnectionDropsNothingEarly() {
+        // Disk fills up mid-batch and the connection stays usable: the rows after that point are
+        // counted once (rows before them were written in the same flush). Every later flush of
+        // the outage writes nothing, so it is kept uncounted, and they are stored when it ends.
+        boolean[] full = {false};
+        int[] calls = {0};
+        errorStore.rowFault = (type, message) -> {
+            if (full[0] || ++calls[0] > 3) {
+                full[0] = true;
+                throw new java.sql.SQLException("could not extend file: No space left on device", "53100");
+            }
+        };
+        for (int i = 0; i < 10; i++) {
+            errorStore.record("E" + i, "m", "GET /e" + i, "s", "req");
+        }
+        errorStore.flush();
+        assertEquals(3, types().size());
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        assertEquals(7, errorStore.bufferedKinds(), "kept through the outage");
+        errorStore.rowFault = null;
+        errorStore.flush();
+        assertEquals(10, types().size());
+    }
+
+    @Test
+    void aThrowingRegressionListenerDoesNotStopTheOtherNotificationsOrTheFlush() {
+        var notified = new java.util.ArrayList<String>();
+        errorStore.setRegressionListener(new ErrorStore.RegressionListener() {
+            public void onNew(String type, String route, String message, java.time.Instant firstSeen) {
+                notified.add("new " + type);
+                if (type.equals("Bad")) throw new IllegalStateException("listener failed on " + message);
+            }
+            public void onRepeat(String type, String route, long count) {
+                notified.add("repeat " + type);
+                if (type.equals("Bad")) throw new IllegalStateException("listener failed again");
+            }
+        });
+        LogTap.clear();
+        for (String type : List.of("A", "Bad", "C", "D")) {
+            errorStore.record(type, "secret-payload", "GET /" + type, "s", "req");
+        }
+        errorStore.expireFailureLogWindow();
+        assertDoesNotThrow(() -> errorStore.flush());
+        assertEquals(List.of("new A", "new Bad", "new C", "new D"), notified.stream().sorted().toList());
+        assertEquals(List.of("A", "Bad", "C", "D"), types(), "the rows are stored whatever the listener does");
+
+        notified.clear();
+        for (String type : List.of("A", "Bad", "C", "D")) {
+            errorStore.record(type, "secret-payload", "GET /" + type, "s", "req");
+        }
+        assertDoesNotThrow(() -> errorStore.flush());
+        assertEquals(List.of("repeat A", "repeat Bad", "repeat C", "repeat D"), notified.stream().sorted().toList());
+
+        var warnings = errorStoreWarnings();
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertTrue(warnings.get(0).contains("regression listener threw")
+            && warnings.get(0).contains("java.lang.IllegalStateException"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("could not persist"), warnings.get(0));
+        assertFalse(warnings.get(0).contains("secret-payload"), warnings.get(0));
+    }
+
+    @Test
+    void aFlushThatAbortsAfterAStrippedWriteKeepsTheFullPayloadForTheRetry() {
+        // The stripped copy replaced the entry in the batch, so when the flush then aborted the
+        // placeholder was what got merged back: the payload was lost though nothing was stored.
+        boolean[] strippedWritten = {false};
+        errorStore.rowFault = (type, message) -> {
+            if (strippedWritten[0]) throw new java.sql.SQLException("terminating connection", "57P01");
+            if (ErrorStore.STRIPPED_MESSAGE.equals(message)) {
+                strippedWritten[0] = true;
+            } else {
+                throw new java.sql.SQLException("value too long", "22001");
+            }
+        };
+        errorStore.connectionCheck = connection -> false;
+        errorStore.record("A", "payload A", "GET /a", "s", "req");
+        errorStore.record("B", "payload B", "GET /b", "s", "req");
+        errorStore.flush();
+        assertTrue(strippedWritten[0]);
+        assertEquals(List.of(), types(), "the flush aborted");
+
+        errorStore.rowFault = null;
+        errorStore.connectionCheck = connection -> connection.isValid(1);
+        errorStore.flush();
+        assertEquals("payload A", find("A").get("message"));
+        assertEquals("payload B", find("B").get("message"));
+    }
+
+    @Test
+    void anErrorDuringAFlushKeepsTheBatchAndIsNotMistakenForARejection() {
+        // The flusher caught Exception only: an Error (a NoClassDefFoundError from a driver or a
+        // listener's dependency) lost the drained batch.
+        var real = errorStore.flushSession;
+        errorStore.record("Kept", "k", "GET /k", "s", "req");
+        errorStore.flushSession = () -> {
+            throw new NoClassDefFoundError("some/driver/Class");
+        };
+        LogTap.clear();
+        errorStore.expireFailureLogWindow();
+        assertDoesNotThrow(() -> errorStore.flush());
+        assertEquals(1, errorStore.pendingKinds(), "the batch is merged back");
+        assertEquals(1, errorStore.bufferedKinds());
+        assertTrue(errorStoreWarnings().stream().anyMatch(w -> w.contains("java.lang.NoClassDefFoundError")),
+            errorStoreWarnings().toString());
+
+        // A VirtualMachineError is not swallowed by a direct flush(), but the batch is still kept.
+        errorStore.flushSession = () -> {
+            throw new StackOverflowError();
+        };
+        assertThrows(StackOverflowError.class, () -> errorStore.flush());
+        assertEquals(1, errorStore.pendingKinds());
+        assertEquals(1, errorStore.bufferedKinds());
+
+        errorStore.flushSession = real;
+        errorStore.flush();
+        assertEquals(List.of("Kept"), types());
+        assertEquals(0, errorStore.bufferedKinds());
+    }
+
+    @Test
+    void theFlusherThreadSurvivesAnError() {
+        var real = errorStore.flushSession;
+        var thrown = new java.util.concurrent.atomic.AtomicInteger();
+        errorStore.flushSession = () -> {
+            thrown.incrementAndGet();
+            throw new OutOfMemoryError("simulated");
+        };
+        errorStore.record("Kept", "k", "GET /k", "s", "req");
+        TestWait.until(java.time.Duration.ofSeconds(15), () -> thrown.get() >= 1,
+            () -> "the flusher never ran");
+        errorStore.flushSession = real;
+        // Only the flusher thread can write it now: nothing here calls flush().
+        TestWait.until(java.time.Duration.ofSeconds(15), () -> types().contains("Kept"),
+            () -> "the flusher thread died with the Error: " + types());
+    }
+
+    @Test
+    void theDropWarningSaysWhetherRejectionsOrAnOutageDroppedTheKind() {
+        LogTap.clear();
+        errorStore.rowFault = (type, message) -> {
+            if (type.equals("Refused")) throw new java.sql.SQLException("lock timeout", "55P03");
+        };
+        errorStore.record("Refused", "m", "GET /r", "s", "req");
+        errorStore.record("Fine", "m", "GET /f", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.expireFailureLogWindow();
+            errorStore.flush();
+        }
+        var rejected = errorStoreWarnings().stream().filter(w -> w.contains("dropped")).toList();
+        assertEquals(1, rejected.size(), errorStoreWarnings().toString());
+        assertTrue(rejected.get(0).contains("after " + ErrorStore.MAX_FLUSH_FAILURES + " rejected flushes: Refused"),
+            rejected.get(0));
+        assertFalse(rejected.get(0).contains("outage"), rejected.get(0));
+    }
+
+    private static java.util.Map<String, Object> find(String type) {
+        return errorStore.list(null).stream().filter(e -> type.equals(e.get("errorType"))).findFirst().orElseThrow();
+    }
+
+    private static void sql(String statement) {
+        var db = new Database(dbFactory.openSession());
+        db.beginTransaction();
+        db.sql(statement);
+        db.commitTransaction();
+        db.close();
+    }
+
+    private static List<Object> types() {
+        return errorStore.list(null).stream().map(e -> e.get("errorType")).sorted().toList();
+    }
+
+    private static List<String> errorStoreWarnings() {
+        return LogTap.snapshot().stream()
+            .filter(e -> "WARN".equals(e.fields().get("level")))
+            .map(e -> String.valueOf(e.fields().get("message")))
+            .filter(m -> m.startsWith("error store:"))
+            .toList();
+    }
+
     @Test
     void recordCreatesRow() {
         errorStore.record("RuntimeException", "test error", "GET /test", "stack...", "GET /test");
@@ -386,9 +1089,9 @@ class ErrorStoreTest {
     void opsErrorsEndpointReturnsErrors(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -429,9 +1132,9 @@ class ErrorStoreTest {
     void opsResolveErrorEndpoint(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opsresolvedb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -499,9 +1202,9 @@ class ErrorStoreTest {
     void opsErrorsRequiresAuth(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:opserrorsauthdb" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -529,12 +1232,12 @@ class ErrorStoreTest {
     void secretBearingPathAndMessageAreRedactedInStoredError(@TempDir Path tmpDir) throws Exception {
         var kp = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, kp.publicKey() + "\n");
+        Files.writeString(keysFile, kp.publicKey() + " scope:control\n");
 
         // A 32-char hex-like secret that should trigger value-shaped redaction
         String secret = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
 
-        app = Brace.app().port(0)
+        app = Brace.app().opsUnpinnedForTests().port(0)
             .database(new DatabaseFactory(
                 "jdbc:h2:mem:redacttest" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
                 List.of(Post.class)))
@@ -601,6 +1304,157 @@ class ErrorStoreTest {
             assertTrue(stackTraceField.contains("RuntimeException: invalid token: [redacted]"), stackTraceField);
             assertFalse(stackTraceField.contains(secret),
                 "stackTrace field must not contain raw secret: " + stackTraceField);
+        } finally {
+            app.stop();
+        }
+    }
+
+    @Test
+    void secretBearingHeadersAndQueryValuesAreRedactedInStoredError(@TempDir Path tmpDir) throws Exception {
+        // M6 (docs/2026-11-09-security-review-todos.md): headers and query strings were redacted
+        // by NAME only, so a reset token in a Referer, a JWT in an identity-proxy header and an
+        // OAuth code in ?code= reached /ops/errors verbatim, readable with a scope:read key.
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + " scope:read\n");
+
+        String resetToken = "a3f9bc2d8ef14a5b6c7d8e9f01234567";
+        String pathToken = "Zx81kLm02PqR7sTuV4wXy9AbCd";
+        String jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyLTQyIiwiZXhwIjoxOTk5OTk5OTk5fQ.c2lnbmF0dXJlLWJ5dGVzLWhlcmUtMTIzNDU2";
+        String oauthCode = "4/0AX4XfWhq8Lp3mN7vB2cD9eF1gH5jK";
+        String requestId = "550e8400-e29b-41d4-a716-446655440000";
+
+        app = Brace.app().opsUnpinnedForTests().port(0)
+            .database(new DatabaseFactory(
+                "jdbc:h2:mem:redacthdrs" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+                List.of(Post.class)))
+            .ops(keysFile.toString());
+        app.get("/reset/submit", req -> { throw new IllegalStateException("reset failed"); });
+        app.get("/oauth/callback", req -> { throw new IllegalStateException("exchange failed"); });
+
+        app.start();
+        try {
+            port = app.actualPort();
+            var resetResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/reset/submit"))
+                    .header("Referer", "https://app.example.com/reset?token=" + resetToken + "&lang=en")
+                    .header("Origin", "https://app.example.com")
+                    .header("X-Original-URL", "/reset/" + pathToken + "/confirm")
+                    .header("Cf-Access-Jwt-Assertion", jwt)
+                    .header("X-Amzn-Oidc-Data", jwt)
+                    .header("X-Auth-Key", "k3y-" + resetToken)
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .header("X-Request-Id", requestId)
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(500, resetResp.statusCode());
+            var oauthResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/oauth/callback?code="
+                        + java.net.URLEncoder.encode(oauthCode, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&state=xyz&%74oken=abc&page=2"))
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(500, oauthResp.statusCode());
+            app.errorStore().flush();
+
+            String token = authenticateOps(port, kp);
+            var listResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors"))
+                    .header("Authorization", "Bearer " + token).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, listResp.statusCode());
+            var list = Json.mapper().readTree(listResp.body());
+            var all = new StringBuilder();
+            for (var row : list.isArray() ? list : list.path("errors")) {
+                var detail = client.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/ops/errors/" + row.get("id").asText()))
+                        .header("Authorization", "Bearer " + token).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+                assertEquals(200, detail.statusCode());
+                all.append(detail.body()).append('\n');
+            }
+            String stored = all.toString();
+            assertTrue(stored.contains("reset failed") && stored.contains("exchange failed"),
+                "both errors stored: " + stored);
+            for (String secret : List.of(resetToken, pathToken, jwt, oauthCode,
+                    java.net.URLEncoder.encode(oauthCode, java.nio.charset.StandardCharsets.UTF_8))) {
+                assertFalse(stored.contains(secret), "secret " + secret + " leaked into: " + stored);
+            }
+            assertFalse(stored.contains("%74oken=abc"), "percent-encoded name must be decoded: " + stored);
+            // Ordinary values survive.
+            assertTrue(stored.contains("app.example.com/reset?token=[REDACTED]&lang=en"), stored);
+            assertTrue(stored.contains("/reset/[redacted]/confirm"), stored);
+            assertTrue(stored.contains("en-US,en;q=0.9"), stored);
+            assertTrue(stored.contains(requestId), stored);
+            assertTrue(stored.contains("state=xyz"), stored);
+            assertTrue(stored.contains("page=2"), stored);
+        } finally {
+            app.stop();
+        }
+    }
+
+    @Test
+    void finalReviewSecretsDoNotReachTheStoreOrTheLogs(@TempDir Path tmpDir) throws Exception {
+        // Final review (docs/2026-11-09-security-review-todos.md, M6 final review fixes): a token
+        // next to punctuation in the path (/dl/T.pdf), a percent-encoded path token, and a URL
+        // quoted in an exception message were stored verbatim and served on /ops/logs.
+        var kp = OpsKeys.generateKeypair();
+        Path keysFile = tmpDir.resolve("authorized-keys");
+        Files.writeString(keysFile, kp.publicKey() + " scope:read\n");
+        String t = "Tt1aB2cD3eF4gH5iJ6kL7mN8";
+        String encoded = "Xx1aB2cD3eF4%2BgH5iJ6kL7%3D%3D";
+        String urlToken = "Uu1aB2cD3eF4gH5iJ6kL7mN8";
+        String dbPassword = "Ww1aB2cD3eF4gH5iJ6kL7";
+
+        app = Brace.app().opsUnpinnedForTests().port(0)
+            .database(new DatabaseFactory(
+                "jdbc:h2:mem:redactfinal" + System.nanoTime() + ";DB_CLOSE_DELAY=-1", null, null,
+                List.of(Post.class)))
+            .ops(keysFile.toString());
+        app.get("/dl/{file}", req -> { throw new IllegalStateException("download failed"); });
+        app.get("/reset/{token}", req -> { throw new IllegalStateException("reset failed"); });
+        app.get("/fetch", req -> {
+            throw new IllegalStateException("upstream: Server returned HTTP response code: 500 for URL: "
+                + "https://api.partner.example/v1/reset/" + urlToken,
+                new java.sql.SQLException("Connection to postgres://dbuser:" + dbPassword + "@db.internal:5432/app refused"));
+        });
+
+        LogTap.clear();
+        app.start();
+        try {
+            port = app.actualPort();
+            for (String path : List.of("/dl/" + t + ".pdf", "/reset/" + encoded, "/fetch")) {
+                var resp = client.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + path)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+                assertEquals(500, resp.statusCode(), path);
+            }
+            app.errorStore().flush();
+
+            String token = authenticateOps(port, kp);
+            var listResp = client.send(HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/ops/errors"))
+                    .header("Authorization", "Bearer " + token).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            var list = Json.mapper().readTree(listResp.body());
+            var all = new StringBuilder();
+            for (var row : list.isArray() ? list : list.path("errors")) {
+                all.append(client.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/ops/errors/" + row.get("id").asText()))
+                        .header("Authorization", "Bearer " + token).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()).body()).append('\n');
+            }
+            String stored = all.toString();
+            assertTrue(stored.contains("download failed") && stored.contains("reset failed")
+                && stored.contains("upstream"), "all three errors stored: " + stored);
+            String logs = LogTap.snapshot().toString();
+            for (String secret : List.of(t, encoded, "Xx1aB2cD3eF4+gH5iJ6kL7", urlToken, dbPassword)) {
+                assertFalse(stored.contains(secret), "secret " + secret + " stored: " + stored);
+                assertFalse(logs.contains(secret), "secret " + secret + " logged: " + logs);
+            }
+            assertTrue(stored.contains("/dl/[redacted].pdf"), stored);
+            assertTrue(stored.contains("https://api.partner.example/v1/reset/[redacted]"), stored);
+            assertTrue(stored.contains("postgres://[REDACTED]@db.internal:5432/app"), stored);
         } finally {
             app.stop();
         }

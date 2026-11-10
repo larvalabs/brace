@@ -26,6 +26,7 @@ final class AnalyticsDashboard {
     private static final DateTimeFormatter LONG = DateTimeFormatter.ofPattern("EEE MMM d", Locale.US);
     private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("MMM", Locale.US);
     private static final DateTimeFormatter MONTH_YEAR = DateTimeFormatter.ofPattern("MMM yyyy", Locale.US);
+    private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm", Locale.US);
 
     private static final Map<String, String[]> REASONS = Map.of(
         "bot", new String[] {"Bots and crawlers", "user agent looked automated"},
@@ -33,7 +34,7 @@ final class AnalyticsDashboard {
         "background", new String[] {"Background fetches", "Sec-Fetch-Mode other than navigate"},
         "prefetch", new String[] {"Prefetches", "Sec-Purpose: prefetch"},
         "excluded", new String[] {"Excluded", "configured paths or IPs, or the don't-count cookie"},
-        "dropped", new String[] {"Dropped", "buffer full: database slow or unreachable"});
+        "dropped", new String[] {"Dropped", "buffer full, or a per-visitor, per-address or daily row cap was hit"});
 
     static String html(Analytics.Report r, String metric, boolean ignored) {
         var sb = new StringBuilder(16_384);
@@ -129,7 +130,18 @@ final class AnalyticsDashboard {
 
         // Not counted
         sb.append("<section class=\"section\"><div class=\"section-head\"><span class=\"h\">Not counted</span>")
-          .append("<span class=\"sub\">page requests the filters rejected in this range</span></div><div class=\"filtered\">");
+          .append("<span class=\"sub\">page requests the filters rejected in this range</span></div>");
+        if (r.rowBudget() != null) {
+            // L16 final review: a spent daily budget stores nothing more until midnight; say so.
+            var b = r.rowBudget();
+            String at = b.reachedAt().atZone(java.time.ZoneId.of(r.timezone())).format(TIME);
+            sb.append("<div class=\"empty\" title=\"").append(esc("This instance's daily budget of " + fmt(b.budget())
+                    + " rows (Analytics.options().dailyRowBudget). Views since are under Dropped."))
+              .append("\">").append(esc("Row budget reached at " + at + ", " + fmt(b.notStored())
+                    + " view" + (b.notStored() == 1 ? "" : "s") + " not stored"))
+              .append("</div>");
+        }
+        sb.append("<div class=\"filtered\">");
         for (var e : r.notCounted().entrySet()) {
             if (e.getKey().equals("dropped") && e.getValue() == 0) continue;
             String[] meta = REASONS.getOrDefault(e.getKey(), new String[] {e.getKey(), ""});

@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,12 +35,124 @@ public class Cache {
     private static final String[] NO_TAGS = new String[0];
 
     // Value classes this process has itself serialized into a shared backend. getOrSet has no
-    // Class<T> to check a stored entry against, so it would otherwise bean-deserialize into
-    // whatever class name the row carries; anyone able to write the shared store could pick the
-    // class. A stored class not in here is treated as a miss instead (defense in depth). Process-
-    // wide so every Cache in the JVM agrees; filled on write, so a fresh instance misses once,
-    // recomputes, writes, and from then on reads its own class normally.
+    // Class<T> to check a stored entry against, and a get with a supertype (Object, an interface)
+    // does not pin the class, so either would otherwise bean-deserialize into whatever class name
+    // the row carries; anyone able to write the shared store could pick the class. A stored class
+    // is read only when it is the exact type requested, in here, a built-in JDK value or container
+    // (BUILT_IN_VALUE_CLASSES), or registered with allowType; otherwise it is a miss with a WARN
+    // (defense in depth). Process-wide so every Cache in the JVM agrees; filled on write.
     private static final Set<String> STORED_CLASSES = ConcurrentHashMap.newKeySet();
+
+    /** Tests: make this JVM look like a fresh process that has stored nothing. */
+    static void forgetStoredClasses() { STORED_CLASSES.clear(); }
+
+    /**
+     * JDK classes always accepted as the stored class of a shared-backend entry, whatever this
+     * process has stored (L15 final review). Without them a fresh instance (every node after a
+     * deploy, or one that only reads) missed on {@code get("denylist", List.class)} for an
+     * {@code ArrayList} another instance wrote, so a denylist or revocation set read through its
+     * interface failed open, and {@code getOrSet} recomputed and overwrote the shared value.
+     *
+     * <p>Each is a plain value or container that Jackson rebuilds without calling app code, so a
+     * row naming one cannot make Jackson bind an arbitrary class (the threat the stored-class check
+     * closes). Elements inside a container carry no type information: they come back as Jackson's
+     * natural types ({@code String}, {@code Integer}, {@code LinkedHashMap} for an object), exactly
+     * as on the instance that wrote them. The immutable {@code List.of}/{@code Map.of}/
+     * {@code Set.of} and {@code Collections.unmodifiable*} classes are stored under their JDK
+     * names and read back as {@code ArrayList} or an unmodifiable wrapper. {@code EnumMap},
+     * {@code EnumSet} and {@code Collections.unmodifiableCollection} do not round-trip through
+     * Jackson at all and are not listed; nor are {@code Collections.unmodifiableSortedSet}/
+     * {@code SortedMap} (verification fix), which Jackson reads back as a plain unmodifiable
+     * set/map, not a {@code SortedSet}/{@code SortedMap}.
+     */
+    static final Set<String> BUILT_IN_VALUE_CLASSES = Set.of(
+        // Containers
+        "java.util.ArrayList", "java.util.LinkedList", "java.util.ArrayDeque",
+        "java.util.HashMap", "java.util.LinkedHashMap", "java.util.TreeMap",
+        "java.util.HashSet", "java.util.LinkedHashSet", "java.util.TreeSet",
+        "java.util.ImmutableCollections$List12", "java.util.ImmutableCollections$ListN",
+        "java.util.ImmutableCollections$Set12", "java.util.ImmutableCollections$SetN",
+        "java.util.ImmutableCollections$Map1", "java.util.ImmutableCollections$MapN",
+        "java.util.Arrays$ArrayList",
+        "java.util.Collections$UnmodifiableList",
+        "java.util.Collections$UnmodifiableRandomAccessList", "java.util.Collections$UnmodifiableSet",
+        "java.util.Collections$UnmodifiableMap",
+        "java.util.Collections$EmptyList", "java.util.Collections$EmptySet", "java.util.Collections$EmptyMap",
+        "java.util.Collections$SingletonList", "java.util.Collections$SingletonSet", "java.util.Collections$SingletonMap",
+        // Values
+        "java.lang.String", "java.lang.Boolean", "java.lang.Character", "java.lang.Byte", "java.lang.Short",
+        "java.lang.Integer", "java.lang.Long", "java.lang.Float", "java.lang.Double",
+        "java.math.BigDecimal", "java.math.BigInteger", "java.util.UUID",
+        "java.time.Instant", "java.time.LocalDate", "java.time.LocalDateTime", "java.time.LocalTime",
+        "java.time.OffsetDateTime", "java.time.OffsetTime", "java.time.ZonedDateTime", "java.time.Duration",
+        "java.time.Period", "java.time.Year", "java.time.YearMonth", "java.time.MonthDay",
+        "java.time.DayOfWeek", "java.time.Month", "java.time.ZoneOffset");
+
+    /** True if {@code className} is a built-in value class, or an array (of any depth) of one or of a primitive. */
+    static boolean isBuiltInValueClass(String className) {
+        if (!className.startsWith("[")) return BUILT_IN_VALUE_CLASSES.contains(className);
+        String component = className.substring(className.lastIndexOf('[') + 1);
+        if (component.length() == 1) return "ZBCSIJFD".contains(component);
+        return component.startsWith("L") && component.endsWith(";")
+            && BUILT_IN_VALUE_CLASSES.contains(component.substring(1, component.length() - 1));
+    }
+
+    // Class names the app registered with allowType, per Cache.
+    private final Set<String> allowedTypes = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Registers app classes that may be read from a shared backend through a supertype
+     * ({@code get(key, Object.class)}, an interface, a base class) or with {@code getOrSet},
+     * on an instance that has not itself stored them. <b>Register at startup on every instance</b>
+     * (every server of the fleet), next to {@code app.cache(...)}: the instance that reads is
+     * often not the one that wrote, and after a deploy no instance has written anything yet.
+     *
+     * <p>Not needed for a read with the stored class itself ({@code get(key, Rule.class)} for a
+     * {@code Rule}), which is always allowed, nor for the JDK containers and values in
+     * {@link #BUILT_IN_VALUE_CLASSES}. Pass the concrete class that is stored, not the type it is
+     * read as: an interface or abstract class throws {@code IllegalArgumentException}. A class
+     * registered here is bound by Jackson from whatever a row names it with, so register only
+     * plain data classes (records, POJOs) whose constructors and setters do nothing but assign.
+     * The in-memory backend stores live objects and needs none of this.
+     */
+    public Cache allowType(Class<?>... types) {
+        for (Class<?> type : types) {
+            if (type.isInterface() || (!type.isArray() && !type.isPrimitive()
+                    && java.lang.reflect.Modifier.isAbstract(type.getModifiers()))) {
+                throw new IllegalArgumentException("allowType takes the concrete class that is stored, not "
+                    + type.getName() + ", which no stored value can be: register the class you pass to set(...)");
+            }
+            allowedTypes.add(type.getName());
+        }
+        return this;
+    }
+
+    // (stored class, requested type) pairs already warned about; bounded, as the stored class
+    // name comes from the row.
+    private static final Set<String> WARNED_REFUSALS = ConcurrentHashMap.newKeySet();
+    private static final int MAX_WARNED_REFUSALS = 1000;
+
+    static Set<String> warnedRefusals() { return WARNED_REFUSALS; }
+
+    static String refusalMessage(String storedName, String requested) {
+        return "cache: an entry stored as " + storedName + " was read as " + requested + " and treated as a miss: "
+            + "this instance has not stored that class itself, and it is neither the type requested nor registered. "
+            + "Register it at startup on every instance with cache.allowType(" + simpleName(storedName) + ".class), "
+            + "or read it with its concrete type. Logged once per stored class and requested type.";
+    }
+
+    private static String simpleName(String className) {
+        int cut = Math.max(className.lastIndexOf('.'), className.lastIndexOf('$'));
+        return cut >= 0 ? className.substring(cut + 1) : className;
+    }
+
+    private static void warnRefusal(String storedName, String requested) {
+        String clipped = storedName.length() > 200 ? storedName.substring(0, 200) : storedName;
+        String pair = clipped + " as " + requested;
+        if (WARNED_REFUSALS.size() < MAX_WARNED_REFUSALS && WARNED_REFUSALS.add(pair)) {
+            Log.warn(refusalMessage(clipped, requested));
+        }
+    }
 
     private final CacheBackend backend;
     private final boolean serializes;
@@ -72,8 +185,180 @@ public class Cache {
         cleanupThread.interrupt();
     }
 
+    /**
+     * A key longer than this many UTF-8 bytes is stored hashed (L5). Postgres refuses a btree entry
+     * over about 2.7 KB, so a page path or {@code vary} value near Jetty's 8 KB URI limit failed the
+     * insert; 512 keeps every stored key well clear of that on both backends.
+     */
+    static final int MAX_KEY_BYTES = 512;
+
+    /**
+     * Prefix of every key the page cache ({@link #wrap}) stores (L4 review F5). The backends treat
+     * keys with it as page entries: they are capped on their own and evicted before any other
+     * entry, so page-cache growth (cheap for a client to cause) never pushes out the app's own
+     * values. It survives hashing ({@link #storageKey} keeps a key's first characters). An app key
+     * with this prefix is refused by {@code set}, {@code getOrSet} and {@code delete} (L4 final
+     * review).
+     */
+    static final String PAGE_KEY_PREFIX = "brace:page:";
+
+    static boolean isPageKey(String storedKey) {
+        return storedKey != null && storedKey.startsWith(PAGE_KEY_PREFIX);
+    }
+
+    /** How much of a hashed key is kept readable in front of the digest, for prefix clears. */
+    static final int RETAINED_PREFIX_CHARS = 128;
+
+    /**
+     * Separates a hashed key's retained prefix from its digest. A key that itself contains this is
+     * hashed too, so a stored hashed form can never be produced by passing some other key raw.
+     */
+    static final String HASHED_KEY_MARKER = "#sha256:";
+
+    /**
+     * The key as the backend stores it (L5). A key with an ISO control character (Postgres refuses
+     * a NUL in a text parameter), longer than {@link #MAX_KEY_BYTES} UTF-8 bytes, or containing
+     * {@link #HASHED_KEY_MARKER} becomes its leading characters, up to the first of those
+     * characters or {@link #RETAINED_PREFIX_CHARS}, then the marker, then the SHA-256 hex digest of
+     * the whole key. Applied in this facade for every key and tag, so both backends store the same
+     * thing, the mapping is invisible to callers, and {@link #deletePrefix} still reaches a hashed
+     * key through its retained prefix.
+     */
+    static String storageKey(String key) {
+        if (key == null) return null;
+        if (!hasControlCharacter(key) && !hasUnpairedSurrogate(key) && !key.contains(HASHED_KEY_MARKER)
+                && !exceedsKeyBytes(key)) {
+            return key;
+        }
+        return key.substring(0, retainedLength(key)) + HASHED_KEY_MARKER + sha256Hex(key);
+    }
+
+    /**
+     * The part of {@code prefix} a hashed key starting with it keeps readable: {@code prefix} cut
+     * at its first control character, unpaired surrogate or {@link #HASHED_KEY_MARKER}, or at
+     * {@link #RETAINED_PREFIX_CHARS} characters. Equal to {@code prefix} when nothing had to be cut.
+     */
+    static String storagePrefix(String prefix) {
+        if (prefix == null) return null;
+        int cut = retainedLength(prefix);
+        if (cut == RETAINED_PREFIX_CHARS && Character.isHighSurrogate(prefix.charAt(cut - 1))) {
+            cut--; // a key continuing this prefix had its cut moved back off the surrogate pair
+        }
+        return prefix.substring(0, cut);
+    }
+
+    /**
+     * True if {@code s} has a surrogate that is not half of a pair (L5 review F11). pgjdbc sends
+     * one as {@code ?}, so two such keys that differ only there were one row on Postgres.
+     */
+    static boolean hasUnpairedSurrogate(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                if (i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) {
+                    i++;
+                    continue;
+                }
+                return true;
+            }
+            if (Character.isLowSurrogate(c)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Length of the part of {@code s} kept in front of a digest: up to its first control
+     * character, its first unpaired surrogate, its first {@link #HASHED_KEY_MARKER}, or
+     * {@link #RETAINED_PREFIX_CHARS} characters, whichever comes first, never splitting a
+     * surrogate pair.
+     */
+    private static int retainedLength(String s) {
+        int limit = Math.min(s.length(), RETAINED_PREFIX_CHARS);
+        for (int i = 0; i < limit; i++) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) {
+                i++; // a pair; a cut between its halves is moved back below
+                continue;
+            }
+            if (Character.isISOControl(c) || Character.isSurrogate(c)) {
+                limit = i;
+                break;
+            }
+        }
+        int marker = s.indexOf(HASHED_KEY_MARKER);
+        if (marker >= 0 && marker < limit) {
+            limit = marker;
+        }
+        if (limit > 0 && limit < s.length()
+                && Character.isHighSurrogate(s.charAt(limit - 1)) && Character.isLowSurrogate(s.charAt(limit))) {
+            limit--;
+        }
+        return limit;
+    }
+
+    private static boolean hasControlCharacter(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isISOControl(s.charAt(i))) return true;
+        }
+        return false;
+    }
+
+    private static boolean exceedsKeyBytes(String s) {
+        if (s.length() * 3 <= MAX_KEY_BYTES) return false; // fast path: at most 3 UTF-8 bytes per char
+        int bytes = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) bytes += 1;
+            else if (c < 0x800) bytes += 2;
+            else if (Character.isHighSurrogate(c)) { bytes += 4; i++; }
+            else bytes += 3;
+            if (bytes > MAX_KEY_BYTES) return true;
+        }
+        return false;
+    }
+
+    private static String sha256Hex(String s) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            return java.util.HexFormat.of().formatHex(digest.digest(digestInput(s)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new AssertionError("SHA-256 not available", e);
+        }
+    }
+
+    /**
+     * The bytes a key is hashed from: its UTF-8 encoding, which is injective for well-formed text.
+     * UTF-8 encoding replaces an unpaired surrogate with {@code ?} (so {@code "a\uD800"} and
+     * {@code "a\uD801"} would hash alike), so such a key is hashed from a 0xFF byte, which never
+     * occurs in UTF-8, followed by its UTF-16 code units (L5 review F11).
+     */
+    static byte[] digestInput(String s) {
+        if (!hasUnpairedSurrogate(s)) return s.getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[1 + 2 * s.length()];
+        out[0] = (byte) 0xFF;
+        for (int i = 0; i < s.length(); i++) {
+            out[1 + 2 * i] = (byte) (s.charAt(i) >>> 8);
+            out[2 + 2 * i] = (byte) s.charAt(i);
+        }
+        return out;
+    }
+
+    private static String[] storageTags(String[] tags) {
+        if (tags == null || tags.length == 0) return tags;
+        String[] out = null;
+        for (int i = 0; i < tags.length; i++) {
+            String stored = storageKey(tags[i]);
+            if (stored != tags[i]) {
+                if (out == null) out = tags.clone();
+                out[i] = stored;
+            }
+        }
+        return out == null ? tags : out;
+    }
+
     @SuppressWarnings("unchecked")
     public <T> T get(String key, Class<T> type) {
+        key = storageKey(key);
         if (serializes) {
             byte[] bytes = backend.getBytes(key);
             if (bytes == null) {
@@ -102,25 +387,41 @@ public class Cache {
     }
 
     public void set(String key, Object value) {
-        store(key, value, null, NO_TAGS);
+        store(requireAppKey(key), value, null, NO_TAGS);
     }
 
     public void set(String key, Object value, String ttl) {
-        store(key, value, parseTtl(ttl), NO_TAGS);
+        store(requireAppKey(key), value, parseTtl(ttl), NO_TAGS);
     }
 
     public void set(String key, Object value, String ttl, String... tags) {
-        store(key, value, parseTtl(ttl), tags);
+        store(requireAppKey(key), value, parseTtl(ttl), tags);
+    }
+
+    /**
+     * Refuses an app key on the page cache's reserved prefix (L4 final review): an app key that
+     * starts with {@value #PAGE_KEY_PREFIX} could replace or break a cached page. Clear pages with
+     * tags, {@link #deletePrefix} or {@code /ops/cache/clear} instead.
+     */
+    private static String requireAppKey(String key) {
+        if (key != null && key.startsWith(PAGE_KEY_PREFIX)) {
+            throw new IllegalArgumentException("Cache key '" + (key.length() > 64 ? key.substring(0, 64) + "..." : key)
+                + "' uses the page cache's reserved prefix " + PAGE_KEY_PREFIX + "; use another prefix for your own keys");
+        }
+        return key;
     }
 
     @SuppressWarnings("unchecked")
     public <T> T getOrSet(String key, String ttl, Supplier<T> supplier) {
+        requireAppKey(key);
+        String original = key;
+        key = storageKey(key);
         if (!serializes) {
             // M9: through the SPI, not a cast to the built-in backend. getOrSet is the cache call
             // the docs recommend most, and casting here meant any third-party non-serializing
             // backend hit a ClassCastException on it.
             var computed = backend.getOrCompute(
-                    key, parseTtl(ttl), () -> requireValue(key, supplier.get()));
+                    key, parseTtl(ttl), () -> requireValue(original, supplier.get()));
             if (computed.hit()) hits.increment(); else misses.increment();
             return (T) computed.value();
         }
@@ -135,17 +436,57 @@ public class Cache {
             }
         }
         misses.increment();
-        T value = requireValue(key, supplier.get());
+        T value = requireValue(original, supplier.get());
         backend.setBytes(key, serialize(value), parseTtl(ttl), NO_TAGS);
         return value;
     }
 
     public void delete(String key) {
-        backend.delete(key);
+        backend.delete(storageKey(requireAppKey(key)));
     }
 
+    /**
+     * Delete every entry whose key starts with {@code prefix}.
+     *
+     * <p>A key that is stored hashed (one with a control character, an unpaired surrogate or
+     * {@link #HASHED_KEY_MARKER}, or over {@value #MAX_KEY_BYTES} UTF-8 bytes) keeps only its
+     * first characters readable, so a prefix that reaches past them cannot be matched exactly.
+     * For such a prefix (one with any of those characters, or longer than
+     * {@value #RETAINED_PREFIX_CHARS} characters) this deletes the keys stored as-is that start
+     * with the whole prefix, and the hashed keys whose readable part is exactly the prefix's
+     * readable part, which every hashed key starting with the prefix has (L5 review F7). What can
+     * still be cleared beyond the prefix: hashed keys that share that readable part without
+     * continuing the prefix. For example {@code deletePrefix("search:\u0001")} also clears
+     * {@code "search:\u0002"} and {@code "search:#sha256:x"}, never {@code "search:alpha"}; a
+     * 200-character prefix also clears hashed keys that share its first 128 characters. A prefix
+     * that ends in the first half of a surrogate pair clears every key starting with the rest of
+     * it. Over-deletion is a cache miss, never a stale entry.
+     *
+     * <p>A prefix covering page-cache keys ({@code "brace:page:"}, {@code "brace:"} or
+     * {@code ""}) clears cached pages too; deleting is always safe, unlike writing under that
+     * prefix, which {@link #set} refuses.
+     *
+     * @throws IllegalArgumentException if {@code prefix} is null
+     */
     public void deletePrefix(String prefix) {
-        backend.deletePrefix(prefix);
+        if (prefix == null) {
+            throw new IllegalArgumentException("deletePrefix needs a prefix; use clear() to remove everything");
+        }
+        if (!prefix.isEmpty() && Character.isHighSurrogate(prefix.charAt(prefix.length() - 1))) {
+            // A key can complete the pair, so its stored form may hold a character the prefix
+            // cannot express (pgjdbc would send the lone half as "?"): clear by the rest.
+            deletePrefix(prefix.substring(0, prefix.length() - 1));
+            return;
+        }
+        String readable = storagePrefix(prefix);
+        if (readable.length() == prefix.length()) {
+            backend.deletePrefix(prefix); // matches plain keys and hashed ones' readable parts alike
+            return;
+        }
+        backend.deletePrefix(readable + HASHED_KEY_MARKER);
+        if (!hasControlCharacter(prefix) && !hasUnpairedSurrogate(prefix) && !prefix.contains(HASHED_KEY_MARKER)) {
+            backend.deletePrefix(prefix); // cut only for length: keys stored as-is may still start with it
+        }
     }
 
     public void clear() {
@@ -156,15 +497,15 @@ public class Cache {
     }
 
     public long incr(String key) {
-        return backend.incr(key, 1);
+        return backend.incr(storageKey(key), 1);
     }
 
     public long decr(String key) {
-        return backend.incr(key, -1);
+        return backend.incr(storageKey(key), -1);
     }
 
     public void clearTag(String tag) {
-        evictions.add(backend.clearTag(tag));
+        evictions.add(backend.clearTag(storageKey(tag)));
     }
 
     /** True when a shared (cross-server) backend is configured — invalidation and clear are fleet-wide. */
@@ -239,6 +580,8 @@ public class Cache {
 
     private void store(String key, Object value, Duration ttl, String[] tags) {
         requireValue(key, value);
+        key = storageKey(key);
+        tags = storageTags(tags);
         if (serializes) {
             backend.setBytes(key, serialize(value), ttl, tags);
         } else {
@@ -274,7 +617,7 @@ public class Cache {
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> T deserialize(byte[] data, Class<T> expected) {
+    private <T> T deserialize(byte[] data, Class<T> expected) {
         if (data.length < 4) {
             throw new CacheCorruptionException("cached value too short to hold a header");
         }
@@ -291,13 +634,16 @@ public class Cache {
         }
         int offset = 4 + len;
         String storedName = new String(className, StandardCharsets.UTF_8);
-        if (expected == null && !STORED_CLASSES.contains(storedName)) {
-            // No caller-supplied type to check against (getOrSet), and this process never stored
-            // this class: don't load or bind to a class named by the row. A miss; the caller
-            // recomputes and the write registers the class.
-            Log.debug("cache entry names a class this process has not stored; treating as a miss",
-                    Map.of("class", storedName.length() > 200 ? storedName.substring(0, 200) : storedName));
-            throw new CacheCorruptionException("cached class not stored by this process: " + storedName);
+        // A class the row names is trusted when this process stored it, it is a built-in JDK value
+        // or container, or the app registered it with allowType (L15, L15 final review).
+        boolean trusted = STORED_CLASSES.contains(storedName) || isBuiltInValueClass(storedName)
+            || allowedTypes.contains(storedName);
+        if (expected == null && !trusted) {
+            // No caller-supplied type to check against (getOrSet), and the class is not trusted:
+            // don't load or bind to a class named by the row. A miss; the caller recomputes and
+            // the write registers the class.
+            warnRefusal(storedName, "getOrSet (no type)");
+            throw new CacheCorruptionException("cached class not trusted by this process: " + storedName);
         }
         Class<?> stored;
         try {
@@ -310,11 +656,30 @@ public class Cache {
             throw new ClassCastException("Cached value is a " + storedName
                     + " but get(...) requested " + expected.getName());
         }
+        if (expected != null && stored != expected && !trusted) {
+            // A strict subtype of the requested type (Object, an interface, a base class) that is
+            // not trusted: the row, not the caller, would choose the class Jackson binds (L15).
+            // Only the exact type the caller named, or a trusted class, is read. A WARN rather than
+            // a silent miss (L15 final review): a security read through an interface failing open
+            // must be visible.
+            warnRefusal(storedName, expected.getName());
+            throw new CacheCorruptionException("cached class not trusted by this process: " + storedName);
+        }
+        Object value;
         try {
-            return (T) Json.mapper().readValue(data, offset, data.length - offset, stored);
-        } catch (java.io.IOException e) {
+            value = Json.mapper().readValue(data, offset, data.length - offset, stored);
+        } catch (java.io.IOException | RuntimeException e) {
+            // Verification fix: Jackson's JDK-container deserializers throw unchecked exceptions
+            // too (a SingletonList row with two elements: IllegalArgumentException). A bad row is
+            // a miss, whatever it throws.
             throw new CacheCorruptionException("cached value body did not deserialize as " + storedName);
         }
+        if (expected != null && !expected.isInstance(value)) {
+            // Rebuilt as something the caller did not ask for (a sorted wrapper read back unsorted):
+            // a miss, not a ClassCastException at the caller's assignment.
+            throw new CacheCorruptionException("cached value " + storedName + " did not read back as " + expected.getName());
+        }
+        return (T) value;
     }
 
     /** Thrown internally when a stored byte payload is unreadable; the facade treats it as a miss. */
@@ -376,7 +741,13 @@ public class Cache {
          * ({@code ?utm_source=...}, {@code ?fbclid=...}, or deliberate {@code ?x=<random>} floods).
          * By default NOTHING varies — a cached route serves one entry per path regardless of query
          * string. If the page's content depends on a param ({@code ?page=}, {@code ?sort=}),
-         * declare it here or stale-wrong responses will be served for it.
+         * declare it here or stale-wrong responses will be served for it. A param given more than
+         * once ({@code ?t=a&t=b}) is keyed on all its values, in order (L4 review F6).
+         *
+         * <p>A cached handler must depend only on the route's path parameters and what it declares
+         * here and in {@link #varyHeader}. In dev mode and under {@code Brace.test()} a read of
+         * anything else through the {@code Request} is reported (logged once per route in dev
+         * mode, thrown in tests).
          */
         public CachedHandler vary(String... params) {
             this.vary = params.clone();
@@ -384,8 +755,90 @@ public class Cache {
             return this;
         }
 
+        /**
+         * Declares request headers that key the cache, as {@link #vary} does for query params: a
+         * page that differs by {@code Accept-Language}, or an htmx endpoint that answers per
+         * {@code HX-Target}. Names are case-insensitive; an absent header and an empty one are
+         * different keys. Declaring one of the headers that otherwise make a request bypass the
+         * cache ({@code Authorization}, {@code HX-Target}, {@code HX-Trigger},
+         * {@code HX-Trigger-Name}, {@code HX-Boosted}, {@code HX-Prompt}) keys on it instead.
+         * Values enter the key as SHA-256 digests, so a declared credential header is never stored
+         * in clear. {@code HX-Request} is always part of the key: absent or exactly {@code true};
+         * any other value bypasses the cache.
+         */
+        public CachedHandler varyHeader(String... names) {
+            var sorted = new java.util.TreeSet<String>();
+            for (var name : names) sorted.add(name.toLowerCase(java.util.Locale.ROOT));
+            this.varyHeaders = sorted.toArray(new String[0]);
+            return this;
+        }
+
+        private String[] varyHeaders = new String[0];
+
+        /**
+         * Headers that make a request skip the cache, unless declared with {@link #varyHeader}
+         * (L4 review F6): credentials, and the htmx headers that say which element asked and how,
+         * which a handler commonly answers per value. Such a request is served by the handler and
+         * its response is not stored.
+         */
+        static final List<String> BYPASS_HEADERS = List.of(
+            "Authorization", "HX-Target", "HX-Trigger", "HX-Trigger-Name", "HX-Boosted", "HX-Prompt");
+
+        /**
+         * Reads the key already covers. {@code HX-Request} is keyed as absent or exactly
+         * {@code true}, and any other value bypasses the cache, so whatever a handler reads of it
+         * ({@code isHtmx()}, {@code hasHeader}, {@code header}) is the same for every request
+         * sharing an entry (L4 final review).
+         */
+        private static final Set<String> ALWAYS_KEYED_HEADERS = Set.of("hx-request");
+
+        boolean warnedUndeclaredReads() { return !warnedReads.isEmpty(); }
+
+        /**
+         * True if {@code rawPath} is in the form a browser sends (RFC 3986 normal form): only
+         * unreserved characters, sub-delimiters, {@code :}, {@code @} and {@code /} appear as is,
+         * and every percent-escape uses upper-case hex and stands for a character that has to be
+         * escaped. {@code /p/%62}, {@code /p/%7e} and a raw {@code é} are not: they spell the same
+         * decoded path parameters as the normal form (so they share its cache key) but a handler
+         * reading {@code req.path()} sees a different string. Such a request may be served an
+         * existing entry, but its own render is never stored (L4 final review), so a crafted
+         * spelling cannot pick the page every visitor of the normal URL gets.
+         */
+        static boolean isNormalPath(String rawPath) {
+            for (int i = 0; i < rawPath.length(); i++) {
+                char c = rawPath.charAt(i);
+                if (c == '%') {
+                    if (i + 2 >= rawPath.length()) return false;
+                    int hi = upperHex(rawPath.charAt(i + 1));
+                    int lo = upperHex(rawPath.charAt(i + 2));
+                    if (hi < 0 || lo < 0) return false;
+                    if (isUnreserved((char) (hi * 16 + lo))) return false;
+                    i += 2;
+                } else if (!isUnreserved(c) && "!$&'()*+,;=:@/".indexOf(c) < 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static int upperHex(char c) {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        }
+
+        private static boolean isUnreserved(char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || c == '-' || c == '.' || c == '_' || c == '~';
+        }
+
         @Override
         public Result apply(Request request) {
+            // L4 review F6: a request carrying a per-request header the key does not cover is
+            // served by the handler and nothing is stored.
+            if (bypassesCache(request)) {
+                return handler.apply(request);
+            }
             // Cache the rendered response, not the Result object: a RenderedResponse is a
             // serializable snapshot, so a page rendered on one server can be replayed by any other
             // across a shared backend. RenderedResponse.from reads result.body(), which materializes a
@@ -394,8 +847,40 @@ public class Cache {
             var key = pageKey(request);
             var cached = cache.get(key, RenderedResponse.class);
             if (cached != null) return cached.toResult();
+            // L4 final review: a miss is rendered, but stored only for a GET whose raw path is in
+            // normal form. A HEAD shares the GET's entry, and req.method() is not a recorded read,
+            // so a handler answering HEAD with an empty body would have that stored and served to
+            // GET for the TTL. A non-normal spelling of the path (/p/%62 for /p/b) shares the
+            // normal one's key, and a req.path() read is only reported in dev mode and tests.
+            boolean storable = !request.method().equals("HEAD")
+                && (request.route() == null || isNormalPath(request.path()));
             var views = new ArrayList<View>();
-            var result = View.recordingViews(views, () -> handler.apply(request));
+            // L4 review F6: in dev mode and tests, record what the handler reads (nothing in production).
+            Request.InputReads reads = request.strictInputChecks() ? new Request.InputReads() : null;
+            Result result;
+            request.recordReads(reads);
+            request.setPageCacheVary(vary); // Paged links keep only declared params (L4 verification)
+            try {
+                result = View.recordingViews(views, () -> handler.apply(request));
+                if (reads != null && !result.isStreaming()) result.rawBytes(); // run a deferred render while recording
+            } finally {
+                request.recordReads(null);
+                request.setPageCacheVary(null);
+            }
+            if (reads != null) reportUndeclaredReads(request, reads);
+            if (!result.setCookies().isEmpty()) {
+                // L4 review F6: the snapshot keeps headers but not Set-Cookie, so the cookie was
+                // dropped even from this response, and a per-visitor cookie must not be replayed
+                // anyway. Served uncached, intact.
+                warnSetCookie(request);
+                return result;
+            }
+            if (result.status() < 200 || result.status() > 299) {
+                // L4: only a success is the page. An error, a redirect or a 304 depends on this
+                // request (a query param the key ignores, a missing record, a login bounce), and
+                // storing it would replay it to every visitor for the TTL. Served uncached, as is.
+                return result;
+            }
             var rendered = RenderedResponse.from(result);
             if (!views.isEmpty() && View.sessionDerived(views, rendered.textForTokenScan())) {
                 // M1: this response carries one visitor's CSRF token and/or pending flash. Storing it
@@ -403,6 +888,7 @@ public class Cache {
                 warnSessionDerived(request.path());
                 return rendered.toResult();
             }
+            if (!storable) return rendered.toResult();
             cache.setInternal(key, rendered, ttl, tags);
             // Replay the snapshot (not the original Result) so a miss and a hit return the same
             // materialized shape — downstream code sees identical bytes either way.
@@ -424,28 +910,142 @@ public class Cache {
         private String pageKey(Request request) {
             // Vary on HX-Request: a handler may return a partial for htmx and a full page otherwise
             // (the Vary: HX-Request the framework sets), so the two must not share a cache entry.
-            var prefix = request.isHtmx() ? "page:hx:" : "page:";
-            // A HEAD reaches a GET route's handler and its response differs only in the body the
-            // framework drops on the way out, so it shares the GET's entry rather than storing a
-            // second copy of the page.
+            // Only "absent" and exactly "true" reach here; any other value bypasses the cache
+            // (bypassesCache), so every read of the header is determined by the key.
+            var prefix = request.isHtmx() ? PAGE_KEY_PREFIX + "hx:" : PAGE_KEY_PREFIX;
+            // A HEAD reaches a GET route's handler and may be served the GET's entry; it never
+            // stores one (apply).
             var method = request.method().equals("HEAD") ? "GET" : request.method();
-            return prefix + method + ":" + request.path() + queryKey(request);
+            return prefix + method + ":" + pathKey(request) + queryKey(request) + headerKey(request);
+        }
+
+        private boolean bypassesCache(Request request) {
+            // L4 final review: HX-Request is keyed as absent or exactly "true" (isHtmx()); any other
+            // value ("1", "True") bypasses. Keyed as two states, "HX-Request: 1" with a handler
+            // testing hasHeader(...) stored its partial under the full-page key.
+            if (request.hasHeader("HX-Request") && !request.isHtmx()) return true;
+            for (var name : BYPASS_HEADERS) {
+                if (request.hasHeader(name) && Arrays.binarySearch(varyHeaders, name.toLowerCase(java.util.Locale.ROOT)) < 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * The header component of the key: each {@link #varyHeader} in sorted order, present or
+         * absent distinguished. Starts with {@code '#'}, which {@link #percentEncode} never emits,
+         * so it cannot be confused with the path or query components. Each value is its SHA-256
+         * hex digest (L4 final review): {@code varyHeader("Authorization")} put the credential
+         * itself in the key, which on Postgres is {@code brace_cache.cache_key}, in clear.
+         */
+        private String headerKey(Request request) {
+            if (varyHeaders.length == 0) return "";
+            var sb = new StringBuilder();
+            for (var name : varyHeaders) {
+                var value = request.hasHeader(name) ? request.header(name) : null;
+                if (value == null) continue;
+                sb.append(sb.isEmpty() ? '#' : '&').append(percentEncode(name)).append('=').append(sha256Hex(value));
+            }
+            return sb.toString();
+        }
+
+        // Routes (or request paths, for hand-built requests) already warned about, dev mode only.
+        private final Set<String> warnedReads = ConcurrentHashMap.newKeySet();
+        private final Set<String> warnedCookies = ConcurrentHashMap.newKeySet();
+
+        private static String routeLabel(Request request) {
+            var route = request.route();
+            return route != null ? route.method() + " " + route.pattern() : request.method() + " " + request.path();
+        }
+
+        /**
+         * L4 review F6: the handler read request input the cache key does not cover, so the page
+         * it stored for this key may be wrong (or attacker-chosen) for the next visitor. Dev mode
+         * logs it once per route; {@code Brace.test()} throws, so the test fails.
+         */
+        private void reportUndeclaredReads(Request request, Request.InputReads reads) {
+            var undeclared = new ArrayList<String>();
+            for (var name : reads.query) {
+                if (name.equals("*")) undeclared.add("the whole query string (queryParams(), url(), urlWith() or form())");
+                else if (Arrays.binarySearch(vary, name) < 0) undeclared.add("query param '" + name + "'");
+            }
+            for (var name : reads.headers) {
+                var lower = name.toLowerCase(java.util.Locale.ROOT);
+                if (!ALWAYS_KEYED_HEADERS.contains(lower) && Arrays.binarySearch(varyHeaders, lower) < 0) {
+                    undeclared.add("header '" + name + "'");
+                }
+            }
+            for (var name : reads.cookies) undeclared.add("cookie '" + name + "'");
+            if (reads.ip) undeclared.add("the client address (req.ip())");
+            if (reads.body) undeclared.add("the request body");
+            // The key holds the route's decoded path parameters; the raw path can be spelled
+            // several ways for one key (/p/! and /p/%21), so a handler reading it may store a page
+            // for one spelling that every other spelling is served.
+            if (reads.rawPath) undeclared.add("the raw request path (req.path(), url() or urlWith())");
+            if (undeclared.isEmpty()) return;
+            var label = routeLabel(request);
+            var message = "Page-cached route " + label + " read " + String.join(", ", undeclared)
+                + ", which is not part of its cache key, so the page stored for one visitor is served to "
+                + "the next whatever they send. A cached handler may depend only on its path parameters and "
+                + "what it declares: .vary(\"param\") for a query param, .varyHeader(\"Name\") for a header. "
+                + (reads.rawPath ? "Read the path through req.pathParam(\"name\"), not req.path(). " : "")
+                + "Anything else (cookies, the client address, the body) means the route should not be page cached.";
+            if (!"dev".equals(System.getProperty("brace.mode"))) {
+                throw new IllegalStateException(message + " (Thrown under Brace.test(); logged once per route in dev mode.)");
+            }
+            if (warnedReads.size() < 100 && warnedReads.add(label)) {
+                Log.warn(message + " Logged once per route.");
+            }
+        }
+
+        private void warnSetCookie(Request request) {
+            if (!"dev".equals(System.getProperty("brace.mode"))) return;
+            var label = routeLabel(request);
+            if (warnedCookies.size() < 100 && warnedCookies.add(label)) {
+                Log.warn("Page-cached route " + label + " set a cookie, so its response was not cached (a "
+                    + "cookie belongs to one visitor). Set cookies on an uncached route, or drop the cache wrapper.");
+            }
+        }
+
+        /**
+         * The path component of the key (L4): the matched route's pattern plus its decoded path
+         * parameters, in pattern order, each URL-encoded. Keying on the raw path made
+         * {@code /posts/hello} and {@code /posts/hell%6f} two entries for one page, so one route
+         * could mint unlimited entries. Encoding keeps it injective: no parameter value can spell
+         * a separator, another parameter or a query component, and the pattern itself names the
+         * route, so two routes never share a key. A request built by hand (no matched route)
+         * keys on its raw path, as before.
+         */
+        private static String pathKey(Request request) {
+            var route = request.route();
+            if (route == null) {
+                return "path:" + request.path();
+            }
+            var sb = new StringBuilder("route:").append(percentEncode(route.pattern()));
+            for (var name : route.paramNames()) {
+                var value = request.pathParam(name);
+                sb.append('/').append(value == null ? "" : percentEncode(value));
+            }
+            return sb.toString();
         }
 
         /**
          * The query component of the cache key: declared {@link #vary} params only, in sorted
          * order, present-or-absent distinguished. Undeclared params never reach the key — the
          * request side must not control cache cardinality (H8: one full rendered page is stored
-         * per distinct key, so attacker-minted keys are a memory-exhaustion vector).
+         * per distinct key, so attacker-minted keys are a memory-exhaustion vector). A repeated
+         * param contributes every value in order (L4 review F6: keying on the last value let
+         * {@code ?t=evil&t=ok} fill the entry for {@code ?t=ok}).
          */
         private String queryKey(Request request) {
             if (vary.length == 0) return "";
             var sb = new StringBuilder();
             for (var param : vary) { // pre-sorted by vary()
-                var value = request.queryParam(param);
-                if (value == null) continue; // absent param: contributes nothing (≠ empty value)
-                sb.append(sb.isEmpty() ? '?' : '&');
-                sb.append(percentEncode(param)).append('=').append(percentEncode(value));
+                for (var value : request.queryValues(param)) { // absent param: contributes nothing
+                    sb.append(sb.isEmpty() ? '?' : '&');
+                    sb.append(percentEncode(param)).append('=').append(percentEncode(value));
+                }
             }
             return sb.toString();
         }

@@ -9,7 +9,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link ErrorStore} on real Postgres — the Tier 2a {@code INSERT ... ON CONFLICT DO UPDATE}
@@ -143,6 +145,289 @@ class ErrorStorePostgresIT extends PostgresTestBase {
             rs.next();
             assertEquals(1, rs.getInt(1), "exactly one physical row for the hot key");
         }
+    }
+
+    // --- M5 (2026-11 review): one poisoned entry must not stall the store ---
+
+    @Test
+    void nulBytesAreStrippedAndDoNotPoisonTheBatch() {
+        // `GET /x?page=1%00` + req.queryInt("page") puts a NUL in the NumberFormatException
+        // message and stack trace. pgjdbc rejects a NUL in a string parameter client-side, which
+        // used to fail the whole flush, merge it back, and fail every later flush the same way.
+        String nul = "\u0000";
+        errorStore.record("NumberFormatException", "For input string: \"1" + nul + "\"",
+                "GET /x", "java.lang.NumberFormatException: For input string: \"1" + nul + "\"\n\tat X.y(X.java:1)\n",
+                "GET /x?page=1" + nul, "{\"count\":0}", "{\"user-agent\":\"a" + nul + "b\"}");
+        errorStore.record("IllegalStateException", "healthy", "GET /healthy", "stack", "GET /healthy");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(2, errors.size(), "both kinds in the batch must be stored: " + errors);
+        var poisoned = errors.stream().filter(e -> "NumberFormatException".equals(e.get("errorType")))
+                .findFirst().orElseThrow();
+        // Replaced with U+FFFD, not deleted: deleting would join already-redacted tokens.
+        assertEquals("For input string: \"1�\"", poisoned.get("message"));
+        assertEquals("GET /x?page=1�", poisoned.get("requestDetail"));
+        assertEquals("{\"user-agent\":\"a�b\"}", poisoned.get("requestHeaders"));
+        assertFalse(((String) poisoned.get("stackTrace")).contains(nul));
+
+        // And the store keeps working afterwards.
+        errorStore.record("LaterException", "later", "GET /later", "stack", "req");
+        errorStore.flush();
+        assertEquals(3, errorStore.list(null).size());
+    }
+
+    @Test
+    void overlongTypeAndRouteAreClippedToTheColumnWidth() {
+        // route is "METHOD /pattern"; the method is client-chosen, and both columns are VARCHAR(255).
+        String longMethod = "X".repeat(400);
+        errorStore.record("E".repeat(300), "m", longMethod + " /r", "s", "req");
+        errorStore.record("Healthy", "m", "GET /ok", "s", "req");
+        errorStore.flush();
+
+        var errors = errorStore.list(null);
+        assertEquals(2, errors.size(), "an over-long kind must not fail the batch: " + errors);
+        for (var e : errors) {
+            assertTrue(((String) e.get("errorType")).length() <= 255);
+            assertTrue(((String) e.get("route")).length() <= 255);
+        }
+    }
+
+    @Test
+    void aRowThePostgresServerRejectsDoesNotAbortTheOthers() throws Exception {
+        // A server-side error aborts the whole Postgres transaction ("current transaction is
+        // aborted, commands ignored until end of transaction block"), so isolating a row needs a
+        // savepoint, not just a catch. A CHECK constraint stands in for any row-specific rejection
+        // sanitizing doesn't foresee.
+        try (var c = connect(); var st = c.createStatement()) {
+            st.execute("ALTER TABLE ops_errors ADD CONSTRAINT it_poison CHECK (message NOT LIKE '%POISON%')");
+        }
+        try {
+            errorStore.record("A", "fine", "GET /a", "s", "req");
+            errorStore.record("B", "POISON", "GET /b", "s POISON", "req POISON");
+            errorStore.record("C", "fine", "GET /c", "s", "req");
+            errorStore.flush();
+
+            var errors = errorStore.list(null);
+            var types = errors.stream().map(e -> e.get("errorType")).sorted().toList();
+            assertEquals(List.of("A", "B", "C"), types, "B is kept by the payload-stripped retry");
+            var b = errors.stream().filter(e -> "B".equals(e.get("errorType"))).findFirst().orElseThrow();
+            assertEquals(ErrorStore.STRIPPED_MESSAGE, b.get("message"));
+            assertEquals(null, b.get("stackTrace"));
+            assertEquals(null, b.get("requestDetail"));
+        } finally {
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS it_poison");
+            }
+        }
+    }
+
+    @Test
+    void aKindTheServerAlwaysRejectsIsDroppedAfterMaxFlushFailures() throws Exception {
+        // On error_type, which the stripped retry keeps, so both attempts are refused.
+        try (var c = connect(); var st = c.createStatement()) {
+            st.execute("ALTER TABLE ops_errors ADD CONSTRAINT it_poison_type CHECK (error_type <> 'B')");
+        }
+        try {
+            errorStore.record("A", "fine", "GET /a", "s", "req");
+            errorStore.record("B", "fine", "GET /b", "s", "req");
+            errorStore.flush();
+            assertEquals(List.of("A"), types());
+
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT it_poison_type");
+            }
+            errorStore.flush();
+            assertEquals(List.of("A"), types(), "the poisoned entry was dropped, not retried forever");
+        } finally {
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("ALTER TABLE ops_errors DROP CONSTRAINT IF EXISTS it_poison_type");
+            }
+        }
+    }
+
+    @Test
+    void aServerSideStatementTimeoutOnOneRowIsARowRejectionNotAStall() throws Exception {
+        // 57014 (query_canceled, e.g. statement_timeout on a huge row) is in a class the store
+        // treats as connection-level. The connection is still fine, so it must count against the
+        // row: before the review fix it aborted the flush and retained the batch, uncounted, forever.
+        try (var c = connect(); var st = c.createStatement()) {
+            st.execute("CREATE OR REPLACE FUNCTION it_cancel_huge() RETURNS trigger AS $$ BEGIN "
+                + "IF NEW.error_type = 'Huge' THEN RAISE EXCEPTION 'canceling statement due to statement timeout' "
+                + "USING ERRCODE = '57014'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql");
+            st.execute("CREATE TRIGGER it_cancel_huge BEFORE INSERT OR UPDATE ON ops_errors "
+                + "FOR EACH ROW EXECUTE FUNCTION it_cancel_huge()");
+        }
+        try {
+            errorStore.record("Huge", "x".repeat(10_000), "GET /huge", "s", "req");
+            errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "the healthy kind commits on the same connection");
+
+            for (int i = 1; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+                errorStore.flush();
+            }
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("DROP TRIGGER it_cancel_huge ON ops_errors");
+            }
+            errorStore.flush();
+            assertEquals(List.of("Healthy"), types(), "counted and dropped, not retained forever");
+        } finally {
+            try (var c = connect(); var st = c.createStatement()) {
+                st.execute("DROP TRIGGER IF EXISTS it_cancel_huge ON ops_errors");
+                st.execute("DROP FUNCTION IF EXISTS it_cancel_huge()");
+            }
+        }
+    }
+
+    private List<Object> types() {
+        return errorStore.list(null).stream().map(e -> e.get("errorType")).sorted().toList();
+    }
+
+    // --- Final review fixes (docs/2026-11-09-security-review-todos.md, M5) ---
+
+    /** A flush session whose transaction runs {@code statement} right after BEGIN (transaction-scoped, nothing leaks into the pool). */
+    private static java.util.function.Supplier<Database> sessionWith(String statement) {
+        return () -> new Database(factory.openSession()) {
+            @Override
+            public void beginTransaction() {
+                super.beginTransaction();
+                jdbc(connection -> {
+                    try (var st = connection.createStatement()) {
+                        st.execute(statement);
+                    }
+                });
+            }
+        };
+    }
+
+    @Test
+    void aReadOnlyTransactionWindowDropsNothing() {
+        // L10: during a failover the flush connection can land on a read-only server: every row
+        // fails with 25006 on a connection that still passes isValid. That counted against every
+        // row, so five flushes (10 s) dropped every pending kind.
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET TRANSACTION READ ONLY");
+        errorStore.record("A", "a", "GET /a", "s", "req");
+        errorStore.record("B", "b", "GET /b", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES + 3; i++) {
+            errorStore.flush();
+        }
+        errorStore.record("Lone", "lone", "GET /lone", "s", "req");
+        errorStore.flush();
+        assertEquals(List.of(), types(), "nothing can be written while read-only");
+
+        errorStore.flushSession = normal;
+        errorStore.flush();
+        assertEquals(List.of("A", "B", "Lone"), types(), "kept uncounted through the read-only window");
+    }
+
+    @Test
+    void aLockTimeoutNeverReplacesStoredDetailsWithThePlaceholder() throws Exception {
+        // L9: a 55P03 lock timeout on the first attempt used to be retried at once without the
+        // payload; when the lock was gone by then, the retry overwrote the existing row's message,
+        // trace, detail and headers with the placeholder.
+        errorStore.record("Locked", "first details", "GET /l", "first trace", "GET /l?a=1",
+            "{\"count\":1}", "{\"x-h\":\"first\"}");
+        errorStore.flush();
+
+        var locked = new java.util.concurrent.CountDownLatch(1);
+        var holder = Thread.startVirtualThread(() -> {
+            try (var c = connect()) {
+                c.setAutoCommit(false);
+                try (var st = c.createStatement()) {
+                    st.execute("SELECT id FROM ops_errors WHERE error_type = 'Locked' FOR UPDATE");
+                }
+                locked.countDown();
+                Thread.sleep(450); // past the first attempt's 300 ms lock_timeout, inside a retry's
+                c.commit();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        locked.await();
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET LOCAL lock_timeout = '300ms'");
+        errorStore.record("Locked", "second details", "GET /l", "second trace", "GET /l?a=2",
+            "{\"count\":2}", "{\"x-h\":\"second\"}");
+        errorStore.record("Healthy", "fine", "GET /ok", "s", "req");
+        errorStore.flush();
+        holder.join();
+
+        var row = errorStore.list(null).stream().filter(e -> "Locked".equals(e.get("errorType"))).findFirst().orElseThrow();
+        assertEquals("first details", row.get("message"), "the stored details are never replaced by the placeholder");
+        assertEquals("first trace", row.get("stackTrace"));
+        assertEquals("{\"x-h\":\"first\"}", row.get("requestHeaders"));
+        assertEquals(List.of("Healthy", "Locked"), types());
+
+        errorStore.flushSession = normal;
+        errorStore.flush(); // the lock is gone: the full payload lands, counted once
+        row = errorStore.list(null).stream().filter(e -> "Locked".equals(e.get("errorType"))).findFirst().orElseThrow();
+        assertEquals("second details", row.get("message"));
+        assertEquals("second trace", row.get("stackTrace"));
+        assertEquals(2, row.get("occurrenceCount"));
+    }
+
+    // --- Verification fixes (docs/2026-11-09-security-review-todos.md, M5) ---
+
+    @Test
+    void rowsThatAreAlwaysLockedOutAreCountedAndDroppedNotKeptForever() throws Exception {
+        // Every row of the batch fails with the same real 55P03 lock timeout. That is not a
+        // server-wide state: it counts against the rows, which are dropped after
+        // MAX_FLUSH_FAILURES flushes instead of being retried, uncounted, forever.
+        errorStore.record("LockA", "a", "GET /a", "s", "req");
+        errorStore.record("LockB", "b", "GET /b", "s", "req");
+        errorStore.flush();
+
+        var locked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var holder = Thread.startVirtualThread(() -> {
+            try (var c = connect()) {
+                c.setAutoCommit(false);
+                try (var st = c.createStatement()) {
+                    st.execute("SELECT id FROM ops_errors WHERE error_type IN ('LockA', 'LockB') FOR UPDATE");
+                }
+                locked.countDown();
+                release.await();
+                c.rollback();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        locked.await();
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET LOCAL lock_timeout = '100ms'");
+        errorStore.record("LockA", "a2", "GET /a", "s", "req");
+        errorStore.record("LockB", "b2", "GET /b", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        release.countDown();
+        holder.join();
+
+        errorStore.flushSession = normal;
+        errorStore.flush();
+        for (var row : errorStore.list(null)) {
+            assertEquals(1, row.get("occurrenceCount"), "the locked-out occurrences were dropped: " + row);
+            assertNotEquals("a2", row.get("message"));
+            assertNotEquals("b2", row.get("message"));
+        }
+    }
+
+    @Test
+    void aReadOnlyWindowLongerThanTheCapDropsTheEntries() {
+        var normal = errorStore.flushSession;
+        errorStore.flushSession = sessionWith("SET TRANSACTION READ ONLY");
+        errorStore.record("A", "a", "GET /a", "s", "req");
+        for (int i = 0; i < ErrorStore.MAX_UNCOUNTED_RETENTIONS + ErrorStore.MAX_FLUSH_FAILURES; i++) {
+            errorStore.flush();
+        }
+        errorStore.flushSession = normal;
+        errorStore.flush();
+        assertEquals(List.of(), types(), "kept up to the cap, then counted and dropped");
     }
 
     @Test

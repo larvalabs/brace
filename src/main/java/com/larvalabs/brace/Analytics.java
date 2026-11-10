@@ -70,6 +70,21 @@ public final class Analytics {
      */
     static final int DEFAULT_RETENTION_DAYS = 35;
 
+    /** One person rarely loads more than a few pages in 10 seconds; 30 leaves room for a fast clicker. */
+    static final int DEFAULT_VIEWS_PER_VISITOR = 30;
+    /** ~75 MB of rows a day at 150 bytes; ten times the 50,000 views a day the sizing guide assumes. */
+    static final long DEFAULT_DAILY_ROW_BUDGET = 500_000;
+    /**
+     * Rows one client address (an IPv6 address by its /64) adds per flush window, whatever user
+     * agents it sends: ten fast visitors behind one NAT, 1.5% of the 20,000-view buffer (L16 final
+     * review).
+     */
+    static final int DEFAULT_VIEWS_PER_IP = 300;
+    /** Share of the daily row budget one client address may use, in percent, when not set. */
+    static final int DEFAULT_DAILY_PERCENT_PER_IP = 2;
+    /** Client addresses whose daily rows are tallied; past it a new address is held only by the other caps. */
+    static final int MAX_TRACKED_IPS = 50_000;
+
     /** Configuration for {@code app.analytics(...)}. */
     public static final class Options {
         private ZoneId zone = ZoneOffset.UTC;
@@ -79,6 +94,10 @@ public final class Analytics {
         private Duration rawRetention = Duration.ofDays(DEFAULT_RETENTION_DAYS);
         private boolean strictNavigation;
         private int bufferLimit = 20_000;
+        private int maxViewsPerVisitor = DEFAULT_VIEWS_PER_VISITOR;
+        private long dailyRowBudget = DEFAULT_DAILY_ROW_BUDGET;
+        private int maxViewsPerIp = DEFAULT_VIEWS_PER_IP;
+        private long maxDailyRowsPerIp = -1; // -1: DEFAULT_DAILY_PERCENT_PER_IP of the budget
 
         private Options() {}
 
@@ -131,6 +150,61 @@ public final class Analytics {
             return this;
         }
 
+        /**
+         * Most page views one visitor (same host, IP and user agent) can add as rows in a single
+         * flush window (10 seconds). Further views in the window are counted under "Not counted:
+         * dropped" instead of stored, so one client cannot fill the table at request rate. Default
+         * {@value #DEFAULT_VIEWS_PER_VISITOR}; {@code 0} or less turns the cap off.
+         */
+        public Options maxViewsPerVisitorPerFlush(int views) {
+            this.maxViewsPerVisitor = views;
+            return this;
+        }
+
+        /**
+         * Most page-view rows this instance inserts per day (in the analytics timezone). Views
+         * past it are counted under "Not counted: dropped", a warning is logged once that day, and
+         * {@code /ops/analytics} shows when it was reached and how many views were not stored.
+         * Default {@value #DEFAULT_DAILY_ROW_BUDGET}; {@code 0} or less turns it off. In a fleet
+         * each instance has its own budget, and a restart resets it. One client address can use
+         * only a share of it ({@link #maxDailyRowsPerIp}).
+         */
+        public Options dailyRowBudget(long rows) {
+            this.dailyRowBudget = rows;
+            return this;
+        }
+
+        /**
+         * Most page views one client address (an IPv6 address by its /64 network) can add as rows
+         * in a single flush window (10 seconds), whatever user agents it sends: the per-visitor cap
+         * keys on host, IP and user agent, so a client rotating its user agent was a new visitor on
+         * every request. Further views in the window are counted under "Not counted: dropped".
+         * Default {@value #DEFAULT_VIEWS_PER_IP}; {@code 0} or less turns the cap off. Raise it for a
+         * site with many visitors behind one address (a large office or campus NAT).
+         */
+        public Options maxViewsPerIpPerFlush(int views) {
+            this.maxViewsPerIp = views;
+            return this;
+        }
+
+        /**
+         * Most rows one client address (an IPv6 address by its /64) can add per day, so one source
+         * cannot spend the whole {@link #dailyRowBudget} and leave the rest of the day unrecorded.
+         * Default {@value #DEFAULT_DAILY_PERCENT_PER_IP}% of the daily budget (10,000 of the default
+         * 500,000), at least 1; {@code 0} turns it off. Up to {@value #MAX_TRACKED_IPS} addresses are
+         * tallied a day; past that, a new address is held only by the other caps.
+         */
+        public Options maxDailyRowsPerIp(long rows) {
+            this.maxDailyRowsPerIp = Math.max(0, rows);
+            return this;
+        }
+
+        long dailyRowsPerIp() {
+            if (maxDailyRowsPerIp >= 0) return maxDailyRowsPerIp;
+            if (dailyRowBudget <= 0) return 0;
+            return Math.max(1, dailyRowBudget * DEFAULT_DAILY_PERCENT_PER_IP / 100);
+        }
+
         Options bufferLimit(int limit) {
             this.bufferLimit = limit;
             return this;
@@ -168,7 +242,14 @@ public final class Analytics {
                          long visitors, long pageviews, Long previousVisitors, Long previousPageviews,
                          long live, List<Point> series, List<Row> pages, List<Row> sources,
                          List<Row> devices, List<Row> browsers, List<Row> os, List<Row> countries,
-                         Map<String, Long> notCounted) {}
+                         Map<String, Long> notCounted, RowBudget rowBudget) {}
+
+    /**
+     * This instance's daily row budget was reached today (L16 final review): when, and how many
+     * views it has refused since. {@code null} in a {@link Report} when it was not reached. Per
+     * instance and in memory, like the budget itself; the views are also in {@code notCounted}.
+     */
+    public record RowBudget(long budget, Instant reachedAt, long notStored) {}
 
     private final Options options;
     private final DatabaseFactory databaseFactory;
@@ -211,7 +292,7 @@ public final class Analytics {
                 try {
                     flush();
                 } catch (Exception e) {
-                    Log.warn("analytics flush failed: " + e);
+                    Log.warn("analytics flush failed: " + Redactor.redactMessage(String.valueOf(e)));
                 }
             }
         });
@@ -242,7 +323,7 @@ public final class Analytics {
                 tally(verdict.wire, today());
             }
         } catch (RuntimeException e) {
-            Log.debug("analytics.observe_failed", Map.of("error", String.valueOf(e)));
+            Log.debug("analytics.observe_failed", Map.of("error", Redactor.redactMessage(String.valueOf(e))));
         }
     }
 
@@ -317,9 +398,14 @@ public final class Analytics {
             tally("dropped", day);
             return;
         }
-        warnIfProxied(req);
         String ua = req.header("User-Agent");
         String host = normalizeHost(req.host());
+        if (overCaps(host, req.ip(), ua, day)) {
+            buffered.decrementAndGet();
+            tally("dropped", day);
+            return;
+        }
+        warnIfProxied(req);
         String path = route.analytics() == Track.ROUTE ? route.pattern() : storedPath(route, req.path());
         String country = null;
         if (options.countryHeader != null && req.fromTrustedProxy()) {
@@ -328,6 +414,95 @@ public final class Analytics {
         buffer.add(new Event(now, day, local.getHour(), host, req.ip(), ua, path,
             source(req, host), UserAgents.device(ua, req.header("Sec-CH-UA-Mobile")),
             UserAgents.browser(ua), UserAgents.os(ua, req.header("Sec-CH-UA-Platform")), country));
+    }
+
+    private record VisitorKey(String host, String ip, String ua) {}
+
+    // Views buffered per visitor, and per client address, since the last flush; cleared by flush().
+    // Bounded by the buffer limit, as every entry stands for at least one buffered event.
+    private final ConcurrentHashMap<VisitorKey, AtomicInteger> windowViews = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicInteger> windowIpViews = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<LocalDate, java.util.concurrent.atomic.AtomicLong> dayRows = new ConcurrentHashMap<>();
+    // Rows stored today per client address (ipBucket), for the per-address share of the daily
+    // budget; at most MAX_TRACKED_IPS entries, replaced when the day changes.
+    private volatile DayIpRows dayIpRows = new DayIpRows(null);
+    private record DayIpRows(LocalDate day, ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> rows) {
+        DayIpRows(LocalDate day) { this(day, new ConcurrentHashMap<>()); }
+    }
+    private volatile LocalDate budgetWarnedFor;
+    // When today's budget was reached on this instance and how many views it has refused since.
+    private record BudgetReached(LocalDate day, Instant at, java.util.concurrent.atomic.AtomicLong refused) {}
+    private volatile BudgetReached budgetReached;
+
+    /**
+     * L16: whether this view may not become a row. The daily row budget; then (L16 final review)
+     * a per-address share of it and a per-address cap per flush window, an IPv6 address counted by
+     * its /64, since a client rotating its user agent is a new visitor on every request; then the
+     * per-visitor cap per flush window. A refused view is tallied as "dropped" by the caller, so
+     * reports show it as not counted rather than silently undercounting. The visitor key is the
+     * inputs of the stored visitor hash (the hash itself needs the day's salt, read at flush).
+     */
+    private boolean overCaps(String host, String ip, String ua, LocalDate day) {
+        long budget = options.dailyRowBudget;
+        java.util.concurrent.atomic.AtomicLong used = null;
+        if (budget > 0) {
+            if (dayRows.size() > 3) dayRows.keySet().removeIf(d -> d.isBefore(day.minusDays(1)));
+            used = dayRows.computeIfAbsent(day, d -> new java.util.concurrent.atomic.AtomicLong());
+            // Checked before the visitor maps are touched, so a flood of distinct visitors after the
+            // budget is spent cannot grow those maps either.
+            if (used.get() >= budget) {
+                budgetRefused(day, budget);
+                return true;
+            }
+        }
+        String bucket = ip == null ? "unknown" : RateLimiter.ipBucket(ip);
+        long perIpDaily = options.dailyRowsPerIp();
+        DayIpRows ipRows = null;
+        if (perIpDaily > 0) {
+            ipRows = dayIpRows;
+            if (!day.equals(ipRows.day())) {
+                ipRows = new DayIpRows(day);
+                dayIpRows = ipRows;
+            }
+            var stored = ipRows.rows().get(bucket);
+            if (stored != null && stored.get() >= perIpDaily) return true;
+        }
+        int perIp = options.maxViewsPerIp;
+        if (perIp > 0 && windowIpViews.computeIfAbsent(bucket, k -> new AtomicInteger()).incrementAndGet() > perIp) {
+            return true;
+        }
+        int perVisitor = options.maxViewsPerVisitor;
+        if (perVisitor > 0
+                && windowViews.computeIfAbsent(new VisitorKey(host, ip, ua), k -> new AtomicInteger())
+                    .incrementAndGet() > perVisitor) {
+            return true;
+        }
+        if (used != null) used.incrementAndGet();
+        if (ipRows != null && (ipRows.rows().size() < MAX_TRACKED_IPS || ipRows.rows().containsKey(bucket))) {
+            ipRows.rows().computeIfAbsent(bucket, k -> new java.util.concurrent.atomic.AtomicLong()).incrementAndGet();
+        }
+        return false;
+    }
+
+    /** Records a view refused by the daily budget: the time it was first reached today, and a count. */
+    private void budgetRefused(LocalDate day, long budget) {
+        var reached = budgetReached;
+        if (reached == null || !reached.day().equals(day)) {
+            synchronized (this) {
+                reached = budgetReached;
+                if (reached == null || !reached.day().equals(day)) {
+                    reached = new BudgetReached(day, Instant.now(), new java.util.concurrent.atomic.AtomicLong());
+                    budgetReached = reached;
+                }
+            }
+        }
+        reached.refused().incrementAndGet();
+        if (!day.equals(budgetWarnedFor)) {
+            budgetWarnedFor = day;
+            Log.warn("Analytics reached its daily budget of " + budget + " page-view rows; further views today "
+                + "are counted under \"Not counted: dropped\" and not stored. Raise it with "
+                + "Analytics.options().dailyRowBudget(...) if this traffic is real.");
+        }
     }
 
     /**
@@ -355,13 +530,13 @@ public final class Analytics {
 
     /**
      * The path to record for a view of {@code route}. A parameter whose <em>name</em> marks it as
-     * sensitive ({@link Redactor#isSensitive}: token, secret, password, apikey, ...) keeps its
+     * sensitive ({@link Redactor#isSensitiveField}: token, secret, password, apikey, ...) keeps its
      * placeholder, so {@code /reset/abc123} is stored as {@code /reset/{token}}: those views are
      * still counted, grouped together, and the value is never written. Other segments go through
      * {@link #storedPath(String)}, which also redacts values that look like secrets.
      */
     static String storedPath(Route route, String rawPath) {
-        if (route.paramNames().stream().noneMatch(Redactor::isSensitive)) return storedPath(rawPath);
+        if (route.paramNames().stream().noneMatch(Redactor::isSensitiveField)) return storedPath(rawPath);
         var pattern = segments(route.pattern());
         var actual = segments(rawPath);
         // The route matched this path, so the segment counts agree; if they somehow don't,
@@ -370,7 +545,7 @@ public final class Analytics {
         var sb = new StringBuilder();
         for (int i = 0; i < pattern.size(); i++) {
             String p = pattern.get(i);
-            boolean sensitive = p.startsWith("{") && p.endsWith("}") && Redactor.isSensitive(p.substring(1, p.length() - 1));
+            boolean sensitive = p.startsWith("{") && p.endsWith("}") && Redactor.isSensitiveField(p.substring(1, p.length() - 1));
             sb.append('/').append(sensitive ? p : actual.get(i));
         }
         return storedPath(sb.isEmpty() ? "/" : sb.toString());
@@ -439,6 +614,8 @@ public final class Analytics {
      * periodic, shutdown and test-triggered flushes can't interleave. Returns the views written.
      */
     synchronized int flush() {
+        windowViews.clear(); // the per-visitor and per-address caps are per flush window (L16)
+        windowIpViews.clear();
         var events = new ArrayList<Event>();
         Event e;
         while ((e = buffer.poll()) != null) {
@@ -757,7 +934,7 @@ public final class Analytics {
                 breakdown(db, through, "browser", from, to, BREAKDOWN_LIMIT),
                 breakdown(db, through, "os", from, to, BREAKDOWN_LIMIT),
                 options.countryHeader == null ? List.of() : breakdown(db, through, "country", from, to, BREAKDOWN_LIMIT),
-                notCounted(db, through, from, to));
+                notCounted(db, through, from, to), rowBudgetToday(to));
         });
     }
 
@@ -902,6 +1079,13 @@ public final class Analytics {
             out.add(new Row(r[0] == null ? null : String.valueOf(r[0]), num(r[1]), num(r[2])));
         }
         return out;
+    }
+
+    /** This instance's budget state if it was reached on {@code today}, else null. */
+    private RowBudget rowBudgetToday(LocalDate today) {
+        var reached = budgetReached;
+        if (reached == null || !reached.day().equals(today)) return null;
+        return new RowBudget(options.dailyRowBudget, reached.at(), reached.refused().get());
     }
 
     private static Map<String, Long> notCounted(Database db, LocalDate through, LocalDate from, LocalDate to) {

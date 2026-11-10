@@ -19,11 +19,11 @@ class CliCommandsTest {
     static void start() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keysFile = projectDir.resolve("ops-authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test\n");
         Files.writeString(projectDir.resolve("ops-private.key"),
             keypair.privateKey() + "\n" + keypair.publicKey() + "\n");
 
-        app = Brace.app().port(0).ops(keysFile.toString());
+        app = Brace.app().opsUnpinnedForTests().port(0).ops(keysFile.toString());
         app.get("/boom", req -> { throw new RuntimeException("cli status test error"); });
         app.start();
         port = app.actualPort();

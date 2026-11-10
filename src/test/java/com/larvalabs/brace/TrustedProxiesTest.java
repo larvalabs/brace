@@ -256,4 +256,44 @@ public class TrustedProxiesTest {
     public void testAutoRefreshOnlyOnCloudflarePreset() {
         assertThrows(IllegalStateException.class, () -> new TrustedProxies("10.0.0.0/8").autoRefresh());
     }
+
+    /**
+     * docs/SECURITY.md recommended {@code "::ffff:10.0.0.0/104"} for proxies on IPv4-mapped
+     * addresses. It throws at startup (Java parses the mapped form as IPv4, so the prefix limit is
+     * 32), and it is unnecessary: an IPv4 CIDR already matches the mapped form.
+     */
+    @Test
+    public void ipv4CidrMatchesTheIpv4MappedForm() {
+        var proxies = new TrustedProxies("10.0.0.0/8", "127.0.0.1");
+        assertTrue(proxies.isTrusted("::ffff:10.1.2.3"));
+        assertTrue(proxies.isTrusted("::ffff:127.0.0.1"));
+        assertTrue(proxies.isTrusted("0:0:0:0:0:ffff:a01:203"), "hex mapped form of 10.1.2.3");
+        assertFalse(proxies.isTrusted("::ffff:11.1.2.3"));
+        assertFalse(proxies.isTrusted("::1"), "loopback IPv6 is not IPv4 loopback: list ::1 separately");
+        var e = assertThrows(IllegalArgumentException.class, () -> new TrustedProxies("::ffff:10.0.0.0/104"));
+        assertTrue(e.getCause().getMessage().contains("0..32"), e.getCause().getMessage());
+    }
+
+    @Test
+    public void forwardingHeaderIsXForwardedForUnlessForwardedIsChosen() {
+        var proxies = new TrustedProxies("127.0.0.1");
+        assertEquals("X-Forwarded-For", proxies.clientIpHeader());
+        assertEquals("X-Forwarded-For", TrustedProxies.cloudflare().clientIpHeader());
+        assertSame(proxies, proxies.useForwardedHeader());
+        assertEquals("Forwarded", proxies.clientIpHeader());
+    }
+
+    @Test
+    public void parseLiteralNeverHandsANameToTheResolver() {
+        // A colon made isIpLiteral say "IPv6 candidate", but InetAddress only parses a literal that
+        // starts with a hex digit or ':'; anything else went to DNS.
+        assertNull(TrustedProxies.parseLiteral("zz:1"));
+        assertNull(TrustedProxies.parseLiteral("localhost:8080"));
+        assertNull(TrustedProxies.parseLiteral("example.com"));
+        assertNull(TrustedProxies.parseLiteral("::1 "));
+        assertNotNull(TrustedProxies.parseLiteral("::1"));
+        assertNotNull(TrustedProxies.parseLiteral("2001:db8::1"));
+        assertNotNull(TrustedProxies.parseLiteral("10.1.2.3"));
+        assertFalse(new TrustedProxies("0.0.0.0/0").isTrusted("zz:1"));
+    }
 }

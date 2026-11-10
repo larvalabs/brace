@@ -46,7 +46,11 @@ app.analytics(Analytics.options()
     .excludeIps("203.0.113.0/24")       // your office, an uptime monitor
     .countryHeader("CF-IPCountry")      // two-letter country from your proxy (see below)
     .rawRetention("35d")                // how long individual page views are kept
-    .strictNavigation(false));          // see "What counts as a page view"
+    .strictNavigation(false)            // see "What counts as a page view"
+    .maxViewsPerVisitorPerFlush(30)     // row cap per visitor per 10 s write
+    .maxViewsPerIpPerFlush(300)         // row cap per client address per 10 s write
+    .dailyRowBudget(500_000)            // rows this instance inserts per day
+    .maxDailyRowsPerIp(10_000));        // one address's share of it (default 2% of the budget)
 ```
 
 | Option | Default | What it does |
@@ -57,6 +61,20 @@ app.analytics(Analytics.options()
 | `countryHeader(name)` | off | Read a two-letter country code from this request header, e.g. `CF-IPCountry` on Cloudflare. Only believed when the request came through a configured trusted proxy. Adds a Countries panel. |
 | `rawRetention(duration)` | `35d` | How long raw page views and filter tallies are kept (minimum `1d`). Reports don't depend on it: every completed day is summarized first and the summaries are kept indefinitely (see [History](#history-daily-summaries)). |
 | `strictNavigation(bool)` | `false` | Require the `Sec-Fetch-Mode: navigate` header on every counted view. See below. |
+| `maxViewsPerVisitorPerFlush(n)` | `30` | Most rows one visitor (same host, IP and user agent) can add in a 10-second write window. Views over it are not stored and are counted as `dropped`. `0` turns the cap off. |
+| `maxViewsPerIpPerFlush(n)` | `300` | Most rows one client address can add in a 10-second write window, whatever user agents it sends (an IPv6 address counts by its /64). Views over it are counted as `dropped`. Raise it if many real visitors share one address (a large office or campus NAT). `0` turns the cap off. |
+| `dailyRowBudget(n)` | `500000` | Most rows this instance inserts per day (your analytics timezone). Views past it are counted as `dropped`, with one warning in the log, and `/ops/analytics` shows "Row budget reached at HH:MM, N views not stored". Per instance in a fleet; a restart resets it. `0` turns the cap off. |
+| `maxDailyRowsPerIp(n)` | 2% of `dailyRowBudget` | Most rows one client address (IPv6 by /64) can add per day, so one source cannot spend the whole budget. Up to 50,000 addresses are tallied a day; past that a new address is held only by the other caps. `0` turns the cap off. |
+
+The caps keep a client that fakes browser headers in a loop from filling the table, and keep one
+client from spending the daily budget so that nobody else's views are stored for the rest of the
+day: the per-visitor cap alone did nothing against one address rotating its `User-Agent` (each
+user agent is a new visitor), so the per-address caps bound that address whatever it sends. Views
+the caps refuse are **not in any total** (visitors, pageviews, top pages): the totals are computed
+from stored rows, so the number of refused views is reported under "Not counted: dropped" instead.
+A day with a non-zero `dropped` that you did not expect is a day to look at; if the traffic is
+real, raise the caps. Many attacking addresses together can still spend the budget; that shows as
+the "Row budget reached" line.
 
 **Behind a reverse proxy or CDN, configure `trustedProxies(...)`.** Visitors are told apart by IP
 address and browser. Without trusted proxies, every request appears to come from the proxy's IP, so
@@ -103,7 +121,7 @@ shown under "Not counted":
 | `htmx` | `HX-Request: true` without `HX-Boosted` or `HX-History-Restore-Request`: a partial swap, not a page load. Boosted link clicks and history restores **are** counted. |
 | `background` | `Sec-Fetch-Mode` is present and isn't `navigate`: a `fetch()`/XHR, an iframe or similar. (Boosted htmx requests are exempt.) |
 | `bot` | The user agent is missing, doesn't start with `Mozilla/`, or names a crawler, script, monitor or link-preview fetcher. Also a request without `Sec-Fetch-Mode` whose user agent claims Chrome 76+, Edge, Firefox 90+ or another browser that always sends it, and with `strictNavigation(true)` any request without it. |
-| `dropped` | Not a filter: the in-memory buffer (20,000 views) was full because the database was slow or down. Shown only when non-zero. |
+| `dropped` | Not a filter: the view was not stored because the in-memory buffer (20,000 views) was full (database slow or down), one visitor passed `maxViewsPerVisitorPerFlush`, one client address passed `maxViewsPerIpPerFlush` or `maxDailyRowsPerIp`, or the instance passed `dailyRowBudget`. Shown only when non-zero. |
 
 Every browser released since spring 2023 sends `Sec-Fetch-Mode`, and most scripts and crawlers
 don't. Scrapers often send a real browser's user agent, so a request that claims Chromium 76+
@@ -162,9 +180,14 @@ Exit code: 0 on success, 1 when the app doesn't have analytics enabled, 2 when i
   "browsers":  [{ "key": "Chrome", "visitors": 4050, "pageviews": 7300 }],
   "os":        [{ "key": "macOS", "visitors": 2600, "pageviews": 4900 }],
   "countries": [],
-  "notCounted": { "bot": 8710, "htmx": 3120, "background": 402, "prefetch": 590, "excluded": 61, "dropped": 0 }
+  "notCounted": { "bot": 8710, "htmx": 3120, "background": 402, "prefetch": 590, "excluded": 61, "dropped": 0 },
+  "rowBudget": null
 }
 ```
+
+`rowBudget` is `null` unless the instance answering reached its daily row budget today; then it is
+`{ "budget": 500000, "reachedAt": "2026-10-07T14:02:11Z", "notStored": 1834 }` (views refused by
+the budget since, also counted in `notCounted.dropped`).
 
 `series` is per hour for `today` (`"bucket": "00"` … the current hour), per month for `12mo`
 (`"bucket": "2026-10"`), and per day otherwise. In
@@ -295,9 +318,12 @@ isn't a real browser. `curl` is rejected as a bot by design. Check that your pag
 **Your own visits show up.** Click "Don't count this browser's visits" on `/ops/analytics` in each
 browser you use, or add your office to `excludeIps(...)`.
 
-**`dropped` is non-zero.** The database was slow or unreachable long enough for 20,000 views to
-pile up in memory, and newer ones were dropped instead of growing the heap. The log has
-`analytics flush failed` warnings with the cause.
+**`dropped` is non-zero.** Either the database was slow or unreachable long enough for 20,000
+views to pile up in memory (the log has `analytics flush failed` warnings with the cause), or a
+per-visitor, per-address or daily row cap was hit (the log has an "Analytics reached its daily
+budget" warning, and `/ops/analytics` a "Row budget reached at" line, for the daily one). Raise
+`dailyRowBudget(...)`, `maxDailyRowsPerIp(...)`, `maxViewsPerIpPerFlush(...)` or
+`maxViewsPerVisitorPerFlush(...)` if the traffic is real.
 
 **`brace analytics` says it isn't enabled.** The app hasn't called `.analytics()`, or the running
 build predates it.

@@ -144,7 +144,7 @@ final class Toolchains {
         }
         var client = HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.NORMAL)   // GitHub asset URLs 302 to a CDN
-                .connectTimeout(Duration.ofSeconds(30))
+                .connectTimeout(Duration.ofSeconds(10))
                 .build();
         var req = HttpRequest.newBuilder(URI.create(url))
                 .header("User-Agent", "brace-cli")             // GitHub API rejects requests without one
@@ -152,11 +152,72 @@ final class Toolchains {
                 .timeout(Duration.ofMinutes(5))
                 .GET()
                 .build();
-        HttpResponse<byte[]> resp = client.send(req, HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<java.io.InputStream> resp = client.send(req, HttpResponse.BodyHandlers.ofInputStream());
         if (resp.statusCode() / 100 != 2) {
+            try { resp.body().close(); } catch (java.io.IOException ignored) {}
             throw new IllegalStateException("HTTP " + resp.statusCode() + " fetching " + url);
         }
-        return resp.body();
+        return readWithIdleTimeout(resp.body(), DOWNLOAD_IDLE_TIMEOUT, DOWNLOAD_MAX_BYTES);
+    }
+
+    /** A download that sends nothing for this long is abandoned (the request timeout covers only the headers). */
+    static final Duration DOWNLOAD_IDLE_TIMEOUT = Duration.ofSeconds(60);
+    /** A ceiling, not a small cap: a toolchain zip is tens of MB. It only stops an endless body filling the heap. */
+    static final long DOWNLOAD_MAX_BYTES = 1024L * 1024 * 1024;
+
+    /** The longest a download may take in all, however steadily its bytes arrive. */
+    static final Duration DOWNLOAD_TOTAL_TIMEOUT = Duration.ofMinutes(30);
+
+    /** As below, with the {@link #DOWNLOAD_TOTAL_TIMEOUT} deadline. */
+    static byte[] readWithIdleTimeout(java.io.InputStream in, Duration idle, long max) throws Exception {
+        return readWithIdleTimeout(in, idle, DOWNLOAD_TOTAL_TIMEOUT, max);
+    }
+
+    /**
+     * Reads {@code in} to its end; fails if no byte arrives for {@code idle}, if it has not ended
+     * within {@code total} (a drip just faster than the idle timeout), or past {@code max} bytes.
+     */
+    static byte[] readWithIdleTimeout(java.io.InputStream in, Duration idle, Duration total, long max) throws Exception {
+        long deadline = System.nanoTime() + total.toNanos();
+        var out = new java.io.ByteArrayOutputStream();
+        var lastProgress = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+        var reader = new java.util.concurrent.FutureTask<Void>(() -> {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                if (out.size() + (long) n > max) throw new java.io.IOException("download larger than " + (max >> 20) + " MB");
+                synchronized (out) { out.write(buf, 0, n); }
+                lastProgress.set(System.nanoTime());
+            }
+            return null;
+        });
+        Thread t = new Thread(reader, "brace-cli-download");
+        t.setDaemon(true);
+        t.start();
+        try {
+            while (true) {
+                try {
+                    reader.get(250, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    break;
+                } catch (java.util.concurrent.TimeoutException stillRunning) {
+                    if (System.nanoTime() - lastProgress.get() > idle.toNanos()) {
+                        throw new java.io.IOException("download stalled: nothing received for " + idle.toSeconds() + " seconds");
+                    }
+                    if (System.nanoTime() - deadline > 0) {
+                        throw new java.io.IOException("download did not finish within "
+                            + (total.toSeconds() >= 60 ? total.toMinutes() + " minutes" : total.toSeconds() + " seconds")
+                            + ": the server is sending too slowly");
+                    }
+                } catch (java.util.concurrent.ExecutionException e) {
+                    if (e.getCause() instanceof java.io.IOException io) throw io;
+                    throw e;
+                }
+            }
+        } finally {
+            reader.cancel(true);
+            try { in.close(); } catch (java.io.IOException ignored) {}
+        }
+        synchronized (out) { return out.toByteArray(); }
     }
 
     static void requireSecure(String url, String allowInsecure) {

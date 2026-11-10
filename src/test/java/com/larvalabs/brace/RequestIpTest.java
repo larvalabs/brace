@@ -53,7 +53,7 @@ public class RequestIpTest {
     public void testIpForwardedRFC7239() {
         // Test RFC 7239 Forwarded header — single element, no multi-element bug
         var headers = Map.of("Forwarded", "for=1.2.3.4;proto=https");
-        var trusted = new TrustedProxies("10.0.0.0/8");
+        var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
         assertEquals("1.2.3.4", req.ip());
     }
@@ -62,14 +62,14 @@ public class RequestIpTest {
     public void testIpForwardedRFC7239IPv6() {
         // Test RFC 7239 Forwarded header with IPv6 bracketed form
         var headers = Map.of("Forwarded", "for=\"[2001:db8::1]\"");
-        var trusted = new TrustedProxies("10.0.0.0/8");
+        var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
         assertEquals("2001:db8::1", req.ip());
     }
 
     @Test
-    public void testIpXForwardedForPrecedence() {
-        // X-Forwarded-For should take precedence over Forwarded
+    public void testIpOnlyTheChosenForwardingHeaderIsRead() {
+        // L3: exactly one header is read. By default X-Forwarded-For; Forwarded is ignored.
         var headers = Map.of(
             "X-Forwarded-For", "1.2.3.4",
             "Forwarded", "for=5.6.7.8"
@@ -77,6 +77,15 @@ public class RequestIpTest {
         var trusted = new TrustedProxies("10.0.0.0/8");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
         assertEquals("1.2.3.4", req.ip());
+        var forwardedOnly = new Request("GET", "/", Map.of(), Map.of(), Map.of("Forwarded", "for=5.6.7.8"),
+            null, Map.of(), "10.0.0.1", trusted);
+        assertEquals("unknown", forwardedOnly.ip(), "Forwarded is not a fallback, and neither is the proxy's address");
+        // With useForwardedHeader(), the reverse.
+        var rfc = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
+        assertEquals("5.6.7.8", new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(),
+            "10.0.0.1", rfc).ip());
+        assertEquals("unknown", new Request("GET", "/", Map.of(), Map.of(), Map.of("X-Forwarded-For", "1.2.3.4"),
+            null, Map.of(), "10.0.0.1", rfc).ip(), "X-Forwarded-For is ignored once Forwarded is chosen");
     }
 
     @Test
@@ -99,11 +108,12 @@ public class RequestIpTest {
 
     @Test
     public void testIpEmptyForwardedFor() {
-        // Empty X-Forwarded-For should be ignored
+        // L3 final review: a trusted proxy's forwarding header that names no address is
+        // "unknown", never the proxy's own address.
         var headers = Map.of("X-Forwarded-For", "");
         var trusted = new TrustedProxies("10.0.0.0/8");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
@@ -193,7 +203,7 @@ public class RequestIpTest {
         // RFC 7239 multi-element: "for=1.1.1.1, for=2.2.2.2" where 2.2.2.2 is untrusted.
         // Rightmost-untrusted: 2.2.2.2 is not in trusted CIDRs → returns 2.2.2.2.
         // (The old split-on-";" bug would have returned only the first element 1.1.1.1.)
-        var trusted = new TrustedProxies("10.0.0.0/8");
+        var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var headers = Map.of("Forwarded", "for=1.1.1.1, for=2.2.2.2");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
         assertEquals("2.2.2.2", req.ip());
@@ -203,7 +213,7 @@ public class RequestIpTest {
     public void testIpForwardedMultiElementTrustedRightmost() {
         // RFC 7239 multi-element: "for=1.1.1.1, for=10.0.0.5" where 10.0.0.5 is trusted.
         // Walk right-to-left: 10.0.0.5 trusted, 1.1.1.1 untrusted → 1.1.1.1.
-        var trusted = new TrustedProxies("10.0.0.0/8");
+        var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var headers = Map.of("Forwarded", "for=1.1.1.1, for=10.0.0.5");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
         assertEquals("1.1.1.1", req.ip());
@@ -213,7 +223,7 @@ public class RequestIpTest {
     public void testIpForwardedMultiElementQuotedBracketed() {
         // RFC 7239 quoted and bracketed IPv6: for="[2001:db8::1]", for="[2001:db8::2]"
         // 2001:db8::2 is untrusted → returns 2001:db8::2.
-        var trusted = new TrustedProxies("10.0.0.0/8");
+        var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var headers = Map.of("Forwarded", "for=\"[2001:db8::1]\", for=\"[2001:db8::2]\"");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
         assertEquals("2001:db8::2", req.ip());
@@ -235,21 +245,23 @@ public class RequestIpTest {
 
     @Test
     public void testIpXffBareComma() {
-        // Header of exactly "," splits to ["", ""] — all blank — must not crash and must fall
-        // back to remoteAddr, not throw ArrayIndexOutOfBoundsException.
+        // Header of exactly "," splits to ["", ""] — all blank — must not crash (no
+        // ArrayIndexOutOfBoundsException) and is "unknown" (L3 final review), not the proxy.
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", ",");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
     public void testIpXffEmbeddedBlankSegment() {
-        // "1.2.3.4,,10.0.0.5" — middle segment is blank; with 10/8 trusted, must return 1.2.3.4.
+        // "1.2.3.4,,10.0.0.5": walking from the right past the trusted 10.0.0.5, the next entry is
+        // blank, so the trusted hop named no client. L3 verification: "unknown", never a skip to
+        // the client-written 1.2.3.4 (this used to expect 1.2.3.4).
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", "1.2.3.4,,10.0.0.5");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("1.2.3.4", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
@@ -258,36 +270,36 @@ public class RequestIpTest {
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", "1.2.3.4,   ,10.0.0.5");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("1.2.3.4", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
     public void testIpXffAllBlankSegments() {
-        // " , , " — all blank — must fall back to remoteAddr, never return "".
+        // " , , " — all blank — is "unknown" (L3 final review), never "".
         var trusted = new TrustedProxies("10.0.0.0/8");
         var headers = Map.of("X-Forwarded-For", " , , ");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
         assertFalse(req.ip().isEmpty());
     }
 
     @Test
     public void testIpForwardedBareComma() {
-        // Forwarded header of exactly "," — no "for=" values extracted, must fall back to remoteAddr.
-        var trusted = new TrustedProxies("10.0.0.0/8");
+        // Forwarded header of exactly "," — no "for=" values extracted: "unknown" (L3 final review).
+        var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var headers = Map.of("Forwarded", ",");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("10.0.0.1", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     @Test
-    public void testIpForwardedBlankElementSkipped() {
-        // "for=1.2.3.4, , for=10.0.0.5" — blank element in the middle contributes no "for=";
-        // with 10/8 trusted the walk returns 1.2.3.4.
-        var trusted = new TrustedProxies("10.0.0.0/8");
+    public void testIpForwardedBlankElementIsNotSkipped() {
+        // "for=1.2.3.4, , for=10.0.0.5" — past the trusted 10.0.0.5 the blank element names no
+        // client. L3 verification: "unknown" (this used to skip it and expect 1.2.3.4).
+        var trusted = new TrustedProxies("10.0.0.0/8").useForwardedHeader();
         var headers = Map.of("Forwarded", "for=1.2.3.4, , for=10.0.0.5");
         var req = new Request("GET", "/", Map.of(), Map.of(), headers, null, Map.of(), "10.0.0.1", trusted);
-        assertEquals("1.2.3.4", req.ip());
+        assertEquals("unknown", req.ip());
     }
 
     // -----------------------------------------------------------------------

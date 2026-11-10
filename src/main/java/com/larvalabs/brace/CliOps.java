@@ -1,6 +1,7 @@
 package com.larvalabs.brace;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.*;
@@ -15,19 +16,57 @@ public class CliOps {
 
     public static int keypair(Path projectDir, String[] args) {
         String label = null;
-        boolean readOnly = false;
+        boolean readOnlyFlag = false;
+        boolean controlFlag = false;
         for (int i = 0; i < args.length; i++) {
             if ("--label".equals(args[i]) && i + 1 < args.length) { label = args[i + 1]; }
-            else if ("--read-only".equals(args[i])) { readOnly = true; }
+            else if ("--read-only".equals(args[i])) { readOnlyFlag = true; }
+            else if ("--control".equals(args[i])) { controlFlag = true; }
         }
-        if (label == null || label.isBlank()) label = defaultLabel(projectDir);
-        label = sanitizeLabel(label);
+        if (readOnlyFlag && controlFlag) {
+            CliOutput.printError("Give --read-only or --control, not both.");
+            return 1;
+        }
+        label = label == null ? "" : sanitizeLabel(label);
+        if (label.isEmpty()) label = defaultLabel(projectDir);
+        // Refuse, before any key exists, a label the server's keys-file grammar would reject at
+        // startup or cut short as a comment (L1 follow-up).
+        String problem = labelProblem(label, readOnlyFlag);
+        if (problem != null) {
+            CliOutput.printError(problem);
+            return 1;
+        }
+        // L1 verification: a rotation keeps the scope of the entry it replaces unless a flag says
+        // otherwise. Defaulting to control silently raised an agent's read-only key to full
+        // control on the next deploy. Decided before any key is generated, so a refusal leaves
+        // nothing behind.
+        OpsScope previous;
+        try {
+            previous = existingScope(projectDir.resolve("ops-authorized-keys"), label);
+        } catch (IllegalStateException e) {
+            if (!readOnlyFlag && !controlFlag) {
+                CliOutput.printError(e.getMessage());
+                return 1;
+            }
+            previous = null;
+        } catch (IOException e) {
+            CliOutput.printError("Failed to read ops-authorized-keys: " + e.getMessage());
+            return 1;
+        }
+        boolean readOnly = readOnlyFlag || (!controlFlag && previous == OpsScope.READ);
         var kp = OpsKeys.generateKeypair();
 
         // Write the private key first. Format must match OpsKeys.readKeyFile: private key on the
         // first non-comment line, public key on the second. Never clobber an existing key — that
         // would orphan a key already trusted by a deployed server's ops-authorized-keys.
         Path keyFile = projectDir.resolve("ops-private.key");
+        try {
+            // Fail before generating anything if the authorized-keys list is a planted symlink.
+            SecretFiles.refuseSymlink(projectDir.resolve("ops-authorized-keys"));
+        } catch (IOException e) {
+            CliOutput.printError(e.getMessage());
+            return 1;
+        }
         if (Files.exists(keyFile)) {
             CliOutput.printError("ops-private.key already exists — refusing to overwrite. "
                 + "Delete it first to generate a fresh keypair.");
@@ -49,28 +88,34 @@ public class CliOps {
         // than leaving an orphaned, still-trusted line. Different developers get different labels
         // (identity@host), so they never clobber each other's entry.
         Path file = projectDir.resolve("ops-authorized-keys");
-        // A read-only key carries a `scope:read` marker; the server caps any token it mints at
-        // READ, so it can pull status/errors/logs but never hit a control endpoint. Hand this to
-        // an autonomous agent. Without the flag the entry is unscoped (server default: CONTROL).
-        String entry = readOnly
-            ? kp.publicKey() + "  scope:read  " + label
-            : kp.publicKey() + "  " + label;
+        // Every entry states its scope (L1 final review: the server refuses a key line without a
+        // scope token, so that no line means CONTROL by omission). A read-only key is
+        // `scope:read`: the server caps any token it mints at READ, so it can pull
+        // status/errors/logs but never hit a control endpoint. Hand that to an autonomous agent.
+        String entry = keysFileLine(kp.publicKey(), label, readOnly);
         boolean replaced = false;
         try {
             if (Files.exists(file)) {
                 var lines = new ArrayList<>(Files.readAllLines(file));
                 for (int i = 0; i < lines.size(); i++) {
-                    if (label.equals(labelOf(lines.get(i)))) {
-                        lines.set(i, entry);
-                        replaced = true;
-                        break;
+                    // The server's own line parser, lenient: an entry written before every line
+                    // had to state its scope (no scope token) must still be found and replaced,
+                    // or the rotated-out key would stay trusted.
+                    var existing = OpsKeys.parseLine(lines.get(i), i == 0, true);
+                    if (existing != null && label.equals(existing.label())) {
+                        if (replaced) {
+                            lines.remove(i--);   // a second entry for the label: its key must not stay trusted either
+                        } else {
+                            lines.set(i, entry);
+                            replaced = true;
+                        }
                     }
                 }
                 if (!replaced) lines.add(entry);
-                Files.writeString(file, String.join("\n", lines) + "\n");
+                SecretFiles.writeProjectFile(file, String.join("\n", lines) + "\n");
             } else {
-                Files.writeString(file,
-                    "# Ops authorized public keys — one per line, optional label\n" + entry + "\n");
+                SecretFiles.writeProjectFile(file,
+                    "# Ops authorized public keys, one per line: KEY scope:read|scope:control label\n" + entry + "\n");
             }
         } catch (Exception e) {
             CliOutput.printError("Failed to write ops-authorized-keys: " + e.getMessage());
@@ -80,11 +125,53 @@ public class CliOps {
         System.out.println("Public key:   " + kp.publicKey());
         System.out.println("Label:        " + label);
         System.out.println("Scope:        " + (readOnly ? "read (read-only — cannot hit control endpoints)" : "control"));
+        OpsScope now = readOnly ? OpsScope.READ : OpsScope.CONTROL;
+        if (previous != null && previous != now) {
+            System.out.println("scope changed: " + previous.wire() + " -> " + now.wire());
+        }
         System.out.println();
         System.out.println("Wrote ops-private.key (gitignored) and " + (replaced ? "updated" : "added")
             + " the entry for \"" + label + "\" in ops-authorized-keys.");
         System.out.println("Commit ops-authorized-keys and deploy it to authorize this key on the server.");
         return 0;
+    }
+
+    /**
+     * The scope of the existing entries for {@code label} in {@code file} (the lower one if
+     * there are several), or null when there is none.
+     *
+     * @throws IllegalStateException when an entry for the label has no scope token (a file
+     *         written before every line had to state one): the caller needs an explicit flag
+     */
+    static OpsScope existingScope(Path file, String label) throws IOException {
+        if (!Files.exists(file)) {
+            return null;
+        }
+        OpsScope scope = null;
+        var lines = Files.readAllLines(file);
+        for (int i = 0; i < lines.size(); i++) {
+            var existing = OpsKeys.parseLine(lines.get(i), i == 0, true);
+            if (existing == null || !label.equals(existing.label())) {
+                continue;
+            }
+            if (existing.scope() == null) {
+                throw new IllegalStateException("The entry for \"" + label + "\" in ops-authorized-keys "
+                    + "has no scope (a line written before every key had to state one), so the scope to "
+                    + "keep is unknown. Re-run with --read-only (status, logs and errors only) or "
+                    + "--control (everything).");
+            }
+            scope = scope == null ? existing.scope() : scope.min(existing.scope());
+        }
+        return scope;
+    }
+
+    /**
+     * The {@code ops-authorized-keys} line for a public key, in the form the server requires
+     * ({@code KEY scope:read|scope:control LABEL}): every line the CLI writes or tells the user to
+     * add comes from here, so none can omit the scope token the server refuses to start without.
+     */
+    static String keysFileLine(String publicKey, String label, boolean readOnly) {
+        return publicKey + "  " + (readOnly ? "scope:read" : "scope:control") + "  " + label;
     }
 
     /**
@@ -99,7 +186,7 @@ public class CliOps {
         if (identity == null || identity.isBlank()) identity = System.getProperty("user.name");
         if (identity == null || identity.isBlank()) identity = "user";
         String host = hostname();
-        return sanitizeLabel(host == null || host.isBlank() ? identity : identity + "@" + host);
+        return safeDefaultLabel(sanitizeLabel(host == null || host.isBlank() ? identity : identity + "@" + host));
     }
 
     /** Project-local git user.email, or null if git is unavailable, not a repo, or unset. */
@@ -130,23 +217,72 @@ public class CliOps {
         return dot > 0 ? h.substring(0, dot) : h;
     }
 
-    /** Collapse whitespace so the label stays a single trailing token on its line. */
-    private static String sanitizeLabel(String s) {
-        return s.strip().replaceAll("\\s+", "-");
+    /**
+     * Why the server's authorized-keys grammar ({@link OpsKeys#loadAuthorizedKeys(String)}) would
+     * refuse or cut short the line {@code KEY scope:read|scope:control LABEL}, or null when it
+     * loads as written. {@code label} is already sanitized (one token, no whitespace). L1
+     * follow-up; since the final review the scope token is always written, so a label that is a
+     * scope word ({@code read}, {@code control}) is only a label and is accepted.
+     */
+    static String labelProblem(String label, boolean readOnly) {
+        String rule = " The ops-authorized-keys format is KEY scope:read|scope:control [label] [# comment].";
+        for (int i = 0; i < label.length(); i++) {
+            if (Character.isISOControl(label.charAt(i))) {
+                return "The label may not contain a control character." + rule;
+            }
+        }
+        // L1 verification: the keys file is UTF-8, which has no encoding for a lone surrogate, so
+        // writing it failed after the private key had been written, leaving an orphan key.
+        if (Cache.hasUnpairedSurrogate(label)) {
+            return "The label is not valid Unicode text (it has an unpaired surrogate)." + rule;
+        }
+        String confusing = OpsKeys.confusingCharacter(label);
+        if (confusing != null) {
+            return "The label has a character the server refuses in a keys file: " + confusing + "." + rule;
+        }
+        if (label.indexOf(':') >= 0 || label.indexOf('=') >= 0) {
+            return "The label may not contain ':' or '=': after the key, a token with either must be"
+                + " exactly scope:read or scope:control, and the server refuses to start otherwise."
+                + " Use --read-only for a read-only key." + rule;
+        }
+        if (label.startsWith("#")) {
+            return "The label may not start with '#': after whitespace, '#' starts a comment, so the"
+                + " label would be dropped." + rule;
+        }
+        return null;
     }
 
     /**
-     * The label portion of an authorized-keys line, or null for blank/comment lines. Skips the
-     * key and an optional {@code scope:...} marker so rotation still matches by label when an
-     * entry carries a scope.
+     * The default label, made acceptable to the keys file: it comes from git {@code user.email}
+     * and the host name, which the user didn't type, so {@code :} and {@code =} become {@code -}
+     * and leading {@code #} are dropped rather than refused.
      */
-    private static String labelOf(String line) {
-        String t = line.strip();
-        if (t.isEmpty() || t.startsWith("#")) return null;
-        String[] tokens = t.split("\\s+");
-        int i = 1; // skip the key
-        if (i < tokens.length && tokens[i].startsWith("scope:")) i++; // skip optional scope marker
-        return i >= tokens.length ? "" : String.join(" ", java.util.Arrays.copyOfRange(tokens, i, tokens.length));
+    static String safeDefaultLabel(String s) {
+        String safe = s.replace(':', '-').replace('=', '-');
+        int start = 0;
+        while (start < safe.length() && safe.charAt(start) == '#') start++;
+        safe = safe.substring(start);
+        return safe.isEmpty() ? "user" : safe;
+    }
+
+    /**
+     * Collapse whitespace so the label stays a single trailing token on its line. Any Unicode
+     * whitespace or space separator counts: the server treats a {@code #} after one as a comment.
+     */
+    private static String sanitizeLabel(String s) {
+        var out = new StringBuilder(s.length());
+        boolean pendingSpace = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isWhitespace(c) || Character.isSpaceChar(c)) {
+                pendingSpace = out.length() > 0;
+            } else {
+                if (pendingSpace) out.append('-');
+                pendingSpace = false;
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     public static int dashboard(Path projectDir, String[] args) {
@@ -156,11 +292,11 @@ public class CliOps {
             // Exchange bearer for single-use login token
             var loginResponse = CliAuth.sendAuthenticated(cfg, projectDir,
                 HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.url() + "/ops/auth/login-token"))
+                    .uri(URI.create(CliAuth.baseUrl(cfg) + "/ops/auth/login-token"))
                     .POST(HttpRequest.BodyPublishers.noBody()));
 
             if (loginResponse.statusCode() != 200) {
-                CliOutput.printError("Failed to get login token: " + loginResponse.body());
+                CliOutput.printError("Failed to get login token: " + CliOutput.excerpt(loginResponse.body()));
                 return 1;
             }
 
@@ -173,7 +309,7 @@ public class CliOps {
                 CliOutput.printError("Server returned a malformed login token; refusing to open it.");
                 return 1;
             }
-            String dashboardUrl = cfg.url() + "/ops/auth/exchange?token=" + loginToken
+            String dashboardUrl = CliAuth.baseUrl(cfg) + "/ops/auth/exchange?token=" + loginToken
                 + (CliCommands.hasFlag(args, "--analytics") ? "&next=analytics" : "");
             if (!dashboardUrl.startsWith("http://") && !dashboardUrl.startsWith("https://")) {
                 CliOutput.printError("Refusing to open a non-http(s) dashboard URL: " + dashboardUrl);

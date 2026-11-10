@@ -22,12 +22,30 @@ public class Cli {
         String cmd = args[0];
         String[] rest = Arrays.copyOfRange(args, 1, args.length);
 
+        System.exit(guarded(() -> dispatch(cwd, cmd, rest)));
+    }
+
+    /**
+     * Runs a command and turns whatever it throws into a short message and exit code 1, never a
+     * raw stack trace. An {@link Error} such as {@code OutOfMemoryError} (a hostile response can
+     * try for one) is reported too, but {@code ThreadDeath} is rethrown: it is control flow, not
+     * a failure of the command.
+     */
+    static int guarded(java.util.concurrent.Callable<Integer> command) {
         try {
-            int code = dispatch(cwd, cmd, rest);
-            System.exit(code);
+            return command.call();
+        } catch (CliAuth.OpsAuthFailure e) {
+            // Already holds an excerpt of the server's text; excerpting again cut its marker.
+            CliOutput.printError(e.getMessage());
+            return 1;
         } catch (Exception e) {
-            CliOutput.printError(e.getMessage() != null ? e.getMessage() : e.toString());
-            System.exit(1);
+            CliOutput.printError(CliOutput.excerpt(e.getMessage() != null ? e.getMessage() : e.toString()));
+            return 1;
+        } catch (Error e) {
+            if (e.getClass().getName().equals("java.lang.ThreadDeath")) throw e;
+            CliOutput.printError("brace failed: " + e.getClass().getSimpleName()
+                + (e instanceof OutOfMemoryError ? " (a response or file was too large to handle)" : ""));
+            return 1;
         }
     }
 
@@ -129,7 +147,7 @@ public class Cli {
         System.out.println("Usage: brace ops <command>");
         System.out.println();
         System.out.println("Ops commands:");
-        System.out.println("  brace ops keypair [--label <l>] [--read-only]  Generate an Ed25519 keypair for ops auth and add it to ops-authorized-keys");
+        System.out.println("  brace ops keypair [--label <l>] [--read-only|--control]  Generate an Ed25519 keypair for ops auth and add it to ops-authorized-keys (a new label is control unless --read-only; replacing a label keeps its scope unless a flag is given)");
         System.out.println("  brace ops dashboard [--analytics]              Open the ops dashboard (or the analytics page) in a browser (login via token exchange)");
         System.out.println();
         System.out.println("Inspecting a running app: brace check, status, errors, logs, cache, analytics, resolve (see 'brace help').");

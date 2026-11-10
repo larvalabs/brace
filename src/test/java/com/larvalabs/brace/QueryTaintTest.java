@@ -144,6 +144,105 @@ class QueryTaintTest {
     }
 
     @Test
+    void sortOfEvasionsThatNormalizationHidesStillThrow() {
+        // L15: Sort.of normalizes (trim, collapse spaces, upper-case keywords), so these request
+        // values no longer appeared verbatim in the ORDER BY text.
+        for (String value : List.of("title ", "title desc", "title,id", "title  desc", " title")) {
+            var req = get(Map.of(), Map.of("sort", value));
+            assertThrows(IllegalArgumentException.class,
+                () -> run(req, true, db -> db.query(Post.class, "", Sort.of(req.queryParam("sort")))),
+                "should flag: [" + value + "]");
+            assertThrows(IllegalArgumentException.class,
+                () -> run(req, true, db -> db.hql("SELECT p.id FROM Post p", Sort.of(req.queryParam("sort")))),
+                "hql should flag: [" + value + "]");
+        }
+        // A fixed order written in code that merely shares nothing with the request is fine.
+        var unrelated = get(Map.of(), Map.of("sort", "body desc"));
+        assertDoesNotThrow(() -> run(unrelated, true, db -> db.query(Post.class, "", Sort.of("createdAt DESC, id"))));
+    }
+
+    @Test
+    void paddedQueryStringDoesNotStarveTheFormBody() {
+        var query = new HashMap<String, String>();
+        for (int i = 0; i < 1500; i++) query.put("pad" + i, "padding-value-" + i);
+        String q = "x' OR '1'='1";
+        var req = new Request("POST", "/search", Map.of(), query,
+            Map.of("Content-Type", "application/x-www-form-urlencoded"),
+            "q=" + java.net.URLEncoder.encode(q, java.nio.charset.StandardCharsets.UTF_8));
+        assertThrows(IllegalArgumentException.class,
+            () -> run(req, true, db -> db.query(Post.class, "title = '" + q + "'")));
+    }
+
+    @Test
+    void overCapIsMarkedUnchecked() {
+        var small = get(Map.of(), Map.of("q", "hello"));
+        assertFalse(QueryTaint.of(small, true).overCap());
+        assertTrue(QueryTaint.of(paddedForm(""), false).overCap());
+        assertTrue(QueryTaint.of(paddedForm(""), true).overCap());
+    }
+
+    // --- L15 final review: padding within one source ---
+
+    @Test
+    void paddingTheQueryStringNoLongerHidesASortValue() throws Exception {
+        // The reviewer's request: 1,000 padding params then sort=body. The query string is bounded
+        // by Jetty's 8 KB request line, so it is recorded whole and the sort value is checked.
+        var app = Brace.test().entities(Post.class).start(a -> {
+            a.defaultAccess(Access.none());
+            a.get("/q", (DbHandler) (r, db) -> Json.of(db.query(Post.class, "", Sort.of(r.queryParam("sort"))).size()));
+        });
+        try {
+            assertEquals(500, app.get("/q?sort=body").status(), "unpadded: flagged");
+            String padded = "/q?" + "a=abc&".repeat(1000) + "sort=body";
+            assertEquals(500, app.get(padded).status(), "padded: still flagged");
+        } finally {
+            app.stop();
+        }
+    }
+
+    @Test
+    void queryAndPathValuesHaveNoCountCap() {
+        var params = new HashMap<String, String>();
+        for (int i = 0; i < 2000; i++) params.put("p" + i, "value-" + i + " x");
+        var taint = QueryTaint.of(get(Map.of(), params), true);
+        assertEquals(2000, taint.size());
+        assertFalse(taint.overCap());
+    }
+
+    @Test
+    void anOverCapRequestThrowsInStrictModeWhenItReachesAQuery() {
+        // A form padded past the cap cannot be checked, so under Brace.test() and dev mode any
+        // where-fragment, raw query or Sort.of it reaches fails instead of passing unchecked.
+        var req = paddedForm("&q=" + java.net.URLEncoder.encode("x' OR '1'='1", java.nio.charset.StandardCharsets.UTF_8));
+        var ex = assertThrows(IllegalArgumentException.class,
+            () -> run(req, true, db -> db.query(Post.class, "title = ?", "x")));
+        assertTrue(ex.getMessage().contains("over"), ex.getMessage());
+        assertThrows(IllegalArgumentException.class,
+            () -> run(req, true, db -> db.query(Post.class, "", Sort.of("createdAt DESC"))));
+        // No query text to check: nothing to refuse.
+        assertDoesNotThrow(() -> run(req, true, db -> db.findAll(Post.class)));
+        // Production runs it and logs.
+        assertDoesNotThrow(() -> run(req, false, db -> db.query(Post.class, "title = ?", "x")));
+    }
+
+    @Test
+    void productionLogsOverCapOncePerCallSite() {
+        var req = paddedForm("");
+        run(req, false, db -> db.query(Post.class, "title = ?", "a"));
+        run(req, false, db -> db.count(Post.class, "title = ?", "b"));
+        long sites = QueryTaint.warnedKeys().stream().filter(k -> k.contains("QueryTaintTest") && k.endsWith("|(over cap)")).count();
+        assertTrue(sites >= 2, "each call site logs its own over-cap warning: " + QueryTaint.warnedKeys());
+    }
+
+    private static Request paddedForm(String extra) {
+        var body = new StringBuilder();
+        for (int i = 0; i < 1500; i++) body.append(i == 0 ? "" : "&").append("pad").append(i).append("=padding-value-").append(i);
+        body.append(extra);
+        return new Request("POST", "/search", Map.of(), Map.of(),
+            Map.of("Content-Type", "application/x-www-form-urlencoded"), body.toString());
+    }
+
+    @Test
     void aliasedOrderByWordThrows() {
         var req = get(Map.of(), Map.of("sort", "title"));
         assertThrows(IllegalArgumentException.class,
@@ -175,10 +274,8 @@ class QueryTaintTest {
     }
 
     @Test
-    void checkedValuesAreCapped() {
-        var params = new HashMap<String, String>();
-        for (int i = 0; i < 5000; i++) params.put("p" + i, "value-" + i + " x");
-        assertEquals(1000, QueryTaint.of(get(Map.of(), params), true).size());
+    void checkedFormValuesAreCapped() {
+        assertEquals(1000, QueryTaint.of(paddedForm(""), true).size());
     }
 
     // --- No false positives ---

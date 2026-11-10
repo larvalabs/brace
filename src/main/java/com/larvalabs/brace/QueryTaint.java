@@ -39,10 +39,14 @@ final class QueryTaint {
     private static final Pattern TOKEN_SPLIT = Pattern.compile("[^A-Za-z0-9_$.]+");
     private static final Set<String> SORT_KEYWORDS = Set.of("asc", "desc", "nulls", "first", "last");
 
-    // A request's checked values are capped so a huge form post can't make every query check
-    // expensive: past the cap, further values are not checked.
-    private static final int MAX_INPUTS = 1000;
-    private static final int MAX_VALUE_CHARS = 64 * 1024;
+    // A form body's checked values are capped so a huge post can't make every query check
+    // expensive: past the cap, further values are not recorded and the request is "over cap".
+    // Path and query values have no count cap (L15 final review: padding the query string with
+    // 1,000 short params pushed ?sort= past the old count cap): Jetty bounds the request line to
+    // 8 KB, so they are few and short. Their character cap only bounds a hand-built Request.
+    static final int MAX_FORM_INPUTS = 1000;
+    private static final int MAX_FORM_CHARS = 1024 * 1024;
+    private static final int MAX_URL_CHARS = 64 * 1024;
 
     private record Input(String source, String name, String value) {}
 
@@ -55,30 +59,48 @@ final class QueryTaint {
     private static final int MAX_WARN_KEYS = 1000;
     private static final ConcurrentHashMap<String, Long> lastWarned = new ConcurrentHashMap<>();
 
-    private QueryTaint(List<Input> inputs, boolean strict) {
+    private final boolean overCap;
+
+    private QueryTaint(List<Input> inputs, boolean strict, boolean overCap) {
         this.inputs = inputs;
         this.strict = strict;
+        this.overCap = overCap;
     }
 
     /** The checkable values of {@code req}; {@code null} when it has none. */
     static QueryTaint of(Request req, boolean strict) {
-        var inputs = new Inputs();
-        if (req.pathParams() != null) req.pathParams().forEach((k, v) -> inputs.add("path parameter", k, v));
-        for (String[] pair : req.queryPairs()) inputs.add("query parameter", pair[0], pair[1]);
+        // Each source gets its own budget (L15). One shared budget, whichever source is filled
+        // first, lets that source starve the rest: a padded query string used to leave the form
+        // body unchecked. Only the form body, bounded by the body limit rather than the ~8 KB
+        // request line, has a count cap; a request over it cannot be checked, and check() then
+        // throws in strict mode and logs per call site in production (L15 final review).
+        var list = new ArrayList<Input>();
+        var form = new Inputs(list, MAX_FORM_INPUTS, MAX_FORM_CHARS);
+        var query = new Inputs(list, Integer.MAX_VALUE, MAX_URL_CHARS);
+        var path = new Inputs(list, Integer.MAX_VALUE, MAX_URL_CHARS);
         // The body is read before the handler runs, so this parses no more than the handler could.
         // Every value of a repeated field counts (formParams reads them all). A body that isn't
         // valid form encoding is skipped: the handler sees that error only if it reads the form.
         if (isFormBody(req.header("Content-Type"))) {
             try {
                 Request.parsePairs(req.body(), false).forEach((name, values) -> {
-                    for (String value : values) inputs.add("form field", name, value);
+                    for (String value : values) form.add("form field", name, value);
                 });
             } catch (IllegalArgumentException malformed) {
                 // e.g. a stray "%" — not a form this handler can read either
             }
         }
-        return inputs.list.isEmpty() ? null : new QueryTaint(inputs.list, strict);
+        for (String[] pair : req.queryPairs()) query.add("query parameter", pair[0], pair[1]);
+        if (req.pathParams() != null) req.pathParams().forEach((k, v) -> path.add("path parameter", k, v));
+        boolean overCap = form.overCap || query.overCap || path.overCap;
+        return list.isEmpty() && !overCap ? null : new QueryTaint(list, strict, overCap);
     }
+
+    /** True when some request values were not recorded because a source hit the cap: unchecked. */
+    boolean overCap() { return overCap; }
+
+    /** Call-site keys that have logged in production (tests). */
+    static Set<String> warnedKeys() { return lastWarned.keySet(); }
 
     /** The body types {@code formParam} reads values from in practice, matched case-insensitively. */
     private static boolean isFormBody(String contentType) {
@@ -88,29 +110,63 @@ final class QueryTaint {
             || type.startsWith("text/plain");
     }
 
+    /** One source's budget, recording into a list shared by all sources. */
     private static final class Inputs {
-        final List<Input> list = new ArrayList<>();
+        final List<Input> list;
+        final int maxCount;
+        final int maxChars;
+        int count;
         int chars;
+        boolean overCap;
+
+        Inputs(List<Input> shared, int maxCount, int maxChars) {
+            this.list = shared;
+            this.maxCount = maxCount;
+            this.maxChars = maxChars;
+        }
 
         void add(String source, String name, String value) {
             if (value == null || value.length() < 3 || NUMBER.matcher(value).matches()) return;
-            if (list.size() >= MAX_INPUTS || chars + value.length() > MAX_VALUE_CHARS) return;
+            if (count >= maxCount || chars + value.length() > maxChars) {
+                overCap = true;
+                return;
+            }
+            count++;
             chars += value.length();
             list.add(new Input(source, name, value));
         }
     }
 
-    /** Throws (strict) or logs once per call site when {@code query} contains request data. */
+    /**
+     * Throws (strict) or logs once per call site when {@code query} contains request data, or when
+     * this request was over the cap and so cannot be checked (L15 final review: an over-cap request
+     * used to pass silently, with one warning per process).
+     */
     void check(String query, String method) {
-        if (query == null) return;
+        if (query == null || query.isBlank()) return;
+        if (overCap) {
+            String message = "This request has more than " + MAX_FORM_INPUTS + " form values (or more text than the "
+                + "check records), over cap, so the query string passed to db." + method + "(...) cannot be checked "
+                + "for request data (H3).";
+            if (strict) {
+                throw new IllegalArgumentException(message + " Thrown in dev mode and tests so an unchecked request "
+                    + "cannot pass silently; production runs the query and logs once a minute per call site.");
+            }
+            warnAtCallSite(message, "(over cap)");
+        }
         Input hit = find(query);
         if (hit == null) return;
         String message = "The " + hit.source + " \"" + hit.name + "\" appears in the query string passed to db."
             + method + "(...). Concatenating request data into HQL or SQL is an injection: bind values with ?, "
             + "and sort with Sort.from(req, ...).";
         if (strict) throw new IllegalArgumentException(message + " (Thrown in dev mode and tests; logged in production.)");
+        warnAtCallSite(message, hit.name);
+    }
+
+    /** Logs {@code message} at most once a minute per call site and {@code what}. */
+    private static void warnAtCallSite(String message, String what) {
         String site = callSite();
-        String key = site + "|" + hit.name;
+        String key = site + "|" + what;
         long now = System.currentTimeMillis();
         if (lastWarned.size() >= MAX_WARN_KEYS && !lastWarned.containsKey(key)) key = "(other call sites)";
         Long previous = lastWarned.get(key);

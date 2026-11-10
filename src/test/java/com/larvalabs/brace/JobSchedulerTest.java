@@ -96,6 +96,28 @@ class JobSchedulerTest {
     }
 
     @Test
+    void secretShapedTokenInJobFailureIsRedactedInStatus() throws Exception {
+        var scheduler = new JobScheduler();
+        var latch = new CountDownLatch(1);
+        // Built from parts so no secret-shaped literal sits in the source for scanners to flag.
+        String secret = "sk_" + "li" + "ve_" + "4eC39HqLyjWDarjtT1zdp7dcAbCdEf12";
+
+        scheduler.every("1s", "leaky-job", (db, ctx) -> {
+            latch.countDown();
+            throw new RuntimeException("upstream rejected key " + secret);
+        });
+
+        scheduler.start(null);
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        Thread.sleep(100);
+
+        var status = scheduler.getStatuses().get(0);
+        assertTrue(status.lastError().contains("upstream rejected key"), status.lastError());
+        assertFalse(status.lastError().contains(secret), status.lastError());
+        scheduler.stop();
+    }
+
+    @Test
     void jobMessageShownInStatus() throws Exception {
         var scheduler = new JobScheduler();
         var latch = new CountDownLatch(1);

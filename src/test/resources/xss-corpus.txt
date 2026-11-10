@@ -1,0 +1,573 @@
+#! Regression corpus for BraceHtmlOutput, read by BraceHtmlCorpusTest. From the probes of the
+#! independent review of the H1/L7 fixes (2026-11 security review): the review findings F1 to F5
+#! and the "Checked and cleared: Template attributes" list in
+#! docs/2026-11-09-security-review-todos.md. The sections from "Final review" on are the
+#! reproductions of the final whole-branch review (M1, L1 to L3 and the JTE comment oddity) and
+#! the cases it found holding.
+#!
+#! ### name          a template; lines up to the next "---" or "###" are its source. A name that
+#!                   starts with "_" is a helper for @template calls and is written as is; the
+#!                   others get "@param String x" and "@param String y".
+#! --- values        one render per line, "x||y" (y defaults to "Y"). \n \t \r \\ \uXXXX are
+#!                   read as escapes. Without this section the default values below are used.
+#! --- expect        the exact output for the value on the same line of "--- values" ("*": not
+#!                   checked). {{NL}} is a newline; nothing else is an escape.
+#! --- forbid        regular expressions that must not be found in the output for any value.
+#! --- error         the template must fail to compile, with this text in the message.
+#!
+#! Every render is done with template text as Strings and as UTF-8 bytes; the two must agree.
+
+### _x
+@param String u
+${u}
+### _lay
+@param gg.jte.Content body
+<html><head><title>t</title></head><body><svg class="i"><script href="/s.js"/></svg>${body}</body></html>
+
+#! ---------------------------------------------------------------- F1
+### f1-svg-self-closing-script
+<svg><script href="/a.js"/></svg><p>${x}</p><a href="${x}">l</a><a href="${x}:${y}">l</a>
+--- values
+javascript:alert(1)||alert(1)
+javascript||alert(1)
+data:text/html,<script>alert(1)</script>||x
+https||//example.com/a
+<b>&amp;</b>||z
+--- expect
+<svg><script href="/a.js"/></svg><p>javascript:alert(1)</p><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a>
+<svg><script href="/a.js"/></svg><p>javascript</p><a href="javascript">l</a><a href="about:invalid#blocked">l</a>
+<svg><script href="/a.js"/></svg><p>data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;</p><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a>
+<svg><script href="/a.js"/></svg><p>https</p><a href="https">l</a><a href="https://example.com/a">l</a>
+<svg><script href="/a.js"/></svg><p>&lt;b&gt;&amp;amp;&lt;/b&gt;</p><a href="&lt;b>&amp;amp;&lt;/b>">l</a><a href="&lt;b>&amp;amp;&lt;/b>:z">l</a>
+### f1-svg-in-layout
+@template._lay(body = @`<a href="${x}">l</a><a href="${x}:${y}">l</a><p>${x}</p>`)
+--- values
+javascript:alert(1)||alert(1)
+javascript||alert(1)
+data:text/html,<script>alert(1)</script>||x
+--- forbid
+(?i)href="\s*(javascript|data):
+\\u00
+### f1-svg-self-closing-style
+<svg><style/><a href="${x}">s</a></svg><p>${x}</p>
+--- values
+javascript:alert(1)
+<img src=x onerror=alert(1)>
+--- expect
+<svg><style/><a href="about:invalid#blocked">s</a></svg><p>javascript:alert(1)</p>
+<svg><style/><a href="&lt;img src=x onerror=alert(1)>">s</a></svg><p>&lt;img src=x onerror=alert(1)&gt;</p>
+### f1-svg-everything-after
+<svg><script href="/a.js"/></svg><p>${x}</p><div onclick="f('${x}')"></div><script>var a="${x}";</script><a href="${x}">after</a><div style="color:${x}"></div>
+--- forbid
+(?i)href="\s*(javascript|data):
+<p>[^<]*\\u00
+### f1-svg-integration-points
+<svg><title>t</title><desc>d ${x}</desc><foreignObject><p>${x}</p><a href="${x}:${y}">f</a></foreignObject><script href="/b.js"/><a href="${x}:${y}">s</a><text>${x}</text></svg><math><mi>${x}</mi><annotation-xml encoding="text/html"><a href="${x}:${y}">m</a></annotation-xml></math><a href="${x}:${y}">l</a>
+--- values
+javascript||alert(1)
+JAVASCRIPT||alert(1)
+'"<||x
+--- forbid
+(?i)href="javascript
+\\u00
+
+#! ---------------------------------------------------------------- F2
+### f2-comment-wrapped-script
+<script>
+<!--
+document.write("<script src='/x.js'></script>");
+var b = "${y}"; foo('${x}');
+//-->
+</script><p>after ${x}</p>
+--- values
+');alert(1);//||";alert(1);//
+</script><img src=x onerror=alert(1)>||ok
+--- expect
+<script>{{NL}}<!--{{NL}}document.write("<script src='/x.js'></script>");{{NL}}var b = "\u0022\u003balert\u00281\u0029\u003b\u002f\u002f"; foo('\u0027\u0029\u003balert\u00281\u0029\u003b\u002f\u002f');{{NL}}//-->{{NL}}</script><p>after ');alert(1);//</p>
+<script>{{NL}}<!--{{NL}}document.write("<script src='/x.js'></script>");{{NL}}var b = "ok"; foo('\u003c\u002fscript\u003e\u003cimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u003e');{{NL}}//-->{{NL}}</script><p>after &lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;</p>
+### f2-double-escaped-one-line
+<script><!--<script>var a="${x}";</script>var b="${y}";--></script><a href="${x}">l</a>
+--- values
+x||";alert(1);//
+x||\\
+javascript:alert(1)||</script><img src=x onerror=alert(1)>
+--- expect
+<script><!--<script>var a="x";</script>var b="\u0022\u003balert\u00281\u0029\u003b\u002f\u002f";--></script><a href="x">l</a>
+<script><!--<script>var a="x";</script>var b="\\";--></script><a href="x">l</a>
+<script><!--<script>var a="javascript\u003aalert\u00281\u0029";</script>var b="\u003c\u002fscript\u003e\u003cimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u003e";--></script><a href="about:invalid#blocked">l</a>
+
+#! ---------------------------------------------------------------- F3
+### f3-svg-script-body
+<svg><script>var a="${x}";</script></svg>
+--- values
+<img src=x onerror=alert(1)>
+</script><script>alert(1)</script>
+' onmouseover='alert(1)
+&lt;img src=x onerror=alert(1)&gt;
+plain
+--- expect
+<svg><script>var a="\u003cimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u003e";</script></svg>
+<svg><script>var a="\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e";</script></svg>
+<svg><script>var a="\u0027\u0020onmouseover\u003d\u0027alert\u00281\u0029";</script></svg>
+<svg><script>var a="\u0026lt\u003bimg\u0020src\u003dx\u0020onerror\u003dalert\u00281\u0029\u0026gt\u003b";</script></svg>
+<svg><script>var a="plain";</script></svg>
+### f3-svg-script-everything
+<svg><foreignObject><script>var a = "${x}";</script></foreignObject><style>a{color:${x}}</style><script>var b = '${x}';</script><script>/* <![CDATA[ */ var c = "${x}"; /* ]]> */</script><title>${x}</title></svg>
+--- forbid
+<img
+<script>alert
+### f3-html-script-body
+<script>var a = "${x}", t = `${x}`;</script><script type="application/json">{"a":"${x}"}</script>
+--- values
+a<b>&c
+</script><script>alert(1)</script>
+<!--<script>
+--- expect
+<script>var a = "a\u003cb\u003e\u0026c", t = `a\u003cb\u003e\u0026c`;</script><script type="application/json">{"a":"a\u003cb\u003e\u0026c"}</script>
+<script>var a = "\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e", t = `\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e`;</script><script type="application/json">{"a":"\u003c\u002fscript\u003e\u003cscript\u003ealert\u00281\u0029\u003c\u002fscript\u003e"}</script>
+<script>var a = "\u003c\u0021\u002d\u002d\u003cscript\u003e", t = `\u003c\u0021\u002d\u002d\u003cscript\u003e`;</script><script type="application/json">{"a":"\u003c\u0021\u002d\u002d\u003cscript\u003e"}</script>
+
+#! ---------------------------------------------------------------- F4
+### f4-hx-request
+<div hx-request='${x}' data-hx-request="${x}"></div><div hx-request='{"timeout": ${x}}'></div>
+--- values
+js:x:alert(1)
+ javascript:{x:alert(1)}
+\u00a0JS:alert(1)
+3000
+--- expect
+<div hx-request='{}' data-hx-request="{}"></div><div hx-request='{"timeout": js:x:alert(1)}'></div>
+<div hx-request='{}' data-hx-request="{}"></div><div hx-request='{"timeout":  javascript:{x:alert(1)}}'></div>
+*
+<div hx-request='3000' data-hx-request="3000"></div><div hx-request='{"timeout": 3000}'></div>
+### f4-hx-vals-and-headers
+<div hx-vals='${x}' hx-headers='${x}' data-hx-vals="${x}" hx-vals=' ${x}'></div><div hx-vals='${x}${y}' hx-headers="&#32;${x}"></div>
+--- values
+js:alert(1)||
+\ufeffjavascript:alert(1)||
+j||s:alert(1)
+--- forbid
+(?i)(js|javascript):
+
+#! ---------------------------------------------------------------- F5
+### f5-data-in-an-end-tag-match
+<script>var a = "</scr${x}ipt>"; var b = "${y}";</script><p>${y}</p>
+--- values
+z||";alert(1)//
+||";alert(1)//
+--- expect
+<script>var a = "</scrzipt>"; var b = "\u0022\u003balert\u00281\u0029\u002f\u002f";</script><p>";alert(1)//</p>
+<script>var a = "</script>"; var b = "\u0022\u003balert\u00281\u0029\u002f\u002f";</script><p>";alert(1)//</p>
+
+#! ------------------------------------- Checked and cleared: Template attributes
+### url-attributes-script-urls
+<a href="${x}">l</a><form action="${x}"><button formaction="${x}">b</button><input formaction="${x}"></form><object data="${x}"></object><embed src="${x}"><iframe src="${x}"></iframe><img src="${x}"><video poster="${x}"></video><blockquote cite="${x}"></blockquote><div hx-get="${x}" hx-post="${x}" hx-put="${x}" hx-patch="${x}" hx-delete="${x}" data-hx-get="${x}"></div><svg><a xlink:href="${x}">x</a><use href="${x}"/></svg><math><mi href="${x}">m</mi></math>
+--- values
+javascript:alert(1)
+\u0001javascript:alert(1)
+\u0000 \u001f javascript:alert(1)
+ javascript:alert(1)
+\tjavascript:alert(1)
+java\nscript:alert(1)
+java\tscript:alert(1)
+java\r\nscript:alert(1)
+javascript\n:alert(1)
+JaVaScRiPt:alert(1)
+JAVASCRIPT:alert(1)
+vbscript:msgbox(1)
+VBScript:msgbox(1)
+data:text/html,<script>alert(1)</script>
+DATA:text/html;base64,PHNjcmlwdD4=
+data:image/svg+xml,<svg onload=alert(1)>
+data:image/svg+xml;base64,PHN2Zz4=
+blob:https://x/1
+filesystem:https://x/temporary/a
+view-source:javascript:alert(1)
+feed:javascript:alert(1)
+--- forbid
+(?:href|src|action|formaction|data|poster|cite|hx-[a-z]+)="(?!about:invalid#blocked")
+### url-attributes-safe-urls
+<a href="${x}">l</a><form action="${x}"><button formaction="${x}">b</button></form><img src="${x}"><div hx-get="${x}"></div><svg><a xlink:href="${x}">x</a></svg>
+--- values
+/ok
+https://example.com/a?b=1&c=2
+mailto:a@example.com
+tel:+15551234
+#frag
+?page=2
+//cdn.example.com/x.js
+ok;javascript:alert(1)
+/search?q=time:10am
+--- forbid
+about:invalid
+### url-attributes-raster-data-only-on-src
+<img src="${x}"><video poster="${x}"></video><a href="${x}">l</a><form action="${x}"></form>
+--- values
+data:image/png;base64,AAAA
+data:image/svg+xml,<svg onload=alert(1)>
+--- expect
+<img src="data:image/png;base64,AAAA"><video poster="data:image/png;base64,AAAA"></video><a href="about:invalid#blocked">l</a><form action="about:invalid#blocked"></form>
+<img src="about:invalid#blocked"><video poster="about:invalid#blocked"></video><a href="about:invalid#blocked">l</a><form action="about:invalid#blocked"></form>
+### url-scheme-in-two-pieces
+<a href="${x}${y}">l</a><a href="${x}:${y}">l</a><a href="${x}&colon;${y}">l</a><a href="${x}&#58;${y}">l</a><a href="${x}&#x3A;${y}">l</a><a href=" ${x}:${y}">l</a>
+--- values
+javascript||alert(1)
+java||script:alert(1)
+JAVA||SCRIPT:alert(1)
+jav||&#97;script:alert(1)
+vbscript||msgbox(1)
+https||//example.com
+--- expect
+<a href="javascriptalert(1)">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a>
+<a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a>
+<a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a>
+*
+<a href="vbscriptmsgbox(1)">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a><a href="about:invalid#blocked">l</a>
+<a href="https//example.com">l</a><a href="https://example.com">l</a><a href="https&colon;//example.com">l</a><a href="https&#58;//example.com">l</a><a href="https&#x3A;//example.com">l</a><a href=" https://example.com">l</a>
+--- forbid
+(?i)href="\s*(java|vb)script(:|&colon;|&#58;|&#x3A;)
+### svg-animation-targets
+<svg><a href="${x}"><text>t</text></a><image href="${x}"/><set attributeName="href" to="${x}"/><animate attributeName="href" values="${x}"/><animate attributeName="href" from="${x}" to="${x}" by="${x}"/><animate attributeName="xlink:href" values="/a;${x}"/></svg>
+--- values
+javascript:alert(1)
+/a;javascript:alert(1)
+ java\tscript:alert(1)
+--- forbid
+(?i)values="[^"]*script:
+(?i)="\s*java\s*script:
+### template-call-inside-an-attribute
+<a href="@template._x(u = x)">l</a><a href="${y}@template._x(u = x)">l</a><a title="@template._x(u = x)">t</a><a title='@template._x(u = x)'>t</a><a onclick="f('@template._x(u = x)')">c</a>
+--- values
+javascript:alert(1)||
+script:alert(1)||java
+" onmouseover="alert(1)||/p
+' onmouseover='alert(1)||/p
+');alert(1);//||/p
+--- forbid
+(?i)href="javascript:
+"" onmouseover=
+'' onmouseover=
+f\(''\)
+### unquoted-attribute-value
+<a title=${x}>l</a>
+--- error
+Unquoted HTML attribute values are not allowed
+### unquoted-url-attribute-value
+<a href=/p/${x}>l</a>
+--- error
+Unquoted HTML attribute values are not allowed
+### unquoted-attribute-from-a-template-call
+<a title=@template._x(u = x)>l</a>
+--- error
+Unquoted HTML attribute values are not allowed
+### data-as-an-attribute-name
+<a ${x}="1">l</a>
+--- error
+Illegal HTML attribute name
+### template-call-as-an-attribute-name
+<a title="a" @template._x(u = x)>l</a>
+--- error
+Illegal HTML attribute name
+
+#! ------------------------------------- Final review, L1 and L3: script-body data is escaped whole
+#! Everything but letters, digits, "_", "," and non-ASCII is \uXXXX ("\" is "\\"), in every script
+#! body. JTE's own escapes (\' \- \` \$) are not JSON, and its \" still ended a pseudo-attribute
+#! when the browser read the script as markup and the tokenizer did not.
+### l3-json-script-block
+<script type="application/json" id="d">{"name": "${x}"}</script>
+--- values
+O'Brien
+a-b `c` $d
+a/b
+tab\tx
+back\\slash "q"
+café 😀, a_b
+--- expect
+<script type="application/json" id="d">{"name": "O\u0027Brien"}</script>
+<script type="application/json" id="d">{"name": "a\u002db\u0020\u0060c\u0060\u0020\u0024d"}</script>
+<script type="application/json" id="d">{"name": "a\u002fb"}</script>
+<script type="application/json" id="d">{"name": "tab\u0009x"}</script>
+<script type="application/json" id="d">{"name": "back\\slash\u0020\u0022q\u0022"}</script>
+<script type="application/json" id="d">{"name": "café\u0020😀,\u0020a_b"}</script>
+--- forbid
+\\['`$-]
+### l1-svg-font-then-script
+<svg width="10" height="10"><defs><font id="f" horiz-adv-x="10"></font></defs><script>if (a<b && ok) { t = "${x}"; }</script></svg>
+--- values
+"x
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(2) x="
+--- expect
+<svg width="10" height="10"><defs><font id="f" horiz-adv-x="10"></font></defs><script>if (a<b && ok) { t = "\u0022x"; }</script></svg>
+*
+--- forbid
+ style=
+statechange=
+\\"
+### l1-math-annotation-xml-script
+<math><annotation-xml encoding="application/x-tex"><script>var n = 0<i ? "${x}" : "";</script></annotation-xml></math>
+--- values
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(3) x="
+--- forbid
+ style=
+statechange=
+\\"
+### script-data-in-every-literal
+<script>var a = "${x}", t = `${x}`, r = /${x}/;</script><svg><script>var a = `${x}`;</script></svg>
+--- values
+${alert(1)}
+x/;alert(1);/
+</script><!--
+--- expect
+<script>var a = "\u0024\u007balert\u00281\u0029\u007d", t = `\u0024\u007balert\u00281\u0029\u007d`, r = /\u0024\u007balert\u00281\u0029\u007d/;</script><svg><script>var a = `\u0024\u007balert\u00281\u0029\u007d`;</script></svg>
+<script>var a = "x\u002f\u003balert\u00281\u0029\u003b\u002f", t = `x\u002f\u003balert\u00281\u0029\u003b\u002f`, r = /x\u002f\u003balert\u00281\u0029\u003b\u002f/;</script><svg><script>var a = `x\u002f\u003balert\u00281\u0029\u003b\u002f`;</script></svg>
+<script>var a = "\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d", t = `\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d`, r = /\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d/;</script><svg><script>var a = `\u003c\u002fscript\u003e\u003c\u0021\u002d\u002d`;</script></svg>
+### table-then-svg-script
+<table><svg><desc><td></td></desc><script>var a = "${x}", b = "${y}";</script></svg></table>
+--- values
+";alert(1)//||ok
+\\||;alert(1)//
+--- expect
+<table><svg><desc><td></td></desc><script>var a = "\u0022\u003balert\u00281\u0029\u002f\u002f", b = "ok";</script></svg></table>
+<table><svg><desc><td></td></desc><script>var a = "\\", b = "\u003balert\u00281\u0029\u002f\u002f";</script></svg></table>
+#! Cases the final review checked and found holding, pinned with the new escaping.
+### svg-script-regex-with-a-url-attribute
+<svg><script>var a = "${x}"; var re = /<a href="${y}"/;</script></svg>
+--- values
+x||javascript:alert(1)
+x||/ok
+--- expect
+<svg><script>var a = "x"; var re = /<a href="about:invalid#blocked"/;</script></svg>
+<svg><script>var a = "x"; var re = /<a href="\u002fok"/;</script></svg>
+### svg-cdata-then-link-and-script
+<svg><![CDATA[ <script> ]]><a href="${x}">l</a><script>var a = "${y}";</script></svg>
+--- values
+javascript:alert(1)||";alert(1)//
+--- expect
+<svg><![CDATA[ <script> ]]><a href="about:invalid#blocked">l</a><script>var a = "\u0022\u003balert\u00281\u0029\u002f\u002f";</script></svg>
+### unsafe-content-inside-a-held-value
+<a href="/p/${x}$unsafe{y}">l</a>|<a href="$unsafe{y}${x}">l</a>|<div hx-vals='$unsafe{y}${x}'></div>|<a href="${x}$unsafe{y}">k</a>
+--- values
+X||UNSAFE
+javascript||:alert(1)
+:alert(1)||javascript
+:alert(1)||js
+--- expect
+<a href="/p/XUNSAFE">l</a>|<a href="UNSAFEX">l</a>|<div hx-vals='UNSAFEX'></div>|<a href="XUNSAFE">k</a>
+<a href="/p/javascript:alert(1)">l</a>|<a href=":alert(1)javascript">l</a>|<div hx-vals=':alert(1)javascript'></div>|<a href="about:invalid#blocked">k</a>
+<a href="/p/:alert(1)javascript">l</a>|<a href="about:invalid#blocked">l</a>|<div hx-vals='{}'></div>|<a href=":alert(1)javascript">k</a>
+<a href="/p/:alert(1)js">l</a>|<a href="about:invalid#blocked">l</a>|<div hx-vals='{}'></div>|<a href=":alert(1)js">k</a>
+### url-in-two-pieces-held
+<a href="${x}${y}">l</a>
+--- values
+j||avascript:alert(1)
+javascript||:alert(1)
+/a||/b
+--- expect
+<a href="about:invalid#blocked">l</a>
+<a href="about:invalid#blocked">l</a>
+<a href="/a/b">l</a>
+#! <font> ends foreign content only with a color, face or size attribute: an SVG font doesn't, so
+#! the self-closing <script/> after it is complete and the rest of the page is read as it is.
+### svg-font-without-color-face-size-is-foreign
+<svg><defs><font id="f" horiz-adv-x="10"></font></defs><script href="/a.js"/></svg><p title="${x}">${x}</p><a href="${y}">l</a><div hx-vals='{"q": "${x}"}'></div>
+--- values
+it's "q" <b>||/ok?a=1&b=2
+it's "q" <b>||javascript:alert(1)
+--- expect
+<svg><defs><font id="f" horiz-adv-x="10"></font></defs><script href="/a.js"/></svg><p title="it&#39;s &#34;q&#34; &lt;b>">it's "q" &lt;b&gt;</p><a href="/ok?a=1&amp;b=2">l</a><div hx-vals='{"q": "it\u0027s \u0022q\u0022 \u003cb\u003e"}'></div>
+<svg><defs><font id="f" horiz-adv-x="10"></font></defs><script href="/a.js"/></svg><p title="it&#39;s &#34;q&#34; &lt;b>">it's "q" &lt;b&gt;</p><a href="about:invalid#blocked">l</a><div hx-vals='{"q": "it\u0027s \u0022q\u0022 \u003cb\u003e"}'></div>
+### svg-font-with-face-is-html
+<svg><font face="x"></font><script>if (a<b) { t = "${x}"; }</script></svg><p>${y}</p>
+--- values
+" onload="alert(1)||<b>
+--- expect
+<svg><font face="x"></font><script>if (a<b) { t = "\u0022\u0020onload\u003d\u0022alert\u00281\u0029"; }</script></svg><p>&lt;b&gt;</p>
+
+#! ------------------------------------- Final review, L2: hx-vals that can't be held and judged whole
+#! The tokenizer reads <annotation-xml> as HTML content whatever its encoding, so here it takes
+#! the self-closing <script/> for a script body that runs to the last </script>: no value is held
+#! in between, and each ${...} of an attribute JTE reports is on its own. An hx-vals, hx-headers
+#! or hx-request value is then "{}" once, whatever the data, so it can't be put together piecewise.
+### l2-hx-vals-in-pieces-during-a-desync
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='${x}${y}' hx-headers='{"a": "${x}", "b": "${y}"}' data-hx-request=' ${x}:${y}'></div><script>var q = 1;</script>
+--- values
+j||s:alert(1)
+js||:alert(1)
+||js:alert(1)
+{"a":1}||
+ok||fine
+--- expect
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": "{}"}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": "{}"}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "", "b": "{}"}' data-hx-request=' :{}'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": ""}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><div hx-vals='{}' hx-headers='{"a": "{}", "b": "{}"}' data-hx-request=' {}:'></div><script>var q = 1;</script>
+--- forbid
+(?i)(js|javascript)\s*:
+### l2-url-in-pieces-during-a-desync
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="${x}${y}">k</a><a href="${x}:${y}">k</a><a href="javascript:go('${x}')">l</a><script>var q = 1;</script>
+--- values
+j||avascript:alert(1)
+javascript||:alert(1)
+java||script:alert(1)
+');alert(1)//||x
+/a||/b
+--- expect
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="about:invalid#blockedabout:invalid#blocked">k</a><a href="about:invalid#blocked:about:invalid#blocked">k</a><a href="javascript:go('about:invalid#blocked')">l</a><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="about:invalid#blocked:alert(1)">k</a><a href="about:invalid#blocked::alert(1)">k</a><a href="javascript:go('about:invalid#blocked')">l</a><script>var q = 1;</script>
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="about:invalid#blockedabout:invalid#blocked">k</a><a href="about:invalid#blocked:about:invalid#blocked">k</a><a href="javascript:go('about:invalid#blocked')">l</a><script>var q = 1;</script>
+*
+<math><annotation-xml encoding="application/x-tex"><script href="/a.js"/></annotation-xml></math><a href="/a/b">k</a><a href="/a:/b">k</a><a href="javascript:go('/a')">l</a><script>var q = 1;</script>
+--- forbid
+(?i)href="\s*javascript:(?!go)
+go\(('|&#39;)\)
+#! Without the desync the values are held and judged whole, as before.
+### l2-hx-vals-in-pieces-held
+<div hx-vals='${x}${y}' hx-headers='{"a": "${x}", "b": "${y}"}' data-hx-request=' ${x}:${y}'></div><a href="${x}${y}">k</a>
+--- values
+j||s:alert(1)
+ok||fine
+--- expect
+<div hx-vals='{}' hx-headers='{"a": "j", "b": "s:alert(1)"}' data-hx-request=' j:s:alert(1)'></div><a href="about:invalid#blocked">k</a>
+<div hx-vals='okfine' hx-headers='{"a": "ok", "b": "fine"}' data-hx-request=' ok:fine'></div><a href="okfine">k</a>
+
+#! ------------------------------------- Final review, M1: data inside a tag, outside a quoted value
+#! A script or style body in <svg>/<math> is markup to a browser, so "0<i ?" opens a tag and a
+#! string that doesn't follow "=" is in attribute-name position. Every character there is escaped.
+### m1-svg-script-string-in-attribute-name-position
+<svg width="10" height="10"><circle r="4"/><script>var n = 0<i ? "${x}" : "";</script></svg>
+--- values
+ok
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(4) x="
+--- expect
+<svg width="10" height="10"><circle r="4"/><script>var n = 0<i ? "\u006f\u006b" : "";</script></svg>
+*
+--- forbid
+ style=
+statechange=
+### m1-svg-script-no-special-character-needed
+<svg width="10" height="10"><script>if (a<b && ok) { log("${x}"); }</script></svg>
+--- values
+x style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(5) y
+hidden
+--- expect
+*
+<svg width="10" height="10"><script>if (a<b && ok) { log("\u0068\u0069\u0064\u0064\u0065\u006e"); }</script></svg>
+--- forbid
+ style=
+statechange=
+### m1-svg-style-tag-opened-by-less-than
+<svg><style>@media (400px<width) { a{fill:${x}} }</style></svg>
+--- values
+red
+x style=display:block onfocus=alert(1) autofocus
+--- expect
+<svg><style>@media (400px<width) { a{fill:\72 \65 \64 } }</style></svg>
+*
+--- forbid
+ autofocus
+onfocus
+### m1-svg-script-tag-name-and-unquoted-value
+<svg><script>var t = "<${x}>"; if (i<n) k=${y};</script></svg>
+--- values
+img src=x onerror=alert(1)||1 onfocus=alert(1) autofocus
+p||7
+--- expect
+*
+<svg><script>var t = "<\u0070>"; if (i<n) k=\u0037;</script></svg>
+--- forbid
+<img
+<p
+ onfocus=
+ autofocus
+### m1-quoted-after-equals-is-a-value
+<svg><script>if (a<b && ok) { t = "${x}"; u = '${x}'; }</script></svg>
+--- values
+" style=display:block;content-visibility:auto oncontentvisibilityautostatechange=alert(6) x="
+--- forbid
+["'] style=
+### m1-html-script-is-raw-text
+<script>var n = 0<i ? "${x}" : "";</script>
+--- values
+ok
+--- expect
+<script>var n = 0<i ? "ok" : "";</script>
+#! JTE 3.2.1 drops the template text before a template's first comment when the text after the
+#! comment has a "<letter" still open at the next ${...}: here "<p>intro</p><script>" is lost, the
+#! script's source is body text, and "i<n;" is a real tag with the data in attribute-name position.
+### m1-jte-drops-the-text-before-a-first-comment
+<p>intro</p>
+<script>
+  // set up
+  for (var i = 0; i<n; i++) { items.push("${x}"); }
+</script>
+--- values
+ok
+x style=display:block onfocus=alert(1) autofocus y
+--- expect
+{{NL}}  for (var i = 0; i<n; i++) { items.push("\u006f\u006b"); }{{NL}}</script>
+*
+--- forbid
+ style=
+onfocus=
+ autofocus
+### m1-jte-drops-the-text-before-a-first-comment-cdata
+<svg><script>// <![CDATA[
+if (a<b && c) { log("${x}"); }
+// ]]></script></svg>
+--- values
+ok
+x style=display:block onfocus=alert(1) "<i>
+--- expect
+{{NL}}if (a<b && c) { log("\u006f\u006b"); }{{NL}}</script></svg>
+*
+--- forbid
+ style=
+onfocus=
+<i>
+#! With a ${...} before the comment nothing is dropped; JTE still strips the comments themselves
+#! ("//" to the end of the line and "/* */" in a script, "/* */" in a style, "<!-- -->" in markup).
+### jte-strips-comments
+<p>${y}</p><svg><script>// <![CDATA[
+if (a<b && c) { log("${x}"); }
+// ]]></script></svg><script>var u = "http://x"; // trailing
+var a = "${x}"; /* block */ var b = 1;</script><style>/* c */ a{color:${x}}</style><div><!-- c --><p>${x}</p></div>
+--- values
+ok||Y
+--- expect
+<p>Y</p><svg><script>{{NL}}if (a<b && c) { log("\u006f\u006b"); }{{NL}}</script></svg><script>var u = "http://x"; {{NL}}var a = "ok";  var b = 1;</script><style> a{color:ok}</style><div><p>ok</p></div>
+### m1-jte-drops-the-text-before-a-first-block-comment
+<script>/* c */ for (i=0;i<n;i++) { log("${x}"); }</script>
+--- values
+7
+x style=display:block onfocus=alert(1) autofocus y
+--- expect
+ for (i=0;i<n;i++) { log("\u0037"); }</script>
+*
+--- forbid
+ style=
+onfocus=
+ autofocus
+### m1-svg-style-pseudo-tag-name
+<svg><style>a{color:${x}} b<c{content:"${y}"}</style></svg>
+--- values
+red||ok
+red;}*{background:url(//evil)}||"><img src=x onerror=alert(1)>
+--- expect
+<svg><style>a{color:red} b<c{content:"\6f \6b "}</style></svg>
+*
+--- forbid
+<img
+onerror
+### m1-jte-drops-the-text-before-a-first-css-comment
+<style>/* c */ a<b { color: ${x} }</style>
+--- values
+red
+x style=display:block onfocus=alert(1) autofocus y
+--- expect
+ a<b { color: \72 \65 \64  }</style>
+*
+--- forbid
+ style=
+onfocus=
+ autofocus

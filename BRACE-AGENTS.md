@@ -27,6 +27,12 @@ lists breaking changes with before/after examples. Guides live at
 https://github.com/larvalabs/brace/tree/main/docs/migrations and in the dist zip at
 `brace-X.Y.Z/migrations/brace-FROM-to-TO.md`.
 
+The launcher refuses a project whose `<brace.version>` is older than the oldest toolchain it
+runs (`This project pins brace X, older than Y, the oldest this launcher runs`), because older
+CLIs have security bugs fixed since; a prerelease counts as older than its release. Raise
+`<brace.version>`. `BRACE_ALLOW_OLD_TOOLCHAIN=1` runs the old pin anyway, for the one command
+that needs it.
+
 After bumping `<brace.version>`, run `brace agents-md` to refresh this file (and `BRACE-OPS.md`).
 Both are written once at `brace new` time and do not update themselves, so without the refresh
 they silently document the old version's API. (`brace agents-md --stdout` prints instead of
@@ -84,9 +90,9 @@ var app = Brace.app()
     .cache(Brace.cache())
     .storage(Storage.s3(config))
     .ops("ops-authorized-keys")
-    .opsOrigins(config.get("ops.origins"))           // the app's public origin: required in prod with ops
-    .staticFiles("/assets", "public")
-    .maxUploadSize("10MB")
+    .opsOrigins(config.get("ops.origins"))           // the app's public origin: required with ops outside dev
+    .staticFiles("/assets", "public").publicFiles()   // a mapping must say .publicFiles() or .access(...)
+    .maxUploadSize("10MB")                            // K/KB, M/MB, G/GB, any case; or a byte count
     .after(SecurityHeaders.strict());
 ```
 
@@ -94,7 +100,8 @@ Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, 
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
-yourself.
+yourself. A stopped app without a database can be started again; one started with a database
+cannot (`start()` throws `IllegalStateException`): build a new `Brace` instead.
 
 ## Routing
 
@@ -226,12 +233,48 @@ app.postDb("/billing/refund", billing::refund)
   inside a group that has a requirement, fails `start()`: register public pages outside the
   restricted group.
 - They run after plain `before(...)` middleware (rate limiters shed load first) and before the
-  body is read and CSRF is checked. A session-reading requirement sees the same `Session` the
+  framework reads the body for the handler and CSRF is checked. (A plain `before` that itself
+  calls `req.body()`/`formParam`/`form` reads the body first, e.g. a login limiter keyed on a
+  form field.) A session-reading requirement sees the same `Session` the
   handler gets, and needs `.sessions(...)` (`start()` throws without it).
 - They are bound to the route, so `/x/`, percent-encoded and `HEAD` requests to a guarded route
   are guarded the same way. WebSocket routes work the same: `app.ws(...).publicRoute()`.
 - `/ops/*` has its own credential; the app default never applies there. The startup banner and
   `/ops/routes` show each route's access.
+
+**Static mappings need a declaration too.** `staticFiles(...)` returns a config, and `start()`
+refuses a mapping that says neither of these:
+
+```java
+app.staticFiles("/assets", "public").publicFiles();                 // everyone (CSS, JS, images)
+app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
+   .access(Access.session("userId", "/login"));                     // all listed requirements must pass
+```
+
+- `defaultAccess(...)` does **not** apply to mappings (not `Access.none()` either): a mapping's
+  access is exactly what `.access(...)` lists. Both methods return the app, so a builder chain
+  continues.
+- The requirements are bound to the mapping and run before the file is looked up, for every
+  method, at the same point as a route's, with the same `Session`. A rejection looks the same
+  whether or not the file exists. A served file is `Cache-Control: private, no-cache`; every
+  other response under a guarded mapping (rejection, 404, 405) is `no-store`, and caching
+  headers set by an `after(...)` are removed there.
+- A mapping serves `GET`/`HEAD` only; other methods get `405`. A route (or `app.ws(...)`
+  socket) registered under a mapping's prefix owns its path: the mapping never serves it, under
+  any method. A request for it under another method runs that route's access first (a caller it
+  refuses gets the same rejection), then gets `405` (`426` for a plain request to a socket
+  path). `start()` logs a warning listing such routes. The prefix must start with `/`
+  (`staticFiles("assets", dir)` throws).
+- `start()` throws if a mapping's directory doesn't exist, or if two mappings' directories
+  overlap (same, nested, or via a symlink) with different access: pass the same `Access`
+  objects to both if they should match. Registering the same prefix twice throws.
+  `/__brace/*` assets are always public. The banner and `/ops/routes` (`STATIC`) list mappings.
+- An access rejection (route or mapping) is always sent `Cache-Control: no-store` with
+  `Vary: Accept, HX-Request`. In dev mode a guarded route answering `Cache-Control: public` or
+  `s-maxage` logs a warning once.
+- A mapping answers "may this user fetch from this directory". For a per-file check (the
+  file's owner), serve from a route: `db.findOwnedOr404(...)`, then `Result.fileUnder(dir, name)`
+  (add `.untrusted()` for uploads).
 
 This is route-level access — whether a user may call the endpoint. Whether they may touch a
 particular row (`/posts/{id}/edit` for someone else's post) is still the handler's check.
@@ -340,7 +383,8 @@ path written. `saveTo(Path)` takes a full path and does no checking. `contentTyp
 uploader's claim; never serve or store by it.
 
 **Serving uploads:** an uploaded `.html`/`.svg` served inline runs script on your origin. Serve
-upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED)` and handler
+upload directories with `app.staticFiles("/uploads", dir, StaticFiles.UNTRUSTED).access(...)` (or
+`.publicFiles()` if anyone may fetch them; see Access) and handler
 responses with `.untrusted()` (`Result.fileUnder(dir, name).untrusted()`). Untrusted responses get
 an allowlisted type (else `application/octet-stream`), `Content-Disposition: attachment` unless a
 raster image (png/jpeg/gif/webp/avif/bmp/ico; not svg), and always `CSP: sandbox` + `nosniff`,
@@ -441,7 +485,13 @@ result.cookie("t", "v", 3600, true, true, "Lax", "/admin")  // ...plus an explic
 
 `Set-Cookie` is the one repeatable header: multiple `result.cookie(...)` calls all reach the
 wire (and your app cookies are never clobbered by the framework session cookie). Every other
-header is single-value — setting it again replaces the prior value.
+header is single-value — setting it again replaces the prior value. Header names are
+case-insensitive (ASCII case): `result.header("cache-control", ...)` replaces `Cache-Control`, and
+`result.header("Cache-Control")` reads either spelling. A name must be an HTTP token (ASCII
+letters, digits and ``!#$%&'*+-.^_`|~``): `result.header("X A", v)` or an empty or non-ASCII
+name throws `IllegalArgumentException`. A response that carries the session
+cookie is always sent `Cache-Control: private` (added to whatever the handler set, unless it
+already says `private` or `no-store`).
 
 Note: `Json.of()`, `View.of()`, and `Redirect.to()` still work (called by the `Result.*` methods).
 
@@ -649,6 +699,10 @@ if (jf.hasErrors()) return Result.json(Map.of("errors", jf.allErrors()), 422);
 
 `Form` methods: `hasErrors()`, `value()`, `errors()`, `allErrors()`, `errors(field)`, `raw(field)`.
 
+**Where `req.form` reads from:** on `POST`/`PUT`/`PATCH`/`DELETE`, the body only (the same
+source as `req.formParam`); a query-string value never fills a missing body field. On `GET`/`HEAD`
+(search and filter forms) it binds from the query string.
+
 **JSON APIs use the same pipeline** via `req.jsonForm(Class)` — never hand-roll per-field
 null checks or wrap `bodyAs` in try/catch. It binds the JSON body to the record, runs the
 annotations plus `validate(Errors)`, and turns a malformed or non-object body into a
@@ -693,20 +747,41 @@ of JTE's escaping, Brace's template output:
   is kept; when user data decides the scheme, only `http`/`https`/`mailto`/`tel` pass (plus raster
   `data:image/png|jpeg|gif|webp|avif|bmp` on `src`/`poster`), and anything else (`javascript:`,
   `data:`, `java\tscript:`, `${scheme}://${host}` with a `javascript` scheme) renders as
-  `about:invalid#blocked`.
+  `about:invalid#blocked`. So does a `javascript:` URL the template wrote with any `${...}` in it
+  (`href="javascript:go('${id}')"`): use a `data-*` attribute and a script file instead.
 - **Script attributes** (`on*`, `hx-on*`, `hx-vals`, `hx-vars`, `hx-headers`, `hx-request`,
   `hx-trigger`): user data is escaped with `\uXXXX` sequences, valid in a JavaScript string and in
   JSON, so `hx-on:click="select('${name}')"` passes `name` as a string and
-  `hx-vals='{"q": "${q}"}'` stays valid JSON. When data is the whole `hx-vals`/`hx-headers` value
+  `hx-vals='{"q": "${q}"}'` stays valid JSON. When data is the whole `hx-vals`/`hx-headers`/`hx-request` value
   (`hx-vals='${json}'`, JSON the handler built), it's attribute-escaped instead, so the JSON stays
-  intact; a whole value starting `js:` becomes `{}`. Still, these attributes are code: prefer passing
-  user data as `hx-vals` JSON or `data-*` attributes over writing it into a handler. The same rules
-  apply to data a `@template` call writes inside an attribute value.
+  intact. If data supplies any of a leading `js:`/`javascript:` (which htmx evaluates), in one piece
+  or several and behind any Unicode whitespace, the whole value becomes `{}`. Still, these attributes are code: prefer passing
+  user data as `hx-vals` JSON or `data-*` attributes over writing it into a handler. The escaping
+  only protects data inside a quoted string (`onclick="go('${id}')"`); data that is the code itself
+  (`onclick="${js}"`, `hx-trigger="${trigger}"`, where `click[alert(1)]` is a valid trigger) runs.
 - `srcdoc`: user data is escaped twice, so it becomes text in the frame, never markup. Its content
   isn't URL-checked; for an HTML preview, sanitize the HTML, write it with
   `srcdoc="$unsafe{Html.escape(sanitized)}"`, and add `sandbox` to the iframe.
-- A `@template` call inside an attribute value renders its output in body context (JTE), without
-  attribute escaping or the URL check: pass values, not template calls, into attributes.
+- **CSS** (`<style>` bodies and `style=""`): characters other than letters, digits, spaces and
+  `# % . _ -` are written as CSS hex escapes, so data can't end its declaration or rule. Plain
+  values (`style="color: ${color}"`, `width: ${pct}%`) and data in a quoted CSS string
+  (`url("${image}")`) work; `style="${wholeDeclarationList}"` and `rgb(...)` as data don't.
+- **`<script>` bodies**: everything in the data but ASCII letters, digits, `_`, `,` and non-ASCII
+  characters is written as `\uXXXX` (`O'Brien` renders as `O\u0027Brien`). A JavaScript string,
+  a template literal, a regex literal and `JSON.parse` all read the original value back, so
+  `<script type="application/json">{"name": "${name}"}</script>` works with any value; only the
+  page source looks different. Put data only inside a quoted string (`var name = "${name}";`):
+  `var n = ${count};` is code, not data, and breaks on anything but letters and digits (`1.5`,
+  `-3`); write `Number("${count}")`. Write `<script src="/app.js"></script>`, never
+  `<script src="/app.js"/>`: HTML has no self-closing script, and the browser swallows the page up
+  to the next `</script>` (it is a complete element only inside `<svg>`). In a script inside
+  `<svg>`, `a<b` opens a tag to the browser; data that lands in one outside a quoted value has
+  every character escaped (the script still reads it back). JTE strips `//` and `/* */` comments
+  from scripts, and JTE 3.2.1 drops the template text before a template's first comment when
+  that comment sits in a script ahead of code like `i<n` (no spaces) and the first `${...}`: if a
+  page loses its top, write `i < n` or move the comment (see `docs/SECURITY.md`).
+- The same rules apply to data a `@template` call or content block writes inside an attribute
+  value: the context comes from the HTML written so far, not from the template source.
 
 `$unsafe{...}` bypasses all of it. Outside templates, `Url.isSafe(url)` / `Url.safe(url)` apply
 the same URL rule (e.g. a URL returned in JSON for a client to put in an `href`).
@@ -762,7 +837,9 @@ app.sessionValidator(s -> !s.has("userId") || Objects.equals(s.get("sessionVersi
 
 **Rotating the secret:** `SessionOptions.of(newSecret).previousSecrets(oldSecret)` keeps old
 cookies working and re-seals them with the new secret; drop the old one after the absolute
-lifetime. On Postgres with WebSockets, instances on different secrets don't share broadcasts
+lifetime. Never list a public or leaked secret (including the `brace new` placeholder, which startup
+refuses) as previous; a previous-secret cookie without `_abs` is rejected. `app.sessions(options)`
+copies the options: configure them fully before the call, later changes are ignored. On Postgres with WebSockets, instances on different secrets don't share broadcasts
 until all are rotated (the bus key derives from the current secret).
 
 ```java
@@ -776,7 +853,7 @@ session.remove("userId");             // remove key
 session.clear();                       // remove all
 ```
 
-Configure cookie security with `app.sessions(SessionOptions.secure("secret").maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `absoluteMaxAge(Duration)`, `previousSecrets(String...)`, `path(String)`, `domain(String)`.
+Configure cookie security with `app.sessions(SessionOptions.secure(config.get("session.secret")).maxAgeDays(14).sameSiteStrict())` — `secure(secret)` means HttpOnly + Secure + SameSite=Lax. `SessionOptions` methods: `of(secret)`, `secure(secret)`, `httpOnly(bool)`, `secure(bool)`, `sameSiteStrict()`, `sameSiteLax()`, `sameSiteNone()`, `maxAge(Duration)`, `maxAgeDays(int)`, `absoluteMaxAge(Duration)`, `previousSecrets(String...)`, `path(String)`, `domain(String)`.
 
 **The `Secure` attribute is on by default.** With no explicit `.secure(...)`, Brace resolves it per request: on unless the request's host is a loopback address, and always on when a trusted proxy reports `X-Forwarded-Proto: https`. The host is `X-Forwarded-Host` when a trusted proxy sends it, else `Host`; a loopback host is still treated as production when the browser's `Origin`/`Referer` is an `https://` page on a real host (a proxy rewriting `Host` — nginx's default — logs a one-time warning naming the fix: `proxy_set_header Host $host;`). So production gets `Secure` with no configuration and `http://localhost` (dev, `Brace.test()`) keeps working. An app genuinely served over plain HTTP on a real hostname must opt out with `.secure(false)`, which logs a startup warning. Do not add `.secure(false)` to make a local setup work — check the Host first.
 
@@ -792,7 +869,9 @@ CSRF protection is **required by default** on POST/PUT/DELETE/PATCH requests whe
   that is expected, and any rendered value validates.
 - **htmx:** put `${csrfMeta}` (declare `@param gg.jte.Content csrfMeta = null`) in the layout's
   `<head>` and load `<script src="/__brace/csrf-htmx.js"></script>` after htmx. Every non-GET
-  htmx request then carries the token; no per-element `hx-headers`.
+  same-origin htmx request then carries the token; no per-element `hx-headers`. The helper sends
+  no `X-CSRF-Token` to another origin, even one set in `hx-headers`; set it in a later
+  `htmx:configRequest` listener on `document` if a cross-origin call needs one.
 - **fetch:** declare `@param String csrfToken = null` and render
   `<meta name="csrf-token" content="${csrfToken}">` (or use `${csrfMeta}`), then send it in the
   `X-CSRF-Token` header with `credentials: 'include'` so cookies are sent. `csrfToken` is masked per render too;
@@ -832,6 +911,7 @@ cache.clearTag("posts");                               // remove all with tag
 cache.incr("counter");                                 // atomic increment
 cache.decr("counter");                                 // atomic decrement
 cache.clear();                                         // remove all
+cache.allowType(Rule.class);                           // shared backend: Rule readable via a supertype (startup)
 ```
 
 Route-level page caching:
@@ -845,8 +925,40 @@ cache.clearTag("posts");  // invalidate all cached pages with this tag
 **Query params are ignored by default** — a cached route serves one entry per path. If the
 page's content depends on a param (`?page=`, `?sort=`), declare it with `.vary("page", "sort")`
 or the cache will serve the same entry for every value. Undeclared params never key the cache
-(so `?utm_source=...` junk can't mint entries). The in-memory backend is capped at 10,000
-entries (drop-expired-then-arbitrary past the cap; `CacheBackend.inMemory(maxEntries)` to size).
+(so `?utm_source=...` junk can't mint entries). A param given twice (`?t=a&t=b`) keys on all its
+values. Headers key the cache only when declared: `.varyHeader("Accept-Language")` (the value
+enters the key as a SHA-256 digest, so a declared `Authorization` is never stored in clear). A
+request carrying `Authorization`, `HX-Target`, `HX-Trigger`, `HX-Trigger-Name`, `HX-Boosted` or
+`HX-Prompt` bypasses the cache (served by the handler, nothing stored) unless that header is
+declared with `.varyHeader(...)`; so does an `HX-Request` with any value but `true`. A response
+that sets a cookie is never stored (and keeps its `Set-Cookie`). A `HEAD` may be served a cached
+`GET` page but never stores one, and a request whose raw path is not in normal form (`/p/%62` for
+`/p/b`, lower-case hex, raw non-ASCII) may be served the entry but never stores it.
+
+**A cached handler must depend only on its route's path parameters and its declared `vary` /
+`varyHeader` values.** Reading anything else through `Request` (another query param, `req.url()`,
+the raw `req.path()`, a header, a cookie, `req.ip()`, the body) means the page stored for one
+visitor is served to the next whatever they send; in dev mode Brace logs this once per route, and
+under `Brace.test()` the request fails with an `IllegalStateException`, so a test catches it. Use
+`req.pathParam(...)`, not `req.path()`, in a cached handler: one key covers several spellings of
+the raw path (`/p/!` and `/p/%21`). `Paged` links are fine in a cached handler
+(`cache.wrap("1h", req -> View.of("list", "rows", Paged.slice(all, req, 10))).vary("page")`): there
+they carry only the declared `vary` params, so an undeclared `?ref=` never reaches a stored page.
+
+Page-cache entries (keys starting `brace:page:`) never push out your own entries, and
+`set`/`getOrSet`/`delete` refuse an app key with that prefix (`IllegalArgumentException`);
+`deletePrefix("brace:page:")`, tags and `clear()` still clear pages. The in-memory backend is
+capped at 10,000 entries (expired first, then the page entries least recently hit, then arbitrary
+ones; a new page entry only displaces another page entry; `CacheBackend.inMemory(maxEntries)` to
+size). The Postgres backend is capped at 100,000 rows, of which at most 10,000 page rows (expired
+first, then page rows least recently written or hit, then app rows soonest-to-expire, rows
+without a TTL last; `CacheBackend.postgres(dbFactory, maxEntries)` or
+`CacheBackend.postgres(dbFactory, maxEntries, maxPageEntries)` to size).
+
+**Only 2xx responses are stored.** An error, a redirect or a 304 is served uncached, so one bad
+request can't pin it for everyone. The key is the matched **route pattern plus its decoded path
+parameters** (`/posts/hello` and `/posts/hell%6f` are one entry), the method (`HEAD` reads the
+`GET` entry), the `HX-Request` variant, and the declared `vary` params and `varyHeader` headers.
 
 **A cached page is shared by every visitor**, so it must not contain per-visitor content. A
 response that includes the visitor's CSRF token (`${csrfField}`, `${csrfToken}`), or whose
@@ -878,7 +990,8 @@ Choose **per use case**, not per deployment — you can run both (a default in-p
 | Cached pages that must match across the fleet | shared |
 
 Constraints on the shared backend (the in-process default has none of these):
-- **Values must be Jackson-round-trippable** (POJOs, records, collections, primitives, String). A non-serializable value (a stream, a live handle) throws at `set` time. A `get` with the wrong `Class` fails loudly (values carry a type header).
+- **Values must be Jackson-round-trippable** (POJOs, records, collections, primitives, String). A non-serializable value (a stream, a live handle) throws at `set` time. A `get` with the wrong `Class` fails loudly (values carry a type header). Elements inside a collection carry no type: a `List<Foo>` comes back holding `LinkedHashMap`s, so cache a record or array wrapping it, or convert.
+- **Read with the concrete class.** `get(key, Rule.class)` for a stored `Rule` always works. A read through a supertype (`Object`, an interface, a base class), or `getOrSet`, accepts the stored class only if this instance stored it itself, it is a JDK container or value (`ArrayList`, `HashMap`, `HashSet`, `TreeMap`, `List.of`/`Map.of`/`Set.of`, boxed numbers, `String`, `BigDecimal`, `java.time` types, `UUID`, arrays of these), or it is registered: `cache.allowType(Rule.class)` (the concrete class; **register at startup on every instance**, since after a deploy no instance has stored anything). Otherwise it is a miss with a WARN naming `allowType`. So read security state (a denylist, revoked tokens, a feature flag) with its concrete type: a miss there fails open.
 - **`getOrSet` dogpile is per-server, not global** — a cold key can have one supplier run per server before the first write lands. Accepted; it's a stampede, not a correctness bug.
 - `counterCount()`/`tagCount()` report 0 (use `size()`).
 
@@ -991,7 +1104,14 @@ SMTP timeouts are bounded by default — 10s connect, 30s per read/write — so 
 the send instead of hanging the caller forever. Override with `.connectTimeout(Duration)` and
 `.timeout(Duration)` for a slow relay or large attachments.
 
+`to(...)`, `cc(...)`, `from(...)` and `Mailer.replyTo(...)` each take exactly one address: a list (`a@b.c, d@e.f`), a group (`g: a@b.c;`), a route address or a control character throws `IllegalArgumentException` (`from`/`replyTo` on the `Mailer` at configuration time). A quoted display name may contain a comma (`"Doe, J" <a@b.c>`). Send to several people with one message each. `Mailer.replyTo(...)` sets `Reply-To` on every SMTP message. `@Email` accepts one bare address only: it rejects `,` `;` `<` `>` `(` `)` `"`, whitespace and control characters (a comment like `x@evil.tld(ceo@corp.example)` would become the display name). `new MailerNotifier(mailer, "a@x.com, b@x.com")` (or varargs / a `List`) validates each recipient at construction and mails each separately.
+
 `sendAsync()` failures are logged and counted in `failCount()` instead of thrown.
+`smtp://` requires STARTTLS: if the relay does not offer it, the send fails rather than falling back to
+cleartext (a network attacker could otherwise strip the offer and read the SMTP password and mail). `smtps://`
+is implicit TLS. For a trusted local relay without TLS use `smtp+plain://localhost:25` (STARTTLS if offered,
+never required); credentials on an `smtp+plain://` URL log a startup warning. Schemes are case-insensitive.
+
 Dev mode (no SMTP URL) captures emails without sending — bounded to the last 500, drop-oldest.
 Access in tests: `mailer.sent()`, `mailer.last()`, `mailer.sentCount()`, `mailer.clearCaptured()`.
 With SMTP configured nothing is captured; `sentCount()` counts successful sends, `failCount()` failures.
@@ -1028,9 +1148,11 @@ Config keys: `s3.accessKeyId`, `s3.secretKey`, `s3.bucket`, `s3.region`, `s3.end
 
 ## Asset Fingerprinting
 
-`staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
+Every mapping ends in `.publicFiles()` or `.access(...)` (see Access); the examples here are
+public assets. `staticFiles(prefix, dir)` never serves a file outside `dir` (symlinks included) and never
 serves dotfiles or dot-directories (`.env`, `.git/config`, `.htaccess` → 404), except under a
-leading `.well-known/`. The longest matching prefix wins. For a directory users write to, use
+leading `.well-known/`. The longest matching prefix wins. The directory must exist at `start()`,
+and only `GET`/`HEAD` are served (other methods: `405`). For a directory users write to, use
 `staticFiles(prefix, dir, StaticFiles.UNTRUSTED)` (see Serving uploads); it must not be inside
 a trusted mapping's directory, or `staticFiles` throws.
 
@@ -1039,7 +1161,8 @@ Cache-bust static assets by appending a content-hash query parameter — in a JT
 `"/assets/app.css?v=a1b2c3d4"`. The hash is the first 8 hex chars of MD5 of the file
 contents, cached per `(path, mtime)`. Unknown URLs (no matching `staticFiles` mapping,
 missing file, or path traversal) return unchanged. Pair with long `Cache-Control: max-age`
-so redeploys with unchanged files don't invalidate browser/CDN caches.
+so redeploys with unchanged files don't invalidate browser/CDN caches. In a mapping with
+`.access(...)` the URL still gets its `?v=`, but the file stays `private, no-cache`.
 
 ## HTTP Client
 
@@ -1097,6 +1220,13 @@ boolean ok = Arrays.stream(InetAddress.getAllByName(host)).allMatch(Http::isPubl
   throw `Http.ResponseTooLargeException` past it, without downloading the rest; change it with
   `.maxResponseBytes(n)`. `stream()` is uncapped: bound what you read. Both `.trusted()` and
   `.maxResponseBytes(n)` work on `multipart()` too.
+- Buffered fetches are bounded in time too: `.timeout()` (default 30s) is the deadline for the
+  whole exchange, headers **and body**, and `.idleTimeout()` (default 30s) each wait for more
+  body bytes. Either throws `Http.StreamTimeoutException`. A server that sends headers and then
+  stalls or drips can't hold the thread. Raise `.timeout(...)` for a big download on a slow
+  link or a slow API. A buffered call always has a deadline: `.timeout(null)` means the 30s
+  default there (only `stream()`/`fetchEvents` run without one); zero or negative throws
+  `IllegalArgumentException`; over 365 days is clamped to 365 days.
 - `Storage`, `WebhookNotifier` and raw `java.net.http` don't apply this check. Details, and the
   narrow DNS-rebinding window that remains, in `docs/SECURITY.md` ("Server-Side Request Forgery").
 
@@ -1138,7 +1268,8 @@ try (var s = Http.post(url).bodyJson(request).stream()) {
 - Stream timeouts differ from `fetch*`: `.idleTimeout()` (default 30s; `Duration.ZERO` or
   `null` turns it off) bounds each wait for the headers or the next bytes, and only counts
   time blocked in a read, so a slow consumer doesn't trip it. There is no total deadline
-  unless you call `.timeout()`, which then bounds the whole call. Either closes the
+  unless you call `.timeout()`, which then bounds the whole call (a `fetchEvents` error body
+  is buffered and gets the 30s default). Either closes the
   connection and throws `Http.StreamTimeoutException` (`idle()`, `limit()`). Both count time
   the machine spends asleep, so a laptop that sleeps through a call gives up within a second
   of waking instead of holding a dead connection.
@@ -1158,6 +1289,8 @@ app.ws("/status", ctx -> new StatusHandler(ctx)).publicRoute();
 
 The upgrade runs plain `before(...)` middleware, the Origin check, then the route's access
 requirements (see Access); any rejection declines the handshake (a login redirect becomes 401).
+The path is a literal: only a request for exactly that path upgrades (`/x/../chat`, `/%63hat`
+and `/chat;x` get 404).
 The socket's `session()` is the session the requirements read. Joining a room is still an
 authorization decision: check the user may see a room before `ctx.join(room)`.
 
@@ -1200,8 +1333,41 @@ app.get("/feed", req -> Result.sse(events -> {
 
 ```java
 app.before("/api/*", RateLimiter.perIp(100, "1m"));
-app.before("/login", RateLimiter.perKey(req -> req.formParam("email"), 5, "15m"));
+
+// Login attempts per account: count the POST only, normalize the identity
+var loginLimit = RateLimiter.perKey(req -> {
+    var email = req.formParam("email");
+    return email == null ? null : email.strip().toLowerCase(Locale.ROOT);
+}, 5, "15m");
+app.before("/login", req -> "POST".equals(req.method()) ? loginLimit.handle(req) : null);
 ```
+
+**A null or blank key is limited, not skipped:** a request without a key is counted in a
+missing-key bucket for its client IP (an IPv6 /64), with the limiter's limit and window, so
+leaving the key out is not a bypass and one client's keyless requests never lock out another.
+That is why the login limiter above runs only for the POST: on `GET /login` (no email) every page
+view would use up one of that visitor's `limit` keyless requests (dev mode warns once when a key
+limiter counts a keyless GET or HEAD). Opt out only where requests without a key are bounded some
+other way:
+`RateLimiter.perKey(req -> req.header("X-Api-Key"), 1000, "1h").exemptMissingKey()` behind a
+`perIp` limiter. Keys are stripped of surrounding whitespace but **not case-folded** (tokens are
+case-sensitive): lower-case usernames and emails in the extractor. Key on what the handler uses:
+`formParam` and, on POST/PUT/PATCH/DELETE, `req.form` read the body only.
+
+`perIp` keys an IPv6 client on its /64 (one site rotating addresses is one client); IPv4 on the full
+address. Each limiter's memory is bounded: at most 100,000 distinct keys plus as many per-address
+overflow buckets (`.maxKeys(n)` on `perIp(...)` or `perKey(...)` changes it). At the cap a new key
+replaces the least recently used key that is under its limit; keys at their limit are kept until
+their windows end (a blocked key stays blocked); when nothing can be replaced a new key is counted
+against its client address instead. On Postgres forgetting a key loses nothing (its fleet count is
+kept and re-read); with per-process counting the forgotten key restarts from zero. When the
+per-address buckets are all at their limit too, the limiter is **saturated** and
+`.onSaturation(RateLimiter.Saturation.FAIL_CLOSED)` (the default) refuses the requests it has no
+room to count, so a flood that large (about 1,300 req/s from 100,000 addresses against
+`perKey(…, 5, "15m")`) locks out clients it is not tracking; `Saturation.FAIL_OPEN` lets them
+through uncounted instead, which gives the same flood unlimited attempts at untracked keys. Pick
+`FAIL_OPEN` only where an uncounted request is cheap. See "Rate Limiting" in `docs/SECURITY.md`.
+On Postgres, two limiters with the same type, limit and window share their buckets.
 
 **Important:** Configure trusted proxies for accurate IP detection behind load balancers (see Security section below). On Postgres a limit is enforced **cluster-wide** (one shared atomic counter), not per instance — see `BRACE-OPS.md` → "Scaling horizontally" and [`docs/scaling.md`](docs/scaling.md).
 
@@ -1230,7 +1396,7 @@ app Dokploy routes joins that network, so on a host shared with apps you don't t
 Traefik's own (fixed) address instead. The scaffold reads the value from `TRUSTED_PROXIES`. When a private-network peer sends `X-Forwarded-For`
 without being trusted, Brace logs a one-time warning naming its address.
 
-Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries, Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples.
+Once configured, `req.ip()` extracts the real client IP from `X-Forwarded-For` when the immediate peer is trusted. With multiple `X-Forwarded-For` entries (or lines), Brace picks the **rightmost untrusted** address (leftmost entries are client-supplied and forgeable) — see "Trusted Proxies" in `docs/SECURITY.md` for the algorithm and examples. Exactly one forwarding header is read: `X-Forwarded-For` by default, or RFC 7239 `Forwarded` with `app.trustedProxies(new TrustedProxies("10.0.0.5").useForwardedHeader())`; the other is ignored, so a client can't supply its address in the header your proxy doesn't overwrite (a trusted proxy sending only the other one gets a one-time warning). `req.ip()` is always a canonical IP literal or the string `"unknown"`: IPv4 dotted (`203.0.113.9`), IPv6 per RFC 5952 (lower-case, compressed, no brackets or port: `2001:db8::5`, `::1`), IPv4-mapped IPv6 as IPv4, a zone id kept. It is `"unknown"`, never the proxy's own address, when a trusted proxy's header names no usable client (the selected entry isn't an address, e.g. `unknown`, `_hidden` or a malformed element; the header is empty; or the proxy sent only the header Brace doesn't read): treat `"unknown"` as matching nothing in an allowlist (`TrustedProxies.isTrusted("unknown")` is false); `perIp` counts all of them in one bucket. A trusted peer sending no forwarding header at all is itself the client. `X-Forwarded-Proto` and `X-Forwarded-Host` use their **rightmost** entry across all lines, so the proxy must set (overwrite) them, not pass a client's through; an `X-Forwarded-Host` entry that isn't a `host[:port]` is ignored. An IPv4 CIDR also matches the IPv4-mapped form (`::ffff:10.1.2.3`); list `::1` separately from `127.0.0.1`.
 
 For apps behind Cloudflare, `TrustedProxies.cloudflare()` is pre-loaded with Cloudflare's published egress ranges:
 
@@ -1303,8 +1469,8 @@ all-lowercase-letters) log a warning but are allowed. Use 32+ random characters.
 
 Enable ops endpoints with `app.ops("ops-authorized-keys")` in `main()`, plus
 `app.opsOrigins("https://your-app")` (or `BRACE_OPS_ORIGINS`), the public origin CLI logins are
-signed for, which prod mode requires; scaffold config with
-`brace init`, keys with `brace ops keypair`. **Operating in production?** Start with
+signed for, which every mode except `dev` (and tests) requires when ops is on; scaffold config with
+`brace init`, keys with `brace ops keypair`. In `ops-authorized-keys` every key line states its scope: `KEY scope:read [label...] [# comment]` or `KEY scope:control [label...] [# comment]`. **A key line with no scope token fails startup** (it used to mean control; add `scope:control` to keep that). Any other token with `:` or `=` fails too (`scope: read`, `--scope=read`, `role:read`), as do a scope written inside the line's comment, non-ASCII spaces or colon look-alikes, and a key that isn't the base64 key `brace ops keypair` prints (e.g. an `ssh-ed25519` line); other words are labels; a duplicate key keeps the lower scope. `brace ops keypair` always writes the scope token (`--read-only` for `scope:read`, `--control` for `scope:control`, control for a new label without either); re-running it for an existing label keeps that line's scope unless a flag changes it (it prints `scope changed: read -> control`), and refuses an old line with no scope until you pass one. `--label` refuses a label the file would reject or cut short (`:`, `=`, a leading `#`). **Operating in production?** Start with
 `brace check --env prod --json` — not `brace status`. The full ops reference — auth keys and
 scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, storage/retention —
 is **`BRACE-OPS.md`** in the project root (written by `brace new`, refreshed together with this
@@ -1325,7 +1491,11 @@ app.analytics(Analytics.options()
     .exclude("/admin/*")                          // exact path or trailing /* prefix
     .excludeIps("203.0.113.0/24")                 // never counted
     .countryHeader("CF-IPCountry")                // read only from trustedProxies peers
-    .rawRetention("35d"));                       // raw rows only; daily summaries are kept
+    .rawRetention("35d")                         // raw rows only; daily summaries are kept
+    .maxViewsPerVisitorPerFlush(30)              // row cap per visitor per 10 s; over it is "Not counted: dropped"
+    .maxViewsPerIpPerFlush(300)                  // per client address (IPv6 /64) per 10 s, any user agents
+    .dailyRowBudget(500_000)                     // rows per instance per day; 0 turns a cap off
+    .maxDailyRowsPerIp(10_000));                 // one address's share of the budget (default 2%)
 
 app.get("/invite/{code}", ctrl::invite).analytics(false);      // URL carries a secret the name doesn't reveal
 app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/{username}
@@ -1337,10 +1507,11 @@ app.get("/u/{username}", ctrl::profile).analyticsByRoute();    // counted as /u/
   partial swaps are rejected and tallied; boosted (`HX-Boosted`) navigations count. `/ops/*`, static files, JSON
   and errors are never candidates.
 - **Paths:** the concrete path (`/posts/hello-world`), decoded and redacted, without query
-  string. A parameter whose name is sensitive by the error-redaction rule (`Redactor.isSensitive`:
-  token, secret, password, apikey, credential, ...) keeps its placeholder, so `/reset/abc123` is
-  stored as `/reset/{token}`. Long random-looking segments become `[redacted]`. Use
-  `.analytics(false)` for other secret-bearing URLs (`/invite/{code}`, magic links).
+  string. A parameter whose name is sensitive by the field rule of error redaction
+  (`Redactor.isSensitiveField`: token, secret, password, apikey, credential, ...) keeps its
+  placeholder, so `/reset/abc123` is stored as `/reset/{token}`. Long random-looking segments
+  become `[redacted]`. Use `.analytics(false)` for other secret-bearing URLs (`/invite/{code}`,
+  magic links: a parameter named just `code` is not sensitive by that rule).
 - **Visitors:** a hash of a daily random salt + host + IP + UA; counted once per day, so a
   multi-day range sums daily visitors. Behind a proxy, configure `trustedProxies(...)` or every
   visitor looks like the proxy (a warning is logged when that's detected).

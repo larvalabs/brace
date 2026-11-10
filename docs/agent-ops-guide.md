@@ -77,12 +77,19 @@ check.log_window_minutes=30
 | `brace cache clear [--env prod]` | Empty the cache | 0 / 2 unreachable |
 | `brace resolve <id> [--env prod]` | Mark an error as resolved | 0 / 1 not found / 2 unreachable |
 | `brace init` | Scaffold `.brace`/`.brace.local` and run ops readiness checks | 0 ok / 1 issues |
-| `brace ops keypair [--label <l>] [--read-only]` | Generate an Ed25519 keypair and wire it up (see Setup) | 0 / 1 |
+| `brace ops keypair [--label <l>] [--read-only\|--control]` | Generate an Ed25519 keypair and wire it up (see Setup); replacing a label keeps its scope unless a flag is given | 0 / 1 |
 | `brace ops dashboard [--analytics]` | Open the ops dashboard (or, with `--analytics`, the analytics page) in a browser (login handled via token exchange) | 0 / 1 |
 | `brace analytics [--range today\|7d\|30d\|12mo] [--env prod]` | Visitors, pageviews, top pages, sources, devices, browsers and what was filtered (apps with `app.analytics()`; default range 7d) | 0 / 1 not enabled / 2 unreachable |
 
 All commands auto-detect output: human-readable table when stdout is a TTY, JSON when
 piped. Force with `--json` or `--pretty`.
+
+Each request times out after 30 seconds and a response body is capped at 16 MB, so a server
+that stalls or never stops sending fails the command with a one-line error instead of hanging.
+`brace check`'s unauthenticated `GET /` (the CSP check) has the same limits and is skipped when
+it cannot finish.
+`--json` output escapes control, format and line-separator characters (and unpaired
+surrogates) as `\uXXXX`; a JSON parser reads them back as the original text.
 
 ## HTTP endpoints
 
@@ -115,7 +122,9 @@ require `control`. See "Token scopes" below. Authenticate with `POST /ops/auth`
 When a new error kind first appears since startup, Brace notifies the registered
 notifiers once (recurrences don't re-notify). A `LogNotifier` is always attached (emits a
 `regression` log event); add more with `app.notifyRegressions(new WebhookNotifier(slackUrl),
-new MailerNotifier(mailer, "ops@example.com"))`. `WebhookNotifier` posts a
+new MailerNotifier(mailer, "ops@example.com"))`. `MailerNotifier` takes one or more
+recipients (`"a@x.com, b@x.com"`, varargs or a `List`), checks each at construction (a bad one
+fails startup) and sends one message per recipient. `WebhookNotifier` posts a
 Slack/Mattermost-shape `{"text": "..."}` payload. `app.regressionsWarmup(seconds)`
 (default 30) suppresses cold-boot noise. Requires a database (regressions ride the error
 store).
@@ -367,7 +376,8 @@ Different developers get different labels, so they never clobber each other's en
 Ops auth uses Ed25519 keypairs. Two files matter:
 
 - **`ops-authorized-keys`** — committed. Public keys allowed to authenticate, one per
-  line as `<base64-pubkey> [scope:read|scope:control] <label>`. Loaded by
+  line as `<base64-pubkey> scope:read|scope:control <label>` (the scope token is
+  required). Loaded by
   `app.ops("ops-authorized-keys")` — this is the allow-list the *server* checks.
 - **`ops-private.key`** — gitignored, per-developer. Three lines: a comment, the base64
   private key, and the matching public key. Path is recorded in `.brace.local` as
@@ -381,12 +391,20 @@ Each authorized key has a **scope ceiling** that caps every token it can mint. T
 - **`control`** — everything `read` can do, plus mutating endpoints: `cache/clear`,
   `errors/{id}/resolve`. `control` implies `read`.
 
-A line with no `scope:` marker defaults to `control` (backward compatible). Mark a key
-read-only by adding `scope:read`:
+Every key line states its scope. **A line with no `scope:` token stops the server from
+starting** (until 0.1.11 such a line meant `control`; add `scope:control` to keep that):
 
 ```
-<base64-pubkey>  scope:read  oncall-agent
+<base64-pubkey>  scope:control  alice@laptop
+<base64-pubkey>  scope:read     oncall-agent   # read-only CI key
 ```
+
+Exactly one token must be `scope:read` or `scope:control`; any other token with `:` or `=`
+(`scope: read`, `scope=read`, `role:read`, `scope:read-only`, a second scope token) also stops
+startup. Every other word is label text, including `read`, `ro` and `control`: with the scope
+stated, a label is only a label. `#` at the start of a line or after whitespace starts a
+comment, and a comment on a key line may not contain `scope:`. The full grammar is in
+`docs/SECURITY.md` (Ops Endpoints).
 
 `POST /ops/auth` caps the minted token at the key's ceiling, so a `scope:read` key
 **cannot** obtain a control token even if it requests one — escalation is impossible by
@@ -437,6 +455,13 @@ green.
 - **Rotate your own key:** `rm ops-private.key && brace ops keypair`, then redeploy.
   Because the label is stable (`email@host`), the new public key *replaces* your existing
   line in `ops-authorized-keys` in place — no orphaned, still-trusted key left behind.
+  **The new line keeps the old line's scope**: rotating a read-only key with
+  `brace ops keypair --label <its label>` gives a read-only key again. To change it, say
+  so: `--control` raises it, `--read-only` lowers it, and the command prints
+  `scope changed: read -> control` (or the reverse). A line written before 0.1.11 with no
+  scope token is replaced too, but there is no scope to keep: the command refuses (exit 1,
+  nothing written) until you pass `--read-only` or `--control`. A label nobody has used
+  yet gets `scope:control` unless you pass `--read-only`.
 - **Add another developer:** they run `brace ops keypair` on their own machine. Their
   distinct `email@host` label gets its own line; committing it never clobbers anyone
   else's entry. Commit the updated `ops-authorized-keys` and deploy so servers accept
@@ -445,8 +470,8 @@ green.
   `brace ops whoami` — `grep -F "$(sed -n '3p' ops-private.key)" ops-authorized-keys` is
   the manual check.
 - **Registering a coworker's existing public key:** there is no CLI for this today;
-  append the line to `ops-authorized-keys` by hand (raw base64 public key, optional
-  `scope:read` marker, then the label).
+  append the line to `ops-authorized-keys` by hand: the raw base64 public key, then
+  `scope:control` (or `scope:read` for a read-only key), then the label.
 
 ## Credential channels
 
@@ -521,24 +546,32 @@ Rules the server enforces:
 - **Key binding:** the public key is part of the signed message, so a
   signature is only valid for the key that produced it.
 - **Origin binding:** the origin must be one the server lists with
-  `app.opsOrigins(...)` / `BRACE_OPS_ORIGINS` (required in prod; without one, in
-  dev, its host must match the request's), so a signature made for another server
+  `app.opsOrigins(...)` / `BRACE_OPS_ORIGINS` (required in every mode except dev; in
+  dev without one, its host must match the request's), so a signature made for another server
   is refused with `401 This request was signed for <origin>…`. The origin is just
   `scheme://host[:port]`: no user info, path, query or fragment.
 
-**Replay caveat (per-instance, best-effort):** the seen-nonce set is held in
-memory on each server instance — ops works without shared fleet state, so it
-cannot be fleet-global. Behind a load balancer, a captured auth request could
-still be replayed against a *different* instance within the ±30s window. Keep
-`/ops/*` behind HTTPS (the protocol assumes the request body is not observable
-in transit); see `docs/SECURITY.md` → "Ops Endpoints".
+**Replay protection depends on the database.** Every instance remembers the
+nonces it accepted. With a database (`app.database(...)`) each accepted nonce
+is also recorded in the shared `brace_counters` table, so a sign-in request is
+refused by every instance and after any restart or deploy once one server has
+accepted it. Without a database (or while it is unreachable) the memory is
+per instance: outside dev mode, a server refuses sign-ins whose timestamp is
+earlier than 30 seconds after it started (a 401 that names the restart; retry
+within a minute), and behind a load balancer a captured request accepted by one live
+instance can still be replayed against a *different* one within its ±30 s
+window. In both modes, a signed request that no server has accepted (never
+delivered, or refused because its timestamp was too far ahead) stays good once
+until its timestamp is 30 seconds old. Keep `/ops/*` behind HTTPS (the protocol
+assumes the request body is not observable in transit); see `docs/SECURITY.md`
+→ "Ops Endpoints" ("Replay suppression").
 
 **Protocols v1 and v2 are removed.** v1 (no `v`, signature over the timestamp
 alone) was removed in 0.1.8; v2 (no origin) in 0.1.11. Either gets a 401 naming
 the cause. If you implemented one by hand, switch to the v3 payload above.
 
 **Token cache.** The CLI caches its bearer token per server origin under
-`target/.brace-token-<id>`, and remembers the last origin each project logged in
+`~/.brace/tokens/<project>/`, outside the project, and remembers the last origin each project logged in
 to in `~/.brace/ops-origins.json`, warning when `.brace` points somewhere new.
 
 ## Environment selection
@@ -648,28 +681,45 @@ Retention is **count-based, not time-based** for both errors and logs — nothin
 dropped purely because it got old. If you need durable logs, capture stdout from the
 process itself.
 
-## Redaction in error records
+## Redaction in error records and logs
 
-Error records are scrubbed before storage — the data you see via `brace errors`
-or `/ops/errors` has already been cleaned. Two passes run at capture time:
+Error records are scrubbed before storage, and the same passes run in the log and
+stats sinks: what you see via `brace errors`, `/ops/errors`, `brace logs`,
+`/ops/logs` and `/ops/status` has already been cleaned (request paths, query
+strings, headers, exception messages and stack traces). `[REDACTED]` means a value
+was replaced because of its **name**, `[redacted]` because of its **shape**.
 
-**Name-based (query params and headers):** fields whose name looks sensitive
-(`token`, `password`, `authorization`, `cookie`, `secret`, `api-key`, etc.) have
-their values replaced with `[REDACTED]`. This is a deliberate over-redact — a
-field named `token_count` is also redacted.
+**Name-based:** a query parameter, header, log field or `name=value` pair whose name
+looks sensitive (`token`, `password`, `authorization`, `cookie`, `secret`,
+`apikey`, `nonce`, an auth-paired `code` such as `reset_code`, etc.) has its value
+replaced with `[REDACTED]`. This is a deliberate over-redact: a field named
+`token_count` is also redacted. Query parameters and headers use a slightly wider
+rule than log fields (a bare `code` or `session` is redacted in a URL, kept as a
+log field).
 
-**Value-shaped (path segments and exception message tokens):** high-entropy
-tokens are detected by their shape and replaced with `[redacted]`, regardless of
-field name. A segment or whitespace-delimited token is redacted when it is 16+
-characters long, consists entirely of base64url/hex characters, and contains at
-least one digit and at least one letter. JWTs (two-dot three-part base64url
-tokens) are also caught.
+**Value-shaped:** URLs inside text keep their scheme, host and port while their
+user info, path and query are redacted; any other run of letters, digits and
+`_ - + / . ~ $ %` is checked label by label (split at `. ~ $ %`), and a label
+of 16+ characters that has both a digit and a letter becomes `[redacted]`,
+whatever field it is in, unless it is a name made of words (`V3__create_users_table`,
+`invoice-48213-final-v2`, `shippingAddressLine2`). A file path in a message is
+judged piece by piece, so its directories stay readable
+(`/tmp/uploads/[redacted].tmp`). JWTs and `payload.signature` tokens are caught
+whole, and percent-encoded runs are checked decoded too. Stack frame lines (`at …`,
+`... N more`, at any indent) are never redacted.
 
 What remains visible (intentionally):
-- **UUIDs** (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) — these are usually record
+- **UUIDs** (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`): these are usually record
   identifiers, not secrets, and are needed for debugging.
-- **Numeric IDs** and **short slugs** (below the 16-char threshold).
+- **Numeric IDs**, **short labels** (below 16 characters), Java class names,
+  hostnames, file paths (piece by piece), names made of words (table, column,
+  constraint, enum and Flyway file names) and email addresses.
 - Exception message text that does not contain high-entropy tokens.
+
+Over-redacted by design: a 16+ character content hash in a file name
+(`main-3f9a1c2b4d5e6f7a8b9c0d1e.css` becomes `[redacted].css`), a commit SHA, and
+other long values that interleave digits and letters (`web-7d9f8b6c5-x2k4q`),
+because they cannot be told from a token.
 
 If your app routes carry user-supplied secrets in path positions, prefer opaque
 non-entropic route parameters (e.g. a lookup key in a database rather than a raw

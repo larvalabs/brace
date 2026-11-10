@@ -41,6 +41,19 @@ public class Router {
 
     void unfreeze() { frozen = false; }
 
+    /**
+     * Remove every route the framework registered ({@link Route#isFramework()}). Called by
+     * {@code Brace.stop()} once the server has stopped: {@code start()} registers them afresh,
+     * bound to that start's handlers, so left in place a second start is a duplicate
+     * registration. App routes are untouched.
+     */
+    void removeFrameworkRoutes() {
+        routes.removeIf(Route::isFramework);
+        staticRoutes.values().removeIf(Route::isFramework);
+        dynamicRoutes.values().forEach(list -> list.removeIf(Route::isFramework));
+        namedRoutes.values().removeIf(Route::isFramework);
+    }
+
     /** Throws if the app is running: routes and their access are fixed at start(). */
     void requireNotStarted(String what) {
         if (frozen) {
@@ -145,6 +158,86 @@ public class Router {
             if (params != null) return new RouteMatch(candidate, params);
         }
         return null;
+    }
+
+    /**
+     * The methods of every route whose pattern matches {@code path}, whatever the request's
+     * method: empty when no route is registered at this path at all. A trailing slash matches as
+     * in {@link #match}, and {@code HEAD} follows {@code GET}, which answers it. BraceHandler
+     * asks this only after {@link #match} found nothing for the request's own method, so a
+     * non-empty answer means "a route owns this path, under another method".
+     */
+    List<String> methodsMatching(String path) {
+        var methods = new java.util.LinkedHashSet<String>();
+        for (var route : routesMatching(path)) {
+            methods.add(route.method());
+            if (route.method().equals("GET")) methods.add("HEAD");
+        }
+        return List.copyOf(methods);
+    }
+
+    /**
+     * The routes whose pattern matches {@code path}, one per method (the one {@link #match} would
+     * pick for that method), in registration order; see {@link #methodsMatching}. Their access
+     * requirements are what decides who may learn that the path exists under another method
+     * (M3 final review).
+     */
+    List<Route> routesMatching(String path) {
+        String canonical = path.length() > 1 && path.endsWith("/") ? stripTrailingSlashes(path) : path;
+        var methods = new java.util.HashSet<String>();
+        var matching = new ArrayList<Route>();
+        for (var route : routes) {
+            if (methods.contains(route.method())) continue;
+            boolean matches = route.isStatic()
+                ? route.staticPath().equals(path) || route.staticPath().equals(canonical)
+                : route.match(path) != null || (canonical != path && route.match(canonical) != null);
+            if (!matches) continue;
+            methods.add(route.method());
+            matching.add(route);
+        }
+        return matching;
+    }
+
+    /**
+     * {@code path} with its {@code .} and {@code ..} segments resolved as a URL normalizer would
+     * (RFC 3986 5.2.4): {@code /x/../docs/./a} is {@code /docs/a}. A {@code ..} at the root stays
+     * at the root. Used only to ask which mapping a dot-segment path would land under; such a
+     * path is never served.
+     */
+    static String resolveDotSegments(String path) {
+        var out = new java.util.ArrayDeque<String>();
+        String[] segments = path.split("/", -1);
+        for (int i = 0; i < segments.length; i++) {
+            String segment = segments[i];
+            boolean last = i == segments.length - 1;
+            if (segment.equals(".")) {
+                if (last) out.addLast("");
+            } else if (segment.equals("..")) {
+                if (out.size() > 1) out.removeLast();
+                if (last) out.addLast("");
+            } else {
+                out.addLast(segment);
+            }
+        }
+        String resolved = String.join("/", out);
+        return resolved.startsWith("/") ? resolved : "/" + resolved;
+    }
+
+    /** True if some {@code /}-separated segment of the raw path is exactly {@code .} or {@code ..}. */
+    static boolean hasDotSegment(String path) {
+        int len = path.length();
+        int start = 0;
+        while (start <= len) {
+            int end = path.indexOf('/', start);
+            if (end < 0) end = len;
+            int n = end - start;
+            if ((n == 1 && path.charAt(start) == '.')
+                    || (n == 2 && path.charAt(start) == '.' && path.charAt(start + 1) == '.')) {
+                return true;
+            }
+            start = end + 1;
+        }
+        return false;
     }
 
     /** Drop trailing slashes, keeping at least "/" — {@code "/a//"} and {@code "/a/"} → {@code "/a"}. */

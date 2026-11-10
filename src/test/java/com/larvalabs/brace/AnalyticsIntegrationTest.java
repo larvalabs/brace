@@ -33,10 +33,10 @@ class AnalyticsIntegrationTest {
     static void startApp() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keysFile = tmpDir.resolve("authorized-keys");
-        Files.writeString(keysFile, keypair.publicKey() + " test-key\n");
+        Files.writeString(keysFile, keypair.publicKey() + " scope:control test-key\n");
         dbFactory = new DatabaseFactory("jdbc:h2:mem:analyticsit;DB_CLOSE_DELAY=-1", null, null, List.of(Post.class));
 
-        app = Brace.app().port(0).banner(false).database(dbFactory).ops(keysFile.toString())
+        app = Brace.app().opsUnpinnedForTests().port(0).banner(false).database(dbFactory).ops(keysFile.toString())
             .analytics(Analytics.options().exclude("/admin/*"));
         app.get("/", req -> Result.html("<h1>home</h1>"));
         app.get("/posts/{slug}", req -> Result.html("<h1>" + req.pathParam("slug") + "</h1>"));
@@ -283,12 +283,12 @@ class AnalyticsIntegrationTest {
 
     @Test
     void startFailsWithoutADatabaseOrOps() {
-        var noDb = Brace.app().port(0).banner(false).ops(tmpDir.resolve("authorized-keys").toString()).analytics();
+        var noDb = Brace.app().opsUnpinnedForTests().port(0).banner(false).ops(tmpDir.resolve("authorized-keys").toString()).analytics();
         var e1 = assertThrows(IllegalStateException.class, noDb::start);
         assertTrue(e1.getMessage().contains("database"), e1.getMessage());
 
         var db = new DatabaseFactory("jdbc:h2:mem:analyticsit-noops;DB_CLOSE_DELAY=-1", null, null, List.of(Post.class));
-        var noOps = Brace.app().port(0).banner(false).database(db).analytics();
+        var noOps = Brace.app().opsUnpinnedForTests().port(0).banner(false).database(db).analytics();
         var e2 = assertThrows(IllegalStateException.class, noOps::start);
         assertTrue(e2.getMessage().contains("ops"), e2.getMessage());
     }

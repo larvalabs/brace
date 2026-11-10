@@ -55,11 +55,12 @@ final class CliAgentsMd {
             return 1;
         }
 
-        Files.writeString(cwd.resolve("BRACE-AGENTS.md"), content);
+        SecretFiles.refuseSymlink(cwd.resolve(OPS_FILE));
+        SecretFiles.writeProjectFile(cwd.resolve("BRACE-AGENTS.md"), content);
         String written = "BRACE-AGENTS.md";
         String ops = loadBundled(OPS_JAR_ENTRY);
         if (ops != null) {
-            Files.writeString(cwd.resolve(OPS_FILE), ops);
+            SecretFiles.writeProjectFile(cwd.resolve(OPS_FILE), ops);
             written += " and " + OPS_FILE;
         }
         CliOutput.printSuccess(written + " refreshed from Brace " + BraceVersion.get());

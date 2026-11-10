@@ -75,7 +75,7 @@ final class WsRegistry {
             try {
                 ctx.send(message);
             } catch (RuntimeException e) {
-                Log.warn("ws-broadcast-send-failed room=" + room + " error=" + e);
+                Log.warn("ws-broadcast-send-failed room=" + room + " error=" + Redactor.redactMessage(String.valueOf(e)));
             }
         }
     }

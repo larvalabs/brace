@@ -44,7 +44,7 @@ class PathDecodingTest {
         Files.writeString(assetDir.getParent().resolve("brace-h3-secret.txt"), SECRET_CONTENT);
 
         app = Brace.test().start(a -> {
-            a.staticFiles("/assets", assetDir.toString());
+            a.staticFiles("/assets", assetDir.toString()).publicFiles();
             a.get("/users/{name}", req -> Result.text(req.pathParam("name")));
             a.get("/echo/{a}/{b}", req -> Result.text(req.pathParam("a") + "|" + req.pathParam("b")));
         });

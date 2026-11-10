@@ -94,6 +94,7 @@ public class OpsHandler {
         var ceilings = new HashMap<String, OpsScope>();
         authorizedKeys.forEach((publicKey, ceiling) -> ceilings.put(OpsKeys.fingerprint(publicKey), ceiling));
         this.ceilingByKid = Map.copyOf(ceilings);
+        this.seenNonces = new NonceCache(NONCE_TTL_MILLIS, NONCE_CAP, nonceQuotaPerKey(authorizedKeys.size()));
         this.tokenSecret = tokenSecret;
         this.errorStore = errorStore;
         this.cache = cache;
@@ -109,6 +110,13 @@ public class OpsHandler {
     // WebSocket routes live outside the Router; /ops/routes lists them too.
     private volatile List<Route> webSocketRoutes = List.of();
 
+    // M3: static mappings are in the access model too; /ops/routes lists them with their access.
+    private volatile java.util.function.Supplier<List<BraceHandler.StaticFileMapping>> staticMappings = List::of;
+
+    void setStaticMappings(java.util.function.Supplier<List<BraceHandler.StaticFileMapping>> mappings) {
+        this.staticMappings = mappings;
+    }
+
     void setWebSocketRoutes(List<Route> routes) {
         this.webSocketRoutes = List.copyOf(routes);
     }
@@ -119,14 +127,69 @@ public class OpsHandler {
         this.pinnedOrigins = List.copyOf(normalized);
     }
 
-    // Replay suppression for v3 auth nonces. Per-instance, in-memory, best-effort: ops must work
-    // without shared fleet state (B5 — no database, no cross-instance store), so this CANNOT be
-    // fleet-global. Residual window: a captured v3 auth request can still be replayed against a
-    // DIFFERENT instance behind the load balancer within the ±30s timestamp window. Documented in
-    // docs/SECURITY.md ("Ops Endpoints"). TTL is 2 minutes — comfortably above the 60s total
-    // acceptance window — and the map is size-bounded (entries are only recorded after a valid
-    // signature, so only holders of an authorized key can occupy slots).
-    private final NonceCache seenNonces = new NonceCache(120_000, 100_000);
+    // Replay suppression for v3 auth nonces, in two layers (L16, final review).
+    //
+    // 1. seenNonces: per-instance, in memory. Always on: ops must work with no database and with
+    //    the database down (B5). TTL is 2 minutes, comfortably above the 60 s total acceptance
+    //    window, and the map is size-bounded (entries are only recorded after a valid signature,
+    //    so only holders of an authorized key can occupy slots).
+    // 2. durableNonces: the same nonce recorded in brace_counters when the app has a database.
+    //    That record is shared by the fleet and survives a restart, so a request any instance
+    //    accepted is refused everywhere, by this process or the next.
+    //
+    // When layer 2 is absent or its write fails, a restart empties the only memory there is. Then
+    // the restart window applies: a request whose timestamp is earlier than RESTART_WINDOW_MILLIS
+    // after this process started is refused. The previous process accepted only timestamps within
+    // 30 s of its own clock, and it stopped before this one started, so everything it accepted is
+    // earlier than that. The cost is that sign-ins are refused for the first 30 s after a start
+    // (up to 60 s for a client whose clock runs 30 s behind). Residual in that mode, documented in
+    // docs/SECURITY.md ("Ops Endpoints"): a request accepted by ANOTHER live instance can be
+    // replayed here within its timestamp window.
+    static final long AUTH_WINDOW_MILLIS = 30_000;
+    static final long RESTART_WINDOW_MILLIS = AUTH_WINDOW_MILLIS;
+    static final int NONCE_CAP = 100_000;
+    static final long NONCE_TTL_MILLIS = 120_000;
+    private volatile long startedAtMillis = System.currentTimeMillis();
+    private volatile boolean restartWindow = true;
+    private volatile Counters durableNonces;
+    private volatile long lastNonceRowSweepMillis;
+    // L16 verification: the durable write is given this long, waiting for a pooled connection
+    // included, then counts as failed; after a failure the database is not tried for the cool-down.
+    // A write that completes after its timeout only records a nonce that this instance already
+    // holds in seenNonces, and the CLI signs every attempt with a fresh nonce, so a late record
+    // can refuse only a replay of that same request, never the operator's next sign-in.
+    static final long DURABLE_WRITE_TIMEOUT_MILLIS = 2_000;
+    static final long DURABLE_COOL_DOWN_MILLIS = 10_000;
+    private volatile long durableRetryAtNanos = System.nanoTime();
+    private final NonceCache seenNonces;
+
+    /**
+     * Each key's share of the nonce cache: 5,000 nonces per 2 minutes, less when there are so many
+     * authorized keys that those shares would not all fit under {@link #NONCE_CAP}. The shares
+     * always sum to at most the cap, so no set of keys can use up another key's room (final
+     * review: with a fixed 5,000 and a cap of 100,000, twenty keys could block a twenty-first).
+     */
+    static int nonceQuotaPerKey(int authorizedKeys) {
+        return Math.max(1, Math.min(5_000, NONCE_CAP / Math.max(1, authorizedKeys)));
+    }
+
+    /** Record accepted nonces in {@code brace_counters} too; called by {@code Brace.start()} when there is a database. */
+    void setDurableNonces(Counters counters) {
+        this.durableNonces = counters;
+    }
+
+    /**
+     * Turn the restart window off: dev mode and the test harness, where a server is restarted
+     * constantly and a replayed localhost sign-in is not a threat.
+     */
+    void disableRestartWindow() {
+        this.restartWindow = false;
+    }
+
+    // Visible for testing
+    void setStartedAtForTest(long millis) {
+        this.startedAtMillis = millis;
+    }
 
     /**
      * POST /ops/auth — validate a signed auth request, issue a short-lived bearer token.
@@ -167,8 +230,9 @@ public class OpsHandler {
                 return Result.unauthorized("Invalid timestamp");
             }
             var now = java.time.Instant.now();
-            if (Math.abs(java.time.Duration.between(ts, now).getSeconds()) > 30) {
-                return Result.unauthorized("Stale timestamp");
+            if (Math.abs(java.time.Duration.between(ts, now).toMillis()) > AUTH_WINDOW_MILLIS) {
+                return Result.unauthorized("Stale timestamp (more than 30 seconds from this server's clock: check "
+                    + "this machine's clock)");
             }
 
             // Verify signature per protocol version
@@ -193,9 +257,32 @@ public class OpsHandler {
                         + "server (Host: " + req.host() + "). Check ops.<env>.url in .brace; behind a proxy "
                         + "that rewrites Host, list the public origin with app.opsOrigins(...)");
                 }
-                // Replay check last, so only validly-signed requests consume nonce slots.
-                if (!seenNonces.checkAndRecord(auth.nonce, System.currentTimeMillis())) {
+                // Replay checks last, so only validly-signed requests for this server consume
+                // nonce slots, and nothing below is told to a caller without an authorized key
+                // (final review: the start-time check ran before the signature was verified).
+                long nowMillis = System.currentTimeMillis();
+                switch (seenNonces.record(OpsKeys.fingerprint(auth.publicKey), auth.nonce, nowMillis)) {
+                    case REPLAY -> {
+                        return Result.unauthorized("Nonce already used");
+                    }
+                    case FULL -> {
+                        return Result.unauthorized("Too many sign-ins with this key in the last two minutes; "
+                            + "wait a minute and retry");
+                    }
+                    case FRESH -> { }
+                }
+                Boolean firstUse = recordDurably(auth.nonce, nowMillis);
+                if (Boolean.FALSE.equals(firstUse)) {
                     return Result.unauthorized("Nonce already used");
+                }
+                // No durable record of what the previous process accepted: refuse what it could
+                // have accepted (see the comment on seenNonces).
+                if (firstUse == null && restartWindow && ts.toEpochMilli() < startedAtMillis + RESTART_WINDOW_MILLIS) {
+                    return Result.unauthorized("This server started less than a minute ago and cannot yet tell a "
+                        + "new sign-in from a replay of one made before the restart: this request's timestamp ("
+                        + auth.timestamp + ") is earlier than 30 seconds after the server started ("
+                        + java.time.Instant.ofEpochMilli(startedAtMillis) + "). Retry in up to a minute. If it "
+                        + "still fails then, this machine's clock is behind the server's: correct the clock.");
                 }
             } else if ("2".equals(auth.v)) {
                 // M14: v2 signed no audience, so a signature made for one server worked at any
@@ -232,7 +319,9 @@ public class OpsHandler {
             // never mint a control token, so the grant is min(requested, ceiling). When
             // the client requests no scope, it gets the full ceiling.
             OpsScope ceiling = authorizedKeys.getOrDefault(auth.publicKey, OpsScope.CONTROL);
-            OpsScope requested = OpsScope.parse(auth.scope, ceiling);
+            // No scope requested -> the ceiling; a scope that is present but unrecognised -> READ.
+            OpsScope requested = auth.scope == null || auth.scope.isBlank()
+                ? ceiling : OpsScope.parse(auth.scope, OpsScope.READ);
             OpsScope granted = requested.min(ceiling);
             String kid = OpsKeys.fingerprint(auth.publicKey);
 
@@ -242,6 +331,90 @@ public class OpsHandler {
         } catch (Exception e) {
             return Result.unauthorized("Authentication failed");
         }
+    }
+
+    /**
+     * Record {@code nonce} in {@code brace_counters}, the one small framework table with an atomic
+     * "add and tell me the count" and an expiry (no migration needed).
+     *
+     * @return true on first use, false if any instance has recorded it before (a replay, a
+     *         unique-key violation from a concurrent first use included), null when there is no
+     *         database, the write failed or did not finish within
+     *         {@link #DURABLE_WRITE_TIMEOUT_MILLIS}, or a recent failure's cool-down is running
+     *         (the caller then applies the restart window; an ops sign-in must not depend on the
+     *         database being up, nor wait on it)
+     */
+    private Boolean recordDurably(String nonce, long nowMillis) {
+        Counters counters = durableNonces;
+        if (counters == null) {
+            return null;
+        }
+        // L16 verification: after a failed or timed-out write, do not try the database again for
+        // a while, so every sign-in during an outage is answered at once.
+        if (System.nanoTime() - durableRetryAtNanos < 0) {
+            return null;
+        }
+        java.util.concurrent.FutureTask<Long> write = null;
+        try {
+            // The nonce is client text of up to 256 characters: store its digest.
+            String key = "ops-nonce:" + java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(nonce.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            var expiresAt = java.time.Instant.ofEpochMilli(nowMillis + NONCE_TTL_MILLIS);
+            long deadline = System.nanoTime() + DURABLE_WRITE_TIMEOUT_MILLIS * 1_000_000L;
+            // On its own (virtual) thread, so the wait for a pooled connection is bounded too:
+            // the statement's query timeout only starts once there is a connection.
+            write = new java.util.concurrent.FutureTask<>(() -> counters.incrementAndGet(key, 1, expiresAt, deadline));
+            Thread.ofVirtual().name("brace-ops-nonce").start(write);
+            long uses = write.get(DURABLE_WRITE_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+            // Expired rows are swept by the rate limiter's cleanup when there is one; make sure
+            // they go either way. Rare (one sweep at most every ten minutes), best effort, and
+            // off the request thread.
+            if (nowMillis - lastNonceRowSweepMillis > 600_000) {
+                lastNonceRowSweepMillis = nowMillis;
+                Thread.ofVirtual().name("brace-ops-nonce-sweep").start(() -> {
+                    try {
+                        counters.sweepExpired();
+                    } catch (RuntimeException ignored) {
+                        // the next sweep retries
+                    }
+                });
+            }
+            return uses == 1;
+        } catch (Exception e) {
+            Throwable cause = e instanceof java.util.concurrent.ExecutionException && e.getCause() != null ? e.getCause() : e;
+            // Two first uses raced and the loser's insert hit the key (H2's portable path): the
+            // other one recorded this nonce, so this is a replay on every database.
+            if (isUniqueViolation(cause)) {
+                return false;
+            }
+            if (write != null) {
+                // Not interrupted: interrupting a virtual thread in a socket read closes the
+                // socket, and the server would keep the statement waiting on its lock. The query
+                // timeout cancels the statement instead, and a connection obtained after the
+                // deadline runs no statement at all (Counters.applyDeadline).
+                write.cancel(false);
+            }
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            durableRetryAtNanos = System.nanoTime() + DURABLE_COOL_DOWN_MILLIS * 1_000_000L;
+            String why = e instanceof java.util.concurrent.TimeoutException
+                ? "no answer within " + DURABLE_WRITE_TIMEOUT_MILLIS + " ms"
+                : Redactor.redactMessage(cause.getMessage());
+            Log.warn("ops auth: could not record the sign-in nonce in the database, using this instance's "
+                + "memory only for the next " + DURABLE_COOL_DOWN_MILLIS / 1000 + " s — " + why);
+            return null;
+        }
+    }
+
+    private static boolean isUniqueViolation(Throwable e) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth++ < 16; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && "23505".equals(sql.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -604,6 +777,14 @@ public class OpsHandler {
             r.put("pattern", route.pattern());
             if (route.name() != null) r.put("name", route.name());
             r.put("access", route.accessLabel());
+            routeList.add(r);
+        }
+        for (var mapping : staticMappings.get()) {
+            var r = new LinkedHashMap<String, Object>();
+            r.put("method", "STATIC");
+            r.put("pattern", mapping.pattern());
+            r.put("access", mapping.accessLabel());
+            if (mapping.mode() == StaticFiles.UNTRUSTED) r.put("mode", "untrusted");
             routeList.add(r);
         }
         return Json.of(routeList);
@@ -1013,7 +1194,7 @@ public class OpsHandler {
 
     /**
      * Whether a v3 auth signature's origin names this server. With origins configured
-     * ({@code app.opsOrigins}, required in prod) it must be one of them, exactly: the request's
+     * ({@code app.opsOrigins}, required outside dev) it must be one of them, exactly: the request's
      * {@code Host} and {@code X-Forwarded-Host} play no part, since the client sending a relayed
      * signature can choose those. Without (dev, tests) its host must be the one the request was
      * addressed to; the port isn't compared, since behind a proxy the app listens on another.
@@ -1086,40 +1267,98 @@ public class OpsHandler {
 
     /**
      * Per-instance, best-effort seen-nonce set for v3 ops auth replay suppression.
-     * Maps nonce → expiry (epoch millis); expired entries are swept opportunistically on
-     * each call (the auth endpoint is low-rate, so a full sweep per call is cheap). The
-     * set is size-bounded and fails closed: when full (after sweeping), new nonces are
-     * rejected rather than evicting live ones. Entries are only recorded after signature
-     * verification, so only holders of an authorized key can fill it.
+     * Maps nonce to its expiry (epoch millis) and the key that used it. Entries are only
+     * recorded after signature verification, so only holders of an authorized key can fill it.
      *
-     * <p>Deliberately NOT fleet-global (B5: ops must work without shared state), so a
-     * captured request remains replayable against a different instance within the
-     * timestamp acceptance window — see docs/SECURITY.md.
+     * <p>Bounded two ways, both failing closed (a new nonce is rejected rather than a live one
+     * evicted): an overall cap, and a per-key quota inside it (L16), so one key, including a
+     * read-scoped one, can exhaust only its own share and never another operator's login
+     * ({@link OpsHandler#nonceQuotaPerKey} keeps the shares within the cap).
+     *
+     * <p>Every call does a bounded amount of work (final review: a refused call swept the whole
+     * map inside the monitor, 673 µs at 100,000 entries). Entries are kept in the order they were
+     * recorded, which is the order they expire in since they all live {@code ttlMillis}, so the
+     * expired ones are at the head of a queue; a call removes at most
+     * {@link #MAX_EVICTIONS_PER_CALL} of them. A call adds at most one entry and removes up to
+     * that many, so a backlog of expired entries only shrinks.
+     *
+     * <p>Per instance, and lost on restart; {@code OpsHandler.auth} layers a database record and
+     * a restart window on top (see {@code seenNonces} there).
      */
     static final class NonceCache {
-        private final java.util.concurrent.ConcurrentHashMap<String, Long> seen =
-            new java.util.concurrent.ConcurrentHashMap<>();
+        static final int MAX_EVICTIONS_PER_CALL = 64;
+
+        enum Outcome { FRESH, REPLAY, FULL }
+
+        private record Entry(String nonce, long expiresAt, String key) {}
+
+        private final java.util.HashMap<String, Entry> seen = new java.util.HashMap<>();
+        private final java.util.ArrayDeque<Entry> byExpiry = new java.util.ArrayDeque<>();
+        private final java.util.HashMap<String, Integer> perKey = new java.util.HashMap<>();
         private final long ttlMillis;
         private final int maxSize;
+        private final int maxPerKey;
 
         NonceCache(long ttlMillis, int maxSize) {
+            this(ttlMillis, maxSize, maxSize);
+        }
+
+        NonceCache(long ttlMillis, int maxSize, int maxPerKey) {
             this.ttlMillis = ttlMillis;
             this.maxSize = maxSize;
+            this.maxPerKey = maxPerKey;
+        }
+
+        boolean checkAndRecord(String nonce, long nowMillis) {
+            return checkAndRecord("", nonce, nowMillis);
+        }
+
+        /** True when {@code nonce} was fresh and is now recorded; see {@link #record}. */
+        boolean checkAndRecord(String key, String nonce, long nowMillis) {
+            return record(key, nonce, nowMillis) == Outcome.FRESH;
         }
 
         /**
-         * Record the nonce if it is fresh. Returns {@code false} when the nonce was
-         * already seen (replay) or the cache is at capacity (fail closed).
+         * Record {@code nonce}, used by {@code key} (a key fingerprint), if it is fresh.
+         * {@link Outcome#REPLAY} when it was already seen, {@link Outcome#FULL} when the key's
+         * quota or the overall cap is full (fail closed).
          */
-        boolean checkAndRecord(String nonce, long nowMillis) {
-            seen.entrySet().removeIf(e -> e.getValue() < nowMillis);
-            if (seen.size() >= maxSize) {
-                return false;
+        synchronized Outcome record(String key, String nonce, long nowMillis) {
+            evictExpired(nowMillis);
+            Entry existing = seen.get(nonce);
+            if (existing != null && existing.expiresAt >= nowMillis) return Outcome.REPLAY;
+            if (seen.size() >= maxSize || perKey.getOrDefault(key, 0) >= maxPerKey) {
+                // An expired entry for this very nonce, not yet reached by the queue, still holds
+                // its slot; either way the caller retries with a new nonce a moment later.
+                return Outcome.FULL;
             }
-            return seen.putIfAbsent(nonce, nowMillis + ttlMillis) == null;
+            var entry = new Entry(nonce, nowMillis + ttlMillis, key);
+            Entry replaced = seen.put(nonce, entry);
+            if (replaced != null) release(replaced.key); // expired, still queued: its queue slot is skipped later
+            byExpiry.addLast(entry);
+            perKey.merge(key, 1, Integer::sum);
+            return Outcome.FRESH;
         }
 
-        int size() {
+        /** Remove expired entries from the head of the queue, at most {@link #MAX_EVICTIONS_PER_CALL}. */
+        private void evictExpired(long nowMillis) {
+            for (int i = 0; i < MAX_EVICTIONS_PER_CALL; i++) {
+                Entry head = byExpiry.peekFirst();
+                if (head == null || head.expiresAt >= nowMillis) return;
+                byExpiry.pollFirst();
+                // Identity: the nonce may have been recorded again since (see record).
+                if (seen.get(head.nonce) == head) {
+                    seen.remove(head.nonce);
+                    release(head.key);
+                }
+            }
+        }
+
+        private void release(String key) {
+            perKey.computeIfPresent(key, (k, n) -> n <= 1 ? null : n - 1);
+        }
+
+        synchronized int size() {
             return seen.size();
         }
     }

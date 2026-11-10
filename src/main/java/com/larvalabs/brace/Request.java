@@ -126,7 +126,7 @@ public class Request {
         try {
             cleanup.close();
         } catch (Throwable t) {
-            Log.warn("failed to release upload temp files: " + t);
+            Log.warn("failed to release upload temp files: " + Redactor.redactMessage(t.toString()));
         }
     }
 
@@ -144,8 +144,31 @@ public class Request {
     }
 
     public String method() { return method; }
-    public String path() { return path; }
-    public Map<String, String> queryParams() { return queryParams; }
+    /**
+     * The request path as the client sent it (still percent-encoded). Under a page-cached
+     * handler in dev mode or a test this is a recorded read: the cache key holds the route's
+     * decoded path parameters, not this string (L4).
+     */
+    public String path() { readRawPath(); return path; }
+
+    /**
+     * {@link #path()} without recording the read, for {@link Paged} links back to this same route
+     * (L4 verification). A page is stored only for a raw path in normal form (Cache), so a link
+     * built from it names the same page.
+     */
+    String pathForLinks() { return path; }
+
+    /**
+     * The query params the page-cache key declares (sorted), while a page-cached handler runs, in
+     * every mode; null otherwise. {@link Paged} copies only these into its links there, so a cached
+     * page never embeds request input its key does not cover (L4 verification).
+     */
+    private String[] pageCacheVary;
+
+    void setPageCacheVary(String[] sortedVary) { this.pageCacheVary = sortedVary; }
+
+    String[] pageCacheVary() { return pageCacheVary; }
+    public Map<String, String> queryParams() { readQuery("*"); return queryParams; }
     public Map<String, String> pathParams() { return pathParams; }
 
     // Path parameter accessors
@@ -165,14 +188,17 @@ public class Request {
     // Query parameter accessors
 
     public String queryParam(String name) {
+        readQuery(name);
         return queryParams.get(name);
     }
 
     public String queryParam(String name, String defaultValue) {
+        readQuery(name);
         return queryParams.getOrDefault(name, defaultValue);
     }
 
     public int queryInt(String name) {
+        readQuery(name);
         return Integer.parseInt(queryParams.get(name));
     }
 
@@ -183,6 +209,7 @@ public class Request {
      * Use {@link #queryInt(String)} when an unparseable value should surface as an error.
      */
     public int queryInt(String name, int defaultValue) {
+        readQuery(name);
         var value = queryParams.get(name);
         if (value == null) return defaultValue;
         try {
@@ -193,6 +220,7 @@ public class Request {
     }
 
     public long queryLong(String name) {
+        readQuery(name);
         return Long.parseLong(queryParams.get(name));
     }
 
@@ -201,6 +229,7 @@ public class Request {
      * missing OR present but unparseable. See {@link #queryInt(String, int)}.
      */
     public long queryLong(String name, long defaultValue) {
+        readQuery(name);
         var value = queryParams.get(name);
         if (value == null) return defaultValue;
         try {
@@ -211,6 +240,7 @@ public class Request {
     }
 
     public boolean hasQueryParam(String name) {
+        readQuery(name);
         return queryParams.containsKey(name);
     }
 
@@ -221,6 +251,12 @@ public class Request {
      * {@link #queryParam(String)} (last value wins) is unchanged.
      */
     public List<String> queryParams(String name) {
+        readQuery(name);
+        return queryValues(name);
+    }
+
+    /** {@link #queryParams(String)} without recording the read, for the page cache's own key. */
+    List<String> queryValues(String name) {
         if (rawQuery == null) {
             // No raw query string available (e.g. a hand-constructed Request in a unit
             // test): fall back to the single-value map.
@@ -238,6 +274,8 @@ public class Request {
      * a link.
      */
     public String url() {
+        readQuery("*");
+        readRawPath();
         var qs = new StringBuilder();
         for (var pair : queryPairs()) Url.appendPair(qs, pair[0], pair[1]);
         return qs.isEmpty() ? path : path + "?" + qs;
@@ -251,6 +289,8 @@ public class Request {
      * Values are re-encoded, so the result is safe to put in a link.
      */
     public String urlWith(String name, Object value) {
+        readQuery("*");
+        readRawPath();
         var text = Url.format(value);
         var qs = new StringBuilder();
         boolean placed = false;
@@ -303,6 +343,7 @@ public class Request {
     public List<String> formParams(String name) {
         // Mirror parseFormBody's split rules: a pair without '=' is a bare key with an
         // empty value; a leading '=' means an empty-string key.
+        readBody();
         resolveBody();
         return valuesOf(body, name, false);
     }
@@ -392,10 +433,12 @@ public class Request {
     }
 
     public String header(String name) {
+        readHeader(name);
         return headers.get(name);
     }
 
     public boolean hasHeader(String name) {
+        readHeader(name);
         return headers.containsKey(name);
     }
 
@@ -418,9 +461,10 @@ public class Request {
         return "true".equals(header("HX-Request"));
     }
 
-    public String body() { resolveBody(); return body; }
+    public String body() { readBody(); resolveBody(); return body; }
 
     public UploadedFile file(String name) {
+        readBody();
         resolveBody();
         var files = uploadedFiles.get(name);
         if (files == null || files.isEmpty()) return null;
@@ -428,6 +472,7 @@ public class Request {
     }
 
     public List<UploadedFile> files(String name) {
+        readBody();
         resolveBody();
         return uploadedFiles.getOrDefault(name, List.of());
     }
@@ -455,7 +500,8 @@ public class Request {
     }
 
     public String cookie(String name) {
-        var cookieHeader = header("Cookie");
+        if (reads != null) reads.cookies.add(name);
+        var cookieHeader = headers.get("Cookie");
         if (cookieHeader == null) return null;
         for (var part : cookieHeader.split(";")) {
             var trimmed = part.trim();
@@ -471,13 +517,13 @@ public class Request {
      * sent it, else {@code Host}. Null if neither is present.
      */
     String host() {
-        String h = ProxyHeaders.effectiveHost(this::header, remoteAddr, trustedProxies);
+        String h = ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies);
         return h == null ? null : stripPort(h.strip());
     }
 
     /** The host the client addressed, with its port if it gave one. */
     String hostWithPort() {
-        String h = ProxyHeaders.effectiveHost(this::header, remoteAddr, trustedProxies);
+        String h = ProxyHeaders.effectiveHost(headers::get, remoteAddr, trustedProxies);
         return h == null ? null : h.strip().toLowerCase(java.util.Locale.ROOT);
     }
 
@@ -486,29 +532,107 @@ public class Request {
         return trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr);
     }
 
+    /**
+     * Every wire instance of the configured forwarding header ({@link TrustedProxies#clientIpHeader}),
+     * joined with {@code ","} in wire order, captured when the framework builds the request (L3).
+     * {@link #headers} keeps one value per name (the last line), which let a client's line and the
+     * proxy's line race; the address chain needs all of them. Null when not captured (a hand-built
+     * Request), in which case {@link #ip()} falls back to the single-value header.
+     */
+    private String forwardingChain;
+    private boolean forwardingChainCaptured;
+
+    /** Set once the "trusted proxy sends only the other forwarding header" warning is logged (L3 review F3). */
+    private static final java.util.concurrent.atomic.AtomicBoolean warnedForwardingHeader =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    static boolean warnedForwardingHeader() { return warnedForwardingHeader.get(); }
+
+    static void resetForwardingHeaderWarning() { warnedForwardingHeader.set(false); }
+
+    void setForwardingChain(String joinedValues) {
+        this.forwardingChain = joinedValues;
+        this.forwardingChainCaptured = true;
+    }
+
+    /** The sentinel {@link #ip()} returns when no client address can be determined. */
+    static final String UNKNOWN_IP = "unknown";
+
+    /** {@link #ip()}'s answer, resolved once per request. */
+    private String resolvedIp;
+
+    /**
+     * The client's address: a canonical IP literal, or {@code "unknown"} (never anything else).
+     *
+     * <p><b>Form.</b> IPv4 is dotted decimal ({@code 203.0.113.9}). IPv6 is RFC 5952: lower-case,
+     * no leading zeros, the longest run of zero groups written {@code ::} ({@code 2001:db8::5},
+     * {@code ::1}), never bracketed and never with a port. An IPv4-mapped IPv6 address
+     * ({@code ::ffff:6.6.6.6}) is returned as the IPv4 address. A zone id is kept as written
+     * ({@code fe80::1%eth0}). So comparing {@code req.ip()} with a string written in that form is
+     * reliable, however the proxy or the socket layer spelled the address.
+     *
+     * <p><b>Which address.</b> The socket peer, unless the peer is a trusted proxy, in which case
+     * it is the rightmost untrusted entry of the one forwarding header {@link TrustedProxies}
+     * names. When a trusted proxy's header names no usable client (the selected entry is not an
+     * address: {@code unknown}, {@code _hidden}, a malformed element, an empty header, or the
+     * proxy sent only the forwarding header Brace was not told to read), the answer is
+     * {@code "unknown"}, never the proxy's own address: returning the proxy's address would let a
+     * client that can malform the header pass for the proxy in an address allowlist. Treat
+     * {@code "unknown"} as matching nothing (it is not an address, so
+     * {@link TrustedProxies#isTrusted} is false for it); {@code RateLimiter.perIp} counts every
+     * such request in one shared bucket. A trusted peer that sends no forwarding header at all
+     * (a health check from the proxy, a local process) is itself the client and is returned.
+     */
     public String ip() {
+        if (reads != null) reads.ip = true;
+        if (resolvedIp == null) resolvedIp = resolveIp();
+        return resolvedIp;
+    }
+
+    private String resolveIp() {
+        String peer = TrustedProxies.canonical(remoteAddr);
+        if (peer == null) return UNKNOWN_IP;
         // Only trust forwarding headers if proxies are configured and the immediate peer is trusted
-        if (trustedProxies != null && remoteAddr != null && trustedProxies.isTrusted(remoteAddr)) {
-            // Check X-Forwarded-For first (most common).
-            // NOTE: Request.headers is a single-value map (TreeMap, case-insensitive), so multiple
-            // X-Forwarded-For header instances from the wire are not visible here — only the value
-            // as concatenated by Jetty (which joins multi-occurrence headers with ", ") is available.
-            var forwarded = header("X-Forwarded-For");
-            if (forwarded != null && !forwarded.isEmpty()) {
-                var result = rightmostUntrusted(forwarded.split(","));
-                if (result != null) return result;
-            }
-
-            // Check Forwarded header (RFC 7239)
-            var forwardedRfc = header("Forwarded");
-            if (forwardedRfc != null && !forwardedRfc.isEmpty()) {
-                var forPart = extractForwardedFor(forwardedRfc);
-                if (forPart != null) return forPart;
-            }
+        if (trustedProxies == null || !trustedProxies.isTrusted(remoteAddr)) return peer;
+        // L3: exactly one forwarding header is read, the one TrustedProxies names
+        // (X-Forwarded-For unless useForwardedHeader()); the other is ignored, so a client
+        // cannot supply its own address in the header the proxy doesn't overwrite.
+        var chain = forwardingChainCaptured ? forwardingChain : headers.get(trustedProxies.clientIpHeader());
+        if (chain == null) {
+            // Nothing in the header Brace reads. If the peer sent the other one it is proxying
+            // for someone Brace cannot identify; with neither, the peer speaks for itself.
+            return warnIfOnlyTheOtherForwardingHeader() ? UNKNOWN_IP : peer;
         }
+        var selected = trustedProxies.usesForwardedHeader()
+            ? extractForwardedFor(chain)
+            : rightmostUntrusted(chain.split(",", -1)); // -1: keep a trailing empty entry (L3 verification)
+        // L3 final review: the peer is a proxy and its header names no address. The proxy's own
+        // address is not the client's, so it is never the fallback.
+        String client = selected == null ? null : TrustedProxies.canonical(selected);
+        return client != null ? client : UNKNOWN_IP;
+    }
 
-        // Default: use socket remote address
-        return remoteAddr != null ? remoteAddr : "unknown";
+    /**
+     * L3 review F3: a trusted proxy sent the forwarding header Brace was not told to read, and not
+     * the one it was. Typically a proxy that writes only RFC 7239 {@code Forwarded} while the app
+     * reads {@code X-Forwarded-For} (the default), so no client's address can be determined.
+     * Logged once per process. Returns true when the other header is present.
+     */
+    private boolean warnIfOnlyTheOtherForwardingHeader() {
+        boolean forwardedChosen = trustedProxies.usesForwardedHeader();
+        String other = forwardedChosen ? "X-Forwarded-For" : "Forwarded";
+        String otherValue = headers.get(other);
+        if (otherValue == null || otherValue.isBlank()) return false;
+        if (warnedForwardingHeader.compareAndSet(false, true)) {
+            Log.warn("Trusted proxy " + remoteAddr + " sent " + other + " but not "
+                + trustedProxies.clientIpHeader() + ", the header req.ip() reads, so req.ip() is \"unknown\" "
+                + "for every client. " + (forwardedChosen
+                    ? "If the proxy writes X-Forwarded-For, drop useForwardedHeader() from app.trustedProxies(...)."
+                    : "If the proxy writes RFC 7239 Forwarded, use app.trustedProxies(new TrustedProxies(...)"
+                        + ".useForwardedHeader()).")
+                + " See docs/SECURITY.md, Trusted Proxies. Logged once.");
+        }
+        return true;
     }
 
     /**
@@ -518,10 +642,11 @@ public class Request {
      * (fully internal infrastructure chain), return the leftmost non-blank entry to preserve
      * the original client address.
      *
-     * <p>Blank/whitespace-only entries are skipped in both directions. If the array is empty or
-     * contains only blank entries, {@code null} is returned so callers fall back to the socket
-     * remote address — this prevents returning an empty string and prevents an
-     * {@link ArrayIndexOutOfBoundsException} on a header value of exactly {@code ","}.
+     * <p>Only an entry that is a trusted proxy's address is walked past (L3 verification). A blank
+     * (or {@code null}: a {@code Forwarded} element without {@code for=}) entry reached first is
+     * the trusted proxy's statement that it names no client, so the walk stops and returns
+     * {@code null} ({@code "unknown"}); it never skips to an earlier entry, which the client may
+     * have written. An empty array also returns {@code null}.
      *
      * <p>Port suffixes are stripped before trust evaluation:
      * <ul>
@@ -531,24 +656,17 @@ public class Request {
      * </ul>
      */
     private String rightmostUntrusted(String[] entries) {
-        // Right-to-left: skip blank segments; return the first untrusted non-blank entry.
+        // Right-to-left: walk past trusted proxies only; the first entry that is not one decides.
         for (int i = entries.length - 1; i >= 0; i--) {
-            var trimmed = entries[i].trim();
-            if (trimmed.isEmpty()) continue;
+            var trimmed = entries[i] == null ? "" : entries[i].trim();
+            if (trimmed.isEmpty()) return null; // names no client: unknown, never an earlier entry
             var addr = stripPort(trimmed);
             if (!trustedProxies.isTrusted(addr)) {
                 return addr;
             }
         }
-        // All non-blank entries are trusted (fully internal chain) — return the leftmost non-blank.
-        for (int i = 0; i < entries.length; i++) {
-            var trimmed = entries[i].trim();
-            if (!trimmed.isEmpty()) {
-                return stripPort(trimmed);
-            }
-        }
-        // No non-blank entries at all — signal to the caller to fall back to remoteAddr.
-        return null;
+        // Every entry is trusted (fully internal chain): the leftmost is the original client.
+        return entries.length == 0 ? null : stripPort(entries[0].trim());
     }
 
     /**
@@ -592,39 +710,136 @@ public class Request {
         return true;
     }
 
+    /**
+     * The {@code for=} value of each RFC 7239 element, in order, then the rightmost-untrusted walk.
+     * L3 review F8: commas and semicolons inside a quoted-string are not separators, and a
+     * backslash escapes the next character in one, so {@code for="a,b"} is one value (which is not
+     * an address, so {@link #ip()} is {@code "unknown"}) rather than {@code "a} and {@code b"}.
+     * An element without {@code for=} (or an empty one) names no client: reached in the walk it
+     * makes the answer {@code "unknown"} (L3 verification), so a proxy's {@code proto=https}
+     * element can no longer be skipped to reach a client-written {@code for=}.
+     *
+     * <p>Elements are split from the RIGHT ({@link #splitForwardedElements}; L3 final review):
+     * the element a trusted proxy appended is the end of the string and is well-formed, so read
+     * from that end it is delimited by its own text alone. Read from the left, a client's
+     * unbalanced quote ({@code for="x}) opened a quoted-string that ran through the proxy's comma
+     * and swallowed its element.
+     */
     private String extractForwardedFor(String forwarded) {
-        // RFC 7239 parser: each list-element is separated by ","; within each element,
-        // parameters are separated by ";". Extract "for=" values and apply rightmost-untrusted walk.
-        var elements = forwarded.split(",");
-        var forValues = new java.util.ArrayList<String>(elements.length);
-        for (var element : elements) {
-            // Split the element's parameters on ";"
-            for (var param : element.split(";")) {
-                var trimmed = param.trim();
-                if (trimmed.toLowerCase().startsWith("for=")) {
-                    var value = trimmed.substring(4);
-                    // Remove surrounding quotes if present (RFC 7239 allows quoted-string)
-                    if (value.startsWith("\"") && value.endsWith("\"") && value.length() >= 2) {
-                        value = value.substring(1, value.length() - 1);
-                    }
-                    // Strip port suffix (handles IPv4:port and [IPv6]:port forms)
-                    value = stripPort(value);
-                    forValues.add(value);
-                    break; // only one "for=" per list-element
-                }
+        var forValues = new java.util.ArrayList<String>();
+        for (var element : splitForwardedElements(forwarded)) {
+            String forValue = null; // no for= in this element
+            for (var param : splitForwarded(element, ';')) {
+                var trimmed = param.strip();
+                int eq = trimmed.indexOf('=');
+                if (eq < 0 || !trimmed.substring(0, eq).strip().equalsIgnoreCase("for")) continue;
+                forValue = unquote(trimmed.substring(eq + 1).strip());
+                break; // only one "for=" per list-element
             }
+            forValues.add(forValue);
         }
-        if (forValues.isEmpty()) return null;
         return rightmostUntrusted(forValues.toArray(new String[0]));
     }
 
+    /**
+     * The comma-separated elements of a {@code Forwarded} value, in wire order, found by scanning
+     * right to left. A {@code "} met from the right closes a quoted-string whose opening quote is
+     * the nearest unescaped {@code "} to its left; commas between the two are content. A
+     * {@code "} with no partner to its left (a client's unbalanced quote) is an ordinary
+     * character, so it spoils only the element it is in. Whatever a suffix of the string is
+     * (the elements trusted proxies appended), it splits the same way regardless of the text
+     * before it.
+     */
+    static List<String> splitForwardedElements(String s) {
+        var parts = new java.util.ArrayList<String>();
+        int end = s.length();
+        boolean noQuoteToTheLeft = false;
+        for (int i = s.length() - 1; i >= 0; i--) {
+            char c = s.charAt(i);
+            if (c == ',') {
+                parts.add(s.substring(i + 1, end));
+                end = i;
+            } else if (c == '"' && !noQuoteToTheLeft) {
+                int open = i - 1;
+                while (open >= 0 && !(s.charAt(open) == '"' && !escaped(s, open))) open--;
+                if (open >= 0) {
+                    i = open; // skip the quoted-string
+                } else {
+                    // A lone quote is just a character, and so is every quote left of it (none
+                    // of them has an unescaped quote to its left either): no rescans.
+                    noQuoteToTheLeft = true;
+                }
+            }
+        }
+        parts.add(s.substring(0, end));
+        java.util.Collections.reverse(parts);
+        return parts;
+    }
+
+    /** True when the character at {@code index} is preceded by an odd number of backslashes. */
+    private static boolean escaped(String s, int index) {
+        int backslashes = 0;
+        for (int i = index - 1; i >= 0 && s.charAt(i) == '\\'; i--) backslashes++;
+        return (backslashes & 1) == 1;
+    }
+
+    /** Split on {@code separator} outside quoted-strings (backslash escapes inside them). */
+    static List<String> splitForwarded(String s, char separator) {
+        var parts = new java.util.ArrayList<String>();
+        boolean quoted = false;
+        int start = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (quoted && c == '\\') {
+                i++; // the escaped character, whatever it is
+            } else if (c == '"') {
+                quoted = !quoted;
+            } else if (c == separator && !quoted) {
+                parts.add(s.substring(start, i));
+                start = i + 1;
+            }
+        }
+        parts.add(s.substring(start));
+        return parts;
+    }
+
+    /** A quoted-string's content with escapes resolved, or {@code s} unchanged if it is a token. */
+    private static String unquote(String s) {
+        if (s.length() < 2 || s.charAt(0) != '"' || s.charAt(s.length() - 1) != '"') return s;
+        var out = new StringBuilder(s.length());
+        for (int i = 1; i < s.length() - 1; i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length() - 1) c = s.charAt(++i);
+            out.append(c);
+        }
+        return out.toString();
+    }
+
+    /**
+     * Bind the form to a record and validate it.
+     *
+     * <p>On {@code GET} and {@code HEAD} (a search or filter form) the fields come from the query
+     * string, with any body field taking precedence. On every other method ({@code POST},
+     * {@code PUT}, {@code PATCH}, {@code DELETE}) they come from the body only, the same source
+     * as {@link #formParam(String)} (M4): a value in the URL must not fill a field the body left
+     * out, or a guard reading {@code formParam} and the handler would see different values.
+     */
     public <T> Form<T> form(Class<T> type) {
+        if (!bindsQueryString(method)) {
+            return FormBinder.bind(type, parsedFormBody());
+        }
         // Copy: the cached form map must not absorb query params, and may be immutable-empty.
+        readQuery("*");
         var params = new LinkedHashMap<>(parsedFormBody());
         for (var entry : queryParams.entrySet()) {
             params.putIfAbsent(entry.getKey(), entry.getValue());
         }
         return FormBinder.bind(type, params);
+    }
+
+    /** Only the safe methods bind a form from the query string; fail closed for anything else. */
+    private static boolean bindsQueryString(String method) {
+        return "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
     }
 
     /**
@@ -673,12 +888,50 @@ public class Request {
      * need to mutate.
      */
     Map<String, String> parsedFormBody() {
+        readBody();
         if (formBodyParams == null) {
             resolveBody();
             formBodyParams = parseSingleValues(body, false);
         }
         return formBodyParams;
     }
+
+    /**
+     * Dev mode or {@code Brace.test()} (set by {@link BraceHandler}, as for the query-taint check):
+     * a page-cached handler's reads are recorded so an input outside the cache key is reported
+     * (L4 review F6). False in production, where nothing is recorded.
+     */
+    private boolean strictInputChecks;
+
+    void setStrictInputChecks(boolean strict) { this.strictInputChecks = strict; }
+
+    boolean strictInputChecks() { return strictInputChecks; }
+
+    /**
+     * The request inputs a handler read while {@link #recordReads} was on: query parameter names
+     * ({@code "*"} for the whole query), header names, cookie names, and whether it read the body
+     * or the client address. Only ever set in dev mode and tests.
+     */
+    static final class InputReads {
+        final java.util.Set<String> query = new java.util.LinkedHashSet<>();
+        final java.util.Set<String> headers = new java.util.TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        final java.util.Set<String> cookies = new java.util.LinkedHashSet<>();
+        boolean body;
+        boolean ip;
+        /** The raw path ({@code path()}, {@code url()}, {@code urlWith()}), not the decoded path params. */
+        boolean rawPath;
+    }
+
+    /** Non-null only while a page-cached handler runs in dev mode or a test; see {@link #strictInputChecks}. */
+    private InputReads reads;
+
+    /** Start recording reads into {@code into}, or stop with null. */
+    void recordReads(InputReads into) { this.reads = into; }
+
+    private void readQuery(String name) { if (reads != null) reads.query.add(name); }
+    private void readHeader(String name) { if (reads != null) reads.headers.add(name); }
+    private void readBody() { if (reads != null) reads.body = true; }
+    private void readRawPath() { if (reads != null) reads.rawPath = true; }
 
     void setStorage(Storage storage) {
         this.storage = storage;
@@ -688,6 +941,13 @@ public class Request {
     void setRawQuery(String rawQuery) {
         this.rawQuery = rawQuery;
     }
+
+    /** The route this request matched, set by {@link BraceHandler}; null for a hand-built Request. */
+    private Route route;
+
+    Route route() { return route; }
+
+    void setRoute(Route route) { this.route = route; }
 
     /** Verified ops credential, attached by the ops routes' access requirement (H1). */
     private OpsToken.Claims opsClaims;

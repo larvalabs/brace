@@ -34,13 +34,13 @@ class OpsRoutesAndCachingTest {
     static void start() throws Exception {
         keypair = OpsKeys.generateKeypair();
         Path keys = tmp.resolve("authorized-keys");
-        Files.writeString(keys, keypair.publicKey() + " test\n");
+        Files.writeString(keys, keypair.publicKey() + " scope:control test\n");
         Path assets = Files.createDirectories(tmp.resolve("assets"));
         Files.writeString(assets.resolve("app.css"), "body{}");
 
-        app = Brace.app().port(0).banner(false).ops(keys.toString())
+        app = Brace.app().opsUnpinnedForTests().port(0).banner(false).ops(keys.toString())
             .sessions("ops-routes-caching-test-secret-0123456789")
-            .staticFiles("/assets", assets.toString());
+            .staticFiles("/assets", assets.toString()).publicFiles();
         // An app that marks everything publicly cacheable.
         app.after((req, res) -> res.header("Cache-Control", "public, max-age=300"));
         // A session-touching middleware: every response carries the session cookie.
@@ -109,7 +109,7 @@ class OpsRoutesAndCachingTest {
 
     @Test
     void aWebSocketPathCantBeRegisteredTwice() {
-        var other = Brace.app();
+        var other = Brace.app().opsUnpinnedForTests();
         other.ws("/chat", Echo::new);
         var e = assertThrows(IllegalStateException.class, () -> other.ws("/chat/", Echo::new));
         assertTrue(e.getMessage().contains("registered twice"), e.getMessage());

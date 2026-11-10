@@ -180,6 +180,8 @@ or resume one of these reviews, read that file first.
 
 Also sweep `README.md`'s API tour sections (Controllers through Configuration, roughly lines 193–486) against `BRACE-AGENTS.md` for drift. They duplicate deliberately — the README is the GitHub landing page and the tour has adoption value — but the README copy isn't session-loaded by agents, so it rots independently and only this checklist catches it.
 
+Did this release fix a CLI-side security bug? Then raise `MIN_TOOLCHAIN` in `bin/brace` to this release's version, in the release commit itself (not before: a floor naming an unreleased version refuses all of its prereleases, newer ones included, apart from the launcher's own bundled build), and add a line to the comment above it saying what the release fixed. **0.1.11 must raise it to `0.1.11`** (finding H2 in `docs/2026-11-09-security-review-todos.md`); `tests/cli/test-pinned-version.sh` passes either way.
+
 ### Commits and pull requests
 Don't add a Claude Code footer ("Generated with Claude Code"), a Claude session link (`Claude-Session:` trailer, `claude.ai/code/session_...` URL), or a `Co-Authored-By: Claude ...` trailer to commit messages, PR titles, or PR descriptions.
 

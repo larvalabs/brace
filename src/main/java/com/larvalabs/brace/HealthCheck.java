@@ -45,7 +45,7 @@ public final class HealthCheck {
                 conn.disconnect();
             }
         } catch (Exception e) {
-            System.err.println("health check failed: " + e);
+            System.err.println("health check failed: " + Redactor.redactMessage(e.toString()));
             return false;
         }
     }
