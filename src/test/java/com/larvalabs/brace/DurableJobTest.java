@@ -636,4 +636,52 @@ class DurableJobTest {
         }
     }
 
+
+    @Test
+    void aFailedAttemptIsLoggedAndRecordedInTheErrorStore() {
+        // scheduled_jobs.error was the only record of a failed attempt, overwritten by the next
+        // one and never logged. Each attempt now reaches the log and /ops/errors like a 500 does.
+        var store = new ErrorStore(factory, 1000);
+        try {
+            var db = new Database(factory.openSession());
+            long id;
+            try {
+                db.beginTransaction();
+                id = Jobs.schedule(db, new SecretFailingJob(), Duration.ZERO,
+                    JobOptions.maxAttempts(2).backoff(Duration.ZERO));
+                db.commitTransaction();
+            } finally {
+                db.close();
+            }
+            LogTap.clear();
+            var poller = new JobPoller();
+            poller.errorStore(store);
+            poller.pollAndExecute(factory);
+
+            var lines = LogTap.snapshot().stream()
+                .map(LogTap.LogEntry::fields)
+                .filter(f -> "job.error".equals(f.get("event")))
+                .toList();
+            assertEquals(1, lines.size(), LogTap.snapshot().toString());
+            var line = lines.get(0);
+            assertEquals("ERROR", line.get("level"));
+            assertEquals("SecretFailingJob", line.get("job"));
+            assertEquals("durable-job", line.get("kind"));
+            assertEquals("RuntimeException", line.get("error"));
+            assertTrue(String.valueOf(line.get("detail")).contains("id=" + id + " attempt 1/2, will retry"),
+                String.valueOf(line.get("detail")));
+            assertFalse(line.toString().contains(SecretFailingJob.SECRET), line.toString());
+
+            store.flush();
+            var errors = store.list(null).stream()
+                .filter(e -> "durable-job SecretFailingJob".equals(e.get("route")))
+                .toList();
+            assertEquals(1, errors.size(), store.list(null).toString());
+            assertEquals("RuntimeException", errors.get(0).get("errorType"));
+            assertFalse(String.valueOf(errors.get(0).get("message")).contains(SecretFailingJob.SECRET));
+        } finally {
+            store.close();
+        }
+    }
+
 }

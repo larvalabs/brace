@@ -10,7 +10,9 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Covers the Tier 1c batched flush write ({@link Brace#insertMetrics}) — the one piece of that
@@ -36,6 +38,7 @@ class OpsMetricsFlushTest {
     @BeforeEach
     void clean() {
         tx(db -> db.sql("DELETE FROM ops_timeseries"));
+        tx(db -> db.sql("DELETE FROM ops_profiling_snapshots"));
     }
 
     @Test
@@ -73,6 +76,68 @@ class OpsMetricsFlushTest {
         tx(db -> Brace.insertMetrics(db, Timestamp.from(Instant.now()), "test-instance", new LinkedHashMap<>()));
 
         assertEquals(0L, count(), "an empty flush must not emit an INSERT");
+    }
+
+    /**
+     * The shape of a real Hibernate access-optimizer class: one generated name per entity, with
+     * every mapped field spelled out. hockeystats' longest was 243 characters; one past 255 failed
+     * the whole multi-row INSERT with SQLState 22001 and lost that five-minute snapshot.
+     */
+    private static String accessOptimizer(String entity, int fields) {
+        var sb = new StringBuilder("app.entities.").append(entity).append("$HibernateAccessOptimizer");
+        for (int i = 0; i < fields; i++) sb.append("5field").append(i);
+        return sb.toString();
+    }
+
+    @Test
+    void profilingSnapshotStoresNamesLongerThanTheColumn() {
+        String longA = accessOptimizer("PlayerGameEvents", 60) + "A";
+        String longB = accessOptimizer("PlayerGameEvents", 60) + "B"; // same 255-char prefix
+        assertTrue(longA.length() > 300);
+        var ts = Timestamp.from(Instant.parse("2026-11-14T04:10:52Z"));
+        List<Map.Entry<String, Long>> methods = List.of(
+            Map.entry(longA + ".get", 40L), Map.entry(longB + ".get", 30L), Map.entry("app.Short.run", 5L));
+        List<Map.Entry<String, Long>> allocations = List.of(Map.entry(longA, 4096L), Map.entry("byte[]", 1024L));
+
+        tx(db -> Brace.insertProfiling(db, ts, methods, allocations));
+
+        var rows = read(db -> db.sqlQuery(
+            "SELECT \"type\", \"name\", \"value\" FROM ops_profiling_snapshots ORDER BY \"type\", \"value\" DESC"));
+        assertEquals(5, rows.size(), "every row lands, the long ones included");
+        assertEquals("byte[]", rows.get(1)[1]);
+        assertEquals("app.Short.run", rows.get(4)[1], "short names are stored as they are");
+        String storedA = (String) rows.get(2)[1], storedB = (String) rows.get(3)[1];
+        assertEquals(255, storedA.length());
+        assertTrue(storedA.startsWith("app.entities.PlayerGameEvents$HibernateAccessOptimizer5field0"));
+        assertNotEquals(storedA, storedB, "names sharing a prefix stay distinct in the key");
+        assertEquals(JfrProfiler.storedName(longA + ".get"), storedA);
+    }
+
+    @Test
+    void emptyProfilingSnapshotIsANoOp() {
+        tx(db -> Brace.insertProfiling(db, Timestamp.from(Instant.now()), List.of(), List.of()));
+        Long n = read(db -> db.sqlQueryLong("SELECT COUNT(*) FROM ops_profiling_snapshots"));
+        assertEquals(0L, n == null ? 0L : n.longValue());
+    }
+
+    @Test
+    void storedNameKeepsShortNamesAndHashesLongOnes() {
+        assertEquals("java.lang.String", JfrProfiler.storedName("java.lang.String"));
+        String exactly255 = "x".repeat(255);
+        assertSame(exactly255, JfrProfiler.storedName(exactly255));
+
+        String long1 = "y".repeat(256);
+        String stored = JfrProfiler.storedName(long1);
+        assertEquals(255, stored.length());
+        assertTrue(stored.matches("y{238}~[0-9a-f]{16}"), stored);
+        assertEquals(stored, JfrProfiler.storedName(long1), "stable across snapshots");
+        assertNotEquals(stored, JfrProfiler.storedName("y".repeat(257)));
+
+        // Never cuts a surrogate pair in half.
+        String emoji = "a".repeat(237) + "\uD83D\uDE00" + "b".repeat(40);
+        String cut = JfrProfiler.storedName(emoji);
+        assertTrue(cut.length() <= 255);
+        assertFalse(Character.isHighSurrogate(cut.charAt(cut.indexOf('~') - 1)), cut);
     }
 
     private long count() {

@@ -150,6 +150,38 @@ public class JfrProfiler implements AutoCloseable {
             .limit(n).toList();
     }
 
+    /** Width of {@code ops_profiling_snapshots.name} (V3), which is part of the primary key. */
+    static final int MAX_STORED_NAME = 255;
+    private static final int HASH_HEX_CHARS = 16;
+
+    /**
+     * {@code name} as stored in {@code ops_profiling_snapshots}: unchanged when it fits in
+     * {@value #MAX_STORED_NAME} characters, otherwise a recognizable prefix plus {@code ~} and
+     * 16 hex characters of the full name's SHA-256, exactly {@value #MAX_STORED_NAME} long.
+     *
+     * <p>Generated classes can exceed the column: Hibernate's
+     * {@code Entity$HibernateAccessOptimizer...} names spell out every mapped field. The hash keeps
+     * two long names that share a prefix distinct within the {@code (ts, type, name)} key, and the
+     * mapping is stable, so one name lands on the same stored value in every snapshot. (The column
+     * stays VARCHAR rather than widening to a CLOB: H2 can't put a CLOB in a primary key.)
+     */
+    static String storedName(String name) {
+        if (name == null || name.length() <= MAX_STORED_NAME) return name;
+        byte[] digest;
+        try {
+            digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(name.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required of every JVM", e);
+        }
+        String hash = HexFormat.of().formatHex(digest, 0, HASH_HEX_CHARS / 2);
+        int end = MAX_STORED_NAME - 1 - HASH_HEX_CHARS;
+        // Don't leave half a surrogate pair at the cut (UTF-16 units >= characters, so the
+        // result is never longer than the column in either measure).
+        if (Character.isHighSurrogate(name.charAt(end - 1))) end--;
+        return name.substring(0, end) + "~" + hash;
+    }
+
     public void resetProfiling() {
         methodSamples.set(new ConcurrentHashMap<>());
         allocationByClass.set(new ConcurrentHashMap<>());
