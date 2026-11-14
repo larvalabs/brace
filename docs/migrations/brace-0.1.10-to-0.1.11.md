@@ -142,6 +142,7 @@ ones that apply to the app.
 | New projects start with strict headers, htmx CSRF wiring and `/public` served | new projects | existing projects: optionally adopt the same layout and `routes()` lines | [§](#new-projects-start-with-the-security-defaults) |
 | Whole-branch review follow-ups: duplicate routes refused; bad percent-encoding is a 400; ops `no-store`; CLI token cache in `~/.brace`; launcher refuses toolchains older than 0.1.8 | security, **breaking** for apps registering one route twice | remove the duplicate registration `start()` names | [§](#security-whole-branch-review-follow-ups) |
 | `brace dev` ships the H2 driver for the scaffold's dev database | fix | none; `brace dev` on a project pinned to this version just works | [§](#fix-brace-dev-ships-the-h2-driver) |
+| Failed job runs are logged and listed in `/ops/errors`; profiling snapshots survive long class names | fix | none; alerts or log filters can match the new `job.error` event | [§](#fix-failed-jobs-are-logged-and-listed-in-opserrors) |
 | Jetty, Jackson and PostgreSQL driver security updates | security | none, unless your own pom pins these artifacts | [§](#security-dependency-updates) |
 | **2026-11 review:** every `staticFiles(...)` mapping declares `.publicFiles()` or `.access(...)`; `start()` refuses one that doesn't; mapping directories must exist; overlapping directories need the same access; a prefix registers once and must start with `/` | security, **breaking** | add `.publicFiles()` to asset mappings and `.access(...)` to private ones; create mapped directories before `start()` | [§](#breaking-static-mappings-declare-their-access) |
 | **2026-11 review:** static files are served only at their canonical URL, and only to `GET` and `HEAD` | security, **breaking** for links whose case differs from the file on disk, percent-encode `~`, or end in `/` | fix those links; serve `POST`/`OPTIONS` on a static path from a route | [§](#breaking-static-files-are-served-only-at-their-canonical-url-to-get-and-head) |
@@ -341,6 +342,32 @@ The ops dashboard header shows the running Brace version next to the Java versio
 has it as `app.braceVersion`, and `brace status` prints it. A build from a JitPack tag reports
 that tag's version, release candidates included (before, an rc build reported the previous
 release's version).
+
+## Fix: failed jobs are logged and listed in `/ops/errors`
+
+A recurring job (`every`, `daily`) that threw used to be recorded only in its `/ops/status`
+entry (`lastError`, `failCount`), and the next good run cleared `lastError`. A durable job's
+failed attempt went only to `scheduled_jobs.error`. Neither was logged, so the only trace was
+whatever the throwing library printed. Each failed run or attempt now:
+
+- logs one `ERROR` line with `"event": "job.error"`, the job's name, `kind` (`job` or
+  `durable-job`), the exception type and redacted message, its root cause (`cause`,
+  `causeMessage`), and `detail` (schedule and duration, or job id and attempt);
+- is recorded in the error store like a failed request, under the route `job <name>` or
+  `durable-job <ClassName>`, so `/ops/errors`, `brace errors` and regression notifications
+  include it. This needs a database, as the error store always has.
+
+A durable job interrupted by shutdown is not reported: it is released and retried.
+
+The framework's `ops-flush-jvm-profiling` job also stopped losing snapshots. It stores hot
+methods and allocating classes in `ops_profiling_snapshots.name`, a `VARCHAR(255)`, and a
+generated class name past 255 characters (Hibernate's `$HibernateAccessOptimizer...` classes
+spell out every field) failed the whole insert with SQLState 22001. Such names are now stored
+as their first 238 characters, `~`, and 16 hex characters of a hash of the full name. On H2 the
+job failed on every run (its column names were unquoted); that is fixed too. A failed write no
+longer keeps its samples to be offered again five minutes later.
+
+No code changes are needed.
 
 ## Security: dependency updates
 

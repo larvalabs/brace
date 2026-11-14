@@ -114,6 +114,7 @@ public class JobPoller {
 
     private final String workerId = UUID.randomUUID().toString();
     private volatile String instanceLabel;
+    private volatile ErrorStore errorStore;
 
     private volatile boolean running;
     private Thread pollerThread;
@@ -210,6 +211,11 @@ public class JobPoller {
     /** Label stored alongside the worker row (the app's instance id) — for humans reading the table. */
     void instanceLabel(String label) {
         this.instanceLabel = label;
+    }
+
+    /** Where failed runs are recorded alongside request errors (/ops/errors, `brace errors`). */
+    void errorStore(ErrorStore errorStore) {
+        this.errorStore = errorStore;
     }
 
     /** Test hook: shrink the heartbeat timing so liveness can be exercised in milliseconds. */
@@ -849,6 +855,17 @@ public class JobPoller {
                 ? "Timed out after " + describe(timeout) + " (" + failure + ")"
                 : failure.getMessage());
             int newAttempts = attempts + 1;
+            // scheduled_jobs.error is overwritten by the next attempt and is not in the log at all;
+            // report each failed attempt like a failed request.
+            Throwable reported = failure;
+            if (flight.timedOut) {
+                reported = new java.util.concurrent.TimeoutException("Timed out after " + describe(timeout));
+                reported.initCause(failure);
+            }
+            JobFailures.report(JobFailures.DURABLE, (String) row[1],
+                jobClass + " id=" + id + " attempt " + newAttempts + "/" + maxAttempts
+                    + (newAttempts >= maxAttempts ? ", failed permanently" : ", will retry"),
+                reported, errorStore);
             if (newAttempts >= maxAttempts) {
                 markTerminal(factory, db, id,
                     "UPDATE scheduled_jobs SET failed_at = CURRENT_TIMESTAMP, error = ? WHERE id = ? AND claimed_by = ?",

@@ -1058,6 +1058,11 @@ Jobs survive deploys and crashes with no configuration:
 Delivery is at-least-once — a job whose instance is killed after its side effect but before
 completion is recorded runs again — so **jobs should be idempotent**.
 
+A job that throws (recurring run or durable attempt) logs one `ERROR` line with
+`"event": "job.error"` (job name, exception, root cause) and, with a database, is listed in
+`/ops/errors` and `brace errors` under the route `job <name>` or `durable-job <ClassName>`. No
+need to wrap job bodies in your own try/catch just to log failures.
+
 ```java
 app.jobTimeout(config.get("jobs.timeout"));          // unset key: no timeout
 app.jobShutdownTimeout("20s");                       // e.g. on Kubernetes

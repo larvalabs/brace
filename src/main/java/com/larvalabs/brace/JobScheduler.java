@@ -39,6 +39,13 @@ public class JobScheduler {
     // the next start() schedules it on a fresh executor (a terminated one rejects every task).
     private volatile ScheduledExecutorService scheduler;
     private DatabaseFactory dbFactory;
+    // Where failed runs are recorded alongside request errors (/ops/errors, `brace errors`).
+    // Null without a database; failures are still logged.
+    private volatile ErrorStore errorStore;
+
+    void errorStore(ErrorStore errorStore) {
+        this.errorStore = errorStore;
+    }
 
     public void every(String interval, String name, Job job) {
         register(interval, name, job, false);
@@ -208,6 +215,10 @@ public class JobScheduler {
                 prev.failCount() + 1, nextRun,
                 msg != null ? msg : prev.lastMessage()
             ));
+            // JobStatus alone is not a record: the next successful run clears lastError, so a
+            // failure used to leave no trace but whatever the throwing library printed.
+            JobFailures.report(JobFailures.RECURRING, rj.name(),
+                rj.schedule() + ", failed after " + durationMs + "ms", e, errorStore);
         } finally {
             if (session != null) {
                 try { session.close(); } catch (Exception ignored) {}

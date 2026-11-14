@@ -1372,6 +1372,9 @@ public class Brace {
             int maxErrors = 1000;
             errorStore = new ErrorStore(databaseFactory, maxErrors);
         }
+        // Failed job runs go to the same store as failed requests (null without a database).
+        jobScheduler.errorStore(errorStore);
+        jobPoller.errorStore(errorStore);
 
         // Create JFR profiler when ops is enabled, unless explicitly disabled (M19):
         // continuous sampling is ~0.5–2% CPU, on by default as a deliberate trade.
@@ -1762,25 +1765,14 @@ public class Brace {
                 });
 
                 jobScheduler.every("5m", "ops-flush-jvm-profiling", (db, ctx) -> {
-                    var ts = java.sql.Timestamp.from(java.time.Instant.now());
-                    var rows = new java.util.ArrayList<Object[]>();
-                    for (var entry : profiler.topMethods(20)) {
-                        rows.add(new Object[]{ts, "method", entry.getKey(), entry.getValue()});
+                    try {
+                        insertProfiling(db, java.sql.Timestamp.from(java.time.Instant.now()),
+                            profiler.topMethods(20), profiler.topAllocations(20));
+                    } finally {
+                        // Reset even when the write fails: otherwise the sample maps keep growing
+                        // and a row the database rejects is offered again every five minutes.
+                        profiler.resetProfiling();
                     }
-                    for (var entry : profiler.topAllocations(20)) {
-                        rows.add(new Object[]{ts, "allocation", entry.getKey(), entry.getValue()});
-                    }
-                    if (!rows.isEmpty()) {
-                        // One multi-row INSERT instead of up to 40 single-row round-trips.
-                        var sql = new StringBuilder("INSERT INTO ops_profiling_snapshots (ts, type, name, value) VALUES ");
-                        var params = new java.util.ArrayList<Object>(rows.size() * 4);
-                        for (int i = 0; i < rows.size(); i++) {
-                            sql.append(i == 0 ? "(?, ?, ?, ?)" : ", (?, ?, ?, ?)");
-                            java.util.Collections.addAll(params, rows.get(i));
-                        }
-                        db.sql(sql.toString(), params.toArray());
-                    }
-                    profiler.resetProfiling();
                 });
             }
 
@@ -1819,6 +1811,36 @@ public class Brace {
             params.add(entry.getKey());
             params.add(entry.getValue());
             params.add(instanceId);
+        }
+        db.sql(sql.toString(), params.toArray());
+    }
+
+    /**
+     * Write one profiling snapshot (top methods and allocating classes) as a single multi-row
+     * INSERT into ops_profiling_snapshots. Names go through {@link JfrProfiler#storedName}, since
+     * the column is VARCHAR(255) and generated class names (Hibernate's access optimizers spell
+     * out every field) can be longer: one such name used to fail the whole statement with
+     * SQLState 22001 and lose the snapshot. Package-private for {@code OpsMetricsFlushTest}.
+     */
+    static void insertProfiling(Database db, java.sql.Timestamp ts,
+                                java.util.List<java.util.Map.Entry<String, Long>> methods,
+                                java.util.List<java.util.Map.Entry<String, Long>> allocations) {
+        if (methods.isEmpty() && allocations.isEmpty()) {
+            return;
+        }
+        var sql = new StringBuilder("INSERT INTO ops_profiling_snapshots (ts, \"type\", \"name\", \"value\") VALUES ");
+        var params = new java.util.ArrayList<Object>((methods.size() + allocations.size()) * 4);
+        boolean first = true;
+        for (var group : java.util.List.of(
+                java.util.Map.entry("method", methods), java.util.Map.entry("allocation", allocations))) {
+            for (var entry : group.getValue()) {
+                sql.append(first ? "(?, ?, ?, ?)" : ", (?, ?, ?, ?)");
+                first = false;
+                params.add(ts);
+                params.add(group.getKey());
+                params.add(JfrProfiler.storedName(entry.getKey()));
+                params.add(entry.getValue());
+            }
         }
         db.sql(sql.toString(), params.toArray());
     }
