@@ -65,6 +65,8 @@ public class Brace {
     private Analytics.Options analyticsOptions;
     private Analytics analytics;
     private boolean opsProfilerEnabled = true;
+    private boolean opsDatabaseStatsEnabled = true;
+    private DatabaseStats databaseStats;
     private boolean compression = true;
     private String instanceId;
     private OpsHandler opsHandler;
@@ -477,6 +479,20 @@ public class Brace {
      */
     public Brace opsProfiler(boolean enabled) {
         this.opsProfilerEnabled = enabled;
+        return this;
+    }
+
+    /**
+     * Enables or disables sampling Postgres's statistics views for the Database panel of
+     * {@code /ops/dashboard} and the {@code db.postgres} block of {@code /ops/status}. Default
+     * {@code true} when ops is on and the database is Postgres. The sampler holds one connection
+     * outside the pool and runs a small read-only query every 5 seconds ({@code pg_stat_activity})
+     * and a few more every 30 ({@code pg_stat_database}, {@code pg_stat_io},
+     * {@code pg_stat_user_tables}). Disabling it keeps the connection-pool and request-query
+     * figures, which cost nothing.
+     */
+    public Brace opsDatabaseStats(boolean enabled) {
+        this.opsDatabaseStatsEnabled = enabled;
         return this;
     }
 
@@ -1389,6 +1405,11 @@ public class Brace {
             tokenSecret = resolveOpsSecret();
             opsHandler = new OpsHandler(stats, jobScheduler, mailer, router, authorizedKeys, tokenSecret, errorStore, cache, profiler);
             opsHandler.setAnalytics(analytics);
+            if (databaseFactory != null) {
+                databaseStats = new DatabaseStats(databaseFactory, opsDatabaseStatsEnabled);
+                databaseStats.start();
+                opsHandler.setDatabaseStats(databaseStats);
+            }
             if (opsOrigins.isEmpty() && System.getenv("BRACE_OPS_ORIGINS") != null) {
                 opsOrigins(System.getenv("BRACE_OPS_ORIGINS"));
             }
@@ -1951,6 +1972,11 @@ public class Brace {
         }
         if (profiler != null) {
             profiler.close();
+        }
+        if (databaseStats != null) {
+            // Its connection is outside the pool, so closing the factory wouldn't release it.
+            databaseStats.close();
+            databaseStats = null;
         }
         if (server != null) {
             server.stop();

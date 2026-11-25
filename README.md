@@ -190,7 +190,7 @@ Components included in the framework jar as of this release:
 - **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
 - **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
 - **Analytics** — Opt-in server-side page-view counts (visitors, top pages, sources, devices) with no tracking script, no cookies and no stored IPs, viewed at `/ops/analytics`
-- **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard, `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
+- **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard (including connection-pool and Postgres load stats), `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
 - **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding (including a hardened distroless, non-root `Dockerfile` and `compose.yaml`), `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
 - **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
 

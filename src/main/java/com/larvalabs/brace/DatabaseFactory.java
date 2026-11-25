@@ -81,6 +81,37 @@ public class DatabaseFactory {
         return postgres;
     }
 
+    /**
+     * The connection pool's state right now: connections in use, idle, open, the configured
+     * maximum, and the number of threads waiting for a connection. A waiting count above zero
+     * means requests (or jobs) are queuing for the database. Reading it is a few in-memory
+     * counters, not a query. Null when the pool can't be reached (not started, or closed).
+     */
+    public PoolStats poolStats() {
+        var ds = hikari;
+        if (ds == null) {
+            try {
+                ds = sessionFactory.unwrap(org.hibernate.engine.spi.SessionFactoryImplementor.class)
+                    .getServiceRegistry()
+                    .requireService(org.hibernate.engine.jdbc.connections.spi.ConnectionProvider.class)
+                    .unwrap(com.zaxxer.hikari.HikariDataSource.class);
+                hikari = ds;
+            } catch (RuntimeException e) {
+                return null;
+            }
+        }
+        if (ds.isClosed()) return null;
+        var pool = ds.getHikariPoolMXBean();
+        if (pool == null) return null;
+        return new PoolStats(pool.getActiveConnections(), pool.getIdleConnections(),
+            pool.getTotalConnections(), ds.getMaximumPoolSize(), pool.getThreadsAwaitingConnection());
+    }
+
+    private volatile com.zaxxer.hikari.HikariDataSource hikari;
+
+    /** See {@link #poolStats()}. */
+    public record PoolStats(int active, int idle, int total, int max, int waiting) {}
+
     public StatelessSession openSession() {
         return sessionFactory.openStatelessSession();
     }

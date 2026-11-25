@@ -83,6 +83,18 @@ td.name { max-width: 0; width: 100%; }
 .head-note { font-weight: normal; text-transform: none; letter-spacing: 0; font-size: 9px; }
 .head-actions { float: right; font-weight: normal; text-transform: none; letter-spacing: 0; }
 .cache-stats { display: flex; gap: 16px; margin-bottom: 4px; }
+.db-stats { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 6px; }
+.db-note { margin-bottom: 6px; }
+.sparkline .stack { position: relative; align-self: stretch; }
+.sparkline .stack > div { position: absolute; left: 0; right: 0; bottom: 0; }
+.load-cpu { background: #9ece6a; }
+.load-io { background: #7aa2f7; }
+.load-lock { background: #f7768e; }
+.load-other { background: #565f89; }
+.key-cpu { color: #9ece6a; }
+.key-io { color: #7aa2f7; }
+.key-lock { color: #f7768e; }
+.key-other { color: #565f89; }
 .trace-toggle { cursor: pointer; }
 .trace-msg { margin-top: 4px; }
 .h0{height:0%}.h1{height:1%}.h2{height:2%}.h3{height:3%}.h4{height:4%}.h5{height:5%}.h6{height:6%}.h7{height:7%}.h8{height:8%}.h9{height:9%}

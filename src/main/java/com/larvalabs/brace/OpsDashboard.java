@@ -30,6 +30,16 @@ public class OpsDashboard {
     public static String html(OpsScope scope, Stats stats, JobScheduler jobScheduler,
                               Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler,
                               boolean analyticsEnabled, Analytics.Summary today) {
+        return html(scope, stats, jobScheduler, mailer, errorStore, cache, profiler, analyticsEnabled, today, null);
+    }
+
+    /**
+     * As above, plus the Database card and panel from {@code db} (null without a database: both
+     * are omitted).
+     */
+    public static String html(OpsScope scope, Stats stats, JobScheduler jobScheduler,
+                              Mailer mailer, ErrorStore errorStore, Cache cache, JfrProfiler profiler,
+                              boolean analyticsEnabled, Analytics.Summary today, DatabaseStats.Snapshot db) {
         boolean canControl = scope != null && scope.grants(OpsScope.CONTROL);
         var sb = new StringBuilder();
         var now = Instant.now();
@@ -145,6 +155,9 @@ public class OpsDashboard {
             statCard(sb, "CPU", "-", "", "c-amber");
             statCard(sb, "Threads", String.valueOf(threadBean.getThreadCount()), "", "c-cyan");
             statCard(sb, "GC", "-", "", "c-green");
+        }
+        if (db != null) {
+            OpsDatabasePanel.statCard(sb, db);
         }
         if (cache != null) {
             long hits = cache.hits(), misses = cache.misses();
@@ -262,6 +275,10 @@ public class OpsDashboard {
             sb.append("</div></div>\n");
 
             sb.append("</div>\n"); // close section
+        }
+
+        if (db != null) {
+            OpsDatabasePanel.section(sb, db, minutes);
         }
 
         // Custom metrics sparklines
@@ -657,7 +674,7 @@ public class OpsDashboard {
         statCard(sb, label, value, detail, colorClass, null);
     }
 
-    private static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass, String title) {
+    static void statCard(StringBuilder sb, String label, String value, String detail, String colorClass, String title) {
         sb.append("<div class=\"stat-card\"");
         if (title != null) sb.append(" title=\"").append(esc(title)).append('"');
         sb.append("><div class=\"label\">").append(esc(label))
@@ -669,7 +686,7 @@ public class OpsDashboard {
      * Escape HTML entities for safe inclusion in HTML attributes and content.
      * Escapes: &, <, >, ", and ' (for use in both double-quoted and single-quoted attributes).
      */
-    private static String esc(String s) {
+    static String esc(String s) {
         if (s == null) return "";
         return s.replace("&", "&amp;")
                 .replace("<", "&lt;")
@@ -736,16 +753,16 @@ public class OpsDashboard {
      * The ops.css class for a bar {@code pct} percent tall: {@code .h0} to {@code .h100}, one per
      * whole percent. A class rather than a {@code style} attribute, which the ops CSP blocks.
      */
-    private static String height(double pct) {
+    static String height(double pct) {
         return "h" + Math.round(Math.min(100, Math.max(0, pct)));
     }
 
     /** A rate or a millisecond figure: one decimal below 10 so small values don't read as 0. */
-    private static String formatMetric(double v) {
+    static String formatMetric(double v) {
         return v < 10 ? String.format("%.1f", v) : String.format("%,.0f", v);
     }
 
-    private static String formatBytes(long bytes) {
+    static String formatBytes(long bytes) {
         if (bytes < 1024) return bytes + " B";
         if (bytes < 1024 * 1024) return (bytes / 1024) + " KB";
         if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)) + " MB";

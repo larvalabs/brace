@@ -96,7 +96,7 @@ var app = Brace.app()
     .after(SecurityHeaders.strict());
 ```
 
-Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `sessionValidator()`, `analytics()`, `ownsDatabase()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsDatabaseStats()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `sessionValidator()`, `analytics()`, `ownsDatabase()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -1481,6 +1481,14 @@ scopes, CLI/HTTP endpoint tables, the `/ops/status` shape, runbooks, scaling, st
 is **`BRACE-OPS.md`** in the project root (written by `brace new`, refreshed together with this
 file by `brace agents-md`; also packaged in the framework jar; source: `docs/agent-ops-guide.md`
 in the brace repo).
+
+With a database, the dashboard has a Database panel and `/ops/status` a `db` block: the
+connection pool (in use, waiting), request query time, and on Postgres the database's load
+(average active sessions by wait: CPU, I/O, lock, other), connections, cache hit ratio,
+commit and temp-file rates, `pg_stat_io` on 16+, and the most sequentially scanned tables.
+It reads only Postgres's core statistics views as the app's own role (no extension, no
+superuser), on one connection outside the pool, every 5 s (30 s for counters).
+`app.opsDatabaseStats(false)` turns the Postgres sampling off; the pool figures remain.
 
 ## Analytics
 
