@@ -2,12 +2,12 @@
 
 ## What This Is
 
-Brace is a full-stack Java web framework. Requires JDK 21+; JDK 25 LTS recommended (JEP 491 removes virtual-thread pinning on `synchronized`, which matters under load with Hibernate/JDBC). Plain Java, no DI container, no bytecode enhancement, no classpath scanning. Batteries included: HTTP, database, templates, sessions, forms, jobs, mailer, ops dashboard.
+Brace is a full-stack Java web framework that favors explicit code the compiler can check. Apps are plain Java wired up in `main()`, with no DI container, no bytecode enhancement and no classpath scanning. The framework includes HTTP, database, templates, sessions, forms, jobs, a mailer, analytics and an ops dashboard. It needs JDK 21 or later. JDK 25 LTS is recommended, because JEP 491 removes virtual-thread pinning on `synchronized`, which matters under load with Hibernate and JDBC.
 
 ## Project Structure
 
 ```
-src/main/java/com/larvalabs/brace/     # Framework source (~20k lines including the CLI)
+src/main/java/com/larvalabs/brace/     # Framework source (~27k lines of code including the CLI)
 src/test/java/com/larvalabs/brace/     # Tests (run with `mvn test`)
 src/test/resources/          # Test templates, migrations
 src/assembly/distribution.xml # Assembly descriptor for the brace CLI zip
@@ -161,10 +161,10 @@ Use `Grep` for text searches (TODOs, string literals, config values, error messa
 When changing public API (adding/removing/renaming methods, classes, or handler types), update `BRACE-AGENTS.md` and `README.md` to reflect the change.
 
 ### Periodic model reviews
-Brace gets a full-codebase review in each of three categories — **Security**, **Token
-Efficiency**, **Runtime Performance** — whenever a notably more capable model becomes
-available. Process, conventions (findings doc, one commit per finding, merge gates), and
-the index of completed reviews live in `docs/reviews/README.md`. If you're asked to run
+Brace gets a full-codebase review in each of three categories (**Security**,
+**Correctness** and **Runtime Performance**) whenever a notably more capable model becomes
+available. The Token Efficiency category is retired. Process, conventions (findings doc, one
+commit per finding, merge gates), and the index of completed reviews live in `docs/reviews/README.md`. If you're asked to run
 or resume one of these reviews, read that file first.
 
 ### Migration guides (per version step)
@@ -178,7 +178,7 @@ or resume one of these reviews, read that file first.
 ### Release checklist (version references)
 `pom.xml` `<version>` is the single source of truth for the framework version. The one place a concrete version must still be hardcoded for users to copy is the install example in `README.md` (Maven/Gradle dependency + the "Replace `vX.Y.Z`" line). When cutting a release, update those `README.md` examples to the new tag. Don't reintroduce hardcoded versions into this file or `BRACE-AGENTS.md` — reference `pom.xml`.
 
-Also sweep `README.md`'s API tour sections (Controllers through Configuration, roughly lines 193–486) against `BRACE-AGENTS.md` for drift. They duplicate deliberately — the README is the GitHub landing page and the tour has adoption value — but the README copy isn't session-loaded by agents, so it rots independently and only this checklist catches it.
+Also sweep `README.md`'s API tour sections (Controllers through Configuration, roughly lines 239–830) against `BRACE-AGENTS.md` for drift. They duplicate deliberately — the README is the GitHub landing page and the tour has adoption value — but the README copy isn't session-loaded by agents, so it rots independently and only this checklist catches it.
 
 Did this release fix a CLI-side security bug? Then raise `MIN_TOOLCHAIN` in `bin/brace` to this release's version, in the release commit itself (not before: a floor naming an unreleased version refuses all of its prereleases, newer ones included, apart from the launcher's own bundled build), and add a line to the comment above it saying what the release fixed. **0.1.11 must raise it to `0.1.11`** (finding H2 in `docs/2026-11-09-security-review-todos.md`); `tests/cli/test-pinned-version.sh` passes either way.
 

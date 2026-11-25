@@ -1,48 +1,113 @@
 # Brace
 
-A full-stack Java web framework designed for development by AI coding agents. APIs are explicit and checked by the compiler, per-request overhead is low, and the framework includes most of the components a production website needs.
+Brace is a full-stack web framework for Java. One dependency gives you an HTTP server, database
+access and migrations, typed templates, sessions, forms, background jobs, email, object storage,
+analytics and an operations dashboard. You wire everything up in plain Java in `main()`, so the
+compiler checks how the pieces fit together.
 
-![Brace Ops Dashboard](docs/brace_ops_screenshot.png)
+![The Brace ops dashboard, showing request, latency, error and heap charts and the Postgres database panel](docs/screenshots/ops-dashboard.png)
 
-## Why Brace Exists
+## Explicit Code the Compiler Can Check
 
-Most web frameworks are designed around human developers and reduce boilerplate with implicit behavior: auto-configuration, bean scoping, proxy chains, conditional loading. Coding agents work more reliably with explicit, predictable code, and with fast feedback from the compiler and unit tests.
+Brace has no dependency injection container, no classpath scanning and no bytecode enhancement.
+Routes, middleware, entities and jobs are registered in `main()`, so one file shows how the app is
+put together. Services get their dependencies through their constructors. A handler receives the
+request, the database and the session as method parameters, so its signature lists everything it
+can use.
 
-Microframeworks avoid the implicit behavior but leave each project to assemble its own set of packages, each with its own conventions, configuration, and error handling. An agent has to keep all of those in context.
+Most mistakes show up as compile errors. Handlers are typed functional interfaces, forms and query
+strings bind to Java records, and JTE templates declare typed parameters. A wrong parameter name or
+type fails the build instead of a request.
 
-Brace provides a small set of core types and a full set of components that share one set of conventions, in a single dependency.
+Brace checks the rest when the app starts. `start()` refuses to run if a route has neither an
+access rule nor `.publicRoute()`, if a static file mapping doesn't say who may fetch it, or if a
+route that uses the session turns off CSRF without giving a reason. The error lists every route
+that needs fixing.
 
-### Explicit, Compiler-Checked APIs
+## Features
 
-Request-scoped dependencies are passed as parameters, so a controller method's signature lists everything it can access. There is no DI container, no classpath scanning, and no bytecode enhancement. Routes, middleware, entities, and jobs are all registered in `main()`.
+Everything below is in the framework jar.
 
-Handler types are functional interfaces, forms bind to Java records, and JTE templates declare typed parameters, so a wrong parameter or type is a compile error. Mistakes show up as a compile error or a failing test with a specific message rather than at runtime. For a coding agent, this means less code to read before making a change and a short, precise signal when a change is wrong.
+| Feature | What you get |
+|---|---|
+| HTTP server | Jetty 12 on virtual threads, gzip on by default, `/__brace/health` for load balancers |
+| Routing | Routes, groups and middleware registered in `main()`, named routes with `Url.to(...)` |
+| Access control | Every route declares an access rule or `.publicRoute()`, checked at startup |
+| Database | Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, pagination, Postgres driver included |
+| Templates | JTE with typed parameters, compiled ahead of time for production |
+| Forms | Request parameters or JSON bound to records, with validation annotations |
+| Sessions | AES-256-GCM encrypted cookies with a fixed lifetime and rotation at login |
+| CSRF | On by default for POST, PUT, PATCH and DELETE, with htmx support |
+| Security | `SecurityHeaders.strict()` with a no-inline-script CSP, trusted proxy ranges, bcrypt |
+| Static files | Fingerprinted asset URLs, Range requests, an access rule per mapping |
+| Cache | In-process cache and page caching, or a shared Postgres backend for several servers |
+| Jobs | Recurring jobs, plus a durable database-backed queue with retries that survives restarts |
+| Email | SMTP mailer using JTE templates, which captures mail instead of sending it in dev mode |
+| Object storage | S3, R2 and MinIO through built-in Sig V4 signing, with no AWS SDK |
+| File uploads | Size limits, large parts streamed to disk, sandboxed serving of user files |
+| HTTP client | `java.net.http` client with JSON, multipart, SSE parsing and SSRF protection |
+| WebSocket | Rooms and broadcast, with the same access rules as HTTP routes |
+| Server-Sent Events | `Result.sse(...)` with heartbeats, and no database connection held open |
+| Rate limiting | Per-IP or per-key limits with bounded memory |
+| htmx | htmx 2.0.10 bundled, `req.isHtmx()`, automatic `Vary: HX-Request` |
+| Metrics | Counters, gauges and timers shown as dashboard sparklines |
+| Analytics | Server-side page-view counts with no script, no cookies and no stored IPs |
+| Ops dashboard | Requests, latency, errors, JVM, jobs, cache and Postgres load at `/ops/dashboard` |
+| Error tracking | Stored exceptions with request details and the queries that ran, plus alerts for new errors |
+| Ops API | JSON endpoints under `/ops/*`, authenticated with Ed25519 keys |
+| CLI | `brace new`, `dev`, `test` and `run`, plus `check`, `status`, `errors` and `logs` against a running app |
+| Testing | `Brace.test()` runs the app in-process against H2 |
 
-[BRACE-AGENTS.md](BRACE-AGENTS.md) is a single framework reference matched to the framework version (`brace agents-md` regenerates it from the jar). `brace test` and `brace compile` print condensed summaries sized for an agent's context window.
+Brace is about 27,000 lines of Java, CLI included, with more than 2,000 tests. It needs JDK 21 or
+later and ships as a single Maven artifact.
 
-### Runtime Performance
+## Performance
 
-With no DI container there is no proxy indirection. Hibernate's StatelessSession skips dirty checking and persistence-context management. JTE templates compile to Java classes. Jetty 12 runs each request on a virtual thread. Read-only handlers run without an explicit transaction, views render after the database connection is returned to the pool, and request stats are lock-free.
+Brace keeps the work done per request small. Jetty 12 runs each request on a virtual thread, and
+there is no proxy layer between the router and your handler. Hibernate's StatelessSession skips
+dirty checking and the persistence context. Read-only handlers run without an explicit
+transaction, and views render after the database connection has gone back to the pool. Request
+stats are recorded without locks, and JTE templates compile to Java classes.
 
-The repo includes a TechEmpower-style [benchmark suite](benchmark/) and JMH micro-benchmarks. Each [runtime performance review](docs/reviews/README.md) records before/after throughput and tail latency for its fixes.
+The [benchmark suite](benchmark/) has TechEmpower-style tests and JMH micro-benchmarks. Each
+[runtime performance review](docs/reviews/README.md) records throughput and tail latency before
+and after its fixes.
 
-### Included Components
+## Operations
 
-Brace covers HTTP and routing, database and migrations, typed templates, encrypted sessions, forms and validation, CSRF, caching, recurring and durable jobs, email, object storage, an outbound HTTP client, WebSocket, rate limiting, htmx, custom metrics, privacy-friendly analytics, and ops tooling. The components share configuration, error handling, and the test harness, and the set is expanding with each release. See [What's Included](#whats-included) for details.
+`app.ops(...)` adds an operations dashboard and a JSON API to the app. They read the app's own
+request stats, error store and database, so there is no separate monitoring service to run.
 
-### Agent Observability
+| Endpoint | Shows |
+|---|---|
+| `/ops/dashboard` | Request rate, latency, errors, JVM, jobs, cache, custom metrics and Postgres load |
+| `/ops/status` | The same figures as compact JSON; `?include=timeseries,profiling` adds per-minute history and JFR hot methods |
+| `/ops/errors`, `/ops/errors/{id}` | Stored exceptions with stack traces, request details and the queries that ran before the error |
+| `/ops/regressions` | Error kinds that are new since the app started, with webhook and email notifiers |
+| `/ops/routes` | Every registered route |
+| `/ops/logs` | Recent structured log entries |
+| `/ops/cache` | Cache entries and hit rates |
+| `/ops/analytics` | Visitors, page views, top pages and sources |
 
-Brace exposes a structured diagnostics API designed so agents can detect, diagnose and fix problems themselves.
+The ops endpoints use Ed25519 keys instead of a shared password. `brace ops keypair` creates a key,
+the app lists the public keys it accepts in `ops-authorized-keys`, and the CLI signs a request for
+a short-lived token. A key can be limited to read-only access. `brace ops dashboard` opens the
+dashboard in a browser, and `brace status`, `brace errors` and `brace logs` read the same data in a
+terminal. `brace check` runs a set of health checks and reports what needs attention, including
+warnings from the Postgres statistics shown in the database panel.
 
-`GET /ops/status` returns a compact snapshot: request rate and stats, slowest and busiest routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, cache hit rates, and, with a database, connection-pool and Postgres load figures. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
+![The Brace analytics page, showing 30 days of visitors with top pages and sources](docs/screenshots/ops-analytics.png)
 
-Ops endpoints use Ed25519 keypair authentication with short-lived tokens, so agents authenticate without a shared secret.
-
-AI agents: read [BRACE-AGENTS.md](BRACE-AGENTS.md) for the complete framework reference, and [docs/agent-ops-guide.md](docs/agent-ops-guide.md) (written into projects as `BRACE-OPS.md`) for operating a running app.
+[BRACE-AGENTS.md](BRACE-AGENTS.md) is the complete API reference. `brace agents-md` writes the
+version that matches a project's Brace version into the project, for the people and coding agents
+working on it. [docs/agent-ops-guide.md](docs/agent-ops-guide.md) covers operating a running app.
 
 ## Install
 
-Requires JDK 21 or later. JDK 25 LTS is recommended — [JEP 491](https://openjdk.org/jeps/491) removes virtual-thread pinning inside `synchronized` blocks, which materially improves tail latency under load when Hibernate and JDBC drivers are on the hot path.
+Brace needs JDK 21 or later. We recommend JDK 25 LTS, because
+[JEP 491](https://openjdk.org/jeps/491) stops virtual threads from pinning inside `synchronized`
+blocks. That makes a real difference to tail latency under load when Hibernate and the JDBC driver
+are on the hot path.
 
 Install the launcher with the bootstrap script, then add `~/.brace/bin` to your PATH:
 
@@ -52,17 +117,19 @@ export PATH="$HOME/.brace/bin:$PATH"   # add to your shell rc to persist
 brace help
 ```
 
-This installs the latest release under `~/.brace/toolchains/<version>` and links `~/.brace/bin/brace` to it. Update the launcher at any time with:
+This installs the latest release under `~/.brace/toolchains/<version>` and links
+`~/.brace/bin/brace` to it. To update the launcher later:
 
 ```bash
 brace self-update            # move to the latest release
 brace self-update 0.1.11     # or switch to a specific version
 ```
 
-No Maven or per-project scripts needed for the dev loop. Maven is only invoked by `brace deps` to populate a project-local `lib/` folder from `pom.xml`.
+The dev loop doesn't need Maven or any per-project scripts. Maven is used only by `brace deps`, to
+fill a project-local `lib/` folder from `pom.xml`.
 
 ```bash
-brace new myapp        # scaffold a new project (pins the framework version)
+brace new myapp        # scaffold a new project (sets the framework version)
 cd myapp
 brace deps             # populate ./lib/ from pom.xml (one time, requires Maven)
 brace dev              # compile + run + watch for changes
@@ -71,19 +138,19 @@ brace ops keypair      # generate ops auth keys
 brace ops dashboard    # authenticate and open /ops/dashboard
 ```
 
-### How versioning works
+### How Versioning Works
 
-The `brace` launcher is independent of the framework version it runs. Each project
-pins its framework version with `<brace.version>` in `pom.xml`; inside a project,
-`brace` resolves that version — downloading and caching it under
-`~/.brace/toolchains/<version>` on first use — and compiles, runs, and tests
-against it. So `brace run` always matches what Maven, your IDE, and CI build,
-regardless of which launcher version you happen to have installed. `brace new`
-pins the version it was created with; bump `<brace.version>` to upgrade a project.
+The `brace` launcher is independent of the framework version it runs. Each project sets its
+framework version with `<brace.version>` in `pom.xml`. Inside a project, `brace` downloads that
+version to `~/.brace/toolchains/<version>` on first use, then compiles, runs and tests against it.
+So `brace run` builds the same thing as Maven, your IDE and CI, whichever launcher version you
+have installed. `brace new` uses the version it was created with, and you upgrade a project by
+changing `<brace.version>`.
 
-### Add Brace to an existing Maven project
+### Add Brace to an Existing Maven Project
 
-Brace is served from [JitPack](https://jitpack.io) — no authentication required. Add the repository and dependency to your `pom.xml`:
+Brace is published on [JitPack](https://jitpack.io), which needs no authentication. Add the
+repository and the dependency to your `pom.xml`:
 
 ```xml
 <repositories>
@@ -113,12 +180,13 @@ dependencies {
 }
 ```
 
-Replace `v0.1.11` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
+Replace `v0.1.11` with the [latest release tag](https://github.com/larvalabs/brace/releases). We
+plan to publish to Maven Central as well.
 
 ## Quick Start
 
-Every route, middleware, entity, and job is registered in `main()`, so this one file describes the app's structure.
-
+Every route, middleware, entity and job is registered in `main()`, so this one file describes the
+whole app.
 
 ```java
 public class App {
@@ -167,36 +235,10 @@ public class App {
 }
 ```
 
-## What's Included
-
-Components included in the framework jar as of this release:
-
-- **HTTP** — Jetty 12 with virtual threads, programmatic routing with a required access rule per route (`app.defaultAccess(...)`, `Access.*`, `.publicRoute()`), middleware, route grouping, named routes with `Url.to()` reverse routing, static file serving with asset fingerprinting and a required access declaration per mapping (`.publicFiles()` or `.access(...)`), gzip response compression on by default (`.compression(false)` to opt out), `GET /__brace/health` for container and load-balancer health checks
-- **Database** — Hibernate 7 StatelessSession, per-request transactions, Flyway migrations, `queryIn()` for batch lookups, `paginate()` with page links, `withSession()` for scoped access, `db.afterCommit()` hooks, `findOwnedOr404()` for user-owned rows, `Sort` for request-chosen orders. PostgreSQL JDBC driver bundled — no extra dependency to add
-- **Templates** — JTE compiled type safe templates with explicit parameters, `javascript:` and other script URLs blocked in URL attributes, hot-reload in dev, precompiled ahead of time for prod by `brace run`
-- **Sessions** — AES-256-GCM encrypted cookies, secure by default, stateless; `__Host-` cookie name in production, absolute lifetime, `session.regenerate()` at login and logout
-- **Forms** — Record-based form binding with validation annotations (`@SafeUrl` for user-supplied links)
-- **CSRF** — Required by default on POST/PUT/DELETE/PATCH, and cross-site mutating requests are refused; `${csrfMeta}` plus `/__brace/csrf-htmx.js` cover htmx. Opt out with `.csrf(false)` only on bearer-token routes (on a cookie-session route it fails `start()` unless given a reason). Tokens rendered into pages are masked per render (BREACH)
-- **Security** — Route access requirements checked at startup, trusted proxy configuration (CIDR-based, plus a `TrustedProxies.cloudflare()` preset with auto-refresh), secure cookie defaults, secret validation, security headers middleware (`SecurityHeaders.strict()` adds a strict Content-Security-Policy: no inline script), bcrypt password hashing
-- **Cache** — In-process by default (TTL, tag invalidation, route-level page caching via `cache.wrap()`); opt into a shared, cross-server-consistent Postgres backend with `app.cache(CacheBackend.postgres(dbFactory))`
-- **Jobs** — In-memory recurring scheduler + durable database-backed queue with retry, heartbeat-owned claims that survive deploys and crashes
-- **Mailer** — SMTP sending with dev-mode email capture using JTE templates
-- **Storage** — S3-compatible object storage with built-in AWS Sig V4 signing (works with S3, R2, MinIO)
-- **HTTP Client** — Fluent outbound client over `java.net.http`: JSON, form, multipart, and raw bodies, bearer auth, timeouts, and streamed responses with Server-Sent Events parsing (`fetchEvents`) for LLM APIs. Refuses loopback, private and cloud-metadata destinations by default (SSRF protection; `.trusted()` for your own internal services) and caps buffered responses at 10 MB
-- **WebSocket** — `app.ws()` with rooms, broadcast, and session access; upgrades run access requirements and an Origin check
-- **Server-Sent Events** — `Result.sse(...)` streams events with per-event flush, heartbeats, disconnect detection, and no DB connection held while the stream is open
-- **Rate Limiting** — Per-IP and per-key rate limiting middleware with trusted proxy support; a request without a key is counted against its client address, not let through; memory is bounded by a per-limiter key cap, with a documented fail-closed (default) or fail-open choice when a flood saturates it
-- **File Uploads** — `req.file()` and `req.files()` with configurable size limits, large parts spilled to disk, confined saving with `safeFilename()`/`saveTo(dir, name)`, served sandboxed with `StaticFiles.UNTRUSTED`, built in S3 support
-- **htmx** — Bundled htmx 2.0.10, `req.isHtmx()` partial detection, automatic `Vary: HX-Request`
-- **Custom Metrics** — Counters, gauges, and timers with lock-free internals and dashboard sparklines
-- **Analytics** — Opt-in server-side page-view counts (visitors, top pages, sources, devices) with no tracking script, no cookies and no stored IPs, viewed at `/ops/analytics`
-- **Ops** — `/ops/status` diagnostics, `/ops/errors` exception tracking, `/ops/dashboard` HTML dashboard (including connection-pool and Postgres load stats), `/ops/regressions` new-error tracking with webhook/email notifiers, `brace check` health verdicts, JFR profiling, Ed25519 token auth
-- **CLI** — `curl | sh` installer with `brace self-update`; a version-independent launcher that runs each project against its pinned framework version: `brace new` scaffolding (including a hardened distroless, non-root `Dockerfile` and `compose.yaml`), `brace dev`/`run`/`test`/`compile` dev loop (no Maven needed), `brace deps` to populate project `lib/` from pom.xml, `brace ops keypair`/`dashboard` for ops auth
-- **Testing** — `Brace.test()` harness for fast in-process integration tests with H2
-
 ## Controllers
 
-Plain classes. Dependencies via constructor. Request-scoped data via method parameters.
+A controller is a plain class. It receives long-lived dependencies through its constructor and
+request-scoped ones as method parameters.
 
 ```java
 public class PostController {
@@ -224,7 +266,8 @@ public class PostController {
 
 ## Handler Types
 
-Each route also needs an access requirement or `.publicRoute()`; see [Access](#access).
+Each route also needs an access requirement or `.publicRoute()`, as described under
+[Access](#access).
 
 ```java
 app.get("/hello", req -> Result.text("Hello!"));                       // Handler: Request only
@@ -233,13 +276,13 @@ app.postDb("/posts", (req, db) -> ...);                                // DbHand
 app.getSession("/profile", (req, session) -> ...);                     // SessionHandler: Request + Session
 app.postFull("/comments", (req, db, session) -> ...);                  // FullHandler: Request + Database + Session
 
-// Typed route methods eliminate cast syntax — multi-arg lambdas on the bare verbs don't compile
-app.getRead("/posts", (req, db) -> ...);        // getRead, getReadFull (read-only, GET only — no transaction)
+// Typed route methods need no casts; multi-arg lambdas on the bare verbs don't compile
+app.getRead("/posts", (req, db) -> ...);        // getRead, getReadFull (read-only, GET only, no transaction)
 app.getDb("/posts", (req, db) -> ...);          // getDb, postDb, putDb, deleteDb
 app.getSession("/profile", (req, session) -> ...); // getSession, postSession, putSession, deleteSession
 app.getFull("/dashboard", (req, db, session) -> ...); // getFull, postFull, putFull, deleteFull
 
-// CSRF is required by default on POST/PUT/DELETE/PATCH - opt out only on bearer-token routes
+// CSRF is required by default on POST/PUT/DELETE/PATCH; opt out only on bearer-token routes
 app.post("/api/items", req -> Result.json(data))
     .access(Access.insteadOfDefault(Access.checkRequest(Api::bearer))).csrf(false);
 // .csrf(false) on a route that uses the cookie session fails start(); say why if it's safe anyway
@@ -251,9 +294,9 @@ app.getRead("/api/me", (req, db) -> Json.of(Json.obj("id", userId, "name", name)
 
 ## Access
 
-Every route — HTTP and WebSocket — needs an access requirement or an explicit `.publicRoute()`;
-`start()` refuses to start otherwise and lists the unmarked routes. Requirements attach to
-routes, not to path patterns, and stack:
+Every HTTP and WebSocket route needs an access requirement or an explicit `.publicRoute()`.
+`start()` refuses to start otherwise and lists the unmarked routes. Requirements attach to routes,
+not to path patterns, and they stack:
 
 ```java
 app.defaultAccess(Access.session("userId", "/login"));   // every route unless marked public
@@ -264,10 +307,10 @@ app.post("/hooks/stripe", hooks::stripe)                  // no login, but a sig
     .access(Access.insteadOfDefault(Access.checkRequest(hooks::verifySignature))).csrf(false);
 ```
 
-`Access.session(key, loginUrl)`, `Access.check((req, session) -> …)`,
-`Access.checkRequest(req -> …)`, `Access.insteadOfDefault(requirement)` for a route or group that
-authenticates differently (bearer-token API, webhook), and `Access.none()` as the default for an
-app with no login.
+The requirements are `Access.session(key, loginUrl)`, `Access.check((req, session) -> …)` and
+`Access.checkRequest(req -> …)`. Use `Access.insteadOfDefault(requirement)` for a route or group
+that authenticates differently, such as a bearer-token API or a webhook, and `Access.none()` as
+the default for an app with no login.
 
 ## Database
 
@@ -299,11 +342,12 @@ db.existsBy(Post.class, "email", "user@ex.com")   // check existence
 db.deleteBy(Post.class, "authorId", userId)       // delete by field (returns count)
 ```
 
-Request values always go in `?` bind params, and a `?sort=` order goes through `Sort.from(...)`
-with an allowlist, as above. A query string that contains a request value throws in dev mode
-and tests, naming the parameter.
+Request values always go in `?` bind parameters, and a `?sort=` order goes through `Sort.from(...)`
+with an allowlist, as above. In dev mode and tests, a query string that contains a request value
+throws an exception that names the parameter.
 
-For scoped DB access outside the request lifecycle (background tasks, WebSocket handlers):
+For database access outside the request lifecycle, such as background tasks or WebSocket handlers,
+use `withSession`:
 
 ```java
 dbFactory.withSession(db -> {
@@ -313,7 +357,7 @@ dbFactory.withSession(db -> {
 var count = dbFactory.withSession(db -> db.count(User.class));
 ```
 
-## Forms & Validation
+## Forms and Validation
 
 ```java
 public record PostForm(
@@ -333,18 +377,20 @@ if (form.hasErrors()) return Result.view("posts/new", "form", form);
 var jsonForm = req.jsonForm(PostForm.class);
 ```
 
-A `boolean` component binds an HTML checkbox directly (`on` is true, absent is false). On
-`POST`, `PUT`, `PATCH` and `DELETE`, `req.form` binds the request body only; `GET` and `HEAD`
-forms bind from the query string.
+A `boolean` component binds an HTML checkbox directly, where `on` is true and a missing value is
+false. On `POST`, `PUT`, `PATCH` and `DELETE`, `req.form` binds the request body only. `GET` and
+`HEAD` forms bind from the query string.
 
-In the template, put `${csrfField}` inside each `<form>` (declared `@param gg.jte.Content
-csrfField = null`); for `fetch`, render `${csrfToken}` (`@param String csrfToken = null`) into a
-`<meta>` tag and send it as `X-CSRF-Token`. Never bind a request body into an `@Entity`: `req.json`/`bodyAs` throw for
-one, so bind a record and copy the allowed fields with the entity's `apply(form)`.
+In the template, put `${csrfField}` inside each `<form>` (declared as `@param gg.jte.Content
+csrfField = null`). For `fetch`, render `${csrfToken}` (`@param String csrfToken = null`) into a
+`<meta>` tag and send it as `X-CSRF-Token`. Never bind a request body into an `@Entity`.
+`req.json` and `bodyAs` throw for one, so bind a record and copy the allowed fields with the
+entity's `apply(form)`.
 
 ## Sessions
 
-Sessions are encrypted with AES-256-GCM — you can safely store emails, roles, and permissions.
+Sessions are encrypted with AES-256-GCM, so it is safe to store emails, roles and permissions in
+them.
 
 ```java
 session.regenerate();             // at login and logout: new CSRF token, restarts the lifetime
@@ -357,7 +403,7 @@ session.has("userId");
 session.clear();
 ```
 
-Configure session cookie security:
+To configure the session cookie:
 
 ```java
 app.sessions(SessionOptions.secure(config.get("session.secret"))
@@ -365,17 +411,17 @@ app.sessions(SessionOptions.secure(config.get("session.secret"))
     .sameSiteLax());
 ```
 
-In production the cookie is named `__Host-brace_session`, and a session ends 30 days after
-sign-in (or `maxAge`, if longer) however active it is; `SessionOptions.absoluteMaxAge(...)` sets
-it. The cookie is self-contained, so to log a user out everywhere, check a per-user version with
-`app.sessionValidator(...)`.
+In production the cookie is named `__Host-brace_session`. A session ends 30 days after sign-in,
+or after `maxAge` if that is longer, however active it is. `SessionOptions.absoluteMaxAge(...)`
+changes that limit. The cookie is self-contained, so to log a user out everywhere, check a
+per-user version with `app.sessionValidator(...)`.
 
-The `Secure` attribute is on by default — resolved per request, so it is set for every
-non-loopback request and omitted on `http://localhost` (local dev and in-process tests keep
-working untouched). An app genuinely served over plain HTTP on a real hostname opts out with
-`SessionOptions.of(secret).secure(false)`. Behind nginx, pass the real host through
-(`proxy_set_header Host $host;`) — its default rewrites `Host` to `127.0.0.1`, which looks like
-local development; see `docs/SECURITY.md`.
+The `Secure` attribute is on by default and decided per request. It is set on every non-loopback
+request and left off on `http://localhost`, so local development and in-process tests work without
+changes. An app served over plain HTTP on a real hostname can turn it off with
+`SessionOptions.of(secret).secure(false)`. Behind nginx, pass the real host through with
+`proxy_set_header Host $host;`. By default nginx rewrites `Host` to `127.0.0.1`, which looks like
+local development (see `docs/SECURITY.md`).
 
 ## Jobs
 
@@ -390,21 +436,21 @@ Jobs.schedule(db, new SendSurvey(orderId), Duration.ofDays(7),
     JobOptions.maxAttempts(5).backoff(Duration.ofMinutes(10)));
 ```
 
-Intervals take `s`, `m`, `h` or `d` (`"1d"`), like cache TTLs. `daily` keeps its wall-clock time
-across DST changes.
+Intervals take `s`, `m`, `h` or `d` (`"1d"`), like cache TTLs. A `daily` job keeps its wall-clock
+time across DST changes.
 
-Finished durable jobs are pruned daily after 7 days (configure with `app.jobRetention(days)`,
-`0` to keep forever).
+Finished durable jobs are deleted daily once they are 7 days old. `app.jobRetention(days)` changes
+that, and `0` keeps them forever.
 
-Scheduling a job with no delay wakes the poller as soon as your transaction commits, so it starts
-almost immediately. Polling continues underneath as a safety net at `app.jobPollInterval("5s")`
-(the default), covering delayed jobs, retries, and work enqueued on other instances.
+A job scheduled with no delay wakes the poller as soon as your transaction commits, so it starts
+almost immediately. The poller also runs every `app.jobPollInterval("5s")` (the default) as a
+safety net for delayed jobs, retries and work enqueued on other instances.
 
-Jobs survive deploys and crashes without configuration. On SIGTERM the app shuts down gracefully:
-running jobs get `app.jobShutdownTimeout("3s")` (the default) to finish, and the rest go back to the
-queue with the attempt refunded. If an instance dies outright, its jobs are recovered once it stops
-heartbeating — never while it is alive, however long a job runs. A per-attempt timeout is available
-but off by default:
+Jobs survive deploys and crashes without any configuration. On SIGTERM the app shuts down
+gracefully. Running jobs get `app.jobShutdownTimeout("3s")` (the default) to finish, and the rest
+go back to the queue without using up an attempt. If an instance dies outright, its jobs are
+recovered once it stops heartbeating, and never while it is alive, however long a job runs. A
+per-attempt timeout is available but off by default:
 
 ```java
 app.jobTimeout(config.get("jobs.timeout"));   // e.g. "2h"; unset means no timeout
@@ -421,13 +467,16 @@ mail.to("user@example.com")
     .sendAsync();   // background virtual thread; send() blocks until delivered
 ```
 
-`smtp://` requires STARTTLS (no silent cleartext fallback); use `smtp+plain://` for a local relay
-without TLS. `to`, `cc` and `from` take one address each: a comma-separated list is rejected (with
-`sendAsync()` only a log line says so), so send one message per recipient. SMTP timeouts default to 10s connect / 30s per read-write, so a wedged relay fails the send rather
-than hanging the caller. Override with `.connectTimeout(Duration)` / `.timeout(Duration)`.
+`smtp://` requires STARTTLS and never falls back to cleartext. Use `smtp+plain://` for a local
+relay without TLS. `to`, `cc` and `from` take one address each. A comma-separated list is rejected
+(with `sendAsync()`, only a log line says so), so send one message per recipient. SMTP timeouts
+default to 10 seconds to connect and 30 seconds per read or write, so a stuck relay fails the send
+instead of hanging the caller. Change them with `.connectTimeout(Duration)` and
+`.timeout(Duration)`.
 
-Use `sendAsync()` from request handlers — `send()` does synchronous SMTP on the calling
-thread. Dev mode captures emails without sending (last 500). Access via `mailer.sent()` in tests.
+Use `sendAsync()` from request handlers, because `send()` talks to the SMTP server on the calling
+thread. Dev mode captures the last 500 emails without sending them, and tests read them with
+`mailer.sent()`.
 
 ## Storage
 
@@ -454,13 +503,14 @@ app.post("/upload-manual", req -> {
 });
 ```
 
-Uploads are stored by their key's extension, never the browser-claimed `Content-Type`: raster
-images, PDFs, text, office documents, archives, audio and video keep their type, everything else
-is `application/octet-stream`, and all but raster images are stored as attachments.
+An upload's content type comes from its key's extension, never from the `Content-Type` the browser
+sent. Raster images, PDFs, text, office documents, archives, audio and video keep their type.
+Everything else is stored as `application/octet-stream`, and everything except raster images is
+stored as an attachment.
 
-Uploads and downloads stream. Multipart parts over `uploadMemoryThreshold` (default 1MB) spill to a
-temp file instead of the heap, `storage.put(key, file)` sends from that file without materializing
-it, and responses can stream back:
+Uploads and downloads stream. A multipart part larger than `uploadMemoryThreshold` (1MB by
+default) goes to a temp file instead of the heap, and `storage.put(key, file)` sends it from that
+file without loading it into memory. Responses can stream back too:
 
 ```java
 app.maxUploadSize("500M")                     // accept large media...
@@ -478,11 +528,11 @@ Result.stream(inputStream, "image/png")       // ...from a stream (chunked)
 Result.stream(out -> writeCsv(out), "text/csv");  // ...generated as it is produced
 ```
 
-Static files stream too, and answer `Range` requests — so seeking in a served video works rather
-than re-fetching from the start.
+Static files stream as well and answer `Range` requests, so seeking in a served video works
+without downloading it again from the start.
 
-An `UploadedFile` is released when its request ends, so save or upload it before the handler
-returns; don't hand it to a background thread.
+An `UploadedFile` is released when its request ends. Save or upload it before the handler returns,
+and don't hand it to a background thread.
 
 ## Server-Sent Events
 
@@ -496,37 +546,39 @@ app.get("/ticks", req -> Result.sse(events -> {
 ```
 
 Each event is flushed as it is sent. The producer runs after the request transaction commits, so a
-long-lived stream never holds a database connection: use `dbFactory.withSession(...)` inside it. A
-client that disconnects is detected on the next send or heartbeat (every 15s), which ends the
-producer. A reconnecting browser sends the last event id as the `Last-Event-ID` header.
+long-lived stream never holds a database connection. Use `dbFactory.withSession(...)` inside it
+when you need one. A client that disconnects is noticed on the next send or heartbeat (every 15
+seconds), which ends the producer. A reconnecting browser sends the last event id in the
+`Last-Event-ID` header.
 
 ## Custom Metrics
 
-Counters, gauges, and timers, with no external metrics server. Metrics render as sparklines in the ops dashboard and are exposed in `/ops/status` JSON.
+Counters, gauges and timers need no external metrics server. They appear as sparklines on the ops
+dashboard and in the `/ops/status` JSON.
 
 ```java
-// Counter — tracks rate (events per minute)
+// Counter: tracks rate (events per minute)
 Metrics.counter("talks.created");
 Metrics.counter("bytes.uploaded", file.size());
 
-// Gauge — samples a value each minute
+// Gauge: samples a value each minute
 Metrics.gauge("queue.depth", () -> (long) queue.size());
 
-// Timer — tracks count, avg, and max duration
+// Timer: tracks count, avg, and max duration
 Metrics.timer("api.external", durationMs);
 ```
 
-`Metrics` is static, like `Log`: call it from any controller or service. It records into the
-running app's `Stats`; `app.stats()` returns the same instance with the same `counter`/`gauge`/`timer`
-methods, for tests or several apps in one JVM.
+`Metrics` is static, like `Log`, so you can call it from any controller or service. It records into
+the running app's `Stats`. `app.stats()` returns the same instance, with the same `counter`,
+`gauge` and `timer` methods, for tests or for several apps in one JVM.
 
 ## Analytics
 
-Visitor and page-view counts computed on the server from the requests the app already handles.
-There is no script on the page to block, no cookie, and no IP address or user agent is stored.
-Visitors are counted with a hash that uses a daily salt, so a visitor can't be traced across
-days. The numbers are viewed at `/ops/analytics` behind the same key auth as the rest of ops, or
-with `brace analytics`.
+Brace counts visitors and page views on the server, from the requests the app already handles.
+There is no script on the page to block and no cookie, and no IP address or user agent is stored.
+Visitors are counted with a hash that uses a daily salt, so a visitor can't be followed from one
+day to the next. You can see the numbers at `/ops/analytics`, behind the same key auth as the rest
+of ops, or with `brace analytics`.
 
 ```java
 app.analytics(Analytics.options()
@@ -537,19 +589,20 @@ app.get("/invite/{code}", ctrl::invite).analytics(false);   // don't record URLs
 app.get("/u/{username}", ctrl::profile).analyticsByRoute(); // count as one page, /u/{username}
 ```
 
-The page shows visitors, pageviews, views per visit and "visitors now" (distinct visitors who loaded
-a page in the last 5 minutes), with Today / 7 day / 30 day / 12 month charts, top pages, sources, devices,
-browsers, operating systems and, behind a proxy that sends one, countries. Bots, prefetches,
-background fetches and htmx partial swaps are filtered out, and the page shows how many requests
-each filter rejected. Requires a database and `app.ops(...)`; behind a reverse proxy, also
-`trustedProxies(...)` so visitors aren't all seen at the proxy's IP.
+The page shows visitors, page views, views per visit and "visitors now", which counts distinct
+visitors who loaded a page in the last 5 minutes. It has Today, 7 day, 30 day and 12 month charts,
+and lists top pages, sources, devices, browsers and operating systems. Behind a proxy that sends a
+country header, it lists countries too. Bots, prefetches, background fetches and htmx partial swaps
+are filtered out, and the page shows how many requests each filter rejected. Analytics needs a
+database and `app.ops(...)`. Behind a reverse proxy it also needs `trustedProxies(...)`, or every
+visitor looks like the proxy's IP.
 
-Each completed day is summarized into a small table that is kept indefinitely, so history
-survives after the raw page-view rows are deleted (35 days by default).
+Each completed day is summarized into a small table that is kept indefinitely, so the history
+stays after the raw page-view rows are deleted (after 35 days by default).
 
-`brace ops dashboard --analytics` opens the page; `brace analytics --range 7d` prints the same
-report in the terminal. See [docs/analytics.md](docs/analytics.md) for what each number means, the
-filters, privacy, and accuracy compared with a JavaScript tracker.
+`brace ops dashboard --analytics` opens the page, and `brace analytics --range 7d` prints the same
+report in the terminal. [docs/analytics.md](docs/analytics.md) explains what each number means, the
+filters, privacy, and how accurate the counts are compared with a JavaScript tracker.
 
 ## Cache
 
@@ -571,28 +624,29 @@ app.get("/news", cache.wrap("10m", ctrl::news).varyHeader("Accept-Language"));  
 cache.clearTag("simulation");  // invalidate all cached pages at once
 ```
 
-A cached handler must depend only on its path parameters and what it declares with `vary` /
-`varyHeader`: dev mode warns, and `Brace.test()` fails, when it reads anything else. Only 2xx
-responses are stored, and a page carrying the visitor's CSRF token or a flash message is served
+A cached handler must depend only on its path parameters and on what it declares with `vary` and
+`varyHeader`. Dev mode warns, and `Brace.test()` fails, when it reads anything else. Only 2xx
+responses are stored. A page that contains the visitor's CSRF token or a flash message is served
 but not stored.
 
-The default cache is per-process. For a multi-server deploy, opt into a shared, durable,
-cross-server-consistent backend in one line — it reuses your Postgres database, no new infra:
+The default cache belongs to one process. For an app on several servers, you can switch to a
+shared backend that reuses your Postgres database, with no new infrastructure:
 
 ```java
 app.cache(CacheBackend.postgres(dbFactory));
 ```
 
-With a shared backend, `clear()` is fleet-wide, `incr` is globally atomic, and a page rendered on
-one server is served by any other. Values must be Jackson-round-trippable (POJOs, records,
-collections, primitives, String). Read a value with its concrete class; reading an app class
-through an interface or with `getOrSet` on a server that didn't write it needs
-`cache.allowType(MyClass.class)` at startup on every instance (JDK collections and values need
-nothing). The default in-process cache has no such restriction.
+With the shared backend, `clear()` clears every server, `incr` is atomic across servers, and a page
+rendered on one server is served by the others. Values must survive a round trip through Jackson
+(POJOs, records, collections, primitives and String). Read a value with its concrete class. To
+read an app class through an interface, or with `getOrSet` on a server that didn't write it, call
+`cache.allowType(MyClass.class)` at startup on every instance. JDK collections and values need
+nothing, and the default in-process cache has no such restriction.
 
-`clear()` empties the cached **data** (a single fleet-wide `TRUNCATE` on the shared backend; this
-instance only on the default). Hit/miss/eviction **stats stay per-instance** — each server reports
-its own hit rate — so a clear resets counters only on the box that handled it.
+`clear()` empties the cached **data**, with a single `TRUNCATE` on the shared backend or on this
+instance only with the default one. Hit, miss and eviction **stats stay per instance**, so each
+server reports its own hit rate, and a clear resets the counters only on the server that handled
+it.
 
 ## Static Files
 
@@ -602,12 +656,13 @@ app.staticFiles("/uploads", "/var/app/uploads", StaticFiles.UNTRUSTED)   // file
    .access(Access.session("userId", "/login"));                         // logged-in users only
 ```
 
-Every mapping ends in `.publicFiles()` or `.access(...)`; `start()` refuses one with neither, and
-`defaultAccess(...)` does not cover mappings. The access check is bound to the mapping and runs
-before the file is looked up.
+Every mapping ends in `.publicFiles()` or `.access(...)`. `start()` refuses a mapping with
+neither, and `defaultAccess(...)` does not cover mappings. The access check belongs to the mapping
+and runs before the file is looked up.
 
-`UNTRUSTED` serves user files so nothing in them can run on your origin: an uploaded `.html` or
-`.svg` is a sandboxed `application/octet-stream` download, and only raster images display inline.
+`UNTRUSTED` serves user files so that nothing in them can run on your origin. An uploaded `.html`
+or `.svg` is downloaded as a sandboxed `application/octet-stream`, and only raster images display
+inline.
 
 ## Route Grouping
 
@@ -626,10 +681,9 @@ app.group("/admin", admin -> {
 
 ## Named Routes
 
-Name a route once at registration and build its URL by name everywhere else — handlers,
-redirects, and templates — so changing a path never leaves a stale link behind. Keep the
-names as constants in a `Routes` class and use the constant on both sides; a typo then
-fails to compile.
+Name a route once when you register it, then build its URL by name in handlers, redirects and
+templates. Changing a path then never leaves a stale link behind. Keep the names as constants in
+a `Routes` class and use the constant on both sides, so a typo fails to compile.
 
 ```java
 public final class Routes {
@@ -651,15 +705,15 @@ Url.to(Routes.POSTS, Url.query("tag", "java", "q", q))  // "/posts?tag=java&q=re
 <a href="${Url.to(Routes.POST, post.id)}">${post.title}</a>
 ```
 
-Group prefixes are included automatically. Path and query values are encoded. Duplicate
-names fail at startup; unknown names fail at the first `Url.to` call with the registered
-names listed, and so does passing too few or too many path arguments. `brace new` scaffolds
-the `Routes` class for you.
+Group prefixes are included automatically, and path and query values are encoded. Duplicate names
+fail at startup. An unknown name fails at the first `Url.to` call and lists the registered names,
+and so does passing too few or too many path arguments. `brace new` creates the `Routes` class for
+you.
 
 ## Pagination
 
-`db.paginate` returns a `Paged<T>`: the page's rows, totals, and page links built from the
-current URL, so filters in the query string carry over with no extra code.
+`db.paginate` returns a `Paged<T>` with the page's rows, the totals, and page links built from the
+current URL. Filters in the query string carry over with no extra code.
 
 ```java
 var posts = db.paginate(Post.class, "tag = ? ORDER BY createdAt DESC", req, 20, tag);
@@ -672,11 +726,14 @@ return View.of("posts/index", "posts", posts);
 @endfor
 ```
 
-`Paged.slice(list, req, perPage)` does the same for an in-memory list.
+`Paged.slice(list, req, perPage)` does the same for a list in memory.
 
 ## htmx
 
-Dynamic page updates without a JavaScript framework. Brace bundles htmx 2.0.10 and serves it from `/__brace/htmx.min.js`. The default pattern: handlers return a full page, htmx uses `hx-select` to extract the element it needs client-side. For optimization, detect htmx requests and return just the partial.
+htmx updates parts of a page without a JavaScript framework. Brace bundles htmx 2.0.10 and serves
+it from `/__brace/htmx.min.js`. By default a handler returns the full page, and htmx uses
+`hx-select` to pick out the element it needs. To save work, a handler can detect an htmx request
+and return only the partial.
 
 ```html
 <!-- In your layout's <head>; declare @param gg.jte.Content csrfMeta = null -->
@@ -686,8 +743,8 @@ ${csrfMeta}
 <script src="/__brace/csrf-htmx.js"></script>  <!-- sends the CSRF token on non-GET htmx requests -->
 ```
 
-The `htmx-config` line stops htmx running code from attributes (`hx-on*`) or swapped-in
-`<script>` tags, which `SecurityHeaders.strict()` would block anyway.
+The `htmx-config` line stops htmx from running code from attributes (`hx-on*`) or from `<script>`
+tags it swaps in. `SecurityHeaders.strict()` would block both anyway.
 
 ```java
 // Full page by default, partial when htmx requests it
@@ -705,7 +762,8 @@ app.getRead("/posts", (req, db) -> {
 </div>
 ```
 
-Brace automatically adds `HX-Request` to the `Vary` header (appending to any value the handler set) so caches don't mix full pages with partials.
+Brace adds `HX-Request` to the `Vary` header automatically, after any value the handler set, so
+caches keep full pages and partials apart.
 
 ## Testing
 
@@ -731,11 +789,12 @@ static TestApp app;
 ```
 
 `start()` checks access in tests too, so every route needs a requirement or `.publicRoute()`. In
-an app, register routes in a `public static void routes(Brace app)` that `main()` also calls (the
-`brace new` layout) and start tests with `.start(App::routes)`, so they run the production routes,
-access requirements and middleware.
+an app, register routes in a `public static void routes(Brace app)` that `main()` also calls, as
+the `brace new` layout does, and start tests with `.start(App::routes)`. The tests then run the
+production routes, access requirements and middleware.
 
-Custom headers (e.g. bearer-token APIs) via the request builder; CSRF-protected routes via `postWithCsrf`:
+Use the request builder for custom headers, such as a bearer token, and `postWithCsrf` for routes
+that need a CSRF token:
 
 ```java
 var res = app.request("GET", "/api/items").header("Authorization", "Bearer " + token).send();
@@ -759,13 +818,13 @@ session.secret=${SESSION_SECRET}
 %dev.db.pass=
 ```
 
-`${VAR}` reads an environment variable. A key that isn't in the file falls back to the
-environment variable named after it (`db.pass` → `DB_PASS`), but a key that is in the file
-always wins, so values that differ per deployment should be `${VAR}` references. `brace new`
-writes a gitignored `application.conf` with a generated `session.secret` for local use, and a
-committed `application.conf.example`, all `${VAR}`, that the scaffolded `Dockerfile` ships.
-The H2 driver for the `%dev.` database comes with the toolchain, for `brace dev` and
-`brace test` only; it never reaches `brace run` or the app's shaded jar.
+`${VAR}` reads an environment variable. A key that isn't in the file falls back to the environment
+variable named after it (`db.pass` becomes `DB_PASS`), but a key that is in the file always wins.
+Values that differ between deployments should therefore be `${VAR}` references. `brace new` writes
+a gitignored `application.conf` with a generated `session.secret` for local use. It also writes a
+committed `application.conf.example`, all `${VAR}` references, which the generated `Dockerfile`
+copies into the image. The H2 driver for the `%dev.` database comes with the toolchain for
+`brace dev` and `brace test` only, and never reaches `brace run` or the app's shaded jar.
 
 ## Tech Stack
 
@@ -773,7 +832,7 @@ The H2 driver for the `%dev.` database comes with the toolchain, for `brace dev`
 |---|---|
 | HTTP | Jetty 12 (virtual threads) |
 | ORM | Hibernate 7 (StatelessSession) |
-| JDBC Drivers | PostgreSQL 42.7.14 (bundled), H2 (test) |
+| JDBC drivers | PostgreSQL 42.7.14 (bundled), H2 (test) |
 | Templates | JTE |
 | Migrations | Flyway |
 | JSON | Jackson |
@@ -781,26 +840,30 @@ The H2 driver for the `%dev.` database comes with the toolchain, for `brace dev`
 | Email | Jakarta Mail |
 | Storage | AWS Sig V4 (no SDK) |
 
-**~20k lines of framework code (CLI included). 1,000+ tests.**
-
 ## Security
 
-See [docs/SECURITY.md](docs/SECURITY.md) for security documentation covering:
+[docs/SECURITY.md](docs/SECURITY.md) covers:
+
 - Route access requirements and object-level authorization (`findOwnedOr404`)
-- SQL injection (bind params, `Sort`)
+- SQL injection (bind parameters, `Sort`)
 - Encrypted sessions (AES-256-GCM), expiry, rotation and revocation
 - Trusted proxy configuration
-- CSRF protection and cross-site request refusal
+- CSRF protection and refusing cross-site requests
 - XSS and Content-Security-Policy (`SecurityHeaders.strict()`)
-- Server-side request forgery (`Http` destination policy)
+- Server-side request forgery (the `Http` destination policy)
 - Cookie security options
 - Rate limiting
 - File upload security and serving uploads (`StaticFiles.UNTRUSTED`)
 - Response compression and BREACH
 - WebSockets
 - Deploying in a container
-- Ops endpoint hardening
+- Hardening the ops endpoints
 
-## Periodic Model Reviews
+## Periodic Reviews
 
-Brace is reviewed end to end whenever a notably more capable AI model becomes available, since a newer model can find issues an earlier one missed. The review repeats even when the code hasn't changed. Reviews run in three categories: **Security**, **Token Efficiency**, and **Runtime Performance**. Each produces a findings doc and a fix branch with one commit per finding; see the [review process and index](docs/reviews/README.md). The first completed review is the [Fable 5 security review](docs/reviews/2026-06-security-fable-5.md) (June 2026): 25 findings, all fixed, each traceable to its commit.
+We review all of Brace again whenever a notably more capable AI model becomes available, because a
+newer model can find problems an earlier one missed. The review is repeated even when the code
+hasn't changed. Reviews cover **Security**, **Correctness** and **Runtime Performance**. Each one
+produces a findings document and a fix branch with one commit per finding. The
+[review index](docs/reviews/README.md) lists every completed review and describes the process. We
+also ran a token-efficiency review in June 2026, but have retired that category.

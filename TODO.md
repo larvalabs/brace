@@ -193,11 +193,7 @@ Surfaced 2026-06-04 by a full audit of single-server architecture assumptions �
 - [ ] Run Spring Boot TFB on same machine for side-by-side comparison
 - [ ] Tune Brace connection pool (HikariCP settings) — DB numbers may improve significantly
 - [ ] Run Brace TFB with H2 embedded for max-performance baseline
-- [ ] Design PetClinic spec for token efficiency benchmark (framework-agnostic prompt)
-- [ ] Implement PetClinic in Brace via AI, measuring tokens
-- [ ] Implement PetClinic in Spring Boot via AI, measuring tokens
-- [ ] Add-feature benchmark: appointment scheduling on both PetClinic implementations
-- [ ] Automate token measurement via Claude API script
+- Dropped 2026-11-25: the token-efficiency benchmark items (a PetClinic spec implemented in Brace and Spring Boot by an AI, measuring tokens, plus an add-feature round and automated token measurement). Brace no longer positions itself on token efficiency; the review category is retired too (see `docs/reviews/README.md`).
 
 ## Tier 2 — Production Maturity
 
@@ -211,7 +207,7 @@ Surfaced 2026-06-04 by a full audit of single-server architecture assumptions �
 
 ## Tier 3 — Evidence & Adoption
 
-- [ ] Broader benchmark suite — add CRUD app, auth-heavy app, htmx flow to token-efficiency benchmarks
+- [ ] Broader benchmark suite — add a CRUD app, an auth-heavy app and an htmx flow to the runtime benchmarks (this item used to target the token-efficiency benchmarks, which are dropped)
 - [x] Migration guides per release — one file per release transition in `docs/migrations/brace-FROM-to-TO.md` (also bundled in dist zip), discoverable via the `Upgrading` section of `BRACE-AGENTS.md`
 - [ ] Golden path sample app — one blessed example showing current best practices end-to-end
 - [ ] Publish to Maven Central — JitPack (`com.github.larvalabs:brace:vX.Y.Z`) is the current public dependency path; it requires zero publisher setup but isn't what most Java shops expect. Migrating to Central means claiming `com.larvalabs` namespace on the Central Portal (DNS TXT verify), generating a GPG signing key, publishing sources+javadoc jars, and switching `publish.yml` to deploy to Central instead of (or in addition to) GitHub Packages. Keep GH Packages for SNAPSHOT/Dokploy use. Then dep instructions drop the `<repositories>` block and become just `com.larvalabs:brace:X.Y.Z`.
