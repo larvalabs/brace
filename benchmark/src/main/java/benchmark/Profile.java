@@ -13,7 +13,8 @@ import java.util.concurrent.ThreadLocalRandom;
 public class Profile {
     public static void main(String[] args) throws Exception {
         var db = new DatabaseFactory(
-            "jdbc:postgresql://localhost:5433/hello_world",
+            "jdbc:postgresql://" + System.getenv().getOrDefault("DB_HOST", "localhost") + ":"
+                + System.getenv().getOrDefault("DB_PORT", "5434") + "/hello_world",
             "benchmarkdbuser", "benchmarkdbpass",
             List.of(World.class, Fortune.class),
             256);

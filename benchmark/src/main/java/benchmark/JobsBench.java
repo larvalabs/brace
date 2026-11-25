@@ -41,7 +41,7 @@ public class JobsBench {
     static final int STATS_WARMUP = 3;
     static final int STATS_ITERS = 20;
 
-    static final String URL = env("JOBS_DB_URL", "jdbc:postgresql://localhost:5433/jobs_bench");
+    static final String URL = env("JOBS_DB_URL", "jdbc:postgresql://localhost:5434/jobs_bench");
     static final String USER = env("JOBS_DB_USER", "benchmarkdbuser");
     static final String PASS = env("JOBS_DB_PASS", "benchmarkdbpass");
 

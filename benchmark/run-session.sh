@@ -12,11 +12,10 @@ set -euo pipefail
 # version (before/after comparisons).
 
 # JDK 25+ recommended (JEP 491: no virtual-thread pinning on synchronized) — see AGENTS.md.
-export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home}"
-export PATH="$JAVA_HOME/bin:$PATH"
+source "$(cd "$(dirname "$0")" && pwd)/lib.sh"   # JDK selection + ensure_jar
+use_jdk
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JAR="${BENCH_JAR:-$SCRIPT_DIR/target/brace-benchmark-0.2.0-SNAPSHOT.jar}"
 export PORT=${PORT:-8081}
 WRK_THREADS=${WRK_THREADS:-8}
 WRK_CONNECTIONS=${WRK_CONNECTIONS:-256}
@@ -24,10 +23,8 @@ WRK_DURATION=${WRK_DURATION:-15s}
 WARMUP_DURATION=${WARMUP_DURATION:-5s}
 LUA="$SCRIPT_DIR/session-post.lua"
 
-if [ ! -f "$JAR" ]; then
-  echo "Building Brace benchmark..."
-  cd "$SCRIPT_DIR" && mvn package -q -DskipTests
-fi
+# Rebuilds against this checkout's framework unless BENCH_JAR or SKIP_BUILD=1 is set (lib.sh).
+ensure_jar
 
 echo "Starting Brace session benchmark app ($JAR)..."
 java --enable-preview -cp "$JAR" benchmark.SessionApp > /dev/null 2>&1 &

@@ -16,16 +16,13 @@ set -euo pipefail
 # partial index over the already-seeded rows.
 
 # JDK 25+ recommended (JEP 491: no virtual-thread pinning on synchronized) — see AGENTS.md.
-export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home}"
-export PATH="$JAVA_HOME/bin:$PATH"
+source "$(cd "$(dirname "$0")" && pwd)/lib.sh"   # JDK selection + ensure_jar
+use_jdk
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JAR="${BENCH_JAR:-$SCRIPT_DIR/target/brace-benchmark-0.2.0-SNAPSHOT.jar}"
 
-if [ ! -f "$JAR" ]; then
-  echo "Building Brace benchmark..."
-  cd "$SCRIPT_DIR" && mvn package -q -DskipTests
-fi
+# Rebuilds against this checkout's framework unless BENCH_JAR or SKIP_BUILD=1 is set (lib.sh).
+ensure_jar
 
 # Ensure the jobs_bench database exists in the tfb-postgres container.
 docker exec tfb-postgres psql -U benchmarkdbuser -d hello_world -tc \

@@ -9,3 +9,6 @@ dependency-reduced-pom.xml
 .DS_Store
 .claude/
 .superpowers/
+
+# Benchmark run output (benchmark/lib.sh); copy keepers into benchmark/baselines/
+benchmark/results/

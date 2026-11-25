@@ -1,62 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# JDK 25+ recommended (JEP 491: no virtual-thread pinning on synchronized) — see AGENTS.md.
-export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home}"
-export PATH="$JAVA_HOME/bin:$PATH"
+# TechEmpower-style suite against the Brace benchmark app (benchmark/src/main/java/benchmark/App.java).
+# Same driver as run-spring.sh (lib.sh): response checks, warmup, RUNS interleaved wrk passes,
+# medians, startup time and RSS. Output is also saved under benchmark/results/.
+#
+# Environment (defaults in lib.sh): PORT, DB_HOST, DB_PORT, DB_POOL, WRK_THREADS,
+# WRK_CONNECTIONS, WRK_DURATION, WARMUP_DURATION, RUNS, JVM_OPTS, BENCH_JAVA_HOME,
+# BENCH_JAR / SKIP_BUILD (see ensure_jar), BRACE_LOG_LEVEL.
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JAR="$SCRIPT_DIR/target/brace-benchmark-0.2.0-SNAPSHOT.jar"
-export PORT=${PORT:-8080}
-WRK_THREADS=8
-WRK_CONNECTIONS=256
-WRK_DURATION=15s
-WARMUP_DURATION=5s
+source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+use_jdk
+tfb_init
+tfb_preflight
+ensure_jar
 
-if [ ! -f "$JAR" ]; then
-  echo "Building Brace benchmark..."
-  cd "$SCRIPT_DIR" && mvn package -q -DskipTests
-fi
+# Per-request logging off, as TechEmpower requires and as run-spring.sh does for Spring
+# (-Dlogging.level.root=OFF). Brace's default (DEBUG) logs a JSON line per request.
+export BRACE_LOG_LEVEL="${BRACE_LOG_LEVEL:-WARN}"
 
-echo "Starting Brace benchmark app..."
-cd "$SCRIPT_DIR/.."
-java --enable-preview -jar "$JAR" > /dev/null 2>&1 &
-APP_PID=$!
-trap "kill $APP_PID 2>/dev/null; wait $APP_PID 2>/dev/null" EXIT
+tfb_record_output brace
+tfb_print_environment "Brace $(framework_version) TFB benchmark ($JAR)"
+echo "brace:       BRACE_LOG_LEVEL=$BRACE_LOG_LEVEL, -Dbrace.mode=prod"
 
-# Wait for app to start
-for i in $(seq 1 30); do
-  if curl -sf http://localhost:$PORT/plaintext > /dev/null 2>&1; then
-    break
-  fi
-  sleep 0.5
-done
-
-# Guard against a stale/foreign process answering on the port (a failed bind
-# would otherwise let wrk measure the wrong server)
-LISTENER=$(lsof -t -iTCP:$PORT -sTCP:LISTEN | head -1)
-if [ "$LISTENER" != "$APP_PID" ]; then
-  echo "FATAL: port $PORT is served by PID ${LISTENER:-none}, not the benchmark app ($APP_PID)" >&2
-  exit 1
-fi
-
-echo "Warming up..."
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/plaintext > /dev/null 2>&1
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/json > /dev/null 2>&1
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/db > /dev/null 2>&1
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/fortunes > /dev/null 2>&1
-
+# brace.mode=prod: production template loading (precompiled or compiled once at startup, no
+# per-render staleness checks), which is how a deployed app runs.
+# shellcheck disable=SC2086
+tfb_start_app "$RESULTS_DIR/brace-app.log" \
+  java --enable-preview -Dbrace.mode=prod $JVM_OPTS -jar "$JAR"
+tfb_check_responses
+tfb_warmup
 echo ""
-echo "=== Brace TFB Benchmark (wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION) ==="
-echo ""
-
-TESTS=("plaintext" "json" "db" "queries?queries=20" "fortunes" "updates?queries=20")
-LABELS=("Plaintext" "JSON" "Single Query" "Multiple Queries (20)" "Fortunes" "Updates (20)")
-
-for i in "${!TESTS[@]}"; do
-  echo "--- ${LABELS[$i]} ---"
-  wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION --latency "http://localhost:$PORT/${TESTS[$i]}"
-  echo ""
-done
-
-echo "Done. Stopping Brace."
+tfb_run_suite
+tfb_summary "Brace $(framework_version)"

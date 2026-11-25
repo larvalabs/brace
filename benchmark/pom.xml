@@ -13,26 +13,20 @@
         <maven.compiler.release>${java.specification.version}</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jmh.version>1.37</jmh.version>
+        <!-- The framework build to benchmark. The run scripts pass -Dbrace.version from the root
+             pom.xml (after `mvn install -DskipTests` at the repo root), so this default only
+             matters for a manual `mvn package` here; keep it equal to the root <version>. -->
+        <brace.version>0.1.12-SNAPSHOT</brace.version>
     </properties>
 
     <dependencies>
         <dependency>
             <groupId>com.larvalabs</groupId>
             <artifactId>brace</artifactId>
-            <!-- Keep in sync with the framework pom.xml <version> (run `mvn install
-                 -DskipTests` at the repo root before building the benchmark). -->
-            <version>0.1.7-SNAPSHOT</version>
+            <version>${brace.version}</version>
         </dependency>
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <version>42.7.4</version>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-database-postgresql</artifactId>
-            <version>10.22.0</version>
-        </dependency>
+        <!-- The PostgreSQL driver and Flyway's PostgreSQL module come from the framework
+             (runtime scope), at the versions it ships with. -->
         <!-- JMH micro-benchmarks (gap #3): allocation-sensitive units measured with
              gc.alloc.rate.norm, which wrk can't see. Run via benchmark.jmh.JmhRunner. -->
         <dependency>
@@ -43,6 +37,8 @@
     </dependencies>
 
     <build>
+        <!-- Stable jar name (target/brace-benchmark.jar) for the run scripts. -->
+        <finalName>brace-benchmark</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

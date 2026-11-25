@@ -1,62 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export JAVA_HOME="${JAVA_HOME:-/Users/matt/Library/Java/JavaVirtualMachines/openjdk-23.0.2/Contents/Home}"
-export PATH="$JAVA_HOME/bin:$PATH"
+# TechEmpower-style suite against the official TechEmpower Spring Boot implementation
+# (frameworks/Java/spring: Spring Boot 3.3.5, Undertow, Hikari). Same driver as run-brace.sh
+# (lib.sh), so both get identical checks, warmups, runs and summary.
+#
+# The TechEmpower repo was archived in March 2026; the code is still there. Build it once:
+#   git clone --depth 1 --filter=blob:none --sparse \
+#     https://github.com/TechEmpower/FrameworkBenchmarks.git /tmp/tfb-spring
+#   cd /tmp/tfb-spring && git sparse-checkout set frameworks/Java/spring
+#   cd frameworks/Java/spring && mvn package -q -DskipTests
+#
+# SPRING_PROFILE picks the data-access variant TechEmpower ships, and its ORM class there:
+#   jdbc (default)  JdbcTemplate             "Micro"
+#   data-jdbc       Spring Data JDBC         "Full"
+#   jooq            jOOQ                     "Full"
+# None of them is Hibernate/JPA.
+#
+# Environment as run-brace.sh, plus SPRING_DIR and SPRING_PROFILE.
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SPRING_DIR="/tmp/tfb-spring/frameworks/Java/spring"
+source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+use_jdk
+tfb_init
+tfb_preflight
+
+SPRING_DIR="${SPRING_DIR:-/tmp/tfb-spring/frameworks/Java/spring}"
+SPRING_PROFILE="${SPRING_PROFILE:-jdbc}"
 JAR="$SPRING_DIR/target/hello-spring-1.0-SNAPSHOT.jar"
-PORT=8080
-WRK_THREADS=8
-WRK_CONNECTIONS=256
-WRK_DURATION=15s
-WARMUP_DURATION=5s
-DB_HOST=localhost
-DB_PORT=5433
-
 if [ ! -f "$JAR" ]; then
-  echo "Spring TFB jar not found at $JAR"
-  echo "Clone and build first:"
-  echo "  cd /tmp && git clone --depth 1 --filter=blob:none --sparse https://github.com/TechEmpower/FrameworkBenchmarks.git tfb-spring"
-  echo "  cd tfb-spring && git sparse-checkout set frameworks/Java/spring"
-  echo "  cd frameworks/Java/spring && mvn package -q -DskipTests"
+  echo "Spring TFB jar not found at $JAR; see the build steps at the top of this script." >&2
   exit 1
 fi
 
-echo "Starting Spring Boot benchmark app..."
-java -XX:+DisableExplicitGC -XX:+UseStringDeduplication \
-  -Dlogging.level.root=OFF \
-  -Ddatabase.host=$DB_HOST -Ddatabase.port=$DB_PORT \
-  -jar "$JAR" --spring.profiles.active=jdbc &
-APP_PID=$!
-trap "kill $APP_PID 2>/dev/null; wait $APP_PID 2>/dev/null" EXIT
+tfb_record_output "spring-$SPRING_PROFILE"
+tfb_print_environment "Spring Boot TFB benchmark, profile $SPRING_PROFILE ($JAR)"
 
-# Wait for app to start
-for i in $(seq 1 30); do
-  if curl -sf http://localhost:$PORT/plaintext > /dev/null 2>&1; then
-    break
-  fi
-  sleep 0.5
-done
-
-echo "Warming up..."
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/plaintext > /dev/null 2>&1
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/json > /dev/null 2>&1
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/db > /dev/null 2>&1
-wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WARMUP_DURATION http://localhost:$PORT/fortunes > /dev/null 2>&1
-
+# JVM flags from TechEmpower's spring.dockerfile. The pool size is set to DB_POOL so both
+# frameworks get the same pool (the TechEmpower config hardcodes 256).
+# shellcheck disable=SC2086
+tfb_start_app "$RESULTS_DIR/spring-app.log" \
+  java -XX:+DisableExplicitGC -XX:+UseStringDeduplication $JVM_OPTS \
+    -Dlogging.level.root=OFF \
+    -Ddatabase.host="$DB_HOST" -Ddatabase.port="$DB_PORT" \
+    -Dspring.datasource.hikari.maximum-pool-size="$DB_POOL" \
+    -Dserver.port="$PORT" \
+    -jar "$JAR" --spring.profiles.active="$SPRING_PROFILE"
+tfb_check_responses
+tfb_warmup
 echo ""
-echo "=== Spring Boot TFB Benchmark (wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION) ==="
-echo ""
-
-TESTS=("plaintext" "json" "db" "queries?queries=20" "fortunes" "updates?queries=20")
-LABELS=("Plaintext" "JSON" "Single Query" "Multiple Queries (20)" "Fortunes" "Updates (20)")
-
-for i in "${!TESTS[@]}"; do
-  echo "--- ${LABELS[$i]} ---"
-  wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION "http://localhost:$PORT/${TESTS[$i]}"
-  echo ""
-done
-
-echo "Done. Stopping Spring Boot."
+tfb_run_suite
+tfb_summary "Spring Boot ($SPRING_PROFILE)"

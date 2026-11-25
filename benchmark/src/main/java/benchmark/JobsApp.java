@@ -34,7 +34,7 @@ public class JobsApp {
 
     public static void main(String[] args) throws Exception {
         var db = new DatabaseFactory(
-            System.getenv().getOrDefault("JOBS_DB_URL", "jdbc:postgresql://localhost:5433/jobs_bench"),
+            System.getenv().getOrDefault("JOBS_DB_URL", "jdbc:postgresql://localhost:5434/jobs_bench"),
             System.getenv().getOrDefault("JOBS_DB_USER", "benchmarkdbuser"),
             System.getenv().getOrDefault("JOBS_DB_PASS", "benchmarkdbpass"),
             List.of());

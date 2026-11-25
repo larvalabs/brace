@@ -8,14 +8,19 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public class App {
     public static void main(String[] args) throws Exception {
+        // DB_HOST / DB_PORT / DB_POOL are set by run-brace.sh (lib.sh); the defaults match the
+        // tfb-postgres container in benchmark/README.md. A pool of 256 matches the TechEmpower
+        // Spring implementation; Brace's own default is 10.
+        var env = System.getenv();
         var db = new DatabaseFactory(
-            "jdbc:postgresql://localhost:5433/hello_world",
+            "jdbc:postgresql://" + env.getOrDefault("DB_HOST", "localhost") + ":"
+                + env.getOrDefault("DB_PORT", "5434") + "/hello_world",
             "benchmarkdbuser", "benchmarkdbpass",
             List.of(World.class, Fortune.class),
-            256);
+            Integer.parseInt(env.getOrDefault("DB_POOL", "256")));
 
         var app = Brace.app()
-            .port(Integer.parseInt(System.getenv().getOrDefault("PORT", "8080")))
+            .port(Integer.parseInt(env.getOrDefault("PORT", "8080")))
             .database(db)
             .templates("benchmark/src/main/resources/views")
             .defaultAccess(Access.none()); // benchmark endpoints are public
