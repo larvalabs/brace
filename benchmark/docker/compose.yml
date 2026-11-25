@@ -1,4 +1,4 @@
-# Containerized TechEmpower-style benchmark: Postgres, one app at a time (brace or spring),
+# Containerized TechEmpower-style benchmark: Postgres, one app at a time (brace or spring-jpa),
 # and wrk, each pinned to its own CPUs so they don't compete. Driven by ../run-docker.sh,
 # which sets every variable below; see ../README.md.
 name: brace-bench
@@ -53,17 +53,17 @@ services:
       JVM_OPTS: ${JVM_OPTS:-}
       BRACE_LOG_LEVEL: ${BRACE_LOG_LEVEL:-WARN}
 
-  spring:
+  spring-jpa:                        # TechEmpower's Spring app on Spring Data JPA / Hibernate (./spring-jpa)
     <<: *app
-    profiles: [spring]
+    profiles: [spring-jpa]
     build:
       context: .
       dockerfile: spring.Dockerfile
-    image: brace-bench/spring:local
+      target: spring-jpa
+    image: brace-bench/spring-jpa:local
     environment:
       DB_POOL: ${DB_POOL:-256}
       JVM_OPTS: ${JVM_OPTS:-}
-      SPRING_PROFILE: ${SPRING_PROFILE:-jdbc}
 
   wrk:
     profiles: [tools]

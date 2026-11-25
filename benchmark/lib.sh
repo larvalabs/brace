@@ -3,8 +3,8 @@
 #
 # Two parts:
 #   - setup used by every script: JDK selection, framework version, building the benchmark jar;
-#   - the TechEmpower-style suite driver used by run-brace.sh and run-spring.sh, so both
-#     frameworks get exactly the same checks, warmups, wrk runs and summary.
+#   - the TechEmpower-style suite used by run-brace.sh and run-docker.sh, so every framework
+#     gets exactly the same checks, warmups, wrk runs and summary.
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
@@ -80,7 +80,7 @@ now_ms() {
 
 # ---- TechEmpower-style suite -----------------------------------------------------------------
 #
-# Used by the local drivers (run-brace.sh, run-spring.sh: app and wrk as processes on this
+# Used by the local driver (run-brace.sh: app and wrk as processes on this
 # machine) and the Docker driver (run-docker.sh: everything in pinned containers). The driver
 # owns starting and stopping the app; these functions do the checks, load, parsing and summary.
 #
@@ -111,7 +111,10 @@ tfb_init() {
   mkdir -p "$RESULTS_DIR"
 }
 
+# The checkout's commit (with -dirty for uncommitted changes). BRACE_COMMIT overrides it, for
+# copies without .git (benchmark/cloud/do-run.sh copies the working tree to the droplet).
 commit_desc() {
+  if [ -n "${BRACE_COMMIT:-}" ]; then echo "$BRACE_COMMIT"; return; fi
   local sha
   sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
   if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then sha="$sha-dirty"; fi
@@ -340,8 +343,10 @@ median() { sort -n | awk '{ v[NR] = $1 } END { if (NR) print v[int((NR + 1) / 2)
 # Column $2 of the rows for framework $1 and test $3, one value per line.
 tsv_col() { awk -F'\t' -v f="$1" -v t="$3" -v c="$2" '$1 == f && $3 == t {print $c}' "$TSV"; }
 
+ratio_of() { awk -v a="$1" -v b="$2" 'BEGIN { if (a != "" && b > 0) printf "%.2fx", a / b; else print "n/a" }'; }
+
 tfb_summary() {
-  local fw label rps p99 errs peak runs n first base ratio
+  local fw label rps p99 errs peak runs n subject ratio
   for fw in $(awk -F'\t' '!seen[$1]++ {print $1}' "$TSV"); do
     n=$(tsv_col "$fw" 4 "${TFB_LABELS[0]}" | wc -l | tr -d ' ')
     echo "=== Summary: $fw (median of $n measurements) ==="
@@ -359,21 +364,24 @@ tfb_summary() {
     echo ""
   done
 
-  # With several frameworks in one file: median req/s of each relative to the first.
-  first=$(awk -F'\t' 'NR == 1 {print $1}' "$TSV")
-  if [ "$(awk -F'\t' '!seen[$1]++' "$TSV" | wc -l | tr -d ' ')" -gt 1 ]; then
-    echo "=== Median req/s relative to $first (>1 means faster than $first) ==="
-    for fw in $(awk -F'\t' -v f="$first" '!seen[$1]++ && $1 != f {print $1}' "$TSV"); do
-      echo "$fw:"
-      for label in "${TFB_LABELS[@]}"; do
-        base=$(tsv_col "$first" 4 "$label" | median)
-        rps=$(tsv_col "$fw" 4 "$label" | median)
-        ratio=$(awk -v a="$rps" -v b="$base" 'BEGIN { if (b > 0) printf "%.2fx", a / b; else print "n/a" }')
-        printf '  %-24s %s\n' "$label" "$ratio"
-      done
+  # With several frameworks in one file: Brace against each of the others (or, without a Brace
+  # row, the first framework against the rest).
+  subject=$(awk -F'\t' '$1 ~ /^brace/ {print $1; exit}' "$TSV")
+  [ -n "$subject" ] || subject=$(awk -F'\t' 'NR == 1 {print $1}' "$TSV")
+  for fw in $(awk -F'\t' -v f="$subject" '!seen[$1]++ && $1 != f {print $1}' "$TSV"); do
+    echo "=== $subject vs $fw (medians; req/s >1x: $subject is faster; p99 <1x: $subject's tail is shorter) ==="
+    printf '%-24s %10s %10s\n' "Test" "req/s" "p99"
+    for label in "${TFB_LABELS[@]}"; do
+      ratio=$(ratio_of "$(tsv_col "$subject" 4 "$label" | median)" "$(tsv_col "$fw" 4 "$label" | median)")
+      p99=$(ratio_of "$(tsv_col "$subject" 5 "$label" | median)" "$(tsv_col "$fw" 5 "$label" | median)")
+      printf '%-24s %10s %10s\n' "$label" "$ratio" "$p99"
     done
+    printf '%-24s %10s\n' "Startup time" \
+      "$(ratio_of "$(tsv_col "$subject" 4 _startup | median)" "$(tsv_col "$fw" 4 _startup | median)")"
+    printf '%-24s %10s\n' "Memory after warmup" \
+      "$(ratio_of "$(tsv_col "$subject" 4 _mem_warm | median)" "$(tsv_col "$fw" 4 _mem_warm | median)")"
     echo ""
-  fi
+  done
 
   echo "Errors = wrk socket errors + non-2xx responses, summed over all measurements. A nonzero"
   echo "count means that row's throughput is not comparable."

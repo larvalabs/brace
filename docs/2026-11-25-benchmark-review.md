@@ -332,12 +332,19 @@ To make it airtight, measure both sides of the Hibernate question rather than av
 - Report Brace against Spring `JdbcTemplate` (Micro), Spring Data JPA (Full) and Quarkus
   Hibernate (Full), each labelled.
 
+**Decision (2026-11-25): the comparison is Brace vs Spring Data JPA only.** `JdbcTemplate` is
+dropped: hand-written SQL against Brace's Hibernate isn't a fair fight, even with a label.
+`run-spring.sh` (JdbcTemplate only) is removed. `run-docker.sh` compares `brace` with
+`spring-jpa`: TechEmpower's Spring app plus a Spring Data JPA profile, in
+`benchmark/docker/spring-jpa/`. A short cloud run before the switch had Brace at about
+0.6–0.9x `JdbcTemplate` on the database tests and 1.5–2.2x on plaintext/JSON (single 5s samples).
+
 ## Recommended plan
 
 | # | Step | What | Effort |
 |---|---|---|---|
 | 1 | Fix the harness | Bump/wire the `brace` version in `benchmark/pom.xml`; DB URL from env; `BRACE_LOG_LEVEL=WARN` in `run-brace.sh`; `run-spring.sh` on JDK 25 with `--latency` and the PID guard; fix `benchmark/README.md`; median-of-3 runs; capture RSS and startup | 0.5 day |
-| 2 | Re-run TFB, Brace vs Spring Boot, JDK 25, same machine, same day | Replaces `RESULTS.md` and closes the `TODO.md` item. **The harness is ready:** `benchmark/run-docker.sh` runs Postgres, the app and wrk in containers pinned to separate CPUs, alternates frameworks round by round, and reports medians, ratios, RSS, startup and CPU steal. What's left is to rent a dedicated-vCPU Linux VM (Hetzner CCX or DigitalOcean CPU-Optimized), run it, and keep the output. Later, add a Full-ORM peer: a Spring Data JPA variant (TechEmpower ships none, about half a day) or TFB's Quarkus Hibernate entry | Half a day of wall time per full run, plus about 0.5 day for a JPA variant |
+| 2 | Re-run TFB, Brace vs Spring Boot, JDK 25, same machine, same day | Replaces `RESULTS.md` and closes the `TODO.md` item. **The harness is ready:** `benchmark/run-docker.sh` runs Postgres, the app and wrk in containers pinned to separate CPUs, alternates frameworks round by round, and reports medians, ratios, RSS, startup and CPU steal. `benchmark/cloud/do-run.sh` runs it on a throwaway DigitalOcean CPU-Optimized droplet and destroys it afterwards (a short test run cost about $0.02). The comparison peer is `spring-jpa`: TechEmpower's Spring app plus a Spring Data JPA profile. `JdbcTemplate` was dropped as unfair, see the Hibernate section. What's left is the full-length run | About $0.20 and under an hour per full run |
 | 3 | Small-box profile (PVRLabs-style, run ourselves) | A `docker compose` with app plus Postgres in one 512 MiB / 1 CPU budget (app `mem_limit` around 400m, Postgres around 100m with PVRLabs' tiny-PG settings), or a 512 MiB Lima VM to copy them exactly. JVM: `-Xmx80m` to match PVRLabs, plus a second run at `-XX:MaxRAMPercentage=50` (Brace's scaffold Dockerfile default); `-XX:+UseSerialGC` as a variant (often the smallest footprint on 1 CPU); `-Dbrace.mode=prod`, `BRACE_LOG_LEVEL=WARN`, Hikari pool 4–10, ops/JFR off. Workload: the TFB DB tests at a fixed rate (wrk2 or oha `-q`) plus a short saturation run. Brace vs Spring Boot JDBC and JPA. Report time to first 200, idle and peak RSS, p99 at fixed rate, max req/s, OOM/errors | 1 day after step 2 |
 | 4 | the-benchmarker submission (optional) | `java/brace/` with the v2 six-route app plus `config.yaml`. Gives Brace a row in the most-watched live list, but says nothing about DB/templates | 0.5–1 day plus PR review time |
 | 5 | Skip PVRLabs for now | Too new, single-maintainer, conflict disclosed. Revisit if it gains users. If we want their exact numbers, implementing their Market Replay app and running their GitHub Actions workflow on a fork is about 1–1.5 days and needs no PR. Step 3 already covers the methodology on our own terms | 0 (or 1–1.5 days) |

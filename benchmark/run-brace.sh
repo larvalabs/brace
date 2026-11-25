@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# TechEmpower-style suite against the Brace benchmark app (benchmark/src/main/java/benchmark/App.java).
-# Same driver as run-spring.sh (lib.sh): response checks, warmup, RUNS interleaved wrk passes,
-# medians, startup time and RSS. Output is also saved under benchmark/results/.
+# TechEmpower-style suite against the Brace benchmark app (benchmark/src/main/java/benchmark/App.java),
+# as a local process: for quick before/after checks while working. Comparisons with Spring run in
+# containers (run-docker.sh). Same suite code (lib.sh): response checks, warmup, RUNS interleaved
+# wrk passes, medians, startup time and RSS. Output is also saved under benchmark/results/.
 #
 # Environment (defaults in lib.sh): PORT, DB_HOST, DB_PORT, DB_POOL, WRK_THREADS,
 # WRK_CONNECTIONS, WRK_DURATION, WARMUP_DURATION, RUNS, JVM_OPTS, BENCH_JAVA_HOME,
@@ -15,7 +16,7 @@ tfb_init
 tfb_preflight
 ensure_jar
 
-# Per-request logging off, as TechEmpower requires and as run-spring.sh does for Spring
+# Per-request logging off, as TechEmpower requires and as the Spring app runs
 # (-Dlogging.level.root=OFF). Brace's default (DEBUG) logs a JSON line per request.
 export BRACE_LOG_LEVEL="${BRACE_LOG_LEVEL:-WARN}"
 

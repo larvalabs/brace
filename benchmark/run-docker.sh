@@ -4,9 +4,10 @@ set -euo pipefail
 # Containerized TechEmpower-style benchmark, meant for a dedicated Linux box (e.g. a
 # dedicated-vCPU cloud VM) so nothing else competes for the CPUs. Postgres, the app and wrk each
 # run in their own container, pinned to their own CPUs (docker/compose.yml). The images come from
-# this checkout (Brace) and TechEmpower's archived repo at a pinned commit (Spring).
+# this checkout (Brace) and TechEmpower's archived repo at a pinned commit plus a Spring Data JPA
+# profile (Spring).
 #
-# Usage: ./benchmark/run-docker.sh [framework...]     framework: brace | spring (default: both)
+# Usage: ./benchmark/run-docker.sh [framework...]     framework: brace | spring-jpa (default: both)
 #
 # Every invocation starts from a fresh, freshly seeded Postgres. For ROUNDS rounds it launches each
 # framework in turn (a new JVM each time), checks its responses, warms up, runs RUNS passes over the
@@ -21,7 +22,6 @@ set -euo pipefail
 #                                   Docker host's CPUs to the app, a quarter each to Postgres and wrk
 #   APP_MEM DB_MEM                  container memory limits, e.g. 512m (default: none)
 #   DB_POOL=256 JVM_OPTS            pool size (both apps), extra JVM flags (both apps)
-#   SPRING_PROFILE=jdbc             jdbc | data-jdbc | jooq (TechEmpower's variants)
 #   PG_MAX_CONNECTIONS=600 PG_SHARED_BUFFERS=256MB
 #   PORT=8080                       host port for the driver's checks (bound to 127.0.0.1)
 #   BENCH_HOST_LABEL                free text for the report, e.g. "hetzner ccx33 fsn1"
@@ -36,13 +36,13 @@ USER_WRK_THREADS=${WRK_THREADS:-}   # tfb_init would default it to 8; here it fo
 tfb_init
 
 FRAMEWORKS=("$@")
-[ ${#FRAMEWORKS[@]} -gt 0 ] || FRAMEWORKS=(brace spring)
+[ ${#FRAMEWORKS[@]} -gt 0 ] || FRAMEWORKS=(brace spring-jpa)
 for fw in "${FRAMEWORKS[@]}"; do
-  case "$fw" in brace|spring) ;; *) echo "FATAL: unknown framework '$fw' (brace, spring)" >&2; exit 1 ;; esac
+  case "$fw" in brace|spring-jpa) ;; *) echo "FATAL: unknown framework '$fw' (brace, spring-jpa)" >&2; exit 1 ;; esac
 done
 
 COMPOSE=(docker compose -f "$BENCH_DIR/docker/compose.yml")
-ALL_PROFILES=(--profile brace --profile spring --profile tools)
+ALL_PROFILES=(--profile brace --profile spring-jpa --profile tools)
 
 # ---- CPU layout ------------------------------------------------------------------------------
 
@@ -72,10 +72,9 @@ fi
 WRK_THREADS=${USER_WRK_THREADS:-$(cpuset_count "$CPUS_LOAD")}
 : "${APP_MEM:=0}"
 : "${DB_MEM:=0}"
-: "${SPRING_PROFILE:=jdbc}"
 : "${BRACE_LOG_LEVEL:=WARN}"
 BRACE_COMMIT=$(commit_desc)
-export CPUS_APP CPUS_DB CPUS_LOAD APP_MEM DB_MEM DB_POOL JVM_OPTS SPRING_PROFILE PORT \
+export CPUS_APP CPUS_DB CPUS_LOAD APP_MEM DB_MEM DB_POOL JVM_OPTS PORT \
   BRACE_LOG_LEVEL BRACE_COMMIT PG_MAX_CONNECTIONS PG_SHARED_BUFFERS
 
 # ---- Hooks for lib.sh: wrk and memory readings go through the containers ----------------------
@@ -90,8 +89,6 @@ mem_mark() { docker exec "$CID" sh -c 'echo 5 > /proc/1/clear_refs' 2> /dev/null
 mem_peak_mb() { proc_status_mb VmHWM; }
 
 container_alive() { [ "$(docker inspect -f '{{.State.Running}}' "$CID" 2> /dev/null)" = true ]; }
-
-fw_label() { if [ "$1" = spring ]; then echo "spring-$SPRING_PROFILE"; else echo "$1"; fi; }
 
 # ---- Setup -----------------------------------------------------------------------------------
 
@@ -135,7 +132,7 @@ echo "jvm opts:    ${JVM_OPTS:-(none)}"
 for fw in "${FRAMEWORKS[@]}"; do
   case "$fw" in
     brace)  echo "brace:       image $(image_id brace-bench/brace:local), brace $(in_image brace-bench/brace:local cat /app/brace-version), commit $(in_image brace-bench/brace:local cat /app/brace-commit), $(in_image brace-bench/brace:local java -version), BRACE_LOG_LEVEL=$BRACE_LOG_LEVEL" ;;
-    spring) echo "spring:      image $(image_id brace-bench/spring:local), TechEmpower $(in_image brace-bench/spring:local cat /spring/tfb-commit | cut -c1-12), profile $SPRING_PROFILE, $(in_image brace-bench/spring:local java -version)" ;;
+    spring-jpa) echo "spring-jpa:  image $(image_id brace-bench/spring-jpa:local), TechEmpower $(in_image brace-bench/spring-jpa:local cat /spring/tfb-commit | cut -c1-12) + Spring Data JPA profile (benchmark/docker/spring-jpa), $(in_image brace-bench/spring-jpa:local java -version)" ;;
   esac
 done
 echo "load:        wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION --latency, $WARMUP_DURATION warmup per test"
@@ -152,7 +149,7 @@ STEAL0=$(cpu_jiffies || true)
 
 for round in $(seq 1 "$ROUNDS"); do
   for fw in "${FRAMEWORKS[@]}"; do
-    label=$(fw_label "$fw")
+    label=$fw
     echo "##### Round $round/$ROUNDS: $label #####"
     "${COMPOSE[@]}" --profile "$fw" up -d --no-deps --force-recreate "$fw" > /dev/null 2>&1
     t0=$(now_ms)
@@ -185,7 +182,7 @@ done
 
 STEAL1=$(cpu_jiffies || true)
 if [ -n "$STEAL0" ] && [ -n "$STEAL1" ]; then
-  echo "cpu steal:   $(echo "$STEAL0 $STEAL1" | awk '{ d = $3 - $1; printf "%.2f%%", d > 0 ? 100 * ($4 - $2) / d : 0 }') of host CPU time during the run (above ~1% means noisy neighbours; distrust the run)"
+  echo "cpu steal:   $(echo "$STEAL0 $STEAL1" | awk '{ d = $3 - $1; printf "%.2f%%", (d > 0 ? 100 * ($4 - $2) / d : 0) }') of host CPU time during the run (above ~1% means noisy neighbours; distrust the run)"
   echo ""
 fi
 tfb_summary

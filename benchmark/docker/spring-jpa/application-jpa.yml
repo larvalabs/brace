@@ -1,0 +1,15 @@
+
+---
+# Added by Brace's benchmark (benchmark/docker/spring-jpa).
+spring:
+  config:
+    activate:
+      on-profile: jpa
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+  data:
+    jdbc:
+      repositories:
+        enabled: false
