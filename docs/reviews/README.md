@@ -1,10 +1,10 @@
 # Periodic Model Reviews
 
-Brace gets a full-codebase review in each of four categories whenever a notably more
-capable frontier model becomes available. The premise: every model generation can find
-real issues the previous one missed, so a review pass is repeated, not because the code
-changed, but because the reviewer got better. Each review produces a findings doc, a fix
-branch with one commit per finding, and a permanent record in this directory.
+Brace gets a full-codebase review in each of three categories whenever a notably more capable
+frontier model becomes available. Each new model generation finds real problems the previous one
+missed, so a review is repeated because the reviewer got better, even when the code hasn't
+changed. Each review produces a findings doc, a fix branch with one commit per finding, and a
+permanent record in this directory.
 
 ## Categories
 
@@ -12,13 +12,16 @@ branch with one commit per finding, and a permanent record in this directory.
 |---|---|---|
 | **Security** | Injection, authn/authz gaps, crypto misuse, DoS, information disclosure, across HTTP lifecycle, sessions, ops surface, database, files/CLI | `fix(security):` |
 | **Correctness** | Plain bugs: wrong results, silently dropped or corrupted data, unbounded growth, work lost rather than retried, behavior contradicting its own docs | `fix(correctness):` |
-| **Token Efficiency** | How much it costs an agent to build and operate apps on Brace: API shapes that force boilerplate, doc weight/staleness, verbose tool output, patterns agents repeat per-route | `feat(tokens):` / `docs(tokens):` |
 | **Runtime Performance** | Hot-path allocation, lock contention, query patterns, startup time, memory footprint under load | `perf:` |
 
-A correctness review overlaps the other three at the edges — a leak is also a perf problem, a
+A correctness review overlaps the other two at the edges. A leak is also a perf problem, and a
 traversal bug is also a security bug. The tie-breaker is the reason the finding is listed: if
 the code produces a *wrong answer* (or loses data, or grows without bound) it belongs here,
 whatever its secondary flavor.
+
+A fourth category, **Token Efficiency**, measured how much it cost a coding agent to build and
+operate apps on Brace. It ran once, in June 2026, and has been retired because Brace no longer
+positions itself on token efficiency. Its record stays in the index below.
 
 ## Process
 
