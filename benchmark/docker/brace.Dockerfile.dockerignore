@@ -1,0 +1,6 @@
+# Build context for brace.Dockerfile is the repo root; send only what the build needs.
+*
+!pom.xml
+!src
+!benchmark/pom.xml
+!benchmark/src

@@ -38,7 +38,7 @@ tfb_print_environment "Spring Boot TFB benchmark, profile $SPRING_PROFILE ($JAR)
 # JVM flags from TechEmpower's spring.dockerfile. The pool size is set to DB_POOL so both
 # frameworks get the same pool (the TechEmpower config hardcodes 256).
 # shellcheck disable=SC2086
-tfb_start_app "$RESULTS_DIR/spring-app.log" \
+tfb_start_app "spring-$SPRING_PROFILE" "$RESULTS_DIR/spring-app.log" \
   java -XX:+DisableExplicitGC -XX:+UseStringDeduplication $JVM_OPTS \
     -Dlogging.level.root=OFF \
     -Ddatabase.host="$DB_HOST" -Ddatabase.port="$DB_PORT" \
@@ -46,7 +46,7 @@ tfb_start_app "$RESULTS_DIR/spring-app.log" \
     -Dserver.port="$PORT" \
     -jar "$JAR" --spring.profiles.active="$SPRING_PROFILE"
 tfb_check_responses
-tfb_warmup
+tfb_warmup "spring-$SPRING_PROFILE" 1
 echo ""
-tfb_run_suite
-tfb_summary "Spring Boot ($SPRING_PROFILE)"
+tfb_run_suite "spring-$SPRING_PROFILE"
+tfb_summary

@@ -68,9 +68,28 @@ ensure_jar() {
   fi
 }
 
-now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+# Milliseconds since the epoch (GNU date on Linux, perl on macOS, where date has no %N).
+now_ms() {
+  local t
+  t=$(date +%s%3N 2>/dev/null)
+  case "$t" in
+    *[!0-9]*|"") perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000' ;;
+    *) echo "$t" ;;
+  esac
+}
 
 # ---- TechEmpower-style suite -----------------------------------------------------------------
+#
+# Used by the local drivers (run-brace.sh, run-spring.sh: app and wrk as processes on this
+# machine) and the Docker driver (run-docker.sh: everything in pinned containers). The driver
+# owns starting and stopping the app; these functions do the checks, load, parsing and summary.
+#
+# Hooks a driver may redefine after sourcing this file (defaults are the local ones):
+#   load_url <path>   URL the load generator uses for a test path
+#   run_wrk <args>    run wrk with these arguments
+#   mem_mark          start tracking the app's peak memory
+#   mem_peak_mb       peak memory (MB) since mem_mark
+#   mem_now_mb        current memory (MB)
 
 TFB_TESTS=("plaintext" "json" "db" "queries?queries=20" "fortunes" "updates?queries=20")
 TFB_LABELS=("Plaintext" "JSON" "Single Query" "Multiple Queries (20)" "Fortunes" "Updates (20)")
@@ -85,23 +104,33 @@ tfb_init() {
   : "${WRK_CONNECTIONS:=256}"
   : "${WRK_DURATION:=15s}"
   : "${WARMUP_DURATION:=5s}"
-  : "${RUNS:=3}"                # measured passes over the whole suite; the summary reports medians
+  : "${RUNS:=3}"                # measured passes over the whole suite per app launch
   : "${JVM_OPTS:=}"             # extra JVM flags, e.g. "-Xmx80m -XX:+UseSerialGC"
   : "${RESULTS_DIR:=$BENCH_DIR/results}"   # git-ignored; outside target/, which every build cleans
   export PORT DB_HOST DB_PORT DB_POOL
   mkdir -p "$RESULTS_DIR"
 }
 
-# Tee everything from here on into $RESULTS_DIR/<timestamp>-<name>-<sha>.txt.
-tfb_record_output() { # name
+commit_desc() {
   local sha
   sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
   if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then sha="$sha-dirty"; fi
+  echo "$sha"
+}
+
+# Tee everything from here on into $RESULTS_DIR/<timestamp>-<name>-<sha>.txt, with one TSV row
+# per measurement next to it: framework, round, test, value, p99 ms, errors, peak MB.
+# (Rows with a test of _startup / _mem_ready / _mem_warm carry ms or MB in the value column.)
+tfb_record_output() { # name
   mkdir -p "$RESULTS_DIR"
-  OUT="$RESULTS_DIR/$(date +%Y-%m-%d-%H%M%S)-$1-$sha.txt"
+  OUT="$RESULTS_DIR/$(date +%Y-%m-%d-%H%M%S)-$1-$(commit_desc).txt"
   TSV="${OUT%.txt}.tsv"
   : > "$TSV"
   exec > >(tee "$OUT") 2>&1
+}
+
+tsv_row() { # framework round test value p99 errors peak
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$@" >> "$TSV"
 }
 
 tfb_preflight() {
@@ -110,24 +139,36 @@ tfb_preflight() {
     echo "  docker start tfb-postgres" >&2
     exit 1
   fi
-  if lsof -t -iTCP:"$PORT" -sTCP:LISTEN > /dev/null 2>&1; then
-    echo "FATAL: something is already listening on port $PORT (PID $(lsof -t -iTCP:"$PORT" -sTCP:LISTEN | head -1)); set PORT or stop it" >&2
+  if port_in_use "$PORT"; then
+    echo "FATAL: something is already listening on port $PORT; set PORT or stop it" >&2
     exit 1
   fi
 }
 
-# Everything needed to judge or reproduce the run.
-tfb_print_environment() { # framework description
+port_in_use() {
+  if command -v lsof > /dev/null 2>&1; then
+    lsof -t -iTCP:"$1" -sTCP:LISTEN > /dev/null 2>&1
+  else
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$1\$"
+  fi
+}
+
+machine_desc() {
+  if [ "$(uname)" = "Darwin" ]; then
+    echo "$(sysctl -n hw.model) / $(sysctl -n machdep.cpu.brand_string) / $(sysctl -n hw.ncpu) cpus / $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+  else
+    echo "$(awk -F': ' '/model name/ {print $2; exit}' /proc/cpuinfo) / $(nproc) cpus / $(awk '/MemTotal/ {printf "%d GB", $2/1048576}' /proc/meminfo)"
+  fi
+}
+
+# Everything needed to judge or reproduce a local run.
+tfb_print_environment() { # description
   echo "=== $1 ==="
   echo "date:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "commit:      $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)$( [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ] && echo ' (dirty)')"
+  echo "commit:      $(commit_desc)"
   echo "java:        $(java -version 2>&1 | head -1) ($JAVA_HOME)"
   echo "jvm opts:    ${JVM_OPTS:-(none)}"
-  if [ "$(uname)" = "Darwin" ]; then
-    echo "machine:     $(sysctl -n hw.model) / $(sysctl -n machdep.cpu.brand_string) / $(sysctl -n hw.ncpu) cpus / $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
-  else
-    echo "machine:     $(uname -m) / $(nproc) cpus / $(awk '/MemTotal/ {printf "%d GB", $2/1048576}' /proc/meminfo)"
-  fi
+  echo "machine:     $(machine_desc)"
   echo "os:          $(uname -sr)"
   echo "postgres:    $DB_HOST:$DB_PORT, app pool $DB_POOL"
   echo "load:        wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION --latency, $WARMUP_DURATION warmup per test, $RUNS runs"
@@ -135,27 +176,34 @@ tfb_print_environment() { # framework description
   echo ""
 }
 
-# Launch the app in the background (cwd = repo root), wait until it answers, and record the
-# time to first 200. Usage: tfb_start_app <logfile> java ...args
+# Wait until the app answers /plaintext, at most 120s. $1 is a command that succeeds while the
+# app is still alive (so a crash fails fast instead of waiting out the timeout).
+wait_until_ready() {
+  local alive=$1
+  for _ in $(seq 1 1200); do
+    if ! $alive; then return 2; fi
+    if curl -sf "http://localhost:$PORT/plaintext" > /dev/null 2>&1; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# Local mode: launch the app as a background process (cwd = repo root), wait until it
+# answers, and record the time to first 200. Usage: tfb_start_app <framework> <logfile> java ...
 tfb_start_app() {
-  local log=$1; shift
-  local t0 t1
+  local fw=$1 log=$2; shift 2
+  local t0 t1 rc=0
   t0=$(now_ms)
   ( cd "$REPO_ROOT" && exec "$@" ) > "$log" 2>&1 &
   APP_PID=$!
   trap tfb_stop_app EXIT
-  local ok=0
-  for _ in $(seq 1 1200); do   # up to 120s
-    if ! kill -0 "$APP_PID" 2>/dev/null; then
-      echo "FATAL: the app exited during startup; last lines of $log:" >&2
-      tail -20 "$log" >&2
-      exit 1
-    fi
-    if curl -sf "http://localhost:$PORT/plaintext" > /dev/null 2>&1; then ok=1; break; fi
-    sleep 0.1
-  done
+  wait_until_ready app_pid_alive || rc=$?
   t1=$(now_ms)
-  if [ "$ok" != 1 ]; then
+  if [ "$rc" = 2 ]; then
+    echo "FATAL: the app exited during startup; last lines of $log:" >&2
+    tail -20 "$log" >&2
+    exit 1
+  elif [ "$rc" != 0 ]; then
     echo "FATAL: the app did not answer on port $PORT within 120s; see $log" >&2
     exit 1
   fi
@@ -169,8 +217,13 @@ tfb_start_app() {
   fi
   STARTUP_MS=$((t1 - t0))
   echo "startup:     ${STARTUP_MS} ms to first 200 (JVM launch to /plaintext answering)"
-  echo "rss ready:   $(rss_mb) MB"
+  tsv_row "$fw" 1 _startup "$STARTUP_MS" 0 0 0
+  local m; m=$(mem_now_mb)
+  echo "rss ready:   $m MB"
+  tsv_row "$fw" 1 _mem_ready "$m" 0 0 0
 }
+
+app_pid_alive() { kill -0 "$APP_PID" 2>/dev/null; }
 
 tfb_stop_app() {
   [ -n "${APP_PID:-}" ] || return 0
@@ -181,7 +234,35 @@ tfb_stop_app() {
   APP_PID=
 }
 
-rss_mb() { ps -o rss= -p "$APP_PID" 2>/dev/null | awk '{printf "%d", $1/1024}'; }
+# ---- Local hooks -----------------------------------------------------------------------------
+
+load_url() { echo "http://localhost:$PORT/$1"; }
+run_wrk() { wrk "$@"; }
+mem_now_mb() { ps -o rss= -p "$APP_PID" 2>/dev/null | awk '{printf "%d", $1/1024}'; }
+mem_mark() {
+  PEAK_FILE=$(mktemp)
+  sample_peak_rss "$PEAK_FILE" &
+  SAMPLER_PID=$!
+}
+mem_peak_mb() {
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  wait "$SAMPLER_PID" 2>/dev/null || true
+  echo $(( $(cat "$PEAK_FILE") / 1024 ))
+  rm -f "$PEAK_FILE"
+}
+
+# Peak RSS of the app process, sampled every 0.5s into $1 (KB).
+sample_peak_rss() {
+  local peak=0 r
+  echo 0 > "$1"
+  while kill -0 "$APP_PID" 2>/dev/null; do
+    r=$(ps -o rss= -p "$APP_PID" 2>/dev/null | tr -d ' ')
+    if [ -n "$r" ] && [ "$r" -gt "$peak" ]; then peak=$r; echo "$peak" > "$1"; fi
+    sleep 0.5
+  done
+}
+
+# ---- Checks, load, summary -------------------------------------------------------------------
 
 # Fail before spending wrk time if an endpoint doesn't do what the TFB spec says. The same
 # checks run against every framework.
@@ -207,23 +288,14 @@ tfb_check_responses() {
   echo "checks:      all six endpoints return TFB-shaped responses"
 }
 
-tfb_warmup() {
-  local t
+tfb_warmup() { # framework round
+  local t m
   for t in "${TFB_TESTS[@]}"; do
-    wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"$WARMUP_DURATION" "http://localhost:$PORT/$t" > /dev/null 2>&1
+    run_wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"$WARMUP_DURATION" "$(load_url "$t")" > /dev/null 2>&1
   done
-  echo "rss warm:    $(rss_mb) MB (after warmup)"
-}
-
-# Peak RSS of the app while a wrk run is in progress, sampled every 0.5s into $1.
-sample_peak_rss() {
-  local peak=0 r
-  echo 0 > "$1"
-  while kill -0 "$APP_PID" 2>/dev/null; do
-    r=$(ps -o rss= -p "$APP_PID" 2>/dev/null | tr -d ' ')
-    if [ -n "$r" ] && [ "$r" -gt "$peak" ]; then peak=$r; echo "$peak" > "$1"; fi
-    sleep 0.5
-  done
+  m=$(mem_now_mb)
+  echo "mem warm:    $m MB (after warmup)"
+  tsv_row "$1" "$2" _mem_warm "$m" 0 0 0
 }
 
 # wrk latency value ("850.12us", "4.71ms", "1.05s") -> milliseconds
@@ -235,50 +307,76 @@ to_ms() {
     else printf "%s", v }'
 }
 
-# Run passes interleaved (run 1 of every test, then run 2, ...) so slow drift on the machine
-# spreads across tests instead of landing on one. Raw wrk output is printed; one TSV row per
-# test per run goes to $TSV.
-tfb_run_suite() {
-  local run i t label raw rps p99 errs non2xx peakfile sampler
-  peakfile=$(mktemp)
+# One measured wrk run of test $3 (an index into TFB_TESTS). Prints the raw output and
+# appends a TSV row.
+tfb_measure() { # framework round index [tag]
+  local fw=$1 round=$2 i=$3 tag=${4:-} raw rps p99 errs non2xx peak
+  echo "--- ${TFB_LABELS[$i]} ($fw${tag:+, $tag}) ---"
+  mem_mark
+  raw=$(run_wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"$WRK_DURATION" --latency "$(load_url "${TFB_TESTS[$i]}")")
+  peak=$(mem_peak_mb)
+  echo "$raw"
+  echo ""
+  rps=$(echo "$raw" | awk '/^Requests\/sec/ {print $2}')
+  p99=$(to_ms "$(echo "$raw" | awk '$1 == "99%" {print $2}')")
+  errs=$(echo "$raw" | awk '/Socket errors/ {gsub(/,/, ""); print $4 + $6 + $8 + $10}')
+  non2xx=$(echo "$raw" | awk '/Non-2xx/ {print $NF}')
+  tsv_row "$fw" "$round" "${TFB_LABELS[$i]}" "${rps:-0}" "${p99:-0}" "$(( ${errs:-0} + ${non2xx:-0} ))" "${peak:-0}"
+}
+
+# RUNS passes, interleaved (run 1 of every test, then run 2, ...) so slow drift on the machine
+# spreads across tests instead of landing on one.
+tfb_run_suite() { # framework [round]
+  local run i
   for run in $(seq 1 "$RUNS"); do
     for i in "${!TFB_TESTS[@]}"; do
-      t=${TFB_TESTS[$i]}; label=${TFB_LABELS[$i]}
-      echo "--- $label (run $run/$RUNS) ---"
-      sample_peak_rss "$peakfile" &
-      sampler=$!
-      raw=$(wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"$WRK_DURATION" --latency "http://localhost:$PORT/$t")
-      kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true
-      echo "$raw"
-      echo ""
-      rps=$(echo "$raw" | awk '/^Requests\/sec/ {print $2}')
-      p99=$(to_ms "$(echo "$raw" | awk '$1 == "99%" {print $2}')")
-      errs=$(echo "$raw" | awk '/Socket errors/ {gsub(/,/, ""); print $4 + $6 + $8 + $10}')
-      non2xx=$(echo "$raw" | awk '/Non-2xx/ {print $NF}')
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$run" "${rps:-0}" "${p99:-0}" \
-        "$(( ${errs:-0} + ${non2xx:-0} ))" "$(( $(cat "$peakfile") / 1024 ))" >> "$TSV"
+      tfb_measure "$1" "${2:-$run}" "$i" "run $run/$RUNS"
     done
   done
-  rm -f "$peakfile"
 }
 
 median() { sort -n | awk '{ v[NR] = $1 } END { if (NR) print v[int((NR + 1) / 2)] }'; }
 
-tfb_summary() { # framework name
-  echo "=== Summary: $1 (median of $RUNS runs; startup ${STARTUP_MS} ms) ==="
-  printf '%-24s %12s %10s %8s %10s   %s\n' "Test" "Req/sec" "p99 ms" "Errors" "Peak RSS" "Req/sec per run"
-  local label rps p99 errs rss runs
-  for label in "${TFB_LABELS[@]}"; do
-    rps=$(awk -F'\t' -v l="$label" '$1 == l {print $3}' "$TSV" | median)
-    p99=$(awk -F'\t' -v l="$label" '$1 == l {print $4}' "$TSV" | median)
-    errs=$(awk -F'\t' -v l="$label" '$1 == l {s += $5} END {print s + 0}' "$TSV")
-    rss=$(awk -F'\t' -v l="$label" '$1 == l && $6 > m {m = $6} END {print m + 0}' "$TSV")
-    runs=$(awk -F'\t' -v l="$label" '$1 == l {printf "%s ", $3}' "$TSV")
-    printf '%-24s %12s %10s %8s %7s MB   %s\n' "$label" "$rps" "$p99" "$errs" "$rss" "$runs"
+# Column $2 of the rows for framework $1 and test $3, one value per line.
+tsv_col() { awk -F'\t' -v f="$1" -v t="$3" -v c="$2" '$1 == f && $3 == t {print $c}' "$TSV"; }
+
+tfb_summary() {
+  local fw label rps p99 errs peak runs n first base ratio
+  for fw in $(awk -F'\t' '!seen[$1]++ {print $1}' "$TSV"); do
+    n=$(tsv_col "$fw" 4 "${TFB_LABELS[0]}" | wc -l | tr -d ' ')
+    echo "=== Summary: $fw (median of $n measurements) ==="
+    echo "startup:     $(tsv_col "$fw" 4 _startup | median) ms to first 200 (median; all: $(tsv_col "$fw" 4 _startup | tr '\n' ' '))"
+    echo "memory:      $(tsv_col "$fw" 4 _mem_ready | median) MB ready, $(tsv_col "$fw" 4 _mem_warm | median) MB after warmup (medians)"
+    printf '%-24s %12s %10s %8s %10s   %s\n' "Test" "Req/sec" "p99 ms" "Errors" "Peak mem" "Req/sec per measurement"
+    for label in "${TFB_LABELS[@]}"; do
+      rps=$(tsv_col "$fw" 4 "$label" | median)
+      p99=$(tsv_col "$fw" 5 "$label" | median)
+      errs=$(tsv_col "$fw" 6 "$label" | awk '{s += $1} END {print s + 0}')
+      peak=$(tsv_col "$fw" 7 "$label" | awk '$1 > m {m = $1} END {print m + 0}')
+      runs=$(tsv_col "$fw" 4 "$label" | tr '\n' ' ')
+      printf '%-24s %12s %10s %8s %7s MB   %s\n' "$label" "$rps" "$p99" "$errs" "$peak" "$runs"
+    done
+    echo ""
   done
-  echo ""
-  echo "Errors = wrk socket errors + non-2xx responses, summed over all runs. A nonzero count"
-  echo "means that row's throughput is not comparable."
+
+  # With several frameworks in one file: median req/s of each relative to the first.
+  first=$(awk -F'\t' 'NR == 1 {print $1}' "$TSV")
+  if [ "$(awk -F'\t' '!seen[$1]++' "$TSV" | wc -l | tr -d ' ')" -gt 1 ]; then
+    echo "=== Median req/s relative to $first (>1 means faster than $first) ==="
+    for fw in $(awk -F'\t' -v f="$first" '!seen[$1]++ && $1 != f {print $1}' "$TSV"); do
+      echo "$fw:"
+      for label in "${TFB_LABELS[@]}"; do
+        base=$(tsv_col "$first" 4 "$label" | median)
+        rps=$(tsv_col "$fw" 4 "$label" | median)
+        ratio=$(awk -v a="$rps" -v b="$base" 'BEGIN { if (b > 0) printf "%.2fx", a / b; else print "n/a" }')
+        printf '  %-24s %s\n' "$label" "$ratio"
+      done
+    done
+    echo ""
+  fi
+
+  echo "Errors = wrk socket errors + non-2xx responses, summed over all measurements. A nonzero"
+  echo "count means that row's throughput is not comparable."
   echo "Raw output: $OUT"
-  echo "Per-run rows: $TSV"
+  echo "Per-measurement rows: $TSV"
 }

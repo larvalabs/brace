@@ -25,9 +25,10 @@ Reads go through Hibernate (`StatelessSession.find`), which TechEmpower would cl
 "Full" ORM. The TechEmpower Spring entry's default profile (`jdbc`, `JdbcTemplate`) is classed
 "Micro".
 
-### Database
+### Database (for local runs)
 
-A dedicated Postgres on port 5434, so it doesn't collide with a local Postgres on 5432:
+`run-docker.sh` brings its own. For the local scripts, a dedicated Postgres on port 5434, so it
+doesn't collide with a local Postgres on 5432:
 
 ```bash
 docker run -d --name tfb-postgres -p 5434:5432 \
@@ -42,12 +43,89 @@ docker exec -i tfb-postgres psql -U benchmarkdbuser -d hello_world < benchmark/s
 
 After that, `docker start tfb-postgres` is all a later run needs.
 
-### Running
+There are two ways to run the suite:
+
+- **Containers on a dedicated Linux box** (`run-docker.sh`): use this for numbers you publish.
+- **Processes on your machine** (`run-brace.sh`, `run-spring.sh`): use this for quick
+  before/after checks while working.
+
+A laptop that's doing other things is the biggest source of error, so don't publish laptop
+numbers.
+
+### On a dedicated box: `run-docker.sh`
+
+Everything runs in Docker (`docker/compose.yml`), each part pinned to its own CPUs so they don't
+compete:
+
+- **Postgres:** fresh and freshly seeded on every invocation.
+- **The app:** Brace built from this checkout, or the official TechEmpower Spring app at the
+  archived repo's final commit, both on the same `eclipse-temurin:25-jdk` image.
+- **wrk:** the load generator, on the same Docker network.
+
+By default the app gets half the CPUs and Postgres and wrk a quarter each. For `ROUNDS` rounds
+it launches each framework in turn (a fresh JVM each time). Each launch checks responses, warms
+up, measures, and stops. Alternating like this spreads any drift across both frameworks.
+
+**The machine.** Use a cloud VM with *dedicated* vCPUs, 8 or more (16 gives an 8/4/4 split):
+
+- Hetzner: the CCX (dedicated vCPU) line, not the shared CX/CPX ones.
+- DigitalOcean: CPU-Optimized droplets, not Basic.
+
+Shared-vCPU instances have noisy neighbours, which is the problem we're trying to escape. The
+report prints the hypervisor's **CPU steal** for the run. Above about 1%, distrust the numbers.
+
+```bash
+# Ubuntu 24.04, as root (or with sudo)
+apt-get update && apt-get install -y docker.io docker-compose-v2 git curl
+git clone https://github.com/larvalabs/brace.git && cd brace
+
+BENCH_HOST_LABEL="hetzner ccx33 fsn1" ./benchmark/run-docker.sh            # Brace and Spring
+BENCH_HOST_LABEL="hetzner ccx33 fsn1" ./benchmark/run-docker.sh brace      # Brace only
+
+# Small-box variant: cap the app at 512 MB, Brace-sized pool
+APP_MEM=512m DB_POOL=10 JVM_OPTS="-XX:MaxRAMPercentage=60" ./benchmark/run-docker.sh
+```
+
+The first run builds the images (a few minutes, mostly Maven downloads). After that,
+`SKIP_BUILD=1` reuses them. Results land in `benchmark/results/`: the report (`.txt`), one row
+per measurement (`.tsv`) and each app's log. Copy them off the box before deleting it, for
+example with `scp -r root@<ip>:brace/benchmark/results .`.
+
+The report header records everything needed to reproduce or judge the run:
+
+- the host label, CPU model and kernel;
+- the Docker version and cpusets;
+- the Postgres image digest;
+- each app image's ID, Brace version and commit, the TechEmpower commit and `java -version`;
+- the wrk settings and the load average.
+
+The summary gives, per framework:
+
+- median startup time (container start to first 200);
+- RSS ready and after warmup;
+- per test: median req/s, median p99, errors and peak RSS (reset before each measurement);
+- each framework's req/s relative to the first one.
+
+`run-docker.sh` settings, beyond the shared ones below:
+
+| Variable | Default | |
+|---|---|---|
+| `ROUNDS` / `RUNS` | 3 / 1 | launches per framework / measured passes per launch |
+| `CPUS_APP` / `CPUS_DB` / `CPUS_LOAD` | half / quarter / quarter of the Docker host's CPUs | set all three or none |
+| `WRK_THREADS` | one per load CPU | |
+| `APP_MEM` / `DB_MEM` | none | container memory caps, e.g. `512m`. An OOM kill is reported |
+| `PG_MAX_CONNECTIONS` / `PG_SHARED_BUFFERS` | 600 / 256MB | |
+| `BENCH_HOST_LABEL` | | free text for the report |
+| `KEEP` | 0 | `1` leaves Postgres running afterwards |
+
+### On your machine: `run-brace.sh`, `run-spring.sh`
 
 ```bash
 ./benchmark/run-brace.sh     # installs this checkout's framework, rebuilds the app, runs the suite
 ./benchmark/run-spring.sh    # same suite against the TechEmpower Spring app (build steps in the script)
 ```
+
+These use the `tfb-postgres` container from the Database section above.
 
 Both scripts use `lib.sh`, so they:
 

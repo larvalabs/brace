@@ -1,0 +1,74 @@
+# Containerized TechEmpower-style benchmark: Postgres, one app at a time (brace or spring),
+# and wrk, each pinned to its own CPUs so they don't compete. Driven by ../run-docker.sh,
+# which sets every variable below; see ../README.md.
+name: brace-bench
+
+x-app: &app
+  cpuset: "${CPUS_APP:-0}"
+  mem_limit: ${APP_MEM:-0}          # 0 = no limit; e.g. 512m for a small-box run
+  depends_on:
+    postgres:
+      condition: service_healthy
+  ports:
+    - "127.0.0.1:${PORT:-8080}:8080"  # for the driver's readiness and response checks only
+  networks:
+    default:
+      aliases: [app]                 # wrk always targets http://app:8080
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: benchmarkdbuser
+      POSTGRES_PASSWORD: benchmarkdbpass
+      POSTGRES_DB: hello_world
+    command:
+      - postgres
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-600}
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+    volumes:
+      # Seeded on first start; the driver recreates the volume for every invocation.
+      - ../sql/create.sql:/docker-entrypoint-initdb.d/create.sql:ro
+    cpuset: "${CPUS_DB:-0}"
+    mem_limit: ${DB_MEM:-0}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmarkdbuser -d hello_world && psql -U benchmarkdbuser -d hello_world -tAc 'select count(*) from world' | grep -qx 10000"]
+      interval: 1s
+      timeout: 5s
+      retries: 120
+
+  brace:
+    <<: *app
+    profiles: [brace]
+    build:
+      context: ../..
+      dockerfile: benchmark/docker/brace.Dockerfile
+      args:
+        BRACE_COMMIT: ${BRACE_COMMIT:-unknown}
+    image: brace-bench/brace:local
+    environment:
+      DB_POOL: ${DB_POOL:-256}
+      JVM_OPTS: ${JVM_OPTS:-}
+      BRACE_LOG_LEVEL: ${BRACE_LOG_LEVEL:-WARN}
+
+  spring:
+    <<: *app
+    profiles: [spring]
+    build:
+      context: .
+      dockerfile: spring.Dockerfile
+    image: brace-bench/spring:local
+    environment:
+      DB_POOL: ${DB_POOL:-256}
+      JVM_OPTS: ${JVM_OPTS:-}
+      SPRING_PROFILE: ${SPRING_PROFILE:-jdbc}
+
+  wrk:
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: wrk.Dockerfile
+    image: brace-bench/wrk:local
+    cpuset: "${CPUS_LOAD:-0}"

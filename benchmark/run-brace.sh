@@ -26,10 +26,10 @@ echo "brace:       BRACE_LOG_LEVEL=$BRACE_LOG_LEVEL, -Dbrace.mode=prod"
 # brace.mode=prod: production template loading (precompiled or compiled once at startup, no
 # per-render staleness checks), which is how a deployed app runs.
 # shellcheck disable=SC2086
-tfb_start_app "$RESULTS_DIR/brace-app.log" \
+tfb_start_app brace "$RESULTS_DIR/brace-app.log" \
   java --enable-preview -Dbrace.mode=prod $JVM_OPTS -jar "$JAR"
 tfb_check_responses
-tfb_warmup
+tfb_warmup brace 1
 echo ""
-tfb_run_suite
-tfb_summary "Brace $(framework_version)"
+tfb_run_suite brace
+tfb_summary
