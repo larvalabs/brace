@@ -339,6 +339,7 @@ public class CliCommands {
         CliOutput.println();
         CliOutput.println("Errors    " + errorCount(root));
         CliOutput.println();
+        renderDb(root.path("db"));
         var jvm = root.path("jvm");
         if (!jvm.isMissingNode()) {
             var heap = jvm.path("heap");
@@ -366,6 +367,46 @@ public class CliCommands {
                 var m = minutes.get(i);
                 CliOutput.printf("  %s  %6d  %4d  %8.1f%n", m.path("ts").asText(),
                     m.path("requests").asLong(), m.path("errors").asLong(), m.path("avgMs").asDouble());
+            }
+        }
+        CliOutput.println();
+    }
+
+    /** The {@code db} block (0.1.11+ servers with a database; absent otherwise, so nothing prints). */
+    private static void renderDb(JsonNode db) {
+        if (db.isMissingNode() || db.isNull()) return;
+        CliOutput.println("Database");
+        var pool = db.path("pool");
+        if (!pool.isMissingNode()) {
+            CliOutput.printf("  pool      %d/%d in use, %d waiting%n", pool.path("active").asInt(),
+                pool.path("max").asInt(), pool.path("waiting").asInt());
+        }
+        var q = db.path("requestQueries");
+        if (!q.isMissingNode()) {
+            CliOutput.printf("  queries   %,d last minute, %.2f ms avg (request handlers)%n",
+                q.path("lastMinute").asLong(), q.path("avgMs").asDouble());
+        }
+        var pg = db.path("postgres");
+        if (!pg.isMissingNode()) {
+            if (pg.hasNonNull("error")) CliOutput.println("  postgres  " + pg.path("error").asText());
+            var load = pg.path("load");
+            if (!load.isMissingNode()) {
+                CliOutput.printf("  load      %.2f avg active sessions (cpu %.2f, io %.2f, lock %.2f, other %.2f)%n",
+                    load.path("avgActive").asDouble(), load.path("onCpu").asDouble(), load.path("waitingIo").asDouble(),
+                    load.path("waitingLock").asDouble(), load.path("waitingOther").asDouble());
+            }
+            var act = pg.path("activity");
+            if (!act.isMissingNode()) {
+                CliOutput.printf("  sessions  %d/%d connections, %d active, %d idle in transaction, longest query %.1fs%n",
+                    act.path("connections").asInt(), act.path("maxConnections").asInt(), act.path("active").asInt(),
+                    act.path("idleInTransaction").asInt(), act.path("longestQuerySeconds").asDouble());
+            }
+            var tp = pg.path("throughput");
+            if (!tp.isMissingNode()) {
+                CliOutput.printf("  txns      %.1f commits/s, %.1f rollbacks/s, cache hit %s, %d deadlocks%n",
+                    tp.path("commitsPerSecond").asDouble(), tp.path("rollbacksPerSecond").asDouble(),
+                    tp.hasNonNull("cacheHitPct") ? String.format("%.1f%%", tp.path("cacheHitPct").asDouble()) : "-",
+                    tp.path("deadlocks").asLong());
             }
         }
         CliOutput.println();

@@ -480,6 +480,36 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void statusIncludesDatabasePoolWithoutPostgresBlock() throws Exception {
+        var response = cacheGet("/ops/status");
+        assertEquals(200, response.statusCode());
+        var db = new com.fasterxml.jackson.databind.ObjectMapper().readTree(response.body()).path("db");
+        assertFalse(db.isMissingNode(), response.body());
+        assertEquals(10, db.path("pool").path("max").asInt(), "the factory's default pool size");
+        assertTrue(db.path("pool").has("waiting"));
+        assertTrue(db.path("postgres").isMissingNode(), "H2 has no pg_stat views to sample");
+    }
+
+    @Test
+    void dashboardShowsDatabasePanel() throws Exception {
+        var body = cacheGet("/ops/dashboard").body();
+        assertTrue(body.contains("<div class=\"label\">Database</div>"), body);
+        assertTrue(body.contains("POOL IN USE"), body);
+        assertFalse(body.contains("Load · avg active sessions"), "no load chart off Postgres");
+    }
+
+    @Test
+    void statusHasNoDatabaseBlockWithoutADatabase() throws Exception {
+        var token = authenticate();
+        var body = getWithToken("/ops/status", token).body();
+        assertTrue(body.contains("\"http\""), body);
+        assertFalse(body.contains("\"db\""), body);
+        var dashboard = getWithToken("/ops/dashboard", token).body();
+        assertTrue(dashboard.contains("Brace Ops"));
+        assertFalse(dashboard.contains("POOL IN USE"));
+    }
+
+    @Test
     void statusIncludesCacheStats() throws Exception {
         var response = cacheGet("/ops/status");
         assertEquals(200, response.statusCode());

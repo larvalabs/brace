@@ -482,4 +482,103 @@ class CliCheckTest {
             assertTrue(check.message().contains("any host"), check.message());
         }
     }
+
+    // --- db ---
+
+    /** A {@code db} block as a 0.1.11 server reports it. */
+    static Map<String, Object> dbBlock(int waitMinutes, double avgActive, double lockWaits, int connections, String error) {
+        var pool = new LinkedHashMap<String, Object>();
+        pool.put("active", 3);
+        pool.put("idle", 7);
+        pool.put("total", 10);
+        pool.put("max", 10);
+        pool.put("waiting", 0);
+        pool.put("recent", Map.of("minutes", 5, "minutesWithWaits", waitMinutes, "peakWaiting", waitMinutes > 0 ? 4 : 0, "peakActive", 10));
+        var pg = new LinkedHashMap<String, Object>();
+        pg.put("version", "16.4");
+        if (error != null) pg.put("error", error);
+        pg.put("activity", Map.of("connections", connections, "maxConnections", 100, "active", 2));
+        pg.put("loadRecent", Map.of("minutes", 5, "avgActive", avgActive, "onCpu", avgActive - lockWaits,
+            "waitingIo", 0.0, "waitingLock", lockWaits, "waitingOther", 0.0));
+        var db = new LinkedHashMap<String, Object>();
+        db.put("pool", pool);
+        db.put("postgres", pg);
+        return db;
+    }
+
+    static JsonNode statusWithDb(Map<String, Object> db) {
+        Map<String, Object> status = Json.mapper().convertValue(healthyStatus(), Map.class);
+        status.put("db", db);
+        return json(status);
+    }
+
+    @Test
+    void dbCheckPassesWithoutADbBlock() {
+        var check = CliCheck.checkDatabase(healthyStatus(), CheckThresholds.DEFAULTS, "prod");
+        assertEquals("db", check.name());
+        assertEquals("pass", check.status());
+        assertTrue(check.message().startsWith("Not reported"), check.message());
+    }
+
+    @Test
+    void dbCheckPassesForAQuietDatabase() {
+        var check = CliCheck.checkDatabase(statusWithDb(dbBlock(0, 1.5, 0, 20, null)), CheckThresholds.DEFAULTS, "prod");
+        assertEquals("pass", check.status(), check.message());
+        assertEquals("Pool 3/10 in use, no waits in the last 5 min; load 1.5", check.message());
+    }
+
+    @Test
+    void dbCheckWarnsWhenRequestsWaitedForAConnection() {
+        var check = CliCheck.checkDatabase(statusWithDb(dbBlock(2, 1.5, 0, 20, null)), CheckThresholds.DEFAULTS, "prod");
+        assertEquals("warn", check.status());
+        assertEquals("Database: requests waited for a database connection in 2 of the last 5 min (peak 4 waiting, pool of 10)",
+            check.message());
+        assertEquals("pool_waits", check.details().getFirst().get("signal"));
+        assertEquals("brace status --env prod --json", check.followUp());
+
+        var tolerant = new CheckThresholds(500, 70, 80, 50, 0.5, 30, 3, 1.0, 0, 90);
+        assertEquals("pass", CliCheck.checkDatabase(statusWithDb(dbBlock(2, 1.5, 0, 20, null)), tolerant, "prod").status());
+        var off = new CheckThresholds(500, 70, 80, 50, 0.5, 30, 0, 1.0, 0, 90);
+        assertEquals("pass", CliCheck.checkDatabase(statusWithDb(dbBlock(5, 1.5, 0, 20, null)), off, "prod").status());
+    }
+
+    @Test
+    void dbCheckWarnsOnSustainedLockWaits() {
+        var check = CliCheck.checkDatabase(statusWithDb(dbBlock(0, 3.0, 1.2, 20, null)), CheckThresholds.DEFAULTS, "prod");
+        assertEquals("warn", check.status());
+        assertEquals("Database: 1.2 sessions blocked on locks on average over 5 min", check.message());
+        assertEquals("pass", CliCheck.checkDatabase(statusWithDb(dbBlock(0, 3.0, 0.4, 20, null)), CheckThresholds.DEFAULTS, "prod").status());
+    }
+
+    @Test
+    void dbLoadIsJudgedOnlyAgainstAConfiguredMaximum() {
+        var busy = statusWithDb(dbBlock(0, 12.0, 0, 20, null));
+        assertEquals("pass", CliCheck.checkDatabase(busy, CheckThresholds.DEFAULTS, "prod").status(),
+            "no default: the database server's core count isn't known");
+        var t = CheckThresholds.fromConfig(Map.of("check.db_max_load", "8"));
+        var check = CliCheck.checkDatabase(busy, t, "prod");
+        assertEquals("warn", check.status());
+        assertEquals("Database: database load 12.0 active sessions over 5 min (cpu 12.0, io 0.0, lock 0.0, other 0.0)",
+            check.message());
+        assertEquals(8.0, check.details().getFirst().get("threshold"));
+    }
+
+    @Test
+    void dbCheckWarnsNearMaxConnectionsAndOnUnreadableStats() {
+        var check = CliCheck.checkDatabase(statusWithDb(dbBlock(0, 1.0, 0, 92, "Postgres statistics unavailable: timeout")),
+            CheckThresholds.DEFAULTS, "staging");
+        assertEquals("warn", check.status());
+        assertEquals("Database: Postgres statistics unavailable; 92/100 database connections in use", check.message());
+        assertEquals("brace status --env staging --json", check.followUp());
+        assertEquals("Postgres statistics unavailable: timeout", check.details().getFirst().get("error"));
+    }
+
+    @Test
+    void dbWarningLeavesTheAppHealthy() {
+        var result = CliCheck.evaluate(statusWithDb(dbBlock(3, 1.5, 0, 20, null)), json(List.of()), json(List.of()),
+            CheckThresholds.DEFAULTS);
+        assertTrue(result.healthy(), "a warning, not a failure");
+        assertTrue(result.summary().startsWith("1 issue: Database: requests waited"), result.summary());
+        assertTrue(result.checks().stream().anyMatch(c -> c.name().equals("db")));
+    }
 }

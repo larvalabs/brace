@@ -42,7 +42,7 @@ applies threshold analysis. Only use the individual commands (`brace errors`,
 }
 ```
 
-**Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, recent_logs, csp.
+**Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, db, recent_logs, csp.
 
 `csp` fetches `GET /` without credentials (redirects not followed) and warns when the response
 has no `Content-Security-Policy`, or one whose scripts allow `'unsafe-inline'` without a nonce or
@@ -53,6 +53,19 @@ hash. The fix is `app.after(SecurityHeaders.strict())` in code, so the check has
 since that means G1's concurrent marking fell behind (often humongous allocations or an
 undersized heap). Its `followUp` fetches allocation profiling.
 
+`db` judges the `db` block of `/ops/status` over its last 5 complete minutes (`pool.recent`,
+`postgres.loadRecent`), not one instant. It warns, never fails, when:
+- requests waited for a pool connection in at least `check.db_pool_wait_minutes` of them;
+- sessions blocked on a lock average at least `check.db_lock_sessions`;
+- average active sessions exceed `check.db_max_load`. Off by default: only you know the
+  database server's core count, so set it to that (CPU-bound beyond it);
+- connections reach `check.db_connections_percent` of `max_connections`;
+- the Postgres statistics can't be read (`postgres.error`).
+
+It passes with "Not reported" when the app has no database or the server predates 0.1.11.
+Its `followUp` is `brace status --json`; the [database load runbook](#database-load-diagnosis)
+says what each signal points to.
+
 **Thresholds** are configurable in `.brace`:
 
 ```
@@ -62,6 +75,10 @@ check.heap_fail_percent=80
 check.gc_pause_ms=50
 check.cache_hit_rate=0.5
 check.log_window_minutes=30
+check.db_pool_wait_minutes=1      # 0 turns a db signal off
+check.db_lock_sessions=1.0
+check.db_max_load=0               # off; set to the database server's core count
+check.db_connections_percent=90
 ```
 
 ## CLI commands
@@ -173,6 +190,24 @@ re-evaluates regressions from a clean baseline. Without Postgres the set is per-
   },
   "jobs": { "scheduled": [{ "name": "cleanup", "lastStatus": "ok", "lastError": null }] },
   "cache": { "shared": false, "entries": 42, "hits": 1200, "misses": 80 },
+  "db": {
+    "pool": { "active": 3, "idle": 7, "total": 10, "max": 10, "waiting": 0,
+              "recent": { "minutes": 5, "minutesWithWaits": 0, "peakWaiting": 0, "peakActive": 8 } },
+    "requestQueries": { "lastMinute": 2140, "avgMs": 1.8 },
+    "postgres": {
+      "version": "16.4", "sizeBytes": 734003200, "sampledAt": "...",
+      "activity": { "connections": 23, "maxConnections": 100, "active": 2, "onCpu": 1, "waitingIo": 1,
+                    "waitingLock": 0, "waitingOther": 0, "idleInTransaction": 0, "hidden": 0,
+                    "longestQuerySeconds": 0.42, "longestIdleInTransactionSeconds": 0 },
+      "load": { "minute": "...", "avgActive": 1.35, "onCpu": 0.9, "waitingIo": 0.4, "waitingLock": 0.05, "waitingOther": 0 },
+      "loadRecent": { "minutes": 5, "avgActive": 1.2, "onCpu": 0.8, "waitingIo": 0.3, "waitingLock": 0.1, "waitingOther": 0 },
+      "throughput": { "commitsPerSecond": 38.2, "rollbacksPerSecond": 0.1, "cacheHitPct": 99.6,
+                      "tempBytesPerSecond": 0, "deadlocks": 0 },
+      "io": { "readsPerSecond": 12.5, "writesPerSecond": 3.1, "avgReadMs": null, "avgWriteMs": null },
+      "tables": [{ "table": "events", "seqScans": 912, "seqRowsRead": 48120000, "indexScans": 30,
+                   "liveRows": 52800, "deadRows": 1200, "lastVacuum": "..." }]
+    }
+  },
   "metrics": { "counters": {...}, "gauges": {...}, "timers": {...} },
   "analytics": { "todayVisitors": 412, "todayPageviews": 733, "live": 6 }
 }
@@ -212,6 +247,38 @@ Notes on the shape:
   to act on; `SerialOld`/`ParallelOld` are how those collectors normally clear the old gen.
   Before 0.1.10 the pause figures counted the whole span of concurrent cycles and were
   overstated (often ~3x on G1).
+- `db` is present when the app has a database. `pool` is the connection pool right now:
+  `waiting` above 0 means requests or jobs are queuing for a connection (the pool is the
+  bottleneck, or queries hold connections too long). `pool.recent` covers the last
+  `minutes` (up to 5) complete minutes from once-a-second samples: in how many a thread
+  waited, and the peaks. `requestQueries` is the last full
+  minute's queries run by request handlers (jobs not included) and their average time.
+  `postgres` (Postgres only, unless `app.opsDatabaseStats(false)`) comes from Postgres's own
+  statistics views, sampled in the background on one connection outside the pool:
+  - `activity` is the latest `pg_stat_activity` sample (every 5 s): sessions running a query
+    (`active`), split by what they wait on: `onCpu` (no wait), `waitingIo` (data files or WAL),
+    `waitingLock` (another transaction's lock), `waitingOther` (lightweight locks, IPC, client,
+    timeouts). `connections` / `maxConnections` counts every backend connected to the server.
+    Without superuser or `pg_read_all_stats` the app's role sees only its own sessions' state;
+    other roles' sessions are in `hidden` and `connections`, not in the load.
+  - `load` averages those samples over the last full minute: the database's load, the way
+    "active session history" tools measure it. `onCpu` near or above the database server's
+    core count means it is CPU-bound; mostly `waitingIo` means it is disk-bound; `waitingLock`
+    means transactions are blocking each other. Postgres can't report its host's CPU or disk
+    utilisation through SQL, so this is the portable measure. `loadRecent` averages the
+    same over the last `minutes` (up to 5) complete minutes; `brace check` judges that.
+  - `throughput` (every 30 s, rates over that interval): commits and rollbacks per second,
+    `cacheHitPct` (block reads served from Postgres's buffer cache; `null` when there were
+    none), temp-file bytes per second (sorts and hashes spilling past `work_mem`), and
+    `deadlocks` since this instance started sampling. Absent until the second sample.
+  - `io` (Postgres 16+, `pg_stat_io`, whole server): read and write operations per second.
+    Reads are of blocks not in the buffer cache, served by the OS cache or the disk. The
+    average times are `null` unless the server has `track_io_timing` on.
+  - `tables`: the 5 tables with the most rows read by sequential scans since the server's
+    statistics were last reset, with index scans, live and dead rows, and the last vacuum.
+    A large table near the top with few index scans is a missing-index candidate.
+  - `error` is set when the last sample failed (the statistics connection is reopened on
+    the next one); the other figures are then from the last good sample.
 - `analytics` is present only when the app calls `app.analytics()`: today's visitors and
   pageviews (in the analytics timezone) and `live`, the distinct visitors in the last 5 minutes.
   It reads `{"error": "unavailable"}` if its query failed; the rest of the snapshot is unaffected.
@@ -286,6 +353,35 @@ When `brace status` shows a route with high average latency:
 4. **If `durationMs` is high but `queryMs` is low** — the handler is CPU-bound or waiting on an external service. Check `jvm.profiling.hotMethods` in status output (opt-in: `brace status --include profiling --json`).
 5. **Check for GC pauses** — `jvm.gc.avgPauseMs` above 50ms, a high `maxPauseMs`, or any `G1Full` in `recentPauses` can cause latency spikes across all routes. Ignore `cycleMs` here: concurrent cycles don't stop requests.
 6. **Check heap pressure** — if heap usage is near max, GC runs more frequently and takes longer.
+
+### Database load diagnosis
+
+When requests are slow across many routes, or `queryMs` dominates `durationMs` in the logs:
+
+```bash
+brace check --env prod --json           # the db check names the signal that fired
+brace status --env prod --json | jq .db
+```
+
+1. **`pool.waiting` above 0** — requests are queuing for a connection. If Postgres's `load`
+   is low at the same time, connections are being held, not used: look for long
+   transactions (`idleInTransaction`, `longestIdleInTransactionSeconds`) and slow external
+   calls made inside a request that holds the database. If `load` is high, the database
+   itself is saturated; a bigger pool won't help.
+2. **`postgres.load.onCpu` high** (near the database server's core count) — queries are
+   doing too much work: check `tables` for large tables read by sequential scans (missing
+   index), and `requestQueries.lastMinute` against traffic for N+1 query patterns.
+3. **`postgres.load.waitingIo` high** — the working set doesn't fit in memory, or the disk
+   is slow. `throughput.cacheHitPct` below ~95% and rising `io.readsPerSecond` confirm it;
+   `tempBytesPerSecond` above 0 means sorts spill to disk (raise `work_mem` or add an index
+   that avoids the sort).
+4. **`postgres.load.waitingLock` above 0** — transactions block each other. Look at
+   `longestQuerySeconds` and `idleInTransaction`; a transaction left open holds its locks.
+   Non-zero `deadlocks` means two code paths lock rows in opposite orders.
+5. **`connections` near `maxConnections`** — every instance's pool (`poolSize` x instances),
+   plus other clients, must fit under `max_connections`.
+
+The dashboard's Database panel shows the same figures with an hour of load history.
 
 ### Post-deploy verification
 
@@ -627,7 +723,9 @@ different numbers. `/ops/status` includes the serving box's `app.instanceId`
 `ops_timeseries` is **instance-tagged**: every instance flushes its own rows (column
 `instance_id`, primary key `(ts, metric, instance_id)`), so an external dashboard
 (Grafana, etc.) can sum across instances for a fleet total or filter to one box — they
-are no longer silently summed or limited to a single instance. The authoritative fleet
+are no longer silently summed or limited to a single instance. In the `db` block,
+`pool` and `requestQueries` are per instance too, but everything under `postgres` describes
+the whole database server, so every instance reports (nearly) the same figures. The authoritative fleet
 picture is an external metrics/log aggregator over that feed and the stdout JSON logs
 (which go to every instance's stdout).
 
@@ -669,6 +767,7 @@ brace analytics --range 7d --env prod            # top pages and sources, human-
 | Errors (`/ops/errors`) | `ops_errors` table (Postgres/H2) | 1000 rows (hardcoded in `Brace.start()`) | When count > 1000: deletes resolved rows first (oldest), then oldest unresolved | Yes |
 | Logs (`/ops/logs`) | `LogTap` in-memory ring (`ConcurrentLinkedDeque`) | 1000 entries (configurable via `LogTap.setCapacity`) | Oldest entry dropped when full | No |
 | Stats (`/ops/status`) | `Stats` in-memory counters / ring buffers | Per-route + timeseries window | Rolling | No |
+| Database load (`db` in `/ops/status`, dashboard Database panel) | `DatabaseStats` in memory | 60 minutes | Rolling | No |
 | Analytics page views (`/ops/analytics`) | `brace_analytics_pageviews` (one row per counted view, no IP/UA) + `brace_analytics_rejects` (filter tallies) | Raw retention, default 35 days (`Analytics.options().rawRetention(...)`) | Nightly `analytics-rollup` job deletes older days, never one not yet summarized | Yes |
 | Analytics history | `brace_analytics_daily` (per-day totals, top 500 pages / 200 sources, other breakdowns, filter tallies) | Indefinite, a few MB a year | None | Yes |
 | Analytics visitor salt | `brace_analytics_salts` (one random salt per day, shared by the fleet) | Today's only | Deleted 5 minutes after its day ends | Yes, until deleted |

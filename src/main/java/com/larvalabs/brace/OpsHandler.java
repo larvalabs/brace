@@ -22,6 +22,7 @@ public class OpsHandler {
     private final JfrProfiler profiler;
     private RegressionTracker regressionTracker;
     private Analytics analytics;
+    private DatabaseStats databaseStats;
     private volatile String instanceId = "unknown";
 
     private static final String OPS_COOKIE_NAME = "__brace_ops_session";
@@ -601,6 +602,14 @@ public class OpsHandler {
             data.put("jvm", jvm);
         }
 
+        // Database: the connection pool, request query time, and (on Postgres) the server's own
+        // statistics. Absent without a database.
+        if (databaseStats != null) {
+            var minuteSnaps = stats.minuteSnapshots();
+            data.put("db", DatabaseStats.statusJson(databaseStats.snapshot(),
+                minuteSnaps.isEmpty() ? null : minuteSnaps.getLast()));
+        }
+
         // Errors: unresolved count + top-5 recent summaries (no stack traces — detail is at
         // /ops/errors/{id}). DB-backed when an ErrorStore exists (that's what "unresolved"
         // means across restarts); the in-memory Stats list is the no-database fallback.
@@ -763,7 +772,8 @@ public class OpsHandler {
             }
         }
         return Result.html(OpsDashboard.html(claims.scope(), stats, jobScheduler, mailer,
-            errorStore, cache, profiler, analytics != null, today));
+            errorStore, cache, profiler, analytics != null, today,
+            databaseStats == null ? null : databaseStats.snapshot()));
     }
 
     public Result routes(Request req) {
@@ -1023,6 +1033,11 @@ public class OpsHandler {
         boolean secure = !BraceHandler.isLoopbackHost(req.host());
         result.cookie(Analytics.IGNORE_COOKIE, on ? "1" : "0", on ? 365 * 24 * 3600 : 0, true, secure, "Lax", "/");
         return result;
+    }
+
+    /** The database panel's source; null without a database (the panel is then omitted). */
+    void setDatabaseStats(DatabaseStats databaseStats) {
+        this.databaseStats = databaseStats;
     }
 
     public void setRegressionTracker(RegressionTracker tracker) {

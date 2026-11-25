@@ -110,6 +110,7 @@ ones that apply to the app.
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
+| Database panel on the ops dashboard, `db` block in `/ops/status`, `db` check in `brace check` | new, on with ops and a database | none; `.opsDatabaseStats(false)` stops the Postgres sampling; tune the check with `check.db_*` in `.brace` | [§](#new-database-panel-on-the-ops-dashboard) |
 | `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
 | `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
 | `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
@@ -342,6 +343,66 @@ The ops dashboard header shows the running Brace version next to the Java versio
 has it as `app.braceVersion`, and `brace status` prints it. A build from a JitPack tag reports
 that tag's version, release candidates included (before, an rc build reported the previous
 release's version).
+
+## New: database panel on the ops dashboard
+
+With ops on and a database configured, the ops dashboard has a **Database** card and panel, and
+`/ops/status` a `db` block (`brace status` prints it):
+
+- **Connection pool:** connections in use out of the pool size, and threads waiting for one,
+  live and as an hour of per-minute peaks. Any database.
+- **Request queries:** queries per minute run by request handlers and their average time, from
+  the counts Brace already kept per request. Any database.
+- **Postgres load and health:** average active sessions per minute, split by what they wait on
+  (CPU, I/O, lock, other), connections against `max_connections`, sessions idle in a
+  transaction, the longest running query, commits and rollbacks per second, buffer cache hit
+  ratio, temp-file spill, deadlocks, I/O operations per second (`pg_stat_io`, Postgres 16+),
+  database size, and the tables with the most rows read by sequential scans.
+
+The Postgres figures come only from core statistics views (`pg_stat_activity`,
+`pg_stat_database`, `pg_stat_io`, `pg_stat_user_tables`), read as the app's own role: no
+extension, no superuser, nothing specific to how Postgres is hosted. Postgres can't report its
+host's CPU or disk utilisation through SQL; the wait breakdown of active sessions is the portable
+measure of whether the database is CPU-bound, disk-bound or lock-bound. Without superuser or
+`pg_read_all_stats`, the role sees the state of its own sessions only, so other roles' sessions
+are counted as connections but not as load (the panel says how many).
+
+The sampler runs in the background whether or not the dashboard is open, so the last hour is
+there when you look. It holds **one extra connection** per instance, outside the pool, and runs a
+small query every 5 seconds and a few more every 30 (`pg_database_size` every 5 minutes). Each
+sample is a short read-only transaction with `SET LOCAL statement_timeout = '3s'`, so it is safe
+behind a transaction-pooling proxy. Count the extra connection when sizing `max_connections`
+(pool size + 1 per instance, plus 1 more for the WebSocket listener when the app has WebSocket routes). To turn the
+Postgres sampling off and keep the pool and request-query figures:
+
+```java
+app.opsDatabaseStats(false);
+```
+
+`brace check` has a new `db` check. It judges the last 5 complete minutes and **warns** (never
+fails, so `healthy` is unaffected) when requests waited for a pool connection, sessions were
+blocked on locks, connections reached 90% of `max_connections`, or the Postgres statistics can't
+be read. A load threshold is available but off by default, since the database server's core
+count isn't visible through SQL; set it to that count. Thresholds, in `.brace` (0 turns one off):
+
+```
+check.db_pool_wait_minutes=1      # minutes of the last 5 with a thread waiting for a connection
+check.db_lock_sessions=1.0        # average sessions blocked on a lock
+check.db_max_load=0               # average active sessions; set to the database server's cores
+check.db_connections_percent=90   # share of max_connections
+```
+
+Against a server before 0.1.11 (no `db` block) the check passes as "Not reported". Scripts that
+assert the exact list of checks in `brace check --json` see one more entry, `db`.
+`CheckThresholds` has four new components; its six-argument constructor still compiles and
+uses the defaults for them.
+
+New public API: `Brace.opsDatabaseStats(boolean)`, `DatabaseFactory.poolStats()` (returns
+`DatabaseFactory.PoolStats`, or `null` when the pool isn't running), `DatabaseStats` and its
+snapshot records, and an `OpsDashboard.html(...)` overload taking a `DatabaseStats.Snapshot`.
+The existing `OpsDashboard.html(...)` overloads are unchanged and render no database panel.
+
+No code changes are needed.
 
 ## Fix: failed jobs are logged and listed in `/ops/errors`
 

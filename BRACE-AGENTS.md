@@ -96,7 +96,7 @@ var app = Brace.app()
     .after(SecurityHeaders.strict());
 ```
 
-Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `sessionValidator()`, `analytics()`, `ownsDatabase()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsSecret()`, `opsProfiler()`, `opsDatabaseStats()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `sessionValidator()`, `analytics()`, `ownsDatabase()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `sharedRateLimiting()`, `rateLimitBatchDivisor()`, `banner()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -114,7 +114,7 @@ app.get("/hello", req -> Result.text("Hi"));                 // Handler: Request
 app.getRead("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // ReadDbHandler: query-only, no transaction
 app.postDb("/posts", (req, db) -> ...);                      // DbHandler: Request + Database (transaction)
 app.getSession("/me", (req, session) -> ...);                // SessionHandler: Request + Session
-app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Request + Database + Session
+app.postFull("/comments", (req, db, session) -> ...);        // FullHandler: Request + Database + Session
 
 // Typed route methods:
 // getRead, getReadFull                               (read-only DB; GET only — a mutating verb with a
@@ -247,7 +247,7 @@ refuses a mapping that says neither of these:
 
 ```java
 app.staticFiles("/assets", "public").publicFiles();                 // everyone (CSS, JS, images)
-app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
+app.staticFiles("/uploads", uploadDir.toString(), StaticFiles.UNTRUSTED)
    .access(Access.session("userId", "/login"));                     // all listed requirements must pass
 ```
 
@@ -1482,6 +1482,17 @@ is **`BRACE-OPS.md`** in the project root (written by `brace new`, refreshed tog
 file by `brace agents-md`; also packaged in the framework jar; source: `docs/agent-ops-guide.md`
 in the brace repo).
 
+With a database, the dashboard has a Database panel and `/ops/status` a `db` block: the
+connection pool (in use, waiting), request query time, and on Postgres the database's load
+(average active sessions by wait: CPU, I/O, lock, other), connections, cache hit ratio,
+commit and temp-file rates, `pg_stat_io` on 16+, and the most sequentially scanned tables.
+It reads only Postgres's core statistics views as the app's own role (no extension, no
+superuser), on one connection outside the pool, every 5 s (30 s for counters).
+`app.opsDatabaseStats(false)` turns the Postgres sampling off; the pool figures remain.
+`brace check` warns from it (`db` check, last 5 minutes): pool waits, lock waits, connections
+near `max_connections`, and load above `check.db_max_load` (off until you set it to the
+database server's core count).
+
 ## Analytics
 
 Server-side page-view counts: visitors, pageviews, top pages, sources, devices, browsers. Counted
@@ -1557,11 +1568,15 @@ and as sparklines in the dashboard.
 In-process integration tests with H2:
 
 ```java
-static TestApp app = Brace.test()
-    .entities(Post.class, User.class)
-    .templates("views")
-    .sessions("test-session-secret-at-least-32-characters") // as main() does; needed by Access.session
-    .start(App::routes);   // exact same wiring as production main()
+static TestApp app;
+
+@BeforeAll static void start() throws Exception {   // start() throws, so not in a field initializer
+    app = Brace.test()
+        .entities(Post.class, User.class)
+        .templates("views")
+        .sessions("test-session-secret-at-least-32-characters") // as main() does; needed by Access.session
+        .start(App::routes);   // exact same wiring as production main()
+}
 
 @Test void listPosts() {
     app.withDb(db -> db.insert(newPost("Hello")));
