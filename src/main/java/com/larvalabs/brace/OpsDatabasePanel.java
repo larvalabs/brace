@@ -30,7 +30,7 @@ final class OpsDatabasePanel {
         String color = pool.waiting() > 0 ? "c-red" : pool.active() >= pool.max() ? "c-amber" : "c-green";
         String detail;
         if (pool.waiting() > 0) {
-            detail = pool.waiting() + " waiting for a connection";
+            detail = pool.waiting() + " waiting";
         } else {
             var last = lastLoad(db.load(), true);
             detail = last != null ? "in use · load " + formatMetric(last.total()) : "in use · " + pool.idle() + " idle";

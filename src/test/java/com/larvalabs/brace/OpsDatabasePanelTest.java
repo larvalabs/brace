@@ -91,7 +91,7 @@ class OpsDatabasePanelTest {
     @Test
     void waitingThreadsTurnTheCardRed() {
         var html = render(new Stats(), postgres(new DatabaseFactory.PoolStats(10, 0, 10, 10, 4), List.of()));
-        assertTrue(html.contains("<div class=\"value c-red\">10/10</div><div class=\"detail\">4 waiting for a connection</div>"), html);
+        assertTrue(html.contains("<div class=\"value c-red\">10/10</div><div class=\"detail\">4 waiting</div>"), html);
         assertTrue(html.contains("<span class=\"c-muted small\">POOL WAITING</span><br/><span class=\"c-red bold\">4</span>"));
         assertFalse(html.contains("Most rows read"), "no table list when empty");
     }
