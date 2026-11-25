@@ -77,9 +77,9 @@ valid_version() {
 # older than it, so a floor naming a version not yet released refuses all of its prereleases,
 # newer ones included. The launcher's own bundled toolchain is exempt (see resolve_toolchain).
 #   0.1.8: `brace ops dashboard` no longer hands a .brace URL to `cmd /c start` on Windows.
-#   0.1.11 (to be set by the 0.1.11 release): the ops token cache no longer lives in target/, and
-#          secret files are no longer written through a link (H2, 2026-11 review).
-MIN_TOOLCHAIN="0.1.8"
+#   0.1.11: the ops token cache no longer lives in target/, and secret files are no longer written
+#           through a link (H2, 2026-11 review).
+MIN_TOOLCHAIN="0.1.11"
 
 # True if the numeric identifier $1 is smaller than $2. Compared as digit strings (length, then
 # order) rather than with $(( )), so a long number can't wrap around 64-bit arithmetic.
