@@ -34,7 +34,7 @@ Brace covers HTTP and routing, database and migrations, typed templates, encrypt
 
 Brace exposes a structured diagnostics API designed so agents can detect, diagnose and fix problems themselves.
 
-`GET /ops/status` returns a compact snapshot: request rate and stats, slowest and busiest routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, and cache hit rates. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
+`GET /ops/status` returns a compact snapshot: request rate and stats, slowest and busiest routes, unresolved error count with recent summaries, custom metrics, JVM heap/CPU/GC figures, job statuses, cache hit rates, and, with a database, connection-pool and Postgres load figures. `GET /ops/errors/{id}` returns a full error (stack trace, request details, queries that ran before the error), and `?include=timeseries,profiling` adds per-minute timeseries and JFR hot methods/allocations. The built-in dashboard shows the same data.
 
 Ops endpoints use Ed25519 keypair authentication with short-lived tokens, so agents authenticate without a shared secret.
 
@@ -56,7 +56,7 @@ This installs the latest release under `~/.brace/toolchains/<version>` and links
 
 ```bash
 brace self-update            # move to the latest release
-brace self-update 0.1.6      # or switch to a specific version
+brace self-update 0.1.11     # or switch to a specific version
 ```
 
 No Maven or per-project scripts needed for the dev loop. Maven is only invoked by `brace deps` to populate a project-local `lib/` folder from `pom.xml`.
@@ -97,7 +97,7 @@ Brace is served from [JitPack](https://jitpack.io) — no authentication require
     <dependency>
         <groupId>com.github.larvalabs</groupId>
         <artifactId>brace</artifactId>
-        <version>v0.1.10</version>
+        <version>v0.1.11</version>
     </dependency>
 </dependencies>
 ```
@@ -109,11 +109,11 @@ repositories {
     maven { url = uri("https://jitpack.io") }
 }
 dependencies {
-    implementation("com.github.larvalabs:brace:v0.1.10")
+    implementation("com.github.larvalabs:brace:v0.1.11")
 }
 ```
 
-Replace `v0.1.10` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
+Replace `v0.1.11` with the [latest release tag](https://github.com/larvalabs/brace/releases). Publishing to Maven Central is on the roadmap.
 
 ## Quick Start
 
@@ -231,7 +231,7 @@ app.get("/hello", req -> Result.text("Hello!"));                       // Handle
 app.getRead("/posts", (req, db) -> Result.json(db.findAll(Post.class))); // ReadDbHandler: query-only, no transaction
 app.postDb("/posts", (req, db) -> ...);                                // DbHandler: Request + Database (transaction)
 app.getSession("/profile", (req, session) -> ...);                     // SessionHandler: Request + Session
-app.postFull("/posts", (req, db, session) -> ...);                     // FullHandler: Request + Database + Session
+app.postFull("/comments", (req, db, session) -> ...);                  // FullHandler: Request + Database + Session
 
 // Typed route methods eliminate cast syntax — multi-arg lambdas on the bare verbs don't compile
 app.getRead("/posts", (req, db) -> ...);        // getRead, getReadFull (read-only, GET only — no transaction)
@@ -338,7 +338,8 @@ A `boolean` component binds an HTML checkbox directly (`on` is true, absent is f
 forms bind from the query string.
 
 In the template, put `${csrfField}` inside each `<form>` (declared `@param gg.jte.Content
-csrfField = null`). Never bind a request body into an `@Entity`: `req.json`/`bodyAs` throw for
+csrfField = null`); for `fetch`, render `${csrfToken}` (`@param String csrfToken = null`) into a
+`<meta>` tag and send it as `X-CSRF-Token`. Never bind a request body into an `@Entity`: `req.json`/`bodyAs` throw for
 one, so bind a record and copy the allowed fields with the entity's `apply(form)`.
 
 ## Sessions
@@ -421,7 +422,8 @@ mail.to("user@example.com")
 ```
 
 `smtp://` requires STARTTLS (no silent cleartext fallback); use `smtp+plain://` for a local relay
-without TLS. SMTP timeouts default to 10s connect / 30s per read-write, so a wedged relay fails the send rather
+without TLS. `to`, `cc` and `from` take one address each: a comma-separated list is rejected (with
+`sendAsync()` only a log line says so), so send one message per recipient. SMTP timeouts default to 10s connect / 30s per read-write, so a wedged relay fails the send rather
 than hanging the caller. Override with `.connectTimeout(Duration)` / `.timeout(Duration)`.
 
 Use `sendAsync()` from request handlers — `send()` does synchronous SMTP on the calling
@@ -570,7 +572,9 @@ cache.clearTag("simulation");  // invalidate all cached pages at once
 ```
 
 A cached handler must depend only on its path parameters and what it declares with `vary` /
-`varyHeader`: dev mode warns, and `Brace.test()` fails, when it reads anything else.
+`varyHeader`: dev mode warns, and `Brace.test()` fails, when it reads anything else. Only 2xx
+responses are stored, and a page carrying the visitor's CSRF token or a flash message is served
+but not stored.
 
 The default cache is per-process. For a multi-server deploy, opt into a shared, durable,
 cross-server-consistent backend in one line — it reuses your Postgres database, no new infra:
@@ -706,13 +710,17 @@ Brace automatically adds `HX-Request` to the `Vary` header (appending to any val
 ## Testing
 
 ```java
-static TestApp app = Brace.test()
-    .entities(Post.class, User.class)
-    .templates("views")
-    .sessions("test-session-secret-at-least-32-characters")  // for session routes and CSRF
-    .start(app -> {
-        app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class))).publicRoute();
-    });
+static TestApp app;
+
+@BeforeAll static void start() throws Exception {   // start() throws, so not in a field initializer
+    app = Brace.test()
+        .entities(Post.class, User.class)
+        .templates("views")
+        .sessions("test-session-secret-at-least-32-characters")  // for session routes and CSRF
+        .start(app -> {
+            app.getRead("/posts", (req, db) -> Json.of(db.findAll(Post.class))).publicRoute();
+        });
+}
 
 @Test void listPosts() {
     app.withDb(db -> { db.insert(newPost("Hello")); });

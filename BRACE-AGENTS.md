@@ -96,7 +96,7 @@ var app = Brace.app()
     .after(SecurityHeaders.strict());
 ```
 
-Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsProfiler()`, `opsDatabaseStats()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `sessionValidator()`, `analytics()`, `ownsDatabase()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `group()`.
+Builder methods: `port()`, `host()`, `database()`, `templates()`, `sessions()`, `mailer()`, `cache()`, `storage()`, `ops()`, `opsSecret()`, `opsProfiler()`, `opsDatabaseStats()`, `opsStatsInterval()`, `staticFiles()`, `maxUploadSize()`, `uploadMemoryThreshold()`, `uploadTempDir()`, `compression()`, `trustedProxies()`, `ws()`, `wsMaxQueuedBytes()`, `wsAllowedOrigins()`, `opsOrigins()`, `defaultAccess()`, `sessionValidator()`, `analytics()`, `ownsDatabase()`, `before()`, `after()`, `every()`, `daily()`, `jobRetention()`, `jobTimeout()`, `jobShutdownTimeout()`, `jobPollInterval()`, `sharedRateLimiting()`, `rateLimitBatchDivisor()`, `banner()`, `group()`.
 
 `app.stop()` closes the `DatabaseFactory` passed to `.database(...)`. If the factory outlives the
 app (shared by several apps, or reused across test cases), add `.ownsDatabase(false)` and close it
@@ -114,7 +114,7 @@ app.get("/hello", req -> Result.text("Hi"));                 // Handler: Request
 app.getRead("/posts", (req, db) -> Result.json(db.findAll(Post.class)));  // ReadDbHandler: query-only, no transaction
 app.postDb("/posts", (req, db) -> ...);                      // DbHandler: Request + Database (transaction)
 app.getSession("/me", (req, session) -> ...);                // SessionHandler: Request + Session
-app.postFull("/posts", (req, db, session) -> ...);           // FullHandler: Request + Database + Session
+app.postFull("/comments", (req, db, session) -> ...);        // FullHandler: Request + Database + Session
 
 // Typed route methods:
 // getRead, getReadFull                               (read-only DB; GET only — a mutating verb with a
@@ -247,7 +247,7 @@ refuses a mapping that says neither of these:
 
 ```java
 app.staticFiles("/assets", "public").publicFiles();                 // everyone (CSS, JS, images)
-app.staticFiles("/uploads", uploadDir, StaticFiles.UNTRUSTED)
+app.staticFiles("/uploads", uploadDir.toString(), StaticFiles.UNTRUSTED)
    .access(Access.session("userId", "/login"));                     // all listed requirements must pass
 ```
 
@@ -1568,11 +1568,15 @@ and as sparklines in the dashboard.
 In-process integration tests with H2:
 
 ```java
-static TestApp app = Brace.test()
-    .entities(Post.class, User.class)
-    .templates("views")
-    .sessions("test-session-secret-at-least-32-characters") // as main() does; needed by Access.session
-    .start(App::routes);   // exact same wiring as production main()
+static TestApp app;
+
+@BeforeAll static void start() throws Exception {   // start() throws, so not in a field initializer
+    app = Brace.test()
+        .entities(Post.class, User.class)
+        .templates("views")
+        .sessions("test-session-secret-at-least-32-characters") // as main() does; needed by Access.session
+        .start(App::routes);   // exact same wiring as production main()
+}
 
 @Test void listPosts() {
     app.withDb(db -> db.insert(newPost("Hello")));
