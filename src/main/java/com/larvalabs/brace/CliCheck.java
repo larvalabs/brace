@@ -127,6 +127,7 @@ public class CliCheck {
         checks.add(checkGcPressure(status, thresholds, env));
         checks.add(checkJobs(status));
         checks.add(checkCache(status, thresholds));
+        checks.add(checkDatabase(status, thresholds, env));
         checks.add(checkRecentLogs(logs, thresholds, env));
         if (csp != null) checks.add(csp);
 
@@ -420,6 +421,87 @@ public class CliCheck {
             return new Check("cache", "warn", msg);
         }
         return new Check("cache", "pass", msg);
+    }
+
+    /**
+     * The {@code db} block (0.1.11+ servers with a database), judged over its recent complete
+     * minutes rather than one instant: requests waiting for a pool connection, sessions blocked
+     * on locks, the average load against {@code check.db_max_load} (off unless set), connections
+     * near {@code max_connections}, and Postgres statistics that can't be read. Every signal
+     * warns; none fails, since a busy database is not by itself an outage.
+     */
+    static Check checkDatabase(JsonNode status, CheckThresholds thresholds, String env) {
+        var db = status.path("db");
+        if (db.isMissingNode() || db.isNull()) {
+            return new Check("db", "pass", "Not reported (no database, or a server before 0.1.11)");
+        }
+        var issues = new ArrayList<String>();
+        var details = new ArrayList<Map<String, Object>>();
+        var pool = db.path("pool");
+        var poolRecent = pool.path("recent");
+        int waitMinutes = poolRecent.path("minutesWithWaits").asInt(0);
+        int recentMinutes = poolRecent.path("minutes").asInt(0);
+        if (thresholds.dbPoolWaitMinutes() > 0 && waitMinutes >= thresholds.dbPoolWaitMinutes()) {
+            issues.add(String.format(Locale.ROOT, "requests waited for a database connection in %d of the last %d min (peak %d waiting, pool of %d)",
+                waitMinutes, recentMinutes, poolRecent.path("peakWaiting").asInt(), pool.path("max").asInt()));
+            details.add(detail("pool_waits", waitMinutes, thresholds.dbPoolWaitMinutes()));
+        }
+        var pg = db.path("postgres");
+        if (pg.hasNonNull("error")) {
+            issues.add("Postgres statistics unavailable");
+            var d = new LinkedHashMap<String, Object>();
+            d.put("signal", "postgres_stats");
+            d.put("error", pg.path("error").asText());
+            details.add(d);
+        }
+        var load = pg.path("loadRecent");
+        if (!load.isMissingNode()) {
+            int minutes = load.path("minutes").asInt();
+            double lockWaits = load.path("waitingLock").asDouble();
+            if (thresholds.dbLockSessions() > 0 && lockWaits >= thresholds.dbLockSessions()) {
+                issues.add(String.format(Locale.ROOT, "%.1f sessions blocked on locks on average over %d min", lockWaits, minutes));
+                details.add(detail("lock_waits", lockWaits, thresholds.dbLockSessions()));
+            }
+            double avgActive = load.path("avgActive").asDouble();
+            if (thresholds.dbMaxLoad() > 0 && avgActive > thresholds.dbMaxLoad()) {
+                issues.add(String.format(Locale.ROOT, "database load %.1f active sessions over %d min (cpu %.1f, io %.1f, lock %.1f, other %.1f)",
+                    avgActive, minutes, load.path("onCpu").asDouble(), load.path("waitingIo").asDouble(),
+                    lockWaits, load.path("waitingOther").asDouble()));
+                details.add(detail("load", avgActive, thresholds.dbMaxLoad()));
+            }
+        }
+        var act = pg.path("activity");
+        int connections = act.path("connections").asInt(0);
+        int maxConnections = act.path("maxConnections").asInt(0);
+        if (thresholds.dbConnectionsPercent() > 0 && maxConnections > 0
+                && connections * 100L >= (long) thresholds.dbConnectionsPercent() * maxConnections) {
+            issues.add(connections + "/" + maxConnections + " database connections in use");
+            details.add(detail("connections", connections * 100L / maxConnections, thresholds.dbConnectionsPercent()));
+        }
+
+        String followUp = "brace status --env " + env + " --json";
+        if (!issues.isEmpty()) {
+            return new Check("db", "warn", "Database: " + String.join("; ", issues), details, followUp);
+        }
+        var msg = new StringBuilder();
+        if (!pool.isMissingNode()) {
+            msg.append("Pool ").append(pool.path("active").asInt()).append('/').append(pool.path("max").asInt()).append(" in use");
+            if (recentMinutes > 0) msg.append(", no waits in the last ").append(recentMinutes).append(" min");
+        } else {
+            msg.append("Database reported");
+        }
+        if (!load.isMissingNode()) {
+            msg.append(String.format(Locale.ROOT, "; load %.1f", load.path("avgActive").asDouble()));
+        }
+        return new Check("db", "pass", msg.toString());
+    }
+
+    private static Map<String, Object> detail(String signal, Object value, Object threshold) {
+        var d = new LinkedHashMap<String, Object>();
+        d.put("signal", signal);
+        d.put("value", value);
+        d.put("threshold", threshold);
+        return d;
     }
 
     static Check checkRecentLogs(JsonNode logs, CheckThresholds thresholds, String env) {

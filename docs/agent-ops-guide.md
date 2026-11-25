@@ -42,7 +42,7 @@ applies threshold analysis. Only use the individual commands (`brace errors`,
 }
 ```
 
-**Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, recent_logs, csp.
+**Checks performed:** reachability, errors, http_5xx, slow_routes, heap, gc_pressure, jobs, cache, db, recent_logs, csp.
 
 `csp` fetches `GET /` without credentials (redirects not followed) and warns when the response
 has no `Content-Security-Policy`, or one whose scripts allow `'unsafe-inline'` without a nonce or
@@ -53,6 +53,19 @@ hash. The fix is `app.after(SecurityHeaders.strict())` in code, so the check has
 since that means G1's concurrent marking fell behind (often humongous allocations or an
 undersized heap). Its `followUp` fetches allocation profiling.
 
+`db` judges the `db` block of `/ops/status` over its last 5 complete minutes (`pool.recent`,
+`postgres.loadRecent`), not one instant. It warns, never fails, when:
+- requests waited for a pool connection in at least `check.db_pool_wait_minutes` of them;
+- sessions blocked on a lock average at least `check.db_lock_sessions`;
+- average active sessions exceed `check.db_max_load`. Off by default: only you know the
+  database server's core count, so set it to that (CPU-bound beyond it);
+- connections reach `check.db_connections_percent` of `max_connections`;
+- the Postgres statistics can't be read (`postgres.error`).
+
+It passes with "Not reported" when the app has no database or the server predates 0.1.11.
+Its `followUp` is `brace status --json`; the [database load runbook](#database-load-diagnosis)
+says what each signal points to.
+
 **Thresholds** are configurable in `.brace`:
 
 ```
@@ -62,6 +75,10 @@ check.heap_fail_percent=80
 check.gc_pause_ms=50
 check.cache_hit_rate=0.5
 check.log_window_minutes=30
+check.db_pool_wait_minutes=1      # 0 turns a db signal off
+check.db_lock_sessions=1.0
+check.db_max_load=0               # off; set to the database server's core count
+check.db_connections_percent=90
 ```
 
 ## CLI commands
@@ -174,7 +191,8 @@ re-evaluates regressions from a clean baseline. Without Postgres the set is per-
   "jobs": { "scheduled": [{ "name": "cleanup", "lastStatus": "ok", "lastError": null }] },
   "cache": { "shared": false, "entries": 42, "hits": 1200, "misses": 80 },
   "db": {
-    "pool": { "active": 3, "idle": 7, "total": 10, "max": 10, "waiting": 0 },
+    "pool": { "active": 3, "idle": 7, "total": 10, "max": 10, "waiting": 0,
+              "recent": { "minutes": 5, "minutesWithWaits": 0, "peakWaiting": 0, "peakActive": 8 } },
     "requestQueries": { "lastMinute": 2140, "avgMs": 1.8 },
     "postgres": {
       "version": "16.4", "sizeBytes": 734003200, "sampledAt": "...",
@@ -182,6 +200,7 @@ re-evaluates regressions from a clean baseline. Without Postgres the set is per-
                     "waitingLock": 0, "waitingOther": 0, "idleInTransaction": 0, "hidden": 0,
                     "longestQuerySeconds": 0.42, "longestIdleInTransactionSeconds": 0 },
       "load": { "minute": "...", "avgActive": 1.35, "onCpu": 0.9, "waitingIo": 0.4, "waitingLock": 0.05, "waitingOther": 0 },
+      "loadRecent": { "minutes": 5, "avgActive": 1.2, "onCpu": 0.8, "waitingIo": 0.3, "waitingLock": 0.1, "waitingOther": 0 },
       "throughput": { "commitsPerSecond": 38.2, "rollbacksPerSecond": 0.1, "cacheHitPct": 99.6,
                       "tempBytesPerSecond": 0, "deadlocks": 0 },
       "io": { "readsPerSecond": 12.5, "writesPerSecond": 3.1, "avgReadMs": null, "avgWriteMs": null },
@@ -230,7 +249,9 @@ Notes on the shape:
   overstated (often ~3x on G1).
 - `db` is present when the app has a database. `pool` is the connection pool right now:
   `waiting` above 0 means requests or jobs are queuing for a connection (the pool is the
-  bottleneck, or queries hold connections too long). `requestQueries` is the last full
+  bottleneck, or queries hold connections too long). `pool.recent` covers the last
+  `minutes` (up to 5) complete minutes from once-a-second samples: in how many a thread
+  waited, and the peaks. `requestQueries` is the last full
   minute's queries run by request handlers (jobs not included) and their average time.
   `postgres` (Postgres only, unless `app.opsDatabaseStats(false)`) comes from Postgres's own
   statistics views, sampled in the background on one connection outside the pool:
@@ -244,7 +265,8 @@ Notes on the shape:
     "active session history" tools measure it. `onCpu` near or above the database server's
     core count means it is CPU-bound; mostly `waitingIo` means it is disk-bound; `waitingLock`
     means transactions are blocking each other. Postgres can't report its host's CPU or disk
-    utilisation through SQL, so this is the portable measure.
+    utilisation through SQL, so this is the portable measure. `loadRecent` averages the
+    same over the last `minutes` (up to 5) complete minutes; `brace check` judges that.
   - `throughput` (every 30 s, rates over that interval): commits and rollbacks per second,
     `cacheHitPct` (block reads served from Postgres's buffer cache; `null` when there were
     none), temp-file bytes per second (sorts and hashes spilling past `work_mem`), and
@@ -337,6 +359,7 @@ When `brace status` shows a route with high average latency:
 When requests are slow across many routes, or `queryMs` dominates `durationMs` in the logs:
 
 ```bash
+brace check --env prod --json           # the db check names the signal that fired
 brace status --env prod --json | jq .db
 ```
 

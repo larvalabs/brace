@@ -110,7 +110,7 @@ ones that apply to the app.
 | `HEAD` requests reach `GET` routes | fix | ops tooling: expect `HEAD <pattern>` rows | [§](#fix-head-requests-reach-get-routes) |
 | Request rates per second on busy apps | display | none | [§](#display-request-rates-per-second-on-busy-apps) |
 | Brace version on the ops dashboard and in `/ops/status` | display | none | [§](#display-brace-version-on-the-ops-dashboard) |
-| Database panel on the ops dashboard, `db` block in `/ops/status` | new, on with ops and a database | none; `.opsDatabaseStats(false)` stops the Postgres sampling | [§](#new-database-panel-on-the-ops-dashboard) |
+| Database panel on the ops dashboard, `db` block in `/ops/status`, `db` check in `brace check` | new, on with ops and a database | none; `.opsDatabaseStats(false)` stops the Postgres sampling; tune the check with `check.db_*` in `.brace` | [§](#new-database-panel-on-the-ops-dashboard) |
 | `csrfField` is `gg.jte.Content`; new `csrfToken` | security, **breaking** for templates declaring `String csrfField` | change the `@param` type to `gg.jte.Content` | [§](#breaking-csrffield-is-content-new-csrftoken) |
 | `req.json`/`bodyAs`/`requireJson` refuse `@Entity` classes | security, **breaking** | bind a record with `jsonForm` and `apply()` it | [§](#breaking-reqjson-refuses-entity-classes) |
 | `@Min`/`@Max` compare exactly; NaN and Infinity rejected | security | none, unless a form relied on fractions slipping past a bound | [§](#security-min-and-max-compare-exactly) |
@@ -378,6 +378,24 @@ Postgres sampling off and keep the pool and request-query figures:
 ```java
 app.opsDatabaseStats(false);
 ```
+
+`brace check` has a new `db` check. It judges the last 5 complete minutes and **warns** (never
+fails, so `healthy` is unaffected) when requests waited for a pool connection, sessions were
+blocked on locks, connections reached 90% of `max_connections`, or the Postgres statistics can't
+be read. A load threshold is available but off by default, since the database server's core
+count isn't visible through SQL; set it to that count. Thresholds, in `.brace` (0 turns one off):
+
+```
+check.db_pool_wait_minutes=1      # minutes of the last 5 with a thread waiting for a connection
+check.db_lock_sessions=1.0        # average sessions blocked on a lock
+check.db_max_load=0               # average active sessions; set to the database server's cores
+check.db_connections_percent=90   # share of max_connections
+```
+
+Against a server before 0.1.11 (no `db` block) the check passes as "Not reported". Scripts that
+assert the exact list of checks in `brace check --json` see one more entry, `db`.
+`CheckThresholds` has four new components; its six-argument constructor still compiles and
+uses the defaults for them.
 
 New public API: `Brace.opsDatabaseStats(boolean)`, `DatabaseFactory.poolStats()` (returns
 `DatabaseFactory.PoolStats`, or `null` when the pool isn't running), `DatabaseStats` and its

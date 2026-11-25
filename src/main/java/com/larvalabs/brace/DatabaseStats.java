@@ -66,6 +66,8 @@ public final class DatabaseStats implements AutoCloseable {
     static final int MINUTES = 60;
     /** Tables listed. */
     static final int TABLES = 5;
+    /** Complete minutes summarized as {@code recent} in {@code /ops/status}, which {@code brace check} judges. */
+    static final int RECENT_MINUTES = 5;
 
     private final DatabaseFactory factory;
     private final boolean sampleServer;
@@ -480,6 +482,10 @@ public final class DatabaseStats implements AutoCloseable {
      */
     static Map<String, Object> statusJson(Snapshot s, Stats.MinuteSnapshot lastMinute) {
         var db = new LinkedHashMap<String, Object>();
+        // The last few complete minutes: a judgement over minutes, not one instant's reading.
+        var recent = new ArrayList<LoadMinute>();
+        for (var m : s.load()) if (!m.partial()) recent.add(m);
+        if (recent.size() > RECENT_MINUTES) recent = new ArrayList<>(recent.subList(recent.size() - RECENT_MINUTES, recent.size()));
         if (s.pool() != null) {
             var p = new LinkedHashMap<String, Object>();
             p.put("active", s.pool().active());
@@ -487,6 +493,12 @@ public final class DatabaseStats implements AutoCloseable {
             p.put("total", s.pool().total());
             p.put("max", s.pool().max());
             p.put("waiting", s.pool().waiting());
+            var r = new LinkedHashMap<String, Object>();
+            r.put("minutes", recent.size());
+            r.put("minutesWithWaits", recent.stream().filter(m -> m.poolWaitingPeak() > 0).count());
+            r.put("peakWaiting", recent.stream().mapToInt(LoadMinute::poolWaitingPeak).max().orElse(0));
+            r.put("peakActive", recent.stream().mapToInt(LoadMinute::poolActivePeak).max().orElse(0));
+            p.put("recent", r);
             db.put("pool", p);
         }
         if (lastMinute != null) {
@@ -529,6 +541,17 @@ public final class DatabaseStats implements AutoCloseable {
                 load.put("waitingLock", round2(last.lock()));
                 load.put("waitingOther", round2(last.other()));
                 pg.put("load", load);
+            }
+            var sampled = recent.stream().filter(m -> m.sessionSamples() > 0).toList();
+            if (!sampled.isEmpty()) {
+                var lr = new LinkedHashMap<String, Object>();
+                lr.put("minutes", sampled.size());
+                lr.put("avgActive", round2(sampled.stream().mapToDouble(LoadMinute::total).average().orElse(0)));
+                lr.put("onCpu", round2(sampled.stream().mapToDouble(LoadMinute::cpu).average().orElse(0)));
+                lr.put("waitingIo", round2(sampled.stream().mapToDouble(LoadMinute::io).average().orElse(0)));
+                lr.put("waitingLock", round2(sampled.stream().mapToDouble(LoadMinute::lock).average().orElse(0)));
+                lr.put("waitingOther", round2(sampled.stream().mapToDouble(LoadMinute::other).average().orElse(0)));
+                pg.put("loadRecent", lr);
             }
             var t = s.throughput();
             if (t != null) {

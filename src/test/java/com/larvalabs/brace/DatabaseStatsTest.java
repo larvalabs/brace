@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -160,5 +161,51 @@ class DatabaseStatsTest {
         assertTrue(json.at("/postgres/throughput/cacheHitPct").isNull());
         assertTrue(json.at("/postgres/io").isMissingNode(), "pg_stat_io absent below 16 or before its second sample");
         assertEquals("users", json.at("/postgres/tables/0/table").asText());
+        assertEquals(1, json.at("/pool/recent/minutes").asInt(), "complete minutes only");
+        assertEquals(0, json.at("/pool/recent/minutesWithWaits").asInt());
+        assertEquals(2.0, json.at("/postgres/loadRecent/avgActive").asDouble());
+    }
+
+    /** The server's db block, as brace check reads it: the two must agree on field names. */
+    @Test
+    void braceCheckReadsTheStatusJsonThisClassWrites() {
+        var t0 = Instant.parse("2026-11-25T10:00:00Z");
+        var load = new java.util.ArrayList<DatabaseStats.LoadMinute>();
+        for (int i = 0; i < 5; i++) {
+            load.add(new DatabaseStats.LoadMinute(t0.plusSeconds(60L * i), false, 12, 6, 1, 1.5, 0.5, 10, i % 2 == 0 ? 3 : 0, 10));
+        }
+        var snap = new DatabaseStats.Snapshot(new DatabaseFactory.PoolStats(10, 0, 10, 10, 2), true, "16.4", 160004, null,
+            new DatabaseStats.Activity(95, 100, 6, 1, 1, 1, 0, 0, 3, 0), null, null, List.of(), load, t0, null);
+        var status = new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(
+            Map.of("db", DatabaseStats.statusJson(snap, null)));
+        var check = CliCheck.checkDatabase(status, CheckThresholds.fromConfig(Map.of("check.db_max_load", "8")), "prod");
+        assertEquals("warn", check.status());
+        assertEquals("Database: requests waited for a database connection in 3 of the last 5 min (peak 3 waiting, pool of 10); "
+            + "1.5 sessions blocked on locks on average over 5 min; "
+            + "database load 9.0 active sessions over 5 min (cpu 6.0, io 1.0, lock 1.5, other 0.5); "
+            + "95/100 database connections in use", check.message());
+    }
+
+    @Test
+    void recentSummariesCoverTheLastFiveCompleteMinutes() {
+        var t0 = Instant.parse("2026-11-25T10:00:00Z");
+        var load = new java.util.ArrayList<DatabaseStats.LoadMinute>();
+        // Seven complete minutes: the first two (heavy, with waits) fall outside the window.
+        for (int i = 0; i < 7; i++) {
+            boolean old = i < 2;
+            load.add(new DatabaseStats.LoadMinute(t0.plusSeconds(60L * i), false, 12,
+                old ? 9 : 1, 0, i == 6 ? 1 : 0, 0, old ? 10 : 4, old ? 6 : (i == 5 ? 2 : 0), 10));
+        }
+        load.add(new DatabaseStats.LoadMinute(t0.plusSeconds(420), true, 3, 50, 0, 0, 0, 10, 9, 10));
+        var snap = new DatabaseStats.Snapshot(new DatabaseFactory.PoolStats(2, 8, 10, 10, 0), true, "16.4", 160004,
+            null, null, null, null, List.of(), load, t0, null);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(DatabaseStats.statusJson(snap, null));
+        assertEquals(5, json.at("/pool/recent/minutes").asInt());
+        assertEquals(1, json.at("/pool/recent/minutesWithWaits").asInt());
+        assertEquals(2, json.at("/pool/recent/peakWaiting").asInt());
+        assertEquals(4, json.at("/pool/recent/peakActive").asInt());
+        assertEquals(5, json.at("/postgres/loadRecent/minutes").asInt());
+        assertEquals(1.2, json.at("/postgres/loadRecent/avgActive").asDouble(), 1e-9);
+        assertEquals(0.2, json.at("/postgres/loadRecent/waitingLock").asDouble(), 1e-9);
     }
 }

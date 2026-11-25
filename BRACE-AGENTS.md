@@ -1489,6 +1489,9 @@ commit and temp-file rates, `pg_stat_io` on 16+, and the most sequentially scann
 It reads only Postgres's core statistics views as the app's own role (no extension, no
 superuser), on one connection outside the pool, every 5 s (30 s for counters).
 `app.opsDatabaseStats(false)` turns the Postgres sampling off; the pool figures remain.
+`brace check` warns from it (`db` check, last 5 minutes): pool waits, lock waits, connections
+near `max_connections`, and load above `check.db_max_load` (off until you set it to the
+database server's core count).
 
 ## Analytics
 
