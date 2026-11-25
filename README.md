@@ -1,9 +1,10 @@
 # Brace
 
-Brace is a full-stack web framework for Java. One dependency gives you an HTTP server, database
+Brace is an opinionated full-stack web framework for Java. Included are an HTTP server, database
 access and migrations, typed templates, sessions, forms, background jobs, email, object storage,
-analytics and an operations dashboard. You wire everything up in plain Java in `main()`, so the
-compiler checks how the pieces fit together.
+analytics and an operations dashboard. Everything is written in plain Java in `main()`, no dependency injection
+or magic runtimes. This provides excellent startup times, runtime performance and allows the compiler to verify correctness.
+Brace requires Java 21+ and Postgres, and is optimized for Java 25+ and Postgres 16+.
 
 ![The Brace ops dashboard, showing request, latency, error and heap charts and the Postgres database panel](docs/screenshots/ops-dashboard.png)
 
