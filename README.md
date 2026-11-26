@@ -96,11 +96,83 @@ dashboard in a browser, and `brace status`, `brace errors` and `brace logs` read
 terminal. `brace check` runs a set of health checks and reports what needs attention, including
 warnings from the Postgres statistics shown in the database panel.
 
-![The Brace analytics page, showing 30 days of visitors with top pages and sources](docs/screenshots/ops-analytics.png)
-
 [BRACE-AGENTS.md](BRACE-AGENTS.md) is the complete API reference. `brace agents-md` writes the
 version that matches a project's Brace version into the project, for the people and coding agents
 working on it. [docs/agent-ops-guide.md](docs/agent-ops-guide.md) covers operating a running app.
+
+### JVM
+
+![The JVM stat cards of the ops dashboard: heap, CPU, threads and average GC pause](docs/screenshots/ops-jvm-cards.png)
+
+With ops on, Brace runs a JDK Flight Recorder stream inside the app. It costs roughly 0.5 to 2%
+CPU and one thread, and `app.opsProfiler(false)` turns it off. The stat cards at the top of the
+dashboard show heap used against the maximum, JVM and host CPU, live and daemon threads, and the
+average garbage collection pause with a count of full collections. A sparkline tracks heap use
+for each minute of the last hour.
+
+The panels further down come from the same recording:
+
+![The JVM panels of the ops dashboard: hot methods, top allocations and recent GC pauses](docs/screenshots/ops-jvm.png)
+
+- **Hot Methods** counts execution samples, taken every 20 ms, by the method at the top of the
+  stack over a five-minute window. It shows where the app spends its CPU time.
+- **Top Allocations** adds up sampled allocations by class over the same window, which points at
+  the code that creates the most garbage.
+- **Recent GC Pauses** lists each collection with its collector and cause, how long the app was
+  stopped and how long the whole cycle took. Pauses over 10 ms show in amber, pauses over 100 ms
+  in red, and full collections are marked.
+
+`/ops/status?include=profiling` returns the same data as JSON.
+
+### Routes
+
+![The Top Routes and Slowest Routes tables of the ops dashboard](docs/screenshots/ops-routes.png)
+
+Brace counts each request under the route pattern it matched, so `/books/17` and `/books/42` both
+count toward `GET /books/{id}`. Requests that match no route are counted as `(unmatched)` and
+static files as `(static)`. **Top Routes** ranks routes by request rate over the last five
+minutes and gives each one's share of traffic. **Slowest Routes** ranks them by average latency
+since the app started, with the number of calls. Above these tables, sparklines show requests,
+average and p95 latency, and errors for each minute of the last hour.
+
+Each request also writes a structured log line with its status, duration, query count and query
+time, which `brace logs` reads. `/ops/routes` lists every registered route with its access level.
+
+### Errors
+
+![The error panels of the ops dashboard, with one stored error's stack trace expanded](docs/screenshots/ops-errors.png)
+
+When a handler throws, the client gets a 500 and the dashboard records the exception in two
+places. **Recent Errors** counts them in memory by exception type and route since the app
+started. With a database, Brace also stores them in the `ops_errors` table, grouped by exception
+type and route. Each entry has an occurrence count, first and last seen times, the stack trace,
+the request and a summary of the queries that ran before the throw. Failed jobs are stored the
+same way, under the job's name. Clicking an error expands its stack trace, and a key with control
+access can mark it resolved. If the same error comes back after that, it opens a new entry.
+
+`/ops/regressions` lists error kinds that are new since the app started, and a notifier can post
+them to a webhook or send an email when they first appear. `brace errors` lists the stored errors
+in a terminal.
+
+### Scheduled Jobs
+
+![The Scheduled Jobs table of the ops dashboard](docs/screenshots/ops-jobs.png)
+
+Every job registered with `app.every(...)` or `app.daily(...)` gets a row with its schedule, the
+status of its last run, how long ago that was and how long it took. A job can call
+`ctx.message(...)` to leave a line of text under its row, such as how many rows it processed. A
+job that throws shows as `error` with the exception's message under its row, and the exception
+goes to the stored errors above. The table also lists Brace's own jobs, such as the ops metric
+flushes and the nightly analytics rollup. With a database, each interval runs on only one
+instance, however many are deployed. Durable jobs queued with `Jobs.schedule(...)` are covered
+under [Jobs](#jobs).
+
+### Page-View Analytics
+
+![The Brace analytics page, showing 30 days of visitors with top pages and sources](docs/screenshots/ops-analytics.png)
+
+`app.analytics()` turns on the page-view analytics at `/ops/analytics`, covered under
+[Analytics](#analytics).
 
 ## Install
 
