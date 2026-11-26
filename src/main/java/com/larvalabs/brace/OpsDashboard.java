@@ -540,9 +540,12 @@ public class OpsDashboard {
                     sb.append("<tr><td>").append(esc(j.name())).append("</td><td class=\"c-muted\">").append(esc(j.schedule())).append("</td>");
                     sb.append("<td><span class=\"").append(statusDot).append("\">● </span>").append(esc(statusLabel)).append("</td>");
                     sb.append("<td class=\"num c-muted\">").append(esc(lastRun)).append("</td></tr>");
-                    if (j.lastMessage() != null && !j.lastMessage().isEmpty()) {
-                        sb.append("<tr><td colspan=\"4\" class=\"c-muted job-msg\">↳ ")
-                          .append(esc(j.lastMessage())).append("</td></tr>");
+                    // A failed run shows its error, not the message a previous successful run left.
+                    boolean failed = "error".equals(j.lastStatus()) && j.lastError() != null && !j.lastError().isEmpty();
+                    String note = failed ? j.lastError() : j.lastMessage();
+                    if (note != null && !note.isEmpty()) {
+                        sb.append("<tr><td colspan=\"4\" class=\"").append(failed ? "c-red" : "c-muted")
+                          .append(" job-msg\">↳ ").append(esc(note)).append("</td></tr>");
                     }
                 }
                 sb.append("</table>");
@@ -622,7 +625,7 @@ public class OpsDashboard {
             sb.append("<p class=\"").append(resolved ? "c-muted" : "c-green").append("\">None</p>");
             return;
         }
-        sb.append("<table><tr><th>Type</th><th>Route</th><th class=\"num\">Count</th><th>First Seen</th><th>Last Seen</th><th></th></tr>");
+        sb.append("<table><tr><th>Type</th><th>Route</th><th class=\"num\">Count</th><th class=\"gap\">First Seen</th><th class=\"gap\">Last Seen</th><th></th></tr>");
         for (var e : errors) {
             long id = ((Number) e.get("id")).longValue();
             sb.append("<tr>");
@@ -630,8 +633,8 @@ public class OpsDashboard {
               .append(esc(str(e.get("errorType")))).append("</td>");
             sb.append("<td>").append(esc(str(e.get("route"), "-"))).append("</td>");
             sb.append("<td class=\"num\">").append(e.get("occurrenceCount")).append("</td>");
-            sb.append("<td class=\"c-muted\">").append(esc(str(e.get("firstSeen"), "-"))).append("</td>");
-            sb.append("<td class=\"c-muted\">").append(esc(str(e.get("lastSeen"), "-"))).append("</td>");
+            sb.append("<td class=\"c-muted gap\">").append(esc(seen(e.get("firstSeen")))).append("</td>");
+            sb.append("<td class=\"c-muted gap\">").append(esc(seen(e.get("lastSeen")))).append("</td>");
             if (!resolved && canControl) {
                 sb.append("<td><button class=\"btn btn-resolve\" hx-post=\"/ops/errors/").append(id)
                   .append("/resolve\"")
@@ -639,7 +642,7 @@ public class OpsDashboard {
             } else if (!resolved) {
                 sb.append("<td></td>");
             } else {
-                sb.append("<td class=\"c-muted\">").append(esc(str(e.get("resolvedAt"), ""))).append("</td>");
+                sb.append("<td class=\"c-muted gap\">").append(esc(e.get("resolvedAt") != null ? seen(e.get("resolvedAt")) : "")).append("</td>");
             }
             sb.append("</tr>");
             sb.append("<tr class=\"hidden\"><td colspan=\"6\"><div class=\"stack-trace\">")
@@ -693,6 +696,14 @@ public class OpsDashboard {
                 .replace(">", "&gt;")
                 .replace("\"", "&quot;")
                 .replace("'", "&#39;");
+    }
+
+    private static final java.time.format.DateTimeFormatter SEEN_FORMAT =
+        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(java.time.ZoneOffset.UTC);
+
+    /** A stored error's first/last-seen time to the second, in UTC like the header's start time. */
+    private static String seen(Object o) {
+        return o instanceof Instant i ? SEEN_FORMAT.format(i) : str(o, "-");
     }
 
     private static String str(Object o) {

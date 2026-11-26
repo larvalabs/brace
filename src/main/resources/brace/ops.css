@@ -27,6 +27,7 @@ table { border-collapse: collapse; width: 100%; }
 th { text-align: left; color: #565f89; font-size: 9px; text-transform: uppercase; padding: 3px 0; }
 td { padding: 3px 0; }
 th.num, td.num { text-align: right; white-space: nowrap; padding-left: 10px; }
+th.gap, td.gap { padding-left: 16px; white-space: nowrap; }
 .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 45px; }
 .sparkline .bar { flex: 1; min-width: 4px; }
 .sparkline .bar-lo { background: #238636; }

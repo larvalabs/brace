@@ -559,6 +559,9 @@ class OpsIntegrationTest {
         assertTrue(body.contains("data-ops-tab=\"resolved\""));
         assertTrue(body.contains("<div id=\"tab-resolved\" class=\"tab-content hidden\""), "resolved tab starts hidden");
         assertTrue(body.contains("data-ops-trace=\""), "stack-trace toggle");
+        // First/last seen read as "2026-11-26 17:26:19" (UTC, to the second), not Instant.toString().
+        assertTrue(body.matches("(?s).*<td class=\"c-muted gap\">\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}</td>.*"), body);
+        assertFalse(body.matches("(?s).*<td class=\"c-muted gap\">\\d{4}-\\d{2}-\\d{2}T.*"), body);
         assertFalse(body.contains("onclick"));
         assertFalse(body.contains("style="));
         assertFalse(body.contains("Bearer"));
