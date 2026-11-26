@@ -339,6 +339,43 @@ dropped: hand-written SQL against Brace's Hibernate isn't a fair fight, even wit
 `benchmark/docker/spring-jpa/`. A short cloud run before the switch had Brace at about
 0.6–0.9x `JdbcTemplate` on the database tests and 1.5–2.2x on plaintext/JSON (single 5s samples).
 
+## Findings from the benchmark runs (2026-11-25)
+
+Short runs (1 round, 5s per test) on a DigitalOcean `c-8` (8 dedicated vCPUs: app 4, Postgres
+2, wrk 2), Brace vs Spring Boot + Spring Data JPA, JDK 25.0.5.1, both on G1 with a 4 GB max heap.
+CPU steal under 0.05% in every run. Single samples, so treat differences under about 15% as
+noise. Both items below are tracked in `TODO.md` for 0.1.12.
+
+1. **Pool size 256 removed all back-pressure.** Spring's concurrency is capped by its Undertow
+   worker threads (8 per CPU, so 32 here), whatever the pool size. Brace's is capped only by the
+   pool. At 256, Postgres sampled mid-run showed 100–145 Brace transactions open at once, 32–63
+   of them waiting on row locks (`Lock: transactionid`). Spring had a handful. Updates p99 was
+   1.14s, against Spring's 336ms. With `DB_POOL=32`, Brace's Updates p99 fell to 367ms and its
+   DB-test throughput rose 28–42%; Spring didn't change. The harness should default to a pool
+   in this range, not TechEmpower's 256.
+2. **Hikari isn't first come, first served.** With pool 32, a benchmark-only fair semaphore
+   (`FAIR_LIMIT`, run as `brace-fair`) in front of the DB routes cut Brace's p99 further:
+   Single Query 36.8 → 14.9ms, Multiple Queries 293 → 153ms (and +21% req/s), Updates 368 →
+   236ms. Medians didn't move. Framework fix: a fair gate before `openSession()` (TODO.md, Bugs).
+3. **Fortunes tail: on-demand jte in prod.** The benchmark image had no precompiled templates,
+   so prod mode fell back to jte's on-demand engine. That engine locks the template's cache
+   slot and reads file timestamps on every render. Found by elimination:
+   - a JSON variant of Fortunes (no template) was as tight as `/db`;
+   - a template-only variant (no DB) had p50 1.9ms but p90 33ms;
+   - JFR showed no monitor contention over 10ms and no pinning;
+   - jte's source (`resolveTemplateOnDemand`) showed the lock and the timestamp read.
+
+   Precompiling in the image (as `brace compile` does) took the template-only variant to p90
+   4.6ms / p99 6.9ms and +21% req/s, and Fortunes' p99 from 50 to 25ms locally. Framework fix:
+   never use on-demand mode in prod (TODO.md, Bugs).
+4. **GC is not a factor.** The longest pause was under 10ms in both apps, and the total under 1%
+   of run time.
+
+Best result so far, Brace with the fair gate against Spring JPA (pool 32): Brace's throughput is
+1.5–3.3x Spring's on every test, and its p99 is 0.29–0.70x Spring's on Single Query, Multiple
+Queries and Updates. That run predates the template fix, so Fortunes still showed the old tail.
+A full run (3 rounds, `c-16`) with both fixes is still to do.
+
 ## Recommended plan
 
 | # | Step | What | Effort |
