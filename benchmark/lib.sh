@@ -90,6 +90,7 @@ now_ms() {
 #   mem_mark          start tracking the app's peak memory
 #   mem_peak_mb       peak memory (MB) since mem_mark
 #   mem_now_mb        current memory (MB)
+#   WRK_REPORT        path of docker/wrk-report.lua as wrk sees it
 
 TFB_TESTS=("plaintext" "json" "db" "queries?queries=20" "fortunes" "updates?queries=20")
 TFB_LABELS=("Plaintext" "JSON" "Single Query" "Multiple Queries (20)" "Fortunes" "Updates (20)")
@@ -132,9 +133,9 @@ tfb_record_output() { # name
   exec > >(tee "$OUT") 2>&1
 }
 
-tsv_row() { # framework round test value p99 errors peak
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$@" >> "$TSV"
-}
+# Columns: 1 framework, 2 round, 3 test, 4 value (req/s, or ms/MB for _ rows), 5 p99 ms,
+# 6 errors, 7 peak MB, 8 p50 ms, 9 p90 ms, 10 p95 ms, 11 p99.9 ms, 12 max ms.
+tsv_row() { local IFS=$'\t'; echo "$*" >> "$TSV"; }
 
 tfb_preflight() {
   if ! nc -z -w 2 "$DB_HOST" "$DB_PORT" 2>/dev/null; then
@@ -240,6 +241,7 @@ tfb_stop_app() {
 # ---- Local hooks -----------------------------------------------------------------------------
 
 load_url() { echo "http://localhost:$PORT/$1"; }
+WRK_REPORT="$BENCH_DIR/docker/wrk-report.lua"
 run_wrk() { wrk "$@"; }
 mem_now_mb() { ps -o rss= -p "$APP_PID" 2>/dev/null | awk '{printf "%d", $1/1024}'; }
 mem_mark() {
@@ -301,30 +303,29 @@ tfb_warmup() { # framework round
   tsv_row "$1" "$2" _mem_warm "$m" 0 0 0
 }
 
-# wrk latency value ("850.12us", "4.71ms", "1.05s") -> milliseconds
-to_ms() {
-  awk -v v="$1" 'BEGIN {
-    if (v ~ /us$/) { sub(/us$/, "", v); printf "%.2f", v / 1000 }
-    else if (v ~ /ms$/) { sub(/ms$/, "", v); printf "%.2f", v }
-    else if (v ~ /s$/)  { sub(/s$/, "", v);  printf "%.2f", v * 1000 }
-    else printf "%s", v }'
-}
-
 # One measured wrk run of test $3 (an index into TFB_TESTS). Prints the raw output and
-# appends a TSV row.
+# appends a TSV row. Percentiles come from docker/wrk-report.lua (microsecond precision, and
+# p95 / p99.9, which wrk's own --latency table doesn't print).
 tfb_measure() { # framework round index [tag]
-  local fw=$1 round=$2 i=$3 tag=${4:-} raw rps p99 errs non2xx peak
+  local fw=$1 round=$2 i=$3 tag=${4:-} raw rps errs non2xx peak lat
   echo "--- ${TFB_LABELS[$i]} ($fw${tag:+, $tag}) ---"
   mem_mark
-  raw=$(run_wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"$WRK_DURATION" --latency "$(load_url "${TFB_TESTS[$i]}")")
+  raw=$(run_wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"$WRK_DURATION" --latency -s "$WRK_REPORT" \
+    "$(load_url "${TFB_TESTS[$i]}")")
   peak=$(mem_peak_mb)
   echo "$raw"
   echo ""
   rps=$(echo "$raw" | awk '/^Requests\/sec/ {print $2}')
-  p99=$(to_ms "$(echo "$raw" | awk '$1 == "99%" {print $2}')")
   errs=$(echo "$raw" | awk '/Socket errors/ {gsub(/,/, ""); print $4 + $6 + $8 + $10}')
   non2xx=$(echo "$raw" | awk '/Non-2xx/ {print $NF}')
-  tsv_row "$fw" "$round" "${TFB_LABELS[$i]}" "${rps:-0}" "${p99:-0}" "$(( ${errs:-0} + ${non2xx:-0} ))" "${peak:-0}"
+  # "p50 p90 p95 p99 p999 max" in ms
+  lat=$(echo "$raw" | awk '/^TFB_LATENCY_US/ {
+    for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] / 1000 }
+    printf "%.2f %.2f %.2f %.2f %.2f %.2f", v["p50"], v["p90"], v["p95"], v["p99"], v["p999"], v["max"] }')
+  [ -n "$lat" ] || lat="0 0 0 0 0 0"
+  set -- $lat
+  tsv_row "$fw" "$round" "${TFB_LABELS[$i]}" "${rps:-0}" "$4" "$(( ${errs:-0} + ${non2xx:-0} ))" "${peak:-0}" \
+    "$1" "$2" "$3" "$5" "$6"
 }
 
 # RUNS passes, interleaved (run 1 of every test, then run 2, ...) so slow drift on the machine
@@ -346,20 +347,27 @@ tsv_col() { awk -F'\t' -v f="$1" -v t="$3" -v c="$2" '$1 == f && $3 == t {print 
 ratio_of() { awk -v a="$1" -v b="$2" 'BEGIN { if (a != "" && b > 0) printf "%.2fx", a / b; else print "n/a" }'; }
 
 tfb_summary() {
-  local fw label rps p99 errs peak runs n subject ratio
+  local fw label rps p50 p95 p99 errs peak runs n subject gc
   for fw in $(awk -F'\t' '!seen[$1]++ {print $1}' "$TSV"); do
     n=$(tsv_col "$fw" 4 "${TFB_LABELS[0]}" | wc -l | tr -d ' ')
     echo "=== Summary: $fw (median of $n measurements) ==="
     echo "startup:     $(tsv_col "$fw" 4 _startup | median) ms to first 200 (median; all: $(tsv_col "$fw" 4 _startup | tr '\n' ' '))"
     echo "memory:      $(tsv_col "$fw" 4 _mem_ready | median) MB ready, $(tsv_col "$fw" 4 _mem_warm | median) MB after warmup (medians)"
-    printf '%-24s %12s %10s %8s %10s   %s\n' "Test" "Req/sec" "p99 ms" "Errors" "Peak mem" "Req/sec per measurement"
+    gc=$(tsv_col "$fw" 4 _gc_name | head -1)
+    if [ -n "$gc" ]; then
+      echo "gc:          $gc, per launch (medians): $(tsv_col "$fw" 4 _gc_pauses | median) pauses, $(tsv_col "$fw" 4 _gc_total_ms | median) ms total, longest $(tsv_col "$fw" 4 _gc_max_ms | median) ms"
+    fi
+    printf '%-24s %11s %8s %8s %8s %8s %7s %9s   %s\n' "Test" "Req/sec" "p50 ms" "p95 ms" "p99 ms" "max ms" "Errors" "Peak mem" "Req/sec per measurement"
     for label in "${TFB_LABELS[@]}"; do
-      rps=$(tsv_col "$fw" 4 "$label" | median)
-      p99=$(tsv_col "$fw" 5 "$label" | median)
-      errs=$(tsv_col "$fw" 6 "$label" | awk '{s += $1} END {print s + 0}')
-      peak=$(tsv_col "$fw" 7 "$label" | awk '$1 > m {m = $1} END {print m + 0}')
-      runs=$(tsv_col "$fw" 4 "$label" | tr '\n' ' ')
-      printf '%-24s %12s %10s %8s %7s MB   %s\n' "$label" "$rps" "$p99" "$errs" "$peak" "$runs"
+      printf '%-24s %11s %8s %8s %8s %8s %7s %6s MB   %s\n' "$label" \
+        "$(tsv_col "$fw" 4 "$label" | median)" \
+        "$(tsv_col "$fw" 8 "$label" | median)" \
+        "$(tsv_col "$fw" 10 "$label" | median)" \
+        "$(tsv_col "$fw" 5 "$label" | median)" \
+        "$(tsv_col "$fw" 12 "$label" | median)" \
+        "$(tsv_col "$fw" 6 "$label" | awk '{s += $1} END {print s + 0}')" \
+        "$(tsv_col "$fw" 7 "$label" | awk '$1 > m {m = $1} END {print m + 0}')" \
+        "$(tsv_col "$fw" 4 "$label" | tr '\n' ' ')"
     done
     echo ""
   done
@@ -369,16 +377,18 @@ tfb_summary() {
   subject=$(awk -F'\t' '$1 ~ /^brace/ {print $1; exit}' "$TSV")
   [ -n "$subject" ] || subject=$(awk -F'\t' 'NR == 1 {print $1}' "$TSV")
   for fw in $(awk -F'\t' -v f="$subject" '!seen[$1]++ && $1 != f {print $1}' "$TSV"); do
-    echo "=== $subject vs $fw (medians; req/s >1x: $subject is faster; p99 <1x: $subject's tail is shorter) ==="
-    printf '%-24s %10s %10s\n' "Test" "req/s" "p99"
+    echo "=== $subject vs $fw (medians; req/s >1x: $subject is faster; latency <1x: $subject is quicker) ==="
+    printf '%-24s %9s %9s %9s %9s\n' "Test" "req/s" "p50" "p95" "p99"
     for label in "${TFB_LABELS[@]}"; do
-      ratio=$(ratio_of "$(tsv_col "$subject" 4 "$label" | median)" "$(tsv_col "$fw" 4 "$label" | median)")
-      p99=$(ratio_of "$(tsv_col "$subject" 5 "$label" | median)" "$(tsv_col "$fw" 5 "$label" | median)")
-      printf '%-24s %10s %10s\n' "$label" "$ratio" "$p99"
+      printf '%-24s %9s %9s %9s %9s\n' "$label" \
+        "$(ratio_of "$(tsv_col "$subject" 4 "$label" | median)" "$(tsv_col "$fw" 4 "$label" | median)")" \
+        "$(ratio_of "$(tsv_col "$subject" 8 "$label" | median)" "$(tsv_col "$fw" 8 "$label" | median)")" \
+        "$(ratio_of "$(tsv_col "$subject" 10 "$label" | median)" "$(tsv_col "$fw" 10 "$label" | median)")" \
+        "$(ratio_of "$(tsv_col "$subject" 5 "$label" | median)" "$(tsv_col "$fw" 5 "$label" | median)")"
     done
-    printf '%-24s %10s\n' "Startup time" \
+    printf '%-24s %9s\n' "Startup time" \
       "$(ratio_of "$(tsv_col "$subject" 4 _startup | median)" "$(tsv_col "$fw" 4 _startup | median)")"
-    printf '%-24s %10s\n' "Memory after warmup" \
+    printf '%-24s %9s\n' "Memory after warmup" \
       "$(ratio_of "$(tsv_col "$subject" 4 _mem_warm | median)" "$(tsv_col "$fw" 4 _mem_warm | median)")"
     echo ""
   done

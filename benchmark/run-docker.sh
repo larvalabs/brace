@@ -8,6 +8,8 @@ set -euo pipefail
 # profile (Spring).
 #
 # Usage: ./benchmark/run-docker.sh [framework...]     framework: brace | spring-jpa (default: both)
+#   brace-fair: Brace with the FAIR_LIMIT experiment (a first-come-first-served cap of DB_POOL
+#   database requests in front of the pool; benchmark/src/main/java/benchmark/App.java)
 #
 # Every invocation starts from a fresh, freshly seeded Postgres. For ROUNDS rounds it launches each
 # framework in turn (a new JVM each time), checks its responses, warms up, runs RUNS passes over the
@@ -22,6 +24,7 @@ set -euo pipefail
 #                                   Docker host's CPUs to the app, a quarter each to Postgres and wrk
 #   APP_MEM DB_MEM                  container memory limits, e.g. 512m (default: none)
 #   DB_POOL=256 JVM_OPTS            pool size (both apps), extra JVM flags (both apps)
+#   GC_LOG=1                        -Xlog:gc on both JVMs; the summary reports GC pauses per launch
 #   PG_MAX_CONNECTIONS=600 PG_SHARED_BUFFERS=256MB
 #   PORT=8080                       host port for the driver's checks (bound to 127.0.0.1)
 #   BENCH_HOST_LABEL                free text for the report, e.g. "hetzner ccx33 fsn1"
@@ -38,7 +41,7 @@ tfb_init
 FRAMEWORKS=("$@")
 [ ${#FRAMEWORKS[@]} -gt 0 ] || FRAMEWORKS=(brace spring-jpa)
 for fw in "${FRAMEWORKS[@]}"; do
-  case "$fw" in brace|spring-jpa) ;; *) echo "FATAL: unknown framework '$fw' (brace, spring-jpa)" >&2; exit 1 ;; esac
+  case "$fw" in brace|brace-fair|spring-jpa) ;; *) echo "FATAL: unknown framework '$fw' (brace, brace-fair, spring-jpa)" >&2; exit 1 ;; esac
 done
 
 COMPOSE=(docker compose -f "$BENCH_DIR/docker/compose.yml")
@@ -73,6 +76,9 @@ WRK_THREADS=${USER_WRK_THREADS:-$(cpuset_count "$CPUS_LOAD")}
 : "${APP_MEM:=0}"
 : "${DB_MEM:=0}"
 : "${BRACE_LOG_LEVEL:=WARN}"
+: "${GC_LOG:=1}"
+# One line per GC event on stdout, so it lands in the container log the driver keeps.
+if [ "$GC_LOG" = 1 ]; then JVM_OPTS="-Xlog:gc:stdout ${JVM_OPTS:-}"; fi
 BRACE_COMMIT=$(commit_desc)
 export CPUS_APP CPUS_DB CPUS_LOAD APP_MEM DB_MEM DB_POOL JVM_OPTS PORT \
   BRACE_LOG_LEVEL BRACE_COMMIT PG_MAX_CONNECTIONS PG_SHARED_BUFFERS
@@ -80,6 +86,7 @@ export CPUS_APP CPUS_DB CPUS_LOAD APP_MEM DB_MEM DB_POOL JVM_OPTS PORT \
 # ---- Hooks for lib.sh: wrk and memory readings go through the containers ----------------------
 
 load_url() { echo "http://app:8080/$1"; }
+WRK_REPORT=/scripts/report.lua   # baked into the wrk image
 run_wrk() { "${COMPOSE[@]}" run --rm --no-deps -T wrk "$@" 2> /dev/null; }
 # The app's java process is PID 1 in its container. VmHWM is its peak RSS; writing 5 to
 # clear_refs resets that peak, so each measurement reports its own.
@@ -87,6 +94,9 @@ proc_status_mb() { docker exec "$CID" sh -c "grep $1 /proc/1/status" | awk '{pri
 mem_now_mb() { proc_status_mb VmRSS; }
 mem_mark() { docker exec "$CID" sh -c 'echo 5 > /proc/1/clear_refs' 2> /dev/null || true; }
 mem_peak_mb() { proc_status_mb VmHWM; }
+
+# The compose service a framework name runs as.
+fw_service() { echo "${1%-fair}"; }
 
 container_alive() { [ "$(docker inspect -f '{{.State.Running}}' "$CID" 2> /dev/null)" = true ]; }
 
@@ -106,7 +116,7 @@ trap cleanup EXIT
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   echo "Building images (Brace from this checkout at $BRACE_COMMIT)..."
   build_profiles=(--profile tools)
-  for fw in "${FRAMEWORKS[@]}"; do build_profiles+=(--profile "$fw"); done
+  for fw in "${FRAMEWORKS[@]}"; do build_profiles+=(--profile "$(fw_service "$fw")"); done
   "${COMPOSE[@]}" "${build_profiles[@]}" build --quiet
 fi
 
@@ -118,6 +128,17 @@ echo "Starting a fresh Postgres..."
 tfb_record_output "docker-$(IFS=-; echo "${FRAMEWORKS[*]}")"
 
 image_id() { docker image inspect -f '{{.Id}}' "$1" 2> /dev/null | cut -c8-19; }
+# The GC and max heap the JVM picks for itself under the app container's CPU and memory limits.
+jvm_ergonomics() {
+  local mem=()
+  [ "$APP_MEM" = 0 ] || mem=(--memory "$APP_MEM")
+  # shellcheck disable=SC2086
+  docker run --rm --cpuset-cpus "$CPUS_APP" "${mem[@]}" --entrypoint java "$1" $JVM_OPTS -XX:+PrintFlagsFinal -version 2> /dev/null \
+    | awk '$2 ~ /^Use(Serial|Parallel|G1|Z|Shenandoah|Epsilon)GC$/ && $4 == "true" { gc = $2 }
+           $2 == "MaxHeapSize" { heap = $4 }
+           $2 == "ActiveProcessorCount" { apc = $4 }
+           END { sub(/^Use/, "", gc); sub(/GC$/, "", gc); printf "%s GC, max heap %d MB", gc, heap / 1048576 }'
+}
 in_image() { docker run --rm --entrypoint "$2" "$1" "${@:3}" 2>&1 | head -1; }
 
 echo "=== Containerized TFB benchmark: ${FRAMEWORKS[*]} ==="
@@ -131,8 +152,10 @@ echo "pool:        $DB_POOL connections per app"
 echo "jvm opts:    ${JVM_OPTS:-(none)}"
 for fw in "${FRAMEWORKS[@]}"; do
   case "$fw" in
-    brace)  echo "brace:       image $(image_id brace-bench/brace:local), brace $(in_image brace-bench/brace:local cat /app/brace-version), commit $(in_image brace-bench/brace:local cat /app/brace-commit), $(in_image brace-bench/brace:local java -version), BRACE_LOG_LEVEL=$BRACE_LOG_LEVEL" ;;
-    spring-jpa) echo "spring-jpa:  image $(image_id brace-bench/spring-jpa:local), TechEmpower $(in_image brace-bench/spring-jpa:local cat /spring/tfb-commit | cut -c1-12) + Spring Data JPA profile (benchmark/docker/spring-jpa), $(in_image brace-bench/spring-jpa:local java -version)" ;;
+    brace|brace-fair) echo "brace:       image $(image_id brace-bench/brace:local), brace $(in_image brace-bench/brace:local cat /app/brace-version), commit $(in_image brace-bench/brace:local cat /app/brace-commit), $(in_image brace-bench/brace:local java -version), BRACE_LOG_LEVEL=$BRACE_LOG_LEVEL"
+            echo "             JVM picks: $(jvm_ergonomics brace-bench/brace:local)" ;;
+    spring-jpa) echo "spring-jpa:  image $(image_id brace-bench/spring-jpa:local), TechEmpower $(in_image brace-bench/spring-jpa:local cat /spring/tfb-commit | cut -c1-12) + Spring Data JPA profile (benchmark/docker/spring-jpa), $(in_image brace-bench/spring-jpa:local java -version)"
+                echo "             JVM picks: $(jvm_ergonomics brace-bench/spring-jpa:local)" ;;
   esac
 done
 echo "load:        wrk -t$WRK_THREADS -c$WRK_CONNECTIONS -d$WRK_DURATION --latency, $WARMUP_DURATION warmup per test"
@@ -150,10 +173,13 @@ STEAL0=$(cpu_jiffies || true)
 for round in $(seq 1 "$ROUNDS"); do
   for fw in "${FRAMEWORKS[@]}"; do
     label=$fw
+    svc=$(fw_service "$fw")
+    fair=0; [ "$fw" = brace-fair ] && fair=$DB_POOL
     echo "##### Round $round/$ROUNDS: $label #####"
-    "${COMPOSE[@]}" --profile "$fw" up -d --no-deps --force-recreate "$fw" > /dev/null 2>&1
+    [ "$fair" = 0 ] || echo "fair limit:  $fair database requests at a time, first come first served"
+    FAIR_LIMIT=$fair "${COMPOSE[@]}" --profile "$svc" up -d --no-deps --force-recreate "$svc" > /dev/null 2>&1
     t0=$(now_ms)
-    CID=$("${COMPOSE[@]}" --profile "$fw" ps -q "$fw")
+    CID=$("${COMPOSE[@]}" --profile "$svc" ps -q "$svc")
     rc=0
     wait_until_ready container_alive || rc=$?
     t1=$(now_ms)
@@ -170,13 +196,25 @@ for round in $(seq 1 "$ROUNDS"); do
     tfb_warmup "$label" "$round"
     echo ""
     tfb_run_suite "$label" "$round"
-    docker logs "$CID" > "${OUT%.txt}-$label-round$round.log" 2>&1 || true
-    "${COMPOSE[@]}" --profile "$fw" stop -t 30 "$fw" > /dev/null 2>&1
+    log="${OUT%.txt}-$label-round$round.log"
+    docker logs "$CID" > "$log" 2>&1 || true
+    if [ "$GC_LOG" = 1 ]; then
+      # -Xlog:gc lines: "[0.006s][info][gc] Using G1" and "... GC(12) Pause Young (Normal) ... 4.567ms"
+      gc_name=$(sed -n 's/.*\[gc\] Using \(.*\)$/\1/p' "$log" | head -1)
+      read -r gc_n gc_total gc_max < <(awk '/\[gc\]/ && /Pause/ && $NF ~ /ms$/ { v = $NF; sub(/ms$/, "", v); n++; t += v; if (v > m) m = v }
+        END { printf "%d %.1f %.1f\n", n, t, m }' "$log")
+      echo "gc:          ${gc_name:-?}, $gc_n pauses, $gc_total ms total, longest $gc_max ms (whole launch)"
+      tsv_row "$label" "$round" _gc_name "${gc_name:-?}" 0 0 0
+      tsv_row "$label" "$round" _gc_pauses "$gc_n" 0 0 0
+      tsv_row "$label" "$round" _gc_total_ms "$gc_total" 0 0 0
+      tsv_row "$label" "$round" _gc_max_ms "$gc_max" 0 0 0
+    fi
+    "${COMPOSE[@]}" --profile "$svc" stop -t 30 "$svc" > /dev/null 2>&1
     if [ "$(docker inspect -f '{{.State.OOMKilled}}' "$CID")" = true ]; then
       echo "WARNING: $label was OOM-killed in round $round"
       tsv_row "$label" "$round" _oom_killed 1 0 0 0
     fi
-    "${COMPOSE[@]}" --profile "$fw" rm -f "$fw" > /dev/null 2>&1
+    "${COMPOSE[@]}" --profile "$svc" rm -f "$svc" > /dev/null 2>&1
   done
 done
 

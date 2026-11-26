@@ -4,6 +4,7 @@ import com.larvalabs.brace.*;
 import benchmark.model.*;
 
 import java.util.*;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 
 public class App {
@@ -30,6 +31,34 @@ public class App {
             result.header("Server", "Brace");
             return result;
         });
+
+        // Benchmark-only experiment (FAIR_LIMIT=N, off by default): admit at most N database
+        // requests at a time, strictly in arrival order, before Brace opens the DB session. It
+        // tests whether the DB tests' latency tail comes from HikariCP letting a newly arriving
+        // request take a just-freed connection ahead of requests already waiting. Spring's
+        // worker-thread queue, by contrast, is first come, first served. Before-middleware runs
+        // before the session opens; after-middleware runs once it's closed, on success and on
+        // error responses alike. The ThreadLocal guards against releasing a permit that wasn't
+        // taken.
+        int fairLimit = Integer.parseInt(env.getOrDefault("FAIR_LIMIT", "0"));
+        if (fairLimit > 0) {
+            var gate = new Semaphore(fairLimit, true);
+            var held = new ThreadLocal<Boolean>();
+            for (String path : List.of("/db", "/queries", "/fortunes", "/updates")) {
+                app.before(path, req -> {
+                    gate.acquireUninterruptibly();
+                    held.set(Boolean.TRUE);
+                    return null;
+                });
+                app.after(path, (req, result) -> {
+                    if (held.get() != null) {
+                        held.remove();
+                        gate.release();
+                    }
+                    return result;
+                });
+            }
+        }
 
         // 1. Plaintext
         app.get("/plaintext", req -> Result.text("Hello, World!"));
@@ -65,6 +94,38 @@ public class App {
             fortunes.sort(Comparator.comparing(f -> f.message));
             return View.of("fortunes", "fortunes", fortunes);
         });
+
+        // Diagnostics for the Fortunes latency tail (DIAG_ROUTES=1; not TechEmpower tests): the
+        // same work with one part removed.
+        //   /fortunes-json   same query and sort, JSON instead of the template (no render)
+        //   /fortunes-nodb   the template over rows read once at startup (no database)
+        if ("1".equals(env.get("DIAG_ROUTES"))) {
+            List<Fortune> cached;
+            var session = db.openSession();
+            try {
+                cached = List.copyOf(new Database(session).findAll(Fortune.class));
+            } finally {
+                session.close();
+            }
+            app.get("/fortunes-json", (ReadDbHandler) (req, dbSession) -> {
+                var fortunes = new ArrayList<>(dbSession.findAll(Fortune.class));
+                var additional = new Fortune();
+                additional.id = 0;
+                additional.message = "Additional fortune added at request time.";
+                fortunes.add(additional);
+                fortunes.sort(Comparator.comparing(f -> f.message));
+                return Json.of(fortunes);
+            });
+            app.get("/fortunes-nodb", req -> {
+                var fortunes = new ArrayList<>(cached);
+                var additional = new Fortune();
+                additional.id = 0;
+                additional.message = "Additional fortune added at request time.";
+                fortunes.add(additional);
+                fortunes.sort(Comparator.comparing(f -> f.message));
+                return View.of("fortunes", "fortunes", fortunes);
+            });
+        }
 
         // 6. Updates (read worlds, then batch update via raw JDBC)
         app.get("/updates", (DbHandler) (req, dbSession) -> {

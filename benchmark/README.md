@@ -72,6 +72,10 @@ compete:
 - **The app:** Brace built from this checkout, or the TechEmpower Spring app (archived repo's
   final commit) with the Spring Data JPA profile, both on the same `eclipse-temurin:25-jdk`
   image.
+  Brace's templates are precompiled in the image, as `brace compile` does for a deployed app.
+  Without that, prod mode falls back to jte's on-demand engine. That engine takes a lock and
+  reads template file timestamps on every render, which gave Fortunes a long latency tail
+  (p90 33ms instead of 5ms on the render-only variant).
 - **wrk:** the load generator, on the same Docker network.
 
 By default the app gets half the CPUs and Postgres and wrk a quarter each. For `ROUNDS` rounds

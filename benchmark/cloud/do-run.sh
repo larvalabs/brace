@@ -9,7 +9,8 @@ set -euo pipefail
 # Usage:
 #   ./benchmark/cloud/do-run.sh [run-docker.sh args...]     e.g.  ./benchmark/cloud/do-run.sh brace
 #   ./benchmark/cloud/do-run.sh --cleanup                   delete any leftover brace-bench droplets and keys
-#   ./benchmark/cloud/do-run.sh --list                      show leftover brace-bench droplets
+#   ./benchmark/cloud/do-run.sh --list                      show leftover brace-bench droplets and keys
+#                                                           (listings lag deletions by a few minutes)
 #
 # Token: DIGITALOCEAN_TOKEN, or the file ~/.config/brace-bench/digitalocean-token (mode 600).
 # A custom-scoped token is enough: droplet (create, read, delete), ssh_key (create, read,
@@ -73,12 +74,24 @@ list_leftovers() {
   api GET "/account/keys?per_page=200" | jq -r --arg t "$TAG-" '.ssh_keys[] | select(.name | startswith($t)) | "ssh key \(.id)  \(.name)"'
 }
 
+# DELETE that treats 404 as done: DigitalOcean's listings lag deletions by a few minutes, so a
+# key or droplet just deleted can still be listed.
+delete_quietly() { # path label
+  local code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H @"$WORK/auth" "$API$1")
+  case "$code" in
+    2*)  echo "deleted $2" ;;
+    404) echo "$2 was already deleted (listings lag by a few minutes)" ;;
+    *)   echo "WARNING: deleting $2 -> HTTP $code" >&2 ;;
+  esac
+}
+
 cleanup_all() {
   local ids
   ids=$(api GET "/droplets?tag_name=$TAG&per_page=200" | jq -r '.droplets[].id')
-  for id in $ids; do api DELETE "/droplets/$id" > /dev/null && echo "deleted droplet $id"; done
+  for id in $ids; do delete_quietly "/droplets/$id" "droplet $id"; done
   ids=$(api GET "/account/keys?per_page=200" | jq -r --arg t "$TAG-" '.ssh_keys[] | select(.name | startswith($t)) | .id')
-  for id in $ids; do api DELETE "/account/keys/$id" > /dev/null && echo "deleted ssh key $id"; done
+  for id in $ids; do delete_quietly "/account/keys/$id" "ssh key $id"; done
 }
 
 case "${1:-}" in

@@ -17,6 +17,13 @@ RUN --mount=type=cache,target=/root/.m2 \
     version="$(sed -n 's:^    <version>\(.*\)</version>.*:\1:p' pom.xml | head -1)" && \
     mvn -q -f benchmark/pom.xml package -DskipTests -Dbrace.version="$version" && \
     echo "$version" > /src/brace-version
+# Precompile the templates as `brace compile` does for a deployed app. Without this, prod mode
+# falls back to an on-demand jte engine, whose per-render hot-reload check (a lock plus a file
+# timestamp read on every render) is not how Brace apps run in production. The marker records
+# the template path as App.java passes it, relative to the working directory.
+RUN java -cp benchmark/target/brace-benchmark.jar com.larvalabs.brace.TemplatePrecompiler \
+        benchmark/src/main/resources/views /src/jte-classes && \
+    test -f /src/jte-classes/.source-templates
 
 # JDK, not JRE: in prod mode Brace compiles the templates once at startup, which needs
 # jdk.compiler. spring.Dockerfile uses the same runtime image.
@@ -29,6 +36,8 @@ COPY --from=build /src/benchmark/target/brace-benchmark.jar /app/brace-benchmark
 COPY --from=build /src/brace-version /app/brace-version
 # App.java resolves templates relative to the working directory.
 COPY benchmark/src/main/resources/views /app/benchmark/src/main/resources/views
+# Loaded in prod mode from the default location, target/jte-classes under the working directory.
+COPY --from=build /src/jte-classes /app/target/jte-classes
 ENV PORT=8080 DB_HOST=postgres DB_PORT=5432 DB_POOL=256 BRACE_LOG_LEVEL=WARN JVM_OPTS=""
 EXPOSE 8080
 # exec: java is PID 1, which the driver reads memory from (/proc/1/status).

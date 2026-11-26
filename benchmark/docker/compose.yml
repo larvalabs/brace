@@ -52,6 +52,8 @@ services:
       DB_POOL: ${DB_POOL:-256}
       JVM_OPTS: ${JVM_OPTS:-}
       BRACE_LOG_LEVEL: ${BRACE_LOG_LEVEL:-WARN}
+      DIAG_ROUTES: ${DIAG_ROUTES:-0}     # /fortunes-json, /fortunes-nodb (App.java)
+      FAIR_LIMIT: ${FAIR_LIMIT:-0}       # benchmark-only experiment, see App.java (run-docker.sh: brace-fair)
 
   spring-jpa:                        # TechEmpower's Spring app on Spring Data JPA / Hibernate (./spring-jpa)
     <<: *app
