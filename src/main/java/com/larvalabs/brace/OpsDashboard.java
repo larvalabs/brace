@@ -540,9 +540,12 @@ public class OpsDashboard {
                     sb.append("<tr><td>").append(esc(j.name())).append("</td><td class=\"c-muted\">").append(esc(j.schedule())).append("</td>");
                     sb.append("<td><span class=\"").append(statusDot).append("\">● </span>").append(esc(statusLabel)).append("</td>");
                     sb.append("<td class=\"num c-muted\">").append(esc(lastRun)).append("</td></tr>");
-                    if (j.lastMessage() != null && !j.lastMessage().isEmpty()) {
-                        sb.append("<tr><td colspan=\"4\" class=\"c-muted job-msg\">↳ ")
-                          .append(esc(j.lastMessage())).append("</td></tr>");
+                    // A failed run shows its error, not the message a previous successful run left.
+                    boolean failed = "error".equals(j.lastStatus()) && j.lastError() != null && !j.lastError().isEmpty();
+                    String note = failed ? j.lastError() : j.lastMessage();
+                    if (note != null && !note.isEmpty()) {
+                        sb.append("<tr><td colspan=\"4\" class=\"").append(failed ? "c-red" : "c-muted")
+                          .append(" job-msg\">↳ ").append(esc(note)).append("</td></tr>");
                     }
                 }
                 sb.append("</table>");

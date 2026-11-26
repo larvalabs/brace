@@ -138,6 +138,34 @@ class JobSchedulerTest {
     }
 
     @Test
+    void dashboardShowsAFailedJobsErrorInsteadOfItsLastMessage() throws Exception {
+        var scheduler = new JobScheduler();
+        var runs = new AtomicInteger(0);
+        var latch = new CountDownLatch(2);
+
+        scheduler.every("1s", "sync", (db, ctx) -> {
+            try {
+                if (runs.incrementAndGet() == 1) {
+                    ctx.message("12 titles restocked");
+                } else {
+                    throw new IllegalStateException("supplier API timed out");
+                }
+            } finally {
+                latch.countDown();
+            }
+        });
+
+        scheduler.start(null);
+        assertTrue(latch.await(4, TimeUnit.SECONDS));
+        Thread.sleep(100);
+
+        String html = OpsDashboard.html(OpsScope.READ, new Stats(), scheduler, null, null, null, null);
+        assertTrue(html.contains("<td colspan=\"4\" class=\"c-red job-msg\">↳ supplier API timed out</td>"), html);
+        assertFalse(html.contains("12 titles restocked"), "the stale success message is not shown");
+        scheduler.stop();
+    }
+
+    @Test
     void jobMessagePersistsAcrossRunsUntilOverwritten() throws Exception {
         var scheduler = new JobScheduler();
         var runs = new AtomicInteger(0);
