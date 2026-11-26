@@ -167,6 +167,38 @@ flushes and the nightly analytics rollup. With a database, each interval runs on
 instance, however many are deployed. Durable jobs queued with `Jobs.schedule(...)` are covered
 under [Jobs](#jobs).
 
+### Postgres
+
+![The Database panel of the ops dashboard: pool, sessions, throughput and I/O figures, load charts and the tables read most by sequential scans](docs/screenshots/ops-database.png)
+
+The Database panel puts the app's connection pool next to what Postgres reports about itself. On
+Postgres, Brace holds one connection outside the pool for a sampler. The sampler reads
+`pg_stat_activity` every 5 seconds, and `pg_stat_database`, `pg_stat_io` (Postgres 16 and later)
+and `pg_stat_user_tables` every 30. `app.opsDatabaseStats(false)` turns it off and keeps the pool
+and query figures, which cost nothing. Other databases get only the pool and query figures.
+
+- **Pool:** connections in use against the pool size, idle connections, and threads waiting for
+  one. A chart shows the peak in use for each minute and counts the minutes where something
+  waited.
+- **Queries:** the number of queries request handlers ran in the last full minute and their
+  average time, with a chart of the average for each minute.
+- **Sessions:** connections against `max_connections`, sessions running a query, sessions blocked
+  on a lock, sessions idle inside an open transaction, and the longest query in progress. The
+  load chart shows the average number of active sessions each minute, split into CPU, I/O, lock
+  and other waits.
+- **Throughput:** the buffer cache hit rate, commits, rollbacks, bytes spilled to temporary files
+  by sorts and hashes, and deadlocks.
+- **I/O:** block reads that missed Postgres's buffer cache and block writes per second, with
+  average times when `track_io_timing` is on.
+- **Tables:** the five tables with the most rows read by sequential scans, with their index scans,
+  live rows, share of dead rows and last vacuum. A table of 1,000 rows or more that is scanned
+  sequentially more often than through an index is highlighted, since that usually means a
+  missing index.
+
+Postgres shows other roles' sessions only to a role with `pg_read_all_stats`, and the panel says
+how many sessions it can't see. `brace check` warns when requests wait for a pool connection,
+sessions block on locks, connections near `max_connections` or the statistics can't be read.
+
 ### Page-View Analytics
 
 ![The Brace analytics page, showing 30 days of visitors with top pages and sources](docs/screenshots/ops-analytics.png)
